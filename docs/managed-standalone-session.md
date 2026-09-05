@@ -26,3 +26,16 @@ tests; REPL factory installation, actual server model/tool guards, and an explic
 reattach/resume route remain separate integration work. Verification tests use
 the real lane/verifier stores with a deterministic process-gateway fixture; they
 do not constitute a real external model or process-execution acceptance run.
+
+Managed server calls now check admission before and after normal/final/repaired
+model generation and claim review, before speculative submission, inside each
+speculative worker, and at direct tool dispatch. Wrappers delegate live model
+metadata used by repair limits. Worker contexts preserve the original selection
+and cancellation identities while using a separate Context object per call.
+Nested model loops lose the lane controller but retain a separate revocation
+guard, so nested ordinary model/tool work cannot escape a revoked parent.
+
+These checks do not cancel an already-dispatched remote model request or undo an
+effect already admitted. They prevent subsequent admission and reject results
+returned after revocation. Existing transactional effect admission and process
+cancellation/containment remain required.

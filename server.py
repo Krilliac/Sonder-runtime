@@ -5130,6 +5130,66 @@ def _offload_impl(
 
 from sonder_runtime.interfaces import standalone_agent_lanes as _standalone_lanes
 
+_MANAGED_AGENT_ADMISSION = contextvars.ContextVar('managed_agent_admission', default=None)
+
+
+def _managed_agent_controller():
+    controller = _standalone_lanes.current()
+    if controller is not None and (
+        getattr(controller, '_managed_factory', None) is not None
+        or getattr(controller, '_managed_session', None) is not None
+        or getattr(controller, '_managed_nested_forbidden', False)
+    ):
+        return controller
+    return _MANAGED_AGENT_ADMISSION.get()
+
+
+@contextlib.contextmanager
+def _managed_agent_admission_scope():
+    # Nested loops lose the lane-controller capability, but must retain the
+    # originating host's revocation checks for model and ordinary tool work.
+    token = _MANAGED_AGENT_ADMISSION.set(_managed_agent_controller())
+    try:
+        yield
+    finally:
+        _MANAGED_AGENT_ADMISSION.reset(token)
+
+
+def _require_managed_agent_admission():
+    controller = _managed_agent_controller()
+    if controller is not None:
+        controller.require_current()
+
+
+def _guard_managed_agent_call(callback, *, inherit_context=False):
+    controller = _managed_agent_controller()
+    if controller is None:
+        return callback
+    captured = contextvars.copy_context() if inherit_context else None
+
+    def admitted(*args, **kwargs):
+        controller.require_current()
+        result = callback(*args, **kwargs)
+        controller.require_current()
+        return result
+
+    def invoke(*args, **kwargs):
+        # Each worker gets a separate Context object while retaining the same
+        # live cancellation/selection identities and authority checks.
+        if captured is not None:
+            return captured.copy().run(admitted, *args, **kwargs)
+        return admitted(*args, **kwargs)
+    class GuardedCall:
+        def __call__(self, *args, **kwargs):
+            return invoke(*args, **kwargs)
+
+        def __getattr__(self, name):
+            # Generation updates metadata on the underlying callable. Preserve
+            # that live view rather than copying a stale attributes snapshot.
+            return getattr(callback, name)
+
+    return GuardedCall()
+
 
 def _standalone_verifier_factory(application, service):
     from sonder_runtime.bootstrap.delegated_verification import compose_delegated_verification
@@ -16811,6 +16871,7 @@ def _agent_negative_claim_review(
         model, system, 0.0, 260, 4096, cloud=cloud,
         cancel_check=cancel_check, compact_cloud_reasoning=True,
     )
+    gen = _guard_managed_agent_call(gen)
     if cloud and cloud_budget_state is not None:
         gen = _bounded_cloud_agent_generate(
             gen,
@@ -17036,6 +17097,7 @@ def _agent_dispatch(
     tool_name, args, allow_web=True, read_only=False, allow_location=False,
     repository_extra_roots="",
 ):
+    _require_managed_agent_admission()
     lane_read_only = read_only
     unsafe = unsafe_lab.active()
     if unsafe:
@@ -19009,7 +19071,7 @@ def _agent_impl(*args, **kwargs) -> str:
     instructions. See _stable_system_context; a nested call under an already
     pinned turn reuses the outer reading.
     """
-    with _stable_system_context(), _standalone_lanes.model_loop_scope():
+    with _managed_agent_admission_scope(), _stable_system_context(), _standalone_lanes.model_loop_scope():
         controller = _standalone_lanes.current()
         if controller is not None:
             controller.terminal_projected = False
@@ -19168,6 +19230,7 @@ def _agent_turn(
         accept_native_tool_calls=True,
         compact_cloud_reasoning=True,
     )
+    gen = _guard_managed_agent_call(gen)
     if cloud:
         gen = _bounded_cloud_agent_generate(
             gen,
@@ -19246,6 +19309,7 @@ def _agent_turn(
         )
         return observation, _agent_tool_observation_ok(tool_name, observation)
 
+    _spec_dispatch = _guard_managed_agent_call(_spec_dispatch, inherit_context=True)
     _spec_engine = sonder_speculation.SpeculationEngine(
         _predictor, _spec_dispatch, enabled=_spec_enabled,
     )
@@ -19657,6 +19721,7 @@ def _agent_turn(
             _predicted_args = _project_scope_args(
                 _predicted_tool, {}, project_scope,
             )
+            _require_managed_agent_admission()
             _spec_issued = _spec_engine.begin(
                 _predicted_tool,
                 _agent_call_signature(_predicted_tool, _predicted_args),
@@ -19671,6 +19736,7 @@ def _agent_turn(
                 _prefetch_scoped = _project_scope_args(
                     "file_read", _prefetch_args, project_scope,
                 )
+                _require_managed_agent_admission()
                 _spec_engine.begin(
                     "file_read",
                     _agent_call_signature("file_read", _prefetch_scoped),
