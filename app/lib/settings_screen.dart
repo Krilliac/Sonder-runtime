@@ -445,26 +445,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: ListView(
               padding: const EdgeInsets.all(20),
               children: [
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Runtime architecture',
-                style: Theme.of(context).textTheme.titleSmall,
-              ),
-              const SizedBox(height: 6),
-              Text(
-                'Sonder Runtime is an orchestration system, not a '
-                'standalone foundation model. Ollama loads and serves the '
-                'selected local model weights for inference. Sonder Runtime '
-                'adds prompts, memory, tools, routing, and policy; adapter '
-                'training uses PEFT/Hugging Face before validated results '
-                'are deployed to Ollama.',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
           const _GroupLabel('Connection'),
           const SizedBox(height: 4),
           TextField(
@@ -539,10 +519,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
             controller: _model,
             autocorrect: false,
             decoration: const InputDecoration(
-              labelText: 'Default inference route / model',
+              labelText: 'Default model or route',
               hintText: 'sonder, code, fast...',
               helperText:
-                  'Sonder Runtime routes it; Ollama serves local weights',
+                  'Used for new conversations.',
               prefixIcon: Icon(Icons.memory_outlined),
               border: OutlineInputBorder(),
             ),
@@ -555,7 +535,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               labelText: 'Context size',
               hintText: '8192, 32k, 256k, 1m',
               helperText:
-                  'Requested virtual context. Ollama native num_ctx is clamped safely.',
+                  'Requested conversation capacity; server limits still apply.',
               prefixIcon: Icon(Icons.view_week_outlined),
               border: OutlineInputBorder(),
             ),
@@ -623,7 +603,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: 12),
           Text(_account == null
               ? 'No account session. Login preserves your deployment API key.'
-              : 'Account session bound to ${_account!.origin}'),
+              : 'Signed-in server: ${_account!.origin}'),
+          const SizedBox(height: 6),
+          Text(
+            'Sign out revokes this session on the server. Forget local session '
+            'removes it from this device only; the server session remains valid.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
           const SizedBox(height: 12),
           Wrap(
             spacing: 8,
@@ -710,14 +696,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               ],
             ),
-          ),
-          const SizedBox(height: 24),
-          Text(
-            'Sonder Runtime is local-first orchestration. It is not the foundation '
-            'model and does not make Ollama a trainer. Hosted tiers, explicit '
-            'web tools, and approximate location contact external services '
-            'only when you enable or invoke them.',
-            style: Theme.of(context).textTheme.bodySmall,
           ),
               ],
             ),
