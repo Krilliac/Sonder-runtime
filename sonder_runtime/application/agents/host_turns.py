@@ -6,7 +6,7 @@ import json
 
 from ..ports.delegated_verification import digest
 from ..ports.host_final import HostFinalFacts
-from ..ports.host_turn_links import ManagedHostTurnLink, ManagedHostTerminalLink
+from ..ports.host_turn_links import ManagedHostTurnLink, ManagedHostTerminalLink, FinalizedHostResult
 from ..ports.lane_continuation import (
     ProjectionBinding,
     open_projection,
@@ -343,6 +343,10 @@ def _terminal_link(bound, tx, record, turn):
 
 
 def read_host_terminal_link(bound, run_id, ordinal):
+    return read_host_terminal_result(bound, run_id, ordinal).receipt
+
+
+def read_host_terminal_result(bound, run_id, ordinal):
     """Reconcile one exact closed turn under current attached host authority."""
     if type(run_id) is not str or not 1 <= len(run_id.encode('utf-8')) <= 128:
         raise ValueError('bounded host run identity required')
@@ -358,7 +362,8 @@ def read_host_terminal_link(bound, run_id, ordinal):
         matches = [turn for turn in turns if turn['run_id'] == run_id and turn['ordinal'] == ordinal]
         if len(matches) != 1 or matches[0]['state'] != 'closed':
             raise PermissionError('exact closed host turn unavailable')
-        return _terminal_link(bound, tx, record, matches[0])
+        final = _stored_final(bound, tx, record, matches[0])
+        return FinalizedHostResult(final.output, _terminal_link(bound, tx, record, matches[0]))
 
 
 def close_host_turn(bound, admission):

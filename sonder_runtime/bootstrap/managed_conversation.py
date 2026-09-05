@@ -9,6 +9,7 @@ from ..application.agents.host_turns import (
     close_host_turn,
     host_turn_link,
     read_host_terminal_link,
+    read_host_terminal_result,
 )
 from ..adapters.agent_terminal_evidence import HostObservationLedger
 from ..interfaces.standalone_agent_lanes import HostTerminalDraft
@@ -108,6 +109,14 @@ class ManagedConversationLifetime:
             if self._owner is None:
                 raise PermissionError("current attached host owner required")
             return read_host_terminal_link(self._owner._bound, run_id, ordinal)
+
+    def terminal_result(self, run_id, ordinal):
+        """Read the original retained outward result without executing a controller."""
+        with self._lock:
+            self._require_current()
+            if self._owner is None:
+                raise PermissionError("current attached host owner required")
+            return read_host_terminal_result(self._owner._bound, run_id, ordinal)
 
     def close(self):
         with self._lock:

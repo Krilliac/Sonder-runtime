@@ -39,6 +39,7 @@ def test_typed_turn_and_terminal_links_bind_exact_outward_result(lanes):
         assert result.receipt.output_digest == hashlib.sha256(result.output.encode()).hexdigest()
         assert result.receipt.original_projection_digest != result.receipt.final_projection_digest
         assert lifetime.terminal_receipt("linked-turn", 1) == result.receipt
+        assert lifetime.terminal_result("linked-turn", 1) == result
         with pytest.raises(PermissionError):
             lifetime.terminal_receipt("linked-turn", 2)
         with pytest.raises(PermissionError):
@@ -50,6 +51,8 @@ def test_typed_turn_and_terminal_links_bind_exact_outward_result(lanes):
             owner._host._save(tx, stored)
         with pytest.raises(PermissionError):
             lifetime.terminal_receipt("linked-turn", 1)
+        with pytest.raises(PermissionError):
+            lifetime.terminal_result("linked-turn", 1)
     finally:
         lifetime.close()
 
