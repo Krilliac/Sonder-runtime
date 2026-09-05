@@ -795,24 +795,28 @@ def configure_typed_config(config) -> None:
     # Validate before applying. Existing in-flight calls consult this live source.
     candidate = ArtifactTransferBinding(lambda: config)
     candidate.start()
+    global _APP_CONTROL_BINDING, _APP_CONTROL_CONFIG
+    from sonder_runtime.bootstrap.app_control_http import AppControlBinding
+    from sonder_runtime.adapters.security.control_plane_paths import ControlPlanePaths, live_control_plane_inventory
+    from sonder_runtime.bootstrap.app import default_app
+    from pathlib import Path
+    try:
+        candidate_control = AppControlBinding(lambda: config, account_open=lambda: server._open_db(),
+            account_path=lambda: Path(server._DB_PATH).resolve(),
+            private_inventory=lambda: live_control_plane_inventory(additional=lambda: ControlPlanePaths(
+                databases=(Path(server._DB_PATH).resolve(),),
+                files=tuple(Path(p) for p in config.private_source_paths))),
+            lanes_provider=lambda: default_app().agent_lanes())
+        candidate_control.start()
+    except BaseException:
+        candidate.close()
+        raise
     previous = _ARTIFACT_TRANSFER_BINDING
     _ARTIFACT_TRANSFER_CONFIG = config
     candidate._config_provider = lambda: _ARTIFACT_TRANSFER_CONFIG
     _ARTIFACT_TRANSFER_BINDING = candidate
     if previous is not None:
         previous.close()
-    global _APP_CONTROL_BINDING, _APP_CONTROL_CONFIG
-    from sonder_runtime.bootstrap.app_control_http import AppControlBinding
-    from sonder_runtime.adapters.security.control_plane_paths import ControlPlanePaths, live_control_plane_inventory
-    from sonder_runtime.bootstrap.app import default_app
-    from pathlib import Path
-    candidate_control = AppControlBinding(lambda: config, account_open=lambda: server._open_db(),
-        account_path=lambda: Path(server._DB_PATH).resolve(),
-        private_inventory=lambda: live_control_plane_inventory(additional=lambda: ControlPlanePaths(
-            databases=(Path(server._DB_PATH).resolve(),),
-            files=tuple(Path(p) for p in config.private_source_paths))),
-        lanes_provider=lambda: default_app().agent_lanes())
-    candidate_control.start()
     _APP_CONTROL_CONFIG = config
     candidate_control._config_provider = lambda: _APP_CONTROL_CONFIG
     _APP_CONTROL_BINDING = candidate_control

@@ -603,6 +603,32 @@ def test_actual_typed_http_configuration_composes_private_store(control, monkeyp
     )
 
 
+def test_rejected_control_start_preserves_published_artifact_binding(control, monkeypatch):
+    from types import SimpleNamespace
+    from sonder_runtime.interfaces.http import serve
+    from sonder_runtime.bootstrap import artifact_transfer, app_control_http
+    calls = []
+    old_config = object()
+    prior = SimpleNamespace(close=lambda: calls.append("prior closed"))
+    candidate = SimpleNamespace(start=lambda: calls.append("candidate started"),
+                                close=lambda: calls.append("candidate closed"))
+    monkeypatch.setattr(serve, "_ARTIFACT_TRANSFER_CONFIG", old_config)
+    monkeypatch.setattr(serve, "_ARTIFACT_TRANSFER_BINDING", prior)
+    original_control = serve._APP_CONTROL_BINDING
+    original_control_config = serve._APP_CONTROL_CONFIG
+    monkeypatch.setattr(artifact_transfer, "ArtifactTransferBinding", lambda config: candidate)
+    def reject(self):
+        raise PermissionError("control startup refused")
+    monkeypatch.setattr(app_control_http.AppControlBinding, "start", reject)
+    with pytest.raises(PermissionError, match="control startup refused"):
+        serve.configure_typed_config(control[2]["config"])
+    assert serve._ARTIFACT_TRANSFER_BINDING is prior
+    assert serve._ARTIFACT_TRANSFER_CONFIG is old_config
+    assert serve._APP_CONTROL_BINDING is original_control
+    assert serve._APP_CONTROL_CONFIG is original_control_config
+    assert calls == ["candidate started", "candidate closed"]
+
+
 def test_account_source_replacement_refuses_identical_database_copy(control):
     import shutil
 
