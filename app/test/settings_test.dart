@@ -50,8 +50,16 @@ void main() {
     final prefs = await SharedPreferences.getInstance();
     expect(prefs.containsKey('sonder_account_session'), isFalse);
     await prefs.setString('sonder_server_url', 'https://foreign.test');
-    expect(
-        (await Settings.load(credentialStore: store)).accountSession, isNull);
+    final mismatched = await Settings.load(credentialStore: store);
+    expect(mismatched.accountSession!.origin, 'https://host.test');
+    final before = Map<String, String>.from(store.values);
+    await expectLater(mismatched.save(credentialStore: store), throwsStateError);
+    expect(store.values, before);
+    mismatched.serverUrl = 'http://remote.test';
+    await expectLater(mismatched.save(credentialStore: store), throwsStateError);
+    expect(store.values, before);
+    await Settings(serverUrl: 'https://foreign.test').save(credentialStore: store);
+    expect(store.values['sonder_account_session'], before['sonder_account_session']);
     await Settings.clearAccountSession(credentialStore: store);
     expect(store.values['sonder_api_key'], 'deployment');
   });
