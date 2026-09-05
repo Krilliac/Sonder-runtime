@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 267,
+      "file_count": 268,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -274,6 +274,7 @@
         "sonder_runtime/adapters/secret_scan.py",
         "sonder_runtime/adapters/secrets.py",
         "sonder_runtime/adapters/security/__init__.py",
+        "sonder_runtime/adapters/security/account_admission.py",
         "sonder_runtime/adapters/security/account_auth.py",
         "sonder_runtime/adapters/security/approval_ledger.py",
         "sonder_runtime/adapters/security/continuation_approval.py",
@@ -316,7 +317,7 @@
       ]
     },
     {
-      "file_count": 292,
+      "file_count": 293,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -450,6 +451,7 @@
         "sonder_runtime/application/ports/__init__.py",
         "sonder_runtime/application/ports/account_auth.py",
         "sonder_runtime/application/ports/app_control.py",
+        "sonder_runtime/application/ports/app_control_http.py",
         "sonder_runtime/application/ports/archive_create.py",
         "sonder_runtime/application/ports/archive_create_limits.py",
         "sonder_runtime/application/ports/artifact_store.py",
@@ -614,12 +616,13 @@
       ]
     },
     {
-      "file_count": 31,
+      "file_count": 32,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
         "sonder_runtime/bootstrap/app.py",
         "sonder_runtime/bootstrap/app_control.py",
+        "sonder_runtime/bootstrap/app_control_http.py",
         "sonder_runtime/bootstrap/artifact_transfer.py",
         "sonder_runtime/bootstrap/capabilities.py",
         "sonder_runtime/bootstrap/child_migration.py",
@@ -825,7 +828,7 @@
       ]
     },
     {
-      "file_count": 46,
+      "file_count": 47,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -840,6 +843,7 @@
         "sonder_runtime/interfaces/editor/__init__.py",
         "sonder_runtime/interfaces/editor/transport.py",
         "sonder_runtime/interfaces/http/__init__.py",
+        "sonder_runtime/interfaces/http/app_control.py",
         "sonder_runtime/interfaces/http/artifact_transfer.py",
         "sonder_runtime/interfaces/http/authority_contract.py",
         "sonder_runtime/interfaces/http/facades/__init__.py",
