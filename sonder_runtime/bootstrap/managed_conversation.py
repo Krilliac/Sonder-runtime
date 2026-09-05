@@ -126,6 +126,13 @@ class ManagedConversationLifetime:
                 raise PermissionError("current attached host owner required")
             return read_current_host_final_evidence(self._owner._bound, expected_turn)
 
+    def terminal_eligibility(self, expected_turn, *, verifier_factory):
+        with self._lock:
+            self._require_current()
+            if self._owner is None:
+                raise PermissionError("current attached host owner required")
+            return self._owner.terminal_eligibility(expected_turn, verifier_factory=verifier_factory)
+
     def close(self):
         with self._lock:
             if self._released:

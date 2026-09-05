@@ -289,8 +289,15 @@ def test_real_pending_or_consumed_unknown_cannot_advance(lanes, unknown):
             draft, verifier_factory=lambda *args: verifier
         ).valid
         identity = view._session._bound.pending_verification()
-        final_receipt(view, 'UNVERIFIED: exact pending', 'UNVERIFIED')
+        turn_link = view.turn_link()
+        view.capture_final('UNVERIFIED: exact pending', HostFinalFacts(
+            (), str(lanes[3]), False, False, False, 'UNVERIFIED', delegated_work=True))
         view.close()
+        eligibility = lifetime.terminal_eligibility(turn_link, verifier_factory=lambda *args: verifier)
+        assert not eligibility.eligible and eligibility.published is None
+        assert eligibility.pending_identity == identity
+        if not unknown:
+            assert eligibility.phase == 'approval_pending' and eligibility.pending_approval is not None
         with pytest.raises(PermissionError):
             lifetime.factory(SimpleNamespace(run_id="new-turn"), app)
         assert lifetime._owner._bound.pending_verification() == identity
@@ -479,8 +486,21 @@ def test_two_turns_use_real_catalog_processes_and_released_job_proofs(coding):
                             "resources_released",
                         )
                     )
-            final_receipt(view, draft.output, validated=True)
+            turn_link = view.turn_link()
+            view.capture_final(draft.output, HostFinalFacts((), str(repo), False,
+                True, True, 'NORMAL', certificate_id=verdict.certificate_id,
+                certificate_generation=verdict.generation, certificate_code=verdict.code,
+                delegated_work=True))
             view.close()
+            eligibility = lifetime.terminal_eligibility(turn_link,
+                verifier_factory=lambda *args: compose_delegated_verification(service, provider, independent))
+            assert eligibility.eligible and eligibility.phase == 'certified'
+            assert eligibility.pending_identity is not None and eligibility.published.valid
+            repeated = lifetime.terminal_eligibility(turn_link,
+                verifier_factory=lambda *args: compose_delegated_verification(service, provider, independent))
+            assert repeated.published.receipt == eligibility.published.receipt
+            with store.transaction() as tx:
+                assert tx.verification_row(verdict.certificate_id, context.principal_id)['job_ids'] == verification['job_ids']
         assert len(set(certificates)) == 2
         assert "return sum(values)\n" in (repo / "calc.py").read_text()
     finally:

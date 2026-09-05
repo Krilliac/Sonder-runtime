@@ -407,3 +407,28 @@ def read_current_host_final_evidence(bound, expected_turn):
             FinalizedHostResult(final.output, _terminal_link(bound, tx, record, turn)),
             HostFinalFacts(**facts),
         )
+
+
+def require_host_pending_turn(bound, expected_turn, identity):
+    """Bind pending verification to this current turn's exact original draft."""
+    from ..ports.lane_continuation import PendingVerificationIdentity
+    if type(expected_turn) is not ManagedHostTurnLink or type(identity) is not PendingVerificationIdentity:
+        raise PermissionError("typed original host verification identity required")
+    with bound._scope() as context, bound._service._transaction(context) as tx:
+        record = bound._service._row(tx, bound.continuation_id)
+        bound._require_current_tx(tx, record, context=context)
+        turn = record.get("host_turn")
+        if (not turn or turn["state"] != "closed" or _turn_link(record, turn) != expected_turn
+                or record.get("pending_verification") != asdict(identity)):
+            raise PermissionError("current host verification identity changed")
+        bound._service._linked_verification(tx, record)
+        host = _stored_projection(bound, tx, record, turn)
+        sealed = tx.terminal_projection(record["id"], record["principal_id"], identity.verification_id)
+        pending = open_projection(bound._service.projection_codec, sealed, sealed.binding)
+        hb, pb = host.binding_value, sealed.binding
+        if (any(getattr(hb, key) != getattr(pb, key) for key in (
+                "continuation_id", "principal_id", "run_id", "host_conversation_id",
+                "parent_session_id", "parent_grant_revision", "project_roots"))
+                or host.output != pending.output or host.ledger_bytes != pending.ledger_bytes
+                or host.terminal_class != pending.terminal_class or host.blockers != pending.blockers):
+            raise PermissionError("verification does not bind exact original host draft")
