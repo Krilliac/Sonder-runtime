@@ -47,6 +47,16 @@ class MemoryLearningFacade:
         with self._unit_of_work() as scope:
             return self._recall.retrieve(scope.connection, task, **options)
 
+    def recall_explained(self, task: str, **options):
+        """Return recall results together with provenance and degradation data."""
+        if self._recall is None:
+            raise RuntimeError("memory recall service is not configured")
+        with self._unit_of_work() as scope:
+            method = getattr(self._recall, "retrieve_page", None)
+            if method is None:
+                raise RuntimeError("explained recall is not configured")
+            return method(scope.connection, task, **options)
+
     def record(self, interaction_id: str, signal: str, *, source: str = "caller") -> float:
         """Record an outcome and its outbox event in one unit of work."""
         with self._unit_of_work() as scope:

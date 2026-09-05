@@ -52,3 +52,9 @@ class RecallGateway(Protocol):
         embedding_model: str | None = None,
         embedding_revision: str | None = None,
     ) -> list[str]: ...
+
+
+class ExplainedRecallGateway(Protocol):
+    """Optional additive gateway for provenance-aware recall pages."""
+
+    def recall_page(self, connection: Any, task: str, **options: Any) -> Any: ...
