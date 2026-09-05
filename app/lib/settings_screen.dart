@@ -607,7 +607,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: 6),
           Text(
             'Sign out revokes this session on the server. Forget local session '
-            'removes it from this device only; the server session remains valid.',
+            'removes it from this device only; it does not revoke it on the server.',
             style: Theme.of(context).textTheme.bodySmall,
           ),
           const SizedBox(height: 12),
