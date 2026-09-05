@@ -127,7 +127,11 @@ def coding(tmp_path, monkeypatch):
             PolicyRule("explicit-fixture-tests", Decision.ALLOW, tool="run_tests"),
         ]
     )
-    facade = ToolApplicationFacade.compose(registry, executor, policy=policy)
+    from sonder_runtime.bootstrap.lane_tests import _test_context
+
+    facade = ToolApplicationFacade.compose(
+        registry, executor, policy=policy, context_factory=_test_context
+    )
     sessions = SQLiteSessionRepository(tmp_path / "sessions.db")
     store = SQLiteAgentLaneStore(tmp_path / "fleet.db", sessions)
     context = local_owner_context(
@@ -588,3 +592,124 @@ def test_catalog_revocation_cancels_running_job(coding, revocation):
     receipt = next(r for r in facade.receipts if r.tool_name == "run_tests")
     result = json.loads(receipt.output)
     assert result["cancelled"] and result["cleanup_completed"]
+
+
+def test_delegated_independent_certificate_after_real_scripted_repair(coding):
+    from sonder_runtime.bootstrap.delegated_verification import (
+        compose_delegated_verification,
+    )
+
+    repo, catalog_path, store, sessions, jobs, provider, facade, context = coding
+    service, model = make_service(
+        coding,
+        [
+            tool("run_tests", target="unit"),
+            tool(
+                "edit_file",
+                path="calc.py",
+                old="return sum(values) + 1",
+                new="return sum(values)",
+            ),
+            tool("run_tests", target="unit"),
+            "Repaired",
+        ],
+    )
+    parent = service.open_model_parent(context)
+    lane_id = service.spawn(
+        command_id="coding",
+        parent_session_id=parent["parent_session_id"],
+        task="Repair and test total",
+        workspace_root=str(repo),
+        context=context,
+        max_steps=8,
+    )["lane"]["id"]
+    service.run_pending(lane_id, context)
+    assert service.inspect(lane_id, context)["lane"]["status"] == "completed"
+    verifier = compose_delegated_verification(
+        service, provider, catalog_path, targets={str(repo): "unit"}
+    )
+    prepared = verifier.prepare(
+        parent["parent_session_id"],
+        command_id="independent-check",
+        context=context,
+        bound_parent_revision=parent["revision"],
+    )
+    approvals = []
+
+    def approve(bundle, ctx):
+        approvals.append(bundle.approval_payload())
+        return "explicit-independent-operator-approval"
+
+    result = verifier.execute_prepared(prepared, context=context, approve=approve)
+    assert result["state"] == "certified", result
+    assert len(approvals) == 1
+    assert len(result["certificate"]["cleanup_proofs"]) == 1
+    assert verifier.validate(
+        parent["parent_session_id"],
+        prepared.verification_id,
+        context=context,
+        bound_parent_revision=parent["revision"],
+    ).valid
+    assert provider.poll(result["job_ids"][0]).result["exit_code"] == 0
+    diff = subprocess.run(
+        ["git", "diff", "--", "calc.py"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "+    return sum(values)" in diff.stdout
+    (repo / "untracked_source.py").write_text("changed = True\n")
+    assert not verifier.validate(
+        parent["parent_session_id"],
+        prepared.verification_id,
+        context=context,
+        bound_parent_revision=parent["revision"],
+    ).valid
+
+
+def test_test_command_mutating_source_cannot_certify(coding):
+    from sonder_runtime.bootstrap.delegated_verification import (
+        compose_delegated_verification,
+    )
+
+    repo, catalog_path, _, _, _, provider, _, context = coding
+    service, _ = make_service(coding, ["Finished"])
+    parent = service.open_model_parent(context)
+    lane_id = service.spawn(
+        command_id="child",
+        parent_session_id=parent["parent_session_id"],
+        task="Inspect only",
+        workspace_root=str(repo),
+        context=context,
+    )["lane"]["id"]
+    service.run_pending(lane_id, context)
+    catalog_path.write_text(
+        json.dumps(
+            {
+                "targets": [
+                    {
+                        "name": "mutating",
+                        "workspace_root": str(repo),
+                        "argv": [
+                            sys.executable,
+                            "-c",
+                            'from pathlib import Path; Path("calc.py").write_text("changed = True\\n")',
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    verifier = compose_delegated_verification(service, provider, catalog_path)
+    prepared = verifier.prepare(
+        parent["parent_session_id"],
+        command_id="verify-mutating",
+        context=context,
+        bound_parent_revision=1,
+    )
+    result = verifier.execute_prepared(
+        prepared, context=context, approve=lambda *args: "independent-approval"
+    )
+    assert result["state"] == "failed" and result["certificate"] is None
+    assert provider.cleanup_proof(result["job_ids"][0])["exit_code"] == 0

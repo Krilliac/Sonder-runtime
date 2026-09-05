@@ -175,8 +175,20 @@ class AgentLaneService:
             if auto_start
             else None
         )
+        self._deferred_verification = {}
         self._condition = threading.Condition()
         self._capture = SessionCaptureService(sessions)
+
+    def resume_after_verification(self, parent_session_id):
+        """Resume only contexts retained from actual dispatch, never minted authority."""
+        for lane_id, context in list(self._deferred_verification.items()):
+            with self.store.transaction() as tx:
+                lane = tx.lane(lane_id)
+                if tx.verification_dispatch_blocked(lane):
+                    continue
+            self._deferred_verification.pop(lane_id, None)
+            if not context.expired and not context.cancellation.cancelled:
+                self._schedule(lane_id, context)
 
     def open_model_parent(self, context):
         if context.expired or context.cancellation.cancelled:
@@ -807,6 +819,9 @@ class AgentLaneService:
         with self.store.transaction() as tx:
             lane = tx.lane(lane_id)
             self._authorize(lane, context, execute=True)
+            if tx.verification_dispatch_blocked(lane):
+                self._deferred_verification[lane_id] = context
+                return
             if lane["status"] != "queued" or lane["owner"]:
                 return
             active = sum(
@@ -1028,6 +1043,8 @@ class AgentLaneService:
         with self.store.transaction() as tx:
             fresh = tx.lane(lane["id"])
             if fresh["owner"] != self.owner or fresh["status"] != "running":
+                return
+            if tx.verification_dispatch_blocked(fresh):
                 return
             self._authorize(fresh, context, execute=True)
             fresh["pending_effect"] = True

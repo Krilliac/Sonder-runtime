@@ -1261,3 +1261,112 @@ def test_a_live_process_without_a_durable_identity_is_still_refused():
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=5)
+
+
+@pytest.mark.parametrize("durable", [False, True])
+def test_explicit_cleanup_proof_survives_only_actual_scope_release(tmp_path, durable):
+    from dataclasses import replace
+
+    registry = (
+        SQLiteDurableJobRegistry(tmp_path / "proof.db")
+        if durable
+        else DurableJobRegistry()
+    )
+    token = _ScopedToken(ProcessContainmentResult(True))
+    provider = SubprocessJobProvider(
+        registry,
+        process_cleanup=_Cleanup(complete=True),
+        launcher=lambda *a, **k: _Process(),
+        platform_name="posix",
+        memory_limiter=_ScopedLimiter(token),
+        process_identity_resolver=lambda pid: "proof-instance",
+    )
+    request = replace(_request("proof"), require_job_scope=True)
+    provider.start(request)
+    assert provider.cleanup_proof("proof") is None
+    provider.wait("proof")
+    proof = provider.cleanup_proof("proof")
+    assert token.closed and proof["process_exited"] and proof["containment_empty"]
+    assert proof["resources_released"] and proof["exit_code"] == 0
+    assert proof["process_identity"] == "proof-instance"
+    if durable:
+        assert (
+            SQLiteDurableJobRegistry(tmp_path / "proof.db").process_cleanup_proof(
+                "proof"
+            )
+            == proof
+        )
+
+
+def test_cleanup_proof_write_failure_cannot_be_inferred_from_terminal(
+    tmp_path, monkeypatch
+):
+    from dataclasses import replace
+
+    registry = SQLiteDurableJobRegistry(tmp_path / "proof.db")
+    token = _ScopedToken(ProcessContainmentResult(True))
+    provider = SubprocessJobProvider(
+        registry,
+        process_cleanup=_Cleanup(complete=True),
+        launcher=lambda *a, **k: _Process(),
+        platform_name="posix",
+        memory_limiter=_ScopedLimiter(token),
+        process_identity_resolver=lambda pid: "proof-instance",
+    )
+    provider.start(replace(_request("proof"), require_job_scope=True))
+
+    def fail(*args):
+        raise OSError("injected durable proof failure")
+
+    monkeypatch.setattr(registry, "_record_process_cleanup", fail)
+    with pytest.raises(OSError):
+        provider.wait("proof")
+    assert registry.poll("proof").is_terminal
+    assert provider.cleanup_proof("proof") is None
+
+
+@pytest.mark.skipif(
+    os.name != "nt", reason="real Windows Job Object descendant accounting"
+)
+def test_real_windows_descendant_is_removed_before_cleanup_certificate(tmp_path):
+    registry = SQLiteDurableJobRegistry(tmp_path / "jobs.db")
+    provider = SubprocessJobProvider(
+        registry, process_cleanup=ProcessTreeSupervisor(), max_concurrent_processes=1
+    )
+    script = (
+        'import subprocess,sys; p=subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"],'
+        "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); print(p.pid,flush=True)"
+    )
+    request = ProcessJobRequest(
+        JobIdentity("descendant-proof", "test", "test", "once"),
+        (sys.executable, "-c", script),
+        cwd=tmp_path,
+        require_job_scope=True,
+        max_descendants=3,
+        memory_limit_bytes=256 * 1024 * 1024,
+        deadline_seconds=10,
+    )
+    provider.start(request)
+    waited = provider.wait("descendant-proof", timeout=5)
+    assert waited.record.status is JobStatus.CANCELLED
+    proof = provider.cleanup_proof("descendant-proof")
+    assert (
+        proof["process_exited"]
+        and proof["containment_empty"]
+        and proof["resources_released"]
+    )
+    assert proof["status"] == "cancelled"
+    assert proof["scope_identity"]["containment_identity"].startswith(
+        "Local\\SonderProcess-"
+    )
+    from dataclasses import replace
+
+    second = replace(
+        request,
+        identity=JobIdentity("after-cleanup", "test", "test2", "twice"),
+        argv=(sys.executable, "-c", "pass"),
+    )
+    provider.start(second)
+    assert (
+        provider.wait("after-cleanup", timeout=5).record.status is JobStatus.SUCCEEDED
+    )

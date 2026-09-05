@@ -39,6 +39,10 @@ from .worker_capacity import CAPACITY_DDL, SQLiteWorkerCapacity
 
 
 _DDL = """
+CREATE TABLE IF NOT EXISTS durable_process_cleanup (
+ job_id TEXT PRIMARY KEY REFERENCES durable_job(job_id) ON DELETE CASCADE,
+ evidence TEXT NOT NULL);
+
 CREATE TABLE IF NOT EXISTS durable_job (
     job_id TEXT PRIMARY KEY, kind TEXT NOT NULL, operation_id TEXT NOT NULL,
     idempotency_key TEXT NOT NULL, parent_job_id TEXT, parent_session_id TEXT,
@@ -228,6 +232,34 @@ class SQLiteDurableJobRegistry(SQLiteWorkerCapacity):
             identity, JobStatus.PENDING, 0, now, now,
             attempt=0, max_attempts=max_attempts,
         )
+
+    def _record_process_cleanup(self, job_id, proof):
+        from ....application.jobs.durable_registry import _validate_cleanup_evidence
+
+        encoded = _json(proof)
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            record = self._record(self._row(connection, job_id))
+            if record is None:
+                raise KeyError("job not found")
+            _validate_cleanup_evidence(record, proof)
+            prior = connection.execute(
+                "SELECT evidence FROM durable_process_cleanup WHERE job_id=?", (job_id,)
+            ).fetchone()
+            if prior is not None:
+                if prior[0] != encoded:
+                    raise ValueError("immutable process cleanup evidence conflict")
+                return
+            connection.execute(
+                "INSERT INTO durable_process_cleanup VALUES (?,?)", (job_id, encoded)
+            )
+
+    def process_cleanup_proof(self, job_id):
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT evidence FROM durable_process_cleanup WHERE job_id=?", (job_id,)
+            ).fetchone()
+        return None if row is None else json.loads(row[0])
 
     def attach_process(
         self,

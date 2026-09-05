@@ -276,6 +276,7 @@ class SubprocessJobProvider:
                 process_group_id=process_group_id,
                 metadata={
                     "launch_state": "attached",
+                    "containment_identity": getattr(memory_token, "identity", ""),
                     "process_instance_identity": process_instance_identity,
                     "process_exited_before_fingerprint": (
                         "1" if exited_before_fingerprint else "0"
@@ -428,10 +429,11 @@ class SubprocessJobProvider:
                 job_id, reason, max_descendants=self._limits.get(job_id, 64),
             )
             self._forget_local_job(job_id)
+            self._publish_cleanup(job_id, exit_code)
             return ProcessJobWait(records[-1], exit_code)
         if containment is not None:
-            self._release_capacity(job_id)
             self._release_memory_limit(job_id)
+            self._release_capacity(job_id)
         output_failure = self._take_output_failure(job_id)
         status = (
             JobStatus.SUCCEEDED
@@ -459,6 +461,8 @@ class SubprocessJobProvider:
         self._release_process_slot(job_id)
         if containment is None:
             self._release_memory_limit(job_id)
+        if containment is not None and containment.complete:
+            self._publish_cleanup(job_id, exit_code)
         return ProcessJobWait(record, exit_code)
 
     def cancel(self, job_id: str, reason: str = "cancelled") -> JobCancellationResult:
@@ -526,15 +530,85 @@ class SubprocessJobProvider:
             self._jobs._lifecycle.record_many(result.records)
         if result.cleanup_completed:
             process = self._processes.get(job_id)
-            self._forget_local_job(job_id)
+            observed_exit = None
             if process is not None:
                 try:
-                    process.wait(timeout=0)
+                    observed_exit = process.wait(timeout=0)
                 except (subprocess.TimeoutExpired, OSError):
                     pass
+            if process is not None and observed_exit is None:
+                self._schedule_deadline(job_id, self._cleanup_retry_seconds)
+                return JobCancellationResult(
+                    result.records,
+                    cleanup_completed=False,
+                    detail="root process exit remains unobserved",
+                )
+            self._forget_local_job(job_id)
+            if (
+                containment is not None
+                and containment.complete
+                and observed_exit is not None
+            ):
+                self._publish_cleanup(job_id, observed_exit)
         else:
             self._schedule_deadline(job_id, self._cleanup_retry_seconds)
         return result
+
+    def _publish_cleanup(self, job_id, exit_code):
+        """Publish only from the provider's observed exit/containment release path."""
+        import hashlib
+        import json
+
+        view = self._registry.view(job_id)
+        metadata = view.metadata or {}
+        if metadata.get("require_job_scope") != "1":
+            return
+        if any(
+            job_id in collection
+            for collection in (
+                self._memory_tokens,
+                self._unresolved_scopes,
+                self._process_slot_owners,
+            )
+        ):
+            raise RuntimeError("process resources remain owned")
+        proof = dict(
+            job_id=job_id,
+            job_revision=view.record.revision,
+            parent_session_id=view.record.identity.parent_session_id,
+            principal_id=metadata.get("principal_id", ""),
+            process_id=view.process_id,
+            process_identity=metadata.get("process_instance_identity"),
+            scope_identity={
+                k: v
+                for k, v in metadata.items()
+                if k.startswith("containment_") or k.startswith("job_scope")
+            },
+            process_exited=True,
+            containment_empty=True,
+            resources_released=True,
+            status=view.record.status.value,
+            exit_code=exit_code,
+        )
+        proof["digest"] = hashlib.sha256(
+            json.dumps(proof, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        self._registry._record_process_cleanup(job_id, proof)
+
+    def cleanup_proof(self, job_id):
+        read = getattr(self._registry, "process_cleanup_proof", None)
+        proof = None if read is None else read(job_id)
+        if proof is None:
+            return None
+        record = self._registry.poll(job_id)
+        if (
+            not record.is_terminal
+            or record.revision != proof.get("job_revision")
+            or record.status.value != proof.get("status")
+            or record.identity.parent_session_id != proof.get("parent_session_id")
+        ):
+            return None
+        return proof
 
     def poll(self, job_id: str):
         return self._registry.poll(job_id)
@@ -806,6 +880,7 @@ class SubprocessJobProvider:
             release(job_id)
 
     def _forget_local_job(self, job_id: str) -> None:
+        self._release_memory_limit(job_id)
         self._release_capacity(job_id)
         self._processes.pop(job_id, None)
         self._failed_launches.discard(job_id)
@@ -814,7 +889,6 @@ class SubprocessJobProvider:
         self._unresolved_scopes.pop(job_id, None)
         self._output_threads.pop(job_id, None)
         self._discard_deadline(job_id)
-        self._release_memory_limit(job_id)
 
     def _release_process_slot(self, job_id: str) -> None:
         with self._timer_lock:
@@ -823,9 +897,10 @@ class SubprocessJobProvider:
             lease.release()
 
     def _release_memory_limit(self, job_id: str) -> None:
-        token = self._memory_tokens.pop(job_id, None)
+        token = self._memory_tokens.get(job_id)
         if token is not None:
             token.close()
+            self._memory_tokens.pop(job_id, None)
 
     def _start_output_readers(self, job_id: str, process: Any) -> None:
         """Publish stdout/stderr incrementally when the process exposes pipes.
