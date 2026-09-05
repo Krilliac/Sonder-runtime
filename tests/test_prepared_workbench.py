@@ -319,3 +319,22 @@ def test_prepared_actual_edit_retains_failed_rung_evidence(
     assert evidence.dirty and not evidence.parent_effects_valid
     assert "UNVERIFIED" in output or "VALIDATION_FAILED" in output
     assert session.calls.count("close") == 1
+
+
+@pytest.mark.parametrize("flag", ["cloud_allowed", "remote_ollama_allowed"])
+def test_factory_transport_attenuation_refuses_before_model(
+    prepared_host, monkeypatch, flag
+):
+    adapter, context, models, policy = prepared_host
+    context = replace(context, **{flag: True})
+    prepared = adapter.prepare_workbench(
+        {"prompt": "inspect repository", "tier": "code", "allow_web": False}, context
+    )
+    session = Session(replace(context, **{flag: False}))
+    with pytest.raises(PermissionError):
+        adapter.execute_prepared_workbench(
+            prepared, admitted_context=context, managed_factory=lambda *a: session
+        )
+    assert not models
+    assert session.calls.count("close") == 1
+    assert not adapter._active

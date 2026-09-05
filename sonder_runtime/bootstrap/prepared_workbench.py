@@ -293,10 +293,9 @@ class PreparedWorkbenchAdapter:
                     or context.workspace_roots != admitted_context.workspace_roots
                     or context.deadline_monotonic is None
                     or context.deadline_monotonic > admitted_context.deadline_monotonic
-                    or context.cloud_allowed
-                    and not admitted_context.cloud_allowed
+                    or context.cloud_allowed != admitted_context.cloud_allowed
                     or context.remote_ollama_allowed
-                    and not admitted_context.remote_ollama_allowed
+                    != admitted_context.remote_ollama_allowed
                 ):
                     raise PermissionError(
                         "managed factory context exceeds prepared admission"
