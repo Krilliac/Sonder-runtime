@@ -794,6 +794,7 @@
         "sonder_runtime/domain/model_error_formatting.py",
         "sonder_runtime/domain/model_response_detail.py",
         "sonder_runtime/domain/model_routing.py",
+        "sonder_runtime/domain/model_shard_recovery.py",
         "sonder_runtime/domain/model_sizing.py",
         "sonder_runtime/domain/model_usage.py",
         "sonder_runtime/domain/model_usage_formatting.py",
