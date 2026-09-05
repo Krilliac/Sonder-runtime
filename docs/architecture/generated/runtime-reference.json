@@ -4308,7 +4308,9 @@
       "tool": "json_patch"
     },
     {
-      "aliases": [],
+      "aliases": [
+        "/recover"
+      ],
       "category": "system",
       "name": "/lanes",
       "native": true,
@@ -9029,6 +9031,12 @@
       "type": "ChildStorageConfig"
     },
     {
+      "default": null,
+      "field": "app_control",
+      "section": "root",
+      "type": "AppControlConfig"
+    },
+    {
       "default": "[redacted]",
       "field": "api_key",
       "section": "secrets",
@@ -9051,6 +9059,96 @@
       "field": "artifact_transfer_key",
       "section": "secrets",
       "type": "str"
+    },
+    {
+      "default": false,
+      "field": "enabled",
+      "section": "app_control",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": "",
+      "field": "runtime_id",
+      "section": "app_control",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "catalog_file",
+      "section": "app_control",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": false,
+      "field": "allow_numeric_loopback_native",
+      "section": "app_control",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": [],
+      "field": "app_origins",
+      "section": "app_control",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": [],
+      "field": "proxy_cidrs",
+      "section": "app_control",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": false,
+      "field": "proxy_only_backend",
+      "section": "app_control",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": 900,
+      "field": "session_ttl_seconds",
+      "section": "app_control",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 3600,
+      "field": "binding_ttl_seconds",
+      "section": "app_control",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 4,
+      "field": "account_session_cap",
+      "section": "app_control",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 64,
+      "field": "global_session_cap",
+      "section": "app_control",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 16,
+      "field": "account_binding_cap",
+      "section": "app_control",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 256,
+      "field": "global_binding_cap",
+      "section": "app_control",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 4096,
+      "field": "command_cap",
+      "section": "app_control",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 100,
+      "field": "page_cap",
+      "section": "app_control",
+      "type": "<class 'int'>"
     },
     {
       "default": false,
@@ -9581,11 +9679,11 @@
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES",
   "counts": {
     "commands": 316,
-    "configuration": 107,
+    "configuration": 123,
     "events": 43,
     "tools": 212
   },
-  "digest": "e21c880c2f46ae360f05e2df79fedeb3271fa8408e62d4e03aae12ce269fd04b",
+  "digest": "b3c3a39738a14de80d8308c439f43929fc9158beecf2d0d7a2dad6fe0afcd9f1",
   "events": [
     {
       "name": "session.started",
@@ -10056,10 +10154,10 @@
   "schema": "sonder-runtime-document-reference-v1",
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "965ae3c6d2914ed674ba42b438da1c0051f831dfca632c7e0f69281f27ef9f43",
+    "server.py": "321fef62377cadf0c1f05c08efee8f7a7841b782aab053352224d43171e3b83c",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
-    "sonder_runtime/platform/config.py": "5f43c2c7576fac2fbfc4f2393d89562a90c2b0938dbec67a48f3de70b797f95b"
+    "sonder_runtime/platform/config.py": "e274ff9e0668680d2be026da3283eb7870886b8ca2f46621533ee3a959a3714e"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
   "tools": [

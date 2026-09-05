@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 261,
+      "file_count": 265,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -119,6 +119,7 @@
         "sonder_runtime/adapters/fanout_receipt.py",
         "sonder_runtime/adapters/filesystem/__init__.py",
         "sonder_runtime/adapters/filesystem/atomic_json.py",
+        "sonder_runtime/adapters/filesystem/child_migration_bundle.py",
         "sonder_runtime/adapters/filesystem/file_ops.py",
         "sonder_runtime/adapters/filesystem/json_patch.py",
         "sonder_runtime/adapters/filesystem/text_patch.py",
@@ -203,6 +204,7 @@
         "sonder_runtime/adapters/persistence/autopilot_repository.py",
         "sonder_runtime/adapters/persistence/autopilot_store.py",
         "sonder_runtime/adapters/persistence/checkpoint_store.py",
+        "sonder_runtime/adapters/persistence/child_migration.py",
         "sonder_runtime/adapters/persistence/composition_store.py",
         "sonder_runtime/adapters/persistence/durable_continuation.py",
         "sonder_runtime/adapters/persistence/epoch_adoption.py",
@@ -214,10 +216,12 @@
         "sonder_runtime/adapters/persistence/migrations.py",
         "sonder_runtime/adapters/persistence/operations_store.py",
         "sonder_runtime/adapters/persistence/postgres_binding.py",
+        "sonder_runtime/adapters/persistence/postgres_child_migration.py",
         "sonder_runtime/adapters/persistence/postgres_continuation.py",
         "sonder_runtime/adapters/persistence/postgres_continuation_transport.py",
         "sonder_runtime/adapters/persistence/queued_actions.py",
         "sonder_runtime/adapters/persistence/repair_journal.py",
+        "sonder_runtime/adapters/persistence/runtime_owner.py",
         "sonder_runtime/adapters/persistence/served_action_receipts.py",
         "sonder_runtime/adapters/persistence/session_checkpoint_privacy.py",
         "sonder_runtime/adapters/persistence/session_repository.py",
@@ -310,7 +314,7 @@
       ]
     },
     {
-      "file_count": 285,
+      "file_count": 291,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -321,6 +325,7 @@
         "sonder_runtime/application/agents/delegated_verification.py",
         "sonder_runtime/application/agents/delegation_service.py",
         "sonder_runtime/application/agents/durable_lineage.py",
+        "sonder_runtime/application/agents/host_turns.py",
         "sonder_runtime/application/agents/interactive_lanes.py",
         "sonder_runtime/application/agents/lane_continuation.py",
         "sonder_runtime/application/agents/lineage_delegation.py",
@@ -447,6 +452,7 @@
         "sonder_runtime/application/ports/artifact_store.py",
         "sonder_runtime/application/ports/artifact_transfer.py",
         "sonder_runtime/application/ports/backup.py",
+        "sonder_runtime/application/ports/child_migration.py",
         "sonder_runtime/application/ports/clock.py",
         "sonder_runtime/application/ports/command_catalog.py",
         "sonder_runtime/application/ports/compaction.py",
@@ -462,6 +468,7 @@
         "sonder_runtime/application/ports/execution_world.py",
         "sonder_runtime/application/ports/extensions.py",
         "sonder_runtime/application/ports/filesystem.py",
+        "sonder_runtime/application/ports/host_final.py",
         "sonder_runtime/application/ports/jobs.py",
         "sonder_runtime/application/ports/lane_continuation.py",
         "sonder_runtime/application/ports/memory.py",
@@ -478,6 +485,7 @@
         "sonder_runtime/application/ports/repl_services.py",
         "sonder_runtime/application/ports/repositories.py",
         "sonder_runtime/application/ports/repository_intelligence.py",
+        "sonder_runtime/application/ports/runtime_owner.py",
         "sonder_runtime/application/ports/sandbox.py",
         "sonder_runtime/application/ports/session_repository.py",
         "sonder_runtime/application/ports/specialized_lifecycle.py",
@@ -563,6 +571,8 @@
         "sonder_runtime/application/skills/procedural_publication.py",
         "sonder_runtime/application/skills/registry.py",
         "sonder_runtime/application/subagents/__init__.py",
+        "sonder_runtime/application/subagents/child_migration.py",
+        "sonder_runtime/application/subagents/child_migration_activation.py",
         "sonder_runtime/application/subagents/continuable.py",
         "sonder_runtime/application/subagents/continuation_codec.py",
         "sonder_runtime/application/subagents/durable_continuation.py",
@@ -601,13 +611,16 @@
       ]
     },
     {
-      "file_count": 25,
+      "file_count": 29,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
         "sonder_runtime/bootstrap/app.py",
+        "sonder_runtime/bootstrap/app_control.py",
         "sonder_runtime/bootstrap/artifact_transfer.py",
         "sonder_runtime/bootstrap/capabilities.py",
+        "sonder_runtime/bootstrap/child_migration.py",
+        "sonder_runtime/bootstrap/child_migration_host.py",
         "sonder_runtime/bootstrap/child_storage.py",
         "sonder_runtime/bootstrap/config_loading.py",
         "sonder_runtime/bootstrap/container.py",
@@ -620,6 +633,7 @@
         "sonder_runtime/bootstrap/legacy_model.py",
         "sonder_runtime/bootstrap/legacy_root.py",
         "sonder_runtime/bootstrap/main.py",
+        "sonder_runtime/bootstrap/managed_conversation.py",
         "sonder_runtime/bootstrap/managed_standalone.py",
         "sonder_runtime/bootstrap/model_gateways.py",
         "sonder_runtime/bootstrap/native_mcp.py",
@@ -858,10 +872,11 @@
       ]
     },
     {
-      "file_count": 35,
+      "file_count": 36,
       "name": "platform",
       "python_files": [
         "sonder_runtime/platform/__init__.py",
+        "sonder_runtime/platform/app_control_config.py",
         "sonder_runtime/platform/artifact_transfer_config.py",
         "sonder_runtime/platform/child_environment_policy.py",
         "sonder_runtime/platform/child_storage_config.py",
