@@ -14,6 +14,7 @@ def test_final_receipt_is_distinct_exact_immutable_and_required(lanes):
     lifetime = ManagedConversationLifetime(application=app,
         session_factory=lambda c, a: setup(lanes, c)[0], require_current=lambda: None)
     view = lifetime.factory(SimpleNamespace(run_id='final-receipt-turn'), app)
+    turn_link = view.turn_link()
     draft = HostTerminalDraft(HostObservationLedger(project_scope=str(lanes[3])).seal(),
                               'model claims finished', 'NORMAL', ())
     facts = HostFinalFacts((), str(lanes[3]), True, False, False, 'VALIDATION_FAILED',
@@ -37,8 +38,14 @@ def test_final_receipt_is_distinct_exact_immutable_and_required(lanes):
             assert turn['final_receipt']['facts']['delegated_work'] is True
             assert turn['final_receipt']['original_digest'] == turn['projection_digest']
         view.close()
+        evidence = lifetime.final_evidence(turn_link)
+        assert evidence.result.output == output
+        assert evidence.facts.delegated_work is True
+        assert lifetime._owner.final_evidence(turn_link) == evidence
         next_view = lifetime.factory(SimpleNamespace(run_id='next-turn'), app)
         assert next_view is not view
+        with pytest.raises(PermissionError):
+            lifetime.final_evidence(turn_link)
     finally:
         lifetime.close()
 
