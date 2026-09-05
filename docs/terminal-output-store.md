@@ -30,3 +30,16 @@ and valid UTF-8. The adapter retains no connections between operations. This is
 single-host durable storage, not replication or protection against a malicious
 process already acting as the same operating-system user. It does not add OS
 filesystem or network isolation to child execution.
+# Terminal projection integration
+
+The host terminal codec keeps the existing schema-1 inline representation for
+outputs up to 16 KiB. Larger outputs, up to the store's 1 MiB ceiling, use a
+schema-2 envelope containing the exact content digest, UTF-8 byte count, and
+complete projection-binding digest. The original text is committed before the
+codec returns a projection. Restoration reads through a newly scoped live host
+context, validates all digests, and never rewrites the blob. It does not truncate
+text, normalize newlines, or convert an original failure into success.
+
+The store and context provider must be injected by trusted host composition.
+The reference itself grants no access. This codec integration is verified with
+actual SQLite reopening; it does not by itself enable an app/REPL recovery route.
