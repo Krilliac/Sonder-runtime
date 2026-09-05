@@ -430,12 +430,24 @@ class CandidateDecision:
 
 
 @dataclass(frozen=True, slots=True)
+class PlacementInventoryScope:
+    candidate_scope: str
+    registry_generation: str
+    observation_revision: int
+    configured_count: int
+    observed_count: int
+    considered_count: int
+    structurally_excluded_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class PlacementDecision:
     request_digest: str
     selected_node_id: str | None
     candidates: tuple[CandidateDecision, ...]
     ranked_node_ids: tuple[str, ...]
     snapshot_digests: tuple[tuple[str, str], ...]
+    inventory_scope: PlacementInventoryScope | None = None
 
 
 class ComputePlacementScheduler:
@@ -454,6 +466,7 @@ class ComputePlacementScheduler:
         snapshots: Iterable[NodeSnapshot],
         *,
         now: datetime,
+        snapshot_digest=None,
     ) -> PlacementDecision:
         if not isinstance(request, WorkloadRequest):
             raise TypeError("request must be a WorkloadRequest")
@@ -469,7 +482,7 @@ class ComputePlacementScheduler:
         eligible: list[CandidateDecision] = []
         digests: list[tuple[str, str]] = []
         for snapshot in ordered:
-            digests.append((snapshot.node.node_id, snapshot.digest()))
+            digests.append((snapshot.node.node_id, snapshot.digest() if snapshot_digest is None else snapshot_digest(snapshot)))
             decision = self._assess(request, snapshot, current)
             decisions.append(decision)
             if decision.eligible:

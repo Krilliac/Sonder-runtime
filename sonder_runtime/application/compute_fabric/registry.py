@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from threading import RLock
 
 from ...domain.compute_fabric import ComputeNode, NodeHealth, NodeSnapshot
+from .index import ComputeIndex
 
 
 def _utc(value: datetime, label: str) -> datetime:
@@ -31,12 +32,19 @@ class ComputeNodeRegistry:
                 raise TypeError("nodes must contain ComputeNode values")
             if node.node_id in configured:
                 raise ValueError(f"duplicate configured node identity: {node.node_id}")
+            if any(not isinstance(getattr(node, name), frozenset) for name in
+                   ("allowed_workloads", "configured_capabilities", "workspace_mappings")):
+                node = replace(node, allowed_workloads=frozenset(node.allowed_workloads),
+                               configured_capabilities=frozenset(node.configured_capabilities),
+                               workspace_mappings=frozenset(node.workspace_mappings))
             configured[node.node_id] = node
         self._nodes = configured
         self._observations: dict[str, NodeSnapshot] = {}
         self._probe_errors: dict[str, str] = {}
         self._snapshot_ttl = snapshot_ttl
         self._lock = RLock()
+        self._index = ComputeIndex(tuple(configured.values()), snapshot_ttl)
+        self._configured_sorted = tuple(configured[identity] for identity in self._index.ids)
 
     @property
     def snapshot_ttl(self) -> timedelta:
@@ -49,7 +57,7 @@ class ComputeNodeRegistry:
             raise KeyError(f"compute node {node_id!r} is not configured") from None
 
     def configured_nodes(self) -> tuple[ComputeNode, ...]:
-        return tuple(self._nodes[node_id] for node_id in sorted(self._nodes))
+        return self._configured_sorted
 
     def observe(
         self,
@@ -70,6 +78,9 @@ class ComputeNodeRegistry:
             snapshot,
             node=configured,
             received_at=controller_time,
+            live_capabilities=frozenset(snapshot.live_capabilities),
+            advertised_workloads=frozenset(snapshot.advertised_workloads),
+            models=tuple(snapshot.models),
         )
         with self._lock:
             prior = self._observations.get(configured.node_id)
@@ -78,6 +89,7 @@ class ComputeNodeRegistry:
                 "prior received_at",
             ):
                 raise ValueError("compute node receipt time cannot move backwards")
+            self._index.update(narrowed)
             self._observations[configured.node_id] = narrowed
             self._probe_errors.pop(configured.node_id, None)
         return narrowed
@@ -116,6 +128,7 @@ class ComputeNodeRegistry:
                     health=NodeHealth.UNHEALTHY,
                 )
             )
+            self._index.update(failed)
             self._observations[node_id] = failed
             self._probe_errors[node_id] = evidence_ref
             return failed
@@ -144,6 +157,25 @@ class ComputeNodeRegistry:
         if observed is None:
             return True
         return current - observed.freshness_at > self._snapshot_ttl
+
+    def candidates(self, request, *, now: datetime, local=None):
+        _utc(now, "now")
+        with self._lock:
+            return self._index.candidates(request, local=local)
+
+    def configured_candidates(self, request, *, local=None):
+        with self._lock:
+            return tuple(self._nodes[identity] for identity in sorted(
+                self._index.matching(request, observed=False, local=local)))
+
+    def inventory_summary(self, *, now: datetime):
+        with self._lock:
+            return self._index.summary(_utc(now, "now"))
+
+    def index_state_size(self):
+        with self._lock:
+            return {"expiry_entries": len(self._index.expiry),
+                    "observations": len(self._observations), "live_postings": len(self._index.live)}
 
 
 __all__ = ["ComputeNodeRegistry"]
