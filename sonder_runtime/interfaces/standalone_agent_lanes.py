@@ -77,6 +77,67 @@ class StandaloneLaneController:
         self._application = self._context = self._parent = None
         self._closed = self._cancelled = self._restricted = False
         self.delegated_work = False
+        self.terminal_projected = False
+        self._verification_attempted = False
+        self._verifier = self._verification_prepared = None
+        self._verification_verdict = None
+
+    def verify_delegated(self, approve, *, verifier_factory):
+        """Host-only finalization: one admission, then fresh typed validation.
+
+        The original controller authority and exact catalog bundle are retained
+        privately. A repeated terminal projection cannot launch another check.
+        """
+        from ..application.ports.delegated_verification import VerificationVerdict
+
+        refused = VerificationVerdict(False, "VERIFICATION_UNAVAILABLE")
+        self._verification_verdict = refused
+        try:
+            self._initialize()
+            if self._parent is None or not self.delegated_work:
+                return refused
+            service = lane_service(self._application)
+            service.verify_model_parent(
+                self._parent["parent_session_id"], self._parent["parent_token"], self._context,
+            )
+            parent = self._parent["parent_session_id"]
+            revision = self._parent["revision"]
+            if not self._verification_attempted:
+                # Set before composition/admission: even an ambiguous failure
+                # may have durable effects and must not cause blind replay.
+                self._verification_attempted = True
+                self._verifier = verifier_factory(self._application, service)
+                self._verification_prepared = self._verifier.prepare(
+                    parent, command_id=self.run_id + "-verify", context=self._context,
+                    bound_parent_revision=revision,
+                )
+                self._verifier.execute_prepared(
+                    self._verification_prepared, context=self._context, approve=approve,
+                )
+            prepared = self._verification_prepared
+            if prepared is None:
+                return refused
+            verdict = self._verifier.validate(
+                parent, prepared.verification_id, context=self._context,
+                bound_parent_revision=revision,
+            )
+            if not isinstance(verdict, VerificationVerdict) or type(verdict.valid) is not bool:
+                return refused
+            if verdict.valid is True and not (
+                verdict.code == "CERTIFIED"
+                and verdict.certificate_id == prepared.verification_id
+                and verdict.parent_session_id == parent == prepared.parent_session_id
+                and verdict.parent_grant_revision == revision == prepared.parent_grant_revision
+                and verdict.generation == prepared.generation
+                and verdict.roots == prepared.roots
+                and verdict.children == prepared.children
+            ):
+                return refused
+            self._verification_verdict = verdict
+            return verdict
+        except Exception:
+            _LOG.warning("standalone delegated verification unavailable")
+            return refused
 
     def restrict(self, *, read_only=False, cloud=False):
         self._restricted = self._restricted or read_only or cloud
