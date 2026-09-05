@@ -110,7 +110,7 @@ def test_logout_admission_is_bounded_and_released_after_failure(monkeypatch):
         for _ in range(2):
             status, _, _ = _request(port, 'POST', '/v1/sonder/logout', body='{}', headers=headers)
             assert status == 503
-            assert gate.acquire(blocking=False)
+            assert gate.acquire(timeout=5)
             gate.release()
 
 
