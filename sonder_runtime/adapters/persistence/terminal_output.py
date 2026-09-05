@@ -1,5 +1,7 @@
 """Bounded private SQLite output storage for trusted host projection codecs."""
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 from contextlib import contextmanager
 from dataclasses import asdict
 import hashlib
@@ -96,7 +98,7 @@ class SQLiteTerminalOutputStore:
         self._check(binding, context)
         with PrivateDirectoryAnchor(self.root) as anchor:
             self._files()
-            conn = sqlite3.connect(self.root / "terminal-output.sqlite", timeout=1)
+            conn = owned_sqlite_connect(self.root / "terminal-output.sqlite", timeout=1)
             try:
                 self._files()
                 conn.execute("PRAGMA synchronous=FULL")

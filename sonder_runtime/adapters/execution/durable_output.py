@@ -7,6 +7,8 @@ declared size; reads therefore verify both before returning any payload.
 """
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -88,7 +90,7 @@ class SQLiteSpillStore:
             connection.execute(_DDL)
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(str(self._path), timeout=5.0)
+        connection = owned_sqlite_connect(str(self._path), timeout=5.0)
         connection.execute("PRAGMA busy_timeout=5000")
         return connection
 

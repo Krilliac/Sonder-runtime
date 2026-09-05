@@ -5,6 +5,8 @@ that sqlite3.connect calls live only in the adapters layer.
 """
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 import json
 import logging
 import sqlite3
@@ -47,7 +49,7 @@ class CheckpointStore:
             path = self._db_path
             if path != ":memory:":
                 Path(path).parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(path, check_same_thread=False)
+            conn = owned_sqlite_connect(path, check_same_thread=False)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=5000")

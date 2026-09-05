@@ -1,6 +1,8 @@
 """SQLite adapter for atomic, idempotent cross-domain record/outbox writes."""
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 import hashlib
 import json
 from pathlib import Path
@@ -76,11 +78,11 @@ class SQLiteCrossDomainCoordinator:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._clock = clock or (lambda: "now")
         self._lock = Lock()
-        with sqlite3.connect(str(self._path)) as connection:
+        with owned_sqlite_connect(str(self._path)) as connection:
             connection.executescript(_DDL)
 
     def _connect(self):
-        connection = sqlite3.connect(str(self._path), timeout=5.0)
+        connection = owned_sqlite_connect(str(self._path), timeout=5.0)
         connection.execute("PRAGMA busy_timeout=5000")
         return connection
 

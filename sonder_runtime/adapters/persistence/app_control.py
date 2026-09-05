@@ -1,5 +1,7 @@
 """Durable app-control metadata on the existing private fleet database."""
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 from dataclasses import asdict, replace
 import hashlib
 import json
@@ -168,7 +170,7 @@ class SQLiteAppControlStore:
         return (info.st_dev, info.st_ino)
 
     def _connect(self):
-        conn = sqlite3.connect(
+        conn = owned_sqlite_connect(
             Path(self.path).as_uri() + "?mode=rw", uri=True, timeout=5
         )
         conn.execute("PRAGMA busy_timeout=5000")

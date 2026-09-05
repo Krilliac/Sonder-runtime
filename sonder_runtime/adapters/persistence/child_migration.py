@@ -1,5 +1,7 @@
 """SQLite transfer transactions for the canonical durable child aggregate."""
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 from contextlib import contextmanager
 from dataclasses import asdict
 import hashlib
@@ -148,7 +150,7 @@ class SQLiteChildMigrationStore:
     def snapshot(self, *, bundle=None):
         if not self.path.is_file() or self.path.is_symlink():
             raise MigrationRefused("migration source is not a regular database")
-        source = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, timeout=1)
+        source = owned_sqlite_connect(self.path.as_uri() + "?mode=ro", uri=True, timeout=1)
         backup = None
         try:
             if bundle is not None:
@@ -157,7 +159,7 @@ class SQLiteChildMigrationStore:
                 backup_path = bundle.path / "source-backup.sqlite"
                 if bundle.has_sealed_backup():
                     source.close()
-                    source = sqlite3.connect(
+                    source = owned_sqlite_connect(
                         backup_path.as_uri() + "?mode=ro", uri=True, timeout=1
                     )
                 elif backup_path.exists():
@@ -167,7 +169,7 @@ class SQLiteChildMigrationStore:
                 else:
                     self._backup(source, backup_path)
                     source.close()
-                    source = sqlite3.connect(
+                    source = owned_sqlite_connect(
                         backup_path.as_uri() + "?mode=ro", uri=True, timeout=1
                     )
                     bundle.seal_backup(self.physical_identity())
@@ -188,7 +190,7 @@ class SQLiteChildMigrationStore:
     def _backup(source, path):
         import time
 
-        backup = sqlite3.connect(path)
+        backup = owned_sqlite_connect(path)
         try:
             deadline = time.monotonic() + 30
             page_size = source.execute("PRAGMA page_size").fetchone()[0]
@@ -209,7 +211,7 @@ class SQLiteChildMigrationStore:
 
     @contextmanager
     def _write(self):
-        connection = sqlite3.connect(self.path, timeout=1)
+        connection = owned_sqlite_connect(self.path, timeout=1)
         try:
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute("BEGIN IMMEDIATE")
@@ -260,7 +262,7 @@ class SQLiteChildMigrationStore:
     def status(self, manifest):
         if not self.path.is_file():
             return {"phase": "UNSTAGED", "migration_id": manifest["migration_id"]}
-        connection = sqlite3.connect(
+        connection = owned_sqlite_connect(
             self.path.as_uri() + "?mode=ro", uri=True, timeout=1
         )
         try:

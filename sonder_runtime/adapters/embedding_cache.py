@@ -19,6 +19,8 @@ Environment knobs: ``SONDER_EMBED_CACHE=0`` disables the cache entirely;
 """
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 import array
 import hashlib
 import os
@@ -67,7 +69,7 @@ def _connection():
             conn.close()
         except sqlite3.Error:
             pass
-    conn = sqlite3.connect(path, timeout=2.0)
+    conn = owned_sqlite_connect(path, timeout=2.0)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(_SCHEMA)
