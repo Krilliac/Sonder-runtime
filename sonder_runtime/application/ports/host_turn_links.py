@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from .app_control import text, digest, positive
+from .host_final import HostFinalFacts
 
 
 @dataclass(frozen=True)
@@ -54,3 +55,11 @@ class ManagedHostTerminalLink:
 class FinalizedHostResult:
     output: str = field(repr=False)
     receipt: ManagedHostTerminalLink
+
+
+@dataclass(frozen=True)
+class ManagedHostFinalEvidence:
+    """Validated retained facts and text; this is not terminal eligibility."""
+
+    result: FinalizedHostResult
+    facts: HostFinalFacts
