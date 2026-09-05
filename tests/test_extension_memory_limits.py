@@ -218,9 +218,10 @@ def test_isolated_scope_bus_context_is_wrapper_only(user_scope):
     result = limiter.isolated_process_environment(prepared, argv, environment)
     assert result.token is prepared.token
     if not user_scope:
-        assert result is prepared
+        assert result.argv[-7:] == ("/usr/bin/env", "-u", "INVOCATION_ID", "--", *argv)
+        assert result.launch_options["env"] == environment
         return
-    assert result.argv[-7:] == ("/usr/bin/env", "-u", "DBUS_SESSION_BUS_ADDRESS", "--", *argv)
+    assert result.argv[-9:] == ("/usr/bin/env", "-u", "DBUS_SESSION_BUS_ADDRESS", "-u", "INVOCATION_ID", "--", *argv)
     wrapper = result.launch_options["env"]
     assert "SECRET" not in wrapper
     assert "malicious" not in result.argv

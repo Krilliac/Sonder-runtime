@@ -457,21 +457,22 @@ class NativeExtensionMemoryLimiter:
         allowed = {"PATH", "LANG", "PYTHONIOENCODING", "PYTHONNOUSERSITE", "TEMP", "TMP"}
         if any(key not in allowed for key in environment):
             raise ExtensionMemoryLimitUnsupported("isolated systemd environment contains unsupported keys")
-        if not prepared.token._user_scope:
-            return prepared
         prefix = prepared.argv[:-len(argv)]
         if not prefix or prefix[-1] != "--":
             raise ExtensionMemoryLimitError("prepared command boundary is missing")
         env_program = self._which("env")
         if not env_program or not env_program.startswith("/"):
             raise ExtensionMemoryLimitUnsupported("isolated systemd launch requires an absolute env executable")
-        uid = self._os.geteuid()
-        if type(uid) is not int or uid < 0:
-            raise ExtensionMemoryLimitError("current effective user identity is unavailable")
         wrapper_environment = dict(environment)
-        wrapper_environment["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{uid}/bus"
+        removed = ("-u", "INVOCATION_ID")
+        if prepared.token._user_scope:
+            uid = self._os.geteuid()
+            if type(uid) is not int or uid < 0:
+                raise ExtensionMemoryLimitError("current effective user identity is unavailable")
+            wrapper_environment["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{uid}/bus"
+            removed = ("-u", "DBUS_SESSION_BUS_ADDRESS", *removed)
         return replace(prepared,
-            argv=(*prefix, env_program, "-u", "DBUS_SESSION_BUS_ADDRESS", "--", *argv),
+            argv=(*prefix, env_program, *removed, "--", *argv),
             launch_options={**prepared.launch_options, "env": wrapper_environment})
 
     def restore_process_job(
