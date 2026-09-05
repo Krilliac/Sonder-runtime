@@ -19,6 +19,11 @@ from pathlib import Path
 from .fleet_store import _ensure_schema as _ensure_fleet_schema
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS agent_lane_terminal_projections (
+ continuation_id TEXT NOT NULL, principal TEXT NOT NULL,
+ verification_id TEXT NOT NULL, binding TEXT NOT NULL,
+ payload BLOB NOT NULL, digest TEXT NOT NULL,
+ PRIMARY KEY(continuation_id,verification_id));
 CREATE TABLE IF NOT EXISTS agent_parent_verification (
  parent_session TEXT PRIMARY KEY, principal TEXT NOT NULL,
  generation INTEGER NOT NULL DEFAULT 0, barrier TEXT NOT NULL DEFAULT '');
@@ -61,6 +66,62 @@ def encode(value):
 class LaneTransaction:
     def __init__(self, conn):
         self.conn = conn
+
+    def link_terminal_projection(self, continuation_id, principal, sealed):
+        """Private persistence primitive; caller must authorize the bound link.
+
+        No upsert: a retry can only confirm the identical original host record.
+        The enclosing continuation admission transaction owns all authority checks.
+        """
+        from dataclasses import asdict
+
+        sealed.validate()
+        for value in (continuation_id, principal):
+            if not isinstance(value, str) or not 1 <= len(value.encode()) <= 256:
+                raise ValueError("projection scope is invalid")
+        binding = encode(asdict(sealed.binding))
+        row = self.conn.execute(
+            "SELECT principal,binding,payload,digest FROM agent_lane_terminal_projections "
+            "WHERE continuation_id=? AND verification_id=?",
+            (continuation_id, sealed.binding.verification_id),
+        ).fetchone()
+        expected = (principal, binding, sealed.payload, sealed.sha256)
+        if row is not None:
+            if tuple(row) != expected:
+                raise ValueError("original terminal projection is immutable")
+            return
+        self.conn.execute(
+            "INSERT INTO agent_lane_terminal_projections VALUES (?,?,?,?,?,?)",
+            (
+                continuation_id,
+                principal,
+                sealed.binding.verification_id,
+                binding,
+                sealed.payload,
+                sealed.sha256,
+            ),
+        )
+
+    def terminal_projection(self, continuation_id, principal, verification_id):
+        from ...application.ports.lane_continuation import (
+            ProjectionBinding,
+            SealedProjection,
+        )
+
+        row = self.conn.execute(
+            "SELECT binding,payload,digest FROM agent_lane_terminal_projections "
+            "WHERE continuation_id=? AND principal=? AND verification_id=?",
+            (continuation_id, principal, verification_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError("terminal projection unavailable")
+        binding = json.loads(row["binding"])
+        binding["project_roots"] = tuple(binding["project_roots"])
+        sealed = SealedProjection(
+            ProjectionBinding(**binding), row["payload"], row["digest"]
+        )
+        sealed.validate()
+        return sealed
 
     def verification_generation(self, parent, principal):
         row = self.conn.execute(
