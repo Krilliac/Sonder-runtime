@@ -1908,6 +1908,23 @@ def _print_facts(project):
         print("  - %s  %s" % (f["id"], f["text"]))
 
 
+def _run_session_work(session_id, *, host_project, **arguments):
+    """Persist the exact REPL-selected conversation before standalone work.
+
+    This private wrapper is not a public session argument or attachment grant.
+    The managed host-selection adapter must still authorize this persisted row.
+    """
+    conn = server._open_db()
+    try:
+        memory_store.touch_session(conn, session_id, project=host_project)
+        row = memory_store.get_session(conn, session_id)
+        if row is None or row['session_id'] != session_id:
+            raise PermissionError('selected host conversation unavailable')
+    finally:
+        conn.close()
+    return server.workbench_agent(**arguments)
+
+
 def main(*, machine_output=False):
     global CURRENT_TOKEN
     trace = False
@@ -2023,7 +2040,7 @@ def main(*, machine_output=False):
         started_at = time.monotonic()
         indicator = _begin_chat_turn("Sonder work")
         try:
-            out = server.workbench_agent(
+            out = _run_session_work(session_id, host_project=project,
                 prompt=task, tier=active_model or active_tier or "auto",
                 max_steps=12, project=workspace_root,
             )
@@ -2679,7 +2696,7 @@ def main(*, machine_output=False):
                 if not arg.strip():
                     print("usage: /work <task>")
                 else:
-                    out = server.workbench_agent(
+                    out = _run_session_work(session_id, host_project=project,
                         prompt=arg.strip(), tier=active_model or active_tier or "auto",
                         project=workspace_root or project, max_steps=12,
                     )
