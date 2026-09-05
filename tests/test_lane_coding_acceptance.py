@@ -1,6 +1,7 @@
 """Scripted model, real filesystem/process coding acceptance in a disposable Git repo."""
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -417,7 +418,7 @@ def test_catalog_cannot_live_in_another_model_writable_root(coding, monkeypatch)
     other.mkdir()
     catalog = other / "catalog.json"
     catalog.write_bytes(path.read_bytes())
-    monkeypatch.setenv("SONDER_FILE_ROOTS", str(repo) + ";" + str(other))
+    monkeypatch.setenv("SONDER_FILE_ROOTS", os.pathsep.join((str(repo), str(other))))
     with pytest.raises(ValueError, match="writable"):
         LaneTestCatalog.load(catalog)
 

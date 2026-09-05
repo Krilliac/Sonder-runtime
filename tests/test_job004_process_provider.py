@@ -1423,3 +1423,29 @@ def test_terminal_cancelled_job_retries_failed_close_before_releasing_slot(
     assert provider.cleanup_proof("close-retry")["resources_released"]
     provider.start(replace(_request("after-close"), require_job_scope=True))
     provider.wait("after-close")
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_prepared_scope_memory_limit_preserves_exact_cleanup_owner(cancel):
+    from dataclasses import replace
+    token = _ScopedToken(ProcessContainmentResult(True))
+    class Limiter(_ScopedLimiter):
+        def apply(self, process, memory_limit_bytes):
+            pytest.fail("prepared scope must not be replaced by a per-process token")
+    provider = SubprocessJobProvider(
+        DurableJobRegistry(), process_cleanup=_Cleanup(complete=True),
+        launcher=lambda *args, **kwargs: _Process(), platform_name="posix",
+        memory_limiter=Limiter(token), process_identity_resolver=lambda pid: "exact-scope-instance")
+    request = replace(_request("scope-memory"), require_job_scope=True, memory_limit_bytes=512 * 1024 * 1024)
+    try:
+        provider.start(request)
+        assert provider._memory_tokens["scope-memory"] is token
+        if cancel:
+            assert provider.cancel("scope-memory").cleanup_completed
+        else:
+            provider.wait("scope-memory")
+        proof = provider.cleanup_proof("scope-memory")
+        assert token.closed and proof["containment_empty"] and proof["resources_released"]
+    finally:
+        if "scope-memory" in provider._processes:
+            provider.cancel("scope-memory", reason="test fixture cleanup")
