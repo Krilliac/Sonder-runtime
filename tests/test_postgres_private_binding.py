@@ -50,6 +50,48 @@ def test_fixed_scram_binding_disables_ambient_client_cert_auth(tmp_path):
         binding.close()
 
 
+def test_private_migration_policy_identity_revalidates_closure_and_exact_policy(
+    tmp_path,
+):
+    from dataclasses import replace
+    from sonder_runtime.adapters.persistence.postgres_child_migration import (
+        PostgresChildMigrationStore,
+    )
+
+    path = bundle(tmp_path)
+    roots = []
+    binding = PostgresPrivateBinding(path, writable_roots=lambda: roots)
+    try:
+        store = object.__new__(PostgresChildMigrationStore)
+        store.binding = binding
+        config = ChildStorageConfig(
+            owner_id="owner-a", durability="sync-pair", required_standby="standby-a"
+        )
+        store.config = config
+        original = store._live_policy_identity()
+        for change in (
+            {"owner_id": "owner-b"},
+            {"durability": "primary"},
+            {"required_standby": "standby-b"},
+            {"operation_timeout_seconds": 6},
+            {"cancel_timeout_seconds": 2},
+        ):
+            store.config = replace(config, **change)
+            differs = store._live_policy_identity() != original
+            assert differs
+        store.config = config
+        roots.append(path.parent)
+        with pytest.raises(ContinuationStorageFailure):
+            store._live_policy_identity()
+        roots.clear()
+        # Private policy tracks content and anchored identity, not just a path.
+        path.write_text(path.read_text() + " ", encoding="utf-8")
+        with pytest.raises(ContinuationStorageFailure):
+            store._live_policy_identity()
+    finally:
+        binding.close()
+
+
 @pytest.mark.parametrize("variable", ["pgservice", "PgPaSsFiLe", "pGoPtIoNs"])
 def test_binding_rejects_case_preserved_windows_libpq_aliases(
     tmp_path, monkeypatch, variable

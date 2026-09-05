@@ -21,6 +21,7 @@ from sonder_runtime.application.subagents.child_migration import (
     export_snapshot,
     stage_snapshot,
     verify_snapshot,
+    MigrationRefused,
 )
 from sonder_runtime.bootstrap.child_migration_host import DisposableChildMigrationHost
 from sonder_runtime.platform.config import SonderConfig
@@ -80,6 +81,28 @@ def test_real_pair_two_direction_exact_history_and_interrupted_resume(
             # Discard the importer and its dedicated session after one committed
             # page. Reopening must retain that exact migration and page receipt.
             assert target.close()
+            changed_config = replace(
+                storage_config,
+                owner_id="other-owner",
+                durability="primary",
+                required_standby="",
+            )
+            changed = PostgresChildMigrationStore(
+                changed_config,
+                PostgresPrivateBinding(
+                    Path(storage_config.binding_file), writable_roots=lambda: ()
+                ),
+            )
+            try:
+                assert changed.identity != manifest["target_identity"]
+                with pytest.raises(MigrationRefused, match="policy identity"):
+                    changed.status(manifest)
+                with pytest.raises(MigrationRefused, match="selection"):
+                    host.activate(bundle, source, changed)
+                assert not bundle.has_phase("SOURCE_RETIRE_INTENT", manifest)
+                assert host.selected_store is source
+            finally:
+                assert changed.close()
             target = PostgresChildMigrationStore(
                 storage_config,
                 PostgresPrivateBinding(
@@ -110,6 +133,9 @@ def test_real_pair_two_direction_exact_history_and_interrupted_resume(
                     monkeypatch.setattr(target, "activate", activate)
                     restore()
             assert host.activate(bundle, source, target)["phase"] == "COMPLETE"
+        with pytest.raises(MigrationRefused, match="policy changed"):
+            host.start(replace(SonderConfig(), child_storage=changed_config))
+        assert host._repository is None
         host.start(replace(SonderConfig(), child_storage=storage_config))
         assert host._repository.mutate(replay).result_bytes == original_result
         assert host._repository.get("child-0000").checkpoint.state == {"value": 0}
@@ -122,6 +148,25 @@ def test_real_pair_two_direction_exact_history_and_interrupted_resume(
             ),
         )
         reverse = SQLiteChildMigrationStore(host.path / "fresh-reverse.db")
+        with ChildMigrationBundle(
+            tmp_path / "stale-owner", writable_roots=lambda: ()
+        ) as stale:
+            stale_manifest = export_snapshot(
+                reverse_source, stale, target_identity=reverse.identity
+            )
+            assert reverse_source.close()
+            # A real owner claim/clean shutdown changes authority, not rows.
+            host.start(replace(SonderConfig(), child_storage=storage_config))
+            host.quiesce()
+            reverse_source = PostgresChildMigrationStore(
+                storage_config,
+                PostgresPrivateBinding(
+                    Path(storage_config.binding_file), writable_roots=lambda: ()
+                ),
+            )
+            with pytest.raises((MigrationRefused, ContinuationStorageFailure)):
+                host.activate(stale, reverse_source, reverse)
+            assert not stale.has_phase("SOURCE_RETIRE_INTENT", stale_manifest)
         with ChildMigrationBundle(
             tmp_path / "inbound", writable_roots=lambda: ()
         ) as bundle:

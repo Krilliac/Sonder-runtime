@@ -241,6 +241,22 @@ class PostgresPrivateBinding:
             result["sslrootcert"] = value["sslrootcert"]
         return result
 
+    def private_closure_identity(self):
+        """Opaque private policy input; never publish individual credential hashes."""
+        with self._lock:
+            self.validate()
+            value = {
+                "root": str(self._root.resolve()),
+                "sslmode": self._value["sslmode"],
+                "files": [
+                    [name, item[0], item[1], item[2], item[3].hex()]
+                    for name, item in sorted(self._files.items())
+                ],
+            }
+            return hashlib.sha256(
+                json.dumps(value, sort_keys=True).encode()
+            ).hexdigest()
+
     def close(self):
         if self._anchor is not None:
             self._anchor.close()
