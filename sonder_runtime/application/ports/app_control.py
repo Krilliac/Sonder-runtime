@@ -280,6 +280,7 @@ ACTIONS = frozenset(
         "clear_selection",
         "revoke_binding",
         "prepare_work",
+        "complete_work_recovery",
     )
 )
 

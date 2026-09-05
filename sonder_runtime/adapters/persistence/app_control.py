@@ -420,6 +420,124 @@ class AppControlTransaction:
             )
         return record
 
+    def complete_recovery_work(
+        self,
+        key,
+        *,
+        principal_id,
+        control_session_id,
+        binding_id,
+        binding_revision,
+        selection_id,
+        epoch,
+        work_id,
+        expected_revision,
+        terminal,
+        completion,
+    ):
+        """Commit host-validated recovery evidence using fresh selection authority.
+
+        This private storage operation neither reattaches nor verifies anything.
+        Its caller must validate the actual recovered bound session and publication
+        before committing. Original execution authority is never reconstructed.
+        """
+        if type(key) is not CommandKey or key.principal_id != principal_id:
+            raise CommandConflict("exact recovery command principal required")
+        self._scope(key, control_session_id)
+        positive(expected_revision)
+        if (
+            type(terminal) is not ManagedHostTerminalLink
+            or type(completion) is not WorkCompletionEvidence
+        ):
+            raise CommandConflict("typed recovery terminal and completion required")
+        terminal.__post_init__()
+        completion.__post_init__()
+        if completion.phase not in ("certified", "certified_after_return"):
+            raise CommandConflict("certified recovery publication required")
+        scope = dict(
+            principal_id=principal_id,
+            control_session_id=control_session_id,
+            binding_id=binding_id,
+            binding_revision=binding_revision,
+            selection_id=selection_id,
+            epoch=epoch,
+            work_id=work_id,
+        )
+        current = self.read_recovery_work(**scope)
+        if current is None or current.verification_pending is None:
+            raise CommandConflict("original pending work unavailable")
+        pending = current.verification_pending
+        if (
+            terminal != pending.original_terminal
+            or completion.pending_identity != pending.identity
+        ):
+            raise CommandConflict(
+                "recovery evidence differs from original pending work"
+            )
+        argument_digest = hashlib.sha256(
+            _encode(
+                dict(
+                    schema="app-work-recovery-completion-v1",
+                    scope=scope,
+                    prepared_digest=current.prepared.digest,
+                    expected_revision=expected_revision,
+                    terminal=asdict(terminal),
+                    completion=asdict(completion),
+                )
+            ).encode("utf8")
+        ).hexdigest()
+        receipt = CommandReceipt(
+            key.command_id,
+            "complete_work_recovery",
+            "COMMITTED",
+            work_id,
+            expected_revision + 1,
+            epoch,
+        )
+        prior = self._start(key, receipt.action, argument_digest)
+        if prior is not None:
+            if (
+                prior != receipt
+                or current.state != "terminal"
+                or current.revision != receipt.entity_revision
+                or current.terminal != terminal
+                or current.completion != completion
+            ):
+                raise CommandConflict(
+                    "recovery receipt no longer matches original completion"
+                )
+            return current
+        if (
+            current.state not in ("verification_pending", "unknown")
+            or current.revision != expected_revision
+        ):
+            raise CommandConflict("pending recovery revision changed")
+        updated = replace(
+            current,
+            state="terminal",
+            revision=expected_revision + 1,
+            terminal=terminal,
+            completion=completion,
+        )
+        self._write_one(
+            "UPDATE app_managed_work SET state=?,revision=?,record=? "
+            "WHERE id=? AND principal=? AND session=? AND revision=? AND state=?",
+            (
+                updated.state,
+                updated.revision,
+                _encode(updated),
+                work_id,
+                principal_id,
+                current.prepared.selection.control_session_id,
+                expected_revision,
+                current.state,
+            ),
+        )
+        if self.read_recovery_work(**scope) != updated:
+            raise StoreUnavailable("recovered completion readback mismatch")
+        self._finish(key, argument_digest, receipt)
+        return updated
+
     def _require_work(self, work):
         if type(work) is not PreparedAppWork:
             raise ValueError("typed prepared work required")
