@@ -18,7 +18,8 @@ from ...application.subagents.continuation_codec import decode_call
 import json
 import sqlite3
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Condition
+from time import monotonic
 
 from sonder_runtime.application.ports.subagents import (
     InvalidSubagentRequest,
@@ -159,19 +160,60 @@ class SQLiteDurableContinuationRepository:
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = Lock()
+        self._connections = Condition()
+        self._live_connections = 0
+        self._admissions_stopped = False
         with self._connect() as connection:
             connection.executescript(_DDL)
 
     @contextmanager
     def _connect(self):
-        connection = sqlite3.connect(str(self._path), timeout=5.0)
+        with self._connections:
+            if self._admissions_stopped:
+                raise ContinuationStorageFailure("child storage is closed")
+            self._live_connections += 1
+        connection = None
         try:
+            connection = sqlite3.connect(str(self._path), timeout=5.0)
             connection.execute("PRAGMA busy_timeout=5000")
             connection.execute("PRAGMA foreign_keys=ON")
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='continuation_migration'"
+            ).fetchone():
+                migration = connection.execute(
+                    "SELECT phase FROM continuation_migration WHERE id=1"
+                ).fetchone()
+                if migration is None or migration[0] != "ACTIVE":
+                    raise ContinuationStorageFailure(
+                        "child migration has not activated this database"
+                    )
             with connection:
                 yield connection
         finally:
-            connection.close()
+            # A failed close deliberately retains the occupied slot: shutdown
+            # cannot turn an unproven handle into a successful cleanup claim.
+            if connection is not None:
+                connection.close()
+            with self._connections:
+                self._live_connections -= 1
+                self._connections.notify_all()
+
+    def stop_admissions(self):
+        with self._connections:
+            self._admissions_stopped = True
+
+    def close(self, *, runners_stopped=False, timeout=5):
+        self.stop_admissions()
+        if not runners_stopped:
+            return False
+        deadline = monotonic() + max(0, min(30, timeout))
+        with self._connections:
+            while self._live_connections:
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    return False
+                self._connections.wait(remaining)
+            return True
 
     @staticmethod
     def _row(row: tuple) -> DurableChildSession:
@@ -261,6 +303,30 @@ class SQLiteDurableContinuationRepository:
                     session.cancellation_reason,
                 ),
             )
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='continuation_migration_watermark'"
+            ).fetchone():
+                watermark = connection.execute(
+                    "SELECT children_high_water FROM continuation_migration_watermark WHERE id=1"
+                ).fetchone()
+                if watermark is None:
+                    raise ContinuationStorageFailure(
+                        "child migration watermark is missing"
+                    )
+                position = connection.execute(
+                    "SELECT rowid FROM durable_child_session WHERE child_id=?",
+                    (child_id,),
+                ).fetchone()[0]
+                if position <= watermark[0]:
+                    position = watermark[0] + 1
+                    connection.execute(
+                        "UPDATE durable_child_session SET rowid=? WHERE child_id=?",
+                        (position, child_id),
+                    )
+                connection.execute(
+                    "UPDATE continuation_migration_watermark SET children_high_water=? WHERE id=1",
+                    (position,),
+                )
         except sqlite3.IntegrityError as exc:
             raise InvalidSubagentRequest("child_id already exists") from exc
         return session
