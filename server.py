@@ -5209,11 +5209,17 @@ def _standalone_verifier_factory(application, service):
     return compose_delegated_verification(service, application.process_job_provider(), catalog)
 
 
-def _run_managed_repl_work(session_id, *, memory_database, _recovery_cursor=None, **arguments):
+def _run_managed_repl_work(session_id, *, memory_database, _recovery_cursor=None,
+                           _recovery_request=None, **arguments):
     """Private REPL entry: persisted history alone never authorizes a host."""
-    from sonder_runtime.bootstrap.repl_managed import run_managed_repl_work
+    from sonder_runtime.bootstrap.repl_managed import run_managed_repl_work, ReplRecoveryRequest
     from sonder_runtime.adapters.security.control_plane_paths import ControlPlanePaths
     application = _application()
+    request = None
+    if _recovery_request is not None:
+        if not isinstance(_recovery_request, tuple) or len(_recovery_request) != 2:
+            raise ValueError('exact REPL recovery identities required')
+        request = ReplRecoveryRequest(*_recovery_request)
     sources = getattr(application, 'private_source_paths', None)
     if not isinstance(sources, tuple):
         raise PermissionError('managed REPL requires configured private source provenance')
@@ -5240,6 +5246,7 @@ def _run_managed_repl_work(session_id, *, memory_database, _recovery_cursor=None
         get_session=selected_row, run=lambda: workbench_agent(**arguments),
         permission_engine=permission_modes, additional_paths=supplemental_paths, ledger=ledger,
         recovery_cursor=_recovery_cursor,
+        recovery_request=request, verifier_factory=_standalone_verifier_factory,
     )
 
 

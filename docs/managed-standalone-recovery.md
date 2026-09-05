@@ -8,8 +8,16 @@ page. Inspection never starts a model, attaches a controller, consumes an
 approval, or resumes verification. Use `/resume` to select an existing REPL
 conversation and `/workspace` to select its configured project first.
 
-Explicit reattachment and pending-verification resume remain private composition
-APIs below; this inspection command does not yet expose those actions.
+Use `/recover resume <continuation-id> <command-id>` for explicit reattachment and
+original pending-verification recovery. Choose one command-id and retain it when
+retrying a pending attempt. The command requires the original verification link,
+uses separate exact attachment and verification approvals through the actual
+permission ledger, and never starts a model turn. A pending attachment prints its
+approval call ID. Inspection lists the original pending verification approval;
+granting one approval does not grant the other. Expired, live-owner or ambiguous
+states remain refused or observational. Only committed terminal publication
+returns the original terminal output. Reattachment after another detached attempt
+can require a fresh attachment approval; no spent approval is reused as authority.
 
 `bootstrap.managed_standalone.ManagedStandaloneRecovery` is a private host
 composition coordinator. It takes the existing controller/application, a fresh

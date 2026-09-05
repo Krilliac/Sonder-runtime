@@ -1321,7 +1321,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /master [mode] ... run orchestration: ask, inline, delegate, or fleet
   /agents            show live master/subagent activity
   /lanes [help]      inspect and control durable agent conversations
-  /recover [cursor] inspect managed work in this conversation; does not resume
+  /recover [cursor] inspect managed work; /recover resume <id> <command-id> resumes verification
   /fanouts [N|active]  list safe recent durable model-fanout summaries
   /capacity [N]      show queued-agent ceiling and safe concurrent worker slots
   /agentcancel <id>  cooperatively cancel an agent/master prefix or all
@@ -1912,10 +1912,20 @@ def _print_facts(project):
 def _recovery_command(session_id, project, argument):
     from sonder_runtime.interfaces.repl.facades.agent_lanes import terminal_text
     text = argument.strip()
-    if text and (not text.isascii() or not text.isdecimal() or len(text) > 19):
+    parts = text.split()
+    request = None
+    if parts and parts[0] == 'resume':
+        if len(parts) != 3 or any(not 1 <= len(value) <= 128 or not all(
+                char.isascii() and (char.isalnum() or char in '-_') for char in value)
+                for value in parts[1:]):
+            return 'Usage: /recover resume <continuation-id> <command-id>. Repeat the same command-id for a pending attempt.'
+        request = tuple(parts[1:])
+        cursor = None
+    elif text and (not text.isascii() or not text.isdecimal() or len(text) > 19):
         return 'Usage: /recover [numeric cursor]. Inspection does not resume work.'
-    cursor = int(text or '0')
-    if cursor >= 2**63:
+    else:
+        cursor = int(text or '0')
+    if cursor is not None and cursor >= 2**63:
         return 'Recovery cursor is outside its supported range.'
     if not project:
         return 'Select a workspace with /workspace before inspecting managed work.'
@@ -1931,9 +1941,20 @@ def _recovery_command(session_id, project, argument):
         connection.close()
     try:
         page = server._run_managed_repl_work(session_id, memory_database=database,
-                                             project=project, _recovery_cursor=cursor)
+                                             project=project, _recovery_cursor=cursor,
+                                             _recovery_request=request)
     except PermissionError:
-        return 'Recovery unavailable: the current conversation or workspace is not authorized.'
+        return 'Recovery unavailable: inspect the current authority and any unresolved prior outcome.'
+    except ValueError:
+        return 'Recovery request no longer matches its stored identity; inspect the run and reuse the original command-id.'
+    if request is not None:
+        lines = ['Recovery: ' + terminal_text(page.code)]
+        if page.approval_call_id:
+            lines.append('Pending approval: ' + terminal_text(page.approval_call_id))
+            lines.append('After approval, repeat the same recovery command and command-id.')
+        if page.output:
+            lines.extend(('Original terminal output:', terminal_text(page.output, limit=1048576)))
+        return '\n'.join(lines)
     lines = ['Managed work — inspection only']
     for item in page.items:
         lines.append('%s | owner: %s | authority: %s | verification: %s' % (
