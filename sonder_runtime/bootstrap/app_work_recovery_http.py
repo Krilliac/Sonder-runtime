@@ -82,16 +82,18 @@ class AppWorkRecoveryHttpBinding:
             raise
 
     def require_current(self):
-        self.work.require_current()
+        inventory = self.work.require_current()
         if self._require_owned(self.work.application) is not self.registry:
             raise PermissionError("exact owned recovery registry unavailable")
+        return inventory
 
     def _attempt(self, selection):
         work = self.work
 
         def guard():
-            self.require_current()
+            inventory = self.require_current()
             work.authority.work_atomic(selection, selection.context, lambda tx: None)
+            return inventory
 
         def approve(prepared, context):
             guard()
@@ -106,8 +108,9 @@ class AppWorkRecoveryHttpBinding:
             )
 
         def private_paths():
-            guard()
-            return work.inventory().admission_directories
+            # Only this fresh guard invocation supplies these paths; no snapshot
+            # is retained across callbacks or used in place of account admission.
+            return guard().admission_directories
 
         model_roots = work.model_roots
 

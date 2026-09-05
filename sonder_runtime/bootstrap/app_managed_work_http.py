@@ -207,7 +207,7 @@ class AppManagedWorkHttpBinding:
         if self._require_owned(self.application) is not self.dispatcher:
             raise PermissionError("exact owned app dispatcher unavailable")
         self.control._config()
-        self.inventory()
+        return self.inventory()
 
     def model_roots(self):
         config = self.control._config_provider()
