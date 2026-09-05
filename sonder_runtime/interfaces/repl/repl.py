@@ -1321,6 +1321,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /master [mode] ... run orchestration: ask, inline, delegate, or fleet
   /agents            show live master/subagent activity
   /lanes [help]      inspect and control durable agent conversations
+  /recover [cursor] inspect managed work in this conversation; does not resume
   /fanouts [N|active]  list safe recent durable model-fanout summaries
   /capacity [N]      show queued-agent ceiling and safe concurrent worker slots
   /agentcancel <id>  cooperatively cancel an agent/master prefix or all
@@ -1906,6 +1907,48 @@ def _print_facts(project):
         return
     for f in facts:
         print("  - %s  %s" % (f["id"], f["text"]))
+
+
+def _recovery_command(session_id, project, argument):
+    from sonder_runtime.interfaces.repl.facades.agent_lanes import terminal_text
+    text = argument.strip()
+    if text and (not text.isascii() or not text.isdecimal() or len(text) > 19):
+        return 'Usage: /recover [numeric cursor]. Inspection does not resume work.'
+    cursor = int(text or '0')
+    if cursor >= 2**63:
+        return 'Recovery cursor is outside its supported range.'
+    if not project:
+        return 'Select a workspace with /workspace before inspecting managed work.'
+    connection = server._open_db()
+    try:
+        if memory_store.get_session(connection, session_id) is None:
+            return 'No managed work for this conversation.'
+        databases = connection.execute('PRAGMA database_list').fetchall()
+        database = next((row[2] for row in databases if row[1] == 'main'), '')
+        if not database:
+            raise PermissionError('durable memory database identity unavailable')
+    finally:
+        connection.close()
+    try:
+        page = server._run_managed_repl_work(session_id, memory_database=database,
+                                             project=project, _recovery_cursor=cursor)
+    except PermissionError:
+        return 'Recovery unavailable: the current conversation or workspace is not authorized.'
+    lines = ['Managed work — inspection only']
+    for item in page.items:
+        lines.append('%s | owner: %s | authority: %s | verification: %s' % (
+            terminal_text(item.continuation_id), terminal_text(item.owner_state),
+            terminal_text(item.authority_state), terminal_text(item.verification_phase or 'none')))
+        if item.verification_code:
+            lines.append('  ' + terminal_text(item.verification_code))
+        if item.pending_approval is not None:
+            lines.append('  pending approval: ' + terminal_text(item.pending_approval.call_id))
+    if not page.items:
+        lines.append('No managed work on this page.')
+    if page.has_more:
+        lines.append('Next page: /recover %s' % page.next_cursor)
+    lines.append('No work was resumed and no approval was consumed.')
+    return '\n'.join(lines)
 
 
 def _run_session_work(session_id, *, host_project, **arguments):
@@ -2647,6 +2690,8 @@ def main(*, machine_output=False):
                 print(server.system_improvement_report(session=session_id, project=project))
             elif cmd == "/lanes":
                 print(_lanes_command(arg))
+            elif cmd == "/recover":
+                print(_recovery_command(session_id, workspace_root, arg))
             elif cmd in ("/agents", "/masterstatus"):
                 print(server.master_status())
             elif cmd == "/fanouts":

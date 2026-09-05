@@ -116,5 +116,29 @@ def test_loaded_toml_and_real_application_support_managed_repl_work(
                                         project=str(project), prompt='inspect')
         assert result['continuation_id']
         assert str(source.resolve()) in application.private_source_paths
+        store = application.agent_lanes().store
+        with store.transaction() as transaction:
+            before = [tuple(row) for row in transaction.conn.execute(
+                'SELECT position,data FROM agent_lane_continuations ORDER BY position')]
+        monkeypatch.setattr(server, 'workbench_agent', lambda **arguments: pytest.fail('inspection ran work'))
+        monkeypatch.setattr(permission_modes, 'decide', lambda *args, **kwargs: pytest.fail('inspection spent approval'))
+        rendered = repl._recovery_command('2222222222222222', str(project), '')
+        assert result['continuation_id'] in rendered
+        assert 'inspection only' in rendered
+        with store.transaction() as transaction:
+            after = [tuple(row) for row in transaction.conn.execute(
+                'SELECT position,data FROM agent_lane_continuations ORDER BY position')]
+        assert after == before
     finally:
         application.close_providers(timeout=5)
+
+
+@pytest.mark.parametrize('argument', ['resume', '-1', '1.2', '９', str(2**63)])
+def test_recovery_rejects_invalid_cursor_before_database(argument, monkeypatch):
+    import server
+    from sonder_runtime.interfaces.repl import repl
+    monkeypatch.setattr(repl, '_legacy_runtime', None)
+    repl.configure_legacy_runtime(server)
+    monkeypatch.setattr(server, '_open_db', lambda: pytest.fail('invalid cursor reached storage'))
+    result = repl._recovery_command('2222222222222222', '', argument)
+    assert 'Usage:' in result or 'outside' in result

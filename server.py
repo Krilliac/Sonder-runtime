@@ -5209,7 +5209,7 @@ def _standalone_verifier_factory(application, service):
     return compose_delegated_verification(service, application.process_job_provider(), catalog)
 
 
-def _run_managed_repl_work(session_id, *, memory_database, **arguments):
+def _run_managed_repl_work(session_id, *, memory_database, _recovery_cursor=None, **arguments):
     """Private REPL entry: persisted history alone never authorizes a host."""
     from sonder_runtime.bootstrap.repl_managed import run_managed_repl_work
     from sonder_runtime.adapters.security.control_plane_paths import ControlPlanePaths
@@ -5239,6 +5239,7 @@ def _run_managed_repl_work(session_id, *, memory_database, **arguments):
         application=application, session_id=session_id, project=arguments.get('project', ''),
         get_session=selected_row, run=lambda: workbench_agent(**arguments),
         permission_engine=permission_modes, additional_paths=supplemental_paths, ledger=ledger,
+        recovery_cursor=_recovery_cursor,
     )
 
 

@@ -22,7 +22,8 @@ from .repl_host_selection import ReplHostPolicy, ReplHostSelectionAdapter
 
 
 def run_managed_repl_work(*, application, session_id, project, get_session,
-                          run, permission_engine, additional_paths, ledger=None):
+                          run, permission_engine, additional_paths, ledger=None,
+                          recovery_cursor=None):
     """Compose only from trusted host callbacks, never public tool arguments.
 
     ``additional_paths`` must enumerate constructor-owned private state before
@@ -30,6 +31,9 @@ def run_managed_repl_work(*, application, session_id, project, get_session,
     """
     if not callable(additional_paths) or not callable(run):
         raise PermissionError('trusted REPL composition callbacks required')
+    if recovery_cursor is not None and (
+            type(recovery_cursor) is not int or not 0 <= recovery_cursor < 2**63):
+        raise ValueError('bounded recovery cursor required')
     selected = Path(project).resolve() if project else None
     if selected is None or not selected.is_dir():
         raise PermissionError('select an existing project before managed work')
@@ -130,6 +134,15 @@ def run_managed_repl_work(*, application, session_id, project, get_session,
 
     with selector.scope(selection, context), control_plane_scope(additional_paths()), \
             control_plane_scope(output_paths), managed_root_scope(lambda: current_context().workspace_roots):
+        if recovery_cursor is not None:
+            try:
+                current_context()
+                host = LaneContinuationService(lanes, authorize_host=selector.authorize,
+                                               model_writable_roots=model_roots)
+                return host.recovery_page(context, cursor=recovery_cursor, limit=16,
+                                           host_conversation_id=selection.host_conversation_id)
+            finally:
+                selector.clear()
         # Pin the real ledger after private path preflight, before any gate call.
         bridge = ContinuationApprovalBridge(ledger=ledger or permission_engine.approval_ledger().pinned(),
                                             decide=decide, digest_call=permission_engine.call_digest)

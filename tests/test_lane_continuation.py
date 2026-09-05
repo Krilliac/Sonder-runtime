@@ -57,6 +57,27 @@ def make_host(lanes):
     return host, context, parent, current
 
 
+def test_recovery_page_filters_selected_host_before_authorizing_rows(lanes):
+    host, context, parent, current = make_host(lanes)
+    selected = current[0]
+    first = host.register_parent(parent['parent_session_id'], parent['parent_token'],
+                                 'host-task', context=context, command_id='selected')
+    first.close()
+    current[0] = replace(selected, host_conversation_id='other-task')
+    other_parent = lanes[0].open_model_parent(context)
+    other = host.register_parent(other_parent['parent_session_id'], other_parent['parent_token'],
+                                 'other-task', context=context, command_id='other')
+    other.close()
+    current[0] = selected
+    page = host.recovery_page(context, host_conversation_id='host-task', limit=1)
+    assert [item.continuation_id for item in page.items] == [first.continuation_id]
+    assert page.has_more is False
+    assert host.recovery_page(context, host_conversation_id='host-task',
+                              cursor=page.next_cursor).items == ()
+    with pytest.raises(PermissionError):
+        host.recovery_page(context, host_conversation_id='other-task')
+
+
 def test_registration_fences_old_bearer_and_raw_root_admission(lanes):
     host, context, parent, current = make_host(lanes)
     bound = host.register_parent(

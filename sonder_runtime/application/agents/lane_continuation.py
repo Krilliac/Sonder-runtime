@@ -928,7 +928,7 @@ class LaneContinuationService:
             lease.close()
             raise
 
-    def recovery_page(self, context, *, cursor=0, limit=32):
+    def recovery_page(self, context, *, cursor=0, limit=32, host_conversation_id=None):
         if (
             type(cursor) is not int
             or cursor < 0
@@ -942,12 +942,19 @@ class LaneContinuationService:
             or context.cancellation.cancelled
         ):
             raise PermissionError("live host authorizer unavailable")
+        if host_conversation_id is not None:
+            if not isinstance(host_conversation_id, str) or not 1 <= len(host_conversation_id.encode()) <= 256:
+                raise ValueError("bounded host conversation identity required")
+            self._grant(context, host_conversation_id)
         items = []
         with self.store.transaction() as tx:
-            rows = tx.conn.execute(
-                "SELECT position,data FROM agent_lane_continuations WHERE principal=? AND position>? ORDER BY position LIMIT ?",
-                (context.principal_id, cursor, limit + 1),
-            ).fetchall()
+            query = "SELECT position,data FROM agent_lane_continuations WHERE principal=? AND position>?"
+            parameters = [context.principal_id, cursor]
+            if host_conversation_id is not None:
+                query += " AND json_extract(data,'$.host_conversation_id')=?"
+                parameters.append(host_conversation_id)
+            rows = tx.conn.execute(query + " ORDER BY position LIMIT ?",
+                                   (*parameters, limit + 1)).fetchall()
             for row in rows[:limit]:
                 record = json.loads(row["data"])
                 if record["principal_id"] != context.principal_id:

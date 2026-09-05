@@ -1,5 +1,16 @@
 # Explicit managed host recovery
 
+The REPL provides `/recover [cursor]` to inspect managed runs belonging to its
+exact currently selected persisted conversation and workspace. Pages contain at
+most 16 runs, with owner, authority and verification states and pending approval
+identity when present. The printed next cursor continues that conversation's
+page. Inspection never starts a model, attaches a controller, consumes an
+approval, or resumes verification. Use `/resume` to select an existing REPL
+conversation and `/workspace` to select its configured project first.
+
+Explicit reattachment and pending-verification resume remain private composition
+APIs below; this inspection command does not yet expose those actions.
+
 `bootstrap.managed_standalone.ManagedStandaloneRecovery` is a private host
 composition coordinator. It takes the existing controller/application, a fresh
 unshared LaneContinuationService with trusted original projection codec, current
