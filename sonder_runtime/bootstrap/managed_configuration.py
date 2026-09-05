@@ -16,7 +16,7 @@ MANIFEST_DIGEST = ApplicationResourceOwners(COMPONENTS, close_order=CLOSE_ORDER)
 
 
 def validate_configuration(value, *, root, namespace, incarnation):
-    keys = {"schema", "namespace", "incarnation", "port", "request_timeout_seconds", "stream_idle_timeout_seconds", "components", "child_storage", "child_path", "child_identity"}
+    keys = {"schema", "namespace", "incarnation", "port", "request_timeout_seconds", "stream_idle_timeout_seconds", "components", "child_storage", "child_path", "child_identity", "artifact_digest"}
     if type(value) is not dict or set(value) != keys:
         raise OwnerRefused("exact managed configuration required")
     if type(value["schema"]) is not int or value["schema"] != 1 or value["namespace"] != namespace or value["incarnation"] != incarnation or value["components"] != MANIFEST_DIGEST:
@@ -27,6 +27,8 @@ def validate_configuration(value, *, root, namespace, incarnation):
         raise OwnerRefused("managed HTTP timeout profile changed")
     if type(value["child_identity"]) is not str or len(value["child_identity"]) != 64 or any(ch not in "0123456789abcdef" for ch in value["child_identity"]):
         raise OwnerRefused("managed child identity is invalid")
+    if type(value["artifact_digest"]) is not str or len(value["artifact_digest"]) != 64 or any(ch not in "0123456789abcdef" for ch in value["artifact_digest"]):
+        raise OwnerRefused("managed artifact identity is invalid")
     try:
         storage = ChildStorageConfig(**value["child_storage"])
         if child_storage_errors(SimpleNamespace(child_storage=storage)):
