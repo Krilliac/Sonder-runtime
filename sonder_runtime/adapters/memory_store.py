@@ -3088,7 +3088,8 @@ def _recall_row_bytes(row):
     total = 0
     for key in (
         "id", "task", "response", "session_id", "task_embedding_model",
-        "task_embedding_revision", "project",
+        "task_embedding_revision", "project", "ts", "tier",
+        "outcome_signal", "outcome_source",
     ):
         value = row[key]
         if isinstance(value, str):
@@ -3105,7 +3106,8 @@ def _decode_recall_candidate(row):
     decoded = dict(row)
     for key in (
         "id", "task", "response", "session_id", "task_embedding_model",
-        "task_embedding_revision", "project",
+        "task_embedding_revision", "project", "ts", "tier",
+        "outcome_signal", "outcome_source",
     ):
         value = decoded.get(key)
         if value is None:
@@ -3202,6 +3204,8 @@ def good_interaction_candidate_page(
         "SELECT CAST(i.ts AS BLOB) AS candidate_ts, "
         "CAST(i.id AS BLOB) AS candidate_cursor_id, "
         "CAST(i.id AS BLOB) AS id, "
+        "CAST(i.ts AS BLOB) AS ts, "
+        "CAST(i.tier AS BLOB) AS tier, "
         "CAST(i.task AS BLOB) AS task, "
         "CASE WHEN i.response IS NULL THEN NULL "
         "ELSE CAST(substr(i.response,1,?) AS BLOB) END AS response, "
@@ -3209,7 +3213,16 @@ def good_interaction_candidate_page(
         "CAST(i.task_embedding_model AS BLOB) AS task_embedding_model, "
         "CAST(i.task_embedding_revision AS BLOB) AS task_embedding_revision, "
         "i.task_embedding_dim, CASE WHEN NULLIF(i.project,'') IS NULL "
-        "THEN NULL ELSE CAST(i.project AS BLOB) END AS project "
+        "THEN NULL ELSE CAST(i.project AS BLOB) END AS project, "
+        "(SELECT CAST(good.signal AS BLOB) FROM outcomes good "
+        "WHERE good.interaction_id=i.id ORDER BY good.rowid ASC LIMIT 1) "
+        "AS outcome_signal, "
+        "(SELECT CAST(good.source AS BLOB) FROM outcomes good "
+        "WHERE good.interaction_id=i.id ORDER BY good.rowid ASC LIMIT 1) "
+        "AS outcome_source, "
+        "(SELECT good.reward FROM outcomes good "
+        "WHERE good.interaction_id=i.id ORDER BY good.rowid ASC LIMIT 1) "
+        "AS outcome_reward "
         "FROM interactions i WHERE i.task_embedding IS NOT NULL "
         "AND typeof(i.id)='text' AND length(i.id) BETWEEN 1 AND 256 "
         "AND typeof(i.ts)='text' AND length(i.ts) BETWEEN 1 AND 64 "

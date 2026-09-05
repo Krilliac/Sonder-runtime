@@ -30,3 +30,17 @@ class LegacyRecallGateway:
                 exc_info=True,
             )
             raise DependencyUnavailable("semantic recall storage is unavailable") from exc
+
+    def recall_page(self, connection, task, **options):
+        """Forward the additive provenance-aware page contract."""
+        logger.debug(f"explained recall gateway query options={list(options.keys())}")
+        implementation = importlib.import_module("sonder_runtime.adapters.recall")
+        try:
+            return implementation.recall_page(connection, task, **options)
+        except (OSError, sqlite3.Error) as exc:
+            logger.error(
+                f"explained recall gateway storage operation failed, "
+                f"error_type={type(exc).__name__!r}",
+                exc_info=True,
+            )
+            raise DependencyUnavailable("semantic recall storage is unavailable") from exc
