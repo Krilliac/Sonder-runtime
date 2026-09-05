@@ -100,9 +100,10 @@ def test_pending_then_certified_original_turn_becomes_terminally_eligible(lanes)
         pending = ledger.resolve_call(before.pending_approval.call_digest)
         ledger.issue(pending.tool, pending.digest, approver="operator")
         verdict = lifetime._owner.resume_pending_verification(
-            identity, verifier_factory=lambda *args: verifier
+            identity, verifier_factory=lambda *args: verifier, publish=False
         )
         assert verdict.valid and gateway.calls == 1
+        assert lifetime._owner.published_terminal is None
         after = lifetime.terminal_eligibility(
             turn_link, verifier_factory=lambda *args: verifier
         )

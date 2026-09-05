@@ -329,12 +329,16 @@ class ManagedStandaloneSession:
 
     def final_evidence(self, expected_turn):
         from ..application.agents.host_turns import read_current_host_final_evidence
+
         self.require_current()
         return read_current_host_final_evidence(self._bound, expected_turn)
 
     def terminal_eligibility(self, expected_turn, *, verifier_factory):
         from .managed_terminal_eligibility import terminal_eligibility
-        return terminal_eligibility(self, expected_turn, verifier_factory=verifier_factory)
+
+        return terminal_eligibility(
+            self, expected_turn, verifier_factory=verifier_factory
+        )
 
     def recovery_verification(self, *, verifier_factory):
         self._compose_verifier(verifier_factory)
@@ -350,7 +354,9 @@ class ManagedStandaloneSession:
             identity, prepared, view["state"], view.get("code", "")
         )
 
-    def resume_pending_verification(self, identity, *, verifier_factory):
+    def resume_pending_verification(self, identity, *, verifier_factory, publish=True):
+        if type(publish) is not bool:
+            raise TypeError("explicit publication choice required")
         self.published_terminal = None
         view = self.recovery_verification(verifier_factory=verifier_factory)
         if (
@@ -374,6 +380,10 @@ class ManagedStandaloneSession:
             self._verifier, identity.verification_id, action="validate"
         )
         if not verdict.valid:
+            return verdict
+        if not publish:
+            # Private coordinators can perform their final eligibility gate before
+            # publication. This verdict alone is never terminal output evidence.
             return verdict
         self.published_terminal = self._publisher.publish()
         return self.published_terminal.verdict
