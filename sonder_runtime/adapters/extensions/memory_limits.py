@@ -191,11 +191,32 @@ class _WindowsJobToken:
         with self._lock:
             if self._published:
                 raise ExtensionMemoryLimitError("published job requires proven cleanup")
+            errors = []
             try:
                 if self._handle:
-                    self._terminate_job()
-            finally:
-                self._release_handles()
+                    if not self._terminate_job():
+                        errors.append("termination failed")
+            except Exception:
+                errors.append("termination unavailable")
+            # No published owner can retry this token. Attempt every release,
+            # including the kill-on-close Job, even if another handle fails.
+            for member in tuple(self._process_handles):
+                try:
+                    if not self._close_handle(member[1]):
+                        raise ExtensionMemoryLimitError("process close failed")
+                    self._process_handles.remove(member)
+                except Exception:
+                    errors.append("process handle release failed")
+            if self._handle:
+                try:
+                    result = self._close_handle(self._handle)
+                    if result is not None and not result:
+                        raise ExtensionMemoryLimitError("job close failed")
+                    self._handle = None
+                except Exception:
+                    errors.append("job handle release failed")
+            if errors:
+                raise ExtensionMemoryLimitError("unregistered job cleanup incomplete: " + "; ".join(errors))
 
     def close(self) -> None:
         with self._lock:

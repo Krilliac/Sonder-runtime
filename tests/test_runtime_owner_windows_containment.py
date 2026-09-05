@@ -90,6 +90,22 @@ def test_unregistered_abort_releases_without_cleanup_proof():
         token._abort_unregistered()
 
 
+def test_unregistered_abort_attempts_job_after_failed_process_release():
+    from sonder_runtime.adapters.extensions.memory_limits import _WindowsJobToken
+    calls = []
+    def close(handle):
+        calls.append(handle)
+        return handle != 456
+    token = _WindowsJobToken(123, close, terminate=lambda h: True)
+    token._process_handles = [(1, 456), (2, 789)]
+    with pytest.raises(Exception, match="cleanup incomplete"):
+        token._abort_unregistered()
+    assert calls == [456, 789, 123]
+    assert token._handle is None
+    assert token._process_handles == [(1, 456)]
+    assert not token._quiescent_proved
+
+
 from sonder_runtime.adapters.extensions.memory_limits import (
     NativeExtensionMemoryLimiter,
 )
