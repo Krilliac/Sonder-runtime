@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import sqlite3
 import secrets
 import threading
@@ -663,22 +664,42 @@ class SQLiteAgentLaneStore:
     def _proof(salt, token):
         return hashlib.sha256((salt + "\0" + token).encode()).hexdigest()
 
-    def open_parent(self, principal):
+    def open_parent(self, principal, *, transaction=None, expires_at=None):
+        if transaction is None:
+            with self.transaction() as tx:
+                return self.open_parent(
+                    principal, transaction=tx, expires_at=expires_at
+                )
+        if (
+            not isinstance(transaction, LaneTransaction)
+            or not transaction.conn.in_transaction
+        ):
+            raise PermissionError("active parent creation transaction required")
+        if expires_at is not None and (
+            type(expires_at) not in (int, float)
+            or not math.isfinite(expires_at)
+            or expires_at <= time.time()
+        ):
+            raise PermissionError("finite live parent expiry required")
         session = "model-parent-" + uuid.uuid4().hex
         salt, token = secrets.token_hex(16), secrets.token_urlsafe(32)
-        expires = time.time() + 3600
-        with self.transaction() as tx:
-            count = tx.conn.execute(
-                "SELECT COUNT(*) FROM agent_lane_parent_grants WHERE principal=? AND revoked=0 AND expires>?",
-                (principal, time.time()),
-            ).fetchone()[0]
-            if count >= 32:
-                raise ValueError("active parent capability capacity reached")
-            tx.root(session, principal)
-            tx.conn.execute(
-                "INSERT INTO agent_lane_parent_grants VALUES (?,?,?,?,?,1,0)",
-                (session, principal, salt, self._proof(salt, token), expires),
-            )
+        expires = (
+            min(time.time() + 3600, expires_at)
+            if expires_at is not None
+            else time.time() + 3600
+        )
+        tx = transaction
+        count = tx.conn.execute(
+            "SELECT COUNT(*) FROM agent_lane_parent_grants WHERE principal=? AND revoked=0 AND expires>?",
+            (principal, time.time()),
+        ).fetchone()[0]
+        if count >= 32:
+            raise ValueError("active parent capability capacity reached")
+        tx.root(session, principal)
+        tx.conn.execute(
+            "INSERT INTO agent_lane_parent_grants VALUES (?,?,?,?,?,1,0)",
+            (session, principal, salt, self._proof(salt, token), expires),
+        )
         return dict(
             parent_session_id=session,
             parent_token=token,

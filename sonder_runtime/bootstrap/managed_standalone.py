@@ -227,14 +227,22 @@ class ManagedStandaloneSession:
             raise PermissionError(
                 "registered conversation requires explicit reattachment"
             )
-        parent = host.lanes.open_model_parent(context)
-        self._bound = host.register_parent(
-            parent["parent_session_id"],
-            parent["parent_token"],
-            host_conversation_id,
-            context=context,
-            command_id=controller.run_id + "-register",
-        )
+        parent = host.open_parent(context)
+        try:
+            self._bound = host.register_parent(
+                parent["parent_session_id"],
+                parent["parent_token"],
+                host_conversation_id,
+                context=context,
+                command_id=controller.run_id + "-register",
+            )
+        except BaseException:
+            try:
+                host.discard_parent(parent, context)
+            except BaseException:
+                # Host retains bounded private cleanup evidence; never expose bearer.
+                pass
+            raise
         self.parent_session_id = parent["parent_session_id"]
         del parent
         try:
