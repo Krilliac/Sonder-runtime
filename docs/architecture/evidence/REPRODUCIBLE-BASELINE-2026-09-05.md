@@ -45,8 +45,8 @@ or installed-runtime behavior is implied by these checks.
 
 The qualified environment reported these relevant pinned packages: `mcp==2.0.0`,
 `mcp-types==2.0.0`, `pytest==9.1.1`, `pydantic==2.13.4`, `cryptography==50.0.0`,
-`httpx2==2.12.0`, `starlette==1.6.0`, and `uvicorn==0.52.4`. The complete `pip freeze`
-output was captured during the run and can be reproduced with:
+`httpx2==2.12.0`, `starlette==1.6.0`, and `uvicorn==0.52.4`. The complete environment
+can be reproduced and inspected with:
 
 ```text
 D:\\sonder-runtime\\venv\\Scripts\\python.exe -m pip freeze
