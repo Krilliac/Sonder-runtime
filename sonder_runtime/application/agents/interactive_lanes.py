@@ -331,6 +331,11 @@ class AgentLaneService:
         )
         digest = _digest(args)
         with self.store.transaction() as tx:
+            from .lane_continuation import require_root_admission
+
+            host_grant = require_root_admission(
+                tx, self.store, parent_session_id, context
+            )
             prior = tx.receipt(context.principal_id, command_id, digest)
             if prior:
                 raise _ReplayReceipt(prior)
@@ -346,6 +351,17 @@ class AgentLaneService:
                 if self.tools
                 else ()
             )
+            if host_grant is not None:
+                if not any(
+                    _inside(root, Path(p)) for p in host_grant["workspace_roots"]
+                ):
+                    raise PermissionError(
+                        "workspace exceeds original host root ceiling"
+                    )
+                expiry = min(expiry, host_grant["expires_at"])
+                allowed = tuple(
+                    name for name in allowed if name in host_grant["allowed_tools"]
+                )
             if parent_lane_id:
                 raise ValueError(
                     "nested lane placement requires subtree grant reservations; not enabled"
@@ -476,7 +492,11 @@ class AgentLaneService:
 
     def inspect(self, lane_id, context, *, cursor=0, limit=100):
         _bounds(cursor, limit)
-        self.store.reconcile(lane_id, context.principal_id)
+        self.store.reconcile(
+            lane_id,
+            context.principal_id,
+            _admit=lambda tx, lane: self._root_control(tx, lane, context),
+        )
         with self.store.transaction() as tx:
             lane = tx.lane(lane_id)
             self._authorize(lane, context)
@@ -504,6 +524,7 @@ class AgentLaneService:
         schedule = False
         with self.store.transaction() as tx:
             lane = tx.lane(lane_id)
+            self._root_control(tx, lane, context)
             self._authorize(lane, context)
             prior = tx.receipt(context.principal_id, command_id, digest)
             if prior:
@@ -569,9 +590,14 @@ class AgentLaneService:
                 author=author,
             )
         )
-        self.store.reconcile(lane_id, context.principal_id)
+        self.store.reconcile(
+            lane_id,
+            context.principal_id,
+            _admit=lambda tx, lane: self._root_control(tx, lane, context),
+        )
         with self.store.transaction() as tx:
             lane = tx.lane(lane_id)
+            self._root_control(tx, lane, context)
             self._authorize(lane, context)
             prior = tx.receipt(context.principal_id, command_id, digest)
             if prior:
@@ -638,7 +664,9 @@ class AgentLaneService:
     def reports(self, parent_session_id, context, *, cursor=0, limit=50):
         _bounds(cursor, limit)
         with self.store.transaction() as tx:
-            reports = tx.report_page(context.principal_id, parent_session_id, cursor, limit + 1)
+            reports = tx.report_page(
+                context.principal_id, parent_session_id, cursor, limit + 1
+            )
         page = reports[:limit]
         return dict(
             reports=page,
@@ -653,6 +681,13 @@ class AgentLaneService:
             dict(action="ack", report_id=report_id, parent_session_id=parent_session_id)
         )
         with self.store.transaction() as tx:
+            row = tx.conn.execute(
+                "SELECT lane_id FROM agent_lane_messages WHERE message_id=? AND report=1",
+                (report_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("report unavailable")
+            self._root_control(tx, tx.lane(row[0]), context)
             prior = tx.receipt(context.principal_id, command_id, digest)
             if prior:
                 raise _ReplayReceipt(prior)
@@ -661,6 +696,11 @@ class AgentLaneService:
             tx.record_receipt(context.principal_id, command_id, digest, receipt)
         self._done()
         return receipt
+
+    def _root_control(self, tx, lane, context):
+        from .lane_continuation import require_root_admission
+
+        require_root_admission(tx, self.store, lane["parent_session_id"], context)
 
     def wait(self, lane_id, context, *, cursor=0, limit=100, timeout_seconds=25):
         with _WAIT_LOCK:
