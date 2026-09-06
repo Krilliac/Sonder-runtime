@@ -33,6 +33,13 @@ page may be empty while a later page has records. Use the printed ack command,
 which includes the report page cursor; an ID outside that bounded page requires
 the matching page cursor. The current REPL chat is never assumed to be a parent.
 
+The console summary prints the server-owned lifecycle status, model tier and
+monotonic lane revision together so an operator can distinguish a queued or
+requested action from an acknowledged state. Per-lane grant and capacity
+counters are intentionally not exposed by the lane view; `/capacity` remains
+the source for bounded cluster-level worker availability. The console never
+derives resource values from a status label.
+
 The injected LaneConsoleFacade owns this family of commands; runtime._application
 supplies production composition. Console context has local user authorship and
 only existing configured workspace roots. No MCP/model parent bearer is accepted
