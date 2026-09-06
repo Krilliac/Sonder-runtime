@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
+from urllib.parse import urlsplit
+
 import pytest
 
 from sonder_runtime.application.control_state import (
     ControlStateTakeoverAttempt,
     ExternalControlStateCoordinator,
 )
+from sonder_runtime.adapters.cluster.http_control_state import HttpsControlStateProvider
 from sonder_runtime.domain.cluster_availability import (
     ControlStateEvent,
     FenceReceipt,
@@ -104,6 +108,44 @@ class _Provider:
         return self.fence_receipt or _fence(ownership)
 
 
+class _HttpResponse:
+    def __init__(self, payload):
+        self.status = 200
+        self._raw = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self, _limit):
+        return self._raw
+
+
+class _HttpOpener:
+    def __init__(self, event: ControlStateEvent):
+        self.event = event
+        self.calls = []
+
+    def __call__(self, request, *, timeout):
+        self.calls.append((request, timeout))
+        path = urlsplit(request.full_url).path
+        if request.get_method() == "POST" and path.endswith("/events"):
+            payload = {
+                "object": "replication_acknowledgement",
+                "acknowledgement": _ack(self.event).as_dict(),
+            }
+        elif request.get_method() == "POST" and path.endswith("/fence"):
+            payload = {
+                "object": "fence_receipt",
+                "receipt": _fence(self.event.scope).as_dict(),
+            }
+        else:
+            raise AssertionError(f"unexpected provider request: {request.full_url}")
+        return _HttpResponse(payload)
+
+
 def _coordinator(provider: _Provider, **changes) -> ExternalControlStateCoordinator:
     values = {"minimum_data_replicas": 2}
     values.update(changes)
@@ -124,6 +166,33 @@ def test_prepare_takeover_collects_exact_receipts_and_only_returns_a_gate_decisi
     assert provider.append_calls == 1
     assert provider.fence_calls == 1
     assert attempt.as_dict()["decision"]["allowed"] is True
+
+
+@pytest.mark.integration
+def test_https_provider_composes_with_coordinator_takeover_gate():
+    event = _event()
+    opener = _HttpOpener(event)
+    provider = HttpsControlStateProvider(
+        origin="https://control.example.test:9443",
+        api_key="key-1",
+        capabilities=_capabilities(),
+        opener=opener,
+    )
+    coordinator = ExternalControlStateCoordinator(provider, provider.capabilities)
+
+    attempt = coordinator.prepare_takeover(
+        event.scope,
+        event,
+        new_owner_id="node-b",
+    )
+
+    assert attempt.decision.allowed is True
+    assert attempt.decision.next_epoch == 4
+    assert [request.get_method() for request, _ in opener.calls] == ["POST", "POST"]
+    assert [urlsplit(request.full_url).path for request, _ in opener.calls] == [
+        "/v1/control-state/events",
+        "/v1/control-state/fence",
+    ]
 
 
 def test_existing_acknowledgement_is_revalidated_without_repeating_append():
