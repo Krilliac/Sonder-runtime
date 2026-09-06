@@ -95,6 +95,54 @@ def invoke(binding, token, action, payload, control_token=""):
     return result[0]
 
 
+def test_private_reuses_a_prevalidated_inventory_snapshot(control, monkeypatch):
+    binding, _, _, _, catalog, _ = control
+    from sonder_runtime.adapters.security.control_plane_paths import (
+        ControlPlanePaths,
+        live_control_plane_inventory,
+    )
+
+    db = Path(binding._account_path())
+    fleet = Path(binding._fleet_path())
+    snapshot = live_control_plane_inventory(
+        additional=lambda: ControlPlanePaths(
+            databases=(db, fleet), files=(catalog,)
+        )
+    )
+    calls = []
+
+    def unexpected_live_inventory():
+        calls.append(True)
+        raise AssertionError("prevalidated inventory must be reused")
+
+    monkeypatch.setattr(binding, "_inventory", unexpected_live_inventory)
+    assert binding._private(inventory=snapshot).exact_files
+    assert calls == []
+
+
+def test_private_snapshot_rejects_changed_private_source(control):
+    binding, _, _, _, catalog, _ = control
+    from sonder_runtime.adapters.security.control_plane_paths import (
+        ControlPlanePaths,
+        live_control_plane_inventory,
+    )
+
+    db = Path(binding._account_path())
+    fleet = Path(binding._fleet_path())
+    snapshot = live_control_plane_inventory(
+        additional=lambda: ControlPlanePaths(
+            databases=(db, fleet), files=(catalog,)
+        )
+    )
+    changed = replace(
+        binding._config_provider(),
+        private_source_paths=(str(binding._account_path()) + ".changed",),
+    )
+    binding._config_provider = lambda: changed
+    with pytest.raises(PermissionError, match="private inventory"):
+        binding._private(inventory=snapshot)
+
+
 def test_real_enrollment_retry_and_binding_lifecycle(control):
     binding, token, *_ = control
     status, body = invoke(
