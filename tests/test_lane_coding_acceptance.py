@@ -23,6 +23,10 @@ from sonder_runtime.adapters.persistence.sqlite.job_registry import (
 from sonder_runtime.adapters.execution.process_jobs import SubprocessJobProvider
 from sonder_runtime.adapters.process_termination import ProcessTreeSupervisor
 from sonder_runtime.application.agents.interactive_lanes import AgentLaneService
+from sonder_runtime.application.jobs.session_lifecycle import (
+    JobRegistryLifecycleAdapter,
+    JobSessionLifecycleRecorder,
+)
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelResponse
 from sonder_runtime.application.ports.tool_registry import InMemoryToolRegistry
@@ -114,9 +118,13 @@ def coding(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     catalog = LaneTestCatalog.load(catalog_path)
+    sessions = SQLiteSessionRepository(tmp_path / "sessions.db")
     jobs = SQLiteDurableJobRegistry(tmp_path / "jobs.db")
     provider = SubprocessJobProvider(
-        jobs, process_cleanup=ProcessTreeSupervisor(), max_concurrent_processes=1
+        jobs,
+        process_cleanup=ProcessTreeSupervisor(),
+        lifecycle=JobRegistryLifecycleAdapter(JobSessionLifecycleRecorder(sessions)),
+        max_concurrent_processes=1,
     )
     executor = LaneTestExecutor(catalog, provider)
     registry = InMemoryToolRegistry(
@@ -133,7 +141,6 @@ def coding(tmp_path, monkeypatch):
     facade = ToolApplicationFacade.compose(
         registry, executor, policy=policy, context_factory=_test_context
     )
-    sessions = SQLiteSessionRepository(tmp_path / "sessions.db")
     store = SQLiteAgentLaneStore(tmp_path / "fleet.db", sessions)
     context = local_owner_context(
         correlation_id="coding-fixture", workspace_roots=(repo,)
@@ -192,6 +199,17 @@ def test_scripted_model_real_edit_failing_test_repair_passing_test_and_diff(codi
     assert [r["exit_code"] for r in results] == [1, 0]
     assert "2 failed" in results[0]["output"] and "2 passed" in results[1]["output"]
     assert all(jobs.poll(r["job_id"]).is_terminal for r in results)
+    assert all(
+        jobs.poll(r["job_id"]).identity.parent_session_id
+        == state["lane"]["session_id"]
+        for r in results
+    )
+    session_events = sessions.read_range(state["lane"]["session_id"])
+    assert any(
+        event.event_type == "job.lifecycle"
+        and event.payload.get("job_id") == results[0]["job_id"]
+        for event in session_events
+    )
     diff = subprocess.run(
         ["git", "diff", "--", "calc.py"],
         cwd=repo,

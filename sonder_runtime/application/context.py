@@ -54,6 +54,10 @@ class OperationContext:
     workspace_roots: tuple[Path, ...] = ()
     cloud_allowed: bool = False
     remote_ollama_allowed: bool = False
+    # The canonical session that owns durable model/tool/job evidence.  This
+    # is optional for one-shot calls, but long-running coding runs bind it so
+    # subprocess jobs can be replayed with the same conversation.
+    session_id: str | None = None
 
     @property
     def remaining_seconds(self) -> float | None:
@@ -77,8 +81,13 @@ def local_owner_context(
     remote_ollama_allowed: bool = False,
     timeout_seconds: float | None = None,
     cancellation: CancellationToken | None = None,
+    session_id: str | None = None,
 ) -> OperationContext:
     """Audited factory for the single-owner local context."""
+    if session_id is not None and (
+        not isinstance(session_id, str) or not session_id.strip()
+    ):
+        raise ValueError("session_id must be non-empty when supplied")
     return OperationContext(
         correlation_id=correlation_id,
         principal_id=LOCAL_OWNER,
@@ -93,4 +102,5 @@ def local_owner_context(
         workspace_roots=workspace_roots,
         cloud_allowed=cloud_allowed,
         remote_ollama_allowed=remote_ollama_allowed,
+        session_id=session_id,
     )

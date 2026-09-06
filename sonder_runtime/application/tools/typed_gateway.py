@@ -68,6 +68,7 @@ def default_tool_context(request: Any) -> OperationContext:
         deadline_monotonic=request.deadline_monotonic,
         cancellation=_CancellationAdapter(request.cancellation),
         workspace_roots=tuple(Path(root) for root in request.scope.workspace_roots),
+        session_id=getattr(request, "session_id", None),
     )
 
 
