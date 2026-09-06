@@ -1120,6 +1120,12 @@ def test_system_status_uses_projected_activity_and_shared_feed(
         "operation_mode": "execution", "fallback_handler": "ollama",
         "handler_state": "handled", "count": 1,
     }
+    assert payload["deployment"]["profile"] == "single-host"
+    assert payload["deployment"]["profile_id"] == "single-pc"
+    assert payload["deployment"]["configured_members"] == ["local"]
+    assert payload["deployment"]["capabilities"]["automatic_takeover"][
+        "available"
+    ] is False
     npu_event = next(
         row for row in payload["execution"]["feed"]["events"]
         if row["kind"] == "npu_fallback_handled"

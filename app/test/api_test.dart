@@ -886,8 +886,45 @@ void main() {
     expect(info.mcpRuntime, isNull);
     expect(info.learningHealth, isNull);
     expect(info.execution, isNull);
+    expect(info.deployment, isNull);
     expect(info.executionSummary, 'lanes unknown | agents unknown');
     expect(info.models, isEmpty);
+  });
+
+  test('system info parses honest deployment capabilities', () {
+    final info = SystemInfo.fromJson({
+      'deployment': {
+        'profile': 'pooled-pair',
+        'profile_id': 'two-pc',
+        'local_node': 'secondary',
+        'configured_members': ['secondary', 'primary'],
+        'preferred_primary': 'primary',
+        'control_state_scope': 'local-instance',
+        'preference_confers_authority': false,
+        'partition_policy': 'no_promotion_without_fencing_and_acknowledged_data',
+        'capabilities': {
+          'private_compute': {
+            'available': true,
+            'reason': 'Configured private-node compute is enabled.',
+          },
+          'automatic_takeover': {
+            'available': false,
+            'reason': 'Fencing is not integrated.',
+          },
+        },
+      },
+    });
+
+    final deployment = info.deployment!;
+    expect(deployment.displayProfile, 'Two PC');
+    expect(deployment.membersLabel, 'secondary, primary');
+    expect(deployment.localNode, 'secondary');
+    expect(deployment.capability('private_compute').available, isTrue);
+    expect(deployment.capability('automatic_takeover').available, isFalse);
+    expect(deployment.capability('automatic_takeover').reason,
+        'Fencing is not integrated.');
+    expect(deployment.capability('quorum').reason,
+        'The runtime did not report this capability.');
   });
 
   test('system info parses shared live execution counts', () {

@@ -4787,6 +4787,7 @@ class Handler(BaseHTTPRequestHandler):
                 "activity": activity,
                 "db_path": getattr(server, "_DB_PATH", ""),
                 "state_home": str(runtime_paths.default_home()),
+                "deployment": sonder_lifecycle.get().deployment_payload(),
                 "account": account or {},
                 "models": [
                     {"id": "sonder", "owned_by": "local"},
