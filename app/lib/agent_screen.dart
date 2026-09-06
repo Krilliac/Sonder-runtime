@@ -18,6 +18,25 @@ class AgentScreen extends StatefulWidget {
   State<AgentScreen> createState() => _AgentScreenState();
 }
 
+class _ShortcutRow extends StatelessWidget {
+  final String keys;
+  final String action;
+
+  const _ShortcutRow({required this.keys, required this.action});
+
+  @override
+  Widget build(BuildContext context) => Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 178,
+            child: Text(keys, style: SonderTokens.of(context).mono(12)),
+          ),
+          Expanded(child: Text(action)),
+        ],
+      );
+}
+
 class _PendingCommand {
   final String id, action;
   final String? content;
@@ -477,6 +496,73 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
     _searchFocus.requestFocus();
   }
 
+  void _handleEscape() {
+    if (_searchFocus.hasFocus && _search.text.isNotEmpty) {
+      setState(() => _search.clear());
+      return;
+    }
+    if (MediaQuery.sizeOf(context).width < 850 && _selected != null) {
+      setState(() => _selected = null);
+      _stopWatch();
+    }
+  }
+
+  void _moveSelection(int delta) {
+    // Do not steal the normal word/cursor movement from a text field.
+    if (_searchFocus.hasFocus || _composerFocus.hasFocus) return;
+    final lanes = _orderedLanes().where(_matches).toList();
+    if (lanes.isEmpty) return;
+    final current = _selected == null
+        ? (delta > 0 ? -1 : lanes.length)
+        : lanes.indexWhere((lane) => lane.id == _selected);
+    final next = (current + delta).clamp(0, lanes.length - 1);
+    _select(lanes[next].id);
+  }
+
+  Future<void> _showKeyboardHelp() async {
+    await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+              title: const Text('Agent conversation shortcuts'),
+              content: const Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _ShortcutRow(
+                    keys: 'Ctrl+Enter / ⌘+Enter',
+                    action: 'Send the follow-up in the composer',
+                  ),
+                  SizedBox(height: 12),
+                  _ShortcutRow(
+                    keys: 'Ctrl+Shift+F / ⌘+Shift+F',
+                    action: 'Focus conversation search',
+                  ),
+                  SizedBox(height: 12),
+                  _ShortcutRow(
+                    keys: 'Alt+↑ / Alt+↓',
+                    action: 'Move to the previous or next loaded conversation',
+                  ),
+                  SizedBox(height: 12),
+                  _ShortcutRow(
+                    keys: 'Escape',
+                    action:
+                        'Clear focused search, or return to the list on narrow screens',
+                  ),
+                  SizedBox(height: 16),
+                  Text(
+                    'Enter adds a new line. A request is sent only after the server confirms the same command.',
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                    autofocus: true,
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('Close')),
+              ],
+            ));
+  }
+
   Widget _laneList() {
     final ordered = _orderedLanes().where(_matches).toList();
     final groups = <String, List<AgentLane>>{};
@@ -788,12 +874,22 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
                           style: Theme.of(context).textTheme.titleLarge))),
               const SizedBox(width: 12),
               Semantics(
-                  liveRegion: true, child: Chip(label: Text(lane.statusLabel))),
+                  label: 'Server execution status: ${lane.executionSummary}',
+                  liveRegion: true,
+                  child: Chip(label: Text(lane.statusLabel))),
             ]),
             Wrap(
                 spacing: 8,
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
+                  Chip(
+                      avatar: const Icon(Icons.memory_outlined, size: 16),
+                      label: Text(lane.tier.isEmpty
+                          ? 'Tier unavailable'
+                          : 'Tier ${lane.tier}')),
+                  Chip(
+                      avatar: const Icon(Icons.sync_outlined, size: 16),
+                      label: Text('Revision ${lane.revision}')),
                   if (lane.canInterrupt)
                     TextButton.icon(
                         onPressed: pending == null
@@ -839,7 +935,9 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
                       ? const CircularProgressIndicator()
                       : const Text('Conversation not loaded.'))
               : ListView(
-                  key: PageStorageKey('transcript-${lane.id}'),
+                  // The controller is retained per lane in _scrolls. A
+                  // PageStorageKey here would collide with ExpansionTile's
+                  // boolean state and nested selectable markdown scrolls.
                   controller: scroll,
                   padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
                   children: [
@@ -847,10 +945,15 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
                             if (lane.task.isNotEmpty ||
-                                lane.workspaceRoot.isNotEmpty)
+                                lane.workspaceRoot.isNotEmpty ||
+                                lane.tier.isNotEmpty)
                               ExpansionTile(
-                                key: PageStorageKey('task-${lane.id}'),
-                                title: const Text('Task and workspace'),
+                                // Keep the tile identity local. A PageStorageKey
+                                // here would share its boolean expansion state
+                                // with nested selectable text scroll positions.
+                                key: ValueKey('task-${lane.id}'),
+                                title: const Text(
+                                    'Task, workspace and run details'),
                                 tilePadding: EdgeInsets.zero,
                                 expandedCrossAxisAlignment:
                                     CrossAxisAlignment.start,
@@ -866,6 +969,30 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
                                     SelectableText(lane.workspaceRoot,
                                         style:
                                             SonderTokens.of(context).mono(12))
+                                  ],
+                                  if (lane.tier.isNotEmpty) ...[
+                                    const SizedBox(height: 12),
+                                    Text('Execution',
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .labelLarge),
+                                    SelectableText(lane.executionSummary,
+                                        style:
+                                            SonderTokens.of(context).mono(12)),
+                                    const SizedBox(height: 8),
+                                    const Text(
+                                        'Per-lane capacity counters are not reported by this server. Use Runtime for cluster-level capacity and resource health.'),
+                                    if (widget.onNavigate != null)
+                                      Align(
+                                          alignment: Alignment.centerLeft,
+                                          child: TextButton.icon(
+                                              onPressed: () => _navigate(
+                                                  WorkspaceDestination.runtime),
+                                              icon: const Icon(
+                                                  Icons.dashboard_customize_outlined,
+                                                  size: 16),
+                                              label:
+                                                  const Text('Open Runtime'))),
                                   ],
                                   const SizedBox(height: 16)
                                 ],
@@ -1098,8 +1225,16 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
                     control: true, shift: true): focusSearch,
                 const SingleActivator(LogicalKeyboardKey.keyF,
                     meta: true, shift: true): focusSearch,
+                const SingleActivator(LogicalKeyboardKey.arrowUp, alt: true):
+                    () => _moveSelection(-1),
+                const SingleActivator(LogicalKeyboardKey.arrowDown, alt: true):
+                    () => _moveSelection(1),
+                const SingleActivator(LogicalKeyboardKey.escape):
+                    _handleEscape,
               },
-              child: Scaffold(
+              child: Focus(
+                autofocus: true,
+                child: Scaffold(
                 appBar: AppBar(
                   title: const Text('Agents'),
                   actions: [
@@ -1107,6 +1242,10 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
                         tooltip: 'Find conversation (Ctrl+Shift+F)',
                         onPressed: focusSearch,
                         icon: const Icon(Icons.search)),
+                    IconButton(
+                        tooltip: 'Agent conversation shortcuts',
+                        onPressed: _showKeyboardHelp,
+                        icon: const Icon(Icons.help_outline)),
                     if (widget.onNavigate != null) ...[
                       WorkspaceMenu(
                           current: WorkspaceDestination.agents,
@@ -1151,7 +1290,7 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
                     : lane == null
                         ? _laneList()
                         : _transcript(lane),
-              ));
+              )));
         },
       );
 }

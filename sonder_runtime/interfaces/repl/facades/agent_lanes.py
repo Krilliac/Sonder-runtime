@@ -18,7 +18,11 @@ HELP = """/lanes list [cursor]
 /lanes reports <lane-id> [cursor]
 /lanes ack <lane-id> <report-id> [reports-page-cursor]
 Messages preserve pasted multiline text. Controls are cooperative requests.
-/agents shows legacy activity; /lanes shows durable conversations."""
+/agents shows legacy activity; /lanes shows durable conversations.
+Status, tier and revision are read from the server-owned lane record. Per-lane
+capacity counters are not exposed here.
+Use /capacity for the bounded cluster view.
+Resource values are never inferred from a lane's status."""
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,159}\Z")
 
 
@@ -180,10 +184,15 @@ class LaneConsoleFacade:
 
     @staticmethod
     def _summary(lane):
+        status = lane.get("status", "unknown")
+        tier = lane.get("tier") or "unavailable"
+        revision = lane.get("revision", "unknown")
         return (
-            f"{lane['id']}  {lane.get('status', 'unknown')}  revision {lane.get('revision', 'unknown')}\n"
+            f"{lane['id']}  {status}  revision {revision}\n"
+            f"  execution: {status} · tier {tier} · revision {revision}\n"
             f"  {str(lane.get('title') or lane.get('task') or '(untitled)')[:200]}\n"
-            f"  workspace: {lane.get('workspace_root', 'unknown')}"
+            f"  workspace: {lane.get('workspace_root', 'unknown')}\n"
+            "  resources: unavailable per lane; use /capacity"
         )
 
     @staticmethod

@@ -8,6 +8,28 @@ def test_lane_console_facade_exists():
     assert LaneConsoleFacade
 
 
+def test_lane_summary_keeps_execution_identity_and_resource_boundary():
+    from sonder_runtime.interfaces.repl.facades.agent_lanes import LaneConsoleFacade
+
+    summary = LaneConsoleFacade._summary({
+        "id": "lane-1",
+        "status": "running",
+        "tier": "code",
+        "revision": 7,
+        "title": "Bounded parser work",
+        "workspace_root": "C:/sonder/workspace",
+    })
+    assert "execution: running · tier code · revision 7" in summary
+    assert "resources: unavailable per lane; use /capacity" in summary
+
+
+def test_lane_help_explains_status_and_capacity_source(env):
+    text = facade(env).run("help")
+    assert "Status, tier and revision are read from the server-owned lane record." in text
+    assert "Use /capacity for the bounded cluster view" in text
+    assert "never inferred from a lane's status" in text
+
+
 from dataclasses import replace
 from types import SimpleNamespace
 import io

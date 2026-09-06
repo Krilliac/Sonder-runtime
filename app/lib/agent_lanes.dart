@@ -32,6 +32,17 @@ class AgentLane {
         'cancelled' => 'Cancelled',
         _ => 'Unknown status',
       };
+
+  /// A compact server-owned identity for status lines and assistive labels.
+  ///
+  /// The lane endpoint deliberately withholds grant and capacity counters.
+  /// Keep this summary to fields that are already public rather than deriving
+  /// progress or inventing resource values in the client.
+  String get executionSummary {
+    final model = tier.isEmpty ? 'tier unavailable' : 'tier $tier';
+    return '$statusLabel · $model · revision $revision';
+  }
+
   bool get canResume => const {
         'interrupted',
         'failed',

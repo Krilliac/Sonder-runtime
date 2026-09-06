@@ -102,6 +102,17 @@ class FakeAgents extends SonderApi {
   }
 }
 
+class MetadataAgents extends FakeAgents {
+  @override
+  Map<String, dynamic> lane(String id) => {
+        ...super.lane(id),
+        'task': 'Bounded task for $id',
+        'workspace_root': 'C:/workspace/$id',
+        'tier': 'code',
+        'revision': 7,
+      };
+}
+
 class DelayedAgents extends FakeAgents {
   final first = Completer<AgentSnapshot>();
   bool delayed = false;
@@ -440,6 +451,74 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Docs agent'), findsOneWidget);
     expect(api.calls, isEmpty);
+    await tester.pumpWidget(const SizedBox());
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+
+  testWidgets('shortcut guide and keyboard lane navigation stay discoverable',
+      (tester) async {
+    final api = FakeAgents();
+    await open(tester, api);
+    await tester.tap(find.byTooltip('Agent conversation shortcuts'));
+    await tester.pumpAndSettle();
+    expect(find.text('Agent conversation shortcuts'), findsOneWidget);
+    expect(find.text('Alt+↑ / Alt+↓'), findsOneWidget);
+    expect(find.textContaining('A request is sent only after the server confirms'),
+        findsOneWidget);
+    await tester.tap(find.text('Close'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Parser agent'));
+    await tester.pumpAndSettle();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.altLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
+    await tester.pumpAndSettle();
+    expect(find.text('Task for b'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+
+  testWidgets('Escape returns from a narrow transcript without cancelling it',
+      (tester) async {
+    final api = FakeAgents();
+    await open(tester, api, size: const Size(390, 844));
+    await tester.tap(find.text('Parser agent'));
+    await tester.pumpAndSettle();
+    expect(find.text('Docs agent'), findsNothing);
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+    expect(find.text('Docs agent'), findsOneWidget);
+    expect(api.calls, isEmpty);
+    await tester.pumpWidget(const SizedBox());
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+
+  testWidgets('run header shows public execution identity and resource boundary',
+      (tester) async {
+    final api = MetadataAgents();
+    WorkspaceDestination? destination;
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    await tester.pumpWidget(MaterialApp(
+        theme: SonderTheme.dark,
+        home: AgentScreen(api: api, onNavigate: (value) => destination = value)));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Parser agent'));
+    await tester.pumpAndSettle();
+    expect(find.text('Tier code'), findsOneWidget);
+    expect(find.text('Revision 7'), findsOneWidget);
+    await tester.tap(find.text('Task, workspace and run details'));
+    await tester.pumpAndSettle();
+    expect(find.text('Running · tier code · revision 7'), findsOneWidget);
+    expect(find.textContaining('Per-lane capacity counters are not reported'),
+        findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.tap(find.text('Open Runtime'));
+    await tester.pumpAndSettle();
+    expect(destination, WorkspaceDestination.runtime);
     await tester.pumpWidget(const SizedBox());
     tester.view.resetPhysicalSize();
     tester.view.resetDevicePixelRatio();
