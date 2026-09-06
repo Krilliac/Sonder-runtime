@@ -861,7 +861,8 @@
         "sonder_runtime/domain/updates/runtime_update_formatting.py",
         "sonder_runtime/domain/updates/stash_formatting.py",
         "sonder_runtime/domain/work_stealing.py",
-        "sonder_runtime/domain/worker_capacity.py"
+        "sonder_runtime/domain/worker_capacity.py",
+        "sonder_runtime/domain/worker_epoch_fence.py"
       ]
     },
     {
