@@ -46,6 +46,17 @@ ambiguous launch exception do not free that reservation. Active legacy catalog
 jobs without admission records block new admissions until resolved. Terminal
 legacy jobs predate this accounting and are not retroactively reserved.
 
+The budget is bound to an opaque SHA-256 physical-host fingerprint in jobs.db.
+When no fingerprint is supplied by an embedding application, the SQLite worker
+adapter derives one from the local Windows machine GUID or Linux machine-id,
+with the OS family included so Windows and WSL do not silently share a fence.
+A changed fingerprint is rejected even when `worker_host_id` is unchanged.
+`reconcile_capacity(limit=...)` marks only expired, undispatched leases as
+`expired`; dispatched rows remain occupied until cleanup proof. The bounded
+`list_capacity(include_released=True)` view omits reservation tokens and is
+intended for operator reconciliation. The fingerprint is an operational fence,
+not hardware attestation; cloned machine identities remain outside this claim.
+
 The authority covers catalog job RAM accounting and concurrent job slots only.
 It does not reserve inference VRAM, CPU cores, disk bandwidth, or RAM used by
 unrelated applications. Use the same durable database and physical host identity
@@ -54,6 +65,14 @@ workers or different PCs do not share a safe budget merely because their labels
 match. No common cross-OS authority or inference resource service is provided here.
 Preserve jobs.db on rollback; unresolved dispatched rows require verified process
 cleanup, not deletion of rows to make capacity appear free.
+
+Whole-job placement requests may carry a bounded `priority` (-100..100) and a
+`max_queue_depth` admission ceiling. The scheduler treats the worker-reported
+`active_jobs` value as queue pressure when that ceiling is present. The
+application-owned `PlacementQueue` provides a process-local pre-placement queue
+with a fixed maximum depth, deterministic priority/age/request ordering,
+duplicate replay, bounded expiry, and redacted explanations. It does not replace
+durable worker capacity or claim a cross-process queue.
 
 ## Network and identity
 

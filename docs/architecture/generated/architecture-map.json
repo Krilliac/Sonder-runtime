@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 272,
+      "file_count": 273,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -242,6 +242,7 @@
         "sonder_runtime/adapters/persistence/sqlite/memory.py",
         "sonder_runtime/adapters/persistence/sqlite/operations.py",
         "sonder_runtime/adapters/persistence/sqlite/outbox.py",
+        "sonder_runtime/adapters/persistence/sqlite/physical_identity.py",
         "sonder_runtime/adapters/persistence/sqlite/selfmod.py",
         "sonder_runtime/adapters/persistence/sqlite/training.py",
         "sonder_runtime/adapters/persistence/sqlite/updates.py",
@@ -321,7 +322,7 @@
       ]
     },
     {
-      "file_count": 299,
+      "file_count": 300,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -366,6 +367,7 @@
         "sonder_runtime/application/compute_fabric/coordinator.py",
         "sonder_runtime/application/compute_fabric/index.py",
         "sonder_runtime/application/compute_fabric/jobs.py",
+        "sonder_runtime/application/compute_fabric/placement_queue.py",
         "sonder_runtime/application/compute_fabric/refresh.py",
         "sonder_runtime/application/compute_fabric/registry.py",
         "sonder_runtime/application/compute_fabric/service.py",
