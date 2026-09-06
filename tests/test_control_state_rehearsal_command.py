@@ -344,36 +344,105 @@ def test_non_rehearsal_config_scope_never_constructs_provider(
 
 
 @pytest.mark.parametrize(
-    ("arguments", "expected"),
+    ("before_command", "arguments", "as_json"),
     [
         (
-            ("--set", "control_state_rehearsal.origin=https://live.example.test"),
-            "unrecognized arguments: --set",
+            (),
+            (
+                "--set",
+                "control_state_rehearsal.origin=https://origin.invalid/parser-secret-value",
+            ),
+            True,
         ),
-        (("--origin", "https://live.example.test"), "unrecognized arguments: --origin"),
-        (("--api-key", "live-key"), "unrecognized arguments: --api-key"),
-        (("--cluster-id", "live-cluster"), "unrecognized arguments: --cluster-id"),
-        (("--witness-id", "witness-live"), "unrecognized arguments: --witness-id"),
-        (("--provider-id", "provider-live"), "unrecognized arguments: --provider-id"),
-        (("--local-owner-id", "node-live"), "unrecognized arguments: --local-owner-id"),
-        (("--resource-kind", "memory_write"), "argument --resource-kind: invalid choice"),
+        (
+            ("--origin", "https://origin.invalid/parser-secret-value"),
+            (),
+            True,
+        ),
+        ((), ("--api-key", "parser-secret-value"), True),
+        ((), ("--cluster-id", "production-cluster"), True),
+        ((), ("--witness-id", "witness-live"), True),
+        ((), ("--provider-id", "provider-live"), True),
+        ((), ("--local-owner-id", "node-live"), True),
+        ((), ("--resource-kind", "parser-secret-value"), False),
+        ((), ("--owner-epoch", "parser-secret-value"), False),
     ],
 )
-def test_parser_refuses_configuration_overrides_and_non_job_scope(
-    tmp_path, capsys, arguments, expected
+def test_rehearsal_parser_redacts_unsafe_values_before_config_or_provider_io(
+    tmp_path, monkeypatch, capsys, before_command, arguments, as_json
 ) -> None:
-    """Catches the dedicated command inheriting unsafe shared CLI options."""
+    """Catches a parser rejection echoing inputs or reaching command I/O."""
+    config_path, secrets_path, _ = _write_rehearsal_inputs(
+        tmp_path, origin="https://control.example.test"
+    )
+    config_calls: list[object] = []
+    factory_calls: list[object] = []
+    import sonder_runtime.__main__ as entrypoint
+    import sonder_runtime.bootstrap.control_state_rehearsal as rehearsal
+
+    monkeypatch.setattr(
+        entrypoint, "_load_config", lambda args: config_calls.append(args)
+    )
+    monkeypatch.setattr(
+        rehearsal,
+        "build_control_state_rehearsal",
+        lambda config: factory_calls.append(config),
+    )
+    args = _command_args(config_path, secrets_path)
+    if not as_json:
+        args.remove("--json")
+    args.extend(arguments)
+
+    assert runtime_main([*before_command, *args]) == 2
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    rendered = captured.out + captured.err
+    for unsafe_value in (*before_command, *arguments):
+        assert unsafe_value not in rendered
+    assert "parser-secret-value" not in rendered
+    if as_json:
+        report = json.loads(captured.out)
+        _assert_safe_report(report, forbidden=("parser-secret-value",))
+        assert report["status"] == "rejected"
+        assert report["reason"] == "invalid_arguments"
+    else:
+        assert "reason: invalid_arguments\n" in captured.out
+    assert config_calls == []
+    assert factory_calls == []
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_rehearsal_parser_emits_a_stable_invalid_arguments_report(
+    tmp_path, capsys, as_json
+) -> None:
+    """Catches parse failures bypassing the command's stable refusal report."""
     config_path, secrets_path, _ = _write_rehearsal_inputs(
         tmp_path, origin="https://control.example.test"
     )
     args = _command_args(config_path, secrets_path)
-    args.extend(arguments)
+    if not as_json:
+        args.remove("--json")
+    args.extend(("--resource-kind", "parser-secret-value"))
 
-    with pytest.raises(SystemExit) as exited:
-        runtime_main(args)
+    assert runtime_main(args) == 2
 
-    assert exited.value.code == 2
-    assert expected in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    if as_json:
+        report = json.loads(captured.out)
+        _assert_safe_report(report, forbidden=("parser-secret-value",))
+        assert report["status"] == "rejected"
+        assert report["reason"] == "invalid_arguments"
+    else:
+        assert captured.out == (
+            "schema: sonder.control-state-rehearsal.v1\n"
+            "status: rejected\n"
+            "evidence_scope: process-boundary-transport-rehearsal\n"
+            "promotion_attempted: False\n"
+            "automatic_takeover_available: False\n"
+            "automatic_failback_available: False\n"
+            "reason: invalid_arguments\n"
+        )
 
 
 def test_parser_requires_an_explicit_rehearsal_config(tmp_path, capsys) -> None:
@@ -384,11 +453,102 @@ def test_parser_requires_an_explicit_rehearsal_config(tmp_path, capsys) -> None:
     args = _command_args(tmp_path / "not-used.toml", secrets_path)
     del args[1:3]
 
+    assert runtime_main(args) == 2
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    report = json.loads(captured.out)
+    _assert_safe_report(report)
+    assert report["reason"] == "invalid_arguments"
+
+
+def test_non_rehearsal_parser_keeps_standard_argument_errors(capsys) -> None:
+    """Catches content-free rehearsal errors accidentally applying globally."""
     with pytest.raises(SystemExit) as exited:
-        runtime_main(args)
+        runtime_main(["status", "--ordinary-unknown-option"])
 
     assert exited.value.code == 2
-    assert "the following arguments are required: --config" in capsys.readouterr().err
+    assert "unrecognized arguments: --ordinary-unknown-option" in capsys.readouterr().err
+
+
+def test_normal_parser_is_not_intercepted_by_a_rehearsal_argument(capsys) -> None:
+    """Catches an argument value being mistaken for the top-level command."""
+    with pytest.raises(SystemExit) as exited:
+        runtime_main(
+            [
+                "status",
+                "--ordinary-unknown-option",
+                "control-state-rehearsal",
+            ]
+        )
+
+    assert exited.value.code == 2
+    assert (
+        "unrecognized arguments: --ordinary-unknown-option control-state-rehearsal"
+        in capsys.readouterr().err
+    )
+
+
+def test_rehearsal_parser_preserves_help_exit(capsys) -> None:
+    """Catches the redaction boundary swallowing the normal help path."""
+    with pytest.raises(SystemExit) as exited:
+        runtime_main(["control-state-rehearsal", "--help"])
+
+    assert exited.value.code == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert "--config CONFIG" in captured.out
+
+
+def test_rehearsal_parser_preserves_global_version_exit(capsys) -> None:
+    """Catches the redaction boundary swallowing a global successful exit."""
+    with pytest.raises(SystemExit) as exited:
+        runtime_main(["--version", "control-state-rehearsal"])
+
+    assert exited.value.code == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert "sonder-runtime" in captured.out
+
+
+def test_config_io_failure_is_redacted_before_provider_construction(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Catches a config filesystem failure leaking its path or exception detail."""
+    config_path, secrets_path, _ = _write_rehearsal_inputs(
+        tmp_path, origin="https://control.example.test"
+    )
+    secret_like_value = "config-io-secret-value"
+    factory_calls: list[object] = []
+    import sonder_runtime.__main__ as entrypoint
+    import sonder_runtime.bootstrap.control_state_rehearsal as rehearsal
+
+    def fail_config_load(_args):
+        raise OSError(f"{config_path}: {secret_like_value}")
+
+    monkeypatch.setattr(entrypoint, "_load_config", fail_config_load)
+    monkeypatch.setattr(
+        rehearsal,
+        "build_control_state_rehearsal",
+        lambda config: factory_calls.append(config),
+    )
+
+    assert runtime_main(_command_args(config_path, secrets_path)) == 2
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    report = json.loads(captured.out)
+    _assert_safe_report(
+        report,
+        forbidden=(
+            secret_like_value,
+            str(config_path),
+            str(secrets_path),
+            "OSError",
+        ),
+    )
+    assert report["status"] == "rejected"
+    assert report["reason"] == "configuration_invalid"
+    assert factory_calls == []
 
 
 def test_confirmed_fence_uses_collected_acknowledgement_without_duplicate_append(

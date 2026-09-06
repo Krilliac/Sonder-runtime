@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import threading
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 import pytest
 
+import sonder_runtime.adapters.cluster.http_control_state as control_state_http
 from sonder_runtime.adapters.cluster.http_control_state import (
     HttpsControlStateProvider,
 )
@@ -43,6 +47,130 @@ class _Opener:
     def __call__(self, request, *, timeout: float):
         self.calls.append((request, timeout))
         return _Response(self.payload, status=self.status)
+
+
+def test_default_opener_uses_direct_transport_despite_ambient_proxy(monkeypatch):
+    """Catches a loopback rehearsal leaking its bearer through HTTP_PROXY."""
+    for name in (
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:8080")
+    monkeypatch.setenv("http_proxy", "http://proxy.invalid:8080")
+    captured: dict[str, object] = {}
+
+    class _DirectOpener:
+        def open(self, request, *, timeout):
+            captured["request"] = request
+            captured["timeout"] = timeout
+            return _Response({})
+
+    def build_opener(*handlers):
+        captured["handlers"] = handlers
+        return _DirectOpener()
+
+    monkeypatch.setattr(urllib.request, "build_opener", build_opener)
+    request = urllib.request.Request("http://127.0.0.1:8765/rehearsal")
+
+    assert control_state_http._default_opener(request, timeout=1.25).status == 200
+    proxy = next(
+        handler
+        for handler in captured["handlers"]
+        if isinstance(handler, urllib.request.ProxyHandler)
+    )
+    assert proxy.proxies == {}
+    assert any(
+        isinstance(handler, control_state_http._NoRedirect)
+        for handler in captured["handlers"]
+    )
+    assert captured["request"] is request
+    assert captured["timeout"] == 1.25
+
+
+def test_default_provider_bypasses_an_ambient_loopback_proxy(monkeypatch):
+    """Catches an ambient proxy receiving a loopback rehearsal bearer."""
+    event = _event()
+    acknowledgement = _ack(event)
+    direct_requests: list[tuple[str, str | None]] = []
+    proxy_authorizations: list[str | None] = []
+
+    class _DirectHandler(BaseHTTPRequestHandler):
+        def log_message(self, _format, *_args):
+            return
+
+        def do_POST(self):
+            direct_requests.append((self.path, self.headers.get("Authorization")))
+            payload = json.dumps(
+                {
+                    "object": "replication_acknowledgement",
+                    "acknowledgement": acknowledgement.as_dict(),
+                }
+            ).encode("utf-8")
+            self.send_response(202)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    class _ProxyHandler(BaseHTTPRequestHandler):
+        def log_message(self, _format, *_args):
+            return
+
+        def do_POST(self):
+            proxy_authorizations.append(self.headers.get("Authorization"))
+            self.send_response(502)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    direct_server = ThreadingHTTPServer(("127.0.0.1", 0), _DirectHandler)
+    proxy_server = ThreadingHTTPServer(("127.0.0.1", 0), _ProxyHandler)
+    direct_thread = threading.Thread(target=direct_server.serve_forever, daemon=True)
+    proxy_thread = threading.Thread(target=proxy_server.serve_forever, daemon=True)
+    direct_thread.start()
+    proxy_thread.start()
+    for name in (
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+        "REQUEST_METHOD",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    proxy_origin = f"http://127.0.0.1:{proxy_server.server_port}"
+    monkeypatch.setenv("HTTP_PROXY", proxy_origin)
+    monkeypatch.setenv("http_proxy", proxy_origin)
+
+    try:
+        provider = HttpsControlStateProvider(
+            origin=f"http://127.0.0.1:{direct_server.server_port}",
+            api_key="direct-transport-test-key",
+            capabilities=_capabilities(),
+            timeout_seconds=1.0,
+            allow_insecure_loopback=True,
+        )
+        assert provider.append(event) == acknowledgement
+    finally:
+        for server in (direct_server, proxy_server):
+            server.shutdown()
+            server.server_close()
+        for thread in (direct_thread, proxy_thread):
+            thread.join(timeout=2)
+
+    assert direct_requests == [
+        ("/v1/control-state/events", "Bearer direct-transport-test-key")
+    ]
+    assert proxy_authorizations == []
 
 
 def _capabilities(**changes) -> ReplicatedControlStateCapabilities:

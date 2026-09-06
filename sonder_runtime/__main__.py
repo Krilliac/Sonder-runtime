@@ -21,6 +21,8 @@ Commands:
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import re
@@ -99,6 +101,35 @@ _REHEARSAL_PREFIX = "rehearsal-"
 _REHEARSAL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _REHEARSAL_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_REHEARSAL_SEQUENCE = (1 << 63) - 1
+_TOP_LEVEL_COMMANDS = frozenset(
+    {
+        "preflight",
+        "doctor",
+        "status",
+        "diagnostics",
+        "config",
+        "migrate",
+        "backup",
+        "restore",
+        "smoke",
+        "control-state-rehearsal",
+        "serve",
+        "repl",
+        "mcp",
+        "drain",
+        "update",
+        "rotate-key",
+        "eval-history",
+    }
+)
+
+
+def _first_top_level_command(argv: list[str]) -> str | None:
+    """Find the first literal top-level command without parsing unsafe input."""
+    for value in argv:
+        if isinstance(value, str) and value in _TOP_LEVEL_COMMANDS:
+            return value
+    return None
 
 
 def _rehearsal_report(status: str, *, reason: str | None = None) -> dict[str, object]:
@@ -229,7 +260,7 @@ def cmd_control_state_rehearsal(args) -> int:
 
     try:
         config = _load_config(args)
-    except sonder_config.ConfigError:
+    except (OSError, sonder_config.ConfigError):
         _emit_rehearsal_report(
             args, _rehearsal_report("rejected", reason="configuration_invalid")
         )
@@ -1466,7 +1497,26 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if _first_top_level_command(raw_argv) == "control-state-rehearsal":
+        # argparse includes caller-provided values in its errors.  This one
+        # command admits provider credentials and an explicitly bounded
+        # disposable scope, so keep only its parse failures content-free.
+        # Nonzero parser exits are handled; --help and --version retain their
+        # normal successful SystemExit behavior.
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                args = build_parser().parse_args(raw_argv)
+            except SystemExit as exc:
+                if exc.code == 2:
+                    _emit(
+                        _rehearsal_report("rejected", reason="invalid_arguments"),
+                        as_json="--json" in raw_argv,
+                    )
+                    return 2
+                raise
+    else:
+        args = build_parser().parse_args(raw_argv)
     try:
         return args.func(args)
     except sonder_config.ConfigError as exc:
