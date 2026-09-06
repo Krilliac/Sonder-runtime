@@ -156,8 +156,8 @@ class MemoryReplicationCoordinator:
         self.source_id = _identity(source.source_id, "source_id")
         if type(sinks) is not tuple:
             raise TypeError("sinks must be an explicit tuple")
-        if not 1 <= len(sinks) <= _MAX_REPLICAS:
-            raise MemoryReplicationError(f"sinks must contain 1..{_MAX_REPLICAS} replicas")
+        if not 0 <= len(sinks) <= _MAX_REPLICAS:
+            raise MemoryReplicationError(f"sinks must contain 0..{_MAX_REPLICAS} replicas")
         identities: list[str] = []
         for sink in sinks:
             identity = _identity(getattr(sink, "identity", None), "replica identity")
@@ -184,11 +184,10 @@ class MemoryReplicationCoordinator:
 
     def replicate(self, *, after_sequence: int = 0) -> MemoryReplicationOutcome:
         after_sequence = _non_negative(after_sequence, "after_sequence")
-        batch = self.source.export(
-            after_sequence=after_sequence,
-            limit=self.limit,
-            project=self.project,
-        )
+        export_kwargs = {"after_sequence": after_sequence, "limit": self.limit}
+        if self.project is not None:
+            export_kwargs["project"] = self.project
+        batch = self.source.export(**export_kwargs)
         if not isinstance(batch, MemoryReplicationBatch):
             raise TypeError("source export must return MemoryReplicationBatch")
         if batch.source_id != self.source_id:
@@ -269,6 +268,8 @@ class MemoryReplicationCoordinator:
             return "receipt_digest_mismatch"
         if receipt.durable is not True:
             return "receipt_not_durable"
+        if receipt.inserted_records > len(batch.records):
+            return "receipt_inserted_count_mismatch"
         return None
 
 
