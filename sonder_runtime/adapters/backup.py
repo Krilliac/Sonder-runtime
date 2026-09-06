@@ -223,6 +223,15 @@ def create_backup(
             + f".{int((now % 1) * 1_000_000):06d}Z",
             "application_version": build.version,
             "commit_sha": build.commit_sha,
+            # The offline recovery rehearsal binds a state image to the
+            # exact source revision that created it.  Keep a version fallback
+            # for source checkouts without Git metadata; older manifests are
+            # still accepted by the verifier and the rehearsal adapter.
+            "source_revision": (
+                build.commit_sha
+                if build.commit_sha and build.commit_sha != "unknown"
+                else f"version:{build.version}"
+            ),
             "schema_versions": _schema_versions(state_dir),
             "files": files,
         }
