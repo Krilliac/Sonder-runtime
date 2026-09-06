@@ -157,6 +157,8 @@ class HttpsMemoryReplicationSink(MemoryReplicationSink):
             raise DependencyUnavailable(
                 f"memory replication request failed: {type(exc).__name__}"
             ) from exc
+        if not isinstance(raw, bytes):
+            raise DependencyUnavailable("memory replication response is not bytes")
         if len(raw) > self._max_response_bytes:
             raise DependencyUnavailable("memory replication response exceeds size bound")
         try:
