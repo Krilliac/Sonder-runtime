@@ -1,4 +1,5 @@
-from threading import Event
+from contextlib import contextmanager
+from threading import Event, Thread
 
 import pytest
 
@@ -91,6 +92,70 @@ def test_durable_cancellation_survives_service_boundary_and_first_reason_wins(tm
     assert handle.result(2).status is SubagentStatus.CANCELLED
     restored = SQLiteDurableContinuationRepository(path).get("child-cancel")
     assert restored and restored.cancellation_reason == "operator stop"
+    service.close(1)
+
+
+def test_cancellation_waits_for_external_intent_receipt(tmp_path):
+    """A healthy writer may be between intent retention and its receipt."""
+    path = tmp_path / "cancel-race.sqlite"
+    repository = SQLiteDurableContinuationRepository(path)
+    service = DurableContinuationService(repository)
+    started = Event()
+    cancel_seen = Event()
+    allow_finish = Event()
+
+    def wait_for_cancel(_state, _checkpoint, cancel):
+        started.set()
+        while not cancel.cancelled:
+            cancel.wait(.01)
+        cancel_seen.set()
+        assert allow_finish.wait(3)
+        return "must not publish"
+
+    class PausedRepository(SQLiteDurableContinuationRepository):
+        def __init__(self, db_path):
+            self.ready = Event()
+            self.release = Event()
+            self.enabled = False
+            self.calls = 0
+            super().__init__(db_path)
+
+        @contextmanager
+        def _connect(self):
+            with super()._connect() as connection:
+                yield connection
+            if self.enabled:
+                self.calls += 1
+                if self.calls == 1:
+                    self.ready.set()
+                    assert self.release.wait(3)
+
+    handle = service.spawn(
+        _request("child-cancel-race"), _context("cancel-race"), wait_for_cancel
+    )
+    assert started.wait(1)
+    assert service.cancel("child-cancel-race", reason="operator stop")
+    external = PausedRepository(path)
+    external.enabled = True
+    external_done = Event()
+
+    def external_cancel():
+        assert not external.request_cancel("child-cancel-race", reason="later stop")
+        external_done.set()
+
+    writer = Thread(target=external_cancel)
+    writer.start()
+    assert external.ready.wait(1)
+    assert cancel_seen.wait(1)
+    allow_finish.set()
+    external.release.set()
+    assert external_done.wait(3)
+    assert handle.result(3).status is SubagentStatus.CANCELLED
+    assert SQLiteDurableContinuationRepository(path).get(
+        "child-cancel-race"
+    ).cancellation_reason == "operator stop"
+    writer.join(1)
+    assert not writer.is_alive()
     service.close(1)
 
 
