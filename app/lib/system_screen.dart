@@ -1268,6 +1268,16 @@ class _SystemScreenState extends State<SystemScreen>
               ),
               const SizedBox(height: 12),
             ],
+            if (info.operationalCapabilities != null) ...[
+              _Section(
+                title: 'Distributed capability surface',
+                child: _OperationalCapabilitiesPanel(
+                  key: const Key('operational-capabilities-panel'),
+                  info: info.operationalCapabilities!,
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
             if (info.runtimePolicy != null) ...[
               _Section(
                 key: _systemPolicyKey,
@@ -2478,6 +2488,80 @@ class _DeploymentPanel extends StatelessWidget {
             style: Theme.of(context).textTheme.bodySmall,
           ),
         ],
+      ],
+    );
+  }
+}
+
+class _OperationalCapabilitiesPanel extends StatelessWidget {
+  final OperationalCapabilitiesInfo info;
+
+  const _OperationalCapabilitiesPanel({super.key, required this.info});
+
+  String _capabilityValue(OperationalCapabilityInfo capability) {
+    if (capability.available) {
+      return capability.reason.isEmpty
+          ? 'Available'
+          : 'Available — ${capability.reason}';
+    }
+    return capability.reason.isEmpty
+        ? 'Unavailable'
+        : 'Unavailable — ${capability.reason}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      key: const Key('operational-capabilities-panel-content'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (info.localNode.isNotEmpty)
+          _StatusRow(label: 'Compute node', value: info.localNode, ok: true),
+        _StatusRow(
+          label: 'Compute peers',
+          value: '${info.configuredPeerCount}',
+          ok: true,
+        ),
+        _StatusRow(
+          label: 'Inference pool',
+          value: '${info.workerSummary}; ${_capabilityValue(info.requestLevelPooling)}',
+          ok: info.requestLevelPooling.available,
+        ),
+        _StatusRow(
+          label: 'Whole-job placement',
+          value: _capabilityValue(info.wholeJobPlacement),
+          ok: info.wholeJobPlacement.available,
+        ),
+        _StatusRow(
+          label: 'Model sharding',
+          value: _capabilityValue(info.modelSharding),
+          ok: info.modelSharding.available,
+        ),
+        _StatusRow(
+          label: 'Memory replication',
+          value: _capabilityValue(info.memoryReplicationTransport),
+          ok: info.memoryReplicationTransport.available,
+        ),
+        _StatusRow(
+          label: 'Artifact transfer',
+          value: _capabilityValue(info.artifactTransferTransport),
+          ok: info.artifactTransferTransport.available,
+        ),
+        _StatusRow(
+          label: 'Automatic memory migration',
+          value: _capabilityValue(info.automaticMemoryMigration),
+          ok: info.automaticMemoryMigration.available,
+        ),
+        _StatusRow(
+          label: 'Automatic artifact migration',
+          value: _capabilityValue(info.automaticArtifactMigration),
+          ok: info.automaticArtifactMigration.available,
+        ),
+        _StatusRow(
+          label: 'Indefinite scale',
+          value: _capabilityValue(info.indefiniteScale),
+          ok: info.indefiniteScale.available,
+        ),
       ],
     );
   }
