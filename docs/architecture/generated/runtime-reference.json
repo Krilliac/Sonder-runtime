@@ -5374,6 +5374,12 @@
           "name": "schema",
           "required": false,
           "type": "str"
+        },
+        {
+          "default": null,
+          "name": "session",
+          "required": false,
+          "type": "str"
         }
       ],
       "risk": "ask",
@@ -8551,6 +8557,12 @@
           "name": "allow_location",
           "required": false,
           "type": "bool"
+        },
+        {
+          "default": null,
+          "name": "session",
+          "required": false,
+          "type": "str"
         }
       ],
       "risk": "ask",
@@ -8598,6 +8610,12 @@
           "name": "allow_location",
           "required": false,
           "type": "bool"
+        },
+        {
+          "default": null,
+          "name": "session",
+          "required": false,
+          "type": "str"
         }
       ],
       "risk": "ask",
@@ -9683,7 +9701,7 @@
     "events": 43,
     "tools": 212
   },
-  "digest": "bd6a04eaedc839366069e8d0ad980a795119d748b7b197df74be0efe87d536c6",
+  "digest": "cbe7bb515fa238fa1149f94761dd11e99e0d83de5215ddced7dcea2c20cffcde",
   "events": [
     {
       "name": "session.started",
@@ -10154,7 +10172,7 @@
   "schema": "sonder-runtime-document-reference-v1",
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "4dd0970caf3d5abb853e0b2fab031b7499a35875e6009f1ff5a28c732b1b744a",
+    "server.py": "c0aac01dd980d5b8687f5a13b21ac5007cd4ac106fcf3bee451076a580d0740c",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/platform/config.py": "e274ff9e0668680d2be026da3283eb7870886b8ca2f46621533ee3a959a3714e"
@@ -10350,7 +10368,7 @@
       }
     },
     {
-      "description": "Run a visible local tool-using agent loop with checklist/reporting.",
+      "description": "Run a visible local tool-using agent loop with checklist/reporting.\n\n    ``session`` optionally binds every model decision and format-repair call to\n    one durable session; omitted calls preserve the existing transient agent\n    behavior. ``session=\"none\"`` explicitly disables capture.\n    ",
       "name": "agent",
       "parameters": {
         "properties": {
@@ -10382,6 +10400,18 @@
           "prompt": {
             "title": "Prompt",
             "type": "string"
+          },
+          "session": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session"
           },
           "tier": {
             "default": "code",
@@ -14290,7 +14320,7 @@
       }
     },
     {
-      "description": "Offload a self-contained subtask to a local or Ollama-cloud model.\n\n    Local aliases (fast/code/general, plus reasoning/vision when the operator\n    binds them) run privately through loopback Ollama by default on CPU or any\n    accelerator Ollama supports; an explicitly opted-in remote OLLAMA_HOST\n    leaves this machine. The learning tiers\n    (SONDER_LEARN_TIERS, default: every configured local tier) participate in the\n    lesson loop: with learn=True (default) the call is captured and the response ends\n    with a '[interaction_id: <id>]' footer you can pass to record_outcome once you know\n    whether it compiled / passed tests, so a good outcome distills a lesson. The local\n    'code' tier is also memory-augmented; cloud tiers answer without augmentation\n    but are still captured \u2014 so a paid frontier model's grounded wins become lessons and\n    fine-tuning data for the local model. 'fast'/'general' (mechanical work) and\n    learn=False run the plain path: no capture, no footer, just text.\n\n    Tiers: fast=3B (default), code=7B coder, general=7B instruct,\n    cloud-code / cloud-general (METERED, prompt leaves this machine).\n    Give a FULLY self-contained prompt (the model can't see this chat or your files).\n\n    schema: optional JSON Schema *as JSON text*, e.g.\n    '{\"type\": \"object\", \"required\": [\"name\"], \"properties\": {\"name\": {\"type\": \"string\"}}}'.\n    Full JSON Schema is accepted and is applied in full by the model's decoder.\n\n    It is then re-checked here, but only PARTIALLY: the in-process check covers\n    \"type\", \"required\", \"properties\" and \"items\". Everything else -- \"enum\",\n    \"minimum\", \"additionalProperties\", \"$ref\", \"oneOf\", and so on -- is\n    constrained during decoding and NOT re-checked. So is any node without an\n    explicit \"type\" (every \"$ref\" node, and \"properties\" written without\n    \"type\": \"object\"), which the check accepts unconditionally.\n\n    What that means for you:\n      - A response failing the re-checked part is REJECTED, with the failing\n        path named. It is never repaired into a passing one and never silently\n        retried.\n      - A response that passes gets back exactly the JSON text, and nothing\n        else, ONLY when the whole schema was re-checkable. Otherwise a\n        '[schema_unverified: <path> (<what went unchecked>)]' line follows the\n        JSON, so partial verification is never handed to you as complete.\n      - Stick to type/required/properties/items if you want the strongest\n        guarantee and clean parseable output.\n\n    Omit schema (the default) and this call behaves exactly as it always has:\n    no format constraint, no checking, raw text back.\n    Small object shapes work far better than deep ones on a 3B/7B local tier.\n    ",
+      "description": "Offload a self-contained subtask to a local or Ollama-cloud model.\n\n    Local aliases (fast/code/general, plus reasoning/vision when the operator\n    binds them) run privately through loopback Ollama by default on CPU or any\n    accelerator Ollama supports; an explicitly opted-in remote OLLAMA_HOST\n    leaves this machine. The learning tiers\n    (SONDER_LEARN_TIERS, default: every configured local tier) participate in the\n    lesson loop: with learn=True (default) the call is captured and the response ends\n    with a '[interaction_id: <id>]' footer you can pass to record_outcome once you know\n    whether it compiled / passed tests, so a good outcome distills a lesson. The local\n    'code' tier is also memory-augmented; cloud tiers answer without augmentation\n    but are still captured \u2014 so a paid frontier model's grounded wins become lessons and\n    fine-tuning data for the local model. 'fast'/'general' (mechanical work) and\n    learn=False run the plain path: no capture, no footer, just text.\n\n    Tiers: fast=3B (default), code=7B coder, general=7B instruct,\n    cloud-code / cloud-general (METERED, prompt leaves this machine).\n    Give a FULLY self-contained prompt (the model can't see this chat or your files).\n\n    schema: optional JSON Schema *as JSON text*, e.g.\n    '{\"type\": \"object\", \"required\": [\"name\"], \"properties\": {\"name\": {\"type\": \"string\"}}}'.\n    Full JSON Schema is accepted and is applied in full by the model's decoder.\n\n    It is then re-checked here, but only PARTIALLY: the in-process check covers\n    \"type\", \"required\", \"properties\" and \"items\". Everything else -- \"enum\",\n    \"minimum\", \"additionalProperties\", \"$ref\", \"oneOf\", and so on -- is\n    constrained during decoding and NOT re-checked. So is any node without an\n    explicit \"type\" (every \"$ref\" node, and \"properties\" written without\n    \"type\": \"object\"), which the check accepts unconditionally.\n\n    What that means for you:\n      - A response failing the re-checked part is REJECTED, with the failing\n        path named. It is never repaired into a passing one and never silently\n        retried.\n      - A response that passes gets back exactly the JSON text, and nothing\n        else, ONLY when the whole schema was re-checkable. Otherwise a\n        '[schema_unverified: <path> (<what went unchecked>)]' line follows the\n        JSON, so partial verification is never handed to you as complete.\n      - Stick to type/required/properties/items if you want the strongest\n        guarantee and clean parseable output.\n\n    Omit schema (the default) and this call behaves exactly as it always has:\n    no format constraint, no checking, raw text back.\n    Small object shapes work far better than deep ones on a 3B/7B local tier.\n\n    session: optional durable session identity. When supplied, the exact\n    model-visible request, effective provider attempts, and accepted response\n    are appended to that session; omitted calls retain the historical one-shot\n    persistence policy. Use ``session=\"none\"`` to explicitly opt out.\n    ",
       "name": "offload",
       "parameters": {
         "properties": {
@@ -14317,6 +14347,18 @@
             "default": "",
             "title": "Schema",
             "type": "string"
+          },
+          "session": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session"
           },
           "system": {
             "default": "",
@@ -16665,7 +16707,7 @@
       }
     },
     {
-      "description": "Execute local work with guarded tools, checklist, validation, and report.",
+      "description": "Execute local work with guarded tools, checklist, validation, and report.\n\n    An optional ``session`` carries each model step across retries and tier\n    escalation in one durable transcript.\n    ",
       "name": "workbench_agent",
       "parameters": {
         "properties": {
@@ -16692,6 +16734,18 @@
           "prompt": {
             "title": "Prompt",
             "type": "string"
+          },
+          "session": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session"
           },
           "tier": {
             "default": "auto",
