@@ -151,6 +151,16 @@ class OwnershipScope:
         """Alias matching control-state event terminology."""
         return self.epoch
 
+    def as_dict(self) -> dict[str, object]:
+        """Return the bounded scope shape used by provider adapters."""
+        return {
+            "cluster_id": self.cluster_id,
+            "resource_kind": self.resource_kind,
+            "resource_id": self.resource_id,
+            "owner_id": self.owner_id,
+            "epoch": self.epoch,
+        }
+
     @classmethod
     def from_lease(cls, lease: object) -> "OwnershipScope":
         """Adapt an existing ``OwnerLease`` without importing its module.
@@ -219,6 +229,43 @@ class ControlStateEvent:
             self.owner_id,
             self.owner_epoch,
         )
+
+    def as_dict(self) -> dict[str, object]:
+        """Return a canonical, transport-safe event representation."""
+        return {
+            "event_id": self.event_id,
+            "cluster_id": self.cluster_id,
+            "resource_kind": self.resource_kind,
+            "resource_id": self.resource_id,
+            "owner_id": self.owner_id,
+            "owner_epoch": self.owner_epoch,
+            "sequence": self.sequence,
+            "payload_digest": self.payload_digest,
+            "protocol_version": self.protocol_version,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> "ControlStateEvent":
+        """Parse one provider event without accepting extension fields."""
+        if not isinstance(value, dict):
+            raise AvailabilityProfileError("control-state event must be an object")
+        expected = {
+            "event_id",
+            "cluster_id",
+            "resource_kind",
+            "resource_id",
+            "owner_id",
+            "owner_epoch",
+            "sequence",
+            "payload_digest",
+            "protocol_version",
+        }
+        if set(value) != expected:
+            raise AvailabilityProfileError("control-state event fields are invalid")
+        try:
+            return cls(**value)
+        except (TypeError, ValueError) as exc:
+            raise AvailabilityProfileError("control-state event is invalid") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,6 +344,70 @@ class ReplicationAcknowledgement:
     def data_replica_count(self) -> int:
         return len(self.data_replica_ids)
 
+    def as_dict(self) -> dict[str, object]:
+        """Return the exact acknowledgement shape accepted by the client."""
+        return {
+            "event_id": self.event_id,
+            "cluster_id": self.cluster_id,
+            "owner_epoch": self.owner_epoch,
+            "sequence": self.sequence,
+            "provider_id": self.provider_id,
+            "protocol_version": self.protocol_version,
+            "data_replica_ids": list(self.data_replica_ids),
+            "witness_ids": list(self.witness_ids),
+            "durable": self.durable,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> "ReplicationAcknowledgement":
+        """Parse one provider acknowledgement without accepting extensions."""
+        if not isinstance(value, dict):
+            raise AvailabilityProfileError(
+                "replication acknowledgement must be an object"
+            )
+        expected = {
+            "event_id",
+            "cluster_id",
+            "owner_epoch",
+            "sequence",
+            "provider_id",
+            "protocol_version",
+            "data_replica_ids",
+            "witness_ids",
+            "durable",
+        }
+        if set(value) != expected:
+            raise AvailabilityProfileError(
+                "replication acknowledgement fields are invalid"
+            )
+        replica_values = value["data_replica_ids"]
+        witness_values = value["witness_ids"]
+        if (
+            not isinstance(replica_values, (list, tuple))
+            or isinstance(replica_values, (str, bytes))
+            or not isinstance(witness_values, (list, tuple))
+            or isinstance(witness_values, (str, bytes))
+        ):
+            raise AvailabilityProfileError(
+                "replication acknowledgement replica fields are invalid"
+            )
+        try:
+            return cls(
+                event_id=value["event_id"],
+                cluster_id=value["cluster_id"],
+                owner_epoch=value["owner_epoch"],
+                sequence=value["sequence"],
+                provider_id=value["provider_id"],
+                protocol_version=value["protocol_version"],
+                data_replica_ids=tuple(replica_values),
+                witness_ids=tuple(witness_values),
+                durable=value["durable"],
+            )
+        except (TypeError, ValueError) as exc:
+            raise AvailabilityProfileError(
+                "replication acknowledgement is invalid"
+            ) from exc
+
 
 @dataclass(frozen=True, slots=True)
 class FenceReceipt:
@@ -344,6 +455,60 @@ class FenceReceipt:
         for field in ("external", "accepted"):
             if type(getattr(self, field)) is not bool:
                 raise AvailabilityProfileError(f"{field} must be boolean")
+
+    def as_dict(self) -> dict[str, object]:
+        """Return the bounded fencing receipt shape used by provider adapters."""
+        return {
+            "receipt_id": self.receipt_id,
+            "cluster_id": self.cluster_id,
+            "resource_kind": self.resource_kind,
+            "resource_id": self.resource_id,
+            "previous_owner_id": self.previous_owner_id,
+            "previous_owner_epoch": self.previous_owner_epoch,
+            "provider_id": self.provider_id,
+            "protocol_version": self.protocol_version,
+            "partition_state": self.partition_state.value,
+            "external": self.external,
+            "accepted": self.accepted,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> "FenceReceipt":
+        """Parse one provider fencing receipt without accepting extensions."""
+        if not isinstance(value, dict):
+            raise AvailabilityProfileError("fence receipt must be an object")
+        expected = {
+            "receipt_id",
+            "cluster_id",
+            "resource_kind",
+            "resource_id",
+            "previous_owner_id",
+            "previous_owner_epoch",
+            "provider_id",
+            "protocol_version",
+            "partition_state",
+            "external",
+            "accepted",
+        }
+        if set(value) != expected:
+            raise AvailabilityProfileError("fence receipt fields are invalid")
+        try:
+            state = PartitionState(value["partition_state"])
+            return cls(
+                receipt_id=value["receipt_id"],
+                cluster_id=value["cluster_id"],
+                resource_kind=value["resource_kind"],
+                resource_id=value["resource_id"],
+                previous_owner_id=value["previous_owner_id"],
+                previous_owner_epoch=value["previous_owner_epoch"],
+                provider_id=value["provider_id"],
+                protocol_version=value["protocol_version"],
+                partition_state=state,
+                external=value["external"],
+                accepted=value["accepted"],
+            )
+        except (TypeError, ValueError) as exc:
+            raise AvailabilityProfileError("fence receipt is invalid") from exc
 
 
 @dataclass(frozen=True, slots=True)
