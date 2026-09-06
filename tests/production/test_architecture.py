@@ -395,6 +395,51 @@ def test_checker_detects_a_violation(tmp_path):
     assert "domain may not import" in result.stdout
 
 
+def test_checker_rejects_transport_import_in_pure_config_url_parser(tmp_path):
+    """Catches a pure URL-parser allowance silently admitting transport I/O."""
+    shutil.copytree(_REPO_ROOT / "sonder_runtime", tmp_path / "sonder_runtime")
+    (tmp_path / "scripts").mkdir()
+    checker = tmp_path / "scripts" / "check_architecture.py"
+    shutil.copy2(_REPO_ROOT / "scripts" / "check_architecture.py", checker)
+
+    for command in (['git', 'init', '-q'], ['git', 'add', '-A']):
+        staged = subprocess.run(
+            command, cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        )
+        if staged.returncode != 0:
+            pytest.skip(
+                "git is required to stage the isolated copy: %s"
+                % (staged.stderr.strip() or staged.stdout.strip())
+            )
+
+    clean = subprocess.run(
+        [sys.executable, str(checker)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert clean.returncode == 0, clean.stdout + clean.stderr
+
+    parser = (
+        tmp_path
+        / "sonder_runtime"
+        / "platform"
+        / "control_state_rehearsal_config.py"
+    )
+    parser.write_text(
+        parser.read_text(encoding="utf-8") + "\nimport urllib.request\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [sys.executable, str(checker)],
+        capture_output=True, text=True, timeout=120,
+    )
+
+    assert result.returncode == 1
+    assert (
+        "control_state_rehearsal_config.py: network module 'urllib' outside adapters"
+        in result.stdout
+    )
+
+
 # Every reviewed migration boundary the ratchet must keep closed.  One
 # behavior, one list: each entry is asserted individually against a single
 # checker run below.  This used to be a 45-way parametrize that rebuilt the

@@ -470,22 +470,45 @@ def test_non_rehearsal_parser_keeps_standard_argument_errors(capsys) -> None:
     assert "unrecognized arguments: --ordinary-unknown-option" in capsys.readouterr().err
 
 
-def test_normal_parser_is_not_intercepted_by_a_rehearsal_argument(capsys) -> None:
-    """Catches an argument value being mistaken for the top-level command."""
-    with pytest.raises(SystemExit) as exited:
-        runtime_main(
-            [
-                "status",
-                "--ordinary-unknown-option",
-                "control-state-rehearsal",
-            ]
-        )
+def test_rehearsal_literal_collision_redacts_before_config_or_provider_io(
+    monkeypatch, capsys
+) -> None:
+    """Catches a leading option value selecting another command before the literal."""
+    config_calls: list[object] = []
+    factory_calls: list[object] = []
+    import sonder_runtime.__main__ as entrypoint
+    import sonder_runtime.bootstrap.control_state_rehearsal as rehearsal
 
-    assert exited.value.code == 2
-    assert (
-        "unrecognized arguments: --ordinary-unknown-option control-state-rehearsal"
-        in capsys.readouterr().err
+    monkeypatch.setattr(
+        entrypoint, "_load_config", lambda args: config_calls.append(args)
     )
+    monkeypatch.setattr(
+        rehearsal,
+        "build_control_state_rehearsal",
+        lambda config: factory_calls.append(config),
+    )
+
+    assert runtime_main(
+        [
+            "--origin",
+            "status",
+            "control-state-rehearsal",
+            "--json",
+            "--api-key",
+            "collision-secret",
+        ]
+    ) == 2
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert "collision-secret" not in captured.out
+    assert "--api-key" not in captured.out
+    report = json.loads(captured.out)
+    _assert_safe_report(report, forbidden=("collision-secret",))
+    assert report["status"] == "rejected"
+    assert report["reason"] == "invalid_arguments"
+    assert config_calls == []
+    assert factory_calls == []
 
 
 def test_rehearsal_parser_preserves_help_exit(capsys) -> None:
