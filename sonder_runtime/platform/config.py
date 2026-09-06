@@ -33,6 +33,10 @@ from sonder_runtime.platform import paths as sonder_paths
 from sonder_runtime.platform.secret_presence import redact_presence
 from sonder_runtime.platform.artifact_transfer_config import ArtifactTransferConfig, artifact_transfer_errors
 from sonder_runtime.platform.app_control_config import AppControlConfig, app_control_errors
+from sonder_runtime.platform.control_state_rehearsal_config import (
+    ControlStateRehearsalConfig,
+    control_state_rehearsal_errors,
+)
 from sonder_runtime.platform.child_storage_config import (
     ChildStorageConfig, child_storage_errors, apply_child_storage_environment,
 )
@@ -63,9 +67,13 @@ SECRET_ENV_KEYS = (
     "SONDER_AUTH_SECRET",
     "SONDER_BACKUP_KEY_FILE",
     "SONDER_LAUNCHER_HEALTH_TOKEN",
+    "SONDER_CONTROL_STATE_REHEARSAL_API_KEY",
 )
 _SECRET_TOML_KEYS = frozenset(
-    {"api_key", "artifact_transfer_key", "auth_secret", "backup_key", "backup_key_file", "secret", "token"}
+    {
+        "api_key", "artifact_transfer_key", "auth_secret", "backup_key",
+        "backup_key_file", "control_state_rehearsal_key", "secret", "token",
+    }
 )
 
 MIN_API_KEY_LENGTH = 24
@@ -229,11 +237,15 @@ class Secrets:
     auth_secret: str = ""
     backup_key_file: str = ""
     artifact_transfer_key: str = field(default="", repr=False)
+    control_state_rehearsal_key: str = field(default="", repr=False)
 
     def as_redacted_dict(self) -> dict:
         return {
             "api_key": redact_presence(self.api_key),
             "artifact_transfer_key": redact_presence(self.artifact_transfer_key),
+            "control_state_rehearsal_key": redact_presence(
+                self.control_state_rehearsal_key
+            ),
             "auth_secret": redact_presence(self.auth_secret),
             "backup_key_file": self.backup_key_file or "[unset]",
         }
@@ -259,6 +271,9 @@ class SonderConfig:
     artifact_transfer: ArtifactTransferConfig = field(default_factory=ArtifactTransferConfig)
     child_storage: ChildStorageConfig = field(default_factory=ChildStorageConfig)
     app_control: AppControlConfig = field(default_factory=AppControlConfig)
+    control_state_rehearsal: ControlStateRehearsalConfig = field(
+        default_factory=ControlStateRehearsalConfig
+    )
 
     def as_redacted_dict(self) -> dict:
         out: dict = {
@@ -270,6 +285,7 @@ class SonderConfig:
             "server",
             "deployment",
             "artifact_transfer",
+            "control_state_rehearsal",
             "state",
             "ollama",
             "features",
@@ -403,6 +419,7 @@ _SECTION_TYPES = {
     "artifact_transfer": ArtifactTransferConfig,
     "child_storage": ChildStorageConfig,
     "app_control": AppControlConfig,
+    "control_state_rehearsal": ControlStateRehearsalConfig,
     "state": StateConfig,
     "ollama": OllamaConfig,
     "features": FeaturesConfig,
@@ -804,6 +821,13 @@ def _apply_environment(
         secrets = replace(secrets, api_key=env["SONDER_API_KEY"].strip())
     if env.get("SONDER_ARTIFACT_TRANSFER_KEY", "").strip():
         secrets = replace(secrets, artifact_transfer_key=env["SONDER_ARTIFACT_TRANSFER_KEY"].strip())
+    if env.get("SONDER_CONTROL_STATE_REHEARSAL_API_KEY", "").strip():
+        secrets = replace(
+            secrets,
+            control_state_rehearsal_key=env[
+                "SONDER_CONTROL_STATE_REHEARSAL_API_KEY"
+            ].strip(),
+        )
     if env.get("SONDER_AUTH_SECRET", "").strip():
         secrets = replace(secrets, auth_secret=env["SONDER_AUTH_SECRET"].strip())
     if env.get("SONDER_BACKUP_KEY_FILE", "").strip():
@@ -862,6 +886,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     errors.extend(child_storage_errors(config))
     errors.extend(app_control_errors(config))
     errors.extend(artifact_transfer_errors(config))
+    errors.extend(control_state_rehearsal_errors(config))
     errors.extend(deployment_errors(config))
     if config.schema_version != 1:
         errors.append(

@@ -20,6 +20,7 @@ def test_config_secret_redaction_uses_platform_policy():
         "auth_secret": "[set]",
         "backup_key_file": "[unset]",
         "artifact_transfer_key": "[unset]",
+        "control_state_rehearsal_key": "[unset]",
     }
 
 
