@@ -4798,6 +4798,11 @@ class Handler(BaseHTTPRequestHandler):
                     memory_receiver_configured=(
                         _MEMORY_REPLICATION_RECEIVER is not None
                     ),
+                    managed_work_configured=(
+                        _APP_CONTROL_BINDING is not None
+                        and getattr(_APP_CONTROL_BINDING, "_work_binding", None)
+                        is not None
+                    ),
                 ),
                 "activity": activity,
                 "db_path": getattr(server, "_DB_PATH", ""),
