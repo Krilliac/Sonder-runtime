@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 276,
+      "file_count": 278,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -165,6 +165,8 @@
         "sonder_runtime/adapters/logging_event_sink.py",
         "sonder_runtime/adapters/mcp_subprocess.py",
         "sonder_runtime/adapters/memory_lesson_ids.py",
+        "sonder_runtime/adapters/memory_replication/__init__.py",
+        "sonder_runtime/adapters/memory_replication/http_client.py",
         "sonder_runtime/adapters/memory_repository.py",
         "sonder_runtime/adapters/memory_rerank.py",
         "sonder_runtime/adapters/memory_store.py",
@@ -325,7 +327,7 @@
       ]
     },
     {
-      "file_count": 302,
+      "file_count": 303,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -436,6 +438,7 @@
         "sonder_runtime/application/memory/outcome_service.py",
         "sonder_runtime/application/memory/procedural_learning.py",
         "sonder_runtime/application/memory/recall_service.py",
+        "sonder_runtime/application/memory/replication.py",
         "sonder_runtime/application/memory/retrieval_evaluation.py",
         "sonder_runtime/application/model_gateway/__init__.py",
         "sonder_runtime/application/model_gateway/escalation.py",
@@ -873,7 +876,7 @@
       ]
     },
     {
-      "file_count": 47,
+      "file_count": 48,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -905,6 +908,7 @@
         "sonder_runtime/interfaces/http/facades/observability.py",
         "sonder_runtime/interfaces/http/facades/session.py",
         "sonder_runtime/interfaces/http/handlers.py",
+        "sonder_runtime/interfaces/http/memory_replication.py",
         "sonder_runtime/interfaces/http/serve.py",
         "sonder_runtime/interfaces/http/serve_policy.py",
         "sonder_runtime/interfaces/mcp/__init__.py",
