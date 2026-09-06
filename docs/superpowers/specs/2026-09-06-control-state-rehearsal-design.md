@@ -39,16 +39,25 @@ startup all fail closed.
 
 ## Command behavior
 
-`python -m sonder_runtime control-state-rehearsal` requires the explicit
-configuration and an operator-supplied bounded resource scope. It submits one
-event, reads the authoritative page, and, only with a confirmation flag,
-requests a fencing receipt and evaluates readiness. A positive readiness result
-means only that the external provider returned matching evidence. The command
-always reports that promotion is outside Sonder and was not attempted.
+`python -m sonder_runtime control-state-rehearsal` requires an explicit config
+file, accepts an optional secrets file, and never accepts configuration
+overrides. It derives the cluster, nodes, witness, provider origin, timeout,
+and credential only from validated configuration. It is restricted to a
+`rehearsal-` cluster namespace, rehearsal-prefixed event and resource IDs, and
+the `job` resource kind so that the disposable exercise cannot target a live
+ownership scope. It submits one event, reads the exact authoritative page, and,
+only with the literal `--confirm-fence external-fence` plus the configured peer
+as new owner, requests a fencing receipt and evaluates readiness. A positive
+readiness result means only that the external provider returned matching
+evidence. The command always reports that promotion is outside Sonder and was
+not attempted.
 
-The command exits nonzero for unavailable, malformed, mismatched, unauthenticated,
-or ambiguous provider evidence. It does not retry ambiguous writes, fall back
-to local SQLite, or infer a witness from either data node.
+The command exits nonzero for unavailable, malformed, mismatched,
+unauthenticated, or ambiguous provider evidence. It does not retry ambiguous
+writes, fall back to local SQLite, or infer a witness from either data node.
+Reports contain only bounded identities and receipt summaries; they omit the
+API key, origin, config paths, payload digest, raw provider responses, and raw
+exception text.
 
 ## Rehearsal evidence
 
@@ -68,9 +77,11 @@ durable replicas, fencing authority, and live failure evidence.
 ## Verification
 
 Tests first cover disabled/default configuration, secret handling, origin and
-identity validation, normal-runtime non-composition, successful command evidence,
-and each fail-closed provider failure. The subprocess fixture asserts separate
-PIDs and state paths, bounded completion, cleanup, and zero promotion calls.
+identity validation, normal-runtime non-composition, successful command
+evidence, and each fail-closed provider failure. The subprocess fixture asserts
+separate PIDs and state paths, bounded completion, cleanup, exact append/read
+bindings, zero unconfirmed fence calls, and zero promotion calls. It labels the
+loopback exercise as process-boundary transport evidence only.
 Focused command/config/provider tests, the existing topology and coordinator
 suites, documentation checks, and a hosted exact-head matrix are required before
 merge.

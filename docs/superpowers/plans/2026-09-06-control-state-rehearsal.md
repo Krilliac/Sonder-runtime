@@ -151,13 +151,14 @@ git commit -s -m "feat(cluster): compose rehearsal provider explicitly"
 - Modify: `sonder_runtime/__main__.py`
 - Modify: `docs/runbooks/control-state-provider.md`
 - Create: `tests/test_control_state_rehearsal_command.py`
-- Modify: `docs/architecture/generated/runtime-reference.json`
-- Modify: `docs/architecture/generated/runtime-reference.md`
+- Regenerate only the documentation catalog files actually changed by `scripts/generate_documentation_catalogs.py --write`.
 
 **Interfaces:**
 - Produces `cmd_control_state_rehearsal(args) -> int` and a JSON-safe report containing `promotion_attempted: false`.
-- Consumes `build_control_state_rehearsal`, explicit CLI resource/event fields, and `--confirm-fence external-fence` before any fencing request.
+- Consumes `build_control_state_rehearsal`, one explicit rehearsal-only job event, and `--confirm-fence external-fence` before any fencing request.
 - The positive process test reads evidence only; it never asserts a role change.
+- Requires `--config`, permits only `--secrets` and `--json` common options, and must not accept `--set`, a CLI origin, credential, cluster, witness, or owner override.
+- Requires the `rehearsal-` cluster namespace and rehearsal-prefixed event/resource identifiers. It must reject a real-looking scope before provider construction or network activity.
 
 - [ ] **Step 1: Write failing command and process-boundary tests**
 
@@ -175,6 +176,11 @@ def test_unavailable_provider_fails_closed_without_promotion(tmp_path):
     assert result["promotion_attempted"] is False
 ```
 
+Add RED cases for unsupported confirmation text, absent/invalid `--new-owner-id`
+when fencing is requested, any CLI configuration override, non-rehearsal
+cluster/event/resource identity, non-`job` resource kind, and malformed
+provider responses. Each invalid request must make zero provider calls.
+
 - [ ] **Step 2: Run tests and verify the expected parser/command failure**
 
 Run: `python -m pytest -q tests/test_control_state_rehearsal_command.py`
@@ -183,11 +189,33 @@ Expected: FAIL because the command is not registered.
 
 - [ ] **Step 3: Implement command with explicit fencing confirmation**
 
-Build a strict `ControlStateEvent` from bounded arguments, append/read it, and only call `prepare_takeover` when `--confirm-fence external-fence` is present. Return JSON or text with no payload content or secret. Catch `DependencyUnavailable` and configuration errors as nonzero fail-closed outcomes. Never import or call a runtime-owner, deployment, promotion, or lease-mutation API.
+Keep imports for the rehearsal factory, provider/coordinator, and ownership
+types inside this command; ordinary serve, MCP, and REPL imports must remain
+unable to compose it. Build a strict `ControlStateEvent` from bounded command
+arguments only after rejecting invalid confirmation text and rehearsal scope.
+Always call `append` once and then `read(cluster_id, after_sequence=sequence -
+1, limit=1)`, requiring the exact event page. Without confirmation, stop after
+collection. With the literal confirmation and the configured peer as
+`--new-owner-id`, call `prepare_takeover(..., acknowledgement=ack)` so it does
+not append twice. Return only bounded JSON/text evidence: no key, origin,
+configuration path, payload digest, raw response, or exception detail. Catch
+configuration/domain input failures, `DependencyUnavailable`, and unexpected
+exceptions as stable nonzero fail-closed status classes. Never import or call a
+runtime-owner, deployment, promotion, lease-mutation, retry, or fallback API.
 
 - [ ] **Step 4: Add an out-of-process loopback test**
 
-Use Windows-safe `multiprocessing.get_context("spawn")`, a loopback-only provider fixture, distinct child homes, readiness JSON, bounded joins, and `finally` cleanup. Assert distinct PIDs/state paths, exact provider request evidence, a successful non-promoting collection case, and an unavailable or malformed-provider denial with no extra provider action.
+Use Windows-safe `multiprocessing.get_context("spawn")`, a parent-owned
+loopback `ThreadingHTTPServer` fixture, distinct child homes/configs/secrets,
+readiness JSON, bounded joins, and `finally` cleanup. Clear inherited
+`SONDER_*` variables in each child before loading its test-only secret. Assert
+distinct PIDs/state paths, exact two append/two bounded-read bindings for two
+successful non-promoting children, zero unconfirmed fence calls, and no bearer
+token retention in fixture evidence. Add a malformed-provider child with one
+append and no read/fence, plus a confirmed-fence case with one append, one read,
+one fence, no duplicate append, and no promotion. Label every loopback result
+as process-boundary transport rehearsal, never independent-witness or
+automatic-HA evidence.
 
 - [ ] **Step 5: Run focused and static verification**
 
@@ -195,14 +223,16 @@ Run: `python -m pytest -q tests/test_control_state_rehearsal_config.py tests/tes
 
 Run: `python -m compileall -q sonder_runtime`
 
-Run: `python scripts/generate_runtime_reference.py --check`
+Run: `python scripts/generate_documentation_catalogs.py --write`
+
+Run: `python scripts/generate_documentation_catalogs.py --check`
 
 Expected: PASS. The report and runbook must state that the loopback test is not independent-witness or automatic-HA evidence.
 
 - [ ] **Step 6: Commit command, test, and docs slice**
 
 ```bash
-git add sonder_runtime/__main__.py docs/runbooks/control-state-provider.md tests/test_control_state_rehearsal_command.py docs/architecture/generated/runtime-reference.json docs/architecture/generated/runtime-reference.md
+git add sonder_runtime/__main__.py docs/runbooks/control-state-provider.md tests/test_control_state_rehearsal_command.py docs/architecture/generated/
 git commit -s -m "feat(cluster): add bounded control-state rehearsal command"
 ```
 
