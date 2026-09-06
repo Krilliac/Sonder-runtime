@@ -1846,6 +1846,7 @@ class OperationalCapabilitiesInfo {
   final String localNode;
   final int configuredPeerCount;
   final bool remoteConfigured;
+  final OperationalCapabilityInfo managedAppWork;
   final int workerCount;
   final int healthyWorkerCount;
   final int remoteWorkerCount;
@@ -1863,6 +1864,7 @@ class OperationalCapabilitiesInfo {
     required this.localNode,
     required this.configuredPeerCount,
     required this.remoteConfigured,
+    required this.managedAppWork,
     required this.workerCount,
     required this.healthyWorkerCount,
     required this.remoteWorkerCount,
@@ -1900,6 +1902,7 @@ class OperationalCapabilitiesInfo {
     final inference = section('inference');
     final compute = section('compute');
     final mobility = section('mobility');
+    final control = section('control');
     // The pool is nested under inference; keep malformed responses bounded.
     final rawPool = inference['pool'];
     final poolMap = rawPool is Map
@@ -1910,6 +1913,7 @@ class OperationalCapabilitiesInfo {
       localNode: compute['local_node']?.toString() ?? '',
       configuredPeerCount: _asInt(compute['configured_peer_count']),
       remoteConfigured: _asBool(compute['remote_enabled']),
+      managedAppWork: capability(control, 'managed_app_work'),
       workerCount: _asInt(poolMap['worker_count']),
       healthyWorkerCount: _asInt(poolMap['healthy_worker_count']),
       remoteWorkerCount: _asInt(poolMap['remote_worker_count']),

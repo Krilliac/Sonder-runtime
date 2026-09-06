@@ -932,6 +932,12 @@ void main() {
     final info = SystemInfo.fromJson({
       'operational_capabilities': {
         'schema_version': 1,
+        'control': {
+          'managed_app_work': {
+            'available': true,
+            'reason': 'Owned dispatcher is installed.',
+          },
+        },
         'inference': {
           'request_level_pooling': {
             'available': true,
@@ -986,6 +992,7 @@ void main() {
     expect(capabilities.localNode, 'node-a');
     expect(capabilities.configuredPeerCount, 1);
     expect(capabilities.remoteConfigured, isTrue);
+    expect(capabilities.managedAppWork.available, isTrue);
     expect(capabilities.workerSummary, '1/2 healthy workers');
     expect(capabilities.requestLevelPooling.available, isTrue);
     expect(capabilities.modelSharding.available, isFalse);
