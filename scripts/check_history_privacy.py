@@ -28,6 +28,12 @@ GIT_TIMEOUT_SECONDS = 30
 # How much of git's own stderr may be quoted back in an error. Bounded so a
 # failing git cannot pump unbounded text into an operator-facing report.
 GIT_STDERR_QUOTE_BYTES = 400
+# The exact object/path baseline was pinned by this commit. It is an audit
+# anchor for the debt-aware gate: the seven entries below may disappear as
+# history is cleaned, but a new entry must never be added silently.
+HISTORY_PRIVACY_GATE_REVISION = (
+    "655b75ec9950e03c0a0c4701a18f8e04b0dea51c"
+)
 _RAW_CHANGE = re.compile(
     rb"^:([0-7]{6}) ([0-7]{6}) ([0-9a-f]{40,64}) "
     rb"([0-9a-f]{40,64}) ([A-Z][0-9]*)$"
@@ -258,6 +264,8 @@ def evaluate(objects: list[tuple[str, str]]) -> dict[str, object]:
     removed = KNOWN_HISTORY_PRIVACY_DEBT - flagged
     return {
         "schema": 1,
+        "baseline_revision": HISTORY_PRIVACY_GATE_REVISION,
+        "baseline_entry_count": len(KNOWN_HISTORY_PRIVACY_DEBT),
         "ok": not unexpected,
         "clean": not flagged,
         "known_debt_count": len(known),
@@ -323,7 +331,8 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"{report.get('known_debt_count', 0)} known sensitive "
                 "object/path pair(s) "
-                "remain reachable",
+                "remain reachable; release is blocked until the separately "
+                "authorized history rewrite and remote-ref cleanup is complete",
                 file=sys.stderr,
             )
     return 0 if success else 1

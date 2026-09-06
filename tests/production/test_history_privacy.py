@@ -57,6 +57,10 @@ def test_current_history_matches_only_the_exact_baseline():
     result = _run(_ROOT)
     assert result.returncode == 0, result.stdout + result.stderr
     report = json.loads(result.stdout)
+    assert report["baseline_revision"] == (
+        "655b75ec9950e03c0a0c4701a18f8e04b0dea51c"
+    )
+    assert report["baseline_entry_count"] == 7
     assert report["unexpected_count"] == 0
     assert report["known_debt_count"] == 7
     assert report["clean"] is False
@@ -64,6 +68,38 @@ def test_current_history_matches_only_the_exact_baseline():
     release = _run(_ROOT, "--require-clean")
     assert release.returncode == 1
     assert json.loads(release.stdout)["passed"] is False
+
+
+def test_release_gate_explains_historical_remediation(monkeypatch, capsys):
+    module = _module()
+    monkeypatch.setattr(module, "inspect", lambda _repo: {
+        "schema": 1,
+        "baseline_revision": module.HISTORY_PRIVACY_GATE_REVISION,
+        "baseline_entry_count": 7,
+        "ok": True,
+        "clean": False,
+        "known_debt_count": 7,
+        "unexpected_count": 0,
+        "removed_from_baseline_count": 0,
+        "known_object_ids": ["a47e45360ed2"],
+        "unexpected": [],
+    })
+
+    assert module.main(["--repo", str(_ROOT), "--require-clean"]) == 1
+    error = capsys.readouterr().err
+    assert "release is blocked" in error
+    assert "history rewrite" in error
+    assert "remote-ref cleanup" in error
+
+
+def test_baseline_is_exactly_seven_well_formed_object_path_pairs():
+    module = _module()
+    assert len(module.KNOWN_HISTORY_PRIVACY_DEBT) == 7
+    assert all(
+        len(object_id) == 40 and all(c in "0123456789abcdef" for c in object_id)
+        and path and "\x00" not in path
+        for object_id, path in module.KNOWN_HISTORY_PRIVACY_DEBT
+    )
 
 
 def test_clean_history_passes_release_gate(tmp_path):
@@ -344,6 +380,9 @@ def test_workflows_enforce_growth_and_release_cleanliness():
     release = (
         _ROOT / ".github" / "workflows" / "build-apps.yml"
     ).read_text(encoding="utf-8")
+    evidence = (
+        _ROOT / "docs" / "security" / "history-privacy-debt.md"
+    ).read_text(encoding="utf-8")
     assert "python scripts/check_history_privacy.py --json" in ci
     assert "fetch-depth: 0" in ci
     assert "filter: blob:none" in ci
@@ -351,3 +390,9 @@ def test_workflows_enforce_growth_and_release_cleanliness():
         "python scripts/check_history_privacy.py --require-clean --json"
         in release
     )
+    assert "fdff77405ddd444a70cdb43f812a43889d6113fa" in evidence
+    assert "655b75ec9950e03c0a0c4701a18f8e04b0dea51c" in evidence
+    assert "passed=false" in evidence
+    assert "clean=false" in evidence
+    assert "16 MiB" in evidence
+    assert "30-second" in evidence
