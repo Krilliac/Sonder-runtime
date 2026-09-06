@@ -167,6 +167,9 @@ from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.application.session.provider_attempts import (
     complete_scoped_provider_request, deferred_provider_request_scope, dispatch_provider,
 )
+from sonder_runtime.application.session.model_steps import (
+    run_model_step, wrap_model_generator,
+)
 from sonder_runtime.adapters.model_inventory import inventory_rows as _inventory_rows_policy
 from sonder_runtime.domain.context import compaction as context_compaction
 from sonder_runtime.domain.context import overflow as context_overflow
@@ -1950,6 +1953,40 @@ def _capture_durable_session_turn(
         user_message=prompt,
         model_response=response,
     )
+
+
+def _legacy_model_failure_code(error):
+    """Map legacy transport kinds to the stable session failure taxonomy."""
+    from sonder_runtime.domain.common.errors import (
+        Cancelled, DeadlineExceeded, DependencyUnavailable, InvalidInput,
+        InternalFailure,
+    )
+
+    if isinstance(error, ModelCallError):
+        return {
+            "cancelled": Cancelled.code,
+            "timeout": DeadlineExceeded.code,
+            "configuration": InvalidInput.code,
+            "empty_response": DependencyUnavailable.code,
+            "http": DependencyUnavailable.code,
+            "protocol": DependencyUnavailable.code,
+            "request": DependencyUnavailable.code,
+            "transport": DependencyUnavailable.code,
+        }.get(error.kind, DependencyUnavailable.code)
+    return getattr(error, "code", InternalFailure.code)
+
+
+def _legacy_model_step_options(generator, *, temperature, num_predict, num_ctx):
+    """Snapshot the requested options, including an active output budget cap."""
+    prediction = num_predict
+    override = getattr(generator, "num_predict_override", None)
+    if isinstance(override, int) and not isinstance(override, bool):
+        prediction = max(1, min(int(num_predict), override))
+    return {
+        "temperature": temperature,
+        "num_predict": prediction,
+        "num_ctx": num_ctx,
+    }
 
 
 def _gateway_generate_text(prompt, tier="fast", system="", temperature=0.2,
@@ -4961,9 +4998,11 @@ def _offload_impl(
     timeout: int = TIMEOUT,
     cancel_check=None,
     schema=None,
+    session: str | None = None,
 ) -> str:
     """Internal offload path; model failures stay typed for orchestrators."""
     schema = _parse_schema_arg(schema)
+    capture_session = _resolve_session(session) if session is not None else None
     # 0 means model-aware automatic sizing. The resolved model is not known
     # until after live tier refresh, so defer selection to the generation
     # boundary where Ollama metadata can be consulted.
@@ -5017,7 +5056,18 @@ def _offload_impl(
         usage = {}
         used_model = model
         msg = ""
-        try:
+
+        from sonder_runtime.application.ports.model_gateway import ModelRequest
+
+        request = ModelRequest(
+            prompt=prompt,
+            tier=tier,
+            system=system,
+            options=dict(options),
+        )
+
+        def invoke_nonlearning():
+            nonlocal msg, used_model, usage
             if cloud:
                 out, msg, used_model = _chat_request_with_cloud_fallback(
                     payload,
@@ -5049,6 +5099,20 @@ def _offload_impl(
                 "tokens_out": int(tokens_out or 0),
                 "token_source": source,
             }
+            return msg
+
+        try:
+            msg = run_model_step(
+                invoke_nonlearning,
+                capture_factory=(
+                    lambda: _application().session_capture_service()
+                    if capture_session is not None else None
+                ),
+                session_id=capture_session,
+                request=request,
+                user_message=prompt,
+                failure_code=_legacy_model_failure_code,
+            )
             # `ok` describes the model call, which succeeded: the request was
             # answered and tokens came back. A schema violation is a verdict on
             # the content, and it is carried by the `rejected` outcome rather
@@ -5109,6 +5173,27 @@ def _offload_impl(
             timeout=request_timeout,
             cancel_check=cancel_check,
             schema=schema,
+        )
+    if capture_session is not None:
+        gen = wrap_model_generator(
+            gen,
+            capture_factory=lambda: _application().session_capture_service(),
+            session_id=capture_session,
+            tier=tier,
+            system=system,
+            options={
+                "temperature": temperature,
+                "num_predict": num_predict,
+                "num_ctx": num_ctx,
+            },
+            options_factory=lambda _prompt, _history, raw: _legacy_model_step_options(
+                raw,
+                temperature=temperature,
+                num_predict=num_predict,
+                num_ctx=num_ctx,
+            ),
+            first_user_message=prompt,
+            failure_code=_legacy_model_failure_code,
         )
     conn = _open_db()
     try:
@@ -5370,6 +5455,7 @@ def offload(
     learn: bool = True,
     timeout: int = TIMEOUT,
     schema: str = "",
+    session: str | None = None,
 ) -> str:
     """Offload a self-contained subtask to a local or Ollama-cloud model.
 
@@ -5415,6 +5501,11 @@ def offload(
     Omit schema (the default) and this call behaves exactly as it always has:
     no format constraint, no checking, raw text back.
     Small object shapes work far better than deep ones on a 3B/7B local tier.
+
+    session: optional durable session identity. When supplied, the exact
+    model-visible request, effective provider attempts, and accepted response
+    are appended to that session; omitted calls retain the historical one-shot
+    persistence policy. Use ``session="none"`` to explicitly opt out.
     """
     _maybe_live_reload()
     try:
@@ -5428,6 +5519,7 @@ def offload(
             learn=learn,
             timeout=timeout,
             schema=schema,
+            session=session,
         )
     except ModelCallError as error:
         return _format_runtime_model_call_error_policy(
@@ -16914,6 +17006,7 @@ def _agent_negative_claim_review(
     cloud: bool = False,
     cancel_check=None,
     cloud_budget_state=None,
+    session_id: str | None = None,
 ) -> dict:
     """Audit negative existence claims without letting the reviewer invent facts."""
     if not _AGENT_NEGATIVE_CLAIM_RE.search(str(final or "")):
@@ -16962,6 +17055,19 @@ def _agent_negative_claim_review(
         model, system, 0.0, 260, 4096, cloud=cloud,
         cancel_check=cancel_check, compact_cloud_reasoning=True,
     )
+    if session_id is not None:
+        gen = wrap_model_generator(
+            gen,
+            capture_factory=lambda: _application().session_capture_service(),
+            session_id=session_id,
+            tier="agent-review",
+            system=system,
+            options={"temperature": 0.0, "num_predict": 260, "num_ctx": 4096},
+            options_factory=lambda _prompt, _history, raw: _legacy_model_step_options(
+                raw, temperature=0.0, num_predict=260, num_ctx=4096,
+            ),
+            failure_code=_legacy_model_failure_code,
+        )
     gen = _guard_managed_agent_call(gen)
     if cloud and cloud_budget_state is not None:
         gen = _bounded_cloud_agent_generate(
@@ -19202,6 +19308,7 @@ def _agent_turn(
     return_host_receipt: bool = False,
     system: str | None = None,
     cancel_check=None,
+    session: str | None = None,
 ) -> str:
     """Run a Claude-like local agent loop that can call tools.
 
@@ -19218,6 +19325,7 @@ def _agent_turn(
         )
 
     _maybe_live_reload()
+    capture_session = _resolve_session(session) if session is not None else None
     # A model failure that ends this run is noted for the escalating
     # workbench runner under this run's own identity, so a nested agent's
     # failure can never be mistaken for it.
@@ -19328,6 +19436,24 @@ def _agent_turn(
         accept_native_tool_calls=True,
         compact_cloud_reasoning=True,
     )
+    if capture_session is not None:
+        gen = wrap_model_generator(
+            gen,
+            capture_factory=lambda: _application().session_capture_service(),
+            session_id=capture_session,
+            tier=tier_label or tier,
+            system=system,
+            options={
+                "temperature": 0.1,
+                "num_predict": agent_num_predict,
+                "num_ctx": 0,
+            },
+            options_factory=lambda _prompt, _history, raw: _legacy_model_step_options(
+                raw, temperature=0.1, num_predict=agent_num_predict, num_ctx=0,
+            ),
+            first_user_message=prompt,
+            failure_code=_legacy_model_failure_code,
+        )
     gen = _guard_managed_agent_call(gen)
     if cloud:
         gen = _bounded_cloud_agent_generate(
@@ -19956,6 +20082,7 @@ def _agent_turn(
                     prompt, final, observations, model, cloud=cloud,
                     cancel_check=cancel_check,
                     cloud_budget_state=cloud_budget_state,
+                    session_id=capture_session,
                 )
                 if claim_review["decision"] == "error":
                     if auto_checklist:
@@ -20495,6 +20622,7 @@ def _agent_turn(
             prompt, final, observations, model, cloud=cloud,
             cancel_check=cancel_check,
             cloud_budget_state=cloud_budget_state,
+            session_id=capture_session,
         )
         if claim_review["decision"] == "error":
             if auto_checklist:
@@ -20564,8 +20692,14 @@ def agent(
     project: str = "",
     checklist: bool = True,
     allow_location: bool = False,
+    session: str | None = None,
 ) -> str:
-    """Run a visible local tool-using agent loop with checklist/reporting."""
+    """Run a visible local tool-using agent loop with checklist/reporting.
+
+    ``session`` optionally binds every model decision and format-repair call to
+    one durable session; omitted calls preserve the existing transient agent
+    behavior. ``session="none"`` explicitly disables capture.
+    """
     refusal = intents.containment_egress_refusal(prompt)
     if refusal:
         return refusal
@@ -20587,6 +20721,7 @@ def agent(
                 auto_checklist=bool(checklist),
                 project=project,
                 allow_location=bool(allow_location),
+                session=session,
             )
     # Keep the report bound to this invocation's span.  Once an outer span
     # closes, ``latest()`` is a process-global last-completed value; another
@@ -20626,7 +20761,8 @@ def _work_expects_effects(prompt):
 
 
 def _workbench_agent_escalating(
-    prompt, tier, *, max_steps, allow_web, project, allow_location, prepared_plan=None,
+    prompt, tier, *, max_steps, allow_web, project, allow_location,
+    prepared_plan=None, session=None,
 ):
     project_scope, _error = _agent_project_scope(project)
     with _standalone_lanes.managed_escalation_scope(
@@ -20636,7 +20772,7 @@ def _workbench_agent_escalating(
             return _workbench_agent_escalating_owned(
                 prompt, tier, max_steps=max_steps, allow_web=allow_web,
                 project=project, allow_location=allow_location, managed_plan=None,
-                prepared_plan=prepared_plan,
+                prepared_plan=prepared_plan, session=session,
             )
         with activity_tracker.response_span(
             'managed-workbench', prompt, surface='agent', model=tier, project=project,
@@ -20644,7 +20780,7 @@ def _workbench_agent_escalating(
             output, answered = _workbench_agent_escalating_owned(
                 prompt, tier, max_steps=max_steps, allow_web=allow_web,
                 project=project, allow_location=allow_location, managed_plan=managed_plan,
-                prepared_plan=prepared_plan,
+                prepared_plan=prepared_plan, session=session,
             )
         return '%s\n\n%s\n\n%s' % (
             output.rstrip(),
@@ -20655,7 +20791,7 @@ def _workbench_agent_escalating(
 
 def _workbench_agent_escalating_owned(
     prompt, tier, *, max_steps, allow_web, project, allow_location, managed_plan,
-    prepared_plan=None,
+    prepared_plan=None, session=None,
 ):
     """Run the workbench agent on ``tier``, stepping up when the model fails.
 
@@ -20683,7 +20819,7 @@ def _workbench_agent_escalating_owned(
         with managed_plan.rung() if managed_plan is not None else contextlib.nullcontext():
             output = workbench_agent(
                 prompt=prompt, tier=tier, max_steps=max_steps, allow_web=allow_web,
-                project=project, allow_location=allow_location,
+                project=project, allow_location=allow_location, session=session,
             )
         finalized = managed_plan.finish() if managed_plan is not None else None
         return finalized if finalized is not None else output, tier
@@ -20698,7 +20834,7 @@ def _workbench_agent_escalating_owned(
         with managed_plan.rung() if managed_plan is not None else contextlib.nullcontext():
             output = workbench_agent(
                 prompt=prompt, tier=rung.tier, max_steps=max_steps, allow_web=allow_web,
-                project=project, allow_location=allow_location,
+                project=project, allow_location=allow_location, session=session,
             )
         failure = _take_agent_model_failure()
         owned = bool(failure) and failure.get("key") == _agent_escalation_key(rung.tier, prompt)
@@ -20737,15 +20873,20 @@ def workbench_agent(
     allow_web: bool = True,
     project: str = "",
     allow_location: bool = False,
+    session: str | None = None,
 ) -> str:
-    """Execute local work with guarded tools, checklist, validation, and report."""
+    """Execute local work with guarded tools, checklist, validation, and report.
+
+    An optional ``session`` carries each model step across retries and tier
+    escalation in one durable transcript.
+    """
     _maybe_live_reload()
     requested = str(tier or "").strip().lower()
     lane_tier = _runtime_lane_tier("workbench", tier)
     if requested in ("", "auto", "default", "policy"):
         output, _answered_tier = _workbench_agent_escalating(
             prompt, lane_tier, max_steps=max_steps, allow_web=allow_web,
-            project=project, allow_location=allow_location,
+            project=project, allow_location=allow_location, session=session,
         )
         return output
     return agent(
@@ -20756,6 +20897,7 @@ def workbench_agent(
         project=project,
         checklist=True,
         allow_location=allow_location,
+        session=session,
     )
 
 
