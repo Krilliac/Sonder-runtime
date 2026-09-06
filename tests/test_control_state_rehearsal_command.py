@@ -95,6 +95,8 @@ def _write_rehearsal_inputs(
         ),
         encoding="utf-8",
     )
+    if os.name == "posix":
+        secrets_path.chmod(0o600)
     return config_path, secrets_path, state_path
 
 
