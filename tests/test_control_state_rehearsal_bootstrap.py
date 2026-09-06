@@ -321,6 +321,10 @@ def test_valid_rehearsal_passes_only_expected_values_to_provider(monkeypatch) ->
     "invalid_config",
     [
         pytest.param(
+            lambda config: replace(config, profile="unsupported-profile"),
+            id="unsupported-top-level-profile",
+        ),
+        pytest.param(
             lambda config: replace(
                 config,
                 deployment=replace(config.deployment, profile="single-host"),
