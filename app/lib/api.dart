@@ -1619,6 +1619,7 @@ class SystemInfo {
   final String improvements;
   final String dbPath;
   final String stateHome;
+  final DeploymentInfo? deployment;
   final ContextHealth? context;
   final AgentStatus? agents;
   final AutopilotStatus? autopilot;
@@ -1638,6 +1639,7 @@ class SystemInfo {
     required this.improvements,
     required this.dbPath,
     required this.stateHome,
+    this.deployment,
     required this.context,
     required this.agents,
     required this.autopilot,
@@ -1663,6 +1665,11 @@ class SystemInfo {
       improvements: json['improvements']?.toString() ?? '',
       dbPath: json['db_path']?.toString() ?? '',
       stateHome: json['state_home']?.toString() ?? '',
+      deployment: json['deployment'] is Map<String, dynamic>
+          ? DeploymentInfo.fromJson(
+              json['deployment'] as Map<String, dynamic>,
+            )
+          : null,
       context: json['context'] is Map<String, dynamic>
           ? ContextHealth.fromJson(json['context'] as Map<String, dynamic>)
           : null,
@@ -1708,6 +1715,101 @@ class SystemInfo {
 
   String get executionSummary =>
       execution?.summary ?? 'lanes unknown | agents unknown';
+}
+
+/// A single deployment capability as reported by the runtime.
+///
+/// Availability is deliberately kept separate from the explanation. A
+/// configured peer or preferred primary is not evidence that promotion,
+/// fencing, or replication is actually available.
+class DeploymentCapabilityInfo {
+  final bool available;
+  final String reason;
+
+  const DeploymentCapabilityInfo({
+    required this.available,
+    required this.reason,
+  });
+
+  factory DeploymentCapabilityInfo.fromJson(Map<String, dynamic> json) {
+    return DeploymentCapabilityInfo(
+      available: _asBool(json['available']),
+      reason: json['reason']?.toString() ?? '',
+    );
+  }
+}
+
+class DeploymentInfo {
+  final String profile;
+  final String profileId;
+  final String localNode;
+  final List<String> configuredMembers;
+  final String preferredPrimary;
+  final String controlStateScope;
+  final bool preferenceConfersAuthority;
+  final String partitionPolicy;
+  final Map<String, DeploymentCapabilityInfo> capabilities;
+
+  const DeploymentInfo({
+    required this.profile,
+    required this.profileId,
+    required this.localNode,
+    required this.configuredMembers,
+    required this.preferredPrimary,
+    required this.controlStateScope,
+    required this.preferenceConfersAuthority,
+    required this.partitionPolicy,
+    required this.capabilities,
+  });
+
+  factory DeploymentInfo.fromJson(Map<String, dynamic> json) {
+    final rawCapabilities = json['capabilities'];
+    final capabilities = <String, DeploymentCapabilityInfo>{};
+    if (rawCapabilities is Map) {
+      for (final entry in rawCapabilities.entries) {
+        if (entry.value is Map) {
+          capabilities[entry.key.toString()] =
+              DeploymentCapabilityInfo.fromJson(
+            Map<String, dynamic>.from(entry.value as Map),
+          );
+        }
+      }
+    }
+    final members = (json['configured_members'] as List? ?? const [])
+        .map((value) => value.toString())
+        .where((value) => value.isNotEmpty)
+        .toList(growable: false);
+    return DeploymentInfo(
+      profile: json['profile']?.toString() ?? '',
+      profileId: json['profile_id']?.toString() ?? '',
+      localNode: json['local_node']?.toString() ?? '',
+      configuredMembers: members,
+      preferredPrimary: json['preferred_primary']?.toString() ?? '',
+      controlStateScope: json['control_state_scope']?.toString() ?? '',
+      preferenceConfersAuthority: _asBool(
+        json['preference_confers_authority'],
+      ),
+      partitionPolicy: json['partition_policy']?.toString() ?? '',
+      capabilities: Map.unmodifiable(capabilities),
+    );
+  }
+
+  DeploymentCapabilityInfo capability(String name) =>
+      capabilities[name] ?? const DeploymentCapabilityInfo(
+        available: false,
+        reason: 'The runtime did not report this capability.',
+      );
+
+  String get displayProfile {
+    final normalized = profileId.trim().toLowerCase();
+    if (normalized == 'single-pc') return 'Single PC';
+    if (normalized == 'two-pc') return 'Two PC';
+    if (profile.trim().isNotEmpty) return profile;
+    return 'Unknown';
+  }
+
+  String get membersLabel =>
+      configuredMembers.isEmpty ? 'None reported' : configuredMembers.join(', ');
 }
 
 class ExecutionStatus {

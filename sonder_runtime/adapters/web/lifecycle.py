@@ -1091,6 +1091,16 @@ class RuntimeLifecycle:
             payload["schemas"] = {"error": type(exc).__name__}
         return payload
 
+    def deployment_payload(self) -> dict:
+        """Return the configured deployment projection without probing services.
+
+        The legacy status dashboard is assembled separately from the lifecycle
+        health endpoint.  Keep this read-only projection cheap and side-effect
+        free so polling the dashboard cannot start reconciliation, touch the
+        Ollama probe, or change admission state.
+        """
+        return self._deployment_status.as_dict()
+
     def version_payload(self) -> dict:
         return self._build.as_dict()
 

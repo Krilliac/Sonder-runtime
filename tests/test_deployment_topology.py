@@ -110,3 +110,22 @@ def test_default_health_status_does_not_infer_ha_from_local_readiness():
     assert status['capabilities']['local_sqlite_state']['available']
     assert not status['capabilities']['automatic_takeover']['available']
     assert not status['preference_confers_authority']
+
+
+def test_deployment_dashboard_projection_is_read_only_and_probe_free(monkeypatch):
+    from sonder_runtime.adapters.web import lifecycle
+
+    lifecycle.reset_for_tests()
+    try:
+        instance = lifecycle.get()
+        monkeypatch.setattr(
+            instance,
+            'adopt_legacy_start',
+            lambda: pytest.fail('dashboard projection must not adopt legacy state'),
+        )
+        projection = instance.deployment_payload()
+        assert projection['profile_id'] == 'single-pc'
+        assert projection['configured_members'] == ['local']
+        assert projection['capabilities']['automatic_takeover']['available'] is False
+    finally:
+        lifecycle.reset_for_tests()
