@@ -170,7 +170,12 @@ class ClusterOwnershipAuthority:
             raise OwnershipConflict("ownership resource capacity exhausted")
         return OwnerLease(
             self.cluster_id, kind, resource_id, owner_id, epoch,
-            secrets.token_urlsafe(24), now + ttl,
+            # ``OwnerLease`` validates tokens with the stable identity grammar.
+            # ``token_urlsafe`` may begin with ``-`` or ``_``, which makes a
+            # freshly generated lease fail its own constructor intermittently.
+            # Hex keeps the same 192 bits of entropy while remaining entirely
+            # inside the identity alphabet.
+            secrets.token_hex(24), now + ttl,
         )
 
     def acquire(self, resource_kind: str, resource_id: str, owner_id: str, *, lease_seconds: int = 30) -> OwnerLease:
