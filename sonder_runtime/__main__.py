@@ -236,7 +236,7 @@ def cmd_control_state_rehearsal(args) -> int:
 
     try:
         config = _load_config(args)
-    except (OSError, sonder_config.ConfigError):
+    except (OSError, UnicodeError, sonder_config.ConfigError):
         _emit_rehearsal_report(
             args, _rehearsal_report("rejected", reason="configuration_invalid")
         )

@@ -574,6 +574,45 @@ def test_config_io_failure_is_redacted_before_provider_construction(
     assert factory_calls == []
 
 
+def test_non_utf8_secrets_are_redacted_before_provider_construction(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Catches a real secrets decode failure leaking bytes, paths, or a traceback."""
+    config_path, secrets_path, _ = _write_rehearsal_inputs(
+        tmp_path, origin="https://control.example.test"
+    )
+    raw_marker = "nonutf8-secret-marker"
+    secrets_path.write_bytes(
+        b"SONDER_CONTROL_STATE_REHEARSAL_API_KEY="
+        + raw_marker.encode("ascii")
+        + b"-\xff\n"
+    )
+    factory_calls: list[object] = []
+    import sonder_runtime.bootstrap.control_state_rehearsal as rehearsal
+
+    monkeypatch.setattr(
+        rehearsal,
+        "build_control_state_rehearsal",
+        lambda config: factory_calls.append(config),
+    )
+
+    assert runtime_main(_command_args(config_path, secrets_path)) == 2
+
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err
+    assert captured.err == ""
+    assert raw_marker not in rendered
+    assert "0xff" not in rendered
+    assert "UnicodeDecodeError" not in rendered
+    assert str(config_path) not in rendered
+    assert str(secrets_path) not in rendered
+    report = json.loads(captured.out)
+    _assert_safe_report(report, forbidden=(raw_marker, "0xff", "UnicodeDecodeError"))
+    assert report["status"] == "rejected"
+    assert report["reason"] == "configuration_invalid"
+    assert factory_calls == []
+
+
 def test_confirmed_fence_uses_collected_acknowledgement_without_duplicate_append(
     tmp_path, monkeypatch, capsys
 ) -> None:
