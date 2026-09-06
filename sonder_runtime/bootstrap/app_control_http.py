@@ -17,6 +17,7 @@ from ..adapters.security.account_admission import account_admission, password_ad
 from ..adapters.security.account_auth import account_auth as admin_auth
 from ..adapters.security.control_plane_paths import (
     ControlPlanePaths,
+    ControlPlaneInventory,
     live_control_plane_inventory,
 )
 from ..application.ports.app_control import (
@@ -125,7 +126,7 @@ class AppControlBinding:
             account_token=account_token, control_token=control_token, context=context
         )
 
-    def _private(self, *, context_roots=()):
+    def _private(self, *, context_roots=(), inventory=None):
         config = self._config_provider()
         if not isinstance(context_roots, tuple) or len(context_roots) > 32:
             raise PermissionError("bounded immutable context roots required")
@@ -137,14 +138,22 @@ class AppControlBinding:
         )
         if not 1 <= len(roots) <= 256 or any(not p.is_dir() for p in roots):
             raise PermissionError("complete model roots unavailable")
-        inventory = self._inventory()
-        inventory.require_disjoint(roots)
-        live_control_plane_inventory(
-            additional=lambda: ControlPlanePaths(
-                databases=(Path(self._fleet_path()), Path(self._account_path())),
-                files=tuple(Path(p) for p in config.private_source_paths),
+        required = ControlPlanePaths(
+            databases=(Path(self._fleet_path()), Path(self._account_path())),
+            files=tuple(Path(p) for p in config.private_source_paths),
+        )
+        if inventory is None:
+            inventory = self._inventory()
+            inventory.require_disjoint(roots)
+            live_control_plane_inventory(additional=lambda: required).require_disjoint(
+                roots
             )
-        ).require_disjoint(roots)
+        else:
+            if type(inventory) is not ControlPlaneInventory or not inventory.covers(
+                required
+            ):
+                raise PermissionError("private inventory snapshot unavailable")
+            inventory.require_disjoint(roots)
         return inventory
 
     def _source(self, conn=None):
