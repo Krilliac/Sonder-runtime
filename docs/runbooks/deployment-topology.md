@@ -10,11 +10,36 @@ supported profile.
 | `single-host` | Default | Local control state; existing optional remote compute configurations continue working. |
 | `pooled-pair` | Exactly one distinct `compute.nodes` peer | Explicit two-PC pool; each instance retains its own control state and workers execute legitimate dispatched jobs. |
 
+The typed domain contract also names these modes `single-pc` and `two-pc`.
+`single-host` and `pooled-pair` remain accepted configuration aliases. The
+contract maps the aliases to the explicit names so status, tests, and future
+adapters cannot silently treat a compute pool as a replicated control plane.
+
 `single-host` names the control-state deployment, not a prohibition on remote
 workers. Existing configurations with remote workers need no profile change.
 Profile membership is configured membership; it does not imply that a peer is
 currently reachable. Existing placement freshness and worker admission checks
 still determine whether a job can execute.
+
+## Replicated control-state prerequisite
+
+`sonder_runtime.domain.cluster_availability` defines the provider boundary for
+the later availability slice. A `ControlStateEvent` identifies the exact
+cluster, resource, owner epoch, sequence, and payload digest. An external
+provider must return a `ReplicationAcknowledgement` for that exact event with
+durable acknowledgement on at least two **data** replicas. Witness IDs are
+recorded separately and never count toward that rule. An
+`OwnerFencingProvider` must return a matching external `FenceReceipt` before a
+takeover can advance the owner epoch.
+
+The pure contract only validates provider-shaped evidence; it does not open
+SQLite/PostgreSQL connections, contact a provider, run consensus, or mutate
+ownership. `two-pc` therefore continues to report takeover and failback as
+unavailable even when a provider capability descriptor has the required shape.
+The descriptor is a prerequisite for adapter conformance, not proof of live
+replication or high availability. A fence receipt marked `ambiguous`,
+`minority`, or `unavailable` is rejected, and a two-node vote alone cannot
+override that decision.
 
 For an explicit pair, use the existing private compute authentication, network,
 and catalog configuration from [the compute runbook](compute-fabric.md), plus:
@@ -32,8 +57,9 @@ It is an operator preference displayed in status. It grants no exclusive control
 authority, reroutes no requests, and does not block a secondary worker.
 
 Authenticated `/health` includes `deployment`, containing the configured members,
-preference, local-instance control-state scope, and capability reasons. These are
-integrated capability/configuration facts, not live peer-health measurements.
+the legacy `profile` value, the canonical `profile_id`, preference,
+local-instance control-state scope, and capability reasons. These are integrated
+capability/configuration facts, not live peer-health measurements.
 Takeover, failback, explicit promotion, acknowledged state replication,
 cluster-wide worker-epoch fencing, and quorum are reported unavailable.
 
