@@ -53,6 +53,16 @@ server-side history rebuilt from the stored session — so both contracts
 work. `choices[0].message.content` contains only the answer; bounded
 observable execution metadata is returned separately as `sonder_activity`.
 
+The administrator-only `/v1/sonder/status` snapshot also contains
+`operational_capabilities` (schema version 1). It is a read-only projection of
+already-applied configuration and injected transports: request-level Ollama
+pooling, complete-job compute placement, authenticated memory-batch and
+content-addressed artifact transfer, plus their bounded limits. It reports
+model sharding, automatic memory/artifact migration, and indefinite-scale
+providers as unavailable until those separate ownership and provider systems
+exist. Reading the projection never probes a peer, loads a model, enrolls a
+receiver, or changes runtime state.
+
 The supported chat subset currently includes `model`, `messages`, `stream`,
 `session`, `project`, `context_size`, and the consented location fields.
 `project` scopes durable facts, which the served route namespaces per
