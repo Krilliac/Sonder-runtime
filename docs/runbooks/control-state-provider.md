@@ -88,6 +88,14 @@ request or a UI command. Automatic takeover and failback remain unavailable in
 the default profiles until the provider is composed into the deployment
 control plane and live failure rehearsal proves the complete path.
 
+`sonder_runtime.application.control_state.ExternalControlStateCoordinator`
+is the explicit application seam for that composition. It validates the
+provider's append/read/fence receipts, evaluates the existing fail-closed
+takeover gate, and returns a bounded `ControlStateTakeoverAttempt`. It never
+promotes an owner, retries an ambiguous write, or creates a provider from
+configuration; a separately owned durable authority must consume an allowed
+attempt before changing an epoch.
+
 ## Verification
 
 The transport and DTO boundary are covered by
