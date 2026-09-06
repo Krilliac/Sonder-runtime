@@ -72,7 +72,12 @@ lifetime drain only; worker, SQLite and native process closure remain separate
 requirements. A late or failed close preserves an unresolved original receipt.
 The current fixed foreground configuration keeps app control disabled; an
 installed empty slot does not advertise managed work availability or construct
-an executor. Enabled app-work HTTP composition is a separate typed startup hook.
+an executor. When a separately validated configuration explicitly enables app
+control, startup composes the owned app-work HTTP binding after typed control
+configuration and legacy compatibility wiring, then refuses publication if the
+exact control/Application identity is not registered. The fixed owner schema
+still does not provide catalog/account enrollment, so the default profile does
+not claim enabled app-work readiness.
 Before the listener starts, the child also binds the existing HTTP compatibility
 surface to this exact owned Application through the bootstrap injection seam and
 registers the typed recall/outcome handlers. This prevents a healthy-looking
