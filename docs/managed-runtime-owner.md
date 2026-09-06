@@ -73,6 +73,11 @@ requirements. A late or failed close preserves an unresolved original receipt.
 The current fixed foreground configuration keeps app control disabled; an
 installed empty slot does not advertise managed work availability or construct
 an executor. Enabled app-work HTTP composition is a separate typed startup hook.
+Before the listener starts, the child also binds the existing HTTP compatibility
+surface to this exact owned Application through the bootstrap injection seam and
+registers the typed recall/outcome handlers. This prevents a healthy-looking
+managed listener from deferring a missing legacy dependency until the first chat
+request; it creates no second Application and does not widen permissions.
 
 ## Current limits and remaining work
 
