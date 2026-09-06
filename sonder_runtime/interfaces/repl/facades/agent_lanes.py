@@ -15,6 +15,7 @@ HELP = """/lanes list [cursor]
 /lanes show <lane-id> [cursor]
 /lanes message <lane-id> <text>
 /lanes interrupt|resume|cancel <lane-id>
+/lanes archive <lane-id>
 /lanes reports <lane-id> [cursor]
 /lanes ack <lane-id> <report-id> [reports-page-cursor]
 Messages preserve pasted multiline text. Controls are cooperative requests.
@@ -98,7 +99,7 @@ def parse(argument):
             "lane_id": _id(fields[1]),
             "cursor": _cursor(fields[2] if len(fields) > 2 else "0"),
         }
-    if action in {"interrupt", "resume", "cancel"} and len(fields) == 2:
+    if action in {"interrupt", "resume", "cancel", "archive"} and len(fields) == 2:
         return action, {"lane_id": _id(fields[1])}
     if action == "ack" and 3 <= len(fields) <= 4:
         return action, {
@@ -342,6 +343,8 @@ class LaneConsoleFacade:
                 parent_session_id=command["parent_session_id"],
                 **options,
             )
+        elif action == "archive":
+            receipt = service.archive(command["lane_id"], **options)
         else:
             receipt = service.control(
                 command["lane_id"], action, author="user", **options
