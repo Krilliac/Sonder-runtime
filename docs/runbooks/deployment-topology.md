@@ -2,8 +2,9 @@
 
 Sonder defaults to local SQLite control state. A second configured PC can run
 private compute jobs. Pooling does not merge session, task, or memory databases
-and does not elect a replacement controller. No witness is required for either
-supported profile.
+and does not elect a replacement controller. A witness is not part of the local
+single-PC profile; a pooled pair requires an independent witness and external
+provider before takeover can be considered.
 
 | Profile | Configuration | Behavior |
 | --- | --- | --- |
