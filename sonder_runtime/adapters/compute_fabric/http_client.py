@@ -84,6 +84,8 @@ class HttpsComputeSnapshotSource:
             raise DependencyUnavailable(
                 f"compute snapshot request failed: {type(exc).__name__}"
             ) from exc
+        if not isinstance(raw, bytes):
+            raise DependencyUnavailable("compute snapshot response is not bytes")
         if len(raw) > self._max_response_bytes:
             raise DependencyUnavailable("compute snapshot response exceeds size bound")
         try:
@@ -182,6 +184,8 @@ class HttpsComputeJobTransport:
             raise DependencyUnavailable(
                 f"compute job request failed: {type(exc).__name__}"
             ) from exc
+        if not isinstance(raw, bytes):
+            raise DependencyUnavailable("compute job response is not bytes")
         if len(raw) > self._max_response_bytes:
             raise DependencyUnavailable("compute job response exceeds size bound")
         try:
@@ -307,6 +311,8 @@ class HttpsComputeJobTransport:
             raise DependencyUnavailable(
                 f"compute artifact request failed: {type(exc).__name__}"
             ) from exc
+        if not isinstance(raw, bytes):
+            raise DependencyUnavailable("compute artifact response is not bytes")
         if len(raw) != expected.size_bytes:
             raise DependencyUnavailable("compute artifact size differs from its receipt")
         content_length = headers.get("Content-Length")

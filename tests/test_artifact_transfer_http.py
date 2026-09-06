@@ -275,3 +275,29 @@ def test_redirect_and_corrupted_binary_are_rejected(receiver, transfers):
     server.redirect = True
     with pytest.raises(TransferError, match="PEER_UNAVAILABLE"):
         peer.artifact(artifact["artifact_id"])
+
+def test_peer_rejects_non_bytes_response_body():
+    class Response:
+        status = 200
+        headers = {"Content-Length": "4"}
+
+        def read(self, _limit):
+            return "text"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class Opener:
+        def open(self, _request, *, timeout):
+            assert timeout == 10
+            return Response()
+
+    peer = HttpsArtifactTransferPeer.for_test_loopback(
+        "http://127.0.0.1:1234", credential_provider=lambda: "test-credential"
+    )
+    peer._opener = Opener()
+    with pytest.raises(TransferError, match="PEER_PROTOCOL"):
+        peer.inspect("0" * 32)

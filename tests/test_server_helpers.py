@@ -2348,6 +2348,48 @@ def test_ollama_get_rejects_oversized_control_plane_response(monkeypatch):
     assert seen["limit"] == server._MAX_MODEL_RESPONSE_BYTES + 1
 
 
+def test_ollama_post_rejects_non_bytes_response_body(monkeypatch):
+    class Response:
+        def read(self, _limit):
+            return "not-bytes"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        server.ollama_endpoint,
+        "open_url",
+        lambda *_args, **_kwargs: Response(),
+    )
+
+    with pytest.raises(server.ModelCallError, match="response body is not bytes"):
+        server._post("/api/tags", {})
+
+
+def test_ollama_get_rejects_non_bytes_response_body(monkeypatch):
+    class Response:
+        def read(self, _limit):
+            return "not-bytes"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        server.ollama_endpoint,
+        "open_url",
+        lambda *_args, **_kwargs: Response(),
+    )
+
+    with pytest.raises(server.ModelCallError, match="response body is not bytes"):
+        server._get("/api/tags")
+
+
 def test_unload_reports_bounded_get_failure_without_raising(monkeypatch):
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server.master_orchestrator, "active_model_call_count", lambda: 0)
