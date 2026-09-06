@@ -238,7 +238,7 @@ class AppManagedWorkHttpBinding:
     def inventory(self):
         result = live_control_plane_inventory(additional=self.private_paths)
         result.require_disjoint(self.model_roots())
-        self.control._private()
+        self.control._private(inventory=result)
         return result
 
     def policy(self, context):

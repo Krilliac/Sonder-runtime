@@ -82,6 +82,33 @@ class ControlPlaneInventory:
     admission_directories: tuple[Path, ...]
     atomic_files: tuple[Path, ...] = ()
 
+    def covers(self, paths):
+        """Return whether this snapshot contains every explicitly supplied path.
+
+        The check is deliberately limited to immutable, trusted composition
+        paths. It lets a caller reuse one live snapshot without replacing the
+        per-request canonicalization performed by :meth:`protects`.
+        """
+        if type(paths) is not ControlPlanePaths:
+            return False
+        exact = {
+            _canonical(value)
+            for value in (*paths.files, *paths.audit_files, *paths.atomic_files)
+        }
+        exact.update(
+            _canonical(str(database) + suffix)
+            for database in paths.databases
+            for suffix in ("", "-wal", "-shm", "-journal")
+        )
+        exact.update(
+            _canonical(str(value) + ".lock") for value in paths.atomic_files
+        )
+        return (
+            exact <= self.exact_files
+            and set(paths.owned_directories) <= set(self.owned_directories)
+            and set(paths.owner_lock_directories) <= set(self.owner_lock_directories)
+        )
+
     def protects(self, path):
         path = _canonical(path)
         return (
