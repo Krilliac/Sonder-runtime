@@ -683,7 +683,7 @@
       ]
     },
     {
-      "file_count": 174,
+      "file_count": 175,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -842,6 +842,7 @@
         "sonder_runtime/domain/skills/__init__.py",
         "sonder_runtime/domain/skills/registry.py",
         "sonder_runtime/domain/speculation_policy.py",
+        "sonder_runtime/domain/takeover_readiness.py",
         "sonder_runtime/domain/task_ledger.py",
         "sonder_runtime/domain/thinking_controls.py",
         "sonder_runtime/domain/thinking_policy.py",
