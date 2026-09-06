@@ -8,6 +8,40 @@ import sys
 from threading import Event
 
 
+def _configure_legacy_http_boundary(application, config, *, serve):
+    """Bind the compatibility handlers to the already-owned application.
+
+    The contained HTTP child uses the canonical ``serve`` adapter, but that
+    adapter still exposes a few legacy route implementations through its
+    explicit injection seam.  Leaving the seam empty makes the listener look
+    healthy while every chat/model route fails closed on first use.  Bind it
+    only after the exact owned :class:`Application` exists; this mirrors the
+    normal ``cmd_serve`` bootstrap and does not create another application or
+    widen any permission surface.
+    """
+    from .legacy_interfaces import (
+        configure_legacy_application,
+        configure_legacy_capacity,
+        configure_legacy_interfaces,
+    )
+
+    configure_legacy_interfaces()
+    configure_legacy_application(application)
+    configure_legacy_capacity(
+        autopilot_runs=config.capacity.autopilot_runs,
+        fleet_workers=config.capacity.fleet_workers,
+        training_jobs=config.capacity.training_jobs,
+    )
+    from ..interfaces.http.handlers import RecallHandler, OutcomeHandler
+
+    serve.configure_thin_handlers(
+        {
+            "/v1/recall": RecallHandler(application.memory),
+            "/v1/outcome": OutcomeHandler(application.memory),
+        }
+    )
+
+
 def run(root, namespace, job_id):
     from ..application.compute_fabric.artifact_spool import PrivateDirectoryAnchor
 
@@ -245,6 +279,7 @@ def _run(root, workspace, namespace, job_id, anchor):
     from ..adapters.filesystem.atomic_json import write_json_atomic
 
     serve.configure_typed_config(config)
+    _configure_legacy_http_boundary(application, config, serve=serve)
     lifecycle.configure(config)
     stopped = Event()
     errors = []
