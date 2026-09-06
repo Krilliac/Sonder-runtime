@@ -840,28 +840,50 @@ def test_natural_language_worker_cap_rejects_negation_and_ambiguity():
 def test_delegated_fleet_limits_actual_concurrency(monkeypatch):
     monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda requested: 2)
     lock = threading.Lock()
-    overlap = threading.Barrier(2, timeout=5)
+    first_two_active = threading.Event()
+    third_worker_entered = threading.Event()
+    release = threading.Event()
     current = {"active": 0, "maximum": 0}
+    observation = {}
 
     def worker(prompt):
         with lock:
             current["active"] += 1
             current["maximum"] = max(current["maximum"], current["active"])
+            if current["active"] == 2:
+                first_two_active.set()
+            elif current["active"] > 2:
+                third_worker_entered.set()
         try:
-            # The barrier proves real model-call overlap without depending on
-            # a scheduler-sensitive fixed sleep during SQLite start transitions.
-            overlap.wait()
+            # Hold the first two workers until an incorrectly admitted third
+            # worker has had a chance to make the cap violation observable.
+            assert release.wait(5)
         finally:
             with lock:
                 current["active"] -= 1
         return "ok"
 
-    result = master_orchestrator.run_delegated(
-        "fan out", worker_fn=worker, audit_fn=lambda prompt: "merged", agents=6,
-    )
+    def observe_and_release():
+        observation["two_workers_started"] = first_two_active.wait(5)
+        if observation["two_workers_started"]:
+            observation["over_capacity"] = third_worker_entered.wait(1)
+        release.set()
 
+    controller = threading.Thread(target=observe_and_release)
+    controller.start()
+    try:
+        result = master_orchestrator.run_delegated(
+            "fan out", worker_fn=worker, audit_fn=lambda prompt: "merged", agents=6,
+        )
+    finally:
+        release.set()
+        controller.join(5)
+
+    assert not controller.is_alive()
+    assert observation["two_workers_started"]
     assert len(result["agents"]) == 6
     assert result["worker_slots"] == 2
+    assert not observation["over_capacity"]
     assert current["maximum"] == 2
 
 
