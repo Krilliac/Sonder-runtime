@@ -109,8 +109,8 @@ class _Provider:
 
 
 class _HttpResponse:
-    def __init__(self, payload):
-        self.status = 200
+    def __init__(self, payload, *, status: int = 200):
+        self.status = status
         self._raw = json.dumps(payload).encode("utf-8")
 
     def __enter__(self):
@@ -124,8 +124,9 @@ class _HttpResponse:
 
 
 class _HttpOpener:
-    def __init__(self, event: ControlStateEvent):
+    def __init__(self, event: ControlStateEvent, *, fence_status: int = 200):
         self.event = event
+        self.fence_status = fence_status
         self.calls = []
 
     def __call__(self, request, *, timeout):
@@ -143,7 +144,7 @@ class _HttpOpener:
             }
         else:
             raise AssertionError(f"unexpected provider request: {request.full_url}")
-        return _HttpResponse(payload)
+        return _HttpResponse(payload, status=self.fence_status if path.endswith("/fence") else 200)
 
 
 def _coordinator(provider: _Provider, **changes) -> ExternalControlStateCoordinator:
@@ -193,6 +194,32 @@ def test_https_provider_composes_with_coordinator_takeover_gate():
         "/v1/control-state/events",
         "/v1/control-state/fence",
     ]
+    assert [request.get_header("Authorization") for request, _ in opener.calls] == [
+        "Bearer key-1",
+        "Bearer key-1",
+    ]
+
+
+@pytest.mark.integration
+def test_https_provider_denied_fence_fails_closed():
+    event = _event()
+    opener = _HttpOpener(event, fence_status=403)
+    provider = HttpsControlStateProvider(
+        origin="https://control.example.test:9443",
+        api_key="key-1",
+        capabilities=_capabilities(),
+        opener=opener,
+    )
+    coordinator = ExternalControlStateCoordinator(provider, provider.capabilities)
+
+    with pytest.raises(DependencyUnavailable, match="HTTP status 403"):
+        coordinator.prepare_takeover(event.scope, event, new_owner_id="node-b")
+
+    assert [urlsplit(request.full_url).path for request, _ in opener.calls] == [
+        "/v1/control-state/events",
+        "/v1/control-state/fence",
+    ]
+    assert opener.calls[-1][0].get_header("Authorization") == "Bearer key-1"
 
 
 def test_existing_acknowledgement_is_revalidated_without_repeating_append():
