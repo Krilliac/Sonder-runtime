@@ -161,6 +161,8 @@ class _RecordingCoordinator:
     local_id: str
     peer_id: str
     witness_id: str
+    decision_allowed: bool = True
+    decision_reason: str = "evidence-collected-only"
 
     def __post_init__(self) -> None:
         self.appended: list[ControlStateEvent] = []
@@ -221,8 +223,8 @@ class _RecordingCoordinator:
                 accepted=True,
             ),
             decision=SimpleNamespace(
-                allowed=True,
-                reason="evidence-collected-only",
+                allowed=self.decision_allowed,
+                reason=self.decision_reason,
                 next_epoch=event.owner_epoch + 1,
                 data_replica_count=2,
             ),
@@ -317,6 +319,86 @@ def test_invalid_request_never_constructs_provider_or_mutates_control_state(
     assert report["status"] == "rejected"
     assert report["reason"] == expected_reason
     assert factory_calls == []
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("--config", ""),
+        ("--config", " \t"),
+        ("--secrets", ""),
+        ("--secrets", " \t"),
+    ],
+)
+def test_explicit_blank_rehearsal_paths_never_fall_back_to_ambient_configuration(
+    tmp_path, monkeypatch, capsys, option, value
+) -> None:
+    """Catches an explicit empty rehearsal path silently selecting ambient state."""
+    config_path, secrets_path, _ = _write_rehearsal_inputs(
+        tmp_path, origin="https://control.example.test"
+    )
+    load_calls: list[object] = []
+    factory_calls: list[object] = []
+    ambient_config = "ambient-config-sentinel"
+    ambient_secrets = "ambient-secrets-sentinel"
+    import sonder_runtime.__main__ as entrypoint
+    import sonder_runtime.bootstrap.control_state_rehearsal as rehearsal
+
+    monkeypatch.setenv("SONDER_CONFIG", ambient_config)
+    monkeypatch.setenv("SONDER_SECRETS", ambient_secrets)
+    monkeypatch.setattr(
+        entrypoint, "_load_config", lambda args: load_calls.append(args)
+    )
+    monkeypatch.setattr(
+        rehearsal,
+        "build_control_state_rehearsal",
+        lambda config: factory_calls.append(config),
+    )
+    args = _command_args(config_path, secrets_path)
+    position = args.index(option)
+    args[position : position + 2] = [f"{option}={value}"]
+
+    assert runtime_main(args) == 2
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    report = json.loads(captured.out)
+    _assert_safe_report(
+        report,
+        forbidden=(
+            _TEST_KEY,
+            str(config_path),
+            str(secrets_path),
+            ambient_config,
+            ambient_secrets,
+        ),
+    )
+    assert report["status"] == "rejected"
+    assert report["reason"] == "configuration_invalid"
+    assert load_calls == []
+    assert factory_calls == []
+
+
+def test_rehearsal_allows_an_omitted_optional_secrets_path(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Catches blank-path hardening accidentally rejecting the optional omission."""
+    config_path, secrets_path, _ = _write_rehearsal_inputs(
+        tmp_path, origin="https://control.example.test"
+    )
+    coordinator = _RecordingCoordinator("node-a", "node-b", "witness-a")
+    _replace_factory(monkeypatch, coordinator)
+    monkeypatch.setenv("SONDER_SECRETS", str(secrets_path))
+    args = _command_args(config_path, secrets_path)
+    position = args.index("--secrets")
+    del args[position : position + 2]
+
+    assert runtime_main(args) == 0
+
+    report = _report(capsys)
+    _assert_safe_report(report, forbidden=(_TEST_KEY, str(secrets_path), _DIGEST))
+    assert report["status"] == "collected"
+    assert len(coordinator.appended) == 1
 
 
 def test_non_rehearsal_config_scope_never_constructs_provider(
@@ -644,6 +726,54 @@ def test_confirmed_fence_uses_collected_acknowledgement_without_duplicate_append
     assert scope == event.scope
     assert new_owner_id == "node-b"
     assert acknowledgement.event_id == event.event_id
+
+
+def test_confirmed_fence_denial_returns_blocked_with_bounded_evidence(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Catches a denied takeover proof being reported as a successful rehearsal."""
+    config_path, secrets_path, _ = _write_rehearsal_inputs(
+        tmp_path, origin="https://control.example.test"
+    )
+    coordinator = _RecordingCoordinator(
+        "node-a",
+        "node-b",
+        "witness-a",
+        decision_allowed=False,
+        decision_reason="ambiguous_partition",
+    )
+    _replace_factory(monkeypatch, coordinator)
+
+    assert runtime_main(
+        _command_args(
+            config_path,
+            secrets_path,
+            confirm_fence="external-fence",
+            new_owner_id="node-b",
+        )
+    ) == 1
+
+    report = _report(capsys)
+    _assert_safe_report(report, forbidden=(_TEST_KEY, str(config_path), _DIGEST))
+    assert report["status"] == "blocked"
+    assert report["reason"] == "takeover_evidence_denied"
+    assert report["fence"] == {
+        "requested": True,
+        "new_owner_id": "node-b",
+        "receipt_id": "rehearsal-fence-receipt",
+        "accepted": True,
+        "external": True,
+        "partition_state": "safe",
+        "decision": {
+            "allowed": False,
+            "reason": "ambiguous_partition",
+            "next_epoch": 4,
+            "data_replica_count": 2,
+        },
+    }
+    assert len(coordinator.appended) == 1
+    assert coordinator.reads == [("rehearsal-command", 6, 1)]
+    assert len(coordinator.fences) == 1
 
 
 class _LoopbackHandler(BaseHTTPRequestHandler):

@@ -140,6 +140,15 @@ def _rehearsal_identity(value: object) -> bool:
 
 def _rehearsal_request_error(args) -> str | None:
     """Reject all caller-controlled scope before config/factory/provider work."""
+    config_path = getattr(args, "config", None)
+    if not isinstance(config_path, str) or not config_path.strip():
+        return "configuration_invalid"
+    secrets_path = getattr(args, "secrets", None)
+    if secrets_path is not None and (
+        not isinstance(secrets_path, str) or not secrets_path.strip()
+    ):
+        return "configuration_invalid"
+
     confirmation = getattr(args, "confirm_fence", None)
     new_owner_id = getattr(args, "new_owner_id", None)
     if confirmation is not None and confirmation != "external-fence":
@@ -320,7 +329,6 @@ def cmd_control_state_rehearsal(args) -> int:
         )
         return 1
 
-    payload["status"] = "fence_evidence_collected"
     receipt = attempt.fence_receipt
     payload["fence"] = {
         "requested": True,
@@ -336,6 +344,13 @@ def cmd_control_state_rehearsal(args) -> int:
             "data_replica_count": attempt.decision.data_replica_count,
         },
     }
+    if attempt.decision.allowed is not True:
+        payload["status"] = "blocked"
+        payload["reason"] = "takeover_evidence_denied"
+        _emit_rehearsal_report(args, payload)
+        return 1
+
+    payload["status"] = "fence_evidence_collected"
     _emit_rehearsal_report(args, payload)
     return 0
 
