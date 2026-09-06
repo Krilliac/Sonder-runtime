@@ -4304,6 +4304,19 @@ def _require_ollama_endpoint(*, cloud: bool = False) -> None:
         )
 
 
+def _read_ollama_response_bytes(resp) -> bytes:
+    """Read one bounded Ollama response while enforcing the opener contract."""
+    raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
+    if not isinstance(raw, bytes):
+        raise ModelCallError("protocol", "Ollama response body is not bytes")
+    if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
+        raise ModelCallError(
+            "protocol",
+            "Ollama response exceeded the 16 MiB safety limit",
+        )
+    return raw
+
+
 def _post_model(
     path: str,
     payload: dict,
@@ -4727,12 +4740,7 @@ def _post(
         )
         def transport():
             with ollama_endpoint.open_url(req, timeout=remaining) as resp:
-                raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
-                if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
-                    raise ModelCallError(
-                        "protocol",
-                        "Ollama response exceeded the 16 MiB safety limit",
-                    )
+                raw = _read_ollama_response_bytes(resp)
                 return json.loads(raw.decode("utf-8"))
 
         # This callback runs once per selected pool worker, inside all payload
@@ -4813,12 +4821,7 @@ def _get(path: str) -> dict:
     def send(origin):
         req = urllib.request.Request(f"{origin}{path}")
         with ollama_endpoint.open_url(req, timeout=15) as resp:
-            raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
-            if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
-                raise ModelCallError(
-                    "protocol",
-                    "Ollama response exceeded the 16 MiB safety limit",
-                )
+            raw = _read_ollama_response_bytes(resp)
             return json.loads(raw.decode("utf-8"))
 
     return (
@@ -22476,12 +22479,7 @@ def status() -> str:
         def _fetch_worker_tags(origin):
             req = urllib.request.Request(f"{origin}/api/tags")
             with ollama_endpoint.open_url(req, timeout=5) as resp:
-                raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
-                if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
-                    raise ModelCallError(
-                        "protocol",
-                        "Ollama response exceeded the 16 MiB safety limit",
-                    )
+                raw = _read_ollama_response_bytes(resp)
                 return json.loads(raw.decode("utf-8"))
 
         # Best-effort per-worker inventory refresh: it feeds the pool's

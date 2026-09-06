@@ -399,6 +399,8 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0):
             request, timeout=timeout, allow_remote=allow_remote,
         ) as response:
             raw = response.read(_PROBE_RESPONSE_LIMIT + 1)
+        if not isinstance(raw, bytes):
+            raise ValueError("capability response is not bytes")
         if len(raw) > _PROBE_RESPONSE_LIMIT:
             raise ValueError("capability response exceeded 1 MiB")
         payload = json.loads(raw.decode("utf-8"))

@@ -7,6 +7,7 @@ import pytest
 from sonder_runtime.adapters.inference.ollama_pool import (
     OllamaWorkerPool,
     _metric_label,
+    _default_capability_prober,
     configure_typed_workers,
     from_environment,
     parse_worker_origins,
@@ -110,6 +111,27 @@ def test_pool_does_not_fail_over_after_a_non_transport_failure():
     with pytest.raises(ValueError, match="invalid request"):
         pool.request(send)
     assert len(calls) == 1
+
+
+def test_default_capability_probe_rejects_non_bytes_response_body(monkeypatch):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return "not-bytes"
+
+    monkeypatch.setattr(
+        "sonder_runtime.adapters.inference.ollama_endpoint.open_url",
+        lambda *_args, **_kwargs: Response(),
+    )
+    probe = _default_capability_prober(allow_remote=False)
+
+    with pytest.raises(ValueError, match="capability response is not bytes"):
+        probe(PRIMARY)
 
 
 def test_pool_never_replays_ambiguous_non_idempotent_transport_failure():

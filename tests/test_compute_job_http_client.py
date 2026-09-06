@@ -122,6 +122,15 @@ def test_job_client_submit_validates_complete_receipt_ownership(field, value, me
         transport.submit(_node(), _envelope())
 
 
+def test_job_client_rejects_non_bytes_response_body() -> None:
+    transport = HttpsComputeJobTransport(
+        api_key="secret",
+        opener=lambda *_args, **_kwargs: _Response(202, "not-bytes"),
+    )
+    with pytest.raises(DependencyUnavailable, match="response is not bytes"):
+        transport.submit(_node(), _envelope())
+
+
 def test_job_client_status_cancel_and_lookup_validate_requested_identity() -> None:
     body = json.loads(_receipt_body())
     body["job"]["remote_job_id"] = "different-job"
@@ -205,6 +214,24 @@ def test_job_client_fetches_and_revalidates_digest_bound_artifact() -> None:
         }),
     )
     with pytest.raises(DependencyUnavailable, match="receipt"):
+        transport.fetch_artifact(_node(), "remote-1", expected)
+
+
+def test_job_client_rejects_non_bytes_artifact_response_body() -> None:
+    from sonder_runtime.application.compute_fabric.jobs import RemoteArtifactReceipt
+
+    expected = RemoteArtifactReceipt(
+        "reports/result.json", 9, "application/json", "0" * 64,
+    )
+    transport = HttpsComputeJobTransport(
+        api_key="secret",
+        opener=lambda *_args, **_kwargs: _Response(
+            200,
+            "not-bytes",
+            {"Content-Length": "9", "Content-Type": "application/json"},
+        ),
+    )
+    with pytest.raises(DependencyUnavailable, match="response is not bytes"):
         transport.fetch_artifact(_node(), "remote-1", expected)
 
 
