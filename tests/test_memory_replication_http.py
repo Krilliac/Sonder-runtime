@@ -150,6 +150,18 @@ def test_memory_sink_rejects_redirect_invalid_json_and_oversize(status, body, me
         sink.apply(_batch())
 
 
+def test_memory_sink_rejects_non_bytes_response_body():
+    sink = HttpsMemoryReplicationSink(
+        identity="node-b",
+        origin="https://node-b.example:8443",
+        api_key="memory-secret",
+        opener=lambda *_args, **_kwargs: _Response(202, "not-bytes"),
+    )
+
+    with pytest.raises(DependencyUnavailable, match="response is not bytes"):
+        sink.apply(_batch())
+
+
 def test_memory_sink_rejects_tampered_receipt_and_oversized_wire_before_network():
     batch = _batch()
     body = json.loads(_receipt_body(batch))
