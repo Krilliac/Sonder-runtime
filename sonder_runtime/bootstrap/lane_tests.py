@@ -27,7 +27,9 @@ class LaneTestOperationContext(OperationContext):
 
 def _test_context(request):
     original = default_tool_context(request)
-    return LaneTestOperationContext(**vars(original), session_id=request.session_id)
+    values = dict(vars(original))
+    values["session_id"] = request.session_id
+    return LaneTestOperationContext(**values)
 
 
 class CatalogPermissionEvaluator(PermissionModesEvaluator):
