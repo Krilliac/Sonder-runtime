@@ -840,17 +840,20 @@ def test_natural_language_worker_cap_rejects_negation_and_ambiguity():
 def test_delegated_fleet_limits_actual_concurrency(monkeypatch):
     monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda requested: 2)
     lock = threading.Lock()
+    overlap = threading.Barrier(2, timeout=5)
     current = {"active": 0, "maximum": 0}
 
     def worker(prompt):
         with lock:
             current["active"] += 1
             current["maximum"] = max(current["maximum"], current["active"])
-        # Leave enough overlap for the process-shared SQLite start transition;
-        # the assertion concerns model-call concurrency, not ledger connection time.
-        time.sleep(0.12)
-        with lock:
-            current["active"] -= 1
+        try:
+            # The barrier proves real model-call overlap without depending on
+            # a scheduler-sensitive fixed sleep during SQLite start transitions.
+            overlap.wait()
+        finally:
+            with lock:
+                current["active"] -= 1
         return "ok"
 
     result = master_orchestrator.run_delegated(
