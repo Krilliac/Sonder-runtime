@@ -614,6 +614,12 @@ void main() {
       'status': 'ready',
       'operational_capabilities': {
         'schema_version': 1,
+        'control': {
+          'managed_app_work': {
+            'available': true,
+            'reason': 'Owned dispatcher is installed.',
+          },
+        },
         'inference': {
           'request_level_pooling': {
             'available': true,
@@ -682,6 +688,10 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Distributed capability surface'), findsOneWidget);
+    expect(
+      find.textContaining('Available — Owned dispatcher is installed.'),
+      findsOneWidget,
+    );
     expect(find.text('1/2 healthy workers; Available — Requests may route to one worker.'), findsOneWidget);
     expect(find.textContaining('Unavailable — Tensor sharding is not integrated.'), findsOneWidget);
     expect(find.textContaining('Unavailable — External provider required.'), findsOneWidget);

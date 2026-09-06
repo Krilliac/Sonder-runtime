@@ -2523,6 +2523,11 @@ class _OperationalCapabilitiesPanel extends StatelessWidget {
           ok: true,
         ),
         _StatusRow(
+          label: 'Managed app work',
+          value: _capabilityValue(info.managedAppWork),
+          ok: info.managedAppWork.available,
+        ),
+        _StatusRow(
           label: 'Inference pool',
           value: '${info.workerSummary}; ${_capabilityValue(info.requestLevelPooling)}',
           ok: info.requestLevelPooling.available,

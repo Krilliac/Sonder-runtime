@@ -61,6 +61,7 @@ def build_operational_capabilities(
     config: object | None,
     inference_pool_status: object = None,
     memory_receiver_configured: bool = False,
+    managed_work_configured: bool = False,
 ) -> dict[str, object]:
     """Build an admin-safe, non-probing capability snapshot.
 
@@ -100,9 +101,28 @@ def build_operational_capabilities(
             else "Memory replication is disabled until an authenticated receiver is injected."
         ),
     )
+    app_control = getattr(config, "app_control", None)
+    app_control_enabled = bool(getattr(app_control, "enabled", False))
+    managed_work = _capability(
+        bool(managed_work_configured and app_control_enabled),
+        (
+            "The owned app-work dispatcher is installed; requests remain subject "
+            "to the app-control account, grant, and approval gates."
+            if managed_work_configured and app_control_enabled
+            else (
+                "App-control metadata is enabled, but the owned app-work "
+                "dispatcher is not composed."
+                if app_control_enabled
+                else "Managed app work is disabled by configuration."
+            )
+        ),
+    )
 
     return {
         "schema_version": _SCHEMA_VERSION,
+        "control": {
+            "managed_app_work": managed_work,
+        },
         "inference": {
             "request_level_pooling": pooled_inference,
             "model_sharding": _capability(

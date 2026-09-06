@@ -22,6 +22,10 @@ def test_default_surface_is_explicitly_local_and_fail_closed():
     assert surface["schema_version"] == 1
     assert surface["compute"]["configured_peer_count"] == 0
     assert surface["compute"]["remote_enabled"] is False
+    assert surface["control"]["managed_app_work"]["available"] is False
+    assert surface["control"]["managed_app_work"]["reason"] == (
+        "Managed app work is disabled by configuration."
+    )
     assert surface["inference"]["request_level_pooling"]["available"] is False
     assert surface["inference"]["model_sharding"]["available"] is False
     assert surface["mobility"]["memory_replication_transport"]["available"] is False
@@ -73,3 +77,22 @@ def test_surface_never_probes_or_uses_unbounded_pool_fields():
     assert surface["inference"]["pool"]["worker_count"] == 1024
     assert surface["inference"]["pool"]["healthy_worker_count"] == 1024
     assert surface["inference"]["pool"]["remote_worker_count"] == 1024
+
+
+def test_surface_reports_owned_work_only_when_enabled_and_composed():
+    from dataclasses import replace
+    from sonder_runtime.platform.app_control_config import AppControlConfig
+
+    config = replace(SonderConfig(), app_control=AppControlConfig(enabled=True))
+    unavailable = build_operational_capabilities(
+        config=config,
+        managed_work_configured=False,
+    )
+    assert unavailable["control"]["managed_app_work"]["available"] is False
+    assert "dispatcher is not composed" in unavailable["control"]["managed_app_work"]["reason"]
+
+    available = build_operational_capabilities(
+        config=config,
+        managed_work_configured=True,
+    )
+    assert available["control"]["managed_app_work"]["available"] is True
