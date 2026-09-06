@@ -4,7 +4,19 @@ from __future__ import annotations
 import logging
 from types import ModuleType
 
-from .legacy_root import runtime as legacy_runtime, runtime_proxy
+from .legacy_root import runtime_proxy
+
+
+def legacy_runtime() -> ModuleType:
+    """Resolve the concrete compatibility runtime at composition time.
+
+    Keeping this lookup behind the existing interface boundary lets managed
+    startup inject the exact runtime while preserving the root-server import
+    ratchet and keeping tests able to replace the boundary explicitly.
+    """
+    from .legacy_root import runtime
+
+    return runtime()
 
 logger = logging.getLogger(__name__)
 
@@ -58,4 +70,9 @@ def configure_legacy_capacity(
     )
 
 
-__all__ = ["configure_legacy_application", "configure_legacy_capacity", "configure_legacy_interfaces"]
+__all__ = [
+    "configure_legacy_application",
+    "configure_legacy_capacity",
+    "configure_legacy_interfaces",
+    "legacy_runtime",
+]

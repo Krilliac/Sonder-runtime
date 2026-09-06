@@ -61,7 +61,7 @@ def _install_owned_app_work_if_enabled(application, config, *, serve):
 
         raise OwnerRefused("typed app-control binding unavailable for managed work")
     from .app_managed_work_http import install_owned_work_http
-    from .legacy_root import runtime as legacy_runtime
+    from .legacy_interfaces import legacy_runtime
     from ..adapters.security.permission_policy import PermissionPolicyProvider
 
     binding = install_owned_work_http(
