@@ -47,6 +47,12 @@ def _positive(value: object, field: str, maximum: int = (1 << 63) - 1) -> int:
     return value
 
 
+def _non_negative(value: object, field: str, maximum: int = (1 << 63) - 1) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
+        raise MemoryReplicationError(f"{field} must be within 0..{maximum}")
+    return value
+
+
 def _timestamp(value: object) -> str:
     if not isinstance(value, str):
         raise MemoryReplicationError("recorded_at must be a timezone-aware timestamp")
@@ -78,6 +84,25 @@ def _payload(value: object, operation: str) -> Mapping[str, object]:
     return MappingProxyType(dict(value))
 
 
+def _canonical_json(value: Mapping[str, object]) -> bytes:
+    try:
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+    except (TypeError, ValueError) as exc:
+        raise MemoryReplicationError("replication evidence must be canonical JSON") from exc
+
+
+def _require_wire_keys(value: object, expected: frozenset[str], label: str) -> dict[str, object]:
+    if not isinstance(value, dict) or frozenset(value) != expected:
+        raise MemoryReplicationError(f"{label} has an invalid wire shape")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class MemoryMutation:
     """One immutable, versioned write-side memory mutation."""
@@ -97,11 +122,11 @@ class MemoryMutation:
         object.__setattr__(self, "source_id", _identity(self.source_id, "source_id"))
         object.__setattr__(self, "source_epoch", _positive(self.source_epoch, "source_epoch"))
         object.__setattr__(self, "sequence", _positive(self.sequence, "sequence"))
-        if self.entity_kind not in _KINDS:
+        if not isinstance(self.entity_kind, str) or self.entity_kind not in _KINDS:
             raise MemoryReplicationError("entity_kind is not supported")
         object.__setattr__(self, "entity_id", _identity(self.entity_id, "entity_id"))
         object.__setattr__(self, "version", _positive(self.version, "version"))
-        if self.operation not in _OPERATIONS:
+        if not isinstance(self.operation, str) or self.operation not in _OPERATIONS:
             raise MemoryReplicationError("operation must be upsert or delete")
         object.__setattr__(self, "project", _project(self.project))
         object.__setattr__(self, "payload", _payload(self.payload, self.operation))
@@ -117,23 +142,57 @@ class MemoryMutation:
 
     @property
     def digest(self) -> str:
-        encoded = json.dumps(
-            {
-                "schema": "sonder.memory-mutation.v1",
-                "source_id": self.source_id,
-                "source_epoch": self.source_epoch,
-                "sequence": self.sequence,
-                "entity_kind": self.entity_kind,
-                "entity_id": self.entity_id,
-                "version": self.version,
-                "operation": self.operation,
-                "project": self.project,
-                "payload": dict(self.payload),
-                "recorded_at": self.recorded_at,
-            },
-            sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False,
-        ).encode("ascii")
-        return hashlib.sha256(encoded).hexdigest()
+        return hashlib.sha256(_canonical_json(self._wire_fields())).hexdigest()
+
+    def _wire_fields(self) -> dict[str, object]:
+        return {
+            "schema": "sonder.memory-mutation.v1",
+            "source_id": self.source_id,
+            "source_epoch": self.source_epoch,
+            "sequence": self.sequence,
+            "entity_kind": self.entity_kind,
+            "entity_id": self.entity_id,
+            "version": self.version,
+            "operation": self.operation,
+            "project": self.project,
+            "payload": dict(self.payload),
+            "recorded_at": self.recorded_at,
+        }
+
+    def as_dict(self) -> dict[str, object]:
+        """Return the canonical, self-authenticating wire representation."""
+        value = self._wire_fields()
+        value["digest"] = self.digest
+        return value
+
+    @classmethod
+    def from_dict(cls, value: object) -> "MemoryMutation":
+        expected = frozenset({
+            "schema", "source_id", "source_epoch", "sequence", "entity_kind",
+            "entity_id", "version", "operation", "project", "payload",
+            "recorded_at", "digest",
+        })
+        wire = _require_wire_keys(value, expected, "memory mutation")
+        if wire["schema"] != "sonder.memory-mutation.v1":
+            raise MemoryReplicationError("memory mutation schema is unsupported")
+        supplied_digest = wire["digest"]
+        if not isinstance(supplied_digest, str) or _DIGEST.fullmatch(supplied_digest) is None:
+            raise MemoryReplicationError("memory mutation digest is invalid")
+        mutation = cls(
+            source_id=wire["source_id"],
+            source_epoch=wire["source_epoch"],
+            sequence=wire["sequence"],
+            entity_kind=wire["entity_kind"],
+            entity_id=wire["entity_id"],
+            version=wire["version"],
+            operation=wire["operation"],
+            project=wire["project"],
+            payload=wire["payload"],
+            recorded_at=wire["recorded_at"],
+        )
+        if mutation.digest != supplied_digest:
+            raise MemoryReplicationError("memory mutation digest does not match fields")
+        return mutation
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,8 +209,7 @@ class MemoryReplicationBatch:
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_id", _identity(self.source_id, "source_id"))
         object.__setattr__(self, "source_epoch", _positive(self.source_epoch, "source_epoch"))
-        if isinstance(self.after_sequence, bool) or not isinstance(self.after_sequence, int) or self.after_sequence < 0:
-            raise MemoryReplicationError("after_sequence must be a non-negative integer")
+        object.__setattr__(self, "after_sequence", _non_negative(self.after_sequence, "after_sequence"))
         if type(self.records) is not tuple or len(self.records) > _MAX_RECORDS:
             raise MemoryReplicationError("records must be a bounded tuple")
         previous = self.after_sequence
@@ -164,10 +222,92 @@ class MemoryReplicationBatch:
                 raise MemoryReplicationError("batch sequences must increase")
             previous = record.sequence
         expected_next = previous if self.records else self.after_sequence
+        object.__setattr__(self, "next_sequence", _non_negative(self.next_sequence, "next_sequence"))
         if self.next_sequence != expected_next:
             raise MemoryReplicationError("next_sequence must identify the last record")
         if type(self.has_more) is not bool:
             raise MemoryReplicationError("has_more must be boolean")
 
+    def _wire_fields(self) -> dict[str, object]:
+        return {
+            "schema": "sonder.memory-replication-batch.v1",
+            "source_id": self.source_id,
+            "source_epoch": self.source_epoch,
+            "after_sequence": self.after_sequence,
+            "records": [record.as_dict() for record in self.records],
+            "next_sequence": self.next_sequence,
+            "has_more": self.has_more,
+        }
 
-__all__ = ["MemoryMutation", "MemoryReplicationBatch", "MemoryReplicationError"]
+    @property
+    def digest(self) -> str:
+        return hashlib.sha256(_canonical_json(self._wire_fields())).hexdigest()
+
+    def as_dict(self) -> dict[str, object]:
+        """Return the canonical, self-authenticating wire representation."""
+        value = self._wire_fields()
+        value["digest"] = self.digest
+        return value
+
+    @classmethod
+    def from_dict(cls, value: object) -> "MemoryReplicationBatch":
+        expected = frozenset({
+            "schema", "source_id", "source_epoch", "after_sequence", "records",
+            "next_sequence", "has_more", "digest",
+        })
+        wire = _require_wire_keys(value, expected, "memory replication batch")
+        if wire["schema"] != "sonder.memory-replication-batch.v1":
+            raise MemoryReplicationError("memory replication batch schema is unsupported")
+        supplied_digest = wire["digest"]
+        if not isinstance(supplied_digest, str) or _DIGEST.fullmatch(supplied_digest) is None:
+            raise MemoryReplicationError("memory replication batch digest is invalid")
+        records_value = wire["records"]
+        if not isinstance(records_value, list):
+            raise MemoryReplicationError("memory replication batch records must be a list")
+        batch = cls(
+            source_id=wire["source_id"],
+            source_epoch=wire["source_epoch"],
+            after_sequence=wire["after_sequence"],
+            records=tuple(MemoryMutation.from_dict(item) for item in records_value),
+            next_sequence=wire["next_sequence"],
+            has_more=wire["has_more"],
+        )
+        if batch.digest != supplied_digest:
+            raise MemoryReplicationError("memory replication batch digest does not match fields")
+        return batch
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryReplicaReceipt:
+    """Durability evidence returned by one explicitly configured replica."""
+
+    replica_id: str
+    source_id: str
+    source_epoch: int
+    next_sequence: int
+    batch_digest: str
+    durable: bool
+    inserted_records: int = 0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "replica_id", _identity(self.replica_id, "replica_id"))
+        object.__setattr__(self, "source_id", _identity(self.source_id, "source_id"))
+        object.__setattr__(self, "source_epoch", _positive(self.source_epoch, "source_epoch"))
+        object.__setattr__(self, "next_sequence", _non_negative(self.next_sequence, "next_sequence"))
+        if not isinstance(self.batch_digest, str) or _DIGEST.fullmatch(self.batch_digest) is None:
+            raise MemoryReplicationError("batch_digest must be a SHA-256 digest")
+        if type(self.durable) is not bool:
+            raise MemoryReplicationError("durable must be boolean")
+        object.__setattr__(
+            self,
+            "inserted_records",
+            _non_negative(self.inserted_records, "inserted_records", _MAX_RECORDS),
+        )
+
+
+__all__ = [
+    "MemoryMutation",
+    "MemoryReplicationBatch",
+    "MemoryReplicaReceipt",
+    "MemoryReplicationError",
+]
