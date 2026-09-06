@@ -683,7 +683,7 @@
       ]
     },
     {
-      "file_count": 172,
+      "file_count": 174,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -789,10 +789,12 @@
         "sonder_runtime/domain/mode_tool_policy.py",
         "sonder_runtime/domain/model_capabilities.py",
         "sonder_runtime/domain/model_catalog.py",
+        "sonder_runtime/domain/model_conformance.py",
         "sonder_runtime/domain/model_deployment.py",
         "sonder_runtime/domain/model_error_formatting.py",
         "sonder_runtime/domain/model_response_detail.py",
         "sonder_runtime/domain/model_routing.py",
+        "sonder_runtime/domain/model_shard_recovery.py",
         "sonder_runtime/domain/model_sizing.py",
         "sonder_runtime/domain/model_usage.py",
         "sonder_runtime/domain/model_usage_formatting.py",
