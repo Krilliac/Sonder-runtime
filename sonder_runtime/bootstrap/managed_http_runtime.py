@@ -42,6 +42,41 @@ def _configure_legacy_http_boundary(application, config, *, serve):
     )
 
 
+def _install_owned_app_work_if_enabled(application, config, *, serve):
+    """Compose the app-work dispatcher only for an explicitly enabled child.
+
+    ``configure_typed_config`` owns the app-control binding, while the child
+    owns the application and the app-work slot.  Keeping this composition in
+    the managed startup path makes the identity handoff explicit: a missing
+    control binding or an installer that does not publish the exact returned
+    service aborts before listener publication.  The default managed profile
+    keeps app control disabled, so this hook cannot silently add a new
+    externally reachable authority.
+    """
+    if not config.app_control.enabled:
+        return None
+    control = getattr(serve, "_APP_CONTROL_BINDING", None)
+    if control is None:
+        from ..application.ports.runtime_owner import OwnerRefused
+
+        raise OwnerRefused("typed app-control binding unavailable for managed work")
+    from .app_managed_work_http import install_owned_work_http
+    from .legacy_root import runtime as legacy_runtime
+    from ..adapters.security.permission_policy import PermissionPolicyProvider
+
+    binding = install_owned_work_http(
+        control,
+        application=application,
+        runtime=legacy_runtime(),
+        permission_engine=PermissionPolicyProvider(),
+    )
+    if getattr(control, "_work_binding", None) is not binding:
+        from ..application.ports.runtime_owner import OwnerRefused
+
+        raise OwnerRefused("owned app-work binding publication was not exact")
+    return binding
+
+
 def run(root, namespace, job_id):
     from ..application.compute_fabric.artifact_spool import PrivateDirectoryAnchor
 
@@ -280,6 +315,7 @@ def _run(root, workspace, namespace, job_id, anchor):
 
     serve.configure_typed_config(config)
     _configure_legacy_http_boundary(application, config, serve=serve)
+    _install_owned_app_work_if_enabled(application, config, serve=serve)
     lifecycle.configure(config)
     stopped = Event()
     errors = []
