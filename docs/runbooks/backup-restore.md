@@ -80,3 +80,43 @@ SONDER_HOME.
 
 Keep `/var/lib/sonder-pre-restore` until the restored system has been
 verified for as long as your incident policy requires.
+
+## Offline recovery rehearsal
+
+Run the disposable rehearsal against a verified backup before an upgrade or
+recovery exercise.  This is a local/test-only contract: it does not stop the
+service, switch `current`, contact a provider, or provide live failover.
+
+```python
+from pathlib import Path
+
+from sonder_runtime.adapters.updates.offline_rehearsal import (
+    FilesystemOfflineRecoveryPort,
+)
+from sonder_runtime.application.updates.recovery_rehearsal import (
+    OfflineRecoveryRehearsal, OfflineRehearsalRequest,
+)
+
+backup = "/var/backups/sonder/<verified-backup>"
+workspace = Path("/var/tmp/sonder-recovery-rehearsal")
+workspace.mkdir(parents=True, exist_ok=True)
+port = FilesystemOfflineRecoveryPort(workspace)
+manifest = port.inspect_backup(backup)
+known_source_revision = "<release revision recorded before the upgrade>"
+if manifest.source_revision != known_source_revision:
+    raise RuntimeError("selected backup is not the expected source revision")
+report = OfflineRecoveryRehearsal(port).run(OfflineRehearsalRequest(
+    backup_ref=backup,
+    destination_ref=str(workspace / "run-1"),
+    source_revision=known_source_revision,
+    target_revision="candidate-release-revision",
+))
+print(report.as_dict())
+```
+
+The default local adapter deliberately reports a failed candidate upgrade so
+the rollback and state-restore path is exercised.  The report must show the
+manifest/checksum digests, `rollback_verified=true`, the ordered steps, and a
+complete bounded cleanup receipt.  A mismatched source revision or corrupt
+manifest member is refused before staging.  The contract is evidence for a
+disposable drill; it is not evidence that a second host can take over.

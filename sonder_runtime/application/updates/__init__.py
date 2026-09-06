@@ -18,6 +18,12 @@ from .publication import (
 from .application_service import (
     PreparedUpdate, UpdateApplicationService, UpdateAuthorizationError,
 )
+from .recovery_rehearsal import (
+    ArtifactIntegrityError, BackupArtifact, BackupManifest, CleanupError,
+    CleanupReceipt, OfflineRecoveryPort, OfflineRecoveryRehearsal,
+    OfflineRehearsalReport, OfflineRehearsalRequest, RehearsalError,
+    RehearsalStep, RestoreReceipt, RevisionMismatchError, UpgradeAttempt,
+)
 
 __all__ = [
     "BoundedUpdateState", "MetadataChainError", "PublicationTarget",
@@ -25,4 +31,8 @@ __all__ = [
     "SignedReleaseEvidencePublisher", "TufLikeMetadata", "TufLikeMetadataChain",
     "UpdatePhase", "UpdateSnapshot", "UpdateTarget", "PreparedUpdate",
     "UpdateApplicationService", "UpdateAuthorizationError",
+    "ArtifactIntegrityError", "BackupArtifact", "BackupManifest", "CleanupError",
+    "CleanupReceipt", "OfflineRecoveryPort", "OfflineRecoveryRehearsal",
+    "OfflineRehearsalReport", "OfflineRehearsalRequest", "RehearsalError",
+    "RehearsalStep", "RestoreReceipt", "RevisionMismatchError", "UpgradeAttempt",
 ]
