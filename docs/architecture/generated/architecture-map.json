@@ -682,7 +682,7 @@
       ]
     },
     {
-      "file_count": 171,
+      "file_count": 172,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -703,6 +703,7 @@
         "sonder_runtime/domain/agents/verification_reach.py",
         "sonder_runtime/domain/approval.py",
         "sonder_runtime/domain/approvals_limit.py",
+        "sonder_runtime/domain/artifact_retention.py",
         "sonder_runtime/domain/artifact_risk_policy.py",
         "sonder_runtime/domain/automation/__init__.py",
         "sonder_runtime/domain/automation/checkpoint.py",
