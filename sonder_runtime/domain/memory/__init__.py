@@ -12,6 +12,12 @@ from .retention_gate import (
     RetentionDecisionStatus,
     decide_memory_retention,
 )
+from .replication import (
+    MemoryMutation,
+    MemoryReplicaReceipt,
+    MemoryReplicationBatch,
+    MemoryReplicationError,
+)
 
 __all__ = [
     "ActiveMemoryReference",
@@ -24,4 +30,8 @@ __all__ = [
     "MemoryRetentionRequest",
     "RetentionDecisionStatus",
     "decide_memory_retention",
+    "MemoryMutation",
+    "MemoryReplicaReceipt",
+    "MemoryReplicationBatch",
+    "MemoryReplicationError",
 ]

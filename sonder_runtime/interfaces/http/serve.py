@@ -35,6 +35,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from sonder_runtime.interfaces.http.artifact_transfer import handle_artifact_transfer, is_artifact_route
+from sonder_runtime.interfaces.http.memory_replication import (
+    handle_memory_replication,
+    is_memory_replication_route,
+)
 
 _APP_CONTROL_BINDING = None
 _APP_CONTROL_CONFIG = None
@@ -42,6 +46,7 @@ from sonder_runtime.interfaces.http.app_control import handle_app_control, is_ap
 
 _ARTIFACT_TRANSFER_BINDING = None
 _ARTIFACT_TRANSFER_CONFIG = None
+_MEMORY_REPLICATION_RECEIVER = None
 _ACCOUNT_LOGOUT_ADMISSION = threading.BoundedSemaphore(2)
 
 import logging as _logging_module
@@ -135,6 +140,24 @@ def configure_a2a_request_handler(handler):
     _A2A_REQUEST_HANDLER = handler
     _serve_logger.info(f"A2A request handler configured, handler_set={handler is not None}")
     return handler
+
+
+def configure_memory_replication_receiver(receiver):
+    """Inject the explicitly configured peer receiver, or disable the route.
+
+    No receiver is created by the HTTP adapter.  A host must construct one
+    with its own durable sink, API key, and accepted source identities before
+    this route becomes reachable.
+    """
+    if receiver is not None and not callable(getattr(receiver, "receive_bytes", None)):
+        raise TypeError("memory replication receiver must provide receive_bytes")
+    global _MEMORY_REPLICATION_RECEIVER
+    _MEMORY_REPLICATION_RECEIVER = receiver
+    _serve_logger.info(
+        "Memory replication receiver configured: enabled=%s",
+        receiver is not None,
+    )
+    return receiver
 
 
 def configure_control_plane_service(service):
@@ -3604,6 +3627,7 @@ class Handler(BaseHTTPRequestHandler):
         caller needs to see.
         """
         if (getattr(self, "_artifact_transfer_request", False)
+                or getattr(self, "_memory_replication_request", False)
                 or getattr(self, "_app_control_request", False)
                 or _request_route(getattr(self, "path", "")) in ("/v1/compute/nodes", "/v1/compute/nodes/refresh")):
             return
@@ -3665,8 +3689,10 @@ class Handler(BaseHTTPRequestHandler):
         super().send_error(code, message, explain)
 
     def log_message(self, fmt, *args):
-        if is_artifact_route(getattr(self, "path", "")) or is_app_control_route(getattr(self, "path", "")):
-            sys.stderr.write("[sonder_serve] artifact transfer response\n")
+        if (is_artifact_route(getattr(self, "path", ""))
+                or is_memory_replication_route(getattr(self, "path", ""))
+                or is_app_control_route(getattr(self, "path", ""))):
+            sys.stderr.write("[sonder_serve] private transfer response\n")
             return
         sys.stderr.write("[sonder_serve] %s\n" % (fmt % args))
 
@@ -3679,6 +3705,10 @@ class Handler(BaseHTTPRequestHandler):
         self._request_started = time.monotonic()
         self._request_body_consumed = False
         self._app_control_request = False
+        self._memory_replication_request = False
+        if handle_memory_replication(
+                self, "OPTIONS", _MEMORY_REPLICATION_RECEIVER):
+            return
         if handle_app_control(self, "OPTIONS", _APP_CONTROL_BINDING,
                 deployment_authorized=_app_control_deployment_authorized,
                 work_binding=_app_managed_work_binding):
@@ -4203,6 +4233,10 @@ class Handler(BaseHTTPRequestHandler):
         self._request_started = time.monotonic()
         self._request_body_consumed = False
         self._app_control_request = False
+        self._memory_replication_request = False
+        if handle_memory_replication(
+                self, "PUT", _MEMORY_REPLICATION_RECEIVER):
+            return
         if handle_app_control(self, "PUT", _APP_CONTROL_BINDING,
                 deployment_authorized=_app_control_deployment_authorized,
                 work_binding=_app_managed_work_binding):
@@ -4217,6 +4251,10 @@ class Handler(BaseHTTPRequestHandler):
         self._request_started = time.monotonic()
         self._request_body_consumed = False
         self._app_control_request = False
+        self._memory_replication_request = False
+        if handle_memory_replication(
+                self, "GET", _MEMORY_REPLICATION_RECEIVER):
+            return
         if handle_app_control(self, "GET", _APP_CONTROL_BINDING,
                 deployment_authorized=_app_control_deployment_authorized,
                 work_binding=_app_managed_work_binding):
@@ -5208,6 +5246,10 @@ class Handler(BaseHTTPRequestHandler):
         self._chat_completion_metrics_recorded = False
         self._request_body_consumed = False
         self._app_control_request = False
+        self._memory_replication_request = False
+        if handle_memory_replication(
+                self, "POST", _MEMORY_REPLICATION_RECEIVER):
+            return
         if handle_app_control(self, "POST", _APP_CONTROL_BINDING,
                 deployment_authorized=_app_control_deployment_authorized,
                 work_binding=_app_managed_work_binding):
@@ -6472,6 +6514,11 @@ def main(config=None, *, _server_factory=None, _close_default_resources=True):
         finally:
             if _ARTIFACT_TRANSFER_BINDING is not None:
                 _ARTIFACT_TRANSFER_BINDING.close()
+            receiver = _MEMORY_REPLICATION_RECEIVER
+            if receiver is not None:
+                close = getattr(receiver, "close", None)
+                if callable(close):
+                    close()
         _serve_logger.info("HTTP server stopped")
 
 
