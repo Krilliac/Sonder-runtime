@@ -92,6 +92,8 @@ class HttpsArtifactTransferPeer:
                 response_headers = response.headers
         except (urllib.error.URLError, OSError, ValueError):
             raise TransferError("PEER_UNAVAILABLE") from None
+        if not isinstance(raw, bytes):
+            raise TransferError("PEER_PROTOCOL")
         if len(raw) > limit or response_headers.get("Content-Length") != str(len(raw)):
             raise TransferError("PEER_LENGTH")
         if binary:
