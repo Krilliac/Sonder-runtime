@@ -532,6 +532,81 @@ void main() {
     }
   });
 
+  testWidgets('System shows deployment profile and honest takeover limits', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(900, 1000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final info = SystemInfo.fromJson({
+      'status': 'ready',
+      'deployment': {
+        'profile': 'pooled-pair',
+        'profile_id': 'two-pc',
+        'local_node': 'secondary',
+        'configured_members': ['secondary', 'primary'],
+        'preferred_primary': 'primary',
+        'control_state_scope': 'local-instance',
+        'preference_confers_authority': false,
+        'partition_policy': 'no_promotion_without_fencing_and_acknowledged_data',
+        'capabilities': {
+          'private_compute': {
+            'available': true,
+            'reason': 'Configured private-node compute is enabled.',
+          },
+          'automatic_takeover': {
+            'available': false,
+            'reason': 'Fencing and acknowledged replication are not integrated.',
+          },
+          'acknowledged_state_replication': {
+            'available': false,
+            'reason': 'No replication backend is integrated.',
+          },
+          'worker_epoch_fencing': {
+            'available': false,
+            'reason': 'Ownership epochs are not integrated.',
+          },
+          'quorum': {
+            'available': false,
+            'reason': 'No quorum provider is integrated.',
+          },
+        },
+      },
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: SystemScreen(
+          settings: Settings(),
+          initialInfo: info,
+          liveUpdates: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('deployment-panel')),
+      240,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Deployment profile'), findsOneWidget);
+    expect(find.text('Two PC (pooled-pair)'), findsOneWidget);
+    expect(find.text('secondary, primary'), findsOneWidget);
+    expect(
+      find.textContaining('Unavailable — Fencing and acknowledged replication'),
+      findsOneWidget,
+    );
+    expect(
+      find.text(
+        'Primary preference is advisory; it never grants promotion authority.',
+      ),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('System shows caller-judged work, never the blended rate alone', (
     tester,
   ) async {

@@ -1258,6 +1258,16 @@ class _SystemScreenState extends State<SystemScreen>
           if (info != null) ...[
             _Section(title: 'Status', child: _OutputText(info.status)),
             const SizedBox(height: 12),
+            if (info.deployment != null) ...[
+              _Section(
+                title: 'Deployment profile',
+                child: _DeploymentPanel(
+                  key: const Key('deployment-panel'),
+                  info: info.deployment!,
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
             if (info.runtimePolicy != null) ...[
               _Section(
                 key: _systemPolicyKey,
@@ -2369,6 +2379,104 @@ class _AgentStatusPanel extends StatelessWidget {
         if (status.events.isNotEmpty) ...[
           const SizedBox(height: 4),
           _OutputCard(text: status.events.take(8).join('\n')),
+        ],
+      ],
+    );
+  }
+}
+
+class _DeploymentPanel extends StatelessWidget {
+  final DeploymentInfo info;
+
+  const _DeploymentPanel({super.key, required this.info});
+
+  String _capabilityValue(DeploymentCapabilityInfo capability) {
+    if (capability.available) {
+      return capability.reason.isEmpty
+          ? 'Available'
+          : 'Available — ${capability.reason}';
+    }
+    return capability.reason.isEmpty
+        ? 'Unavailable'
+        : 'Unavailable — ${capability.reason}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final privateCompute = info.capability('private_compute');
+    final takeover = info.capability('automatic_takeover');
+    final replication = info.capability('acknowledged_state_replication');
+    final fencing = info.capability('worker_epoch_fencing');
+    final quorum = info.capability('quorum');
+    final policy = info.partitionPolicy.replaceAll('_', ' ');
+    return Column(
+      key: const Key('deployment-panel-content'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _StatusRow(
+          label: 'Profile',
+          value: info.profile.isEmpty
+              ? info.displayProfile
+              : '${info.displayProfile} (${info.profile})',
+          ok: info.profile.isNotEmpty || info.profileId.isNotEmpty,
+        ),
+        _StatusRow(
+          label: 'Members',
+          value: info.membersLabel,
+          ok: info.configuredMembers.isNotEmpty,
+        ),
+        if (info.localNode.isNotEmpty)
+          _StatusRow(label: 'Local node', value: info.localNode, ok: true),
+        if (info.preferredPrimary.isNotEmpty)
+          _StatusRow(
+            label: 'Preferred primary',
+            value: info.preferredPrimary,
+            ok: true,
+          ),
+        _StatusRow(
+          label: 'Private compute',
+          value: _capabilityValue(privateCompute),
+          ok: privateCompute.available,
+        ),
+        _StatusRow(
+          label: 'Automatic takeover',
+          value: _capabilityValue(takeover),
+          ok: takeover.available,
+        ),
+        _StatusRow(
+          label: 'State replication',
+          value: _capabilityValue(replication),
+          ok: replication.available,
+        ),
+        _StatusRow(
+          label: 'Worker fencing',
+          value: _capabilityValue(fencing),
+          ok: fencing.available,
+        ),
+        _StatusRow(
+          label: 'Quorum',
+          value: _capabilityValue(quorum),
+          ok: quorum.available,
+        ),
+        if (info.controlStateScope.isNotEmpty)
+          _StatusRow(
+            label: 'State scope',
+            value: info.controlStateScope,
+            ok: true,
+          ),
+        if (policy.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          Text(
+            'Partition policy: $policy.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
+        if (!info.preferenceConfersAuthority) ...[
+          const SizedBox(height: 4),
+          Text(
+            'Primary preference is advisory; it never grants promotion authority.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
         ],
       ],
     );

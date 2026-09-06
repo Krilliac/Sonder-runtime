@@ -16,7 +16,7 @@ production lifecycle and admission layer (`sonder_lifecycle.py`).
 | `GET /v1/models` | key | Route IDs plus exact chat-capable catalog models. |
 | `POST /v1/admin/drain` | admin | Begin graceful drain (idempotent). |
 | `GET /v1/admin/updates/status` | admin | Durable update state (System page). |
-| `GET /v1/sonder/status` | admin/owner | Rich host-wide runtime/stats snapshot. Ordinary hosted accounts receive only their account and the model catalog. |
+| `GET /v1/sonder/status` | admin/owner | Rich host-wide runtime/stats snapshot, including the configured deployment profile and honest capability availability. Ordinary hosted accounts receive only their account and the model catalog. |
 | `GET /v1/sonder/feed` | any authorized caller | Owner-scoped live execution feed: the caller's own active and recently completed responses (category/name, state, elapsed, redacted summary, current operation). Never exposes prompts, tool arguments, paths, outputs, reasoning, or another principal's work. |
 
 `/live` may be unauthenticated so an external check never needs the key;
@@ -28,6 +28,14 @@ tier IDs. It also includes exact installed/discovered models that declare a
 chat capability; embedding- or vision-only entries are omitted. Cloud models
 appear only after the operator enables cloud use, so clients must treat the
 response as the live allowlist rather than a static catalog.
+
+The administrator `/v1/sonder/status` projection includes `deployment` with
+the configured members, canonical `profile_id` (`single-pc` or `two-pc`), local
+control-state scope, and per-capability `available`/`reason` values. A preferred
+primary is advisory. In the currently supported profiles, automatic takeover,
+failback, explicit promotion, acknowledged state replication, worker-epoch
+fencing, and quorum remain explicitly unavailable until their external
+authority prerequisites are integrated.
 
 ## Chat request
 
