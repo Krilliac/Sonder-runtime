@@ -4,6 +4,11 @@ from threading import Event, Thread
 import pytest
 
 from sonder_runtime.application.context import local_owner_context
+from sonder_runtime.application.ports.continuation_mutations import (
+    ContinuationCommitAmbiguous,
+    ContinuationMutationOutcome,
+    prepare_call,
+)
 from sonder_runtime.application.ports.subagents import SubagentBudget, SubagentRequest, SubagentStatus
 from sonder_runtime.application.subagents.continuable import ContinuableCheckpoint
 from sonder_runtime.application.subagents.durable_continuation import (
@@ -93,6 +98,30 @@ def test_durable_cancellation_survives_service_boundary_and_first_reason_wins(tm
     restored = SQLiteDurableContinuationRepository(path).get("child-cancel")
     assert restored and restored.cancellation_reason == "operator stop"
     service.close(1)
+
+
+def test_public_cancellation_settles_a_prior_worker_receipt_before_retry(tmp_path):
+    repository = SQLiteDurableContinuationRepository(tmp_path / "cancel-retry.sqlite")
+    pending = prepare_call(
+        "update",
+        "child-pending",
+        status=SubagentStatus.RUNNING,
+        expected_revision=0,
+    )
+    attempts = []
+
+    def mutate(prepared):
+        attempts.append(prepared)
+        if len(attempts) == 1:
+            raise ContinuationCommitAmbiguous(pending)
+        return ContinuationMutationOutcome("no_change", b"false", None)
+
+    repository.mutate = mutate
+    repository.reconcile = lambda _prepared: None
+
+    assert repository.request_cancel("child-pending", reason="operator stop") is False
+    assert len(attempts) == 2
+    assert attempts[0] == attempts[1]
 
 
 def test_cancellation_waits_for_external_intent_receipt(tmp_path):

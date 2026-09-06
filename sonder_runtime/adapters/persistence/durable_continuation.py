@@ -21,7 +21,7 @@ import json
 import sqlite3
 from pathlib import Path
 from threading import Lock, Condition
-from time import monotonic
+from time import monotonic, sleep
 
 from sonder_runtime.application.ports.subagents import (
     InvalidSubagentRequest,
@@ -53,6 +53,13 @@ CREATE TABLE IF NOT EXISTS durable_child_session (
     cancellation_requested INTEGER NOT NULL, cancellation_reason TEXT
 );
 """
+
+
+# A public cancellation request may race a worker's terminal update after the
+# worker has retained its intent but before its receipt is committed.  Give a
+# healthy writer a short, finite opportunity to settle that prior intent; a
+# crashed writer still returns the original fail-closed ambiguity.
+_CANCELLATION_SETTLEMENT_GRACE_SECONDS = 1.0
 
 
 def _budget_json(budget: SubagentBudget) -> str:
@@ -571,9 +578,23 @@ class SQLiteDurableContinuationRepository:
         ).value
 
     def request_cancel(self, child_id, *, reason):
-        return self.mutate(
-            prepare_call("request_cancel", child_id, reason=reason)
-        ).value
+        prepared = prepare_call("request_cancel", child_id, reason=reason)
+        deadline = monotonic() + _CANCELLATION_SETTLEMENT_GRACE_SECONDS
+        while True:
+            try:
+                return self.mutate(prepared).value
+            except ContinuationCommitAmbiguous as error:
+                # Keep this retry scoped to cancellation.  Other mutation
+                # callers retain their immediate ambiguity contract, and the
+                # same prepared identity prevents duplicate intent rows.
+                if error.prepared.child_id != child_id:
+                    raise
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise
+                if self.reconcile(error.prepared) is not None:
+                    continue
+                sleep(min(0.01, remaining))
 
     def _apply_save_checkpoint(
         self, connection, checkpoint: ContinuableCheckpoint, *, expected_sequence: int
