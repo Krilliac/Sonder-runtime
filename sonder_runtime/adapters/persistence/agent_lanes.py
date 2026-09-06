@@ -604,6 +604,77 @@ class LaneTransaction:
         self.save(lane)
         return lane
 
+    def archive(self, lane):
+        """Retire a quiescent lane while preserving its append-only audit log.
+
+        The lane row and its immutable outbox events remain available for
+        inspection. Mailbox bodies and the fleet agent row are deliberately
+        retired only after all reports have been acknowledged and no queued
+        instructions or uncertain effects remain. The returned tombstone is
+        bounded metadata, never a copy of message content.
+        """
+        if lane["status"] == "archived":
+            raise ValueError("lane already archived")
+        if lane["status"] not in {"completed", "failed", "cancelled", "interrupted"}:
+            raise ValueError("only a terminal lane can be archived")
+        if lane.get("owner") or lane.get("pending_effect") or lane.get("pending_response"):
+            raise ValueError("lane must be quiescent before archive")
+        rows = self.conn.execute(
+            "SELECT message_id,sequence,author,attempt_id,report,acknowledged,delivery_state "
+            "FROM agent_lane_messages WHERE lane_id=? ORDER BY sequence LIMIT 1025",
+            (lane["id"],),
+        ).fetchall()
+        if len(rows) > 1024:
+            raise ValueError("lane mailbox bound exceeded; archive requires reconciliation")
+        if any(
+            (row["report"] and not row["acknowledged"])
+            or (not row["report"] and row["delivery_state"] == "queued")
+            for row in rows
+        ):
+            raise ValueError("acknowledge reports and drain messages before archive")
+        metadata = [
+            {
+                "id": row["message_id"],
+                "sequence": row["sequence"],
+                "author": row["author"],
+                "attempt_id": row["attempt_id"],
+                "report": bool(row["report"]),
+                "acknowledged": bool(row["acknowledged"]),
+                "delivery_state": row["delivery_state"],
+            }
+            for row in rows
+        ]
+        digest = hashlib.sha256(encode(metadata).encode("utf-8")).hexdigest()
+        tombstone = {
+            "version": 1,
+            "archived_at": time.time(),
+            "message_count": len(rows),
+            "report_count": sum(bool(row["report"]) for row in rows),
+            "digest": digest,
+        }
+        lane["status"] = "archived"
+        lane["archived_at"] = tombstone["archived_at"]
+        lane["archive_tombstone"] = tombstone
+        self.emit(lane, "lane.archived", tombstone)
+        self.save(lane)
+        ids = [row["message_id"] for row in rows]
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            self.conn.execute(
+                "DELETE FROM agent_lane_messages WHERE lane_id=?", (lane["id"],)
+            )
+            self.conn.execute(
+                "DELETE FROM fleet_messages WHERE message_id IN (" + placeholders + ")",
+                ids,
+            )
+        # Fleet activity is a projection and can be retired after the
+        # canonical lane row and archive event are durable.
+        self.conn.execute(
+            "DELETE FROM fleet_agents WHERE id=? AND role='agent_lane'",
+            (lane["id"],),
+        )
+        return lane
+
 
 class SQLiteAgentLaneStore:
     def __init__(self, path, sessions):
