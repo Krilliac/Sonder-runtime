@@ -36,11 +36,12 @@ STDLIB = set(sys.stdlib_module_names)
 
 # Root modules each layer may reach while the strangler migration runs.
 ROOT_PLATFORM_MODULES = set()
-# These platform-owned modules contain the unavoidable standard-library
-# edges for parsing configured Ollama URLs and reading the local build stamp.
-# They are not root-module compatibility allowances.
+# These platform-owned modules contain pure standard-library URL parsing.
+# They never initiate transport and are not root-module compatibility
+# allowances.
 PLATFORM_NETWORK_MODULES = frozenset({
     "sonder_runtime/platform/config.py",
+    "sonder_runtime/platform/control_state_rehearsal_config.py",
 })
 PLATFORM_SUBPROCESS_MODULES = frozenset({
     "sonder_runtime/platform/system_profile.py",
