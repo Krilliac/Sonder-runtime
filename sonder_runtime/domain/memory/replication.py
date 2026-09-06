@@ -304,6 +304,59 @@ class MemoryReplicaReceipt:
             _non_negative(self.inserted_records, "inserted_records", _MAX_RECORDS),
         )
 
+    def _wire_fields(self) -> dict[str, object]:
+        return {
+            "schema": "sonder.memory-replica-receipt.v1",
+            "replica_id": self.replica_id,
+            "source_id": self.source_id,
+            "source_epoch": self.source_epoch,
+            "next_sequence": self.next_sequence,
+            "batch_digest": self.batch_digest,
+            "durable": self.durable,
+            "inserted_records": self.inserted_records,
+        }
+
+    @property
+    def digest(self) -> str:
+        """Return a canonical digest for transport response validation."""
+
+        return hashlib.sha256(_canonical_json(self._wire_fields())).hexdigest()
+
+    def as_dict(self) -> dict[str, object]:
+        """Return a self-authenticating, bounded receipt representation."""
+
+        value = self._wire_fields()
+        value["digest"] = self.digest
+        return value
+
+    @classmethod
+    def from_dict(cls, value: object) -> "MemoryReplicaReceipt":
+        expected = frozenset({
+            "schema", "replica_id", "source_id", "source_epoch",
+            "next_sequence", "batch_digest", "durable", "inserted_records",
+            "digest",
+        })
+        wire = _require_wire_keys(value, expected, "memory replica receipt")
+        if wire["schema"] != "sonder.memory-replica-receipt.v1":
+            raise MemoryReplicationError("memory replica receipt schema is unsupported")
+        supplied_digest = wire["digest"]
+        if not isinstance(supplied_digest, str) or _DIGEST.fullmatch(supplied_digest) is None:
+            raise MemoryReplicationError("memory replica receipt digest is invalid")
+        receipt = cls(
+            replica_id=wire["replica_id"],
+            source_id=wire["source_id"],
+            source_epoch=wire["source_epoch"],
+            next_sequence=wire["next_sequence"],
+            batch_digest=wire["batch_digest"],
+            durable=wire["durable"],
+            inserted_records=wire["inserted_records"],
+        )
+        if receipt.digest != supplied_digest:
+            raise MemoryReplicationError(
+                "memory replica receipt digest does not match fields"
+            )
+        return receipt
+
 
 __all__ = [
     "MemoryMutation",

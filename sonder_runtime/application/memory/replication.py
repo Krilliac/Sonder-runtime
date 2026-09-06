@@ -9,6 +9,8 @@ transferred batch.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hmac
+import json
 import re
 from typing import Protocol, Sequence, runtime_checkable
 
@@ -273,9 +275,104 @@ class MemoryReplicationCoordinator:
         return None
 
 
+class MemoryReplicationReceiver:
+    """Authenticate and apply one bounded batch on an explicit peer.
+
+    The receiver is an application boundary so HTTP adapters never need to
+    import domain records or transport libraries.  Peer admission is explicit:
+    only configured source identities can write to the injected sink.
+    """
+
+    def __init__(
+        self,
+        sink: MemoryReplicationSink,
+        *,
+        api_key: str,
+        accepted_source_ids: tuple[str, ...],
+        max_body_bytes: int = 8 * 1024 * 1024,
+    ) -> None:
+        if not callable(getattr(sink, "apply", None)):
+            raise TypeError("memory replication sink must provide apply(batch)")
+        self.sink = sink
+        self.identity = _identity(getattr(sink, "identity", None), "replica identity")
+        if not isinstance(api_key, str) or not 1 <= len(api_key) <= 512:
+            raise ValueError("memory replication API key must be 1..512 characters")
+        if any(ord(char) < 0x21 or ord(char) > 0x7E for char in api_key):
+            raise ValueError("memory replication API key must contain printable ASCII")
+        self._api_key = api_key
+        if type(accepted_source_ids) is not tuple or not 1 <= len(accepted_source_ids) <= _MAX_REPLICAS:
+            raise ValueError(
+                f"accepted_source_ids must contain 1..{_MAX_REPLICAS} identities"
+            )
+        normalized = tuple(
+            _identity(item, "accepted source identity")
+            for item in accepted_source_ids
+        )
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("accepted_source_ids must not contain duplicates")
+        if self.identity in normalized:
+            raise ValueError("receiver identity cannot be an accepted source")
+        if type(max_body_bytes) is not int or not 1024 <= max_body_bytes <= 64 * 1024 * 1024:
+            raise ValueError(
+                "memory replication body bound must be within 1024..67108864 bytes"
+            )
+        self.accepted_source_ids = normalized
+        self.max_body_bytes = max_body_bytes
+
+    def receive(self, authorization: str, payload: object) -> MemoryReplicaReceipt:
+        expected = "Bearer " + self._api_key
+        if (
+            not isinstance(authorization, str)
+            or len(authorization) > 520
+            or not hmac.compare_digest(authorization, expected)
+        ):
+            raise PermissionError("memory replication authentication is required")
+        if not isinstance(payload, dict) or set(payload) != {"object", "batch"}:
+            raise MemoryReplicationError("memory replication request envelope is invalid")
+        if payload.get("object") != "memory_replication_batch":
+            raise MemoryReplicationError("memory replication request envelope is invalid")
+        try:
+            batch = MemoryReplicationBatch.from_dict(payload["batch"])
+        except (MemoryReplicationError, TypeError, ValueError) as exc:
+            raise MemoryReplicationError(str(exc)) from exc
+        if batch.source_id not in self.accepted_source_ids:
+            raise PermissionError("memory replication source is not accepted")
+        try:
+            receipt = self.sink.apply(batch)
+        except (MemoryReplicationError, PermissionError):
+            raise
+        except Exception as exc:
+            raise RuntimeError("memory replication sink is unavailable") from exc
+        if not isinstance(receipt, MemoryReplicaReceipt):
+            raise MemoryReplicationError("memory replication sink returned an invalid receipt")
+        if (
+            receipt.replica_id != self.identity
+            or receipt.source_id != batch.source_id
+            or receipt.source_epoch != batch.source_epoch
+            or receipt.next_sequence != batch.next_sequence
+            or receipt.batch_digest != batch.digest
+            or receipt.durable is not True
+            or receipt.inserted_records > len(batch.records)
+        ):
+            raise MemoryReplicationError(
+                "memory replication sink receipt does not match the batch"
+            )
+        return receipt
+
+    def receive_bytes(self, authorization: str, body: bytes) -> MemoryReplicaReceipt:
+        if not isinstance(body, bytes) or len(body) > self.max_body_bytes:
+            raise MemoryReplicationError("memory replication request exceeds the body bound")
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise MemoryReplicationError("memory replication request is not valid JSON") from exc
+        return self.receive(authorization, payload)
+
+
 __all__ = [
     "MemoryReplicationCoordinator",
     "MemoryReplicationOutcome",
+    "MemoryReplicationReceiver",
     "MemoryReplicationSink",
     "SQLiteMemoryReplicationSink",
 ]

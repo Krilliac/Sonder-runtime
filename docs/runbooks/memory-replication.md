@@ -42,8 +42,40 @@ safe because the SQLite journal is idempotent; a replay receipt can therefore
 have `inserted_records=0`.  An empty export returns `empty` and never counts
 as a peer acknowledgement.
 
-The current sink is intentionally local and explicit.  There is no network
-transport, owner election, quorum service, automatic takeover/failback,
-cross-process fencing, or claim of high availability in this contract.  A
-deployment that needs those guarantees must add a separately reviewed
-transport and control-state provider around these receipts.
+## Explicit HTTPS peer transport
+
+The same coordinator can use the authenticated `HttpsMemoryReplicationSink`
+for a configured peer.  A remote origin must use HTTPS; plain HTTP is accepted
+only for loopback development/testing.  The sink sends one canonical batch to
+`POST /v1/memory/replication/batches`, rejects redirects and oversized bodies,
+and accepts a receipt only when its self-authenticating digest, source, epoch,
+cursor, replica identity, and durable flag match the batch.
+
+```python
+from sonder_runtime.adapters.memory_replication import HttpsMemoryReplicationSink
+
+remote = HttpsMemoryReplicationSink(
+    identity="node-b",
+    origin="https://node-b.example:8443",
+    api_key="a-private-peer-key",
+)
+coordinator = MemoryReplicationCoordinator(
+    source,
+    (remote,),
+    minimum_data_replicas=2,
+)
+```
+
+The receiving host constructs `MemoryReplicationReceiver` with its durable
+SQLite sink, the same peer key, and an explicit tuple of accepted source IDs,
+then injects it with `configure_memory_replication_receiver`.  The HTTP route
+is disabled until that injection; it accepts no browser `Origin`, account
+fields, or source identity supplied outside the signed batch.  A receiver
+failure is returned as unavailable so the coordinator records `pending` rather
+than claiming a durable copy.
+
+This transport provides authenticated, digest-bound delivery and idempotent
+replay only.  It does not elect an owner, provide quorum, fence processes,
+replicate control state, or claim automatic takeover/failback or high
+availability.  Those guarantees require a separately reviewed replication and
+consensus provider around these receipts.
