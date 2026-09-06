@@ -19,6 +19,7 @@ from ..platform.config import (
     ComputeConfig,
     ComputeNodeConfig,
     DeploymentConfig,
+    PROFILES,
     Secrets,
     SonderConfig,
     deployment_errors,
@@ -68,6 +69,8 @@ def _validate_config(config: SonderConfig) -> tuple[str, str]:
     section = config.control_state_rehearsal
     if section.enabled is False:
         raise ValueError("control-state rehearsal is disabled")
+    if config.profile not in PROFILES:
+        raise ValueError(_INVALID_CONFIGURATION)
 
     try:
         errors = [
