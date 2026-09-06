@@ -101,35 +101,11 @@ _REHEARSAL_PREFIX = "rehearsal-"
 _REHEARSAL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _REHEARSAL_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_REHEARSAL_SEQUENCE = (1 << 63) - 1
-_TOP_LEVEL_COMMANDS = frozenset(
-    {
-        "preflight",
-        "doctor",
-        "status",
-        "diagnostics",
-        "config",
-        "migrate",
-        "backup",
-        "restore",
-        "smoke",
-        "control-state-rehearsal",
-        "serve",
-        "repl",
-        "mcp",
-        "drain",
-        "update",
-        "rotate-key",
-        "eval-history",
-    }
-)
 
 
-def _first_top_level_command(argv: list[str]) -> str | None:
-    """Find the first literal top-level command without parsing unsafe input."""
-    for value in argv:
-        if isinstance(value, str) and value in _TOP_LEVEL_COMMANDS:
-            return value
-    return None
+def _contains_rehearsal_literal(argv: list[str]) -> bool:
+    """Identify raw invocations that could expose rehearsal-only input."""
+    return any(value == "control-state-rehearsal" for value in argv)
 
 
 def _rehearsal_report(status: str, *, reason: str | None = None) -> dict[str, object]:
@@ -1498,12 +1474,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
-    if _first_top_level_command(raw_argv) == "control-state-rehearsal":
+    if _contains_rehearsal_literal(raw_argv):
         # argparse includes caller-provided values in its errors.  This one
         # command admits provider credentials and an explicitly bounded
-        # disposable scope, so keep only its parse failures content-free.
-        # Nonzero parser exits are handled; --help and --version retain their
-        # normal successful SystemExit behavior.
+        # disposable scope, so keep any parse failure containing its literal
+        # content-free. A malformed leading option cannot safely distinguish
+        # its value from a command token. Normal argv without this literal
+        # retains ordinary argparse behavior. Nonzero parser exits are handled;
+        # --help and --version retain their normal successful SystemExit behavior.
         with contextlib.redirect_stderr(io.StringIO()):
             try:
                 args = build_parser().parse_args(raw_argv)

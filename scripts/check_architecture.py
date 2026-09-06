@@ -36,12 +36,11 @@ STDLIB = set(sys.stdlib_module_names)
 
 # Root modules each layer may reach while the strangler migration runs.
 ROOT_PLATFORM_MODULES = set()
-# These platform-owned modules contain pure standard-library URL parsing.
-# They never initiate transport and are not root-module compatibility
-# allowances.
-PLATFORM_NETWORK_MODULES = frozenset({
-    "sonder_runtime/platform/config.py",
-    "sonder_runtime/platform/control_state_rehearsal_config.py",
+# These two platform-owned config parsers may use urllib.parse only. They never
+# initiate transport and are not root-module compatibility allowances.
+PLATFORM_PURE_URL_IMPORTS = frozenset({
+    ("sonder_runtime/platform/config.py", "urllib.parse"),
+    ("sonder_runtime/platform/control_state_rehearsal_config.py", "urllib.parse"),
 })
 PLATFORM_SUBPROCESS_MODULES = frozenset({
     "sonder_runtime/platform/system_profile.py",
@@ -792,7 +791,7 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
                 if (
                     top in IO_MODULES
                     and layer not in ("adapters", "entry")
-                    and rel.as_posix() not in PLATFORM_NETWORK_MODULES
+                    and (rel.as_posix(), name) not in PLATFORM_PURE_URL_IMPORTS
                     and rel.as_posix() not in DOMAIN_PURE_URL_MODULES
                 ):
                     violations.append(
