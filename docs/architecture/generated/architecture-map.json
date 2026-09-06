@@ -692,7 +692,7 @@
       ]
     },
     {
-      "file_count": 181,
+      "file_count": 182,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -815,6 +815,7 @@
         "sonder_runtime/domain/native_tool_policy.py",
         "sonder_runtime/domain/natural_model_request.py",
         "sonder_runtime/domain/ollama_policy.py",
+        "sonder_runtime/domain/operational_capabilities.py",
         "sonder_runtime/domain/permission_context.py",
         "sonder_runtime/domain/project_scope_keys.py",
         "sonder_runtime/domain/promotion/__init__.py",
