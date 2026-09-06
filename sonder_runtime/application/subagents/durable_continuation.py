@@ -12,6 +12,7 @@ from sonder_runtime.application.ports.runtime_threads import Thread as owned_run
 
 from collections.abc import Callable, Mapping
 from threading import Event, Lock, Thread
+from time import monotonic, sleep
 from typing import Protocol
 from uuid import uuid4
 from ..ports.continuation_mutations import (
@@ -59,6 +60,13 @@ class DurableContinuationRepository(Protocol):
 
 Runner = Callable[[Mapping[str, object], Callable[[Mapping[str, object], str | None], ContinuableCheckpoint], "DurableCancellation"], str]
 
+# A second repository process can have durably retained an intent while it is
+# still finishing the effect receipt.  Cancellation is cooperative, so give
+# that ordered write a short, bounded chance to settle before publishing the
+# terminal cancellation result.  An absent receipt after the grace period is
+# still an ambiguous storage outcome and remains fail-closed.
+_CANCELLATION_SETTLEMENT_GRACE_SECONDS = 1.0
+
 
 class DurableCancellation:
     def __init__(self, repository: DurableContinuationRepository, child_id: str,
@@ -100,7 +108,7 @@ class DurableContinuationService:
         self._admitted_roots: dict[str, int] = {}
         self._storage_failures: dict[str, ContinuationStorageFailure] = {}
 
-    def _write(self, method, *args, **kwargs):
+    def _write(self, method, *args, _settlement_timeout=0.0, **kwargs):
         value = args[0]
         child_id = (value.request.child_id if isinstance(value, DurableChildSession)
                     else value.child_id if isinstance(value, ContinuableCheckpoint) else value)
@@ -110,7 +118,12 @@ class DurableContinuationService:
             # cannot observe another operation in that narrow interval and
             # misclassify the ordered mutation as its own ambiguity.
             with self._lock:
-                self._require_storage_settled(child_id)
+                if _settlement_timeout > 0:
+                    self._wait_for_storage_settlement(
+                        child_id, timeout=_settlement_timeout
+                    )
+                else:
+                    self._require_storage_settled(child_id)
                 return getattr(self._repository, method)(*args, **kwargs)
         except ContinuationStorageFailure as error:
             self._storage_failures[child_id] = error
@@ -125,6 +138,31 @@ class DurableContinuationService:
         pending = self._repository.unresolved_mutation(child_id)
         if pending is not None:
             raise ContinuationCommitAmbiguous(pending)
+
+    def _wait_for_storage_settlement(self, child_id, *, timeout: float) -> None:
+        """Wait briefly for an already-retained external intent to receipt.
+
+        The repository intentionally separates intent retention from the
+        effect receipt so a crashed writer can be reconciled.  A cooperative
+        cancellation worker may therefore encounter a healthy writer in that
+        narrow interval.  Polling reconciliation here does not retry an
+        unknown effect: it only proceeds once the exact retained operation has
+        a receipt, and otherwise raises the same ambiguity after a finite
+        deadline.
+        """
+        deadline = monotonic() + max(0.0, timeout)
+        while True:
+            if child_id in self._storage_failures:
+                raise self._storage_failures[child_id]
+            pending = self._repository.unresolved_mutation(child_id)
+            if pending is None:
+                return
+            if self._repository.reconcile(pending) is not None:
+                continue
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise ContinuationCommitAmbiguous(pending)
+            sleep(min(0.01, remaining))
 
     def spawn(self, request: SubagentRequest, context: OperationContext, runner: Runner) -> SubagentHandle:
         child_id = request.child_id or f"child-{uuid4().hex}"
@@ -321,7 +359,14 @@ class DurableContinuationService:
             usage = SubagentUsage(steps=max(expected + 1, 0))
             result = SubagentResult(child_id, record.request.parent_id, SubagentStatus.CANCELLED,
                                     error=SubagentError("cancelled", str(exc)), usage=usage)
-            self._write("update", child_id, status=result.status, usage=usage, result=result)
+            self._write(
+                "update",
+                child_id,
+                status=result.status,
+                usage=usage,
+                result=result,
+                _settlement_timeout=_CANCELLATION_SETTLEMENT_GRACE_SECONDS,
+            )
         except TimeoutError as exc:
             result = SubagentResult(child_id, record.request.parent_id, SubagentStatus.TIMED_OUT,
                                     error=SubagentError("deadline_exceeded", str(exc), True),
