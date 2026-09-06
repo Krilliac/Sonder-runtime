@@ -93,6 +93,7 @@ git commit -s -m "feat(cluster): add explicit control-state rehearsal config"
 - Produces `build_control_state_rehearsal(config) -> ExternalControlStateCoordinator`.
 - Consumes `SonderConfig.control_state_rehearsal`, its secrets-only key, and two data identities from the validated pooled-pair deployment.
 - Does not modify `bootstrap/app.py` or construct a provider during ordinary application startup.
+- Revalidates the canonical rehearsal and deployment boundary before construction so a directly instantiated `SonderConfig` cannot bypass loader validation.
 
 - [ ] **Step 1: Write failing bootstrap tests**
 
@@ -108,6 +109,14 @@ def test_bootstrap_builds_exact_two_data_replicas_and_distinct_witness():
     assert coordinator.capabilities.witness_ids == ("witness-a",)
 ```
 
+Add negative direct-construction coverage for disabled rehearsal, wrong profile,
+missing or duplicate peer identity, local-node mismatch, witness overlap, invalid
+boolean or timeout values, missing key, plaintext remote origin, and disabled
+remote compute.  Each must fail before `HttpsControlStateProvider` is
+constructed.  Add constructor-spy coverage for ordinary serve, MCP, and REPL
+composition with both disabled and otherwise-valid enabled rehearsal
+configuration; all ordinary paths must make zero factory/provider calls.
+
 - [ ] **Step 2: Run the bootstrap test and verify the expected import failure**
 
 Run: `python -m pytest -q tests/test_control_state_rehearsal_bootstrap.py`
@@ -121,13 +130,13 @@ def build_control_state_rehearsal(config: SonderConfig) -> ExternalControlStateC
     """Construct a rehearsal-only provider; never construct an owner."""
 ```
 
-Validate profile, enabled flag, two data identities, witness distinction, key presence, and normalized origin before building `HttpsControlStateProvider`. Set `minimum_data_replicas=2`; never accept an implicit provider or a local SQLite fallback.
+Validate profile, enabled flag, two data identities, witness distinction, key presence, remote-compute permission, and adapter-accepted origin before building `HttpsControlStateProvider`. Reuse the canonical configuration/deployment validators and then enforce factory-only checks for direct callers; never stringify the configuration or secret in an error. Set `minimum_data_replicas=2`; never accept an implicit provider or a local SQLite fallback.
 
 - [ ] **Step 4: Run bootstrap plus existing provider/coordinator regressions**
 
 Run: `python -m pytest -q tests/test_control_state_rehearsal_bootstrap.py tests/test_http_control_state_provider.py tests/test_control_state_composition.py tests/test_cluster_availability.py`
 
-Expected: PASS, with normal runtime tests retaining their non-composition behavior.
+Expected: PASS, with direct malformed configurations rejected before provider construction and ordinary serve, MCP, and REPL retaining zero rehearsal composition calls.
 
 - [ ] **Step 5: Commit the bootstrap slice**
 
