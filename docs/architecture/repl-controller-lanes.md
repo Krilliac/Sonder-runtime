@@ -10,6 +10,7 @@ same durable conversations used by the agent UI and standalone controller.
 /lanes show <lane-id> [cursor]
 /lanes message <lane-id> <text>
 /lanes interrupt|resume|cancel <lane-id>
+/lanes archive <lane-id>
 /lanes reports <lane-id> [cursor]
 /lanes ack <lane-id> <report-id> [reports-page-cursor]
 /lanes help
@@ -45,6 +46,12 @@ supplies production composition. Console context has local user authorship and
 only existing configured workspace roots. No MCP/model parent bearer is accepted
 or exposed. Message, interrupt, resume, cancel and ack pass the existing
 permission decision engine with exact action/target/content/grant arguments.
+Archive is also a principal and parent scoped mutation. It accepts only a
+terminal, quiescent lane after every report is acknowledged and all queued
+instructions are drained. The lane row and immutable event stream remain
+available with a bounded digest/count tombstone; mailbox bodies and the fleet
+activity projection are retired. An archived lane cannot be resumed or receive
+new messages, and its workspace reservation is released for a later lane.
 Approval identity excludes the fresh host dispatch command ID, so an unchanged
 unattended retry consumes an operator-issued one-shot approval. Each actual
 dispatch still retains its unique idempotency ID.

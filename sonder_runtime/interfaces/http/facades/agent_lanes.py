@@ -73,6 +73,8 @@ def dispatch_agent_lane_route(service, method, path, payload, query, context):
                 result = service.send_message(
                     parts[0], context=context, author="user", **payload
                 )
+            elif parts[1] == "archive":
+                result = service.archive(parts[0], context=context, **payload)
             elif parts[1] in {"interrupt", "resume", "cancel"}:
                 result = service.control(parts[0], parts[1], context=context, **payload)
             else:

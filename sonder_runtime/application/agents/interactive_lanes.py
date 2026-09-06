@@ -682,14 +682,15 @@ class AgentLaneService:
                 )
             if depth > 2:
                 raise ValueError("lane depth limit reached")
-            lanes = [l for _, l in tx.lanes(context.principal_id, limit=1000)]
-            if len(lanes) >= 256 or sum(l["root_id"] == root_id for l in lanes) >= 8:
+            lanes = [lane_row for _, lane_row in tx.lanes(context.principal_id, limit=1000)]
+            retained = [lane_row for lane_row in lanes if lane_row.get("status") != "archived"]
+            if len(retained) >= 256 or sum(lane_row["root_id"] == root_id for lane_row in retained) >= 8:
                 raise ValueError("lane fanout or retained lane capacity reached")
-            if sum(l["status"] in _ACTIVE for l in lanes) >= 8:
+            if sum(lane_row["status"] in _ACTIVE for lane_row in retained) >= 8:
                 raise ValueError("principal queued lane capacity reached")
             # Explicit exclusive root grant; no implicit merge or shared checkout.
             for other in tx.all_lanes():
-                if other["status"] == "cancelled" or other["id"] == parent_lane_id:
+                if other["status"] in {"cancelled", "archived"} or other["id"] == parent_lane_id:
                     continue
                 other_root = Path(other["workspace_root"]).resolve()
                 if _inside(root, other_root) or _inside(other_root, root):
@@ -731,6 +732,8 @@ class AgentLaneService:
                 depth=depth,
                 error="",
                 artifacts=[],
+                archived_at=None,
+                archive_tombstone=None,
             )
             self._authorize(lane, context, execute=True, tx=tx)
             tx.insert(lane)
@@ -847,6 +850,8 @@ class AgentLaneService:
             prior = tx.receipt(context.principal_id, command_id, digest)
             if prior:
                 raise _ReplayReceipt(prior)
+            if lane["status"] == "archived":
+                raise ValueError("archived lane cannot accept instructions")
             if lane["status"] in {"cancelled", "cancel_requested"}:
                 raise ValueError("cancelled lane cannot accept instructions")
             if lane["status"] == "completed":
@@ -927,6 +932,8 @@ class AgentLaneService:
             prior = tx.receipt(context.principal_id, command_id, digest)
             if prior:
                 raise _ReplayReceipt(prior)
+            if lane["status"] == "archived":
+                raise ValueError("archived lane cannot accept control")
             if action == "resume":
                 self._authorize(lane, context, execute=True, tx=tx)
                 self._remaining(lane)
@@ -1021,6 +1028,29 @@ class AgentLaneService:
             if prior:
                 raise _ReplayReceipt(prior)
             lane = tx.acknowledge(report_id, context.principal_id, parent_session_id)
+            receipt = self._receipt(tx, lane, command_id)
+            tx.record_receipt(context.principal_id, command_id, digest, receipt)
+        self._done()
+        return receipt
+
+    @_recover_committed_command
+    def archive(self, lane_id, *, command_id, context):
+        """Retire a quiescent lane and release its mailbox reservation."""
+        command_id = _text(command_id, "command_id", 160)
+        digest = _digest(dict(action="archive", lane_id=lane_id))
+        self.store.reconcile(
+            lane_id,
+            context.principal_id,
+            _admit=lambda tx, lane: self._root_control(tx, lane, context),
+        )
+        with self._transaction(context, lane_id=lane_id) as tx:
+            lane = tx.lane(lane_id)
+            self._root_control(tx, lane, context)
+            self._authorize(lane, context)
+            prior = tx.receipt(context.principal_id, command_id, digest)
+            if prior:
+                raise _ReplayReceipt(prior)
+            lane = tx.archive(lane)
             receipt = self._receipt(tx, lane, command_id)
             tx.record_receipt(context.principal_id, command_id, digest, receipt)
         self._done()
