@@ -322,7 +322,7 @@
       ]
     },
     {
-      "file_count": 300,
+      "file_count": 301,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -365,6 +365,7 @@
         "sonder_runtime/application/compute_fabric/artifact_spool.py",
         "sonder_runtime/application/compute_fabric/capacity.py",
         "sonder_runtime/application/compute_fabric/coordinator.py",
+        "sonder_runtime/application/compute_fabric/deployment_admission.py",
         "sonder_runtime/application/compute_fabric/index.py",
         "sonder_runtime/application/compute_fabric/jobs.py",
         "sonder_runtime/application/compute_fabric/placement_queue.py",
