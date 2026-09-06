@@ -641,7 +641,7 @@
       ]
     },
     {
-      "file_count": 48,
+      "file_count": 49,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -663,6 +663,7 @@
         "sonder_runtime/bootstrap/child_storage.py",
         "sonder_runtime/bootstrap/config_loading.py",
         "sonder_runtime/bootstrap/container.py",
+        "sonder_runtime/bootstrap/control_state_rehearsal.py",
         "sonder_runtime/bootstrap/delegated_verification.py",
         "sonder_runtime/bootstrap/doctor_checks.py",
         "sonder_runtime/bootstrap/doctor_formatting.py",
@@ -937,7 +938,7 @@
       ]
     },
     {
-      "file_count": 37,
+      "file_count": 38,
       "name": "platform",
       "python_files": [
         "sonder_runtime/platform/__init__.py",
@@ -950,6 +951,7 @@
         "sonder_runtime/platform/config_environment.py",
         "sonder_runtime/platform/context_policy.py",
         "sonder_runtime/platform/context_selection.py",
+        "sonder_runtime/platform/control_state_rehearsal_config.py",
         "sonder_runtime/platform/debug_dump.py",
         "sonder_runtime/platform/deployment_auth.py",
         "sonder_runtime/platform/environment_options.py",

@@ -15,6 +15,7 @@ Commands:
     restore       verify / apply a backup into an empty directory
     drain         request graceful drain of a running server
     smoke         minimal end-to-end check without a real model
+    control-state-rehearsal  collect disposable provider evidence without promotion
     eval-history  inspect or explicitly record precomputed evaluation evidence
 """
 from __future__ import annotations
@@ -22,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 
 from sonder_runtime.adapters.persistence.migrations import STORE_NAMES
@@ -91,6 +93,244 @@ def _emit(payload: dict, *, as_json: bool) -> None:
                 else:
                     print(f"{pad}- {item}")
     walk(payload)
+
+
+_REHEARSAL_PREFIX = "rehearsal-"
+_REHEARSAL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+_REHEARSAL_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+_MAX_REHEARSAL_SEQUENCE = (1 << 63) - 1
+
+
+def _rehearsal_report(status: str, *, reason: str | None = None) -> dict[str, object]:
+    """Return the stable, content-free report shared by every outcome.
+
+    The explicit command can collect provider transport evidence, but it never
+    owns a runtime transition.  Keep these properties present for success and
+    every refusal so callers cannot mistake a capability declaration or fence
+    receipt for automatic availability.
+    """
+    report: dict[str, object] = {
+        "schema": "sonder.control-state-rehearsal.v1",
+        "status": status,
+        "evidence_scope": "process-boundary-transport-rehearsal",
+        "promotion_attempted": False,
+        "automatic_takeover_available": False,
+        "automatic_failback_available": False,
+    }
+    if reason is not None:
+        report["reason"] = reason
+    return report
+
+
+def _emit_rehearsal_report(args, report: dict[str, object]) -> None:
+    """Emit a report without config paths, transport bodies, or exceptions."""
+    _emit(report, as_json=bool(getattr(args, "json", False)))
+
+
+def _rehearsal_identity(value: object) -> bool:
+    return isinstance(value, str) and _REHEARSAL_ID.fullmatch(value) is not None
+
+
+def _rehearsal_request_error(args) -> str | None:
+    """Reject all caller-controlled scope before config/factory/provider work."""
+    confirmation = getattr(args, "confirm_fence", None)
+    new_owner_id = getattr(args, "new_owner_id", None)
+    if confirmation is not None and confirmation != "external-fence":
+        return "invalid_confirmation"
+    if confirmation == "external-fence" and not new_owner_id:
+        return "new_owner_required"
+    if confirmation is None and new_owner_id is not None:
+        return "new_owner_without_confirmation"
+
+    event_id = getattr(args, "event_id", None)
+    if (
+        not _rehearsal_identity(event_id)
+        or not event_id.startswith(_REHEARSAL_PREFIX)
+        or len(event_id) == len(_REHEARSAL_PREFIX)
+    ):
+        return "rehearsal_event_required"
+    resource_id = getattr(args, "resource_id", None)
+    if (
+        not _rehearsal_identity(resource_id)
+        or not resource_id.startswith(_REHEARSAL_PREFIX)
+        or len(resource_id) == len(_REHEARSAL_PREFIX)
+    ):
+        return "rehearsal_resource_required"
+    if getattr(args, "resource_kind", None) != "job":
+        return "rehearsal_job_required"
+    if not _rehearsal_identity(new_owner_id) and new_owner_id is not None:
+        return "new_owner_invalid"
+    for field, reason in (("owner_epoch", "owner_epoch_invalid"), ("sequence", "sequence_invalid")):
+        value = getattr(args, field, None)
+        if type(value) is not int or not 1 <= value <= _MAX_REHEARSAL_SEQUENCE:
+            return reason
+    if not isinstance(getattr(args, "payload_digest", None), str) or (
+        _REHEARSAL_DIGEST.fullmatch(args.payload_digest) is None
+    ):
+        return "payload_digest_invalid"
+    return None
+
+
+def _rehearsal_config_boundary(config) -> tuple[str, str, str] | None:
+    """Return configured rehearsal identities without constructing a provider.
+
+    The factory remains the canonical topology validator.  This narrow preflight
+    only prevents a command-line request from reaching it with a non-disposable
+    cluster or an uninspectable peer identity.
+    """
+    section = getattr(config, "control_state_rehearsal", None)
+    cluster_id = getattr(section, "cluster_id", None)
+    local_id = getattr(section, "node_id", None)
+    compute = getattr(config, "compute", None)
+    nodes = getattr(compute, "nodes", None)
+    if (
+        not _rehearsal_identity(cluster_id)
+        or not cluster_id.startswith(_REHEARSAL_PREFIX)
+        or len(cluster_id) == len(_REHEARSAL_PREFIX)
+        or not _rehearsal_identity(local_id)
+        or type(nodes) is not tuple
+        or len(nodes) != 1
+    ):
+        return None
+    peer_id = getattr(nodes[0], "node_id", None)
+    if not _rehearsal_identity(peer_id) or peer_id == local_id:
+        return None
+    return cluster_id, local_id, peer_id
+
+
+def _rehearsal_event_report(event, acknowledgement) -> dict[str, object]:
+    """Select only bounded, non-payload evidence from exact receipts."""
+    return {
+        "cluster_id": event.cluster_id,
+        "event": {
+            "event_id": event.event_id,
+            "resource_kind": event.resource_kind,
+            "resource_id": event.resource_id,
+            "owner_id": event.owner_id,
+            "owner_epoch": event.owner_epoch,
+            "sequence": event.sequence,
+        },
+        "acknowledgement": {
+            "provider_id": acknowledgement.provider_id,
+            "durable": acknowledgement.durable,
+            "data_replica_ids": list(acknowledgement.data_replica_ids),
+            "witness_ids": list(acknowledgement.witness_ids),
+            "data_replica_count": acknowledgement.data_replica_count,
+        },
+    }
+
+
+def cmd_control_state_rehearsal(args) -> int:
+    """Collect one disposable provider evidence page; never promote an owner."""
+    request_error = _rehearsal_request_error(args)
+    if request_error is not None:
+        _emit_rehearsal_report(args, _rehearsal_report("rejected", reason=request_error))
+        return 2
+
+    try:
+        config = _load_config(args)
+    except sonder_config.ConfigError:
+        _emit_rehearsal_report(
+            args, _rehearsal_report("rejected", reason="configuration_invalid")
+        )
+        return 2
+
+    boundary = _rehearsal_config_boundary(config)
+    if boundary is None:
+        _emit_rehearsal_report(
+            args, _rehearsal_report("rejected", reason="rehearsal_cluster_required")
+        )
+        return 2
+    cluster_id, local_id, peer_id = boundary
+    if args.confirm_fence == "external-fence" and args.new_owner_id != peer_id:
+        _emit_rehearsal_report(
+            args,
+            _rehearsal_report("rejected", reason="new_owner_not_configured_peer"),
+        )
+        return 2
+
+    # These imports are intentionally local.  Ordinary serve, MCP, and REPL
+    # command composition must not obtain a rehearsal provider by importing the
+    # production entrypoint.
+    from .bootstrap.control_state_rehearsal import build_control_state_rehearsal
+    from .domain.cluster_availability import ControlStateEvent
+    from .domain.common.errors import DependencyUnavailable
+
+    try:
+        coordinator = build_control_state_rehearsal(config)
+    except (TypeError, ValueError):
+        _emit_rehearsal_report(
+            args, _rehearsal_report("rejected", reason="configuration_invalid")
+        )
+        return 2
+
+    try:
+        event = ControlStateEvent(
+            event_id=args.event_id,
+            cluster_id=cluster_id,
+            resource_kind=args.resource_kind,
+            resource_id=args.resource_id,
+            owner_id=local_id,
+            owner_epoch=args.owner_epoch,
+            sequence=args.sequence,
+            payload_digest=args.payload_digest,
+        )
+    except (TypeError, ValueError):
+        _emit_rehearsal_report(
+            args, _rehearsal_report("rejected", reason="invalid_request")
+        )
+        return 2
+
+    try:
+        acknowledgement = coordinator.append(event)
+        page = coordinator.read(
+            event.cluster_id,
+            after_sequence=event.sequence - 1,
+            limit=1,
+        )
+        if page != (event,):
+            raise DependencyUnavailable("control-state rehearsal event page mismatch")
+        payload = _rehearsal_report("collected")
+        payload.update(_rehearsal_event_report(event, acknowledgement))
+        if args.confirm_fence != "external-fence":
+            _emit_rehearsal_report(args, payload)
+            return 0
+
+        attempt = coordinator.prepare_takeover(
+            event.scope,
+            event,
+            new_owner_id=peer_id,
+            acknowledgement=acknowledgement,
+        )
+    except DependencyUnavailable:
+        _emit_rehearsal_report(
+            args, _rehearsal_report("blocked", reason="dependency_unavailable")
+        )
+        return 1
+    except Exception:
+        _emit_rehearsal_report(
+            args, _rehearsal_report("blocked", reason="internal_error")
+        )
+        return 1
+
+    payload["status"] = "fence_evidence_collected"
+    receipt = attempt.fence_receipt
+    payload["fence"] = {
+        "requested": True,
+        "new_owner_id": peer_id,
+        "receipt_id": receipt.receipt_id,
+        "accepted": receipt.accepted,
+        "external": receipt.external,
+        "partition_state": receipt.partition_state.value,
+        "decision": {
+            "allowed": attempt.decision.allowed,
+            "reason": attempt.decision.reason,
+            "next_epoch": attempt.decision.next_epoch,
+            "data_replica_count": attempt.decision.data_replica_count,
+        },
+    }
+    _emit_rehearsal_report(args, payload)
+    return 0
 
 
 def _run_preflight(config, *, check_ollama=True, ollama_timeout=5.0):
@@ -1098,6 +1338,26 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("smoke", help="minimal end-to-end check")
     common(p, ollama_flag=True)
     p.set_defaults(func=cmd_smoke)
+
+    p = sub.add_parser(
+        "control-state-rehearsal",
+        help="collect disposable external control-state evidence without promotion",
+    )
+    p.add_argument("--config", required=True, help="path to rehearsal-only sonder.toml")
+    p.add_argument("--secrets", help="path to the rehearsal secrets env file")
+    p.add_argument("--json", action="store_true", help="emit a redacted JSON report")
+    p.add_argument("--event-id", required=True)
+    p.add_argument("--resource-kind", required=True, choices=("job",))
+    p.add_argument("--resource-id", required=True)
+    p.add_argument("--owner-epoch", required=True, type=int)
+    p.add_argument("--sequence", required=True, type=int)
+    p.add_argument("--payload-digest", required=True)
+    p.add_argument(
+        "--confirm-fence",
+        help="pass exactly external-fence before requesting one external receipt",
+    )
+    p.add_argument("--new-owner-id", help="must be the configured rehearsal peer")
+    p.set_defaults(func=cmd_control_state_rehearsal)
 
     p = sub.add_parser("serve", help="run the HTTP adapter")
     common(p, ollama_flag=True)

@@ -9055,6 +9055,12 @@
       "type": "AppControlConfig"
     },
     {
+      "default": null,
+      "field": "control_state_rehearsal",
+      "section": "root",
+      "type": "ControlStateRehearsalConfig"
+    },
+    {
       "default": "[redacted]",
       "field": "api_key",
       "section": "secrets",
@@ -9075,6 +9081,12 @@
     {
       "default": "[redacted]",
       "field": "artifact_transfer_key",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "control_state_rehearsal_key",
       "section": "secrets",
       "type": "str"
     },
@@ -9371,6 +9383,54 @@
       "field": "cancel_timeout_seconds",
       "section": "child_storage",
       "type": "<class 'int'>"
+    },
+    {
+      "default": false,
+      "field": "enabled",
+      "section": "control_state_rehearsal",
+      "type": "bool"
+    },
+    {
+      "default": "",
+      "field": "cluster_id",
+      "section": "control_state_rehearsal",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "node_id",
+      "section": "control_state_rehearsal",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "witness_id",
+      "section": "control_state_rehearsal",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "provider_id",
+      "section": "control_state_rehearsal",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "origin",
+      "section": "control_state_rehearsal",
+      "type": "str"
+    },
+    {
+      "default": 5,
+      "field": "timeout_seconds",
+      "section": "control_state_rehearsal",
+      "type": "int"
+    },
+    {
+      "default": false,
+      "field": "allow_insecure_loopback",
+      "section": "control_state_rehearsal",
+      "type": "bool"
     },
     {
       "default": "single-host",
@@ -9697,11 +9757,11 @@
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES",
   "counts": {
     "commands": 316,
-    "configuration": 123,
+    "configuration": 133,
     "events": 43,
     "tools": 212
   },
-  "digest": "d42b127fd15b61be115f6f216960de6258b0c69e01191ac837cc94773155ec2c",
+  "digest": "39d8f83473f702ff6607b28c22047bceebe404efc65855e58d54ab529467de0e",
   "events": [
     {
       "name": "session.started",
@@ -10175,7 +10235,7 @@
     "server.py": "9a4262ad4dd80fa47d5a1875a46e1e786d2ae5364cf9257140d5c5072456591c",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
-    "sonder_runtime/platform/config.py": "e274ff9e0668680d2be026da3283eb7870886b8ca2f46621533ee3a959a3714e"
+    "sonder_runtime/platform/config.py": "ae35c4bdaf88e36ced63af1d563f891fee87b56e14fd453076bb4a74a0424c26"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
   "tools": [
