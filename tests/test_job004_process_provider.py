@@ -22,7 +22,7 @@ from sonder_runtime.application.jobs.durable_registry import (
     ProcessTreeCleanupReceipt,
 )
 from sonder_runtime.application.ports.jobs import JobIdentity, JobStatus
-from sonder_runtime.adapters.process_liveness import PROCESS_ALIVE
+from sonder_runtime.adapters.process_liveness import PROCESS_ALIVE, PROCESS_DEAD
 
 
 def _request(job_id: str = "job-process") -> ProcessJobRequest:
@@ -205,6 +205,25 @@ class _Process:
 
     def kill(self):
         self.killed = True
+
+
+class _ReapedAfterTimeoutProcess(_Process):
+    """Model a POSIX child killed before its zero-time wait can reap it."""
+
+    def __init__(self, exit_code: int = -9) -> None:
+        super().__init__(exit_code)
+        self.exited = False
+        self._wait_timed_out = False
+
+    def poll(self):
+        return self.exit_code if self.exited else None
+
+    def wait(self, timeout=None):
+        self.wait_calls.append(timeout)
+        if not self.exited:
+            self._wait_timed_out = True
+            raise subprocess.TimeoutExpired("fixture", timeout)
+        return self.exit_code
 
 
 class _Cleanup:
@@ -1053,6 +1072,44 @@ def test_worker_enforces_deadline_without_controller_polling(tmp_path):
     assert "deadline" in registry.poll(job_id).error
     assert process.poll() is not None
     assert job_id not in provider._processes
+
+
+def test_terminal_cleanup_retry_reaps_root_after_posix_kill_race(monkeypatch):
+    process = _ReapedAfterTimeoutProcess()
+    probe_results = iter(((PROCESS_ALIVE, "stable"), (PROCESS_DEAD, None)))
+    cleanup = ProcessTreeSupervisor(
+        os_module=SimpleNamespace(name="posix", killpg=lambda _group, _signal: None),
+        signal_module=SimpleNamespace(SIGKILL=9),
+        platform_name="posix",
+        process_probe=lambda _pid, _expected: next(
+            probe_results, (PROCESS_DEAD, None)
+        ),
+    )
+    provider = SubprocessJobProvider(
+        DurableJobRegistry(),
+        process_cleanup=cleanup,
+        launcher=lambda _argv, **_kwargs: process,
+        platform_name="posix",
+        process_identity_resolver=lambda _pid: "stable",
+    )
+    retries = []
+    monkeypatch.setattr(
+        provider, "_schedule_deadline", lambda *args: retries.append(args)
+    )
+    provider.start(_request("job-kill-race"))
+
+    first = provider.cancel("job-kill-race", reason="deadline exceeded")
+
+    assert first.cleanup_completed is False
+    assert provider.poll("job-kill-race").status is JobStatus.CANCELLED
+    assert "job-kill-race" in provider._processes
+    assert retries
+
+    process.exited = True
+    provider._expire_deadline_owned("job-kill-race")
+
+    assert "job-kill-race" not in provider._processes
+    assert process.wait_calls == [0, 0]
 
 
 def test_provider_rehydrates_persisted_deadline_after_owner_restart(tmp_path):

@@ -703,8 +703,26 @@ class SubprocessJobProvider:
                     exit_code = self._cleanup_observations[job_id]
                     self._forget_local_job(job_id)
                     self._publish_cleanup(job_id, exit_code)
-                elif self._owns_cleanup_resources(job_id):
-                    self.cancel(job_id, reason="terminal job resource cleanup retry")
+                else:
+                    # A completed tree kill can race the provider's zero-time
+                    # wait: the signal is accepted, but the root has not been
+                    # reaped yet.  On retry the platform identity probe may
+                    # correctly report that the child is gone, so do not ask
+                    # the supervisor to validate an already-completed cleanup
+                    # a second time.  A local process handle that reports an
+                    # exit is sufficient to finish the provider-owned reap;
+                    # a live or unobservable handle still follows the normal
+                    # fail-closed retry path below.
+                    process = self._processes.get(job_id)
+                    poll = getattr(process, "poll", None) if process is not None else None
+                    try:
+                        process_exited = callable(poll) and poll() is not None
+                    except Exception:
+                        process_exited = False
+                    if process_exited:
+                        self.wait(job_id, timeout=0)
+                    elif self._owns_cleanup_resources(job_id):
+                        self.cancel(job_id, reason="terminal job resource cleanup retry")
                 return
             process = self._processes.get(job_id)
             if process is not None:
