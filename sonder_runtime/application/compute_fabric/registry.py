@@ -166,6 +166,36 @@ class ComputeNodeRegistry:
         with self._lock:
             return self._index.candidates(request, local=local)
 
+    def capability_candidates(
+        self,
+        *,
+        required_capabilities=(),
+        any_capabilities=(),
+        any_capability_groups=(),
+        now: datetime,
+        local=None,
+    ):
+        """Return a bounded indexed capability view without copying inventory."""
+        _utc(now, "now")
+        with self._lock:
+            ids = sorted(self._index.capability_ids(
+                required_capabilities=required_capabilities,
+                any_capabilities=any_capabilities,
+                any_capability_groups=any_capability_groups,
+                local=local,
+            ))
+            configured_count = len(self._nodes) if local is None else len(
+                self._index.static.get(("local", local), ())
+            )
+            observed_count = len(self._observations) if local is None else len(
+                self._index.live.get(("local", local), ())
+            )
+            return self._index.candidates_from_ids(
+                ids,
+                configured_count=configured_count,
+                observed_count=observed_count,
+            )
+
     def configured_candidates(self, request, *, local=None):
         with self._lock:
             return tuple(self._nodes[identity] for identity in sorted(

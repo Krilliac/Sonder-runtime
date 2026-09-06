@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import heapq
 from uuid import uuid4
 
-from ...domain.compute_fabric import NodeHealth, PlacementInventoryScope
+from ...domain.compute_fabric import ComputeCapability, NodeHealth, PlacementInventoryScope
 
 
 @dataclass(frozen=True)
@@ -116,11 +116,66 @@ class ComputeIndex:
         result.difference_update(request.avoided_node_ids)
         return result
 
-    def candidates(self, request, *, local=None):
-        ids = sorted(self.matching(request, observed=True, local=local))
-        configured_count = len(self.nodes) if local is None else len(self.static.get(("local", local), ()))
-        observed_count = len(self.observations) if local is None else len(self.live.get(("local", local), ()))
+    def capability_ids(
+        self,
+        *,
+        required_capabilities=(),
+        any_capabilities=(),
+        any_capability_groups=(),
+        local=None,
+    ):
+        """Return observed IDs selected by capability postings only.
+
+        This narrow query is useful to callers that need a capability view
+        before they know the eventual workload.  It remains a structural
+        superset: health, freshness, resources, consent, and policy are still
+        evaluated by ``ComputePlacementScheduler``.
+        """
+        if local is not None and not isinstance(local, bool):
+            raise ValueError("local capability filter must be boolean or None")
+        required_capabilities = tuple(required_capabilities)
+        any_capabilities = tuple(any_capabilities)
+        groups = tuple(any_capability_groups)
+        for values, label in (
+            (required_capabilities, "required_capabilities"),
+            (any_capabilities, "any_capabilities"),
+        ):
+            if any(not isinstance(value, ComputeCapability) for value in values):
+                raise ValueError(f"{label} contains an unknown capability")
+        if len(groups) > 16 or any(
+            not isinstance(group, (set, frozenset, tuple, list))
+            or not group
+            or any(not isinstance(value, ComputeCapability) for value in group)
+            for group in groups
+        ):
+            raise ValueError("any_capability_groups must contain bounded capability sets")
+        sets = []
+        if local is not None:
+            sets.append(self.live.get(("local", local), set()))
+        sets.extend(
+            self.live.get(("cap", value), set())
+            for value in required_capabilities
+        )
+        groups = ((any_capabilities,) if any_capabilities else ()) + groups
+        for group in groups:
+            sets.append(set().union(*(self.live.get(("cap", value), set()) for value in group)))
+        if not sets:
+            return set(self.observations)
+        smallest, *others = sorted(sets, key=len)
+        result = set(smallest)
+        for posting in others:
+            result.intersection_update(posting)
+        return result
+
+    def candidates_from_ids(self, ids, *, configured_count, observed_count):
+        ids = tuple(sorted(ids))
         return IndexedCandidates(tuple(self.observations[identity] for identity in ids),
             {identity: self.digests[identity] for identity in ids},
             PlacementInventoryScope("indexed_structural_candidates", self.generation, self.revision,
-                                    configured_count, observed_count, len(ids), observed_count - len(ids)))
+                                    configured_count, observed_count, len(ids), max(0, observed_count - len(ids))))
+
+    def candidates(self, request, *, local=None):
+        ids = self.matching(request, observed=True, local=local)
+        configured_count = len(self.nodes) if local is None else len(self.static.get(("local", local), ()))
+        observed_count = len(self.observations) if local is None else len(self.live.get(("local", local), ()))
+        return self.candidates_from_ids(ids, configured_count=configured_count, observed_count=observed_count)

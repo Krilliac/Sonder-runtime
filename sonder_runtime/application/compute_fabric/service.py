@@ -93,6 +93,7 @@ class ComputeFabricService:
             ],
             "ranked_node_ids": list(record.placement.ranked_node_ids),
             "snapshot_digests": [list(item) for item in record.placement.snapshot_digests],
+            "explanations": [item.as_dict() for item in record.placement.explain()],
             "inventory_scope": (asdict(record.placement.inventory_scope) if record.placement.inventory_scope else None),
         }
 

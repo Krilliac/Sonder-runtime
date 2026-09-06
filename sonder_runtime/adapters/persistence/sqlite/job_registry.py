@@ -37,7 +37,7 @@ from sonder_runtime.domain.common.errors import (
 )
 
 
-from .worker_capacity import CAPACITY_DDL, SQLiteWorkerCapacity
+from .worker_capacity import SQLiteWorkerCapacity, initialize_capacity_schema
 
 
 _DDL = """
@@ -147,7 +147,7 @@ class SQLiteDurableJobRegistry(SQLiteWorkerCapacity):
         self._lock = Lock()
         with self._connect() as connection:
             initialize_schema(connection)
-            connection.executescript(CAPACITY_DDL)
+            initialize_capacity_schema(connection)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
