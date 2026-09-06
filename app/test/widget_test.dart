@@ -607,6 +607,87 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('System shows distributed capability boundaries', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(900, 1200));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final info = SystemInfo.fromJson({
+      'status': 'ready',
+      'operational_capabilities': {
+        'schema_version': 1,
+        'inference': {
+          'request_level_pooling': {
+            'available': true,
+            'reason': 'Requests may route to one worker.',
+          },
+          'model_sharding': {
+            'available': false,
+            'reason': 'Tensor sharding is not integrated.',
+          },
+          'pool': {
+            'worker_count': 2,
+            'healthy_worker_count': 1,
+            'remote_worker_count': 1,
+          },
+        },
+        'compute': {
+          'local_node': 'node-a',
+          'configured_peer_count': 1,
+          'remote_enabled': true,
+          'whole_job_placement': {
+            'available': true,
+            'reason': 'Complete jobs are placed on one node.',
+          },
+          'indefinite_scale': {
+            'available': false,
+            'reason': 'External provider required.',
+          },
+        },
+        'mobility': {
+          'memory_replication_transport': {
+            'available': true,
+            'reason': 'Receiver injected.',
+          },
+          'artifact_transfer_transport': {
+            'available': false,
+            'reason': 'Explicit grant is disabled.',
+          },
+          'automatic_memory_migration': {
+            'available': false,
+            'reason': 'Ownership is not integrated.',
+          },
+          'automatic_artifact_migration': {
+            'available': false,
+            'reason': 'Explicit transfer only.',
+          },
+        },
+      },
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: SystemScreen(
+          settings: Settings(),
+          initialInfo: info,
+          liveUpdates: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('operational-capabilities-panel')),
+      240,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Distributed capability surface'), findsOneWidget);
+    expect(find.text('1/2 healthy workers; Available — Requests may route to one worker.'), findsOneWidget);
+    expect(find.textContaining('Unavailable — Tensor sharding is not integrated.'), findsOneWidget);
+    expect(find.textContaining('Unavailable — External provider required.'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('System shows caller-judged work, never the blended rate alone', (
     tester,
   ) async {

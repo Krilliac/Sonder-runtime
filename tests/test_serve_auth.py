@@ -1126,6 +1126,12 @@ def test_system_status_uses_projected_activity_and_shared_feed(
     assert payload["deployment"]["capabilities"]["automatic_takeover"][
         "available"
     ] is False
+    capabilities = payload["operational_capabilities"]
+    assert capabilities["schema_version"] == 1
+    assert capabilities["inference"]["request_level_pooling"]["available"] is False
+    assert capabilities["inference"]["model_sharding"]["available"] is False
+    assert capabilities["mobility"]["memory_replication_transport"]["available"] is False
+    assert capabilities["mobility"]["automatic_artifact_migration"]["available"] is False
     npu_event = next(
         row for row in payload["execution"]["feed"]["events"]
         if row["kind"] == "npu_fallback_handled"

@@ -94,6 +94,7 @@ from sonder_runtime.interfaces.http.facades.model_request import (
     ModelRequestFacade,
 )
 from sonder_runtime.domain.common.errors import Conflict, DependencyUnavailable, InvalidInput, NotFound
+from sonder_runtime.domain.operational_capabilities import build_operational_capabilities
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.application.execution.world_control import OutputWatermark
 from sonder_runtime.application.ports.model_gateway import ModelRequest
@@ -4766,6 +4767,13 @@ class Handler(BaseHTTPRequestHandler):
             )
             from sonder_runtime.bootstrap.app import default_app
             application = default_app()
+            try:
+                inference_pool_status = server.OLLAMA_POOL.status()
+            except Exception:
+                # Status must stay useful when the optional legacy pool is
+                # unavailable; the capability projection reports unknown
+                # instead of turning an admin dashboard into a 500.
+                inference_pool_status = None
             payload = {
                 "status": server.status(),
                 "providers": list(application.provider_health_data()),
@@ -4784,6 +4792,13 @@ class Handler(BaseHTTPRequestHandler):
                 "mcp_runtime": server.mcp_runtime_data(),
                 "npu_fallback": server.npu_fallback_status_data(),
                 "learning_health": server.learning_health_data(),
+                "operational_capabilities": build_operational_capabilities(
+                    config=getattr(application, "config", None),
+                    inference_pool_status=inference_pool_status,
+                    memory_receiver_configured=(
+                        _MEMORY_REPLICATION_RECEIVER is not None
+                    ),
+                ),
                 "activity": activity,
                 "db_path": getattr(server, "_DB_PATH", ""),
                 "state_home": str(runtime_paths.default_home()),

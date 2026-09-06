@@ -1620,6 +1620,7 @@ class SystemInfo {
   final String dbPath;
   final String stateHome;
   final DeploymentInfo? deployment;
+  final OperationalCapabilitiesInfo? operationalCapabilities;
   final ContextHealth? context;
   final AgentStatus? agents;
   final AutopilotStatus? autopilot;
@@ -1640,6 +1641,7 @@ class SystemInfo {
     required this.dbPath,
     required this.stateHome,
     this.deployment,
+    this.operationalCapabilities,
     required this.context,
     required this.agents,
     required this.autopilot,
@@ -1668,6 +1670,12 @@ class SystemInfo {
       deployment: json['deployment'] is Map<String, dynamic>
           ? DeploymentInfo.fromJson(
               json['deployment'] as Map<String, dynamic>,
+            )
+          : null,
+      operationalCapabilities: json['operational_capabilities']
+              is Map<String, dynamic>
+          ? OperationalCapabilitiesInfo.fromJson(
+              json['operational_capabilities'] as Map<String, dynamic>,
             )
           : null,
       context: json['context'] is Map<String, dynamic>
@@ -1810,6 +1818,120 @@ class DeploymentInfo {
 
   String get membersLabel =>
       configuredMembers.isEmpty ? 'None reported' : configuredMembers.join(', ');
+}
+
+/// Read-only distributed capability projection from the runtime status API.
+///
+/// Each capability carries its own availability and reason. A pool can route
+/// requests while model sharding and automatic migration remain unavailable.
+class OperationalCapabilityInfo {
+  final bool available;
+  final String reason;
+
+  const OperationalCapabilityInfo({
+    required this.available,
+    required this.reason,
+  });
+
+  factory OperationalCapabilityInfo.fromJson(Map<String, dynamic> json) {
+    return OperationalCapabilityInfo(
+      available: _asBool(json['available']),
+      reason: json['reason']?.toString() ?? '',
+    );
+  }
+}
+
+class OperationalCapabilitiesInfo {
+  final int schemaVersion;
+  final String localNode;
+  final int configuredPeerCount;
+  final bool remoteConfigured;
+  final int workerCount;
+  final int healthyWorkerCount;
+  final int remoteWorkerCount;
+  final OperationalCapabilityInfo requestLevelPooling;
+  final OperationalCapabilityInfo modelSharding;
+  final OperationalCapabilityInfo wholeJobPlacement;
+  final OperationalCapabilityInfo indefiniteScale;
+  final OperationalCapabilityInfo memoryReplicationTransport;
+  final OperationalCapabilityInfo artifactTransferTransport;
+  final OperationalCapabilityInfo automaticMemoryMigration;
+  final OperationalCapabilityInfo automaticArtifactMigration;
+
+  const OperationalCapabilitiesInfo({
+    required this.schemaVersion,
+    required this.localNode,
+    required this.configuredPeerCount,
+    required this.remoteConfigured,
+    required this.workerCount,
+    required this.healthyWorkerCount,
+    required this.remoteWorkerCount,
+    required this.requestLevelPooling,
+    required this.modelSharding,
+    required this.wholeJobPlacement,
+    required this.indefiniteScale,
+    required this.memoryReplicationTransport,
+    required this.artifactTransferTransport,
+    required this.automaticMemoryMigration,
+    required this.automaticArtifactMigration,
+  });
+
+  factory OperationalCapabilitiesInfo.fromJson(Map<String, dynamic> json) {
+    Map<String, dynamic> section(String key) {
+      final value = json[key];
+      return value is Map<String, dynamic>
+          ? value
+          : const <String, dynamic>{};
+    }
+
+    OperationalCapabilityInfo capability(
+      Map<String, dynamic> owner,
+      String key,
+    ) {
+      final value = owner[key];
+      return value is Map<String, dynamic>
+          ? OperationalCapabilityInfo.fromJson(value)
+          : const OperationalCapabilityInfo(
+              available: false,
+              reason: 'The runtime did not report this capability.',
+            );
+    }
+
+    final inference = section('inference');
+    final compute = section('compute');
+    final mobility = section('mobility');
+    // The pool is nested under inference; keep malformed responses bounded.
+    final rawPool = inference['pool'];
+    final poolMap = rawPool is Map
+        ? Map<String, dynamic>.from(rawPool)
+        : const <String, dynamic>{};
+    return OperationalCapabilitiesInfo(
+      schemaVersion: _asInt(json['schema_version']),
+      localNode: compute['local_node']?.toString() ?? '',
+      configuredPeerCount: _asInt(compute['configured_peer_count']),
+      remoteConfigured: _asBool(compute['remote_enabled']),
+      workerCount: _asInt(poolMap['worker_count']),
+      healthyWorkerCount: _asInt(poolMap['healthy_worker_count']),
+      remoteWorkerCount: _asInt(poolMap['remote_worker_count']),
+      requestLevelPooling: capability(inference, 'request_level_pooling'),
+      modelSharding: capability(inference, 'model_sharding'),
+      wholeJobPlacement: capability(compute, 'whole_job_placement'),
+      indefiniteScale: capability(compute, 'indefinite_scale'),
+      memoryReplicationTransport:
+          capability(mobility, 'memory_replication_transport'),
+      artifactTransferTransport:
+          capability(mobility, 'artifact_transfer_transport'),
+      automaticMemoryMigration:
+          capability(mobility, 'automatic_memory_migration'),
+      automaticArtifactMigration:
+          capability(mobility, 'automatic_artifact_migration'),
+    );
+  }
+
+  String get workerSummary {
+    if (workerCount <= 0) return 'No inference workers reported';
+    return '$healthyWorkerCount/$workerCount healthy workers';
+  }
 }
 
 class ExecutionStatus {

@@ -887,6 +887,7 @@ void main() {
     expect(info.learningHealth, isNull);
     expect(info.execution, isNull);
     expect(info.deployment, isNull);
+    expect(info.operationalCapabilities, isNull);
     expect(info.executionSummary, 'lanes unknown | agents unknown');
     expect(info.models, isEmpty);
   });
@@ -925,6 +926,71 @@ void main() {
         'Fencing is not integrated.');
     expect(deployment.capability('quorum').reason,
         'The runtime did not report this capability.');
+  });
+
+  test('system info parses bounded distributed capability surface', () {
+    final info = SystemInfo.fromJson({
+      'operational_capabilities': {
+        'schema_version': 1,
+        'inference': {
+          'request_level_pooling': {
+            'available': true,
+            'reason': 'Requests may route to one worker.',
+          },
+          'model_sharding': {
+            'available': false,
+            'reason': 'One worker owns a request.',
+          },
+          'pool': {
+            'worker_count': 2,
+            'healthy_worker_count': 1,
+            'remote_worker_count': 1,
+          },
+        },
+        'compute': {
+          'local_node': 'node-a',
+          'configured_peer_count': 1,
+          'remote_enabled': true,
+          'whole_job_placement': {
+            'available': true,
+            'reason': 'Complete cataloged jobs are placed on one node.',
+          },
+          'indefinite_scale': {
+            'available': false,
+            'reason': 'External provider required.',
+          },
+        },
+        'mobility': {
+          'memory_replication_transport': {
+            'available': true,
+            'reason': 'Receiver injected.',
+          },
+          'artifact_transfer_transport': {
+            'available': false,
+            'reason': 'Grant disabled.',
+          },
+          'automatic_memory_migration': {
+            'available': false,
+            'reason': 'Ownership is not integrated.',
+          },
+          'automatic_artifact_migration': {
+            'available': false,
+            'reason': 'Explicit transfer only.',
+          },
+        },
+      },
+    });
+
+    final capabilities = info.operationalCapabilities!;
+    expect(capabilities.schemaVersion, 1);
+    expect(capabilities.localNode, 'node-a');
+    expect(capabilities.configuredPeerCount, 1);
+    expect(capabilities.remoteConfigured, isTrue);
+    expect(capabilities.workerSummary, '1/2 healthy workers');
+    expect(capabilities.requestLevelPooling.available, isTrue);
+    expect(capabilities.modelSharding.available, isFalse);
+    expect(capabilities.memoryReplicationTransport.available, isTrue);
+    expect(capabilities.automaticArtifactMigration.available, isFalse);
   });
 
   test('system info parses shared live execution counts', () {
