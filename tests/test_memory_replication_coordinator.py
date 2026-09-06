@@ -76,6 +76,18 @@ def test_coordinator_requires_durable_replica_receipts(tmp_path):
             ).fetchone()[0] == 1
 
 
+def test_single_host_profile_counts_only_the_authoritative_source(tmp_path):
+    source = _source(tmp_path)
+
+    result = MemoryReplicationCoordinator(
+        source, (), minimum_data_replicas=1
+    ).replicate()
+
+    assert result.status == "replicated"
+    assert result.replica_ids == ("source-a",)
+    assert result.failed_replica_ids == ()
+
+
 def test_coordinator_reports_pending_when_a_sink_fails(tmp_path):
     source = _source(tmp_path)
     first = SQLiteMemoryReplicationJournal(tmp_path / "first.sqlite", source_id="first")
@@ -121,6 +133,32 @@ def test_invalid_receipt_cannot_satisfy_replica_quorum(tmp_path):
     assert result.replica_ids == ("source-a",)
     assert result.failed_replica_ids == ("wrong",)
     assert result.failure_reasons == (("wrong", "receipt_digest_mismatch"),)
+
+
+def test_invalid_inserted_count_cannot_be_reported_as_durable(tmp_path):
+    source = _source(tmp_path)
+
+    class InflatedReceipt:
+        identity = "inflated"
+
+        def apply(self, batch):
+            return MemoryReplicaReceipt(
+                replica_id="inflated",
+                source_id=batch.source_id,
+                source_epoch=batch.source_epoch,
+                next_sequence=batch.next_sequence,
+                batch_digest=batch.digest,
+                durable=True,
+                inserted_records=2,
+            )
+
+    result = MemoryReplicationCoordinator(
+        source, (InflatedReceipt(),), minimum_data_replicas=2
+    ).replicate()
+
+    assert result.status == "pending"
+    assert result.replica_ids == ("source-a",)
+    assert result.failure_reasons == (("inflated", "receipt_inserted_count_mismatch"),)
 
 
 def test_retry_is_idempotent_and_empty_export_is_not_a_false_ack(tmp_path):

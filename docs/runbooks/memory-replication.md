@@ -24,6 +24,10 @@ coordinator = MemoryReplicationCoordinator(
 outcome = coordinator.replicate(after_sequence=0)
 ```
 
+For a single-host profile, pass an empty sink tuple and
+`minimum_data_replicas=1`; the source remains authoritative and the outcome
+does not imply a second durable copy.
+
 `minimum_data_replicas` includes the authoritative source.  A non-empty page
 is `replicated` only when that many receipts validate all of the following:
 
