@@ -22,6 +22,7 @@ from ..artifacts.mobility import (
     MobilityOperation,
     ReceiptCapabilityProtector,
     ReceiptCheckpoint,
+    _ArtifactMobilityPeerRequestFences,
 )
 from ..artifacts.mobility_source import SourceArtifactRange
 
@@ -53,9 +54,18 @@ class ArtifactMobilityPeer(Protocol):
     accepts a destination URL, source path, source scope, or source port.
     """
 
+    def _request_fence_scope(
+        self, request_fences: _ArtifactMobilityPeerRequestFences
+    ): ...
+
     def recipient_attestation(self, spec: dict) -> dict: ...
 
-    def begin(self, spec: dict, command_id: str, receipt_capability: str) -> dict: ...
+    def begin(
+        self,
+        spec: dict,
+        command_id: str,
+        receipt_capability: str,
+    ) -> dict: ...
 
     def inspect_receipt(
         self,

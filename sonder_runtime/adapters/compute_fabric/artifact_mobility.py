@@ -8,6 +8,7 @@ records and durable operation ownership before it invokes these methods.
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextvars import ContextVar
 import hashlib
 import hmac
 import json
@@ -19,6 +20,11 @@ from ...application.artifacts.transfer import (
     MOBILITY_V1_VERSION,
     TransferError,
     recipient_mobility_attestation,
+)
+from ...application.artifacts.mobility import (
+    MobilityPeerAvailabilityError,
+    _AttemptRequestFences,
+    _ArtifactMobilityPeerRequestFences,
 )
 from ...platform.artifact_mobility_config import artifact_mobility_errors
 from ...platform.artifact_mobility_source_config import artifact_mobility_source_errors
@@ -92,6 +98,36 @@ def _canonical_json(value: object) -> bytes:
         _fail("MOBILITY_PROTOCOL")
 
 
+class _RequestFenceScope:
+    """Install one service-issued fence only for a synchronous peer call."""
+
+    __slots__ = ("_peer", "_fences", "_token", "_entered")
+
+    def __init__(
+        self,
+        peer: "ConfiguredArtifactMobilityPeer",
+        fences: _ArtifactMobilityPeerRequestFences,
+    ) -> None:
+        self._peer = peer
+        self._fences = fences
+        self._token = None
+        self._entered = False
+
+    def __enter__(self):
+        if self._entered or self._peer._request_fences.get() is not None:
+            _fail("MOBILITY_INTEGRITY")
+        self._token = self._peer._request_fences.set(self._fences)
+        self._entered = True
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        if self._entered:
+            self._peer._request_fences.reset(self._token)
+            self._entered = False
+            self._token = None
+        return False
+
+
 class ConfiguredArtifactMobilityPeer:
     """Direct, authenticated mobility-v1 peer for one operator-configured origin.
 
@@ -141,9 +177,20 @@ class ConfiguredArtifactMobilityPeer:
         self._max_object_bytes = min(
             section.max_object_bytes, source.max_object_bytes
         )
+        self._request_fences = ContextVar(
+            "artifact_mobility_request_fences", default=None
+        )
 
     def __repr__(self) -> str:
         return "ConfiguredArtifactMobilityPeer(configured=True)"
+
+    def _request_fence_scope(
+        self, request_fences: _ArtifactMobilityPeerRequestFences
+    ) -> _RequestFenceScope:
+        """Accept a service-issued fence without widening public peer methods."""
+        if type(request_fences) is not _AttemptRequestFences:
+            _fail("MOBILITY_ENVELOPE")
+        return _RequestFenceScope(self, request_fences)
 
     @staticmethod
     def _validate_spec(spec: object, *, maximum: int) -> dict:
@@ -230,18 +277,22 @@ class ConfiguredArtifactMobilityPeer:
         extra = dict(headers or {})
         if payload is not None:
             extra["Content-Type"] = "application/json"
+        before_request = self._before_request()
+        headers_supplier = lambda: self._credential_headers(extra)
+        transport_request = self._transport.request
+        before_request(method, path)
         try:
-            response = self._transport.request(
+            response = transport_request(
                 method,
                 path,
                 body=body,
-                headers_supplier=lambda: self._credential_headers(extra),
+                headers_supplier=headers_supplier,
                 response_limit=_CONTROL_RESPONSE_LIMIT,
             )
         except PinnedHttpsClientError as error:
             self._raise_transport_error(error)
         if response.status not in accepted_statuses:
-            self._raise_remote_error(response.body)
+            self._raise_remote_error(response.status, response.body)
         try:
             value = json.loads(response.body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
@@ -250,15 +301,26 @@ class ConfiguredArtifactMobilityPeer:
             _fail("MOBILITY_PROTOCOL")
         return value
 
+    def _before_request(self):
+        """Return the active private fence operation for this peer call only."""
+        request_fences = self._request_fences.get()
+        if not isinstance(request_fences, _ArtifactMobilityPeerRequestFences):
+            _fail("MOBILITY_ENVELOPE")
+        return request_fences.before_request
+
     @staticmethod
-    def _raise_remote_error(body: bytes) -> None:
-        """Expose only the three dispatch-relevant receiver admissions."""
+    def _raise_remote_error(status: int, body: bytes) -> None:
+        """Expose only bounded receiver outcomes with known retry semantics."""
         try:
             value = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
             _fail("MOBILITY_PEER_STATUS")
         error = value.get("error") if isinstance(value, dict) else None
         code = error.get("code") if isinstance(error, dict) else None
+        if status == 503 and code == "UNAVAILABLE":
+            raise MobilityPeerAvailabilityError("MOBILITY_UNAVAILABLE")
+        if status == 429 and code == "BUSY":
+            raise MobilityPeerAvailabilityError("MOBILITY_BUSY")
         if code in {"QUOTA", "CAPACITY", "FORBIDDEN"}:
             _fail("MOBILITY_" + code)
         _fail("MOBILITY_PEER_STATUS")
@@ -275,7 +337,8 @@ class ConfiguredArtifactMobilityPeer:
 
     def _attestation(self, spec: dict) -> dict:
         response = self._request_json(
-            "GET", "/v1/artifact-transfers/recipient-attestation"
+            "GET",
+            "/v1/artifact-transfers/recipient-attestation",
         )
         if set(response) != _ATTESTATION_FIELDS:
             _fail("MOBILITY_ATTESTATION")
@@ -396,7 +459,12 @@ class ConfiguredArtifactMobilityPeer:
             **(extra or {}),
         }
 
-    def begin(self, spec: dict, command_id: str, receipt_capability: str) -> dict:
+    def begin(
+        self,
+        spec: dict,
+        command_id: str,
+        receipt_capability: str,
+    ) -> dict:
         immutable_spec = self._validate_spec(spec, maximum=self._max_object_bytes)
         command = self._validate_command(command_id)
         capability = self._validate_capability(receipt_capability)
@@ -480,29 +548,36 @@ class ConfiguredArtifactMobilityPeer:
         ):
             _fail("MOBILITY_ENVELOPE")
         digest = hashlib.sha256(body).hexdigest()
+        path = (
+            "/v1/artifact-transfers/"
+            + receipt["transfer_id"]
+            + "/chunks/"
+            + str(offset)
+        )
+        before_request = self._before_request()
+        headers_supplier = lambda: self._credential_headers(
+            self._mobility_headers(
+                capability,
+                {
+                    "Content-Type": "application/octet-stream",
+                    "X-Sonder-Chunk-Sha256": digest,
+                },
+            )
+        )
+        transport_request = self._transport.request
+        before_request("PUT", path)
         try:
-            response = self._transport.request(
+            response = transport_request(
                 "PUT",
-                "/v1/artifact-transfers/"
-                + receipt["transfer_id"]
-                + "/chunks/"
-                + str(offset),
+                path,
                 body=body,
-                headers_supplier=lambda: self._credential_headers(
-                    self._mobility_headers(
-                        capability,
-                        {
-                            "Content-Type": "application/octet-stream",
-                            "X-Sonder-Chunk-Sha256": digest,
-                        },
-                    )
-                ),
+                headers_supplier=headers_supplier,
                 response_limit=_CONTROL_RESPONSE_LIMIT,
             )
         except PinnedHttpsClientError as error:
             self._raise_transport_error(error)
         if response.status != 200:
-            self._raise_remote_error(response.body)
+            self._raise_remote_error(response.status, response.body)
         try:
             ack = json.loads(response.body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):

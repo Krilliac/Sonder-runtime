@@ -37,6 +37,7 @@ _IDENTIFIER = re.compile(r"[!-~]{1,128}")
 _COMMAND = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 _PROTECTED_CAPABILITY = re.compile(r"v1\.[0-9a-f]{24}\.[0-9a-f]{96}")
 _CAPABILITY = re.compile(r"[0-9a-f]{64}")
+_ATTESTATION_PATH = "/v1/artifact-transfers/recipient-attestation"
 
 MAX_RECEIPT_TTL_SECONDS = 31 * 24 * 60 * 60
 MAX_ATTEMPTS = 256
@@ -79,6 +80,7 @@ _OUTCOME_CODES = frozenset(
         "SOURCE_UNAVAILABLE",
         "MOBILITY_CAPACITY",
         "MOBILITY_QUOTA",
+        "MOBILITY_BUSY",
         "MOBILITY_UNAVAILABLE",
         "MOBILITY_FORBIDDEN",
         "MOBILITY_INTEGRITY",
@@ -90,6 +92,24 @@ _OUTCOME_CODES = frozenset(
 
 class MobilityJournalError(RuntimeError):
     """A stable local journal code with no paths, credentials, or peer text."""
+
+
+class MobilityPeerAvailabilityError(TransferError):
+    """A definitive, received peer availability response with no lost reply."""
+
+
+class _ArtifactMobilityPeerRequestFences:
+    """Private one-shot lease fence consumed inside a fixed peer transport.
+
+    The dispatch service is the only production issuer.  A peer receives it
+    through an internal scope, never as a public peer-method argument, and can
+    only consume an exact precomputed method/path pair before its own request.
+    """
+
+    __slots__ = ()
+
+    def before_request(self, method: str, path: str) -> None:
+        raise NotImplementedError
 
 
 def _fail(code: str) -> None:
@@ -676,6 +696,104 @@ class ArtifactMobilityJournal:
         )
 
 
+class _AttemptRequestFences(_ArtifactMobilityPeerRequestFences):
+    """Consume one service-issued lease proof for each fixed peer request.
+
+    The service creates this object only after source, destination, and
+    immutable-fence validation.  A peer gets no mutable target or callback:
+    it can consume the next precomputed request pair exactly once.  Closing
+    clears its internal references so a retained object cannot prove a later
+    request after the enclosing peer call has returned.
+    """
+
+    __slots__ = (
+        "_repository",
+        "_lease",
+        "_lock",
+        "_now",
+        "_lease_seconds",
+        "_targets",
+        "_index",
+        "_active",
+    )
+
+    def __init__(
+        self,
+        *,
+        repository,
+        lease: DispatchLease,
+        lock,
+        now,
+        lease_seconds: int,
+        targets: tuple[tuple[str, str], ...],
+    ) -> None:
+        if (
+            type(targets) is not tuple
+            or not targets
+            or any(
+                type(target) is not tuple
+                or len(target) != 2
+                or type(target[0]) is not str
+                or type(target[1]) is not str
+                or target[0] not in {"GET", "POST", "PUT"}
+                or not target[1].startswith("/")
+                for target in targets
+            )
+        ):
+            raise TransferError("MOBILITY_INTEGRITY")
+        self._repository = repository
+        self._lease = lease
+        self._lock = lock
+        self._now = now
+        self._lease_seconds = lease_seconds
+        self._targets = targets
+        self._index = 0
+        self._active = True
+
+    def close(self) -> None:
+        """Make this single peer-call capability permanently unusable."""
+        self._active = False
+        self._repository = None
+        self._lease = None
+        self._lock = None
+        self._now = None
+        self._lease_seconds = 0
+        self._targets = ()
+        self._index = 0
+
+    def before_request(self, method: str, path: str) -> None:
+        """Renew the held lease for the next exact pinned transport request."""
+        if (
+            not self._active
+            or type(method) is not str
+            or type(path) is not str
+            or self._index >= len(self._targets)
+            or (method, path) != self._targets[self._index]
+        ):
+            self.close()
+            raise TransferError("MOBILITY_INTEGRITY")
+        timestamp = self._now()
+        self._repository.assert_current_lease(
+            self._lease, lock=self._lock, now=timestamp
+        )
+        self._lease = self._repository.renew_dispatch(
+            self._lease,
+            lock=self._lock,
+            now=timestamp,
+            lease_seconds=self._lease_seconds,
+        )
+        self._index += 1
+
+    def finish(self) -> DispatchLease:
+        """Require the peer to have fenced every request it declared."""
+        if not self._active or self._index != len(self._targets):
+            self.close()
+            raise TransferError("MOBILITY_INTEGRITY")
+        lease = self._lease
+        self.close()
+        return lease
+
+
 class ArtifactMobilityDispatchService:
     """Run one synchronous, explicitly invoked send or resume attempt.
 
@@ -724,6 +842,7 @@ class ArtifactMobilityDispatchService:
     ) -> None:
         source_methods = ("inspect_sealed", "read_range")
         peer_methods = (
+            "_request_fence_scope",
             "recipient_attestation",
             "begin",
             "inspect_receipt",
@@ -735,6 +854,7 @@ class ArtifactMobilityDispatchService:
             "load_operation",
             "try_acquire_dispatch_lock",
             "acquire_dispatch",
+            "assert_current_lease",
             "renew_dispatch",
             "assert_immutable_fence",
             "transition_with_lease",
@@ -867,7 +987,7 @@ class ArtifactMobilityDispatchService:
 
     def _prepare_peer(
         self, operation: MobilityOperation, lease: DispatchLease, lock
-    ) -> tuple[MobilityOperation, DispatchLease]:
+    ) -> tuple[MobilityDispatchContext, MobilityOperation, DispatchLease]:
         context, operation = self._fence(operation, lease, lock)
         lease = self._repository.renew_dispatch(
             lease,
@@ -875,7 +995,7 @@ class ArtifactMobilityDispatchService:
             now=self._now(),
             lease_seconds=context.attempt_lease_seconds,
         )
-        return operation, lease
+        return context, operation, lease
 
     def _peer_call(
         self,
@@ -884,14 +1004,31 @@ class ArtifactMobilityDispatchService:
         lock,
         method,
         *args,
+        request_targets: tuple[tuple[str, str], ...],
     ):
-        operation, lease = self._prepare_peer(operation, lease, lock)
+        context, operation, lease = self._prepare_peer(operation, lease, lock)
+        request_fences = _AttemptRequestFences(
+            repository=self._repository,
+            lease=lease,
+            lock=lock,
+            now=self._now,
+            lease_seconds=context.attempt_lease_seconds,
+            targets=request_targets,
+        )
         try:
-            result = method(*args)
-        except TransferError:
+            with self._peer._request_fence_scope(request_fences):
+                try:
+                    result = method(*args)
+                except BaseException:
+                    request_fences.close()
+                    raise
+                lease = request_fences.finish()
+        except (MobilityJournalError, TransferError):
             raise
         except Exception:
             raise TransferError("MOBILITY_UNAVAILABLE") from None
+        finally:
+            request_fences.close()
         return result, operation, lease
 
     @staticmethod
@@ -1105,13 +1242,17 @@ class ArtifactMobilityDispatchService:
             if error.args and isinstance(error.args[0], str)
             else "MOBILITY_UNAVAILABLE"
         )
-        if code in {"MOBILITY_QUOTA", "MOBILITY_CAPACITY"}:
+        if code in {"MOBILITY_QUOTA", "MOBILITY_CAPACITY", "MOBILITY_BUSY"}:
             return self._transition(lease, lock, "retryable_blocked", code, receipt)
         if code == "MOBILITY_UNAVAILABLE":
             return self._transition(
                 lease,
                 lock,
-                "resumable" if response_may_be_lost else "retryable_blocked",
+                (
+                    "retryable_blocked"
+                    if isinstance(error, MobilityPeerAvailabilityError)
+                    else "resumable" if response_may_be_lost else "retryable_blocked"
+                ),
                 code,
                 receipt,
             )
@@ -1194,6 +1335,7 @@ class ArtifactMobilityDispatchService:
                 lock,
                 self._peer.recipient_attestation,
                 dict(operation.immutable_spec),
+                request_targets=(("GET", _ATTESTATION_PATH),),
             )
             attestation = self._validate_attestation(raw_attestation, operation)
 
@@ -1207,6 +1349,10 @@ class ArtifactMobilityDispatchService:
                     dict(operation.immutable_spec),
                     operation.remote_command_id,
                     capability,
+                    request_targets=(
+                        ("GET", _ATTESTATION_PATH),
+                        ("POST", "/v1/artifact-transfers"),
+                    ),
                 )
             else:
                 raw_envelope, operation, lease = self._peer_call(
@@ -1218,6 +1364,15 @@ class ArtifactMobilityDispatchService:
                     operation.remote_command_id,
                     dict(operation.immutable_spec),
                     capability,
+                    request_targets=(
+                        ("GET", _ATTESTATION_PATH),
+                        (
+                            "POST",
+                            "/v1/artifact-transfers/"
+                            + receipt.transfer_id
+                            + "/mobility-receipt",
+                        ),
+                    ),
                 )
             envelope, receipt = self._validate_envelope(
                 raw_envelope,
@@ -1237,6 +1392,15 @@ class ArtifactMobilityDispatchService:
                         dict(operation.immutable_spec),
                         operation.remote_command_id + ".seal",
                         capability,
+                        request_targets=(
+                            ("GET", _ATTESTATION_PATH),
+                            (
+                                "POST",
+                                "/v1/artifact-transfers/"
+                                + receipt.transfer_id
+                                + "/seal",
+                            ),
+                        ),
                     )
                     envelope, receipt = self._validate_envelope(
                         raw_envelope,
@@ -1273,6 +1437,16 @@ class ArtifactMobilityDispatchService:
                     dict(operation.immutable_spec),
                     body,
                     capability,
+                    request_targets=(
+                        ("GET", _ATTESTATION_PATH),
+                        (
+                            "PUT",
+                            "/v1/artifact-transfers/"
+                            + receipt.transfer_id
+                            + "/chunks/"
+                            + str(receipt.offset),
+                        ),
+                    ),
                 )
                 self._validate_ack(acknowledgement, checkpoint=receipt, body=body)
                 acknowledged_offset = acknowledgement["next_offset"]
@@ -1286,6 +1460,15 @@ class ArtifactMobilityDispatchService:
                     operation.remote_command_id,
                     dict(operation.immutable_spec),
                     capability,
+                    request_targets=(
+                        ("GET", _ATTESTATION_PATH),
+                        (
+                            "POST",
+                            "/v1/artifact-transfers/"
+                            + receipt.transfer_id
+                            + "/mobility-receipt",
+                        ),
+                    ),
                 )
                 envelope, receipt = self._validate_envelope(
                     raw_envelope,
