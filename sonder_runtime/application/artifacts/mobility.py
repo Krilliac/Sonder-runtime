@@ -772,24 +772,43 @@ class _AttemptRequestFences(_ArtifactMobilityPeerRequestFences):
         ):
             self.close()
             raise TransferError("MOBILITY_INTEGRITY")
+        previous_lease = self._lease
+        if not isinstance(previous_lease, DispatchLease):
+            self.close()
+            raise TransferError("MOBILITY_INTEGRITY")
         assertion_now = self._now()
         self._repository.assert_current_lease(
-            self._lease, lock=self._lock, now=assertion_now
+            previous_lease, lock=self._lock, now=assertion_now
         )
         # The assertion may have blocked on SQLite.  Renew with a new clock
         # sample so a lease that expired while it ran cannot be revived using
         # the assertion's stale timestamp.
         renewal_now = self._now()
         renewed_lease = self._repository.renew_dispatch(
-            self._lease,
+            previous_lease,
             lock=self._lock,
             now=renewal_now,
             lease_seconds=self._lease_seconds,
         )
-        # Renewal can also block.  Prove the returned lease is still live at
-        # the only point the peer may proceed to its concrete transport call.
+        # Renewal can also block.  The old lease must remain current, and the
+        # replacement must preserve its identity, token, and epoch at the only
+        # point the peer may proceed to its concrete transport call.  This
+        # prevents a future replacement expiry from reviving an old lease that
+        # expired while its renewal was blocked.
         transport_now = self._now()
-        if renewed_lease.expires_at <= transport_now:
+        if (
+            not isinstance(renewed_lease, DispatchLease)
+            or renewed_lease.operation_id != previous_lease.operation_id
+            or renewed_lease.source_owner_id != previous_lease.source_owner_id
+            or renewed_lease.epoch != previous_lease.epoch
+            or not hmac.compare_digest(renewed_lease.token, previous_lease.token)
+        ):
+            self.close()
+            raise TransferError("MOBILITY_INTEGRITY")
+        if (
+            previous_lease.expires_at <= transport_now
+            or renewed_lease.expires_at <= transport_now
+        ):
             self.close()
             _fail("LEASE_LOST")
         self._lease = renewed_lease

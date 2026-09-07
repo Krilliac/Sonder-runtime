@@ -172,6 +172,30 @@ class _RenewalCrossingFenceRepository:
         return renewed
 
 
+class _OldLeaseExpiryDuringRenewalRepository:
+    """Cross the old expiry during renewal while returning a future lease."""
+
+    def __init__(self, clock):
+        self._clock = clock
+        self.assertion_times = []
+        self.renewal_times = []
+        self._assertion_count = 0
+        self._renewal_count = 0
+
+    def assert_current_lease(self, lease, *, lock, now):
+        self.assertion_times.append(now)
+        self._assertion_count += 1
+        if self._assertion_count == 2:
+            self._clock.value = 1001.9
+
+    def renew_dispatch(self, lease, *, lock, now, lease_seconds):
+        self.renewal_times.append(now)
+        self._renewal_count += 1
+        if self._renewal_count == 2:
+            self._clock.value = 1002.1
+        return replace(lease, expires_at=now + lease_seconds)
+
+
 def _test_attempt_fences(targets, request_fences):
     expected = tuple(targets)
     if isinstance(request_fences, _RequestFences):
@@ -710,6 +734,86 @@ def test_post_renewal_time_blocks_configured_transport_after_renewal_crosses_exp
     assert repository.assertion_times == [1000.0]
     assert repository.renewal_times == [1000.0]
     assert connections.requests == []
+
+
+@pytest.mark.parametrize("operation", ("begin", "append", "seal", "inspect"))
+def test_old_lease_expiry_during_renewal_blocks_later_configured_request(
+    tmp_path, operation
+):
+    """A future replacement lease cannot revive an old expired holder."""
+    config, attestation = _config(tmp_path)
+    spec = _spec()
+    opening = _envelope(attestation, spec)
+    responses = {
+        "begin": opening,
+        "append": {
+            "offset": 0,
+            "next_offset": len(_CHUNK),
+            "chunk_sha256": spec["sha256"],
+            "revision": 2,
+        },
+        "seal": _envelope(
+            attestation, spec, state="verifying", offset=len(_CHUNK)
+        ),
+        "inspect": opening,
+    }
+    paths = {
+        "begin": ("POST", "/v1/artifact-transfers"),
+        "append": ("PUT", f"/v1/artifact-transfers/{_TRANSFER_ID}/chunks/0"),
+        "seal": ("POST", f"/v1/artifact-transfers/{_TRANSFER_ID}/seal"),
+        "inspect": (
+            "POST",
+            f"/v1/artifact-transfers/{_TRANSFER_ID}/mobility-receipt",
+        ),
+    }
+    connections = _Connections(
+        [_Response(attestation), _Response(responses[operation])]
+    )
+    peer = _configured_peer(config, connections)
+    clock = _FenceClock()
+    repository = _OldLeaseExpiryDuringRenewalRepository(clock)
+    fences = mobility._AttemptRequestFences(
+        repository=repository,
+        lease=mobility.DispatchLease(
+            operation_id="f" * 32,
+            source_owner_id="source-a",
+            epoch=1,
+            token="e" * 64,
+            expires_at=1002.0,
+        ),
+        lock=object(),
+        now=clock,
+        lease_seconds=2,
+        targets=(
+            ("GET", "/v1/artifact-transfers/recipient-attestation"),
+            paths[operation],
+        ),
+    )
+
+    try:
+        with pytest.raises(MobilityJournalError, match="LEASE_LOST"):
+            with peer._request_fence_scope(fences):
+                if operation == "begin":
+                    peer.begin(spec, "mobility-v1.command-a", _CAPABILITY)
+                elif operation == "append":
+                    peer.append(opening, spec, _CHUNK, _CAPABILITY)
+                elif operation == "seal":
+                    peer.seal(opening, spec, "seal-a", _CAPABILITY)
+                else:
+                    peer.inspect_receipt(
+                        _TRANSFER_ID,
+                        "mobility-v1.command-a",
+                        spec,
+                        _CAPABILITY,
+                    )
+    finally:
+        fences.close()
+
+    assert repository.assertion_times == [1000.0, 1000.0]
+    assert repository.renewal_times == [1000.0, 1001.9]
+    assert [
+        (request[1], request[2], request[3]) for request in connections.requests
+    ] == [("GET", "/v1/artifact-transfers/recipient-attestation", None)]
 
 
 @pytest.mark.parametrize(
