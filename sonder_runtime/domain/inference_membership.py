@@ -354,6 +354,15 @@ class MembershipReconciliation:
             raise ValueError("reconciliation requires an immutable membership roster")
         if self.high_water is not None and type(self.high_water) is not MembershipHighWater:
             raise ValueError("reconciliation requires an immutable high-water record")
+        if self.roster is not None:
+            snapshot = self.roster.snapshot
+            if self.high_water is None or (
+                snapshot.cluster_id != self.high_water.cluster_id
+                or snapshot.issuer_id != self.high_water.issuer_id
+                or snapshot.generation != self.high_water.generation
+                or snapshot.digest != self.high_water.digest
+            ):
+                raise ValueError("reconciliation roster must bind its exact snapshot high-water")
         for name in ("additions", "activations", "drains", "expirations"):
             values = _bounded_tuple(getattr(self, name), MAX_ROSTER_WORKERS, name)
             if any(type(value) is not WorkerAdvertisement for value in values):

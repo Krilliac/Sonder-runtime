@@ -554,6 +554,74 @@ def test_reconciliation_cannot_hold_mutable_unvalidated_authority(changes):
         domain().MembershipReconciliation(**(dict(roster=None, high_water=None) | changes))
 
 
+@pytest.mark.parametrize("changes", [
+    None, {"cluster_id": "other-cluster"}, {"issuer_id": "other-issuer"},
+    {"generation": 2}, {"digest": "0" * 64},
+])
+def test_reconciliation_roster_requires_matching_high_water(changes):
+    current = active_roster()
+    high_water = replace(current.high_water, **changes) if changes is not None else None
+    with pytest.raises(ValueError, match="high-water"):
+        domain().MembershipReconciliation(current.roster, high_water)
+
+
+def test_reconciliation_empty_roster_still_requires_matching_high_water():
+    current = reconcile(snapshot([]))
+    with pytest.raises(ValueError, match="high-water"):
+        domain().MembershipReconciliation(current.roster, replace(current.high_water, generation=2))
+
+
+@pytest.mark.parametrize("has_high_water", [False, True])
+def test_reconciliation_without_roster_preserves_valid_high_water_and_drains(has_high_water):
+    current = active_roster()
+    high_water = current.high_water if has_high_water else None
+    drains = (current.roster.members[0].advertisement,)
+
+    result = domain().MembershipReconciliation(None, high_water, drains=drains)
+
+    assert result.roster is None
+    assert result.high_water is high_water
+    assert result.drains == drains
+    assert result.roster_generation == 0
+
+
+@pytest.mark.parametrize("matching", [False, True])
+def test_reconciliation_binding_never_dispatches_record_equality(monkeypatch, matching):
+    current = active_roster()
+    high_water = current.high_water if matching else replace(current.high_water, digest="0" * 64)
+    for record_type in (domain().MembershipHighWater, domain().MembershipSnapshot):
+        for comparison in ("__eq__", "__ne__"):
+            monkeypatch.setattr(record_type, comparison,
+                                lambda *_: pytest.fail("record equality used for authority"))
+
+    if matching:
+        result = domain().MembershipReconciliation(current.roster, high_water)
+        assert result.roster is current.roster
+        assert result.high_water is high_water
+    else:
+        with pytest.raises(ValueError, match="high-water"):
+            domain().MembershipReconciliation(current.roster, high_water)
+
+
+@pytest.mark.parametrize("name", ["roster", "high_water"])
+def test_reconciliation_binding_rejects_domain_subclasses_without_equality(name):
+    current = active_roster()
+    value = getattr(current, name)
+    equality_calls = []
+
+    def compare(*_):
+        equality_calls.append(True)
+        return True
+
+    subtype = type("Hostile" + type(value).__name__, (type(value),), {
+        "__eq__": compare, "__ne__": compare,
+    })
+    hostile = subtype(**{field.name: getattr(value, field.name) for field in fields(value)})
+    with pytest.raises(ValueError):
+        replace(current, **{name: hostile})
+    assert equality_calls == []
+
+
 def test_reconciliation_copies_action_lists_and_roster_rejects_unverified_members():
     current = reconcile(snapshot())
     additions = list(current.additions)
