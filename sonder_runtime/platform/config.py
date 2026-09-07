@@ -1214,7 +1214,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         errors.append("[compute].node_id must differ from remote node identities")
     if len(node_ids) != len(set(node_ids)):
         errors.append("[compute].nodes contains duplicate node identities")
-    if compute.nodes and len(config.secrets.api_key) < MIN_API_KEY_LENGTH:
+    if compute.nodes and not _has_minimum_api_key(api_key):
         errors.append(
             "[compute].nodes requires SONDER_API_KEY of at least "
             f"{MIN_API_KEY_LENGTH} characters for authenticated remote compute"

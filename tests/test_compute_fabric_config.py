@@ -2,7 +2,15 @@ from __future__ import annotations
 
 import pytest
 
-from sonder_runtime.platform.config import ConfigError, load_config
+from sonder_runtime.platform import config as platform_config
+from sonder_runtime.platform.config import (
+    ComputeConfig,
+    ComputeNodeConfig,
+    ConfigError,
+    Secrets,
+    SonderConfig,
+    load_config,
+)
 
 
 def test_default_compute_config_is_local_only_and_remote_disabled() -> None:
@@ -77,6 +85,61 @@ def test_remote_compute_consent_does_not_enable_cloud_and_requires_auth(tmp_path
     config = load_config(path, env={"SONDER_API_KEY": "x" * 24})
     assert config.compute.allow_remote is True
     assert config.features.cloud is False
+
+
+def _direct_remote_compute_config(api_key: str) -> SonderConfig:
+    return SonderConfig(
+        compute=ComputeConfig(
+            allow_remote=True,
+            nodes=(
+                ComputeNodeConfig(
+                    node_id="remote-node",
+                    origin="https://remote-node.example:8443",
+                    workloads=("build",),
+                ),
+            ),
+        ),
+        secrets=Secrets(api_key=api_key),
+    )
+
+
+@pytest.mark.parametrize(
+    ("api_key", "expected_errors"),
+    (
+        (
+            "short",
+            [
+                "[compute].nodes requires SONDER_API_KEY of at least "
+                f"{platform_config.MIN_API_KEY_LENGTH} characters for authenticated remote compute",
+            ],
+        ),
+        ("x" * platform_config.MIN_API_KEY_LENGTH, []),
+    ),
+)
+def test_direct_typed_remote_compute_preserves_builtin_key_contract(
+    api_key: str,
+    expected_errors: list[str],
+) -> None:
+    errors: list[str] = []
+
+    platform_config._validate(_direct_remote_compute_config(api_key), errors)
+
+    assert errors == expected_errors
+
+
+def test_direct_typed_remote_compute_rejects_short_key_subclass() -> None:
+    class ShortKey(str):
+        def __len__(self):
+            return platform_config.MIN_API_KEY_LENGTH
+
+    errors: list[str] = []
+
+    platform_config._validate(_direct_remote_compute_config(ShortKey("short")), errors)
+
+    assert errors == [
+        "[compute].nodes requires SONDER_API_KEY of at least "
+        f"{platform_config.MIN_API_KEY_LENGTH} characters for authenticated remote compute",
+    ]
 
 
 @pytest.mark.parametrize(
