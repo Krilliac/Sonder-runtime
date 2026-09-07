@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sonder_runtime.platform.config import Secrets
+from sonder_runtime.platform.config import Secrets, SonderConfig
 from sonder_runtime.platform.secret_presence import redact_presence
 
 
@@ -22,6 +22,29 @@ def test_config_secret_redaction_uses_platform_policy():
         "artifact_transfer_key": "[unset]",
         "memory_replication_key": "[unset]",
     }
+
+
+def test_secrets_repr_omits_all_secret_values():
+    secrets = Secrets(
+        api_key="private-api-key",
+        auth_secret="private-auth-secret",
+        artifact_transfer_key="private-artifact-key",
+        memory_replication_key="private-memory-key",
+        backup_key_file="C:/private/backup.key",
+    )
+
+    rendered_secrets = repr(secrets)
+    rendered_config = repr(SonderConfig(secrets=secrets))
+
+    for value in (
+        "private-api-key",
+        "private-auth-secret",
+        "private-artifact-key",
+        "private-memory-key",
+        "C:/private/backup.key",
+    ):
+        assert value not in rendered_secrets
+        assert value not in rendered_config
 
 
 def test_artifact_transfer_secret_redacts_to_presence_only():

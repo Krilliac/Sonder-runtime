@@ -97,7 +97,7 @@ def _bounded_integer(value: object, minimum: int, maximum: int) -> bool:
 
 def _dedicated_secret_is_valid(value: object) -> bool:
     return (
-        isinstance(value, str)
+        type(value) is str
         and _MIN_SECRET_LENGTH <= len(value) <= _MAX_SECRET_LENGTH
         and all(0x21 <= ord(char) <= 0x7E for char in value)
     )

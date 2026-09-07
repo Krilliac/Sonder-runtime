@@ -234,9 +234,9 @@ class BackupConfig:
 class Secrets:
     """Secret material, loaded separately so it can never be dumped."""
 
-    api_key: str = ""
-    auth_secret: str = ""
-    backup_key_file: str = ""
+    api_key: str = field(default="", repr=False)
+    auth_secret: str = field(default="", repr=False)
+    backup_key_file: str = field(default="", repr=False)
     artifact_transfer_key: str = field(default="", repr=False)
     memory_replication_key: str = field(default="", repr=False)
 

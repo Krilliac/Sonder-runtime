@@ -284,6 +284,36 @@ def test_direct_typed_config_rejects_nonstring_sources_without_raising():
     assert any("accepted_source_ids must contain" in message for message in errors)
 
 
+def test_direct_typed_config_rejects_dedicated_secret_str_subclass_before_equality():
+    class EvasiveSecret(str):
+        def __eq__(self, other):
+            return False
+
+    key = _key("e")
+    config = SonderConfig(
+        secrets=Secrets(
+            memory_replication_key=EvasiveSecret(key),
+            auth_secret=key,
+        ),
+        memory_replication=MemoryReplicationConfig(
+            enabled=True,
+            local_node_id="node-a",
+            project_scope="repo-a",
+            peers=(MemoryReplicationPeerConfig(
+                node_id="node-b",
+                project_scope="repo-a",
+                origin="https://node-b.example:8443",
+            ),),
+        ),
+    )
+
+    errors = memory_replication_errors(config)
+
+    assert errors == [
+        "memory replication requires a dedicated 32..512 character secret",
+    ]
+
+
 @pytest.mark.parametrize(
     "value",
     (None, 0, [], b"not-a-text-secret", {"secret": "not-a-text-secret"}),
