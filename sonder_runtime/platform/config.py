@@ -246,7 +246,7 @@ class Secrets:
             "artifact_transfer_key": redact_presence(self.artifact_transfer_key),
             "memory_replication_key": redact_presence(self.memory_replication_key),
             "auth_secret": redact_presence(self.auth_secret),
-            "backup_key_file": self.backup_key_file or "[unset]",
+            "backup_key_file": redact_presence(self.backup_key_file),
         }
 
 

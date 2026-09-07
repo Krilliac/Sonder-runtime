@@ -47,6 +47,19 @@ def test_secrets_repr_omits_all_secret_values():
         assert value not in rendered_config
 
 
+def test_backup_key_file_redacts_to_presence_in_direct_and_config_projection():
+    backup_key_file = "C:/private/backup.key"
+    secrets = Secrets(backup_key_file=backup_key_file)
+
+    direct = secrets.as_redacted_dict()
+    nested = SonderConfig(secrets=secrets).as_redacted_dict()["secrets"]
+
+    assert direct["backup_key_file"] == "[set]"
+    assert nested["backup_key_file"] == "[set]"
+    assert backup_key_file not in repr(direct)
+    assert backup_key_file not in repr(nested)
+
+
 def test_artifact_transfer_secret_redacts_to_presence_only():
     redacted = Secrets(artifact_transfer_key="private-artifact-test-key").as_redacted_dict()
     assert redacted["artifact_transfer_key"] == "[set]"

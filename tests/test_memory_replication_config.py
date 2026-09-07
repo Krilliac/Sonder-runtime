@@ -6,7 +6,13 @@ from dataclasses import replace
 import pytest
 
 from sonder_runtime.platform import config_environment
-from sonder_runtime.platform.config import ConfigError, Secrets, SonderConfig, load_config
+from sonder_runtime.platform.config import (
+    ConfigError,
+    Secrets,
+    ServerConfig,
+    SonderConfig,
+    load_config,
+)
 from sonder_runtime.platform.memory_replication_config import (
     MemoryReplicationConfig,
     MemoryReplicationPeerConfig,
@@ -44,6 +50,36 @@ def _load(tmp_path, text: str, *, env: dict[str, str] | None = None):
     if env is not None:
         effective_env.update(env)
     return load_config(path, env=effective_env)
+
+
+def _direct_enabled_config(
+    *,
+    secrets: Secrets | None = None,
+    local_node_id: object = "node-a",
+    project_scope: object = "repo-a",
+    peer_node_id: object = "node-b",
+    peer_scope: object = "repo-a",
+    peer_origin: object = "https://node-b.example:8443",
+    receiver_enabled: bool = False,
+    accepted_source_ids: tuple[object, ...] = (),
+    server: ServerConfig | None = None,
+) -> SonderConfig:
+    return SonderConfig(
+        server=ServerConfig() if server is None else server,
+        secrets=Secrets(memory_replication_key=_key()) if secrets is None else secrets,
+        memory_replication=MemoryReplicationConfig(
+            enabled=True,
+            local_node_id=local_node_id,
+            project_scope=project_scope,
+            receiver_enabled=receiver_enabled,
+            accepted_source_ids=accepted_source_ids,
+            peers=(MemoryReplicationPeerConfig(
+                node_id=peer_node_id,
+                project_scope=peer_scope,
+                origin=peer_origin,
+            ),),
+        ),
+    )
 
 
 def test_memory_replication_defaults_are_disabled_and_empty():
@@ -311,6 +347,109 @@ def test_direct_typed_config_rejects_dedicated_secret_str_subclass_before_equali
 
     assert errors == [
         "memory replication requires a dedicated 32..512 character secret",
+    ]
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("api_key", "artifact_transfer_key", "auth_secret"),
+)
+def test_direct_typed_config_rejects_subclassed_comparison_secret_before_equality(
+    field,
+):
+    class UnequalSecret(str):
+        def __eq__(self, other):
+            return False
+
+    key = _key("c")
+    config = _direct_enabled_config(
+        secrets=Secrets(memory_replication_key=key, **{field: UnequalSecret(key)}),
+    )
+
+    errors = memory_replication_errors(config)
+
+    assert errors == [
+        "memory replication secret separation requires exact builtin strings",
+    ]
+    assert key not in repr(errors)
+
+
+def test_direct_typed_config_rejects_local_identity_subclass_before_peer_membership():
+    class HidingIdentity(str):
+        def __eq__(self, other):
+            return False
+
+    config = _direct_enabled_config(
+        local_node_id=HidingIdentity("node-a"),
+        peer_node_id="node-a",
+    )
+
+    errors = memory_replication_errors(config)
+
+    assert errors == [
+        "[memory_replication].local_node_id must be a bounded stable identity",
+    ]
+
+
+def test_direct_typed_config_rejects_scope_subclass_before_peer_scope_comparison():
+    class HidingScope(str):
+        def __ne__(self, other):
+            return False
+
+    config = _direct_enabled_config(
+        project_scope=HidingScope("repo-other"),
+        peer_scope="repo-a",
+    )
+
+    errors = memory_replication_errors(config)
+
+    assert errors == [
+        "[memory_replication].project_scope must be an exact bounded scope",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    (
+        (
+            "peer_node_id",
+            "node-b",
+            "[memory_replication].peers[0].node_id must be a bounded stable identity",
+        ),
+        (
+            "peer_scope",
+            "repo-a",
+            "[memory_replication].peers[0].project_scope must be an exact bounded scope",
+        ),
+    ),
+)
+def test_direct_typed_config_rejects_peer_string_subclasses(field, value, expected):
+    class PeerString(str):
+        pass
+
+    config = _direct_enabled_config(**{field: PeerString(value)})
+
+    assert memory_replication_errors(config) == [expected]
+
+
+def test_direct_typed_config_rejects_host_subclass_that_claims_loopback():
+    class PretendLoopback(str):
+        def __eq__(self, other):
+            return other == "localhost"
+
+    config = _direct_enabled_config(
+        receiver_enabled=True,
+        accepted_source_ids=("node-b",),
+        server=ServerConfig(
+            host=PretendLoopback("0.0.0.0"),
+            tls_terminated_by_proxy=False,
+        ),
+    )
+
+    errors = memory_replication_errors(config)
+
+    assert errors == [
+        "[memory_replication].receiver_enabled requires a loopback listener or declared TLS proxy",
     ]
 
 

@@ -47,6 +47,8 @@ class MemoryReplicationConfig:
 
 
 def _is_loopback_host(value: object) -> bool:
+    if type(value) is not str:
+        return False
     if value == "localhost":
         return True
     try:
@@ -56,11 +58,11 @@ def _is_loopback_host(value: object) -> bool:
 
 
 def _is_identity(value: object) -> bool:
-    return isinstance(value, str) and _IDENTITY.fullmatch(value) is not None
+    return type(value) is str and _IDENTITY.fullmatch(value) is not None
 
 
 def _is_project_scope(value: object) -> bool:
-    return isinstance(value, str) and _PROJECT.fullmatch(value) is not None
+    return type(value) is str and _PROJECT.fullmatch(value) is not None
 
 
 def _is_strict_https_origin(value: object) -> bool:
@@ -110,19 +112,26 @@ def memory_replication_errors(config) -> list[str]:
         return ["[memory_replication] must use the typed configuration section"]
 
     errors: list[str] = []
-    if type(section.enabled) is not bool:
+    enabled_value = section.enabled
+    receiver_enabled_value = section.receiver_enabled
+    if type(enabled_value) is not bool:
         errors.append("[memory_replication].enabled must be a boolean")
-    if type(section.receiver_enabled) is not bool:
+    if type(receiver_enabled_value) is not bool:
         errors.append("[memory_replication].receiver_enabled must be a boolean")
-    enabled = section.enabled is True
-    receiver_enabled = section.receiver_enabled is True
+    enabled = enabled_value is True
+    receiver_enabled = receiver_enabled_value is True
 
-    if not isinstance(section.local_node_id, str):
+    local_node_id = section.local_node_id
+    project_scope = section.project_scope
+    local_node_id_is_exact_string = type(local_node_id) is str
+    project_scope_is_exact_string = type(project_scope) is str
+
+    if not local_node_id_is_exact_string:
         errors.append(
             "[memory_replication].local_node_id must be a bounded stable identity"
         )
-    elif section.local_node_id:
-        if not _is_identity(section.local_node_id):
+    elif local_node_id:
+        if not _is_identity(local_node_id):
             errors.append(
                 "[memory_replication].local_node_id must be a bounded stable identity"
             )
@@ -131,12 +140,12 @@ def memory_replication_errors(config) -> list[str]:
             "[memory_replication].local_node_id must be a bounded stable identity"
         )
 
-    if not isinstance(section.project_scope, str):
+    if not project_scope_is_exact_string:
         errors.append(
             "[memory_replication].project_scope must be an exact bounded scope"
         )
-    elif section.project_scope:
-        if not _is_project_scope(section.project_scope):
+    elif project_scope:
+        if not _is_project_scope(project_scope):
             errors.append(
                 "[memory_replication].project_scope must be an exact bounded scope"
             )
@@ -178,8 +187,8 @@ def memory_replication_errors(config) -> list[str]:
         )
     if (
         accepted_are_strings
-        and isinstance(section.local_node_id, str)
-        and section.local_node_id in accepted
+        and local_node_id_is_exact_string
+        and local_node_id in accepted
     ):
         errors.append("[memory_replication] local identity cannot be an accepted source")
     if accepted and not receiver_enabled:
@@ -200,22 +209,29 @@ def memory_replication_errors(config) -> list[str]:
         if not isinstance(peer, MemoryReplicationPeerConfig):
             errors.append(f"{where} must be a typed fixed peer")
             continue
-        if not _is_identity(peer.node_id):
+        peer_node_id = peer.node_id
+        peer_project_scope = peer.project_scope
+        peer_origin = peer.origin
+        if not _is_identity(peer_node_id):
             errors.append(f"{where}.node_id must be a bounded stable identity")
         else:
-            peer_ids.append(peer.node_id)
-        if not _is_project_scope(peer.project_scope):
+            peer_ids.append(peer_node_id)
+        if not _is_project_scope(peer_project_scope):
             errors.append(f"{where}.project_scope must be an exact bounded scope")
-        elif section.project_scope != peer.project_scope:
+        elif project_scope_is_exact_string and project_scope != peer_project_scope:
             errors.append(
                 f"{where}.project_scope must exactly match [memory_replication].project_scope"
             )
-        if not _is_strict_https_origin(peer.origin):
+        if not _is_strict_https_origin(peer_origin):
             errors.append(f"{where}.origin must be a canonical HTTPS origin with an explicit port")
 
     if len(set(peer_ids)) != len(peer_ids):
         errors.append("[memory_replication].peers must not contain duplicate identities")
-    if section.local_node_id and section.local_node_id in peer_ids:
+    if (
+        local_node_id_is_exact_string
+        and local_node_id
+        and local_node_id in peer_ids
+    ):
         errors.append("[memory_replication] local identity cannot be an outbound peer")
 
     if receiver_enabled and not enabled:
@@ -233,7 +249,14 @@ def memory_replication_errors(config) -> list[str]:
             api_key = getattr(secrets, "api_key", None)
             artifact_key = getattr(secrets, "artifact_transfer_key", None)
             auth_secret = getattr(secrets, "auth_secret", None)
-            if key == api_key or key == artifact_key or key == auth_secret:
+            if not all(
+                type(value) is str
+                for value in (key, api_key, artifact_key, auth_secret)
+            ):
+                errors.append(
+                    "memory replication secret separation requires exact builtin strings"
+                )
+            elif key == api_key or key == artifact_key or key == auth_secret:
                 errors.append(
                     "memory replication dedicated key must be distinct from API, artifact-transfer, and auth secrets"
                 )
@@ -247,8 +270,12 @@ def memory_replication_errors(config) -> list[str]:
                     "[memory_replication].accepted_source_ids must name fixed configured peers"
                 )
             server = getattr(config, "server", None)
-            if not _is_loopback_host(getattr(server, "host", None)) and (
-                getattr(server, "tls_terminated_by_proxy", None) is not True
+            server_host = getattr(server, "host", None)
+            tls_terminated_by_proxy = getattr(
+                server, "tls_terminated_by_proxy", None,
+            )
+            if not _is_loopback_host(server_host) and (
+                tls_terminated_by_proxy is not True
             ):
                 errors.append(
                     "[memory_replication].receiver_enabled requires a loopback listener or declared TLS proxy"
