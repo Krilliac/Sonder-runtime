@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 282,
+      "file_count": 283,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -87,6 +87,7 @@
         "sonder_runtime/adapters/command_parsing.py",
         "sonder_runtime/adapters/command_surface.py",
         "sonder_runtime/adapters/compute_fabric/__init__.py",
+        "sonder_runtime/adapters/compute_fabric/artifact_mobility.py",
         "sonder_runtime/adapters/compute_fabric/artifact_transfer.py",
         "sonder_runtime/adapters/compute_fabric/http_client.py",
         "sonder_runtime/adapters/compute_fabric/local_snapshot.py",

@@ -32,3 +32,41 @@ class ArtifactMobilityReader(Protocol):
     def read_range(
         self, source_artifact_id: str, offset: int, length: int
     ) -> SourceArtifactRange: ...
+
+
+class ArtifactMobilityPeer(Protocol):
+    """Fixed configured destination transport, separate from source authority.
+
+    This is an application-internal transport contract for a future durable
+    operator-invoked service.  It carries only an already sealed immutable
+    spec, receiver receipt envelope, and opaque receipt capability.  It never
+    accepts a destination URL, source path, source scope, or source port.
+    """
+
+    def recipient_attestation(self, spec: dict) -> dict: ...
+
+    def begin(self, spec: dict, command_id: str, receipt_capability: str) -> dict: ...
+
+    def inspect_receipt(
+        self,
+        transfer_id: str,
+        command_id: str,
+        spec: dict,
+        receipt_capability: str,
+    ) -> dict: ...
+
+    def append(
+        self,
+        envelope: dict,
+        immutable_spec: dict,
+        body: bytes,
+        receipt_capability: str,
+    ) -> dict: ...
+
+    def seal(
+        self,
+        envelope: dict,
+        immutable_spec: dict,
+        seal_command_id: str,
+        receipt_capability: str,
+    ) -> dict: ...
