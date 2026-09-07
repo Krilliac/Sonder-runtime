@@ -69,8 +69,12 @@ def test_legacy_export_includes_typed_ollama_static_roster_bounds():
 def _typed_capacity_config() -> SonderConfig:
     return SonderConfig(
         ollama=OllamaConfig(
+            worker_pool_max_workers=64,
             worker_max_inflight=7,
             worker_queue_depth=90,
+            worker_capability_probe_parallelism=8,
+            worker_capability_probe_batch_size=128,
+            worker_status_page_size=128,
         )
     )
 
@@ -91,8 +95,12 @@ def _assert_typed_capacity_was_forwarded(captured) -> None:
     assert len(captured) == 1
     worker_origins, options = captured[0]
     assert worker_origins == ()
+    assert options.get("max_workers") == 64
     assert options.get("max_inflight_per_worker") == 7
     assert options.get("queue_depth") == 90
+    assert options.get("capability_probe_parallelism") == 8
+    assert options.get("capability_probe_batch_size") == 128
+    assert options.get("status_page_size") == 128
 
 
 def test_cmd_serve_forwards_typed_ollama_capacity_to_worker_pool(monkeypatch):

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from sonder_runtime.platform.runtime_threads import ThreadPoolExecutor as owned_runtime_pool
 
+import base64
+import binascii
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import http.client
@@ -47,7 +49,18 @@ _DEFAULT_MAX_INFLIGHT = 1
 _DEFAULT_QUEUE_DEPTH = 32
 _DEFAULT_ADMISSION_TIMEOUT_SECONDS = 1.0
 _DEFAULT_CAPABILITY_TTL_SECONDS = 300.0
-_MAX_WORKERS = 16
+_DEFAULT_MAX_WORKERS = 16
+_MAX_POOL_WORKERS = 256
+_DEFAULT_CAPABILITY_PROBE_PARALLELISM = 4
+_MAX_CAPABILITY_PROBE_PARALLELISM = 8
+_DEFAULT_CAPABILITY_PROBE_BATCH_SIZE = 32
+_MAX_CAPABILITY_PROBE_BATCH_SIZE = 128
+_DEFAULT_STATUS_PAGE_SIZE = 32
+_MAX_STATUS_PAGE_SIZE = 128
+_MAX_STATUS_SERIALIZED_BYTES = 65_536
+_STATUS_MODEL_PREVIEW_COUNT = 8
+_STATUS_MODEL_PREVIEW_LENGTH = 128
+_STATUS_SCHEMA_VERSION = 1
 _MAX_MODELS_PER_WORKER = 2048
 _MAX_INFLIGHT_PER_WORKER = 64
 _MAX_QUEUE_DEPTH = 4096
@@ -69,6 +82,10 @@ _configured_capability_ttl_seconds: int | None = None
 _configured_probe_timeout_ms: int | None = None
 _configured_max_inflight: int | None = None
 _configured_queue_depth: int | None = None
+_configured_max_workers: int | None = None
+_configured_probe_parallelism: int | None = None
+_configured_probe_batch_size: int | None = None
+_configured_status_page_size: int | None = None
 _configuration_lock = threading.RLock()
 
 
@@ -143,16 +160,20 @@ def _positive_int(
     return value
 
 
-def parse_worker_origins(raw: str | None) -> tuple[str, ...]:
+def parse_worker_origins(
+    raw: str | None, *, max_workers: int = _DEFAULT_MAX_WORKERS,
+) -> tuple[str, ...]:
     """Parse a comma/semicolon-separated worker origin list."""
+    if not 1 <= max_workers <= _MAX_POOL_WORKERS:
+        raise ValueError("max workers must be within 1..256")
     values = []
     for item in str(raw or "").replace(";", ",").split(","):
         value = item.strip()
         if value:
             values.append(value)
-    if len(values) > _MAX_WORKERS - 1:
+    if len(values) > max_workers - 1:
         raise ValueError(
-            "at most %d additional Ollama workers are supported" % (_MAX_WORKERS - 1)
+            "at most %d additional Ollama workers are supported" % (max_workers - 1)
         )
     return tuple(values)
 
@@ -236,6 +257,10 @@ def configure_typed_workers(
     probe_timeout_ms: int | None = None,
     max_inflight_per_worker: int | None = None,
     queue_depth: int | None = None,
+    max_workers: int | None = None,
+    capability_probe_parallelism: int | None = None,
+    capability_probe_batch_size: int | None = None,
+    status_page_size: int | None = None,
 ) -> None:
     logger.debug(f"configuring typed workers: count={len(worker_origins)}, allow_remote={allow_remote}, trusted_origins={trusted_origins!r}")
     logger.info(f"configuring {len(worker_origins)} typed Ollama worker(s), allow_remote={allow_remote}")
@@ -247,11 +272,46 @@ def configure_typed_workers(
         )
         for origin in tuple(worker_origins)
     )
+    configured_max_workers = (
+        _DEFAULT_MAX_WORKERS if max_workers is None else int(max_workers)
+    )
+    configured_probe_parallelism = (
+        _DEFAULT_CAPABILITY_PROBE_PARALLELISM
+        if capability_probe_parallelism is None
+        else int(capability_probe_parallelism)
+    )
+    configured_probe_batch_size = (
+        _DEFAULT_CAPABILITY_PROBE_BATCH_SIZE
+        if capability_probe_batch_size is None
+        else int(capability_probe_batch_size)
+    )
+    configured_status_page_size = (
+        _DEFAULT_STATUS_PAGE_SIZE
+        if status_page_size is None
+        else int(status_page_size)
+    )
+    if not 1 <= configured_max_workers <= _MAX_POOL_WORKERS:
+        raise ValueError("max workers must be within 1..256")
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("worker origins contain a duplicate canonical origin")
+    if len(normalized) > configured_max_workers - 1:
+        raise ValueError(
+            "at most %d additional Ollama workers are supported"
+            % (configured_max_workers - 1)
+        )
+    if not 1 <= configured_probe_parallelism <= _MAX_CAPABILITY_PROBE_PARALLELISM:
+        raise ValueError("capability probe parallelism must be within 1..8")
+    if not 1 <= configured_probe_batch_size <= _MAX_CAPABILITY_PROBE_BATCH_SIZE:
+        raise ValueError("capability probe batch size must be within 1..128")
+    if not 1 <= configured_status_page_size <= _MAX_STATUS_PAGE_SIZE:
+        raise ValueError("status page size must be within 1..128")
     global _configured_workers, _configured_allow_remote, _configured_trusted_origins
     global _configured_failure_threshold, _configured_cooldown_seconds
     global _configured_admission_timeout_ms, _configured_capability_ttl_seconds
     global _configured_probe_timeout_ms, _configured_max_inflight
-    global _configured_queue_depth
+    global _configured_queue_depth, _configured_max_workers
+    global _configured_probe_parallelism, _configured_probe_batch_size
+    global _configured_status_page_size
     with _configuration_lock:
         _configured_workers = normalized
         _configured_allow_remote = allow_remote
@@ -263,6 +323,10 @@ def configure_typed_workers(
         _configured_probe_timeout_ms = probe_timeout_ms
         _configured_max_inflight = max_inflight_per_worker
         _configured_queue_depth = queue_depth
+        _configured_max_workers = configured_max_workers
+        _configured_probe_parallelism = configured_probe_parallelism
+        _configured_probe_batch_size = configured_probe_batch_size
+        _configured_status_page_size = configured_status_page_size
 
 
 def reset_typed_workers() -> None:
@@ -271,7 +335,9 @@ def reset_typed_workers() -> None:
     global _configured_failure_threshold, _configured_cooldown_seconds
     global _configured_admission_timeout_ms, _configured_capability_ttl_seconds
     global _configured_probe_timeout_ms, _configured_max_inflight
-    global _configured_queue_depth
+    global _configured_queue_depth, _configured_max_workers
+    global _configured_probe_parallelism, _configured_probe_batch_size
+    global _configured_status_page_size
     with _configuration_lock:
         _configured_workers = None
         _configured_allow_remote = None
@@ -283,6 +349,10 @@ def reset_typed_workers() -> None:
         _configured_probe_timeout_ms = None
         _configured_max_inflight = None
         _configured_queue_depth = None
+        _configured_max_workers = None
+        _configured_probe_parallelism = None
+        _configured_probe_batch_size = None
+        _configured_status_page_size = None
 
 
 def has_configured_remote_workers(environment=None) -> bool:
@@ -294,7 +364,15 @@ def has_configured_remote_workers(environment=None) -> bool:
         origins = typed_workers
     else:
         env = os.environ if environment is None else environment
-        origins = parse_worker_origins(env.get("SONDER_OLLAMA_WORKERS"))
+        origins = parse_worker_origins(
+            env.get("SONDER_OLLAMA_WORKERS"),
+            max_workers=_positive_int(
+                env,
+                "SONDER_OLLAMA_POOL_MAX_WORKERS",
+                _DEFAULT_MAX_WORKERS,
+                maximum=_MAX_POOL_WORKERS,
+            ),
+        )
     return any(not _is_loopback(origin) for origin in origins)
 
 
@@ -453,6 +531,10 @@ class OllamaWorkerPool:
         queue_depth: int = _DEFAULT_QUEUE_DEPTH,
         admission_timeout_seconds: float = _DEFAULT_ADMISSION_TIMEOUT_SECONDS,
         capability_ttl_seconds: float = _DEFAULT_CAPABILITY_TTL_SECONDS,
+        max_workers: int = _DEFAULT_MAX_WORKERS,
+        capability_probe_parallelism: int = _DEFAULT_CAPABILITY_PROBE_PARALLELISM,
+        capability_probe_batch_size: int = _DEFAULT_CAPABILITY_PROBE_BATCH_SIZE,
+        status_page_size: int = _DEFAULT_STATUS_PAGE_SIZE,
         capability_prober: Callable[[str], object] | None = None,
         clock: Callable[[], float] = time.monotonic,
         time_fn: Callable[[], float] | None = None,
@@ -471,19 +553,38 @@ class OllamaWorkerPool:
             raise ValueError("admission timeout must be within 0..60 seconds")
         if not 1 <= capability_ttl_seconds <= _MAX_CAPABILITY_TTL_SECONDS:
             raise ValueError("capability TTL must be within 1..86400 seconds")
+        if not 1 <= max_workers <= _MAX_POOL_WORKERS:
+            raise ValueError("max workers must be within 1..256")
+        if not 1 <= capability_probe_parallelism <= _MAX_CAPABILITY_PROBE_PARALLELISM:
+            raise ValueError("capability probe parallelism must be within 1..8")
+        if not 1 <= capability_probe_batch_size <= _MAX_CAPABILITY_PROBE_BATCH_SIZE:
+            raise ValueError("capability probe batch size must be within 1..128")
+        if not 1 <= status_page_size <= _MAX_STATUS_PAGE_SIZE:
+            raise ValueError("status page size must be within 1..128")
         all_origins = (primary_origin, *worker_origins)
-        if len(all_origins) > _MAX_WORKERS:
-            raise ValueError("at most %d Ollama workers are supported" % _MAX_WORKERS)
-        states = []
+        normalized_origins = []
         seen = set()
-        for raw in all_origins:
+        primary_normalized = ""
+        for index, raw in enumerate(all_origins):
             origin = validate_worker_origin(raw, allow_remote=allow_remote, trusted_origins=trusted_origins)
             if origin in seen:
-                continue
+                if index and origin == primary_normalized:
+                    raise ValueError(
+                        "worker origin duplicates primary after canonical normalization"
+                    )
+                raise ValueError("worker origins contain a duplicate canonical origin")
             seen.add(origin)
-            states.append(_WorkerState(
-                WorkerEndpoint(origin, _worker_id(origin), _metric_label(len(states)))
-            ))
+            normalized_origins.append(origin)
+            if index == 0:
+                primary_normalized = origin
+        if len(normalized_origins) > max_workers:
+            raise ValueError("at most %d Ollama workers are supported" % max_workers)
+        states = [
+            _WorkerState(
+                WorkerEndpoint(origin, _worker_id(origin), _metric_label(index))
+            )
+            for index, origin in enumerate(normalized_origins)
+        ]
         if not states:
             raise ValueError("at least one Ollama worker is required")
         logger.debug(
@@ -491,7 +592,9 @@ class OllamaWorkerPool:
             f"origins={[s.endpoint.origin for s in states]}, "
             f"failure_threshold={failure_threshold}, cooldown={cooldown_seconds}s, "
             f"max_inflight={max_inflight_per_worker}, queue_depth={queue_depth}, "
-            f"admission_timeout={admission_timeout_seconds}s, capability_ttl={capability_ttl_seconds}s"
+            f"admission_timeout={admission_timeout_seconds}s, capability_ttl={capability_ttl_seconds}s, "
+            f"max_workers={max_workers}, probe_parallelism={capability_probe_parallelism}, "
+            f"probe_batch_size={capability_probe_batch_size}, status_page_size={status_page_size}"
         )
         logger.info(
             f"Ollama worker pool initialized with {len(states)} worker(s), "
@@ -504,9 +607,15 @@ class OllamaWorkerPool:
         self._queue_depth = int(queue_depth)
         self._admission_timeout = float(admission_timeout_seconds)
         self._capability_ttl = float(capability_ttl_seconds)
+        self._max_workers = int(max_workers)
+        self._probe_parallelism = int(capability_probe_parallelism)
+        self._probe_batch_size = int(capability_probe_batch_size)
+        self._status_page_size = int(status_page_size)
         self._capability_prober = capability_prober
         self._clock = time_fn or clock
         self._cursor = 0
+        self._probe_cursor = 0
+        self._roster_generation = 1
         self._waiters = 0
         self._draining = False
         self._condition = threading.Condition(threading.RLock())
@@ -710,12 +819,25 @@ class OllamaWorkerPool:
         try:
             now = self._clock()
             with self._condition:
-                candidates = [
-                    state for state in self._states
-                    if (force or self._capabilities_stale(state, now))
-                    and (force or state.cooldown_until <= now)
-                    and not state.half_open_inflight
-                ]
+                candidates = []
+                last_selected_index = None
+                state_count = len(self._states)
+                start = self._probe_cursor % state_count if state_count else 0
+                for offset in range(state_count):
+                    index = (start + offset) % state_count
+                    state = self._states[index]
+                    if not (
+                        (force or self._capabilities_stale(state, now))
+                        and (force or state.cooldown_until <= now)
+                        and not state.half_open_inflight
+                    ):
+                        continue
+                    candidates.append(state)
+                    last_selected_index = index
+                    if len(candidates) >= self._probe_batch_size:
+                        break
+                if last_selected_index is not None and state_count:
+                    self._probe_cursor = (last_selected_index + 1) % state_count
             if not candidates:
                 logger.debug("no stale/eligible workers to probe")
                 return self.snapshots()
@@ -729,9 +851,12 @@ class OllamaWorkerPool:
                 except Exception as error:
                     return None, 0.0, error
 
-            logger.debug(f"probing {len(candidates)} candidate workers: {[s.endpoint.worker_id for s in candidates]}")
+            logger.debug(
+                f"probing {len(candidates)} candidate workers: "
+                f"{[s.endpoint.worker_id for s in candidates]}"
+            )
             logger.info(f"probing capabilities on {len(candidates)} worker(s)")
-            workers = min(4, len(candidates))
+            workers = min(self._probe_parallelism, len(candidates))
             with owned_runtime_pool(max_workers=workers) as executor:
                 futures = [executor.submit(run, state) for state in candidates]
                 outcomes = [future.result() for future in futures]
@@ -1161,7 +1286,82 @@ class OllamaWorkerPool:
                 ))
             return tuple(snapshots)
 
-    def status(self) -> dict:
+    def _encode_status_cursor(self, offset: int) -> str:
+        payload = "%d:%d" % (self._roster_generation, offset)
+        return base64.urlsafe_b64encode(payload.encode("ascii")).decode("ascii").rstrip("=")
+
+    def _decode_status_cursor(self, cursor: str | None, total: int) -> int:
+        if cursor in (None, ""):
+            return 0
+        try:
+            encoded = str(cursor).encode("ascii")
+            padding = b"=" * (-len(encoded) % 4)
+            generation_text, offset_text = base64.urlsafe_b64decode(
+                encoded + padding
+            ).decode("ascii").split(":", 1)
+            generation = int(generation_text)
+            offset = int(offset_text)
+        except (binascii.Error, UnicodeError, ValueError):
+            raise ValueError("invalid Ollama worker status cursor") from None
+        if generation != self._roster_generation:
+            raise ValueError("Ollama worker status cursor is for another roster")
+        if not 0 <= offset <= total:
+            raise ValueError("invalid Ollama worker status cursor")
+        return offset
+
+    @staticmethod
+    def _status_error_category(snapshot: WorkerSnapshot) -> str:
+        if not snapshot.last_error:
+            return "none"
+        error = snapshot.last_error.casefold()
+        if "timeout" in error:
+            return "timeout"
+        if snapshot.state == "incompatible" or "capability" in error:
+            return "capability"
+        if "http" in error or "protocol" in error:
+            return "protocol"
+        if "authoriz" in error or "forbidden" in error or "unauthorized" in error:
+            return "authorization"
+        if "urlerror" in error or "connection" in error or "transport" in error:
+            return "transport"
+        return "unknown"
+
+    @staticmethod
+    def _status_worker_record(snapshot: WorkerSnapshot) -> dict:
+        previews = tuple(sorted({
+            _safe_scalar(model, limit=_STATUS_MODEL_PREVIEW_LENGTH)
+            for model in snapshot.models
+            if _safe_scalar(model, limit=_STATUS_MODEL_PREVIEW_LENGTH)
+        }))[:_STATUS_MODEL_PREVIEW_COUNT]
+        return {
+            "worker_id": _safe_scalar(snapshot.worker_id, limit=256),
+            "origin": _safe_scalar(snapshot.origin, limit=256),
+            "state": snapshot.state,
+            "healthy": snapshot.healthy,
+            "inflight": snapshot.inflight,
+            "capacity": snapshot.capacity,
+            "consecutive_failures": snapshot.consecutive_failures,
+            "cooldown_remaining_seconds": snapshot.cooldown_remaining_seconds,
+            "latency_ewma_ms": snapshot.latency_ewma_ms,
+            "protocol": _safe_scalar(snapshot.protocol, limit=80),
+            "version": _safe_scalar(snapshot.version, limit=80),
+            "capabilities_stale": snapshot.capabilities_stale,
+            "trips": snapshot.trips,
+            "probing": snapshot.probing,
+            "ewma_latency_ms": snapshot.ewma_latency_ms or 0.0,
+            "error_category": OllamaWorkerPool._status_error_category(snapshot),
+            "model_count": len(snapshot.models),
+            "model_preview": list(previews),
+        }
+
+    @staticmethod
+    def _serialized_status_bytes(payload: dict) -> int:
+        return len(json.dumps(payload).encode("utf-8"))
+
+    def status(
+        self, *, cursor: str | None = None, page_size: int | None = None,
+    ) -> dict:
+        """Return cached, bounded worker detail without starting a probe."""
         workers = self.snapshots()
         with self._condition:
             metrics = dict(self._metrics)
@@ -1174,15 +1374,33 @@ class OllamaWorkerPool:
                 f"pool running with {healthy_count}/{total_count} healthy "
                 f"workers; unhealthy: {[w.worker_id for w in workers if not w.healthy]}"
             )
-        return {
+        try:
+            selected_page_size = (
+                self._status_page_size if page_size is None else int(page_size)
+            )
+        except (TypeError, ValueError):
+            raise ValueError("status page size must be within 1..128") from None
+        if not 1 <= selected_page_size <= _MAX_STATUS_PAGE_SIZE:
+            raise ValueError("status page size must be within 1..128")
+        start = self._decode_status_cursor(cursor, total_count)
+        worker_records = tuple(self._status_worker_record(worker) for worker in workers)
+        common = {
+            "schema_version": _STATUS_SCHEMA_VERSION,
+            "roster_generation": self._roster_generation,
+            "membership_mode": "static",
+            "membership_state": "configured",
             "enabled": self.enabled,
             "admission": "draining" if draining else "accepting",
             "worker_count": len(workers),
+            "configured_worker_limit": self._max_workers,
+            "worker_pool_max_workers": self._max_workers,
             "remote_worker_count": sum(
                 1 for state in self._states
                 if not _is_loopback(state.endpoint.origin)
             ),
             "healthy_worker_count": sum(1 for worker in workers if worker.healthy),
+            "unhealthy_worker_count": sum(1 for worker in workers if not worker.healthy),
+            "draining_worker_count": total_count if draining else 0,
             "available_capacity": sum(
                 max(0, worker.capacity - worker.inflight)
                 for worker in workers
@@ -1195,11 +1413,51 @@ class OllamaWorkerPool:
                 "system-trust-store" if self.has_remote_workers else "not-applicable"
             ),
             "non_idempotent_failover": False,
-            "queue": {"waiting": waiters, "limit": self._queue_depth},
+            "queue": {
+                "waiting": waiters,
+                "limit": self._queue_depth,
+                "scope": "global",
+            },
             "routing": "latency-aware-least-inflight",
             "metrics": metrics,
-            "workers": [snapshot.to_dict() for snapshot in workers],
+            "probe_parallelism": self._probe_parallelism,
+            "probe_batch_size": self._probe_batch_size,
+            "status_page_size": self._status_page_size,
+            "worker_capability_probe_parallelism": self._probe_parallelism,
+            "worker_capability_probe_batch_size": self._probe_batch_size,
+            "worker_status_page_size": self._status_page_size,
         }
+
+        def page_payload(records: list[dict], end: int) -> dict:
+            payload = dict(common)
+            payload.update({
+                "page_size": selected_page_size,
+                "next_cursor": (
+                    self._encode_status_cursor(end) if end < total_count else None
+                ),
+                "complete": end >= total_count,
+                "omitted_worker_count": total_count - end,
+                "workers": records,
+                # Reserve the widest possible encoded value while choosing records.
+                "serialized_bytes": _MAX_STATUS_SERIALIZED_BYTES,
+            })
+            return payload
+
+        records: list[dict] = []
+        end = start
+        while end < total_count and len(records) < selected_page_size:
+            candidate = records + [worker_records[end]]
+            payload = page_payload(candidate, end + 1)
+            if self._serialized_status_bytes(payload) > _MAX_STATUS_SERIALIZED_BYTES:
+                break
+            records = candidate
+            end += 1
+        result = page_payload(records, end)
+        for _ in range(3):
+            result["serialized_bytes"] = self._serialized_status_bytes(result)
+        if result["serialized_bytes"] > _MAX_STATUS_SERIALIZED_BYTES:
+            raise RuntimeError("bounded Ollama worker status exceeded its byte limit")
+        return result
 
     def operator_status_lines(self) -> tuple[str, ...]:
         """Render compact, bounded status without response bodies or prompts."""
@@ -1230,13 +1488,18 @@ class OllamaWorkerPool:
                     worker["inflight"],
                     worker["capacity"],
                     latency,
-                    len(worker["models"]),
+                    worker["model_count"],
                     worker["version"],
                     (
                         " retry=%.1fs" % worker["cooldown_remaining_seconds"]
                         if worker["cooldown_remaining_seconds"] else ""
                     ),
                 )
+            )
+        if status["omitted_worker_count"]:
+            lines.append(
+                "  + %d worker(s) omitted by the configured status page limit"
+                % status["omitted_worker_count"]
             )
         return tuple(lines)
 
@@ -1257,14 +1520,59 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
         typed_probe = _configured_probe_timeout_ms
         typed_max_inflight = _configured_max_inflight
         typed_queue_depth = _configured_queue_depth
+        typed_max_workers = _configured_max_workers
+        typed_probe_parallelism = _configured_probe_parallelism
+        typed_probe_batch_size = _configured_probe_batch_size
+        typed_status_page_size = _configured_status_page_size
     use_typed = environment is None and typed_workers is not None and typed_allow_remote is not None
+    max_workers = (
+        typed_max_workers if use_typed and typed_max_workers is not None
+        else _positive_int(
+            env,
+            "SONDER_OLLAMA_POOL_MAX_WORKERS",
+            _DEFAULT_MAX_WORKERS,
+            maximum=_MAX_POOL_WORKERS,
+        )
+    )
+    probe_parallelism = (
+        typed_probe_parallelism
+        if use_typed and typed_probe_parallelism is not None
+        else _positive_int(
+            env,
+            "SONDER_OLLAMA_WORKER_PROBE_PARALLELISM",
+            _DEFAULT_CAPABILITY_PROBE_PARALLELISM,
+            maximum=_MAX_CAPABILITY_PROBE_PARALLELISM,
+        )
+    )
+    probe_batch_size = (
+        typed_probe_batch_size
+        if use_typed and typed_probe_batch_size is not None
+        else _positive_int(
+            env,
+            "SONDER_OLLAMA_WORKER_PROBE_BATCH_SIZE",
+            _DEFAULT_CAPABILITY_PROBE_BATCH_SIZE,
+            maximum=_MAX_CAPABILITY_PROBE_BATCH_SIZE,
+        )
+    )
+    status_page_size = (
+        typed_status_page_size
+        if use_typed and typed_status_page_size is not None
+        else _positive_int(
+            env,
+            "SONDER_OLLAMA_WORKER_STATUS_PAGE_SIZE",
+            _DEFAULT_STATUS_PAGE_SIZE,
+            maximum=_MAX_STATUS_PAGE_SIZE,
+        )
+    )
     if use_typed:
         worker_origins = typed_workers
         allow_remote = typed_allow_remote
         trusted_origins = typed_trusted_origins or ()
         logger.debug(f"from_environment: using typed config, workers={len(worker_origins)}, allow_remote={allow_remote}")
     else:
-        worker_origins = parse_worker_origins(env.get("SONDER_OLLAMA_WORKERS"))
+        worker_origins = parse_worker_origins(
+            env.get("SONDER_OLLAMA_WORKERS"), max_workers=max_workers,
+        )
         allow_remote = str(env.get("SONDER_ALLOW_REMOTE_OLLAMA", "")).strip().lower() in {
             "1", "true", "yes", "on",
         }
@@ -1309,6 +1617,10 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
         trusted_origins=trusted_origins,
         failure_threshold=failure_threshold,
         cooldown_seconds=cooldown,
+        max_workers=max_workers,
+        capability_probe_parallelism=probe_parallelism,
+        capability_probe_batch_size=probe_batch_size,
+        status_page_size=status_page_size,
         max_inflight_per_worker=(
             typed_max_inflight if use_typed and typed_max_inflight is not None
             else _positive_int(

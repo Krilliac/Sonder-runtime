@@ -30,7 +30,9 @@ worker. Each endpoint must be unique after canonical normalization, so a
 repeated worker or an alias of the primary endpoint is rejected rather than
 silently removed. The bound keeps one coordinator's roster finite; it does
 not guarantee that a host can sustain that many workers or any particular
-throughput.
+throughput. The roster is static: Sonder only probes the origins an operator
+configured. It does not discover remote Ollama nodes, shard one model or
+request across nodes, or claim indefinite scaling.
 
 ## Prerequisites
 
@@ -132,7 +134,7 @@ trusted_origins = ["10.77.0.0/24"]
 | Key | Purpose |
 |---|---|
 | `allow_remote` | Consent gate — must be `true` to reference non-loopback workers. |
-| `workers` | Additional Ollama origins. The coordinator discovers each worker's loaded models and routes by least-inflight. |
+| `workers` | Additional explicitly configured Ollama origins. The coordinator probes their model capabilities and routes complete requests by least-inflight. |
 | `trusted_origins` | CIDR list of private subnets where HTTP (non-TLS) is accepted. Without this, every remote worker must use HTTPS. |
 
 Alternatively, set via environment:
@@ -141,6 +143,10 @@ Alternatively, set via environment:
 SONDER_ALLOW_REMOTE_OLLAMA=1
 SONDER_OLLAMA_WORKERS=http://10.77.0.2:11434
 SONDER_TRUSTED_ORIGINS=10.77.0.0/24
+SONDER_OLLAMA_POOL_MAX_WORKERS=16
+SONDER_OLLAMA_WORKER_PROBE_PARALLELISM=4
+SONDER_OLLAMA_WORKER_PROBE_BATCH_SIZE=32
+SONDER_OLLAMA_WORKER_STATUS_PAGE_SIZE=32
 ```
 
 ## 3. Tier routing with remote models
@@ -177,8 +183,12 @@ whichever worker advertises the chosen model.
 python -m sonder_runtime status --json | jq '.ollama_pool'
 ```
 
-Each worker shows its health, inflight count, and discovered model
-capabilities.  A worker that fails the health probe enters cooldown
+The pool summary preserves total health and the one global queue limit. Worker
+detail is a bounded cached page: it reports at most the configured page size,
+model counts and short previews, then an omitted-worker count and cursor when
+more configured workers exist. The current `status` command may refresh the
+already configured workers' capability cache, but it never creates or
+discovers a worker. A worker that fails a capability probe enters cooldown
 (`worker_cooldown_seconds`, default 30s) and re-enters the pool after
 recovery.
 
@@ -186,12 +196,12 @@ recovery.
 
 | Setting | Default | Notes |
 |---|---|---|
-| `worker_pool_max_workers` | 16 | Maximum unique primary-plus-worker roster held by one coordinator. This is a finite configuration bound, not a throughput guarantee. |
+| `worker_pool_max_workers` | 16 | Maximum unique primary-plus-worker roster held by one coordinator (1–256). This is a finite configuration bound, not a throughput guarantee. |
 | `worker_max_inflight` | 1 | Concurrent requests per worker.  Increase only if the worker has enough VRAM to serve multiple slots. |
 | `worker_queue_depth` | 32 | Bounded backpressure waiters across the whole pool. It is not multiplied by the number of workers. |
-| `worker_capability_probe_parallelism` | 4 | Maximum concurrent worker capability probes for this pool. |
-| `worker_capability_probe_batch_size` | 32 | Maximum stale workers selected by one capability-refresh pass. |
-| `worker_status_page_size` | 32 | Default bounded administrative worker-detail page size. |
+| `worker_capability_probe_parallelism` | 4 | Maximum concurrent worker capability probes for this pool (1–8). |
+| `worker_capability_probe_batch_size` | 32 | Maximum stale workers selected by one fair refresh pass (1–128). |
+| `worker_status_page_size` | 32 | Default bounded cached worker-detail page size (1–128); one page is capped at 65,536 UTF-8 bytes. |
 | `worker_failure_threshold` | 3 | Consecutive failures before cooldown. |
 | `worker_cooldown_seconds` | 30 | Seconds a failed worker stays out of rotation. |
 | `worker_capability_ttl_seconds` | 300 | How often model lists are re-probed. |

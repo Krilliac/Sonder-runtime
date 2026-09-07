@@ -672,6 +672,12 @@ def cmd_serve(args) -> int:
         probe_timeout_ms=config.ollama.worker_probe_timeout_ms,
         max_inflight_per_worker=config.ollama.worker_max_inflight,
         queue_depth=config.ollama.worker_queue_depth,
+        max_workers=config.ollama.worker_pool_max_workers,
+        capability_probe_parallelism=(
+            config.ollama.worker_capability_probe_parallelism
+        ),
+        capability_probe_batch_size=config.ollama.worker_capability_probe_batch_size,
+        status_page_size=config.ollama.worker_status_page_size,
     )
     from sonder_runtime.adapters.inference import ollama_vision
     ollama_vision.configure_typed_request_timeout(
@@ -848,6 +854,12 @@ def cmd_mcp(args) -> int:
             probe_timeout_ms=config.ollama.worker_probe_timeout_ms,
             max_inflight_per_worker=config.ollama.worker_max_inflight,
             queue_depth=config.ollama.worker_queue_depth,
+            max_workers=config.ollama.worker_pool_max_workers,
+            capability_probe_parallelism=(
+                config.ollama.worker_capability_probe_parallelism
+            ),
+            capability_probe_batch_size=config.ollama.worker_capability_probe_batch_size,
+            status_page_size=config.ollama.worker_status_page_size,
         )
 
     try:
