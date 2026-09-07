@@ -226,7 +226,10 @@ def validate_membership_config(config, secrets, *, allow_remote=True) -> None:
             raise ValueError
         for path in (config.trust_anchor_file, config.signature_public_key_file,
                      secrets.membership_client_cert_file, secrets.membership_client_key_file):
-            if type(path) is not str or not path.strip() or len(path) > 4096 or "\x00" in path:
+            if (type(path) is not str or not path.strip() or len(path) > 4096 or "\x00" in path
+                    or not Path(path).is_absolute() or path.startswith(("\\\\", "//"))
+                    or ".." in Path(path).parts
+                    or (os.name == "nt" and ":" in str(Path(path).relative_to(Path(path).anchor)))):
                 raise ValueError
         validate_membership_endpoint(MembershipEndpointPolicy("source", config.source_origin,
             config.source_tls_server_name, config.source_allowed_cidrs), source=True)

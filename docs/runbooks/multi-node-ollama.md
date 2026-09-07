@@ -278,6 +278,25 @@ clock, source, and state store are checked at compatibility bindings. External
 mode must use that typed composition; a bare remote `python server.py` root
 fails closed without it.
 
+Authority and client credential paths must be absolute local paths to private,
+single-link regular files beneath private directories. Relative paths, UNC or
+mapped network drives on Windows, symlinks/junctions, special files, foreign
+owners and public file permissions are rejected. The runtime trusts the local
+owner to provision the four files before application construction. It captures
+bounded bytes using directory anchors and file identity/permission checks;
+the signing key and private TLS context use only those captured bytes for that
+application lifetime. Subsequent file replacement or edits cannot rotate live
+authority: restart the application to adopt a deliberate credential/CA/signing
+rotation. TLS client-chain loading briefly creates private temporary copies
+and removes them before connecting. This does not defend against a compromised
+local owner or administrator controlling the running process.
+
+The default embedding provider is unavailable in external membership mode,
+including with `local_fallback = true` and with valid admitted members. It
+fails before using the generic Ollama transport; typed custom embedding
+providers remain explicitly supplied integrations. Static-mode default
+embeddings retain their existing behavior.
+
 Standalone preflight and doctor Ollama checks are explicitly deferred in
 external mode. They perform no registry or worker I/O and expose no endpoint
 details; readiness requires the typed pool's explicit membership/capability
@@ -291,6 +310,9 @@ capability/inference requests. Each connection resolves once, checks every
 answer against its configured CIDRs, then connects to a validated numeric
 address with the configured SNI and exact SAN. Proxies and redirects are never
 used. A signed advertisement cannot change any transport or credential policy.
+Only a body-free `GET /api/version` 404 retains the older-worker compatibility
+fallback to `/api/tags`. Other response-bearing failures remain closed and
+cannot trigger inference replay.
 
 The signed response is compact ASCII JSON with sorted keys and no whitespace
 or trailing newline: `{"payload":...,"signature":"..."}`. The payload has

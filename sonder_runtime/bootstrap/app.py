@@ -284,6 +284,10 @@ def build_application(
         import sonder_runtime.adapters.embeddings as legacy_embeddings
 
         def embedding_provider(request, context):
+            # The legacy adapter owns a generic endpoint transport, not the
+            # externally admitted pool. It cannot inherit membership authority.
+            if config is not None and config.membership.mode == "external":
+                raise RuntimeError("default embeddings unavailable in external membership mode")
             timeout = context.remaining_seconds
             timeout = 30.0 if timeout is None else max(0.001, timeout)
             vectors = []
