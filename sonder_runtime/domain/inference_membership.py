@@ -6,6 +6,8 @@ as a pure callable over the exact canonical signed envelope. The adapter must
 also enforce its configured issuer, member-origin/SAN/CIDR and mTLS policies.
 A reconciliation is only a proposal: its high-water value must be durably
 compare-and-advanced before a future controller applies any roster change.
+Public boundaries accept exact domain value types and built-in comparison
+fields; subclasses cannot override equality to substitute membership authority.
 """
 from __future__ import annotations
 
@@ -34,7 +36,7 @@ def _integer(value: int, low: int, high: int, name: str) -> int:
 
 
 def _identity(value: str) -> str:
-    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", value):
+    if type(value) is not str or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", value):
         raise ValueError("membership identity must be a bounded opaque ASCII identifier")
     return value
 
@@ -42,7 +44,7 @@ def _identity(value: str) -> str:
 def _origin(value: str) -> str:
     # Parse an origin only, without resolving DNS or permitting URL credentials,
     # paths, queries, fragments, zone identifiers, or ambiguous bind-all hosts.
-    match = re.fullmatch(r"https://(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+):([0-9]{1,5})/?", value) if isinstance(value, str) else None
+    match = re.fullmatch(r"https://(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+):([0-9]{1,5})/?", value) if type(value) is str else None
     if not match or len(value) > 2048:
         raise ValueError("member origin must be an explicit HTTPS origin")
     host, port = match.groups()
@@ -66,13 +68,13 @@ def _origin(value: str) -> str:
 
 
 def _aware(value: datetime, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("%s must be a timezone-aware datetime" % name)
     return value.astimezone(timezone.utc)
 
 
 def _timestamp(value: str) -> datetime:
-    if not isinstance(value, str) or not re.fullmatch(
+    if type(value) is not str or not re.fullmatch(
         r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})", value,
     ):
         raise ValueError("snapshot timestamp must include an explicit timezone")
@@ -81,7 +83,7 @@ def _timestamp(value: str) -> datetime:
 
 def _bounded_tuple(value, maximum: int, name: str) -> tuple:
     # Do not consume arbitrary iterators or silently trim remote records.
-    if not isinstance(value, (tuple, list)) or len(value) > maximum:
+    if type(value) not in (tuple, list) or len(value) > maximum:
         raise ValueError("%s exceeds its bounded sequence limit" % name)
     return tuple(value)
 
@@ -103,11 +105,11 @@ class WorkerAdvertisement:
         _identity(self.worker_id)
         object.__setattr__(self, "origin", _origin(self.origin))
         _integer(self.member_generation, 1, _MAX_GENERATION, "member generation")
-        if not isinstance(self.lifecycle_state, str) or self.lifecycle_state not in _STATES:
+        if type(self.lifecycle_state) is not str or self.lifecycle_state not in _STATES:
             raise ValueError("invalid advertised lifecycle state")
         models = _bounded_tuple(self.models, 2048, "model keys")
         for model in models:
-            if not isinstance(model, str) or len(model) > 256 or not re.fullmatch(
+            if type(model) is not str or len(model) > 256 or not re.fullmatch(
                 r"[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9._-]+)?", model,
             ):
                 raise ValueError("invalid bounded model key")
@@ -156,6 +158,8 @@ class MembershipSnapshot:
         max_advertisements: int = MAX_ADVERTISEMENTS,
         max_bytes: int = MAX_SNAPSHOT_BYTES,
     ) -> MembershipSnapshot:
+        if cls is not MembershipSnapshot:
+            raise ValueError("snapshot factory requires the exact domain type")
         _integer(max_advertisements, 1, MAX_ADVERTISEMENTS, "advertisement limit")
         _integer(max_bytes, 1, MAX_SNAPSHOT_BYTES, "snapshot byte limit")
         if type(canonical_envelope) is not bytes or not 0 < len(canonical_envelope) <= max_bytes:
@@ -168,12 +172,12 @@ class MembershipSnapshot:
             raise ValueError("malformed signed snapshot") from exc
         if encoded != canonical_envelope:
             raise ValueError("signed snapshot is not canonical")
-        if not isinstance(signed, dict) or signed.keys() != {"payload", "signature"}:
+        if type(signed) is not dict or signed.keys() != {"payload", "signature"}:
             raise ValueError("invalid signed envelope fields")
-        if not isinstance(signed["signature"], str) or not 0 < len(signed["signature"]) <= 8192:
+        if type(signed["signature"]) is not str or not 0 < len(signed["signature"]) <= 8192:
             raise ValueError("invalid bounded signature")
         payload = signed["payload"]
-        if not isinstance(payload, dict) or payload.keys() != {
+        if type(payload) is not dict or payload.keys() != {
             "cluster_id", "issuer_id", "generation", "protocol_version", "issued_at", "expires_at", "workers",
         }:
             raise ValueError("invalid membership payload fields")
@@ -193,7 +197,7 @@ class MembershipSnapshot:
             raise ValueError("snapshot expiry must follow issue time")
         workers, identities, origins = [], set(), set()
         for row in rows:
-            if not isinstance(row, dict) or row.keys() != {
+            if type(row) is not dict or row.keys() != {
                 "worker_id", "origin", "member_generation", "lifecycle_state", "models", "advertised_capacity",
             }:
                 raise ValueError("invalid advertisement fields")
@@ -227,7 +231,7 @@ class MembershipHighWater:
         _identity(self.cluster_id)
         _identity(self.issuer_id)
         _integer(self.generation, 1, _MAX_GENERATION, "high-water generation")
-        if not isinstance(self.digest, str) or not re.fullmatch(r"[0-9a-f]{64}", self.digest):
+        if type(self.digest) is not str or not re.fullmatch(r"[0-9a-f]{64}", self.digest):
             raise ValueError("high-water digest must be a SHA-256 hex digest")
 
 
@@ -253,13 +257,13 @@ def validate_high_water(
     _identity(cluster_id)
     _identity(issuer_id)
     now = _aware(clock(), "clock")
-    if not isinstance(snapshot, MembershipSnapshot):
+    if type(snapshot) is not MembershipSnapshot:
         raise ValueError("a verified membership snapshot is required")
     _authority(snapshot, cluster_id, issuer_id)
     if not snapshot.issued_at <= now < snapshot.expires_at:
         raise ValueError("snapshot is expired or issued in the future")
     if previous is not None:
-        if not isinstance(previous, MembershipHighWater):
+        if type(previous) is not MembershipHighWater:
             raise ValueError("invalid high-water record")
         _authority(previous, cluster_id, issuer_id)
         if snapshot.generation < previous.generation:
@@ -296,12 +300,12 @@ class RosterMember:
     evidence: CapabilityEvidence | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.advertisement, WorkerAdvertisement):
+        if type(self.advertisement) is not WorkerAdvertisement:
             raise ValueError("invalid roster advertisement")
-        if self.lifecycle_state not in {"probation", "active", "unhealthy", "expired"}:
+        if type(self.lifecycle_state) is not str or self.lifecycle_state not in {"probation", "active", "unhealthy", "expired"}:
             raise ValueError("invalid admitted lifecycle state")
         if self.evidence is not None and (
-            not isinstance(self.evidence, CapabilityEvidence) or _key(self.evidence) != _key(self.advertisement)
+            type(self.evidence) is not CapabilityEvidence or _key(self.evidence) != _key(self.advertisement)
         ):
             raise ValueError("capability evidence does not bind this member")
         if self.lifecycle_state == "active" and self.evidence is None:
@@ -315,14 +319,14 @@ class MembershipRoster:
     generation: int
 
     def __post_init__(self) -> None:
-        if not isinstance(self.snapshot, MembershipSnapshot):
+        if type(self.snapshot) is not MembershipSnapshot:
             raise ValueError("roster requires a verified snapshot")
         _integer(self.generation, 1, _MAX_GENERATION, "roster generation")
         members = _bounded_tuple(self.members, MAX_ROSTER_WORKERS, "roster members")
         advertisements = {worker.worker_id: worker for worker in self.snapshot.workers}
         seen = set()
         for member in members:
-            if not isinstance(member, RosterMember):
+            if type(member) is not RosterMember:
                 raise ValueError("invalid roster member")
             worker = member.advertisement
             if worker.worker_id in seen or advertisements.get(worker.worker_id) != worker:
@@ -346,13 +350,13 @@ class MembershipReconciliation:
     omitted_worker_count: int = 0
 
     def __post_init__(self) -> None:
-        if self.roster is not None and not isinstance(self.roster, MembershipRoster):
+        if self.roster is not None and type(self.roster) is not MembershipRoster:
             raise ValueError("reconciliation requires an immutable membership roster")
-        if self.high_water is not None and not isinstance(self.high_water, MembershipHighWater):
+        if self.high_water is not None and type(self.high_water) is not MembershipHighWater:
             raise ValueError("reconciliation requires an immutable high-water record")
         for name in ("additions", "activations", "drains", "expirations"):
             values = _bounded_tuple(getattr(self, name), MAX_ROSTER_WORKERS, name)
-            if any(not isinstance(value, WorkerAdvertisement) for value in values):
+            if any(type(value) is not WorkerAdvertisement for value in values):
                 raise ValueError("invalid reconciliation advertisement")
             object.__setattr__(self, name, values)
         _integer(self.omitted_worker_count, 0, MAX_ADVERTISEMENTS, "omitted worker count")
@@ -384,16 +388,22 @@ def reconcile_membership(
     _integer(max_workers, 1, MAX_ROSTER_WORKERS, "roster worker limit")
     now = _aware(clock(), "clock")
     if high_water is not None:
-        if not isinstance(high_water, MembershipHighWater):
+        if type(high_water) is not MembershipHighWater:
             raise ValueError("invalid high-water record")
         _authority(high_water, cluster_id, issuer_id)
     if previous is not None:
-        if not isinstance(previous, MembershipRoster) or high_water is None:
+        if type(previous) is not MembershipRoster or high_water is None:
             raise ValueError("previous roster requires its retained high-water record")
         _authority(previous.snapshot, cluster_id, issuer_id)
-        if candidate is None and _water(previous.snapshot) != high_water:
+        if candidate is None and (
+            previous.snapshot.cluster_id != high_water.cluster_id
+            or previous.snapshot.issuer_id != high_water.issuer_id
+            or previous.snapshot.generation != high_water.generation
+            or previous.snapshot.digest != high_water.digest
+        ):
             # Persistence may have advanced through a revocation before roster
             # application. An outage cannot revive that superseded authority.
+            # Compare validated built-in fields, never overridable record equality.
             return MembershipReconciliation(
                 None, high_water,
                 drains=tuple(member.advertisement for member in previous.members),
@@ -434,7 +444,7 @@ def reconcile_membership(
 
     proofs = {}
     for proof in _bounded_tuple(capability_evidence, MAX_ROSTER_WORKERS, "capability evidence"):
-        if not isinstance(proof, CapabilityEvidence) or _key(proof) in proofs:
+        if type(proof) is not CapabilityEvidence or _key(proof) in proofs:
             raise ValueError("invalid or duplicate capability evidence")
         proofs[_key(proof)] = proof
     members, additions, activations = [], [], []

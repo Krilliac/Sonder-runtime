@@ -359,6 +359,129 @@ def test_outage_requires_exact_high_water_digest_even_at_equal_generation():
         reconcile(current.roster.snapshot, previous=current.roster, high_water=conflicting)
 
 
+@pytest.mark.parametrize("boundary", ["outage", "candidate", "validation", "result"])
+def test_hostile_high_water_subclass_is_rejected_before_equality_dispatch(boundary):
+    current = active_roster()
+    revoked = snapshot([], generation=2)
+    equality_calls = []
+
+    class HostileHighWater(domain().MembershipHighWater):
+        def __eq__(self, other):
+            equality_calls.append("eq")
+            return True
+
+        def __ne__(self, other):
+            equality_calls.append("ne")
+            return False
+
+    hostile = HostileHighWater("cluster-a", "issuer-a", 2, revoked.digest)
+    with pytest.raises(ValueError, match="high-water"):
+        if boundary == "outage":
+            reconcile(None, previous=current.roster, high_water=hostile)
+        elif boundary == "candidate":
+            reconcile(revoked, previous=current.roster, high_water=hostile)
+        elif boundary == "validation":
+            domain().validate_high_water(revoked, hostile, cluster_id="cluster-a",
+                                        issuer_id="issuer-a", clock=lambda: NOW)
+        else:
+            domain().MembershipReconciliation(None, hostile)
+    assert equality_calls == []
+
+
+def test_normal_high_water_retention_never_dispatches_record_equality(monkeypatch):
+    current = active_roster()
+    monkeypatch.setattr(domain().MembershipHighWater, "__eq__",
+                        lambda *_: pytest.fail("record equality used for authority"))
+
+    result = reconcile(None, previous=current.roster, high_water=current.high_water)
+
+    assert result.high_water is current.high_water
+    assert result.roster.members[0].lifecycle_state == "active"
+
+
+@pytest.mark.parametrize("name", ["cluster_id", "issuer_id", "digest"])
+def test_high_water_fields_reject_equality_overriding_string_subclasses(name):
+    class HostileString(str):
+        def __eq__(self, other):
+            return True
+
+        def __ne__(self, other):
+            return False
+
+    values = dict(cluster_id="cluster-a", issuer_id="issuer-a", generation=1, digest="a" * 64)
+    values[name] = HostileString(values[name])
+    with pytest.raises(ValueError):
+        domain().MembershipHighWater(**values)
+
+
+@pytest.mark.parametrize("kind", ["advertisement", "evidence", "member", "roster"])
+def test_other_membership_boundaries_reject_domain_subclasses(kind):
+    current = active_roster()
+    member = current.roster.members[0]
+    value = {
+        "advertisement": member.advertisement,
+        "evidence": member.evidence,
+        "member": member,
+        "roster": current.roster,
+    }[kind]
+    subtype = type("Hostile" + type(value).__name__, (type(value),), {
+        "__eq__": lambda *_: True, "__ne__": lambda *_: False,
+    })
+    hostile = subtype(**{field.name: getattr(value, field.name) for field in fields(value)})
+    with pytest.raises(ValueError):
+        if kind == "advertisement":
+            domain().RosterMember(hostile, "probation")
+        elif kind == "evidence":
+            reconcile(current.roster.snapshot, previous=current.roster, high_water=current.high_water,
+                      capability_evidence=(hostile,))
+        elif kind == "member":
+            domain().MembershipRoster(current.roster.snapshot, (hostile,), 1)
+        else:
+            reconcile(None, previous=hostile, high_water=current.high_water)
+
+
+def test_snapshot_factory_rejects_subclasses_that_could_override_field_equality():
+    class HostileSnapshot(domain().MembershipSnapshot):
+        def __eq__(self, other):
+            return True
+
+    with pytest.raises(ValueError):
+        HostileSnapshot.from_signed_envelope(envelope(), verify=verify)
+
+
+def test_clock_rejects_datetime_subclasses_with_overridden_comparisons():
+    class HostileDatetime(datetime):
+        def __lt__(self, other):
+            return True
+
+        def __le__(self, other):
+            return True
+
+    with pytest.raises(ValueError):
+        reconcile(snapshot(), now=HostileDatetime(2026, 9, 7, 12, tzinfo=timezone.utc))
+
+
+@pytest.mark.parametrize("kind", ["sequence", "model", "state"])
+def test_member_comparison_fields_cannot_retain_equality_overriding_subclasses(kind):
+    class HostileString(str):
+        __hash__ = str.__hash__
+
+        def __eq__(self, other):
+            return True
+
+    class HostileTuple(tuple):
+        def __eq__(self, other):
+            return True
+
+    changes = {
+        "sequence": {"models": HostileTuple(("safe:latest",))},
+        "model": {"models": (HostileString("safe:latest"),)},
+        "state": {"lifecycle_state": HostileString("active")},
+    }[kind]
+    with pytest.raises(ValueError):
+        domain().WorkerAdvertisement(**wire_worker(**changes))
+
+
 def test_source_outage_cannot_add_previously_omitted_members_when_limit_grows():
     current = reconcile(snapshot([wire_worker("worker-a"), wire_worker("worker-b")]), max_workers=1)
     result = reconcile(None, previous=current.roster, high_water=current.high_water, max_workers=2)
