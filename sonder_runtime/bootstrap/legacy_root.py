@@ -15,12 +15,23 @@ def configure_application(application) -> None:
         raise RuntimeError("legacy application composition is busy")
     try:
         current = legacy._APP_GRAPH
-        if current is application:
-            return
-        if current is not None:
+        if current is not None and current is not application:
             if current is not _owned_application:
                 raise RuntimeError("legacy runtime retains a caller-owned application")
             current.close_providers(timeout=5)
+        pool = getattr(application, "inference_pool", None)
+        if pool is not None:
+            from ..adapters.inference import ollama_endpoint
+
+            previous_pool = legacy.OLLAMA_POOL
+            if previous_pool is not pool:
+                # Preloaded legacy modules must not retain a second admission
+                # path. Existing work finishes against its original pool.
+                previous_pool.drain(timeout_seconds=0)
+            legacy.OLLAMA_POOL = pool
+            legacy.BASE = ollama_endpoint.normalize(application.config.ollama.url)
+        if current is application:
+            return
         legacy._APP_GRAPH = application
         _owned_application = application
     finally:

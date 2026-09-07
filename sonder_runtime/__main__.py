@@ -724,27 +724,30 @@ def cmd_serve(args) -> int:
         pass
 
     from sonder_runtime.bootstrap.legacy_interfaces import (
+        configure_legacy_application,
         configure_legacy_interfaces,
         configure_legacy_capacity,
     )
-
-    configure_legacy_interfaces()
-    configure_legacy_capacity(
-        autopilot_runs=config.capacity.autopilot_runs,
-        fleet_workers=config.capacity.fleet_workers,
-        training_jobs=config.capacity.training_jobs,
-    )
-
     from sonder_runtime.bootstrap.app import default_app
     from sonder_runtime.interfaces.http.handlers import RecallHandler, OutcomeHandler
-    app = default_app()
-    sonder_serve.configure_thin_handlers({
-        "/v1/recall": RecallHandler(app.memory),
-        "/v1/outcome": OutcomeHandler(app.memory),
-    })
-
-    sys.argv = ["python -m sonder_runtime serve", str(config.server.port)]
-    sonder_serve.main(config=config)
+    # Compose typed admission before any boundary resolves the legacy root.
+    app = default_app(config=config)
+    try:
+        configure_legacy_application(app)
+        configure_legacy_interfaces()
+        configure_legacy_capacity(
+            autopilot_runs=config.capacity.autopilot_runs,
+            fleet_workers=config.capacity.fleet_workers,
+            training_jobs=config.capacity.training_jobs,
+        )
+        sonder_serve.configure_thin_handlers({
+            "/v1/recall": RecallHandler(app.memory),
+            "/v1/outcome": OutcomeHandler(app.memory),
+        })
+        sys.argv = ["python -m sonder_runtime serve", str(config.server.port)]
+        sonder_serve.main(config=config)
+    finally:
+        app.close_providers(timeout=5)
     return 0
 
 
@@ -838,8 +841,6 @@ def cmd_mcp(args) -> int:
         _export_runtime_environment(config)
         from sonder_runtime.bootstrap.app import default_app
         from sonder_runtime.bootstrap.legacy_mcp import configure_legacy_application
-        owned_application = default_app(config=config)
-        configure_legacy_application(owned_application)
         from sonder_runtime.adapters.inference import ollama_endpoint
         ollama_endpoint.configure_typed_endpoint(config.ollama.url)
         from sonder_runtime.adapters.inference import ollama_pool
@@ -861,6 +862,10 @@ def cmd_mcp(args) -> int:
             capability_probe_batch_size=config.ollama.worker_capability_probe_batch_size,
             status_page_size=config.ollama.worker_status_page_size,
         )
+        # Do not reset typed worker configuration after the application binds
+        # its pool: that would erase the shared compatibility pool reference.
+        owned_application = default_app(config=config)
+        configure_legacy_application(owned_application)
 
     try:
         McpCommand(build_legacy_server_mcp_runtime()).execute(_configure_mcp_legacy)

@@ -30,12 +30,15 @@ def test_config_retains_exact_private_file_provenance(tmp_path):
 def test_legacy_injection_does_not_replace_caller_owned_application(monkeypatch):
     calls = []
     caller = SimpleNamespace(close_providers=lambda **kw: calls.append("closed"))
-    runtime = SimpleNamespace(_APP_GRAPH=caller, _APP_GRAPH_LOCK=threading.Lock())
+    pool = SimpleNamespace(drain=lambda **kw: calls.append("drained"))
+    runtime = SimpleNamespace(_APP_GRAPH=caller, _APP_GRAPH_LOCK=threading.Lock(),
+                              OLLAMA_POOL=pool, BASE="http://127.0.0.1:11434")
     monkeypatch.setattr(legacy_root, "runtime", lambda: runtime)
     monkeypatch.setattr(legacy_root, "_owned_application", None)
     with pytest.raises(RuntimeError, match="caller-owned"):
-        legacy_root.configure_application(SimpleNamespace())
+        legacy_root.configure_application(SimpleNamespace(inference_pool=object()))
     assert runtime._APP_GRAPH is caller and calls == []
+    assert runtime.OLLAMA_POOL is pool and runtime.BASE == "http://127.0.0.1:11434"
 
 
 def test_owned_legacy_replacement_requires_successful_bounded_cleanup(monkeypatch):
@@ -46,12 +49,14 @@ def test_owned_legacy_replacement_requires_successful_bounded_cleanup(monkeypatc
         raise RuntimeError("cleanup incomplete")
 
     old = SimpleNamespace(close_providers=fail)
-    runtime = SimpleNamespace(_APP_GRAPH=old, _APP_GRAPH_LOCK=threading.Lock())
+    pool = SimpleNamespace(drain=lambda **kw: calls.append("drained"))
+    runtime = SimpleNamespace(_APP_GRAPH=old, _APP_GRAPH_LOCK=threading.Lock(), OLLAMA_POOL=pool)
     monkeypatch.setattr(legacy_root, "runtime", lambda: runtime)
     monkeypatch.setattr(legacy_root, "_owned_application", old)
     with pytest.raises(RuntimeError, match="cleanup incomplete"):
-        legacy_root.configure_application(SimpleNamespace())
+        legacy_root.configure_application(SimpleNamespace(inference_pool=object()))
     assert runtime._APP_GRAPH is old and calls == [5]
+    assert runtime.OLLAMA_POOL is pool
 
 
 def test_busy_legacy_composition_is_bounded_and_does_not_replace(monkeypatch):

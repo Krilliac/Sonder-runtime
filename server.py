@@ -4749,6 +4749,8 @@ def _post(
             return dispatch_provider("ollama", path, json.loads(data), transport)
         return transport()
 
+    if local_only and not ollama_endpoint.is_loopback(BASE):
+        raise ollama_pool.WorkerPoolUnavailable("local-only inference requires a loopback primary")
     if local_only or not OLLAMA_POOL.enabled:
         return send(BASE)
     model_hint = payload.get("model") if isinstance(payload, dict) else None

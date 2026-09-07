@@ -7,6 +7,7 @@ import importlib
 import json
 import threading
 from urllib.error import URLError
+from types import SimpleNamespace
 
 import pytest
 
@@ -69,6 +70,57 @@ def controller(source, pool, clock):
     module = importlib.import_module("sonder_runtime.application.inference_membership.controller")
     return module.MembershipController(source, pool, clock=clock, cluster_id="static-config",
                                        issuer_id="local-config", refresh_interval_seconds=60)
+
+
+def test_metric_identity_reservations_survive_removal_replacement_and_new_pool():
+    from sonder_runtime.platform.metrics import MetricsRegistry
+
+    class Metrics(MetricsRegistry):
+        def __init__(self):
+            super().__init__(enabled=False)
+            self.requests = []
+
+        def observe_ollama_worker_request(self, *, worker, result, elapsed_seconds):
+            self.requests.append((worker, result))
+
+    metrics = Metrics()
+    clock = Clock()
+    source = Source(signed_snapshot(worker_prefix="first"))
+    pool = OllamaWorkerPool(REMOTE, (REPLACEMENT,), allow_remote=True, metrics=metrics,
+                            capability_prober=lambda _: {"models": ["code"]})
+    control = controller(source, pool, clock)
+    try:
+        control.refresh(timeout_seconds=2)
+        assert pool.request(lambda origin: origin) == REMOTE
+        source.snapshot = signed_snapshot((), generation=2)
+        control.refresh(timeout_seconds=2)
+        assert pool.origins == ()
+        source.snapshot = signed_snapshot(generation=3, worker_prefix="second")
+        control.refresh(timeout_seconds=2)
+        pool.request(lambda origin: origin)
+        # Endpoint and incarnation changes keep the same admitted identity.
+        source.snapshot = signed_snapshot((REPLACEMENT,), generation=4,
+                                          member_generation=2, worker_prefix="second")
+        control.refresh(timeout_seconds=2)
+        assert pool.request(lambda origin: origin) == REPLACEMENT
+        source.snapshot = signed_snapshot(generation=5, worker_prefix="first")
+        control.refresh(timeout_seconds=2)
+        pool.request(lambda origin: origin)
+        assert metrics.requests == [("w0", "ok"), ("w1", "ok"), ("w1", "ok"), ("w0", "ok")]
+    finally:
+        assert control.close(timeout=2)
+
+    # Re-composition shares the process metric owner, not recycled pool slots.
+    source = Source(signed_snapshot(worker_prefix="third"))
+    pool = OllamaWorkerPool(REMOTE, allow_remote=True, metrics=metrics,
+                            capability_prober=lambda _: {"models": ["code"]})
+    control = controller(source, pool, clock)
+    try:
+        control.refresh(timeout_seconds=2)
+        pool.request(lambda origin: origin)
+        assert metrics.requests[-1] == ("w2", "ok")
+    finally:
+        assert control.close(timeout=2)
 
 
 def test_snapshot_sequence_probation_activation_removal_and_expiry():
@@ -470,3 +522,106 @@ def test_refresh_rejects_invalid_timeout_before_starting_a_thread(timeout):
         assert control._thread is None and source.calls == 0
     finally:
         assert control.close(timeout=0)
+
+
+@pytest.mark.parametrize("primary_remote", [False, True])
+@pytest.mark.parametrize("command", ["serve", "mcp", "repl"])
+def test_entrypoint_legacy_requests_share_typed_membership_admission(
+    monkeypatch, tmp_path, primary_remote, command,
+):
+    import server
+    import sonder_runtime.__main__ as entrypoint
+    from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool
+    from sonder_runtime.adapters.persistence import migrations, operations_store
+    from sonder_runtime.adapters.persistence.sqlite import bridge_migration
+    from sonder_runtime.bootstrap import app as bootstrap, legacy_root
+    from sonder_runtime.adapters.application_lifecycle import ApplicationLifecycle
+    from sonder_runtime.interfaces.http import serve
+    from sonder_runtime.interfaces.repl import repl
+    from sonder_runtime.platform.config import SonderConfig, StateConfig
+
+    config = SonderConfig(state=StateConfig(home=str(tmp_path)), ollama=OllamaConfig(
+        url=REMOTE if primary_remote else LOCAL, workers=() if primary_remote else (REMOTE,),
+        allow_remote=True, worker_capability_ttl_seconds=60))
+    # Exercise the preloaded legacy case as well as the real command wiring:
+    # this is the otherwise-uncontrolled pool that the serve command must retire.
+    stale_pool = OllamaWorkerPool(config.ollama.url, config.ollama.workers, allow_remote=True,
+        capability_prober=lambda _: {"models": ["remote-model"]})
+    monkeypatch.setattr(server, "OLLAMA_POOL", stale_pool)
+    monkeypatch.setattr(server, "BASE", config.ollama.url)
+    monkeypatch.setattr(server, "_APP_GRAPH", None)
+    monkeypatch.setattr(legacy_root, "_owned_application", None)
+    monkeypatch.setattr(bootstrap, "_application_lifecycle", ApplicationLifecycle(bootstrap._build_default_application))
+    for name in ("_default_config", "_default_compute_close", "_default_delegation_close", "_default_inference_close"):
+        monkeypatch.setattr(bootstrap, name, None)
+    monkeypatch.setattr(entrypoint, "_load_config", lambda _: config)
+    monkeypatch.setattr(entrypoint, "_export_runtime_environment", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bridge_migration, "require_epoch_2", lambda _: None)
+    monkeypatch.setattr(migrations, "migrate_all", lambda **_: None)
+    monkeypatch.setattr(operations_store, "OperationsStore", lambda: SimpleNamespace(prune_events=lambda _: 0))
+    calls = []
+
+    class Response:
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            return False
+        def read(self, *_):
+            return b'{"ok":true}'
+
+    def transport(request, **_):
+        calls.append(request.full_url)
+        return Response()
+
+    monkeypatch.setattr(ollama_endpoint, "open_url", transport)
+    monkeypatch.setattr(server, "dispatch_provider", lambda _provider, _path, _payload, send: send())
+    monkeypatch.setattr(ollama_pool, "_default_capability_prober", lambda **_: (
+        lambda origin: {"models": ["remote-model" if origin == REMOTE else "local-model"]}))
+    checked = []
+
+    def run_interface(**_):
+        application = bootstrap.default_app()
+        with pytest.raises(ollama_pool.WorkerPoolError):
+            server._post("/api/generate", {"model": "remote-model"})
+        assert calls == []
+        assert application.config is config
+        assert server.OLLAMA_POOL is application.inference_pool
+        assert ollama_pool.from_environment(config.ollama.url) is application.inference_pool
+        assert server._application() is application
+        assert application.inference_membership._thread is None
+        if primary_remote:
+            with pytest.raises(ollama_pool.WorkerPoolError):
+                server._get("/api/tags")
+            with pytest.raises(ollama_pool.WorkerPoolError):
+                server._post("/api/generate", {"model": "remote-model"}, local_only=True)
+        assert stale_pool is not application.inference_pool
+        with pytest.raises(ollama_pool.WorkerPoolDraining):
+            stale_pool.request(lambda _: pytest.fail("retired legacy pool admitted"))
+        clock = Clock()
+        control = application.inference_membership
+        control._clock = control._source._clock = application.inference_pool._membership_clock = clock
+        control.refresh(timeout_seconds=2)
+        assert server._post("/api/generate", {"model": "remote-model"}) == {"ok": True}
+        assert calls == [REMOTE + "/api/generate"]
+        clock.now += timedelta(seconds=61)
+        with pytest.raises(ollama_pool.WorkerPoolError):
+            server._post("/api/generate", {"model": "remote-model"})
+        if primary_remote:
+            with pytest.raises(ollama_pool.WorkerPoolError):
+                server._get("/api/tags")
+            with pytest.raises(ollama_pool.WorkerPoolError):
+                server._post("/api/generate", {"model": "remote-model"}, local_only=True)
+        assert calls == [REMOTE + "/api/generate"]
+        checked.append(True)
+
+    monkeypatch.setattr(serve, "main", run_interface)
+    monkeypatch.setattr(server.mcp, "run", run_interface)
+    monkeypatch.setattr(server, "require_mcp_startup_safety", lambda: None)
+    monkeypatch.setattr(repl, "main", run_interface)
+    try:
+        args = SimpleNamespace(skip_preflight=True, native=False, json=False)
+        assert getattr(entrypoint, "cmd_" + command)(args) == 0
+        assert checked == [True]
+    finally:
+        bootstrap.close_default_runtime_resources(timeout=2)
+        ollama_pool.reset_typed_workers()

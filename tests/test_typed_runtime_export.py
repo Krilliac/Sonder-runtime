@@ -79,13 +79,16 @@ def _typed_capacity_config() -> SonderConfig:
     )
 
 
-def _capture_typed_worker_configuration(monkeypatch):
+def _capture_typed_worker_configuration(monkeypatch, *, apply=False):
     from sonder_runtime.adapters.inference import ollama_pool
 
     captured = []
+    configure = ollama_pool.configure_typed_workers
 
     def capture(worker_origins, **options):
         captured.append((worker_origins, options))
+        if apply:
+            configure(worker_origins, **options)
 
     monkeypatch.setattr(ollama_pool, "configure_typed_workers", capture)
     return captured
@@ -182,20 +185,21 @@ def test_legacy_mcp_forwards_typed_ollama_capacity_to_worker_pool(monkeypatch):
 def test_build_application_forwards_typed_ollama_capacity_to_worker_pool(
     monkeypatch,
 ):
-    from sonder_runtime.adapters.inference import ollama_endpoint
+    from sonder_runtime.adapters.inference import ollama_pool
     from sonder_runtime.adapters.web import lifecycle
     from sonder_runtime.bootstrap import app as bootstrap_app
 
     config = _typed_capacity_config()
-    captured = _capture_typed_worker_configuration(monkeypatch)
-    monkeypatch.setattr(
-        ollama_endpoint, "configure_typed_endpoint", lambda _origin: None
-    )
-
+    captured = _capture_typed_worker_configuration(monkeypatch, apply=True)
+    application = None
     try:
         application = bootstrap_app.build_application(config=config)
         assert application.config is config
+        assert application.inference_pool.summary()["configured_worker_limit"] == 64
     finally:
+        if application is not None:
+            application.close_providers(timeout=2)
+        ollama_pool.reset_typed_workers()
         lifecycle.reset_for_tests()
 
     _assert_typed_capacity_was_forwarded(captured)

@@ -372,6 +372,8 @@ def has_configured_remote_workers(environment=None) -> bool:
 class WorkerEndpoint:
     origin: str
     worker_id: str
+    # Retained for endpoint constructor compatibility; emitted metric labels
+    # come from the process registry's immutable identity reservations.
     metric_label: str = "w0"
 
 
@@ -434,6 +436,7 @@ class WorkerSnapshot:
 @dataclass
 class _WorkerState:
     endpoint: WorkerEndpoint
+    metric_label: str | None = None
     inflight: int = 0
     consecutive_failures: int = 0
     last_error: str = ""
@@ -630,6 +633,12 @@ class OllamaWorkerPool:
             "reconnects": 0,
         }
         self._metrics_observer = metrics
+        # Production pools share their process registry. Lightweight injected
+        # observers still get a bounded allocator for the lifetime of this pool.
+        self._metric_label_registry = (
+            metrics if callable(getattr(metrics, "reserve_ollama_worker_label", None))
+            else MetricsRegistry(enabled=False)
+        )
         self._redactor = redactor or Redactor()
         self._membership_clock = None
         self._membership_authority = None
@@ -717,8 +726,8 @@ class OllamaWorkerPool:
                         omitted += 1
                         continue
                     worker = member.advertisement
-                    state = _WorkerState(WorkerEndpoint(worker.origin, worker.worker_id,
-                                                       _metric_label(len(retained))), advertisement=worker)
+                    state = _WorkerState(WorkerEndpoint(worker.origin, worker.worker_id),
+                                         advertisement=worker)
                 else:
                     existing.pop(key)
                     if key in new_admissions:
@@ -871,6 +880,20 @@ class OllamaWorkerPool:
             effective_max_inflight=min(self._max_inflight, advertised),
         ), round(measured_ms, 3)
 
+    def _worker_metric_label(self, state: _WorkerState) -> str:
+        # Reserve only when observed: provisional configured endpoints must
+        # not consume slots before receiving an admitted member identity.
+        if state.metric_label is None:
+            if state.advertisement is not None:
+                identity = ("member", *self._membership_authority,
+                            state.advertisement.worker_id)
+            else:
+                identity = ("configured-origin", state.endpoint.origin)
+            digest = hashlib.sha256(json.dumps(identity, separators=(",", ":"),
+                                                ensure_ascii=True).encode("ascii")).hexdigest()
+            state.metric_label = self._metric_label_registry.reserve_ollama_worker_label(digest)
+        return state.metric_label
+
     def _record_transport_failure(
         self, state: _WorkerState, error: BaseException,
     ) -> None:
@@ -924,7 +947,7 @@ class OllamaWorkerPool:
                 )
             if not was_open and self._metrics_observer is not None:
                 self._metrics_observer.observe_ollama_worker_circuit(
-                    worker=state.endpoint.metric_label, state="open"
+                    worker=self._worker_metric_label(state), state="open"
                 )
 
     def _record_success(self, state: _WorkerState, latency_ms: float) -> None:
@@ -949,7 +972,7 @@ class OllamaWorkerPool:
             self._metrics["reconnects"] += 1
             if self._metrics_observer is not None:
                 self._metrics_observer.observe_ollama_worker_circuit(
-                    worker=state.endpoint.metric_label, state="closed"
+                    worker=self._worker_metric_label(state), state="closed"
                 )
 
     def refresh_capabilities(
@@ -1189,6 +1212,8 @@ class OllamaWorkerPool:
                 now = self._clock()
                 state = self._choose(model=model, excluded=excluded, now=now)
                 if state is not None:
+                    if self._metrics_observer is not None:
+                        self._worker_metric_label(state)
                     state.inflight += 1
                     if state.consecutive_failures >= self._failure_threshold:
                         state.half_open_inflight = True
@@ -1286,7 +1311,7 @@ class OllamaWorkerPool:
                 result = "error"
             if self._metrics_observer is not None:
                 self._metrics_observer.observe_ollama_worker_request(
-                    worker=state.endpoint.metric_label,
+                    worker=self._worker_metric_label(state),
                     result=result,
                     elapsed_seconds=max(0.0, latency_ms / 1000.0),
                 )
