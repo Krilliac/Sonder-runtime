@@ -204,20 +204,31 @@ def test_external_embedding_fence_survives_real_staged_live_reload(source, monke
     assert candidate is not original
     assert policy._external_membership_owners is original_policy._external_membership_owners
     assert policy._embedding_policy_lock is original_policy._embedding_policy_lock
+    assert policy._embedding_policy_condition is original_policy._embedding_policy_condition
+    assert policy._embedding_operations is original_policy._embedding_operations
+    assert policy._embedding_operation_local is original_policy._embedding_operation_local
     assert adapter.embed("sensitive text after reload") is None
 
 
 @pytest.mark.parametrize("compose_during_embed", [False, True])
-def test_default_embedding_dispatch_rechecks_owned_external_source(tmp_path, monkeypatch, compose_during_embed):
+def test_default_embedding_rejects_reentrant_registration_without_partial_ownership(tmp_path, monkeypatch, compose_during_embed):
     from sonder_runtime.adapters import embeddings
     monkeypatch.setenv("SONDER_EMBED_REVISION", "static-test-revision")
     monkeypatch.setenv("SONDER_EMBED_DIM", "1")
     monkeypatch.setattr(embeddings, "_npu_prefer_active", lambda: False)
     monkeypatch.setattr(embeddings, "_npu_shadow_embed", lambda *_a: None)
-    owners, calls = [], []
+    owners, calls, serialized = [], [], []
+    original_dumps = json.dumps
+    def dumps(value, *args, **kwargs):
+        if isinstance(value, dict) and set(value) == {"model", "prompt"}:
+            serialized.append(embeddings.ollama_endpoint._default_embeddings_disabled())
+        return original_dumps(value, *args, **kwargs)
+    monkeypatch.setattr(json, "dumps", dumps)
     def accelerate(*_a):
         if compose_during_embed:
-            owners.append(ExternalMembershipSource(configuration(tmp_path), credentials(tmp_path), clock=lambda: NOW))
+            with pytest.raises(MembershipSourceError, match="^external membership unavailable$"):
+                ExternalMembershipSource(configuration(tmp_path), credentials(tmp_path), clock=lambda: NOW)
+            assert not embeddings.ollama_endpoint._default_embeddings_disabled()
         return None
     monkeypatch.setattr(embeddings, "_accelerated_embed", accelerate)
     def opened(request, **_kw):
@@ -226,11 +237,139 @@ def test_default_embedding_dispatch_rechecks_owned_external_source(tmp_path, mon
     monkeypatch.setattr(embeddings.ollama_endpoint._OPENER, "open", opened)
     try:
         result = embeddings.embed("dispatch-private-text", base="http://127.0.0.1:11434", model="test-embed")
-        assert result == (None if compose_during_embed else [1.0])
-        assert len(calls) == (0 if compose_during_embed else 1)
+        assert result == [1.0]  # refused registration never became an external owner
+        assert not any(serialized)
+        assert len(calls) == 1
         if calls: assert json.loads(calls[0])["prompt"] == "dispatch-private-text"
     finally:
         for owner in owners: owner.close(timeout=1)
+
+
+@pytest.mark.parametrize("operation", ["revision", "current", "refresh", "embed"])
+def test_default_policy_registration_cannot_overtake_active_operation(tmp_path, monkeypatch, operation):
+    import threading
+    from sonder_runtime.adapters import embeddings
+    endpoint = embeddings.ollama_endpoint
+    entered, release, registering, registered = (threading.Event() for _ in range(4))
+    owners, calls, results, failures, serialized = [], [], [], [], []
+    original_dumps = json.dumps
+    def dumps(value, *args, **kwargs):
+        if isinstance(value, dict) and set(value) == {"model", "prompt"}:
+            serialized.append(endpoint._default_embeddings_disabled())
+        return original_dumps(value, *args, **kwargs)
+    monkeypatch.setattr(json, "dumps", dumps)
+    monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
+    monkeypatch.delenv("SONDER_EMBED_REVISION", raising=False)
+    monkeypatch.setattr(embeddings, "BASE", ORIGIN)
+    monkeypatch.setattr(embeddings, "_accelerated_embed", lambda *_a: None)
+    monkeypatch.setattr(embeddings, "_npu_prefer_active", lambda: False)
+    monkeypatch.setattr(embeddings, "_npu_shadow_embed", lambda *_a: None)
+    original_origin = endpoint.configured_origin
+    def origin(*args, **kwargs):
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(3)
+        return original_origin(*args, **kwargs)
+    monkeypatch.setattr(endpoint, "configured_origin", origin)
+    def opened(request, **kwargs):
+        assert not endpoint._embedding_policy_lock._is_owned()
+        calls.append((getattr(request, "full_url", request), endpoint._default_embeddings_disabled()))
+        return io.BytesIO(b'{"models":[],"embedding":[1.0]}')
+    monkeypatch.setattr(endpoint._OPENER, "open", opened)
+    def run():
+        try:
+            call = {"revision": lambda: embeddings.serving_model_revision(),
+                    "current": lambda: embeddings.current_revision(),
+                    "refresh": lambda: embeddings.refresh_runtime_revision(),
+                    "embed": lambda: embeddings.embed("private race text")}[operation]
+            results.append(call())
+        except BaseException as error: failures.append(error)
+    def register():
+        try:
+            registering.set()
+            owners.append(ExternalMembershipSource(configuration(tmp_path), credentials(tmp_path), clock=lambda: NOW))
+            registered.set()
+        except BaseException as error: failures.append(error)
+    worker, registration = threading.Thread(target=run), threading.Thread(target=register)
+    worker.start()
+    try:
+        assert entered.wait(3)
+        registration.start()
+        assert registering.wait(3)
+        with endpoint._embedding_policy_condition:
+            assert endpoint._embedding_policy_condition.wait_for(
+                lambda: endpoint._embedding_operations["pending"] == 1, timeout=2)
+        assert not registered.is_set(), "ownership overtook an active default operation"
+        # A waiting source fences new work while letting existing nested
+        # provenance work finish. No policy lock is held during transport.
+        before, before_serialized = list(calls), list(serialized)
+        assert embeddings.embed("pending private text") is None
+        assert embeddings.serving_model_revision() == ""
+        assert embeddings.current_revision() == ""
+        assert embeddings.refresh_runtime_revision() == ""
+        assert calls == before and serialized == before_serialized
+    finally:
+        release.set()
+        worker.join(3)
+        if registration.ident is not None: registration.join(3)
+        for owner in owners: owner.close(timeout=1)
+    assert not worker.is_alive() and not registration.is_alive()
+    assert failures == [] and results and registered.is_set()
+    assert calls and not any(active for _, active in calls)
+    assert not any(serialized)
+
+
+def test_registration_timeout_never_publishes_or_leaves_pending_restriction(tmp_path):
+    import threading
+    from sonder_runtime.adapters.inference import ollama_endpoint as endpoint
+    entered, release = threading.Event(), threading.Event()
+    def reader():
+        with endpoint._default_embedding_operation() as allowed:
+            assert allowed
+            entered.set()
+            release.wait(10)
+    thread = threading.Thread(target=reader)
+    thread.start()
+    try:
+        assert entered.wait(2)
+        with pytest.raises(MembershipSourceError, match="^external membership unavailable$"):
+            ExternalMembershipSource(configuration(tmp_path), credentials(tmp_path), clock=lambda: NOW)
+        assert not endpoint._default_embeddings_disabled()
+        assert endpoint._embedding_operations == {"active": 1, "pending": 0}
+        with endpoint._default_embedding_operation() as allowed:
+            assert allowed  # a failed registration does not disable static-only work
+    finally:
+        release.set()
+        thread.join(2)
+    assert not thread.is_alive() and endpoint._embedding_operations == {"active": 0, "pending": 0}
+
+
+def test_static_default_operations_remain_concurrent_without_holding_policy_lock(monkeypatch):
+    import threading
+    from sonder_runtime.adapters import embeddings
+    endpoint = embeddings.ollama_endpoint
+    entered = threading.Barrier(3)
+    release = threading.Event()
+    errors, results = [], []
+    def opened(*_a, **_kw):
+        assert not endpoint._embedding_policy_lock._is_owned()
+        entered.wait(3)
+        assert release.wait(3)
+        return io.BytesIO(b'{"models":[]}')
+    monkeypatch.setattr(endpoint._OPENER, "open", opened)
+    def run():
+        try: results.append(embeddings.serving_model_revision(base="http://127.0.0.1:11434"))
+        except BaseException as error: errors.append(error)
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for thread in threads: thread.start()
+    try:
+        entered.wait(3)
+        assert endpoint._embedding_operations["active"] == 2
+    finally:
+        release.set()
+        for thread in threads: thread.join(3)
+    assert errors == [] and results == ["", ""]
+    assert all(not thread.is_alive() for thread in threads)
 
 
 @pytest.mark.parametrize("failure", ["signature", "cluster", "issuer", "protocol", "expired", "future",
@@ -752,6 +891,13 @@ def test_real_entrypoints_keep_external_admission_transport_and_local_choice(
     monkeypatch.setattr(repl, "_named_command_gate", lambda *_a: (True, ""))
     local_calls, remote_calls, source_calls, checked = [], [], [], []
     embedding_active, generic_embedding_requests = [False], []
+    serialized_embedding_bodies = []
+    original_dumps = json.dumps
+    def watched_dumps(value, *args, **kwargs):
+        if isinstance(value, dict) and set(value) == {"model", "prompt"}:
+            serialized_embedding_bodies.append(value)
+        return original_dumps(value, *args, **kwargs)
+    monkeypatch.setattr(json, "dumps", watched_dumps)
     def local_transport(request, **kwargs):
         if embedding_active[0]:
             generic_embedding_requests.append((getattr(request, "full_url", request), getattr(request, "data", None)))
@@ -809,10 +955,14 @@ def test_real_entrypoints_keep_external_admission_transport_and_local_choice(
                 # adapter, and cannot serve as an escape hatch.
                 assert server.embeddings.embed("sensitive embedding text", base=local, model="embed-test") is None
                 assert server.embeddings.embed_result("sensitive embedding text") is None
+                assert server.embeddings.serving_model_revision() == ""
+                assert server.embeddings.current_revision() == ""
+                assert server.embeddings.refresh_runtime_revision() == ""
                 assert isinstance(server.memory_embedding_backfill(limit=1, apply=True), str)
             finally:
                 embedding_active[0] = False
             assert generic_embedding_requests == []
+            assert serialized_embedding_bodies == []
             assert (local_calls, remote_calls, source_calls) == before
         embedding_closed()  # before any signed membership or high-water evidence
         with pytest.raises(ollama_pool.WorkerPoolError): server._post("/api/generate", {"model":"remote-model"})

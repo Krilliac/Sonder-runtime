@@ -303,8 +303,20 @@ existing soft-failure behavior and can store memory without vectors. The
 process-default adapter stays disabled while any composed external source is
 still owned, including a closed, expired or revoked source. Constructing an
 unrelated static graph cannot clear that restriction; a static-only process
-with no external source retains default embeddings. Dispatch rechecks the
-restriction before handing any embedding body to the generic opener.
+with no external source retains default embeddings. Each complete default
+embedding or revision/provenance operation holds an active-operation lease
+covering checks, metadata transport, text conversion, JSON serialization and
+embedding transport. Registration first refuses new operations, then waits up
+to five seconds for existing operations to finish before activating ownership.
+If they do not finish, source construction fails without publishing ownership
+or leaving a pending restriction. Same-thread registration from inside an
+active operation is rejected to avoid a callback deadlock.
+Static operations can run concurrently; the short policy lock protects only
+counts and ownership, and is released during network, cache and accelerator
+work. Nested provenance calls inherit the existing operation so pending
+registration cannot prevent that operation from completing. Existing transport
+timeouts still apply; registration's five-second bound does not cancel an
+earlier static operation.
 The ownership fence also survives staged live reloads of the embedding and
 endpoint-policy modules.
 

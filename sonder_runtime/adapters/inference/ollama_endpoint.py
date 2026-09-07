@@ -1,6 +1,7 @@
 """Fail-closed Ollama endpoint parsing and transport policy."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 import logging
 import os
 import threading
@@ -25,6 +26,44 @@ if "_embedding_policy_lock" not in globals():
     _embedding_policy_lock = threading.RLock()
 if "_external_membership_owners" not in globals():
     _external_membership_owners = weakref.WeakSet()
+if "_embedding_policy_condition" not in globals():
+    _embedding_policy_condition = threading.Condition(_embedding_policy_lock)
+if "_embedding_operations" not in globals():
+    _embedding_operations = {"active": 0, "pending": 0}
+if "_embedding_operation_local" not in globals():
+    _embedding_operation_local = threading.local()
+
+
+@contextmanager
+def _default_embedding_operation():
+    """One read lease spans all default side effects; never lock across I/O.
+
+    Nested provenance calls inherit the outer lease, even while registration
+    is waiting. New operations are refused as soon as registration is pending.
+    """
+    depth = getattr(_embedding_operation_local, "depth", 0)
+    if depth:
+        _embedding_operation_local.depth = depth + 1
+        try:
+            yield True
+        finally:
+            _embedding_operation_local.depth = depth
+        return
+    with _embedding_policy_condition:
+        allowed = not _external_membership_owners and not _embedding_operations["pending"]
+        if allowed:
+            _embedding_operations["active"] += 1
+    if not allowed:
+        yield False
+        return
+    _embedding_operation_local.depth = 1
+    try:
+        yield True
+    finally:
+        _embedding_operation_local.depth = 0
+        with _embedding_policy_condition:
+            _embedding_operations["active"] -= 1
+            _embedding_policy_condition.notify_all()
 
 
 def _restrict_for_external_membership(owner):
@@ -34,8 +73,18 @@ def _restrict_for_external_membership(owner):
     permits an unrelated static-only application after every external owner
     has actually gone away; there is no caller-controlled enable switch.
     """
-    with _embedding_policy_lock:
-        _external_membership_owners.add(owner)
+    if getattr(_embedding_operation_local, "depth", 0):
+        raise RuntimeError("external membership cannot compose inside a default embedding operation")
+    with _embedding_policy_condition:
+        _embedding_operations["pending"] += 1
+        _embedding_policy_condition.notify_all()
+        try:
+            if not _embedding_policy_condition.wait_for(lambda: not _embedding_operations["active"], timeout=5):
+                raise RuntimeError("default embedding operations are still active")
+            _external_membership_owners.add(owner)
+        finally:
+            _embedding_operations["pending"] -= 1
+            _embedding_policy_condition.notify_all()
 
 
 def _default_embeddings_disabled():

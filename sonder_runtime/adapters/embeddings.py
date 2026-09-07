@@ -112,48 +112,52 @@ def local_manifest_revision(model=None, models_root=None):
 
 def serving_model_revision(model=None, base=None, timeout=0.5):
     """Read the digest advertised by the Ollama endpoint serving this model."""
-    if ollama_endpoint._default_embeddings_disabled():
+    with ollama_endpoint._default_embedding_operation() as allowed:
+        if not allowed:
+            return ""
+        identity = canonical_model_name(model or EMBED_MODEL)
+        try:
+            selected_base = ollama_endpoint.configured_origin(base or BASE)
+        except ValueError:
+            return ""
+        try:
+            with ollama_endpoint.open_url(
+                "%s/api/tags" % selected_base, timeout=timeout,
+            ) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (OSError, TimeoutError, ValueError, urllib.error.URLError):
+            return ""
+        for item in payload.get("models", []) if isinstance(payload, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            if canonical_model_name(item.get("name") or item.get("model")) != identity:
+                continue
+            digest = str(item.get("digest") or "").strip().lower()
+            if digest.startswith("sha256:"):
+                digest = digest[7:]
+            if len(digest) == 64 and all(char in "0123456789abcdef" for char in digest):
+                return _REVISION_PREFIX + digest
         return ""
-    identity = canonical_model_name(model or EMBED_MODEL)
-    try:
-        selected_base = ollama_endpoint.configured_origin(base or BASE)
-    except ValueError:
-        return ""
-    try:
-        with ollama_endpoint.open_url(
-            "%s/api/tags" % selected_base, timeout=timeout,
-        ) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (OSError, TimeoutError, ValueError, urllib.error.URLError):
-        return ""
-    for item in payload.get("models", []) if isinstance(payload, dict) else []:
-        if not isinstance(item, dict):
-            continue
-        if canonical_model_name(item.get("name") or item.get("model")) != identity:
-            continue
-        digest = str(item.get("digest") or "").strip().lower()
-        if digest.startswith("sha256:"):
-            digest = digest[7:]
-        if len(digest) == 64 and all(char in "0123456789abcdef" for char in digest):
-            return _REVISION_PREFIX + digest
-    return ""
 
 
 def current_revision(model=None, base=None, models_root=None):
-    configured = os.environ.get("SONDER_EMBED_REVISION", "").strip()
-    if configured and not configured.startswith(_REVISION_PREFIX):
+    with ollama_endpoint._default_embedding_operation() as allowed:
+        if not allowed:
+            return ""
+        configured = os.environ.get("SONDER_EMBED_REVISION", "").strip()
+        if configured and not configured.startswith(_REVISION_PREFIX):
+            return configured
+        if models_root is not None:
+            return local_manifest_revision(model=model, models_root=models_root) or configured
+        selected_base = base or BASE
+        served = serving_model_revision(model=model, base=selected_base)
+        if served:
+            return served
+        if endpoint_is_loopback(selected_base):
+            local = local_manifest_revision(model=model)
+            if local:
+                return local
         return configured
-    if models_root is not None:
-        return local_manifest_revision(model=model, models_root=models_root) or configured
-    selected_base = base or BASE
-    served = serving_model_revision(model=model, base=selected_base)
-    if served:
-        return served
-    if endpoint_is_loopback(selected_base):
-        local = local_manifest_revision(model=model)
-        if local:
-            return local
-    return configured
 
 
 EMBED_REVISION = (
@@ -164,9 +168,12 @@ EMBED_REVISION = (
 
 def refresh_runtime_revision(models_root=None):
     """Refresh mutable Ollama tag provenance at request/embed boundaries."""
-    global EMBED_REVISION
-    EMBED_REVISION = current_revision(models_root=models_root)
-    return EMBED_REVISION
+    with ollama_endpoint._default_embedding_operation() as allowed:
+        if not allowed:
+            return ""
+        global EMBED_REVISION
+        EMBED_REVISION = current_revision(models_root=models_root)
+        return EMBED_REVISION
 
 
 _KNOWN_DIMENSIONS = {
@@ -373,146 +380,139 @@ def embed(text, timeout=30, base=None, model=None):
     _EMBED_STATE.accelerated = False
     _EMBED_STATE.simulated = False
     _EMBED_STATE.fallback_reason = ""
-    if ollama_endpoint._default_embeddings_disabled():
-        _EMBED_STATE.fallback_reason = "external_membership"
-        return None
-    npu_fallback_pending = False
-    try:
-        selected_base = ollama_endpoint.configured_origin(base or BASE)
-    except ValueError:
-        return None
-    selected_model = model or EMBED_MODEL
-    explicit_runtime = base is not None or model is not None
-    revision_before = (
-        current_revision(model=selected_model, base=selected_base)
-        if explicit_runtime else refresh_runtime_revision()
-    )
-    # Cap the prompt to the embedder's context budget. Without this an
-    # over-length input is an HTTP 500 that soft-fails to None (see
-    # EMBED_MAX_CHARS) rather than a usable vector.
-    prompt = text if text is None else str(text)[:EMBED_MAX_CHARS]
-    identity = canonical_model_name(selected_model)
-    dimension = expected_dimension(selected_model)
-    if isinstance(prompt, str) and prompt and revision_before:
-        # Same (identity, revision, text) means the same deterministic vector
-        # regardless of which backend produced it, so a cache hit is exact —
-        # and the revision key invalidates on any model update.
-        cached = embed_cache.get(prompt, identity, revision_before)
-        if (
-            valid_vector(cached)
-            and (dimension is None or len(cached) == dimension)
-        ):
-            _EMBED_STATE.vector = cached
-            _EMBED_STATE.revision = revision_before
-            _EMBED_STATE.model = identity
-            _EMBED_STATE.provider = "cache"
-            return cached
-    if isinstance(prompt, str) and prompt:
-        accelerated = _accelerated_embed(
-            prompt, identity, revision_before, dimension,
+    with ollama_endpoint._default_embedding_operation() as allowed:
+        if not allowed:
+            _EMBED_STATE.fallback_reason = "external_membership"
+            return None
+        npu_fallback_pending = False
+        try:
+            selected_base = ollama_endpoint.configured_origin(base or BASE)
+        except ValueError:
+            return None
+        selected_model = model or EMBED_MODEL
+        explicit_runtime = base is not None or model is not None
+        revision_before = (
+            current_revision(model=selected_model, base=selected_base)
+            if explicit_runtime else refresh_runtime_revision()
         )
-        provider = (
-            str(accelerated.get("provider") or "").strip().lower()
-            if isinstance(accelerated, dict) else ""
-        )
-        acceleration_flag = (
-            accelerated.get("accelerated")
-            if isinstance(accelerated, dict) else None
-        )
-        simulated_flag = (
-            accelerated.get("simulated")
-            if isinstance(accelerated, dict) else None
-        )
-        vector = accelerated.get("vector") if isinstance(accelerated, dict) else None
-        valid_accelerated = (
-            isinstance(dimension, int)
-            and not isinstance(dimension, bool)
-            and isinstance(acceleration_flag, bool)
-            and isinstance(simulated_flag, bool)
-            and not simulated_flag
-            and provider in {"openvino", "qnn", "cpu"}
-            and accelerated.get("model") == identity
-            and accelerated.get("revision") == revision_before
-            and accelerated.get("dimension") == dimension
-            and isinstance(vector, (list, tuple))
-            and len(vector) == dimension
-            and valid_vector(vector)
-            and acceleration_flag == (provider in {"openvino", "qnn"})
-        )
-        if valid_accelerated:
-            revision_after = (
-                current_revision(model=selected_model, base=selected_base)
-                if explicit_runtime else refresh_runtime_revision()
+        # Cap the prompt to the embedder's context budget. Without this an
+        # over-length input is an HTTP 500 that soft-fails to None (see
+        # EMBED_MAX_CHARS) rather than a usable vector.
+        prompt = text if text is None else str(text)[:EMBED_MAX_CHARS]
+        identity = canonical_model_name(selected_model)
+        dimension = expected_dimension(selected_model)
+        if isinstance(prompt, str) and prompt and revision_before:
+            # Same (identity, revision, text) means the same deterministic vector
+            # regardless of which backend produced it, so a cache hit is exact —
+            # and the revision key invalidates on any model update.
+            cached = embed_cache.get(prompt, identity, revision_before)
+            if (
+                valid_vector(cached)
+                and (dimension is None or len(cached) == dimension)
+            ):
+                _EMBED_STATE.vector = cached
+                _EMBED_STATE.revision = revision_before
+                _EMBED_STATE.model = identity
+                _EMBED_STATE.provider = "cache"
+                return cached
+        if isinstance(prompt, str) and prompt:
+            accelerated = _accelerated_embed(
+                prompt, identity, revision_before, dimension,
             )
-            if revision_after != revision_before:
-                _EMBED_STATE.fallback_reason = "revision_changed"
-                return None
-            vector = list(accelerated["vector"])
-            npu_accelerated = acceleration_flag
-            _EMBED_STATE.vector = vector
-            _EMBED_STATE.revision = revision_before
-            _EMBED_STATE.model = identity
-            if npu_accelerated:
-                _EMBED_STATE.provider = "npu:%s" % provider
-            else:
-                _EMBED_STATE.provider = "cpu-reference"
-            _EMBED_STATE.accelerated = npu_accelerated
-            _EMBED_STATE.simulated = simulated_flag
-            embed_cache.put(
-                prompt, identity, revision_before, vector,
-                provider=_EMBED_STATE.provider,
+            provider = (
+                str(accelerated.get("provider") or "").strip().lower()
+                if isinstance(accelerated, dict) else ""
             )
-            return vector
-        if _npu_prefer_active():
-            _EMBED_STATE.fallback_reason = "npu_unavailable"
-            npu_fallback_pending = True
-    payload = json.dumps({"model": selected_model, "prompt": prompt}).encode("utf-8")
-    req = urllib.request.Request(
-        "%s/api/embeddings" % selected_base,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        # Recheck at the actual body-dispatch boundary. Source composition
-        # shares this lock, so an earlier embed cannot send after the external
-        # owner registers while provenance/cache/acceleration was in progress.
-        with ollama_endpoint._embedding_policy_lock:
-            if ollama_endpoint._external_membership_owners:
-                _EMBED_STATE.fallback_reason = "external_membership"
-                return None
-            response = ollama_endpoint.open_url(req, timeout=timeout)
-        with response as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            vector = data.get("embedding") if isinstance(data, dict) else None
-            revision_after = (
-                current_revision(model=selected_model, base=selected_base)
-                if explicit_runtime else refresh_runtime_revision()
+            acceleration_flag = (
+                accelerated.get("accelerated")
+                if isinstance(accelerated, dict) else None
             )
-            if revision_after != revision_before:
-                if npu_fallback_pending:
-                    _record_npu_fallback_handler(False)
-                return None
-            if not valid_vector(vector):
-                if npu_fallback_pending:
-                    _record_npu_fallback_handler(False)
-                return None
-            _EMBED_STATE.vector = vector
-            _EMBED_STATE.revision = revision_before
-            _EMBED_STATE.model = identity
-            _EMBED_STATE.provider = "ollama"
-            if isinstance(prompt, str) and prompt:
+            simulated_flag = (
+                accelerated.get("simulated")
+                if isinstance(accelerated, dict) else None
+            )
+            vector = accelerated.get("vector") if isinstance(accelerated, dict) else None
+            valid_accelerated = (
+                isinstance(dimension, int)
+                and not isinstance(dimension, bool)
+                and isinstance(acceleration_flag, bool)
+                and isinstance(simulated_flag, bool)
+                and not simulated_flag
+                and provider in {"openvino", "qnn", "cpu"}
+                and accelerated.get("model") == identity
+                and accelerated.get("revision") == revision_before
+                and accelerated.get("dimension") == dimension
+                and isinstance(vector, (list, tuple))
+                and len(vector) == dimension
+                and valid_vector(vector)
+                and acceleration_flag == (provider in {"openvino", "qnn"})
+            )
+            if valid_accelerated:
+                revision_after = (
+                    current_revision(model=selected_model, base=selected_base)
+                    if explicit_runtime else refresh_runtime_revision()
+                )
+                if revision_after != revision_before:
+                    _EMBED_STATE.fallback_reason = "revision_changed"
+                    return None
+                vector = list(accelerated["vector"])
+                npu_accelerated = acceleration_flag
+                _EMBED_STATE.vector = vector
+                _EMBED_STATE.revision = revision_before
+                _EMBED_STATE.model = identity
+                if npu_accelerated:
+                    _EMBED_STATE.provider = "npu:%s" % provider
+                else:
+                    _EMBED_STATE.provider = "cpu-reference"
+                _EMBED_STATE.accelerated = npu_accelerated
+                _EMBED_STATE.simulated = simulated_flag
                 embed_cache.put(
                     prompt, identity, revision_before, vector,
-                    provider="ollama",
+                    provider=_EMBED_STATE.provider,
                 )
-                _npu_shadow_embed(prompt, identity, revision_before)
+                return vector
+            if _npu_prefer_active():
+                _EMBED_STATE.fallback_reason = "npu_unavailable"
+                npu_fallback_pending = True
+        payload = json.dumps({"model": selected_model, "prompt": prompt}).encode("utf-8")
+        req = urllib.request.Request(
+            "%s/api/embeddings" % selected_base,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with ollama_endpoint.open_url(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                vector = data.get("embedding") if isinstance(data, dict) else None
+                revision_after = (
+                    current_revision(model=selected_model, base=selected_base)
+                    if explicit_runtime else refresh_runtime_revision()
+                )
+                if revision_after != revision_before:
+                    if npu_fallback_pending:
+                        _record_npu_fallback_handler(False)
+                    return None
+                if not valid_vector(vector):
+                    if npu_fallback_pending:
+                        _record_npu_fallback_handler(False)
+                    return None
+                _EMBED_STATE.vector = vector
+                _EMBED_STATE.revision = revision_before
+                _EMBED_STATE.model = identity
+                _EMBED_STATE.provider = "ollama"
+                if isinstance(prompt, str) and prompt:
+                    embed_cache.put(
+                        prompt, identity, revision_before, vector,
+                        provider="ollama",
+                    )
+                    _npu_shadow_embed(prompt, identity, revision_before)
+                if npu_fallback_pending:
+                    _record_npu_fallback_handler(True)
+                return vector
+        except (urllib.error.URLError, TimeoutError, ValueError, OSError):
             if npu_fallback_pending:
-                _record_npu_fallback_handler(True)
-            return vector
-    except (urllib.error.URLError, TimeoutError, ValueError, OSError):
-        if npu_fallback_pending:
-            _record_npu_fallback_handler(False)
-        return None
+                _record_npu_fallback_handler(False)
+            return None
 
 
 def embed_result(text, timeout=30, base=None, model=None):

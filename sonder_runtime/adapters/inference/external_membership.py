@@ -316,13 +316,12 @@ class ExternalMembershipSource:
             if not isinstance(self._signing_key, Ed25519PublicKey):
                 raise ValueError
             self._transport = _PinnedTransport(config, secrets)
+            # Registration waits for default operations before activating
+            # ownership; a busy/reentrant composition fails without publication.
+            from .ollama_endpoint import _restrict_for_external_membership
+            _restrict_for_external_membership(self)
         except Exception:
             raise MembershipSourceError("external membership unavailable") from None
-
-        # All historical server/MCP/HTTP/REPL embedding operations share this
-        # adapter. A typed provider closure alone cannot fence those callers.
-        from .ollama_endpoint import _restrict_for_external_membership
-        _restrict_for_external_membership(self)
 
     def read_snapshot(self, *, limits):
         try:
