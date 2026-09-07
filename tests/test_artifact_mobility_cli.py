@@ -152,6 +152,78 @@ def test_direct_parser_redacts_misplaced_mobility_arguments(capsys):
     assert capsys.readouterr().err == 'artifact-mobility: INVALID_REQUEST\n'
 
 
+@pytest.fixture
+def no_mobility_host_access(monkeypatch):
+    from sonder_runtime.bootstrap import app, artifact_mobility
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('rejected argv accessed host authority')
+
+    monkeypatch.setattr(app, '_artifact_mobility_operator_application', forbidden)
+    monkeypatch.setattr(app, 'build_application', forbidden)
+    monkeypatch.setattr(artifact_mobility, '_load_mobility_host_config', forbidden)
+    monkeypatch.setattr(artifact_mobility, '_canonical_mobility_host_home', forbidden)
+    monkeypatch.setattr(cli, '_load_config', forbidden)
+
+
+@pytest.mark.parametrize('action, option', [
+    ('send', '--source-artifact'), ('resume', '--operation-id'), ('status', '--operation-id'),
+])
+@pytest.mark.parametrize('value', [
+    'C:/PRIVATE/source.bin', 'https://PRIVATE.invalid:9443', '../PRIVATE', '',
+    'a' * 31, 'a' * 33, 'a' * 4096, 'A' * 32, 'g' * 32, '0' * 31 + '\N{ARABIC-INDIC DIGIT ZERO}',
+    ' ' + 'a' * 32, 'a' * 32 + '\n', 'a' * 15 + '\x00' + 'a' * 16,
+])
+@pytest.mark.parametrize('joined', [False, True])
+@pytest.mark.parametrize('help_position', [None, 'family', 'action', 'tail'])
+def test_malformed_mobility_ids_rejected_before_host_and_help(
+        action, option, value, joined, help_position, no_mobility_host_access, capsys):
+    args = ['artifact-mobility', action]
+    args.extend([option + '=' + value] if joined else [option, value])
+    if action == 'send':
+        args.extend(['--confirm-destination', 'node-one'])
+    if help_position is not None:
+        args.insert({'family': 1, 'action': 2, 'tail': len(args)}[help_position], '--help')
+    with pytest.raises(SystemExit) as failure:
+        cli.main(args)
+    assert failure.value.code == 2
+    output = capsys.readouterr()
+    assert output.out == ''
+    assert output.err == 'artifact-mobility: INVALID_REQUEST\n'
+
+
+@pytest.mark.parametrize('selector', [
+    '--config', '--secrets', '--set', '--destination-url', '--pin', '--key', '--grant', '--unknown',
+])
+@pytest.mark.parametrize('joined', [False, True])
+@pytest.mark.parametrize('position', range(5))
+def test_forbidden_mobility_selectors_rejected_in_every_help_position(
+        selector, joined, position, no_mobility_host_access, capsys):
+    args = ['artifact-mobility', '--help', 'list', '--help']
+    override = [selector + '=PRIVATE'] if joined else [selector, 'PRIVATE']
+    args[position:position] = override
+    with pytest.raises(SystemExit) as failure:
+        cli.main(args)
+    assert failure.value.code == 2
+    output = capsys.readouterr()
+    assert output.out == ''
+    assert output.err == 'artifact-mobility: INVALID_REQUEST\n'
+
+
+@pytest.mark.parametrize('args', [
+    ['--help'], ['-h'], ['send', '--help'], ['resume', '-h'], ['status', '--help'], ['list', '--help'],
+    ['send', '--help', '--source-artifact', '0123456789abcdef' * 2, '--confirm-destination', 'node-one'],
+    ['resume', '--operation-id=' + '0123456789abcdef' * 2, '--help'],
+])
+def test_clean_mobility_help_stays_available(args, no_mobility_host_access, capsys):
+    with pytest.raises(SystemExit) as result:
+        cli.main(['artifact-mobility', *args])
+    assert result.value.code == 0
+    output = capsys.readouterr()
+    assert 'usage:' in output.out
+    assert output.err == ''
+
+
 def test_production_cli_reopens_preadmitted_source_and_resumes_without_constructor_mock(tmp_path, monkeypatch, capsys):
     """Real CLI/Application/source/journal/peer/receiver; scripted transport, no TLS proof."""
     from dataclasses import replace

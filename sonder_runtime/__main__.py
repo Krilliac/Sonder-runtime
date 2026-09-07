@@ -1036,6 +1036,41 @@ class _MobilityArgumentParser(argparse.ArgumentParser):
         self.exit(2, "artifact-mobility: INVALID_REQUEST\n")
 
 
+def _check_mobility_arguments(values, parser):
+    """Admit the complete local grammar before help or host composition."""
+    action_options = {
+        "send": {"--source-artifact", "--confirm-destination"},
+        "resume": {"--operation-id"},
+        "status": {"--operation-id"},
+        "list": set(),
+    }
+    action = None
+    index = 0
+    while index < len(values):
+        token = values[index]
+        index += 1
+        if token in ("--help", "-h"):
+            continue
+        if action is None and token in action_options:
+            action = token
+            continue
+        if action is not None and token == "--json":
+            continue
+        option, separator, value = token.partition("=")
+        if action is None or option not in action_options[action]:
+            parser.error(None)
+        if not separator:
+            if index == len(values) or values[index].startswith("-"):
+                parser.error(None)
+            value = values[index]
+            index += 1
+        if option in ("--source-artifact", "--operation-id"):
+            # IDs have exactly the store's bounded ASCII opaque-ID grammar.
+            # Check length first; never normalize or echo a rejected value.
+            if len(value) != 32 or any(char not in "0123456789abcdef" for char in value):
+                parser.error(None)
+
+
 class _ProductionArgumentParser(argparse.ArgumentParser):
     def parse_args(self, args=None, namespace=None):
         values = list(sys.argv[1:] if args is None else args)
@@ -1045,6 +1080,7 @@ class _ProductionArgumentParser(argparse.ArgumentParser):
             parser = _MobilityArgumentParser(prog="artifact-mobility", allow_abbrev=False)
             if not values or values[0] != "artifact-mobility":
                 parser.error(None)
+            _check_mobility_arguments(values[1:], parser)
             _add_mobility_arguments(parser)
             result = parser.parse_args(values[1:], namespace)
             result.command = "artifact-mobility"
