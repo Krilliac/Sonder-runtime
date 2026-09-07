@@ -13,6 +13,82 @@ import sonder_runtime.platform.config as runtime_config
 import sonder_health
 
 
+@pytest.mark.parametrize("mode,role,key,allowed", [
+    ("local-open", None, False, True), ("api-key", None, True, True),
+    ("account", "user", False, False), ("account", "developer", False, False),
+    ("account", "admin", False, True), ("both", "user", True, False),
+    ("both", "admin", True, True),
+])
+def test_pool_admin_http_detail_obeys_administrator_boundary(monkeypatch, mode, role, key, allowed):
+    from sonder_runtime.adapters.inference.ollama_pool import OllamaWorkerPool
+    probes = []
+    pool = OllamaWorkerPool("http://127.0.0.1:11434", capability_prober=lambda origin: probes.append(origin) or {"models": ()})
+    monkeypatch.setattr(ts.server, "OLLAMA_POOL", pool)
+    context = {"mode": mode, "authorized": True, "api_key": key,
+               "account": {"username": "caller", "role": role} if role else None}
+    monkeypatch.setattr(ts.Handler, "_request_auth_context", lambda self: context)
+    if not allowed:
+        monkeypatch.setattr(pool, "validate_status_request", lambda **k: pytest.fail("unauthorized pool call"))
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(port, "POST", "/v1/sonder/ollama-pool", body='{"refresh":true,"page_size":1}',
+                                   headers={"Content-Type": "application/json"})
+    assert status == (200 if allowed else 403), body
+    assert len(probes) == (1 if allowed else 0)
+    if allowed:
+        page = json.loads(body)
+        assert page["schema_version"] == 2
+        assert len(page["workers"]) == 1
+        assert page["serialized_bytes"] == len(json.dumps(page).encode("utf-8"))
+    else:
+        assert json.loads(body) == {"error": "authorization"}
+
+
+def test_pool_admin_generic_tool_cannot_bypass_role_gate():
+    context = {"mode": "account", "authorized": True, "api_key": False,
+               "account": {"username": "reader", "role": "user"}}
+    assert ts._http_tool_refusal(("ollama_pool_admin_status",), "/ollama_pool_admin_status", context)
+
+
+def test_pool_admin_http_rejects_probe_overrides_and_bad_cursors_without_io(monkeypatch):
+    from sonder_runtime.adapters.inference.ollama_pool import OllamaWorkerPool
+    pool = OllamaWorkerPool("http://127.0.0.1:11434", capability_prober=lambda _: pytest.fail("unexpected probe"))
+    monkeypatch.setattr(ts.server, "OLLAMA_POOL", pool)
+    context = {"mode": "account", "authorized": True, "api_key": False,
+               "account": {"username": "owner", "role": "admin"}}
+    monkeypatch.setattr(ts.Handler, "_request_auth_context", lambda self: context)
+    with _http_server(monkeypatch) as port:
+        for payload in ({"refresh": True, "probe_batch_size": 128}, {"refresh": True, "cursor": "invalid"}):
+            status, _, body = _request(port, "POST", "/v1/sonder/ollama-pool", body=json.dumps(payload),
+                                       headers={"Content-Type": "application/json"})
+            assert status == 400, body
+            assert json.loads(body) == {"error": "invalid_request"}
+
+
+def test_pool_http_cached_pages_bind_cursors_to_current_admin_before_refresh(monkeypatch):
+    from sonder_runtime.adapters.inference.ollama_pool import OllamaWorkerPool
+    pool = OllamaWorkerPool("http://127.0.0.1:11434", ("http://127.0.0.1:11435",),
+                           capability_prober=lambda _: pytest.fail("unexpected probe"))
+    monkeypatch.setattr(ts.server, "OLLAMA_POOL", pool)
+    context = {"mode": "account", "authorized": True, "api_key": False,
+               "account": {"username": "owner-a", "role": "admin"}}
+    monkeypatch.setattr(ts.Handler, "_request_auth_context", lambda self: context)
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(port, "GET", "/v1/sonder/ollama-pool?page_size=1")
+        assert status == 200
+        assert headers["Cache-Control"] == "no-store"
+        cursor = json.loads(body)["next_cursor"]
+        context["account"]["username"] = "owner-b"
+        status, _, body = _request(port, "POST", "/v1/sonder/ollama-pool",
+                                   body=json.dumps({"refresh": True, "cursor": cursor}),
+                                   headers={"Content-Type": "application/json"})
+        assert status == 400
+        assert json.loads(body) == {"error": "invalid_request"}
+        context["account"]["username"] = "owner-a"
+        status, _, body = _request(port, "GET", "/v1/sonder/ollama-pool?cursor=" + cursor)
+        assert status == 200
+        assert json.loads(body)["complete"] is True
+
+
 @pytest.mark.parametrize('mode', ['account', 'both', 'either', 'api-key', 'local-open'])
 def test_logout_revokes_only_explicit_session_with_safe_retry(monkeypatch, tmp_path, mode):
     import admin_auth

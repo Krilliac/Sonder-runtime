@@ -315,7 +315,7 @@ def test_cloud_model_on_remote_endpoint_requires_both_opt_ins(monkeypatch):
     assert calls == [1]
 
 
-def test_status_labels_explicit_remote_endpoint(monkeypatch):
+def test_cached_status_omits_explicit_remote_endpoint_details(monkeypatch):
     monkeypatch.setattr(server, "BASE", "https://models.example.test:11434")
     monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
     monkeypatch.setattr(
@@ -326,23 +326,24 @@ def test_status_labels_explicit_remote_endpoint(monkeypatch):
 
     result = server.status()
 
-    assert "remote-opt-in" in result
-    assert "REMOTE OLLAMA - leaves machine" in result
-    assert "remote/cloud retries off" in result
+    assert "models.example.test" not in result
+    assert "whole-worker" in result
+    assert "unknown" in result
 
 
-def test_cloud_status_label_is_ascii_and_not_mojibake(monkeypatch):
+def test_cached_status_is_ascii_and_omits_cloud_tier_details(monkeypatch):
     monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
     monkeypatch.setattr(server, "_get", lambda path: {"models": []})
 
     result = server.status()
 
-    assert "[CLOUD - leaves machine]" in result
+    assert "[CLOUD - leaves machine]" not in result
+    assert "unknown" in result
     assert "â" not in result
     assert "—" not in result
 
 
-def test_status_reports_stale_mcp_source_restart_action(monkeypatch):
+def test_mcp_recovery_action_reports_restart_without_private_paths(monkeypatch):
     monkeypatch.setattr(server, "_get", lambda path: {"models": []})
     monkeypatch.setattr(
         server,
@@ -360,11 +361,9 @@ def test_status_reports_stale_mcp_source_restart_action(monkeypatch):
         },
     )
 
-    result = server.status()
+    result = server._safe_mcp_recovery_action(server.mcp_runtime_data()["provenance"])
 
-    assert "mcp runtime: ERROR stale_source_root" in result
-    assert "source root: missing" in result
-    assert "mcp ACTION: Restart/reconnect the MCP process" in result
+    assert "Restart/reconnect the MCP process" in result
     assert "python -m sonder_runtime mcp" in result
     assert r"C:\deleted Sonder worktree" not in result
     assert r"C:\canonical" not in result

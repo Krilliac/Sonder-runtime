@@ -1555,6 +1555,7 @@ def _admin_authorized(context):
 # Keep this at the HTTP boundary: hiding a command in the app does not stop a
 # crafted request, and a prompt must never be the thing that confers a role.
 SYSTEM_OPERATION_ROLES = {
+    "inference_pool_administration": "admin",
     "permission_mode_change": "admin",
     "runtime_policy_change": "admin",
     "permission_rule_change": "admin",
@@ -1570,6 +1571,7 @@ SYSTEM_OPERATION_ROLES = {
 # Direct local MCP/console use remains a trusted operator surface; this map is
 # deliberately enforced only when an HTTP request supplies an auth context.
 SYSTEM_OPERATION_TOOLS = {
+    "ollama_pool_admin_status": "inference_pool_administration",
     "permission_mode": "permission_mode_change",
     "permission_rule_set": "permission_rule_change",
     "permission_approve": "permission_rule_change",
@@ -1622,6 +1624,16 @@ def _http_system_operation_for(tool):
         operator_tools=getattr(server, "_AGENT_SYSTEM_OPERATOR_TOOLS", ()),
         canonicalize=getattr(server, "_canonical_agent_tool_name", None),
     )
+
+
+def _ollama_pool_admin_page(context, params):
+    """Authorize before touching pool state, for both HTTP entry paths."""
+    if not _admin_authorized(context):
+        return {"error": "authorization"}, 403
+    if not isinstance(params, dict) or set(params) - {"refresh", "cursor", "page_size"}:
+        return {"error": "invalid_request"}, 400
+    result = server._ollama_pool_admin_status_data(principal=_state_principal(context), **params)
+    return result, 400 if "error" in result else 200
 
 
 def _system_operation_authority_error(operation, context):
@@ -2805,6 +2817,11 @@ def _run_catalogued_tool_gated(line, tool_name, kwargs, handler, *, state, conte
     )
     if refusal:
         return refusal
+    if tool_name == "ollama_pool_admin_status" and context is not None:
+        # A tool argument cannot replace the authenticated HTTP principal.
+        params = {key: value for key, value in kwargs.items() if key != "token"}
+        result, _status = _ollama_pool_admin_page(context, params)
+        return json.dumps(result)
     if tool_name == "loop":
         refusal = _loop_global_operation_refusal(kwargs.get("actions_json"), context)
         if refusal:
@@ -4245,6 +4262,28 @@ class Handler(BaseHTTPRequestHandler):
         if not handle_artifact_transfer(self, "PUT", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
             self._send_not_found()
 
+    def _handle_ollama_pool_admin(self, method):
+        context = self._request_auth_context()
+        if not _admin_authorized(context):
+            self._send_json_payload({"error": "authorization"}, status=403,
+                                    headers={"Cache-Control": "no-store"})
+            return
+        try:
+            if method == "GET":
+                values = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query,
+                                              keep_blank_values=True, max_num_fields=2)
+                if set(values) - {"cursor", "page_size"} or any(len(v) != 1 for v in values.values()):
+                    raise ValueError("invalid page query")
+                params = {key: value[0] for key, value in values.items()}
+                if "page_size" in params:
+                    params["page_size"] = int(params["page_size"])
+            else:
+                params = self._read_json()
+            result, status = _ollama_pool_admin_page(context, params)
+        except (ValueError, HTTPRequestError):
+            result, status = {"error": "invalid_request"}, 400
+        self._send_json_payload(result, status=status, headers={"Cache-Control": "no-store"})
+
     def do_GET(self):
         # Keep-alive reuses Handler instances; see do_OPTIONS for why this is
         # reset before every externally visible request.
@@ -4265,6 +4304,9 @@ class Handler(BaseHTTPRequestHandler):
         if self._reject_disallowed_origin():
             return
         path = _request_route(self.path)
+        if path == "/v1/sonder/ollama-pool":
+            self._handle_ollama_pool_admin("GET")
+            return
         _serve_logger.debug(f"do_GET: path={path!r}, peer={self._peer()!r}")
         if path == "/" and _local_log_dashboard_allowed(self._peer()):
             self._send_local_log_page()
@@ -4768,7 +4810,7 @@ class Handler(BaseHTTPRequestHandler):
             from sonder_runtime.bootstrap.app import default_app
             application = default_app()
             try:
-                inference_pool_status = server.OLLAMA_POOL.status()
+                inference_pool_status = server.OLLAMA_POOL.summary()
             except Exception:
                 # Status must stay useful when the optional legacy pool is
                 # unavailable; the capability projection reports unknown
@@ -5290,6 +5332,9 @@ class Handler(BaseHTTPRequestHandler):
                 )
 
         if self._reject_disallowed_origin():
+            return
+        if _request_route(self.path) == "/v1/sonder/ollama-pool":
+            self._handle_ollama_pool_admin("POST")
             return
         _maybe_live_reload()
         path = _request_route(self.path)

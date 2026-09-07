@@ -8,6 +8,72 @@ import pytest
 import server
 
 
+def test_status_is_cached_and_never_performs_inventory_or_network_work(monkeypatch):
+    import socket
+    from sonder_runtime.adapters.inference.ollama_pool import OllamaWorkerPool
+    pool = OllamaWorkerPool("http://127.0.0.1:11434", ("https://private-worker.example:11434",), allow_remote=True)
+    monkeypatch.setattr(server, "OLLAMA_POOL", pool)
+    for name in ("refresh_capabilities", "refresh_inventory", "snapshots", "status"):
+        monkeypatch.setattr(pool, name, lambda *a, **k: pytest.fail("detail or refresh from default status"))
+    monkeypatch.setattr(server, "_get", lambda *a, **k: pytest.fail("local Ollama I/O"))
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: pytest.fail("live reload from cached status"))
+    monkeypatch.setattr(server.ollama_endpoint, "open_url", lambda *a, **k: pytest.fail("worker I/O"))
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: pytest.fail("DNS probe"))
+    result = server.status()
+    assert "0/2 eligible" in result
+    assert "not_refreshed" in result
+    assert "unknown" in result
+    assert "whole-worker" in result
+    assert "private-worker" not in result
+    assert "127.0.0.1" not in result
+
+
+@pytest.mark.parametrize("refresh", [False, True])
+def test_pool_admin_status_denial_never_touches_pool(monkeypatch, refresh):
+    class UntouchablePool:
+        def __getattribute__(self, name):
+            pytest.fail("unauthorized pool access: " + name)
+    monkeypatch.setattr(server, "OLLAMA_POOL", UntouchablePool())
+    monkeypatch.setattr(server, "_deployment_authenticates_callers", lambda: True)
+    calls = []
+    monkeypatch.setattr(server, "_admin_require", lambda token, role: calls.append((token, role)) or (False, "private denial", None))
+    result = json.loads(server.ollama_pool_admin_status(refresh=refresh))
+    assert result == {"error": "authorization"}
+    assert calls == [("", "admin")]
+
+
+def test_pool_admin_status_explicit_refresh_obeys_configured_batch_and_cursor(monkeypatch):
+    from sonder_runtime.adapters.inference.ollama_pool import OllamaWorkerPool
+    calls = []
+    pool = OllamaWorkerPool("http://127.0.0.1:11434", ("http://127.0.0.1:11435", "http://127.0.0.1:11436"),
+                           capability_probe_parallelism=1, capability_probe_batch_size=1,
+                           capability_prober=lambda origin: calls.append(origin) or {"models": ("safe-model",)})
+    monkeypatch.setattr(server, "OLLAMA_POOL", pool)
+    monkeypatch.setattr(server, "_deployment_authenticates_callers", lambda: False)
+    page = json.loads(server.ollama_pool_admin_status(page_size=1))
+    assert calls == []
+    assert page["schema_version"] == 2
+    assert json.loads(server.ollama_pool_admin_status(refresh=True, cursor="invalid")) == {"error": "invalid_request"}
+    assert calls == []
+    refreshed = json.loads(server.ollama_pool_admin_status(refresh=True, page_size=1))
+    assert calls == ["http://127.0.0.1:11434"]
+    assert refreshed["workers"][0]["model_preview"] == ["safe-model"]
+    with pytest.raises(TypeError):
+        server.ollama_pool_admin_status(refresh=True, probe_batch_size=128)
+    assert len(calls) == 1
+
+
+def test_pool_admin_status_never_exposes_unexpected_failure_text(monkeypatch):
+    from sonder_runtime.adapters.inference.ollama_pool import OllamaWorkerPool
+    pool = OllamaWorkerPool("http://127.0.0.1:11434")
+    monkeypatch.setattr(server, "OLLAMA_POOL", pool)
+    monkeypatch.setattr(server, "_deployment_authenticates_callers", lambda: False)
+    def fail():
+        raise RuntimeError("credential=private-exception-body")
+    monkeypatch.setattr(pool, "refresh_capabilities", fail)
+    assert json.loads(server.ollama_pool_admin_status(refresh=True)) == {"error": "unknown"}
+
+
 def _host_repo_result(project, output="grounded result"):
     return server.autopilot_controller.HostTaskResult(
         output=(

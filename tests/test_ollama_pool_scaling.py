@@ -242,7 +242,7 @@ def test_status_pages_are_bounded_safe_and_report_active_limits():
     pool.refresh_capabilities()
 
     first = pool.status()
-    assert first["schema_version"] == 1
+    assert first["schema_version"] == 2
     assert first["roster_generation"] == 1
     assert first["configured_worker_limit"] == 3
     assert first["worker_count"] == 3
@@ -317,3 +317,102 @@ def test_status_stops_at_a_complete_record_before_the_byte_ceiling():
     lines = pool.operator_status_lines()
     assert len(lines) == len(page["workers"]) + 2
     assert "omitted by the configured status page limit" in lines[-1]
+
+
+@pytest.mark.parametrize("first,second", [
+    ("https://Worker.Example:11434", "https://worker.example.:11434/"),
+    ("https://[2001:db8::1]:11434", "https://[2001:0db8:0:0:0:0:0:1]:11434/"),
+    ("http://[::1]:11434", "http://[0:0:0:0:0:0:0:1]:11434"),
+])
+@pytest.mark.parametrize("route", ["direct", "environment", "typed", "parser"])
+def test_equivalent_origins_rejected_before_scheduler_creation(monkeypatch, first, second, route):
+    import sonder_runtime.adapters.inference.ollama_pool as module
+
+    monkeypatch.setattr(module, "_WorkerState", lambda *a, **k: pytest.fail("scheduler created"))
+    with pytest.raises(ValueError, match="duplicate"):
+        if route == "direct":
+            OllamaWorkerPool(first, (second,), allow_remote=True)
+        elif route == "environment":
+            from_environment(first, {
+                "SONDER_ALLOW_REMOTE_OLLAMA": "1", "SONDER_OLLAMA_WORKERS": second,
+            })
+        elif route == "typed":
+            configure_typed_workers((first, second), allow_remote=True)
+        else:
+            parse_worker_origins(first + "," + second)
+
+
+def test_status_builds_only_the_requested_page(monkeypatch):
+    primary, workers = _roster(64)
+    pool = OllamaWorkerPool(primary, workers, max_workers=64)
+    first = pool.status(page_size=1)
+    record = pool._status_worker_record
+    visited = []
+
+    def build(snapshot):
+        visited.append(snapshot.origin)
+        return record(snapshot)
+
+    monkeypatch.setattr(pool, "_status_worker_record", build)
+    page = pool.status(cursor=first["next_cursor"], page_size=1)
+    assert visited == [workers[0]]
+    assert page["worker_count"] == 64
+    assert len(page["workers"]) == 1
+
+
+def test_summary_never_builds_worker_or_model_details(monkeypatch):
+    primary, workers = _roster(64)
+    pool = OllamaWorkerPool(primary, workers, max_workers=64)
+    monkeypatch.setattr(pool, "snapshots", lambda: pytest.fail("whole-roster snapshots"))
+    monkeypatch.setattr(pool, "_status_worker_record", lambda _: pytest.fail("worker detail"))
+    summary = pool.summary()
+    assert summary["worker_count"] == 64
+    assert summary["refresh_state"] == "not_refreshed"
+    assert summary["refresh_age_seconds"] is None
+    assert summary["eligible_worker_count"] == 0
+    assert not {"workers", "origin", "tls_verification", "models"} & summary.keys()
+
+
+def test_admin_page_cursor_rejects_other_principal_tampering_and_generation():
+    primary, workers = _roster(3)
+    pool = OllamaWorkerPool(primary, workers)
+    page = pool.status(page_size=1, principal="admin-a")
+    cursor = page["next_cursor"]
+    for wrong in (cursor, cursor[:-3] + "xyz"):
+        with pytest.raises(ValueError, match="cursor"):
+            pool.status(cursor=wrong, principal="admin-b")
+    pool._roster_generation += 1
+    with pytest.raises(ValueError, match="cursor"):
+        pool.status(cursor=cursor, principal="admin-a")
+
+
+@pytest.mark.parametrize("route", ["direct", "environment", "typed"])
+def test_trusted_cidr_never_relaxes_remote_https(route):
+    with pytest.raises(ValueError, match="https"):
+        if route == "direct":
+            OllamaWorkerPool("http://127.0.0.1:11434", ("http://10.77.0.2:11434",),
+                             allow_remote=True, trusted_origins=("10.77.0.0/24",))
+        elif route == "environment":
+            from_environment("http://127.0.0.1:11434", {
+                "SONDER_ALLOW_REMOTE_OLLAMA": "1", "SONDER_TRUSTED_ORIGINS": "10.77.0.0/24",
+                "SONDER_OLLAMA_WORKERS": "http://10.77.0.2:11434",
+            })
+        else:
+            configure_typed_workers(("http://10.77.0.2:11434",), allow_remote=True,
+                                    trusted_origins=("10.77.0.0/24",))
+
+
+def test_admin_page_omits_unsafe_provider_model_and_version_text():
+    from sonder_runtime.platform.logging import Redactor
+    pool = OllamaWorkerPool("http://127.0.0.1:11434", redactor=Redactor(secret_values=("private-token-value",)),
+                           capability_prober=lambda _: {
+                               "version": "response body password=secret",
+                               "models": ("safe:latest", "private-token-value", "C:/private/workspace/model", "<body>prompt secret</body>"),
+                           })
+    pool.refresh_capabilities()
+    page = pool.status()
+    assert page["workers"][0]["model_count"] == 4
+    assert page["workers"][0]["model_preview"] == ["safe:latest"]
+    assert page["workers"][0]["version"] == "unknown"
+    assert "private" not in json.dumps(page)
+    assert "secret" not in json.dumps(page)

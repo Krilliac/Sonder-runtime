@@ -13,6 +13,18 @@ pytestmark = pytest.mark.unit
 _CLEAN_ENV: dict[str, str] = {}
 
 
+@pytest.mark.parametrize("remote_primary", [False, True])
+def test_trusted_cidr_does_not_allow_remote_http(tmp_path, remote_primary):
+    toml = tmp_path / "sonder.toml"
+    toml.write_text(
+        '[ollama]\nallow_remote = true\ntrusted_origins = ["10.77.0.0/24"]\n'
+        + ('url = "http://10.77.0.2:11434"\n' if remote_primary
+           else 'workers = ["http://10.77.0.2:11434"]\n'), encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="https"):
+        load_config(toml, env={})
+
+
 def _strong_key() -> str:
     return "k" * sonder_config.MIN_API_KEY_LENGTH
 

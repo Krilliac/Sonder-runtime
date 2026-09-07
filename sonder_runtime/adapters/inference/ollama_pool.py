@@ -15,7 +15,8 @@ from __future__ import annotations
 from sonder_runtime.platform.runtime_threads import ThreadPoolExecutor as owned_runtime_pool
 
 import base64
-import binascii
+import hashlib
+import hmac
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import http.client
@@ -24,6 +25,7 @@ import ipaddress
 import json
 import math
 import os
+import re
 import threading
 import time
 from typing import Callable, Mapping
@@ -60,7 +62,7 @@ _MAX_STATUS_PAGE_SIZE = 128
 _MAX_STATUS_SERIALIZED_BYTES = 65_536
 _STATUS_MODEL_PREVIEW_COUNT = 8
 _STATUS_MODEL_PREVIEW_LENGTH = 128
-_STATUS_SCHEMA_VERSION = 1
+_STATUS_SCHEMA_VERSION = 2
 _MAX_MODELS_PER_WORKER = 2048
 _MAX_INFLIGHT_PER_WORKER = 64
 _MAX_QUEUE_DEPTH = 4096
@@ -175,7 +177,10 @@ def parse_worker_origins(
         raise ValueError(
             "at most %d additional Ollama workers are supported" % (max_workers - 1)
         )
-    return tuple(values)
+    normalized = tuple(ollama_policy.normalize(value) for value in values)
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("worker origins contain a duplicate canonical origin")
+    return normalized
 
 
 def _model_key(name) -> str:
@@ -185,24 +190,6 @@ def _model_key(name) -> str:
 
 def _metric_label(index: int) -> str:
     return "w%d" % index if index < _MAX_METRIC_WORKERS else _METRIC_OVERFLOW_LABEL
-
-
-def _host_in_trusted_origins(
-    host: str, trusted_origins: tuple[str, ...],
-) -> bool:
-    if not trusted_origins:
-        return False
-    try:
-        addr = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    for cidr in trusted_origins:
-        try:
-            if addr in ipaddress.ip_network(cidr, strict=False):
-                return True
-        except ValueError:
-            continue
-    return False
 
 
 def validate_worker_origin(
@@ -235,10 +222,7 @@ def validate_worker_origin(
             raise ValueError(
                 "remote worker endpoints require SONDER_ALLOW_REMOTE_OLLAMA=1"
             )
-        if (
-            parsed.scheme.casefold() != "https"
-            and not _host_in_trusted_origins(parsed.hostname or "", trusted_origins)
-        ):
+        if parsed.scheme.casefold() != "https":
             raise ValueError("remote worker endpoints must use https")
     result = normalized.rstrip("/")
     logger.debug(f"validated worker origin -> {result!r}")
@@ -616,6 +600,7 @@ class OllamaWorkerPool:
         self._cursor = 0
         self._probe_cursor = 0
         self._roster_generation = 1
+        self._status_cursor_key = os.urandom(32)
         self._waiters = 0
         self._draining = False
         self._condition = threading.Condition(threading.RLock())
@@ -1229,85 +1214,88 @@ class OllamaWorkerPool:
     def snapshots(self) -> tuple[WorkerSnapshot, ...]:
         now = self._clock()
         with self._condition:
-            snapshots = []
-            for state in self._states:
-                stale = self._capabilities_stale(state, now)
-                healthy = (
-                    not state.compatibility_error
-                    and not (
-                        state.capabilities is None
-                        and state.capability_probe_failed
-                    )
-                    and state.cooldown_until <= now
-                )
-                capacity = self._capacity(state)
-                if self._draining:
-                    label = "draining" if state.inflight else "drained"
-                elif state.compatibility_error:
-                    label = "incompatible"
-                elif state.cooldown_until > now:
-                    label = "circuit_open"
-                elif state.capabilities is None and state.capability_probe_failed:
-                    label = "unreachable"
-                elif state.half_open_inflight:
-                    label = "reconnecting"
-                elif state.inflight >= capacity:
-                    label = "saturated"
-                elif state.capabilities is None:
-                    label = "unknown"
-                elif stale:
-                    label = "stale"
-                else:
-                    label = "ready"
-                capabilities = state.capabilities
-                snapshots.append(WorkerSnapshot(
-                    worker_id=state.endpoint.worker_id,
-                    origin=state.endpoint.origin,
-                    state=label,
-                    healthy=healthy,
-                    inflight=state.inflight,
-                    capacity=capacity,
-                    consecutive_failures=state.consecutive_failures,
-                    last_error=state.last_error,
-                    cooldown_remaining_seconds=round(
-                        max(0.0, state.cooldown_until - now), 3,
-                    ),
-                    latency_ewma_ms=(
-                        None if state.latency_ewma_ms is None
-                        else round(state.latency_ewma_ms, 3)
-                    ),
-                    protocol=capabilities.protocol if capabilities else "unknown",
-                    version=capabilities.version if capabilities else "unknown",
-                    models=capabilities.models if capabilities else (),
-                    capabilities_stale=stale,
-                    cooldown_until=state.cooldown_until,
-                    trips=state.trips,
-                    probing=state.half_open_inflight,
-                ))
-            return tuple(snapshots)
+            return tuple(self._snapshot(state, now) for state in self._states)
 
-    def _encode_status_cursor(self, offset: int) -> str:
-        payload = "%d:%d" % (self._roster_generation, offset)
-        return base64.urlsafe_b64encode(payload.encode("ascii")).decode("ascii").rstrip("=")
+    def _snapshot(self, state: _WorkerState, now: float) -> WorkerSnapshot:
+        """Copy one selected worker while the pool condition is held."""
+        stale = self._capabilities_stale(state, now)
+        healthy = (
+            not state.compatibility_error
+            and not (
+                state.capabilities is None
+                and state.capability_probe_failed
+            )
+            and state.cooldown_until <= now
+        )
+        capacity = self._capacity(state)
+        if self._draining:
+            label = "draining" if state.inflight else "drained"
+        elif state.compatibility_error:
+            label = "incompatible"
+        elif state.cooldown_until > now:
+            label = "circuit_open"
+        elif state.capabilities is None and state.capability_probe_failed:
+            label = "unreachable"
+        elif state.half_open_inflight:
+            label = "reconnecting"
+        elif state.inflight >= capacity:
+            label = "saturated"
+        elif state.capabilities is None:
+            label = "unknown"
+        elif stale:
+            label = "stale"
+        else:
+            label = "ready"
+        capabilities = state.capabilities
+        return WorkerSnapshot(
+            worker_id=state.endpoint.worker_id,
+            origin=state.endpoint.origin,
+            state=label,
+            healthy=healthy,
+            inflight=state.inflight,
+            capacity=capacity,
+            consecutive_failures=state.consecutive_failures,
+            last_error=state.last_error,
+            cooldown_remaining_seconds=round(
+                max(0.0, state.cooldown_until - now), 3,
+            ),
+            latency_ewma_ms=(
+                None if state.latency_ewma_ms is None
+                else round(state.latency_ewma_ms, 3)
+            ),
+            protocol=capabilities.protocol if capabilities else "unknown",
+            version=capabilities.version if capabilities else "unknown",
+            models=capabilities.models if capabilities else (),
+            capabilities_stale=stale,
+            cooldown_until=state.cooldown_until,
+            trips=state.trips,
+            probing=state.half_open_inflight,
+        )
 
-    def _decode_status_cursor(self, cursor: str | None, total: int) -> int:
+    def _encode_status_cursor(self, offset: int, principal: str) -> str:
+        # A keyed opaque handle: no identity, offset, or topology is encoded
+        # in the returned token, and no unbounded cursor registry is retained.
+        material = f"{self._roster_generation}:{offset}:{principal}".encode("utf-8")
+        digest = hmac.new(self._status_cursor_key, material, hashlib.sha256).digest()
+        return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+    def _decode_status_cursor(self, cursor: str | None, total: int, principal: str) -> int:
         if cursor in (None, ""):
             return 0
-        try:
-            encoded = str(cursor).encode("ascii")
-            padding = b"=" * (-len(encoded) % 4)
-            generation_text, offset_text = base64.urlsafe_b64decode(
-                encoded + padding
-            ).decode("ascii").split(":", 1)
-            generation = int(generation_text)
-            offset = int(offset_text)
-        except (binascii.Error, UnicodeError, ValueError):
-            raise ValueError("invalid Ollama worker status cursor") from None
-        if generation != self._roster_generation:
-            raise ValueError("Ollama worker status cursor is for another roster")
-        if not 0 <= offset <= total:
-            raise ValueError("invalid Ollama worker status cursor")
-        return offset
+        if isinstance(cursor, str) and len(cursor) == 43 and cursor.isascii():
+            # At most 256 candidate offsets, independent of model inventory.
+            for offset in range(1, total + 1):
+                if hmac.compare_digest(cursor, self._encode_status_cursor(offset, principal)):
+                    return offset
+        raise ValueError("invalid or stale Ollama worker status cursor")
+
+    def validate_status_request(self, *, cursor=None, page_size=None, principal="local-open") -> tuple[int, int]:
+        """Validate a cached detail request before any explicit refresh."""
+        size = self._status_page_size if page_size is None else page_size
+        if type(size) is not int or not 1 <= size <= _MAX_STATUS_PAGE_SIZE:
+            raise ValueError("status page size must be within 1..128")
+        with self._condition:
+            return self._decode_status_cursor(cursor, len(self._states), principal), size
 
     @staticmethod
     def _status_error_category(snapshot: WorkerSnapshot) -> str:
@@ -1326,12 +1314,12 @@ class OllamaWorkerPool:
             return "transport"
         return "unknown"
 
-    @staticmethod
-    def _status_worker_record(snapshot: WorkerSnapshot) -> dict:
+    def _status_worker_record(self, snapshot: WorkerSnapshot) -> dict:
         previews = tuple(sorted({
-            _safe_scalar(model, limit=_STATUS_MODEL_PREVIEW_LENGTH)
+            model[:_STATUS_MODEL_PREVIEW_LENGTH]
             for model in snapshot.models
-            if _safe_scalar(model, limit=_STATUS_MODEL_PREVIEW_LENGTH)
+            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9._-]+)?", model)
+            and self._redactor.redact(model) == model
         }))[:_STATUS_MODEL_PREVIEW_COUNT]
         return {
             "worker_id": _safe_scalar(snapshot.worker_id, limit=256),
@@ -1344,7 +1332,8 @@ class OllamaWorkerPool:
             "cooldown_remaining_seconds": snapshot.cooldown_remaining_seconds,
             "latency_ewma_ms": snapshot.latency_ewma_ms,
             "protocol": _safe_scalar(snapshot.protocol, limit=80),
-            "version": _safe_scalar(snapshot.version, limit=80),
+            "version": snapshot.version if re.fullmatch(r"v?\d+(?:\.\d+){1,3}(?:[-+][A-Za-z0-9.-]+)?", snapshot.version)
+            and self._redactor.redact(snapshot.version) == snapshot.version else "unknown",
             "capabilities_stale": snapshot.capabilities_stale,
             "trips": snapshot.trips,
             "probing": snapshot.probing,
@@ -1358,82 +1347,97 @@ class OllamaWorkerPool:
     def _serialized_status_bytes(payload: dict) -> int:
         return len(json.dumps(payload).encode("utf-8"))
 
-    def status(
-        self, *, cursor: str | None = None, page_size: int | None = None,
-    ) -> dict:
-        """Return cached, bounded worker detail without starting a probe."""
-        workers = self.snapshots()
-        with self._condition:
-            metrics = dict(self._metrics)
-            waiters = self._waiters
-            draining = self._draining
-        healthy_count = sum(1 for w in workers if w.healthy)
-        total_count = len(workers)
-        if healthy_count < total_count and not draining:
-            logger.warning(
-                f"pool running with {healthy_count}/{total_count} healthy "
-                f"workers; unhealthy: {[w.worker_id for w in workers if not w.healthy]}"
-            )
-        try:
-            selected_page_size = (
-                self._status_page_size if page_size is None else int(page_size)
-            )
-        except (TypeError, ValueError):
-            raise ValueError("status page size must be within 1..128") from None
-        if not 1 <= selected_page_size <= _MAX_STATUS_PAGE_SIZE:
-            raise ValueError("status page size must be within 1..128")
-        start = self._decode_status_cursor(cursor, total_count)
-        worker_records = tuple(self._status_worker_record(worker) for worker in workers)
-        common = {
+    def _summary_locked(self, now: float) -> dict:
+        """Compute bounded scalar aggregates without copying model inventories."""
+        healthy = eligible = capacity = inflight = remote = refreshed = 0
+        newest = None
+        for state in self._states:
+            remote += not _is_loopback(state.endpoint.origin)
+            inflight += state.inflight
+            healthy_now = (not state.compatibility_error
+                           and not (state.capabilities is None and state.capability_probe_failed)
+                           and state.cooldown_until <= now)
+            healthy += healthy_now
+            fresh = not self._capabilities_stale(state, now)
+            eligible_now = healthy_now and fresh and not self._draining
+            eligible += eligible_now
+            if eligible_now:
+                capacity += max(0, self._capacity(state) - state.inflight)
+            if state.capabilities is not None:
+                refreshed += 1
+                observed = state.capabilities.observed_at
+                newest = observed if newest is None else max(newest, observed)
+        total = len(self._states)
+        refresh_state = ("not_refreshed" if not refreshed else
+                         "current" if eligible == total else "stale_or_partial")
+        return {
             "schema_version": _STATUS_SCHEMA_VERSION,
             "roster_generation": self._roster_generation,
             "membership_mode": "static",
-            "membership_state": "configured",
-            "enabled": self.enabled,
-            "admission": "draining" if draining else "accepting",
-            "worker_count": len(workers),
+            "membership_state": "static",
+            "enabled": total > 1,
+            "admission": "draining" if self._draining else "accepting",
+            "worker_count": total,
             "configured_worker_limit": self._max_workers,
             "worker_pool_max_workers": self._max_workers,
-            "remote_worker_count": sum(
-                1 for state in self._states
-                if not _is_loopback(state.endpoint.origin)
-            ),
-            "healthy_worker_count": sum(1 for worker in workers if worker.healthy),
-            "unhealthy_worker_count": sum(1 for worker in workers if not worker.healthy),
-            "draining_worker_count": total_count if draining else 0,
-            "available_capacity": sum(
-                max(0, worker.capacity - worker.inflight)
-                for worker in workers
-                if not draining
-                and worker.healthy
-                and worker.state not in {"incompatible", "circuit_open"}
-            ),
-            "remote_tls_required": self.has_remote_workers,
-            "tls_verification": (
-                "system-trust-store" if self.has_remote_workers else "not-applicable"
-            ),
-            "non_idempotent_failover": False,
-            "queue": {
-                "waiting": waiters,
-                "limit": self._queue_depth,
-                "scope": "global",
-            },
+            "remote_worker_count": remote,
+            "healthy_worker_count": healthy,
+            "eligible_worker_count": eligible,
+            "unhealthy_worker_count": total - healthy,
+            "draining_worker_count": total if self._draining else 0,
+            "available_capacity": capacity,
+            "inflight": inflight,
+            "refresh_state": refresh_state,
+            "refresh_age_seconds": None if newest is None else round(max(0, now - newest), 3),
+            "queue": {"waiting": self._waiters, "limit": self._queue_depth, "scope": "global"},
             "routing": "latency-aware-least-inflight",
-            "metrics": metrics,
-            "probe_parallelism": self._probe_parallelism,
-            "probe_batch_size": self._probe_batch_size,
-            "status_page_size": self._status_page_size,
-            "worker_capability_probe_parallelism": self._probe_parallelism,
-            "worker_capability_probe_batch_size": self._probe_batch_size,
-            "worker_status_page_size": self._status_page_size,
+            "request_placement": "whole-worker; no model sharding",
+            "model_sharding": False,
+            "indefinite_scale": False,
         }
+
+    def summary(self) -> dict:
+        """Return cached aggregate state only; never probe or construct detail."""
+        with self._condition:
+            return self._summary_locked(self._clock())
+
+    def status(
+        self, *, cursor: str | None = None, page_size: int | None = None,
+        principal: str = "local-open",
+    ) -> dict:
+        """Return a cached administrative page without starting a probe."""
+        with self._condition:
+            start, selected_page_size = self.validate_status_request(
+                cursor=cursor, page_size=page_size, principal=principal,
+            )
+            now = self._clock()
+            common = self._summary_locked(now)
+            total_count = len(self._states)
+            # Snapshot only this requested page. Models are immutable tuples;
+            # records outside this slice are neither copied nor sanitized.
+            workers = tuple(self._snapshot(state, now) for state in
+                            self._states[start:start + selected_page_size])
+            common.update({
+                "remote_tls_required": bool(common["remote_worker_count"]),
+                "tls_verification": "system-trust-store" if common["remote_worker_count"] else "not-applicable",
+                "non_idempotent_failover": False,
+                "metrics": dict(self._metrics),
+                "probe_parallelism": self._probe_parallelism,
+                "probe_batch_size": self._probe_batch_size,
+                "status_page_size": self._status_page_size,
+                "worker_capability_probe_parallelism": self._probe_parallelism,
+                "worker_capability_probe_batch_size": self._probe_batch_size,
+                "worker_status_page_size": self._status_page_size,
+            })
+            cursors = {end: self._encode_status_cursor(end, principal)
+                       for end in range(start, min(total_count, start + selected_page_size) + 1)}
 
         def page_payload(records: list[dict], end: int) -> dict:
             payload = dict(common)
             payload.update({
                 "page_size": selected_page_size,
                 "next_cursor": (
-                    self._encode_status_cursor(end) if end < total_count else None
+                    cursors[end] if end < total_count else None
                 ),
                 "complete": end >= total_count,
                 "omitted_worker_count": total_count - end,
@@ -1446,7 +1450,7 @@ class OllamaWorkerPool:
         records: list[dict] = []
         end = start
         while end < total_count and len(records) < selected_page_size:
-            candidate = records + [worker_records[end]]
+            candidate = records + [self._status_worker_record(workers[end - start])]
             payload = page_payload(candidate, end + 1)
             if self._serialized_status_bytes(payload) > _MAX_STATUS_SERIALIZED_BYTES:
                 break

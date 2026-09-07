@@ -314,5 +314,5 @@ def test_failed_initial_probe_is_not_admitted_and_status_is_safe():
     assert calls == [workers[0]]
     assert pool.snapshots()[0].state == "unreachable"
     rendered = "\n".join(pool.operator_status_lines())
-    assert "0.11 forged-status" in rendered
-    assert "\nforged-status" not in rendered
+    assert "version=unknown" in rendered
+    assert "forged-status" not in rendered

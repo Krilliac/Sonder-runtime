@@ -7,6 +7,49 @@ import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/models.dart';
 
 void main() {
+  test('pool page parser handles v2 truncation and v1 counts', () {
+    final page = OllamaPoolPage.fromJson({
+      'schema_version': 2, 'worker_count': 64, 'page_size': 1,
+      'complete': false, 'next_cursor': 'opaque', 'omitted_worker_count': 63,
+      'serialized_bytes': 1000,
+      'workers': [{'origin': 'https://worker.test:11434', 'state': 'ready',
+        'model_count': 2048, 'model_preview': ['safe'], 'error_category': 'transport'}],
+    });
+    expect(page.workerCount, 64);
+    expect(page.complete, isFalse);
+    expect(page.nextCursor, 'opaque');
+    expect(page.workers.single.modelCount, 2048);
+    expect(page.workers.single.modelPreview, ['safe']);
+    expect(page.workers.single.errorCategory, 'transport');
+    final legacy = OllamaPoolPage.fromJson({'worker_count': 2, 'healthy_worker_count': 1});
+    expect(legacy.schemaVersion, 1);
+    expect(legacy.workerCount, 2);
+    expect(legacy.workers, isEmpty);
+    expect(OllamaPoolWorker.fromJson({'error_category': 'secret exception'}).errorCategory, 'unknown');
+  });
+
+  test('pool detail API sends only explicit page and refresh arguments', () async {
+    late http.Request seen;
+    final client = MockClient((request) async {
+      seen = request;
+      return http.Response(jsonEncode({'schema_version': 2, 'worker_count': 1,
+        'complete': true, 'workers': []}), 200);
+    });
+    await http.runWithClient(() => SonderApi(baseUrl: 'https://host.test', apiKey: 'key')
+      .ollamaPoolAdminStatus(refresh: true, cursor: 'opaque', pageSize: 128), () => client);
+    expect(seen.url.path, '/v1/sonder/ollama-pool');
+    expect(jsonDecode(seen.body), {'refresh': true, 'cursor': 'opaque', 'page_size': 128});
+  });
+
+  test('v2 pool summary shows eligible workers and bounded queue', () {
+    final info = OperationalCapabilitiesInfo.fromJson({'inference': {'pool': {
+      'schema_version': 2, 'worker_count': 64, 'healthy_worker_count': 63,
+      'eligible_worker_count': 60, 'available_capacity': 120,
+      'queue': {'waiting': 3, 'limit': 32}, 'membership_state': 'static',
+    }}});
+    expect(info.workerSummary, '60/64 eligible workers');
+    expect(info.poolCapacitySummary, '120 available slots; queue 3/32; static');
+  });
   test('extension registry fetch parses the admin projection', () async {
     late http.Request seen;
     final client = MockClient((request) async {

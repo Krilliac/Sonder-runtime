@@ -397,25 +397,6 @@ def _canonical_ollama_origin(value: object) -> str | None:
     return f"{scheme}://{rendered_host}:{port}"
 
 
-def _host_in_trusted_origins(
-    host: str, trusted_origins: tuple[str, ...],
-) -> bool:
-    """Return whether *host* falls within any configured trusted CIDR."""
-    if not trusted_origins:
-        return False
-    try:
-        addr = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    for cidr in trusted_origins:
-        try:
-            if addr in ipaddress.ip_network(cidr, strict=False):
-                return True
-        except ValueError:
-            continue
-    return False
-
-
 def parse_env_file(path: Path) -> dict[str, str]:
     """Parse a secrets environment file with the historical error contract."""
     try:
@@ -1031,9 +1012,6 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     elif (
         not _is_loopback_host(parts.hostname)
         and parts.scheme != "https"
-        and not _host_in_trusted_origins(
-            parts.hostname, config.ollama.trusted_origins,
-        )
     ):
         errors.append(
             "[ollama].url remote Ollama must use https so prompts and "
@@ -1073,12 +1051,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
                 errors.append(
                     "[ollama].workers remote entries require the remote-Ollama consent gate"
                 )
-            elif (
-                worker_parts.scheme != "https"
-                and not _host_in_trusted_origins(
-                    worker_parts.hostname, config.ollama.trusted_origins,
-                )
-            ):
+            elif worker_parts.scheme != "https":
                 errors.append("[ollama].workers remote entries must use https")
         canonical_worker = _canonical_ollama_origin(worker)
         if canonical_worker is not None:

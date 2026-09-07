@@ -8,6 +8,23 @@ from sonder_runtime.platform.config import (
 )
 
 
+def test_64_worker_pool_is_available_only_when_accepting_eligible_work():
+    for admission, eligible, available in (("accepting", 64, True), ("draining", 64, False), ("accepting", 0, False)):
+        surface = build_operational_capabilities(config=None, inference_pool_status={
+            "schema_version": 2, "enabled": True, "worker_count": 64,
+            "healthy_worker_count": 64, "eligible_worker_count": eligible,
+            "admission": admission, "available_capacity": 128,
+            "queue": {"waiting": 3, "limit": 32}, "membership_state": "static",
+            "workers": [{"origin": "https://private.example:11434"}],
+        })
+        assert surface["inference"]["request_level_pooling"]["available"] is available
+        assert surface["inference"]["pool"]["eligible_worker_count"] == eligible
+        assert surface["inference"]["pool"]["queue"] == {"waiting": 3, "limit": 32, "scope": "global"}
+        assert surface["inference"]["model_sharding"]["available"] is False
+        assert surface["compute"]["indefinite_scale"]["available"] is False
+        assert "private.example" not in str(surface)
+
+
 def test_default_surface_is_explicitly_local_and_fail_closed():
     surface = build_operational_capabilities(
         config=SonderConfig(),
