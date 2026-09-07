@@ -126,14 +126,17 @@ def build_operational_capabilities(
     memory_capability = _capability(
         memory_available,
         (
-            "Configured memory replication is an explicit bounded authenticated "
-            "fact-only batch transport; an operator must invoke replicate_once."
+            "Configured fixed-peer memory replication is an explicit bounded "
+            "authenticated fact-only batch transport; an operator must invoke "
+            "replicate_once. Every configured peer must return a durable receipt "
+            "before the cursor advances; this is not quorum or high availability."
             if service_enabled
             else (
-                "An authenticated memory replication receiver is explicitly injected; "
-                "replication remains a bounded batch transport."
+                "An authenticated fixed-peer memory replication receiver is "
+                "explicitly injected; it accepts bounded fact batches only and does "
+                "not provide quorum or high availability."
                 if receiver_configured
-                else "Memory replication is disabled until an authenticated receiver is injected."
+                else "Memory fact replication is disabled until an authenticated receiver is injected."
             )
         ),
     )

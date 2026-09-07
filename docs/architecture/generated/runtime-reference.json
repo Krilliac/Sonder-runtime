@@ -9044,6 +9044,12 @@
     },
     {
       "default": null,
+      "field": "memory_replication",
+      "section": "root",
+      "type": "MemoryReplicationConfig"
+    },
+    {
+      "default": null,
       "field": "child_storage",
       "section": "root",
       "type": "ChildStorageConfig"
@@ -9075,6 +9081,18 @@
     {
       "default": "[redacted]",
       "field": "artifact_transfer_key",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "memory_replication_key",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "memory_replication_state_integrity_key",
       "section": "secrets",
       "type": "str"
     },
@@ -9697,11 +9715,11 @@
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES",
   "counts": {
     "commands": 316,
-    "configuration": 123,
+    "configuration": 126,
     "events": 43,
     "tools": 212
   },
-  "digest": "d42b127fd15b61be115f6f216960de6258b0c69e01191ac837cc94773155ec2c",
+  "digest": "80364fc8f8add390f53f0e61e13678cbc339fa2f3ee7933c3b29b1684f4deeca",
   "events": [
     {
       "name": "session.started",
@@ -10175,7 +10193,7 @@
     "server.py": "9a4262ad4dd80fa47d5a1875a46e1e786d2ae5364cf9257140d5c5072456591c",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
-    "sonder_runtime/platform/config.py": "e274ff9e0668680d2be026da3283eb7870886b8ca2f46621533ee3a959a3714e"
+    "sonder_runtime/platform/config.py": "20eb6d3e8d3ffec7649b3f686c80d3afda45d68b4799dee00372c98cdf5a907c"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
   "tools": [

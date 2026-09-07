@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 281,
+      "file_count": 282,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -235,6 +235,7 @@
         "sonder_runtime/adapters/persistence/session_checkpoint_privacy.py",
         "sonder_runtime/adapters/persistence/session_repository.py",
         "sonder_runtime/adapters/persistence/sqlite/__init__.py",
+        "sonder_runtime/adapters/persistence/sqlite/authoritative_memory.py",
         "sonder_runtime/adapters/persistence/sqlite/automation.py",
         "sonder_runtime/adapters/persistence/sqlite/bridge_migration.py",
         "sonder_runtime/adapters/persistence/sqlite/cas.py",
@@ -641,7 +642,7 @@
       ]
     },
     {
-      "file_count": 48,
+      "file_count": 49,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -680,6 +681,7 @@
         "sonder_runtime/bootstrap/managed_runtime_owner.py",
         "sonder_runtime/bootstrap/managed_standalone.py",
         "sonder_runtime/bootstrap/managed_terminal_eligibility.py",
+        "sonder_runtime/bootstrap/memory_replication.py",
         "sonder_runtime/bootstrap/model_gateways.py",
         "sonder_runtime/bootstrap/native_mcp.py",
         "sonder_runtime/bootstrap/owned_http_runtime.py",
@@ -937,7 +939,7 @@
       ]
     },
     {
-      "file_count": 37,
+      "file_count": 38,
       "name": "platform",
       "python_files": [
         "sonder_runtime/platform/__init__.py",
@@ -959,6 +961,7 @@
         "sonder_runtime/platform/local_retry_policy.py",
         "sonder_runtime/platform/location_consent.py",
         "sonder_runtime/platform/logging.py",
+        "sonder_runtime/platform/memory_replication_config.py",
         "sonder_runtime/platform/metrics.py",
         "sonder_runtime/platform/model_paths.py",
         "sonder_runtime/platform/model_retry_policy.py",

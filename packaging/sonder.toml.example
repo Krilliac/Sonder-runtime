@@ -32,6 +32,25 @@ workspace_roots = ["/srv/sonder/workspaces"]
 minimum_free_disk_bytes = 5368709120
 sqlite_busy_timeout_ms = 5000
 
+[memory_replication]
+# Disabled by default. This is a bounded, explicit, project-scoped fact-copy
+# transport between fixed trusted peers; it is not HA, takeover, or failback.
+enabled = false
+local_node_id = ""
+project_scope = ""
+receiver_enabled = false
+accepted_source_ids = []
+request_timeout_seconds = 5
+max_request_bytes = 8388608
+max_response_bytes = 65536
+max_batch_records = 256
+# Add only reciprocal fixed peers with a canonical HTTPS origin and explicit
+# port. Secrets belong exclusively in sonder.env.
+# [[memory_replication.peers]]
+# node_id = "node-b"
+# project_scope = "project-a"
+# origin = "https://<PEER-DNS-NAME>:8443"
+
 [ollama]
 url = "http://127.0.0.1:11434"
 allow_remote = false

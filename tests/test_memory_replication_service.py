@@ -505,6 +505,9 @@ def test_enabled_service_capability_is_fact_only_and_denies_takeover(tmp_path):
     assert transport["automatic_failback_available"] is False
     assert capabilities["mobility"]["automatic_memory_migration"]["available"] is False
     assert "fact" in transport["reason"].lower()
+    assert "fixed" in transport["reason"].lower()
+    assert "quorum" in transport["reason"].lower()
+    assert "high availability" in transport["reason"].lower()
     invalid = replace(
         config,
         memory_replication=replace(config.memory_replication, project_scope="repo-other"),

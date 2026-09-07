@@ -653,7 +653,8 @@ void main() {
           'automatic_failback_available': false,
           'memory_replication_transport': {
             'available': true,
-            'reason': 'Receiver injected.',
+            'reason':
+                'Configured fixed-peer memory replication is an explicit bounded authenticated fact-only batch transport; an operator must invoke replicate_once. Every configured peer must return a durable receipt before the cursor advances; this is not quorum or high availability.',
           },
           'artifact_transfer_transport': {
             'available': false,
@@ -697,6 +698,12 @@ void main() {
     expect(find.text('1/2 healthy workers; Available — Requests may route to one worker.'), findsOneWidget);
     expect(find.textContaining('Unavailable — Tensor sharding is not integrated.'), findsOneWidget);
     expect(find.textContaining('Unavailable — External provider required.'), findsOneWidget);
+    expect(
+      find.textContaining(
+        'Configured fixed-peer memory replication is an explicit bounded authenticated fact-only batch transport;',
+      ),
+      findsOneWidget,
+    );
     expect(
       find.text('Unavailable — automatic takeover is not available.'),
       findsOneWidget,
