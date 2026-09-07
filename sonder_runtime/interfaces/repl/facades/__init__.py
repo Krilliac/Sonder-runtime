@@ -6,6 +6,7 @@ from .status_model import (
     InstalledModel,
     ModelSelectionFacade,
     PermissionModeFacade,
+    RecoveryPostureFacade,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "InstalledModel",
     "ModelSelectionFacade",
     "PermissionModeFacade",
+    "RecoveryPostureFacade",
 ]

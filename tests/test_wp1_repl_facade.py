@@ -11,6 +11,7 @@ from sonder_runtime.interfaces.repl.facades import (
     ExecutionStatusFacade,
     InstalledModel,
     ModelSelectionFacade,
+    RecoveryPostureFacade,
 )
 
 pytestmark = pytest.mark.unit
@@ -99,3 +100,28 @@ def test_status_and_context_facades_fail_closed_and_normalize_counts():
         raise RuntimeError("unavailable")
 
     assert ContextHealthFacade(broken_context).snapshot("session", "project") is None
+
+
+def test_recovery_posture_facade_keeps_automatic_recovery_limits_visible():
+    facade = RecoveryPostureFacade(
+        lambda: {
+            'profile_id': 'two-pc',
+            'recovery_posture': {
+                'mode': 'external-authority-required',
+                'automatic_takeover_available': False,
+                'automatic_failback_available': False,
+                'independent_witness_required': True,
+                'reason': 'Automatic takeover and failback are unavailable without an independent witness.',
+            },
+        }
+    )
+
+    assert facade.format() == (
+        'Recovery posture — read-only\n'
+        'Profile: two-pc\n'
+        'Automatic takeover: unavailable\n'
+        'Automatic failback: unavailable\n'
+        'Independent witness: required before automatic owner transition.\n'
+        'Automatic takeover and failback are unavailable without an independent witness.'
+    )
+    assert RecoveryPostureFacade(lambda: {}).format() == 'Recovery posture unavailable.'

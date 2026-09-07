@@ -62,6 +62,7 @@ from sonder_runtime.interfaces.repl.facades import (
     InstalledModel,
     ModelSelectionFacade,
     PermissionModeFacade,
+    RecoveryPostureFacade,
 )
 
 # Optional: the live filtering "/" menu. Absent or unusable (piped stdin,
@@ -1327,6 +1328,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /agents            show live master/subagent activity
   /lanes [help]      inspect and control durable agent conversations
   /recover [cursor] inspect managed work; /recover resume <id> <command-id> resumes verification
+  /recovery          show the configured control-state recovery posture (read-only)
   /fanouts [N|active]  list safe recent durable model-fanout summaries
   /capacity [N]      show queued-agent ceiling and safe concurrent worker slots
   /agentcancel <id>  cooperatively cancel an agent/master prefix or all
@@ -1977,6 +1979,15 @@ def _recovery_command(session_id, project, argument):
         lines.append('Next page: /recover %s' % page.next_cursor)
     lines.append('No work was resumed and no approval was consumed.')
     return '\n'.join(lines)
+
+
+def _recovery_posture_command():
+    """Render configured recovery limits without touching ownership state."""
+    from sonder_runtime.adapters.web import lifecycle as runtime_lifecycle
+
+    return RecoveryPostureFacade(
+        lambda: runtime_lifecycle.get().deployment_payload()
+    ).format()
 
 
 def _run_session_work(session_id, *, host_project, **arguments):
@@ -2735,6 +2746,8 @@ def main(*, machine_output=False):
                 print(_lanes_command(arg))
             elif cmd == "/recover":
                 print(_recovery_command(session_id, workspace_root, arg))
+            elif cmd == "/recovery":
+                print(_recovery_posture_command())
             elif cmd in ("/agents", "/masterstatus"):
                 print(server.master_status())
             elif cmd == "/fanouts":

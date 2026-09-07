@@ -6039,6 +6039,16 @@
     },
     {
       "aliases": [],
+      "category": "system",
+      "name": "/recovery",
+      "native": true,
+      "params": [],
+      "risk": "safe",
+      "summary": "show the configured control-state recovery posture (read-only)",
+      "tool": ""
+    },
+    {
+      "aliases": [],
       "category": "dev",
       "name": "/refactor",
       "native": true,
@@ -9696,12 +9706,12 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES",
   "counts": {
-    "commands": 316,
+    "commands": 317,
     "configuration": 123,
     "events": 43,
     "tools": 212
   },
-  "digest": "d42b127fd15b61be115f6f216960de6258b0c69e01191ac837cc94773155ec2c",
+  "digest": "6ff3ceadbc5c8d95db0e65660292e8c7a3b68299caf93755c8df69bb151bd5c3",
   "events": [
     {
       "name": "session.started",

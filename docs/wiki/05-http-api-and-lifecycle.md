@@ -37,6 +37,12 @@ failback, explicit promotion, acknowledged state replication, worker-epoch
 fencing, and quorum remain explicitly unavailable until their external
 authority prerequisites are integrated.
 
+`deployment.recovery_posture` is a read-only summary shared by the API, app,
+and REPL. It reports automatic takeover and failback as unavailable and names
+the independent-witness, fencing, replication, and ownership-epoch evidence
+required before an automatic owner transition can be considered. It neither
+contacts a peer nor changes ownership or fence state.
+
 ## Chat request
 
 ```json

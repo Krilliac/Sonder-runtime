@@ -95,6 +95,41 @@ def test_cloud_command_changes_runtime_consent_without_a_model_turn(monkeypatch,
     assert "cloud on" in capsys.readouterr().out
 
 
+def test_recovery_posture_command_is_read_only_and_never_starts_a_model_turn(monkeypatch, capsys):
+    from sonder_runtime.adapters.web import lifecycle
+
+    lines = iter(("/recovery", "/exit"))
+    calls = []
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
+    class _ReadOnlyLifecycle:
+        def deployment_payload(self):
+            calls.append("deployment_payload")
+            return {
+                "profile": "single-pc",
+                "recovery_posture": {
+                    "automatic_takeover_available": False,
+                    "automatic_failback_available": False,
+                    "independent_witness_required": True,
+                    "reason": "An independent witness is required before automatic owner transition.",
+                },
+            }
+
+    monkeypatch.setattr(lifecycle, "get", _ReadOnlyLifecycle)
+    monkeypatch.setattr(
+        sonder_repl.server,
+        "sonder",
+        lambda *_args, **_kwargs: pytest.fail("recovery posture must not start a model turn"),
+    )
+
+    sonder_repl.main()
+
+    assert calls == ["deployment_payload"]
+    assert "Recovery posture — read-only" in capsys.readouterr().out
+
+
 def test_refactor_apply_prompt_never_reads_piped_stdin(monkeypatch):
     lines = iter(("/refactor sample.py improve", "/exit"))
     writes = []

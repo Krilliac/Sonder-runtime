@@ -457,6 +457,11 @@ _UNREGISTERED_BRANCH_WORK = {
     # Declare its work here even though static discovery cannot follow it.
     "/lanes": "agent_lane",
     "/recover": "workspace_run",
+    # This command formats an injected deployment-status projection only.  It
+    # does not acquire ownership, contact a peer, or start a model turn, but it
+    # must remain visible to the permission map rather than resolving as an
+    # empty tool set.
+    "/recovery": "recovery",
     "/selfmod": "selfmod",
     "/selfmodify": "selfmod",
     "/mcp": "mcp",

@@ -112,6 +112,32 @@ def test_default_health_status_does_not_infer_ha_from_local_readiness():
     assert not status['preference_confers_authority']
 
 
+def test_recovery_posture_keeps_takeover_and_failback_fenced_without_a_witness():
+    from sonder_runtime.domain.deployment_topology import DeploymentStatus
+
+    status = DeploymentStatus(
+        profile='pooled-pair',
+        local_node='pc-a',
+        peers=('pc-b',),
+        allow_remote_compute=True,
+    ).as_dict()
+
+    posture = status['recovery_posture']
+    assert posture['mode'] == 'external-authority-required'
+    assert posture['automatic_takeover_available'] is False
+    assert posture['automatic_failback_available'] is False
+    assert posture['independent_witness_required'] is True
+    assert 'independent witness' in posture['reason']
+    assert status['capabilities']['automatic_takeover'] == {
+        'available': False,
+        'reason': posture['reason'],
+    }
+    assert status['capabilities']['automatic_failback'] == {
+        'available': False,
+        'reason': posture['reason'],
+    }
+
+
 def test_deployment_dashboard_projection_is_read_only_and_probe_free(monkeypatch):
     from sonder_runtime.adapters.web import lifecycle
 
