@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 283,
+      "file_count": 284,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -208,6 +208,7 @@
         "sonder_runtime/adapters/persistence/__init__.py",
         "sonder_runtime/adapters/persistence/agent_lanes.py",
         "sonder_runtime/adapters/persistence/app_control.py",
+        "sonder_runtime/adapters/persistence/artifact_mobility.py",
         "sonder_runtime/adapters/persistence/artifact_mobility_source.py",
         "sonder_runtime/adapters/persistence/artifact_transfer.py",
         "sonder_runtime/adapters/persistence/autopilot_repository.py",
@@ -332,7 +333,7 @@
       ]
     },
     {
-      "file_count": 307,
+      "file_count": 308,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -352,6 +353,7 @@
         "sonder_runtime/application/architecture/ownership_catalog.py",
         "sonder_runtime/application/artifacts/__init__.py",
         "sonder_runtime/application/artifacts/immutable_manifest.py",
+        "sonder_runtime/application/artifacts/mobility.py",
         "sonder_runtime/application/artifacts/mobility_source.py",
         "sonder_runtime/application/artifacts/transfer.py",
         "sonder_runtime/application/automation/__init__.py",
