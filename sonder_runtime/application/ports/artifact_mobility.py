@@ -35,7 +35,7 @@ class ArtifactMobilityPublisher(Protocol):
 
 
 class ArtifactMobilityReader(Protocol):
-    """Trusted host-injected local source reader for later dispatch composition."""
+    """Trusted host-injected local source reader for bounded dispatch."""
 
     def inspect_sealed(self, source_artifact_id: str) -> dict: ...
 
@@ -47,7 +47,7 @@ class ArtifactMobilityReader(Protocol):
 class ArtifactMobilityPeer(Protocol):
     """Fixed configured destination transport, separate from source authority.
 
-    This is an application-internal transport contract for a future durable
+    This is the application-internal transport contract for the durable
     operator-invoked service.  It carries only an already sealed immutable
     spec, receiver receipt envelope, and opaque receipt capability.  It never
     accepts a destination URL, source path, source scope, or source port.
@@ -83,10 +83,10 @@ class ArtifactMobilityPeer(Protocol):
 
 
 class ArtifactMobilityDispatchLock(Protocol):
-    """A held private local OS fence for one future bounded attempt.
+    """A held private local OS fence for one bounded attempt.
 
     This is an internal application port.  It carries no destination, source,
-    credential, path, peer, or scheduling authority.  Later dispatch code must
+    credential, path, peer, or scheduling authority.  Dispatch code must
     retain it from lease acquisition through every peer call and transition.
     """
 

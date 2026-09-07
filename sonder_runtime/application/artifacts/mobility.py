@@ -1,9 +1,9 @@
-"""Local-only durable intent primitives for one fixed mobility-v1 copy.
+"""Durable intent and one explicit bounded mobility-v1 dispatch service.
 
-This module has deliberately no transport, source-reader, filesystem, route,
-or scheduler dependency.  It gives a later explicit application service a
-small, typed journal contract: make immutable intent first, then acquire a
-real local dispatch lock and a fenced lease before it can contact a peer.
+The application service composes only abstract source, fixed-peer, and journal
+ports.  It has no filesystem, route, CLI, scheduler, timer, or worker
+dependency: immutable intent is written first, and each invocation retains a
+real local dispatch lock plus a fenced lease until its one outcome transition.
 
 The journal's records are private implementation data.  ``public_status`` is
 the only projection intended for a CLI, REPL, log, or status surface.  It
@@ -14,6 +14,8 @@ lease token, receipt capability, and receiver receipt details.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import hmac
 import json
 import math
 import re
@@ -22,7 +24,12 @@ import time
 from types import MappingProxyType
 from typing import Mapping, Protocol
 
-from .transfer import MOBILITY_V1_VERSION
+from .mobility_source import MobilitySourceError, SourceArtifactRange
+from .transfer import (
+    MOBILITY_V1_VERSION,
+    TransferError,
+    recipient_mobility_attestation,
+)
 
 _OPERATION_ID = re.compile(r"[0-9a-f]{32}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -161,6 +168,52 @@ def derive_remote_command(destination_scope_id: object, operation_id: object) ->
     if _COMMAND.fullmatch(command) is None:
         _fail("INTEGRITY")
     return command
+
+
+@dataclass(frozen=True, repr=False)
+class MobilityDispatchContext:
+    """Current trusted local source and fixed-destination binding facts."""
+
+    source_owner_id: str
+    source_scope_id: str
+    destination_label: str
+    destination_scope_id: str
+    credential_generation: str
+    destination_binding_hmac: str = field(repr=False)
+    credential_material: object = field(repr=False, compare=False)
+    attempt_lease_seconds: int = 30
+    receipt_ttl_seconds: int = 7 * 24 * 60 * 60
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source_owner_id", _identifier(self.source_owner_id))
+        object.__setattr__(self, "source_scope_id", _digest(self.source_scope_id))
+        object.__setattr__(
+            self, "destination_label", _identifier(self.destination_label)
+        )
+        object.__setattr__(
+            self, "destination_scope_id", _digest(self.destination_scope_id)
+        )
+        object.__setattr__(
+            self, "credential_generation", _digest(self.credential_generation)
+        )
+        object.__setattr__(
+            self, "destination_binding_hmac", _digest(self.destination_binding_hmac)
+        )
+        if self.credential_material is None:
+            _fail("INVALID_REQUEST")
+        if (
+            type(self.attempt_lease_seconds) is not int
+            or not 2 <= self.attempt_lease_seconds <= 3600
+            or type(self.receipt_ttl_seconds) is not int
+            or not 60 <= self.receipt_ttl_seconds <= MAX_RECEIPT_TTL_SECONDS
+        ):
+            _fail("INVALID_REQUEST")
+
+    def __repr__(self) -> str:
+        return (
+            "MobilityDispatchContext("
+            f"destination_label={self.destination_label!r}, private=True)"
+        )
 
 
 class ReceiptCapabilityProtector(Protocol):
@@ -623,7 +676,654 @@ class ArtifactMobilityJournal:
         )
 
 
+class ArtifactMobilityDispatchService:
+    """Run one synchronous, explicitly invoked send or resume attempt.
+
+    The service owns no thread, timer, retry policy, route, or source mutation.
+    Every peer method is preceded by a fresh immutable-fence check and a lease
+    renewal while the same nonblocking OS lock remains continuously held.
+    """
+
+    _ATTESTATION_FIELDS = frozenset(
+        {
+            "protocol_version",
+            "receiver_identity_id",
+            "principal_id",
+            "project_id",
+            "authorized_source_owner_id",
+            "grant_id",
+            "grant_revision",
+            "can_write",
+            "max_object_bytes",
+            "sha256",
+        }
+    )
+    _ENVELOPE_FIELDS = frozenset(
+        {
+            "protocol_version",
+            "recipient_attestation",
+            "command_id",
+            "spec",
+            "receipt",
+        }
+    )
+    _RECEIPT_FIELDS = frozenset(
+        {"transfer_id", "state", "offset", "chunk_bytes", "expires_at", "revision"}
+    )
+    _ACK_FIELDS = frozenset({"offset", "next_offset", "chunk_sha256", "revision"})
+
+    def __init__(
+        self,
+        *,
+        source_reader,
+        peer,
+        repository,
+        journal: ArtifactMobilityJournal,
+        current_context,
+        clock=time.time,
+    ) -> None:
+        source_methods = ("inspect_sealed", "read_range")
+        peer_methods = (
+            "recipient_attestation",
+            "begin",
+            "inspect_receipt",
+            "append",
+            "seal",
+        )
+        repository_methods = (
+            "load_operation_for_fencing",
+            "load_operation",
+            "try_acquire_dispatch_lock",
+            "acquire_dispatch",
+            "renew_dispatch",
+            "assert_immutable_fence",
+            "transition_with_lease",
+        )
+        if (
+            any(
+                not callable(getattr(source_reader, name, None))
+                for name in source_methods
+            )
+            or any(not callable(getattr(peer, name, None)) for name in peer_methods)
+            or any(
+                not callable(getattr(repository, name, None))
+                for name in repository_methods
+            )
+            or not isinstance(journal, ArtifactMobilityJournal)
+            or not callable(current_context)
+            or not callable(clock)
+        ):
+            _fail("INVALID_REQUEST")
+        self._source_reader = source_reader
+        self._peer = peer
+        self._repository = repository
+        self._journal = journal
+        self._current_context = current_context
+        self._clock = clock
+
+    def __repr__(self) -> str:
+        return "ArtifactMobilityDispatchService(private=True)"
+
+    def send(
+        self, source_artifact_id: object, *, confirm_destination: object
+    ) -> MobilityOperation:
+        """Persist one fresh immutable intent, then run its bounded attempt."""
+        context = self._context()
+        if (
+            not isinstance(confirm_destination, str)
+            or not hmac.compare_digest(confirm_destination, context.destination_label)
+        ):
+            _fail("CONFIRMATION_REQUIRED")
+        source_id = _operation_id(source_artifact_id)
+        immutable_spec = self._inspect_source(source_id)
+        request = MobilityOperationRequest(
+            source_owner_id=context.source_owner_id,
+            source_scope_id=context.source_scope_id,
+            source_artifact_id=source_id,
+            immutable_spec=immutable_spec,
+            destination_label=context.destination_label,
+            destination_scope_id=context.destination_scope_id,
+            credential_generation=context.credential_generation,
+            destination_binding_hmac=context.destination_binding_hmac,
+            receipt_ttl_seconds=context.receipt_ttl_seconds,
+        )
+        operation = self._journal.create_operation(
+            request, credential_material=context.credential_material
+        )
+        return self._attempt(operation)
+
+    def resume(self, operation_id: object) -> MobilityOperation:
+        """Run one fresh attempt for exactly one eligible nonterminal record."""
+        identity = _operation_id(operation_id, code="NOT_FOUND")
+        operation = self._repository.load_operation_for_fencing(identity)
+        if operation.state in TERMINAL_STATES:
+            _fail("TERMINAL")
+        if operation.state not in DISPATCH_ELIGIBLE_STATES:
+            _fail("BUSY")
+        return self._attempt(operation)
+
+    def _context(self) -> MobilityDispatchContext:
+        try:
+            current = self._current_context()
+        except Exception:
+            raise TransferError("MOBILITY_UNAVAILABLE") from None
+        if not isinstance(current, MobilityDispatchContext):
+            raise TransferError("MOBILITY_UNAVAILABLE")
+        return current
+
+    def _now(self) -> float:
+        return _timestamp(self._clock(), code="UNAVAILABLE")
+
+    def _inspect_source(self, source_artifact_id: str) -> dict[str, object]:
+        try:
+            record = self._source_reader.inspect_sealed(source_artifact_id)
+        except MobilitySourceError:
+            raise
+        except Exception:
+            raise MobilitySourceError("UNAVAILABLE") from None
+        if (
+            not isinstance(record, Mapping)
+            or set(record) != {
+                "source_artifact_id",
+                "sha256",
+                "size_bytes",
+                "media_type",
+            }
+            or record.get("source_artifact_id") != source_artifact_id
+        ):
+            raise MobilitySourceError("INVALID_SPEC")
+        try:
+            return dict(
+                _immutable_spec(
+                    {
+                        "sha256": record.get("sha256"),
+                        "size_bytes": record.get("size_bytes"),
+                        "media_type": record.get("media_type"),
+                    },
+                    code="INVALID_REQUEST",
+                )
+            )
+        except MobilityJournalError:
+            raise MobilitySourceError("INVALID_SPEC") from None
+
+    def _fence(
+        self, operation: MobilityOperation, lease: DispatchLease, lock
+    ) -> tuple[MobilityDispatchContext, MobilityOperation]:
+        context = self._context()
+        immutable_spec = self._inspect_source(operation.source_artifact_id)
+        current = MobilityImmutableFence(
+            source_owner_id=context.source_owner_id,
+            source_scope_id=context.source_scope_id,
+            source_artifact_id=operation.source_artifact_id,
+            immutable_spec=immutable_spec,
+            destination_scope_id=context.destination_scope_id,
+            credential_generation=context.credential_generation,
+            destination_binding_hmac=context.destination_binding_hmac,
+        )
+        checked = self._repository.assert_immutable_fence(
+            lease, current, lock=lock, now=self._now()
+        )
+        return context, checked
+
+    def _prepare_peer(
+        self, operation: MobilityOperation, lease: DispatchLease, lock
+    ) -> tuple[MobilityOperation, DispatchLease]:
+        context, operation = self._fence(operation, lease, lock)
+        lease = self._repository.renew_dispatch(
+            lease,
+            lock=lock,
+            now=self._now(),
+            lease_seconds=context.attempt_lease_seconds,
+        )
+        return operation, lease
+
+    def _peer_call(
+        self,
+        operation: MobilityOperation,
+        lease: DispatchLease,
+        lock,
+        method,
+        *args,
+    ):
+        operation, lease = self._prepare_peer(operation, lease, lock)
+        try:
+            result = method(*args)
+        except TransferError:
+            raise
+        except Exception:
+            raise TransferError("MOBILITY_UNAVAILABLE") from None
+        return result, operation, lease
+
+    @staticmethod
+    def _same_json(left: object, right: object) -> bool:
+        try:
+            left_bytes = json.dumps(
+                left, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode("ascii")
+            right_bytes = json.dumps(
+                right, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode("ascii")
+            return hmac.compare_digest(left_bytes, right_bytes)
+        except (TypeError, ValueError, UnicodeError):
+            return False
+
+    def _validate_attestation(
+        self, value: object, operation: MobilityOperation
+    ) -> dict[str, object]:
+        if not isinstance(value, dict) or set(value) != self._ATTESTATION_FIELDS:
+            raise TransferError("MOBILITY_INTEGRITY")
+        supplied_digest = value.get("sha256")
+        fields = {name: value[name] for name in self._ATTESTATION_FIELDS - {"sha256"}}
+        try:
+            canonical = recipient_mobility_attestation(fields)
+        except TransferError:
+            raise TransferError("MOBILITY_INTEGRITY") from None
+        if (
+            not isinstance(supplied_digest, str)
+            or not hmac.compare_digest(supplied_digest, canonical["sha256"])
+            or canonical["authorized_source_owner_id"] != operation.source_owner_id
+            or canonical["can_write"] is not True
+            or operation.immutable_spec["size_bytes"] > canonical["max_object_bytes"]
+        ):
+            raise TransferError("MOBILITY_INTEGRITY")
+        return canonical
+
+    def _validate_envelope(
+        self,
+        value: object,
+        *,
+        operation: MobilityOperation,
+        attestation: dict[str, object],
+        previous: ReceiptCheckpoint | None,
+    ) -> tuple[dict[str, object], ReceiptCheckpoint]:
+        spec = dict(operation.immutable_spec)
+        if (
+            not isinstance(value, dict)
+            or set(value) != self._ENVELOPE_FIELDS
+            or value.get("protocol_version") != MOBILITY_V1_VERSION
+            or value.get("command_id") != operation.remote_command_id
+            or not self._same_json(value.get("recipient_attestation"), attestation)
+            or not self._same_json(value.get("spec"), spec)
+        ):
+            raise TransferError("MOBILITY_INTEGRITY")
+        receipt = value.get("receipt")
+        if not isinstance(receipt, dict):
+            raise TransferError("MOBILITY_INTEGRITY")
+        state = receipt.get("state")
+        expected_fields = self._RECEIPT_FIELDS | (
+            {"artifact"} if state == "sealed" else set()
+        )
+        if set(receipt) != expected_fields or state not in {
+            "open",
+            "verifying",
+            "sealed",
+        }:
+            raise TransferError("MOBILITY_INTEGRITY")
+        try:
+            checkpoint = ReceiptCheckpoint(
+                transfer_id=receipt.get("transfer_id"),
+                artifact_id=(
+                    receipt.get("artifact", {}).get("artifact_id")
+                    if state == "sealed" and isinstance(receipt.get("artifact"), dict)
+                    else None
+                ),
+                state=state,
+                offset=receipt.get("offset"),
+                chunk_bytes=receipt.get("chunk_bytes"),
+                revision=receipt.get("revision"),
+                expires_at=receipt.get("expires_at"),
+            )
+        except MobilityJournalError:
+            raise TransferError("MOBILITY_INTEGRITY") from None
+        if (
+            checkpoint.offset > spec["size_bytes"]
+            or (previous is not None and checkpoint.transfer_id != previous.transfer_id)
+            or (previous is not None and checkpoint.offset < previous.offset)
+            or (previous is not None and checkpoint.revision < previous.revision)
+            or (
+                previous is not None
+                and previous.state == "verifying"
+                and checkpoint.state == "open"
+            )
+            or (
+                checkpoint.state in {"verifying", "sealed"}
+                and checkpoint.offset != spec["size_bytes"]
+            )
+        ):
+            raise TransferError("MOBILITY_INTEGRITY")
+        if checkpoint.expires_at <= self._now():
+            raise TransferError("MOBILITY_RECEIPT_EXPIRED")
+        if state == "sealed":
+            artifact = receipt.get("artifact")
+            if (
+                not isinstance(artifact, dict)
+                or set(artifact) != {
+                    "artifact_id",
+                    "sha256",
+                    "size_bytes",
+                    "media_type",
+                }
+                or not self._same_json(
+                    {
+                        name: artifact[name]
+                        for name in ("sha256", "size_bytes", "media_type")
+                    },
+                    spec,
+                )
+                or checkpoint.offset != spec["size_bytes"]
+            ):
+                raise TransferError("MOBILITY_INTEGRITY")
+        return dict(value), checkpoint
+
+    @staticmethod
+    def _validate_range(
+        value: object,
+        *,
+        operation: MobilityOperation,
+        offset: int,
+        length: int,
+    ) -> bytes:
+        if not isinstance(value, SourceArtifactRange):
+            raise MobilitySourceError("INVALID_SPEC")
+        body = value.body
+        if (
+            value.source_artifact_id != operation.source_artifact_id
+            or value.sha256 != operation.immutable_spec["sha256"]
+            or value.size_bytes != operation.immutable_spec["size_bytes"]
+            or value.offset != offset
+            or not isinstance(body, bytes)
+            or len(body) != length
+            or value.chunk_sha256 != hashlib.sha256(body).hexdigest()
+        ):
+            raise MobilitySourceError("INVALID_SPEC")
+        return body
+
+    @staticmethod
+    def _validate_ack(
+        value: object, *, checkpoint: ReceiptCheckpoint, body: bytes
+    ) -> None:
+        digest = hashlib.sha256(body).hexdigest()
+        if (
+            not isinstance(value, dict)
+            or set(value) != ArtifactMobilityDispatchService._ACK_FIELDS
+            or value.get("offset") != checkpoint.offset
+            or value.get("next_offset") != checkpoint.offset + len(body)
+            or value.get("chunk_sha256") != digest
+            or type(value.get("revision")) is not int
+            or value["revision"] != checkpoint.revision + 1
+        ):
+            raise TransferError("MOBILITY_INTEGRITY")
+
+    def _transition(
+        self,
+        lease: DispatchLease,
+        lock,
+        target: str,
+        outcome: str,
+        receipt: ReceiptCheckpoint | None,
+    ) -> MobilityOperation:
+        return self._repository.transition_with_lease(
+            lease,
+            target,
+            lock=lock,
+            now=self._now(),
+            receipt=receipt,
+            outcome_code=outcome,
+        )
+
+    def _source_failure(
+        self,
+        error: MobilitySourceError,
+        lease: DispatchLease,
+        lock,
+        receipt: ReceiptCheckpoint | None,
+    ) -> MobilityOperation:
+        code = (
+            error.args[0]
+            if error.args and isinstance(error.args[0], str)
+            else "UNAVAILABLE"
+        )
+        if code == "UNAVAILABLE":
+            return self._transition(
+                lease, lock, "retryable_blocked", "SOURCE_UNAVAILABLE", receipt
+            )
+        return self._transition(
+            lease, lock, "terminal_blocked", "IMMUTABLE_FENCE", receipt
+        )
+
+    def _peer_failure(
+        self,
+        error: TransferError,
+        lease: DispatchLease,
+        lock,
+        receipt: ReceiptCheckpoint | None,
+        *,
+        response_may_be_lost: bool,
+    ) -> MobilityOperation:
+        code = (
+            error.args[0]
+            if error.args and isinstance(error.args[0], str)
+            else "MOBILITY_UNAVAILABLE"
+        )
+        if code in {"MOBILITY_QUOTA", "MOBILITY_CAPACITY"}:
+            return self._transition(lease, lock, "retryable_blocked", code, receipt)
+        if code == "MOBILITY_UNAVAILABLE":
+            return self._transition(
+                lease,
+                lock,
+                "resumable" if response_may_be_lost else "retryable_blocked",
+                code,
+                receipt,
+            )
+        if code == "MOBILITY_RECEIPT_EXPIRED":
+            return self._transition(lease, lock, "expired", code, receipt)
+        if code in {"MOBILITY_FORBIDDEN", "FORBIDDEN"}:
+            outcome = "MOBILITY_FORBIDDEN"
+        elif code == "MOBILITY_PROTOCOL":
+            outcome = "MOBILITY_PROTOCOL"
+        else:
+            outcome = "MOBILITY_INTEGRITY"
+        return self._transition(lease, lock, "terminal_blocked", outcome, receipt)
+
+    def _attempt(self, original: MobilityOperation) -> MobilityOperation:
+        with self._repository.try_acquire_dispatch_lock(original.operation_id) as lock:
+            context = self._context()
+            lease = self._repository.acquire_dispatch(
+                original.operation_id,
+                original.source_owner_id,
+                lock=lock,
+                now=self._now(),
+                lease_seconds=context.attempt_lease_seconds,
+            )
+            receipt = original.receipt
+            try:
+                if original.receipt_expires_at <= self._now():
+                    return self._transition(
+                        lease,
+                        lock,
+                        "expired",
+                        "MOBILITY_RECEIPT_EXPIRED",
+                        receipt,
+                    )
+                context, operation = self._fence(original, lease, lock)
+                try:
+                    capability = self._journal.receipt_capability_for(
+                        operation, credential_material=context.credential_material
+                    )
+                except MobilityJournalError as error:
+                    if error.args in {("INTEGRITY",), ("INVALID_CREDENTIAL",)}:
+                        return self._transition(
+                            lease,
+                            lock,
+                            "terminal_blocked",
+                            "MOBILITY_INTEGRITY",
+                            receipt,
+                        )
+                    raise
+                return self._dispatch(operation, lease, lock, capability)
+            except MobilitySourceError as error:
+                return self._source_failure(error, lease, lock, receipt)
+            except TransferError as error:
+                return self._peer_failure(
+                    error,
+                    lease,
+                    lock,
+                    receipt,
+                    response_may_be_lost=False,
+                )
+            except MobilityJournalError as error:
+                if error.args == ("IMMUTABLE_FENCE",):
+                    return self._repository.load_operation(
+                        original.operation_id, original.source_owner_id
+                    )
+                raise
+
+    def _dispatch(
+        self,
+        operation: MobilityOperation,
+        lease: DispatchLease,
+        lock,
+        capability: str,
+    ) -> MobilityOperation:
+        receipt = operation.receipt
+        response_may_be_lost = False
+        try:
+            raw_attestation, operation, lease = self._peer_call(
+                operation,
+                lease,
+                lock,
+                self._peer.recipient_attestation,
+                dict(operation.immutable_spec),
+            )
+            attestation = self._validate_attestation(raw_attestation, operation)
+
+            response_may_be_lost = True
+            if receipt is None:
+                raw_envelope, operation, lease = self._peer_call(
+                    operation,
+                    lease,
+                    lock,
+                    self._peer.begin,
+                    dict(operation.immutable_spec),
+                    operation.remote_command_id,
+                    capability,
+                )
+            else:
+                raw_envelope, operation, lease = self._peer_call(
+                    operation,
+                    lease,
+                    lock,
+                    self._peer.inspect_receipt,
+                    receipt.transfer_id,
+                    operation.remote_command_id,
+                    dict(operation.immutable_spec),
+                    capability,
+                )
+            envelope, receipt = self._validate_envelope(
+                raw_envelope,
+                operation=operation,
+                attestation=attestation,
+                previous=receipt,
+            )
+
+            while receipt.state == "open":
+                if receipt.offset == operation.immutable_spec["size_bytes"]:
+                    raw_envelope, operation, lease = self._peer_call(
+                        operation,
+                        lease,
+                        lock,
+                        self._peer.seal,
+                        envelope,
+                        dict(operation.immutable_spec),
+                        operation.remote_command_id + ".seal",
+                        capability,
+                    )
+                    envelope, receipt = self._validate_envelope(
+                        raw_envelope,
+                        operation=operation,
+                        attestation=attestation,
+                        previous=receipt,
+                    )
+                    break
+
+                length = min(
+                    receipt.chunk_bytes,
+                    operation.immutable_spec["size_bytes"] - receipt.offset,
+                )
+                try:
+                    source_range = self._source_reader.read_range(
+                        operation.source_artifact_id, receipt.offset, length
+                    )
+                except MobilitySourceError:
+                    raise
+                except Exception:
+                    raise MobilitySourceError("UNAVAILABLE") from None
+                body = self._validate_range(
+                    source_range,
+                    operation=operation,
+                    offset=receipt.offset,
+                    length=length,
+                )
+                acknowledgement, operation, lease = self._peer_call(
+                    operation,
+                    lease,
+                    lock,
+                    self._peer.append,
+                    envelope,
+                    dict(operation.immutable_spec),
+                    body,
+                    capability,
+                )
+                self._validate_ack(acknowledgement, checkpoint=receipt, body=body)
+                acknowledged_offset = acknowledgement["next_offset"]
+                acknowledged_revision = acknowledgement["revision"]
+                raw_envelope, operation, lease = self._peer_call(
+                    operation,
+                    lease,
+                    lock,
+                    self._peer.inspect_receipt,
+                    receipt.transfer_id,
+                    operation.remote_command_id,
+                    dict(operation.immutable_spec),
+                    capability,
+                )
+                envelope, receipt = self._validate_envelope(
+                    raw_envelope,
+                    operation=operation,
+                    attestation=attestation,
+                    previous=receipt,
+                )
+                if (
+                    receipt.offset != acknowledged_offset
+                    or receipt.revision != acknowledged_revision
+                ):
+                    raise TransferError("MOBILITY_INTEGRITY")
+
+            if receipt.state == "verifying":
+                return self._transition(lease, lock, "awaiting_seal", "", receipt)
+            if receipt.state == "sealed":
+                return self._transition(lease, lock, "sealed", "", receipt)
+            raise TransferError("MOBILITY_INTEGRITY")
+        except MobilitySourceError as error:
+            return self._source_failure(error, lease, lock, receipt)
+        except TransferError as error:
+            return self._peer_failure(
+                error,
+                lease,
+                lock,
+                receipt,
+                response_may_be_lost=response_may_be_lost,
+            )
+        except MobilityJournalError as error:
+            if error.args == ("IMMUTABLE_FENCE",):
+                return self._repository.load_operation(
+                    operation.operation_id, operation.source_owner_id
+                )
+            raise
+
+
 __all__ = [
+    "ArtifactMobilityDispatchService",
     "ArtifactMobilityJournal",
     "ArtifactMobilityJournalRepository",
     "DISPATCH_ELIGIBLE_STATES",
@@ -633,6 +1333,7 @@ __all__ = [
     "MAX_RECEIPT_TTL_SECONDS",
     "MOBILITY_STATES",
     "MobilityImmutableFence",
+    "MobilityDispatchContext",
     "MobilityJournalError",
     "MobilityOperation",
     "MobilityOperationRequest",
