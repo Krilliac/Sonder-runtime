@@ -166,6 +166,29 @@ def no_mobility_host_access(monkeypatch):
     monkeypatch.setattr(cli, '_load_config', forbidden)
 
 
+@pytest.mark.parametrize('family', [
+    'ARTIFACT-MOBILITY', 'Artifact-Mobility', 'aRtIfAcT-mObIlItY', 'artifact-MOBILITY',
+])
+@pytest.mark.parametrize('before, after', [
+    ([], ['list']),
+    (['--config', 'C:/PRIVATE.toml'], ['list']),
+    (['--bogus', 'https://PRIVATE.invalid:9443'], ['list']),
+    ([], ['list', '--config', 'C:/PRIVATE.toml']),
+    ([], ['--bogus', 'https://PRIVATE.invalid:9443', 'list']),
+    (['PRIVATE-before'], ['list', 'PRIVATE-after']),
+    (['--help', '--config=C:/PRIVATE.toml'], ['list']),
+    ([], ['--help', 'list', '--secrets=C:/PRIVATE.env']),
+])
+def test_case_variant_mobility_family_redacts_all_token_orders(
+        family, before, after, no_mobility_host_access, capsys):
+    with pytest.raises(SystemExit) as failure:
+        cli.main([*before, family, *after])
+    assert failure.value.code == 2
+    output = capsys.readouterr()
+    assert output.out == ''
+    assert output.err == 'artifact-mobility: INVALID_REQUEST\n'
+
+
 @pytest.mark.parametrize('action, option', [
     ('send', '--source-artifact'), ('resume', '--operation-id'), ('status', '--operation-id'),
 ])

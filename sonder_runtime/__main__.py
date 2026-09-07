@@ -1074,9 +1074,9 @@ def _check_mobility_arguments(values, parser):
 class _ProductionArgumentParser(argparse.ArgumentParser):
     def parse_args(self, args=None, namespace=None):
         values = list(sys.argv[1:] if args is None else args)
-        if "artifact-mobility" in values:
-            # Detect the family before ordinary parsing can echo an earlier
-            # misplaced option or value. No configuration is read here.
+        if any(value.casefold() == "artifact-mobility" for value in values):
+            # Detect case variants before ordinary parsing can echo an earlier
+            # misplaced value. Only exact lowercase syntax is admitted below.
             parser = _MobilityArgumentParser(prog="artifact-mobility", allow_abbrev=False)
             if not values or values[0] != "artifact-mobility":
                 parser.error(None)
