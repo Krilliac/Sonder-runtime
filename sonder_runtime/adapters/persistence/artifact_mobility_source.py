@@ -61,7 +61,13 @@ class SQLiteArtifactMobilitySourceStore:
                         anchor.publish(temporary, _LOCK_NAME)
                     except FileExistsError:
                         anchor.unlink(temporary)
-            with self._connection() as connection:
+            # A pending metadata row is committed *before* any payload path is
+            # created.  It is therefore part of capacity and byte accounting
+            # even if this process dies after an fsync and before sealing the
+            # metadata.  Startup reaps every such incomplete reservation while
+            # holding the same cross-process writer lock, before any caller can
+            # calculate source quotas.
+            with self._mutation(), self._connection() as connection:
                 connection.executescript(
                     """
                     CREATE TABLE IF NOT EXISTS mobility_source_artifacts(
@@ -72,6 +78,8 @@ class SQLiteArtifactMobilitySourceStore:
                       media_type TEXT NOT NULL,
                       created_at REAL NOT NULL,
                       expires_at REAL NOT NULL,
+                      state TEXT NOT NULL DEFAULT 'sealed'
+                        CHECK(state IN ('pending', 'sealed')),
                       UNIQUE(scope, id)
                     );
                     CREATE TABLE IF NOT EXISTS mobility_source_chunks(
@@ -83,6 +91,22 @@ class SQLiteArtifactMobilitySourceStore:
                     );
                     """
                 )
+                columns = {
+                    row["name"]
+                    for row in connection.execute(
+                        "PRAGMA table_info(mobility_source_artifacts)"
+                    )
+                }
+                if "state" not in columns:
+                    # Existing Task 2 source records predate reservations and
+                    # are already committed sealed objects.  Do not reinterpret
+                    # them as pending during the one-way schema migration.
+                    connection.execute(
+                        "ALTER TABLE mobility_source_artifacts "
+                        "ADD COLUMN state TEXT NOT NULL DEFAULT 'sealed'"
+                    )
+                connection.execute("BEGIN IMMEDIATE")
+                self._reap_incomplete(connection)
         except MobilitySourceError:
             raise
         except (ArtifactSpoolError, OSError, RuntimeError, sqlite3.Error):
@@ -247,6 +271,12 @@ class SQLiteArtifactMobilitySourceStore:
         if row is None:
             raise MobilitySourceError("NOT_FOUND")
         self._row_identity(row)
+        if row["state"] != "sealed":
+            # A reservation never becomes observable until metadata and the
+            # immutable chunk manifest commit together.
+            if row["state"] == "pending":
+                raise MobilitySourceError("NOT_FOUND")
+            raise MobilitySourceError("INTEGRITY")
         expires_at = row["expires_at"]
         if (
             isinstance(expires_at, bool)
@@ -316,7 +346,13 @@ class SQLiteArtifactMobilitySourceStore:
             except (ArtifactSpoolError, OSError):
                 pass
 
-    def _remove_expired_payload(self, row) -> None:
+    def _remove_payload(self, row) -> None:
+        """Securely remove one row's exact private payload directory.
+
+        This is used for both expired sealed objects and pre-seal reservations.
+        It only accepts the database's strict content-addressed names; an
+        unexpected entry fails closed rather than recursively deleting a path.
+        """
         source_id, scope, digest = self._row_identity(row)
         try:
             with self._artifact_directory(scope, source_id, create=False) as artifact:
@@ -348,7 +384,7 @@ class SQLiteArtifactMobilitySourceStore:
             (time.time(), limit),
         ).fetchall()
         for row in rows:
-            self._remove_expired_payload(row)
+            self._remove_payload(row)
             connection.execute(
                 "DELETE FROM mobility_source_chunks WHERE artifact_id=?", (row["id"],)
             )
@@ -356,43 +392,115 @@ class SQLiteArtifactMobilitySourceStore:
                 "DELETE FROM mobility_source_artifacts WHERE id=?", (row["id"],)
             )
 
+    def _reap_incomplete(self, connection) -> None:
+        """Remove all committed pre-seal reservations before capacity checks.
+
+        A payload cannot be created until its pending row has committed.  Thus
+        a crash can leave only (a) a pending row that continues to consume its
+        declared limits, or (b) a pending row plus its exact payload directory.
+        Reaping is transactional and fail-closed: failure to prove a directory
+        safe leaves the reservation in place and prevents a later quota check
+        in the same mutation from treating it as free space.
+        """
+        # A valid writer admits at most 4096 rows.  Keep recovery memory and
+        # filesystem work bounded even if a locally corrupted database contains
+        # more: after 4096 reservations the transaction rolls back and quota
+        # calculation remains unavailable rather than treating any as free.
+        for batch in range(65):
+            rows = connection.execute(
+                """SELECT * FROM mobility_source_artifacts
+                   WHERE state='pending' ORDER BY created_at, id LIMIT 64"""
+            ).fetchall()
+            if not rows:
+                return
+            if batch == 64:
+                raise MobilitySourceError("CAPACITY")
+            for row in rows:
+                self._remove_payload(row)
+                connection.execute(
+                    "DELETE FROM mobility_source_chunks WHERE artifact_id=?", (row["id"],)
+                )
+                connection.execute(
+                    "DELETE FROM mobility_source_artifacts WHERE id=? AND state='pending'",
+                    (row["id"],),
+                )
+
+    def _reserve_pending(self, spec: dict, authority: SourceAuthority) -> str:
+        """Durably account a source object before any payload is fsynced."""
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._reap_incomplete(connection)
+            self._reap_expired(connection)
+            if connection.execute(
+                "SELECT COUNT(*) FROM mobility_source_artifacts"
+            ).fetchone()[0] >= 4096:
+                raise MobilitySourceError("CAPACITY")
+            used = connection.execute(
+                "SELECT COALESCE(SUM(size_bytes), 0) FROM mobility_source_artifacts"
+            ).fetchone()[0]
+            if used + spec["size_bytes"] > authority.limits.total_bytes:
+                raise MobilitySourceError("QUOTA")
+            source_id = uuid.uuid4().hex
+            now = time.time()
+            connection.execute(
+                """INSERT INTO mobility_source_artifacts
+                   (id,scope,sha256,size_bytes,media_type,created_at,expires_at,state)
+                   VALUES(?,?,?,?,?,?,?, 'pending')""",
+                (
+                    source_id,
+                    authority.scope_id,
+                    spec["sha256"],
+                    spec["size_bytes"],
+                    spec["media_type"],
+                    now,
+                    now + authority.limits.ttl_seconds,
+                ),
+            )
+            return source_id
+
+    def _seal_pending(
+        self, source_id: str, chunks: list[tuple[int, int, str]], authority: SourceAuthority
+    ) -> None:
+        """Atomically add the chunk manifest and make a reservation readable."""
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """SELECT * FROM mobility_source_artifacts
+                   WHERE id=? AND scope=? AND state='pending'""",
+                (source_id, authority.scope_id),
+            ).fetchone()
+            if row is None:
+                raise MobilitySourceError("INTEGRITY")
+            self._row_identity(row)
+            if (
+                type(row["size_bytes"]) is not int
+                or row["size_bytes"] > authority.limits.max_object_bytes
+            ):
+                raise MobilitySourceError("INTEGRITY")
+            connection.executemany(
+                """INSERT INTO mobility_source_chunks
+                   (artifact_id,offset,size_bytes,sha256) VALUES(?,?,?,?)""",
+                [(source_id, *chunk) for chunk in chunks],
+            )
+            if connection.execute(
+                """UPDATE mobility_source_artifacts SET state='sealed'
+                   WHERE id=? AND scope=? AND state='pending'""",
+                (source_id, authority.scope_id),
+            ).rowcount != 1:
+                raise MobilitySourceError("INTEGRITY")
+
     def publish_sealed(self, stream, spec: dict, authority: SourceAuthority) -> dict:
         try:
-            with self._mutation(), self._connection() as connection:
-                connection.execute("BEGIN IMMEDIATE")
-                self._reap_expired(connection)
-                if connection.execute(
-                    "SELECT COUNT(*) FROM mobility_source_artifacts"
-                ).fetchone()[0] >= 4096:
-                    raise MobilitySourceError("CAPACITY")
-                used = connection.execute(
-                    "SELECT COALESCE(SUM(size_bytes), 0) FROM mobility_source_artifacts"
-                ).fetchone()[0]
-                if used + spec["size_bytes"] > authority.limits.total_bytes:
-                    raise MobilitySourceError("QUOTA")
-                source_id = uuid.uuid4().hex
-                with self._artifact_directory(authority.scope_id, source_id, create=True) as artifact:
+            # Keep the OS lock across the reservation, payload fsync/publish,
+            # and seal transition.  No other source writer can reap or reuse a
+            # pending identity while this call is live.
+            with self._mutation():
+                source_id = self._reserve_pending(spec, authority)
+                with self._artifact_directory(
+                    authority.scope_id, source_id, create=True
+                ) as artifact:
                     chunks = self._copy_stream(stream, artifact, spec)
-                now = time.time()
-                connection.execute(
-                    """INSERT INTO mobility_source_artifacts
-                       (id,scope,sha256,size_bytes,media_type,created_at,expires_at)
-                       VALUES(?,?,?,?,?,?,?)""",
-                    (
-                        source_id,
-                        authority.scope_id,
-                        spec["sha256"],
-                        spec["size_bytes"],
-                        spec["media_type"],
-                        now,
-                        now + authority.limits.ttl_seconds,
-                    ),
-                )
-                connection.executemany(
-                    """INSERT INTO mobility_source_chunks
-                       (artifact_id,offset,size_bytes,sha256) VALUES(?,?,?,?)""",
-                    [(source_id, *chunk) for chunk in chunks],
-                )
+                self._seal_pending(source_id, chunks, authority)
                 return {
                     "source_artifact_id": source_id,
                     "sha256": spec["sha256"],

@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 import threading
+from weakref import ref
 
 from sonder_runtime.application.artifacts.mobility_source import (
     ArtifactMobilitySourceService,
@@ -15,6 +16,9 @@ from sonder_runtime.application.errors import DependencyUnavailable
 from sonder_runtime.application.ports.artifact_mobility import (
     ArtifactMobilityPublisher,
     ArtifactMobilityReader,
+    _issue_publisher,
+    _issue_reader,
+    _revoke,
 )
 from sonder_runtime.platform.artifact_mobility_source_config import (
     artifact_mobility_source_errors,
@@ -30,53 +34,6 @@ class _SourceContext:
     _issuer: object = field(repr=False, compare=False)
     _capability: object = field(repr=False, compare=False)
     _proof: tuple = field(repr=False, compare=False)
-
-
-class _BoundPublisher:
-    __slots__ = ("_binding", "_context")
-
-    def __init__(self, binding, context: _SourceContext) -> None:
-        self._binding = binding
-        self._context = context
-
-    def publish_sealed(self, stream, immutable_spec: dict, trusted_provenance: object) -> dict:
-        # Reject a forged producer/provenance before lazy store construction.
-        # An invalid call must not create a private spool merely by probing it.
-        try:
-            service = self._binding._service_for_port(
-                self._context, "publish", trusted_provenance
-            )
-        except PermissionError:
-            raise MobilitySourceError("FORBIDDEN") from None
-        except DependencyUnavailable:
-            raise MobilitySourceError("UNAVAILABLE") from None
-        return service.publish_sealed(stream, immutable_spec, trusted_provenance, self._context)
-
-
-class _BoundReader:
-    __slots__ = ("_binding", "_context")
-
-    def __init__(self, binding, context: _SourceContext) -> None:
-        self._binding = binding
-        self._context = context
-
-    def inspect_sealed(self, source_artifact_id: str) -> dict:
-        try:
-            service = self._binding._service_for_port(self._context, "read")
-        except PermissionError:
-            raise MobilitySourceError("FORBIDDEN") from None
-        except DependencyUnavailable:
-            raise MobilitySourceError("UNAVAILABLE") from None
-        return service.inspect_sealed(source_artifact_id, self._context)
-
-    def read_range(self, source_artifact_id: str, offset: int, length: int):
-        try:
-            service = self._binding._service_for_port(self._context, "read")
-        except PermissionError:
-            raise MobilitySourceError("FORBIDDEN") from None
-        except DependencyUnavailable:
-            raise MobilitySourceError("UNAVAILABLE") from None
-        return service.read_range(source_artifact_id, offset, length, self._context)
 
 
 class ArtifactMobilitySourceBinding:
@@ -109,6 +66,12 @@ class ArtifactMobilitySourceBinding:
         self._lock = threading.RLock()
         self._service = None
         self._service_settings = None
+        # The binding must not own a port strongly: a holder with only its
+        # token must have no reverse object-graph edge into this host state.
+        self._publisher_port_ref = None
+        self._publisher_proof = None
+        self._reader_port_ref = None
+        self._reader_proof = None
         self._closed = False
         try:
             config = config_provider()
@@ -209,10 +172,73 @@ class ArtifactMobilitySourceBinding:
         )
 
     def publisher_for(self, capability: object) -> ArtifactMobilityPublisher:
-        return _BoundPublisher(self, self._context_for(capability, "publish"))
+        context = self._context_for(capability, "publish")
+        with self._lock:
+            existing = (
+                self._publisher_port_ref()
+                if self._publisher_port_ref is not None
+                else None
+            )
+            if (
+                existing is not None
+                and self._publisher_proof == context._proof
+            ):
+                return existing
+            _revoke(existing)
+            port = _issue_publisher(
+                lambda stream, immutable_spec, trusted_provenance: self._publish_from_port(
+                    context, stream, immutable_spec, trusted_provenance
+                )
+            )
+            self._publisher_port_ref = ref(port)
+            self._publisher_proof = context._proof
+            return port
 
     def reader_for(self, capability: object) -> ArtifactMobilityReader:
-        return _BoundReader(self, self._context_for(capability, "read"))
+        context = self._context_for(capability, "read")
+        with self._lock:
+            existing = self._reader_port_ref() if self._reader_port_ref is not None else None
+            if (
+                existing is not None
+                and self._reader_proof == context._proof
+            ):
+                return existing
+            _revoke(existing)
+            port = _issue_reader(
+                lambda source_artifact_id, offset=None, length=None: self._read_from_port(
+                    context, source_artifact_id, offset, length
+                )
+            )
+            self._reader_port_ref = ref(port)
+            self._reader_proof = context._proof
+            return port
+
+    def _publish_from_port(
+        self, context: _SourceContext, stream, immutable_spec: dict, trusted_provenance: object
+    ) -> dict:
+        # The port registry never receives this context or binding through the
+        # port object itself.  Validate before lazy store construction.
+        try:
+            service = self._service_for_port(context, "publish", trusted_provenance)
+        except PermissionError:
+            raise MobilitySourceError("FORBIDDEN") from None
+        except DependencyUnavailable:
+            raise MobilitySourceError("UNAVAILABLE") from None
+        return service.publish_sealed(stream, immutable_spec, trusted_provenance, context)
+
+    def _read_from_port(
+        self, context: _SourceContext, source_artifact_id: str, offset, length):
+        try:
+            service = self._service_for_port(context, "read")
+        except PermissionError:
+            raise MobilitySourceError("FORBIDDEN") from None
+        except DependencyUnavailable:
+            raise MobilitySourceError("UNAVAILABLE") from None
+        if offset is None and length is None:
+            return service.inspect_sealed(source_artifact_id, context)
+        if offset is None or length is None:
+            raise MobilitySourceError("INVALID_BOUND")
+        return service.read_range(source_artifact_id, offset, length, context)
 
     def _authorize(self, context: object, action: str, trusted_provenance: object = None) -> SourceAuthority:
         if action not in ("publish", "read") or not isinstance(context, _SourceContext):
@@ -279,5 +305,13 @@ class ArtifactMobilitySourceBinding:
         with self._lock:
             self._closed = True
             service = self._service
+            port_refs = (self._publisher_port_ref, self._reader_port_ref)
+            self._publisher_port_ref = None
+            self._publisher_proof = None
+            self._reader_port_ref = None
+            self._reader_proof = None
+        for port_ref in port_refs:
+            if port_ref is not None:
+                _revoke(port_ref())
         if service is not None:
             service.close()
