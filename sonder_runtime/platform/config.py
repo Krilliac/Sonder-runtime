@@ -119,12 +119,8 @@ class OllamaConfig:
     allow_remote: bool = False
     workers: tuple[str, ...] = ()
     trusted_origins: tuple[str, ...] = ()
-    worker_pool_max_workers: int = 16
     worker_max_inflight: int = 1
     worker_queue_depth: int = 32
-    worker_capability_probe_parallelism: int = 4
-    worker_capability_probe_batch_size: int = 32
-    worker_status_page_size: int = 32
     worker_admission_timeout_ms: int = 1_000
     worker_failure_threshold: int = 3
     worker_cooldown_seconds: int = 30
@@ -132,6 +128,11 @@ class OllamaConfig:
     worker_probe_timeout_ms: int = 2_000
     startup_timeout_seconds: int = 60
     request_timeout_seconds: int = 300
+    # Keep new static-pool settings after the legacy positional contract.
+    worker_pool_max_workers: int = 16
+    worker_capability_probe_parallelism: int = 4
+    worker_capability_probe_batch_size: int = 32
+    worker_status_page_size: int = 32
 
 
 @dataclass(frozen=True)

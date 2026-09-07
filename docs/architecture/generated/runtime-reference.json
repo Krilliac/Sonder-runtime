@@ -9511,12 +9511,6 @@
       "type": "tuple[str, ...]"
     },
     {
-      "default": 16,
-      "field": "worker_pool_max_workers",
-      "section": "ollama",
-      "type": "int"
-    },
-    {
       "default": 1,
       "field": "worker_max_inflight",
       "section": "ollama",
@@ -9525,24 +9519,6 @@
     {
       "default": 32,
       "field": "worker_queue_depth",
-      "section": "ollama",
-      "type": "int"
-    },
-    {
-      "default": 4,
-      "field": "worker_capability_probe_parallelism",
-      "section": "ollama",
-      "type": "int"
-    },
-    {
-      "default": 32,
-      "field": "worker_capability_probe_batch_size",
-      "section": "ollama",
-      "type": "int"
-    },
-    {
-      "default": 32,
-      "field": "worker_status_page_size",
       "section": "ollama",
       "type": "int"
     },
@@ -9585,6 +9561,30 @@
     {
       "default": 300,
       "field": "request_timeout_seconds",
+      "section": "ollama",
+      "type": "int"
+    },
+    {
+      "default": 16,
+      "field": "worker_pool_max_workers",
+      "section": "ollama",
+      "type": "int"
+    },
+    {
+      "default": 4,
+      "field": "worker_capability_probe_parallelism",
+      "section": "ollama",
+      "type": "int"
+    },
+    {
+      "default": 32,
+      "field": "worker_capability_probe_batch_size",
+      "section": "ollama",
+      "type": "int"
+    },
+    {
+      "default": 32,
+      "field": "worker_status_page_size",
       "section": "ollama",
       "type": "int"
     },
@@ -9725,7 +9725,7 @@
     "events": 43,
     "tools": 212
   },
-  "digest": "68a476257883b6a80f23b9fdcbb7a6234a249905fca7dee68c8406046c422186",
+  "digest": "a05a601925afbfacbd1f0219a3926a057e3ad636c6362d62c57188e42da5e97a",
   "events": [
     {
       "name": "session.started",
@@ -10199,7 +10199,7 @@
     "server.py": "9a4262ad4dd80fa47d5a1875a46e1e786d2ae5364cf9257140d5c5072456591c",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
-    "sonder_runtime/platform/config.py": "132cb528c25199efd08d107aaeb9e685734b5c6fb63d364a3583bdb5e26dcdc9"
+    "sonder_runtime/platform/config.py": "78801e9c2780612e84b9b88268425fb002ba5fb347f8055bb758e4f4e7e644b7"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
   "tools": [

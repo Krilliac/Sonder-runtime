@@ -340,6 +340,39 @@ def test_ollama_static_roster_defaults_are_bounded():
     assert config.ollama.worker_status_page_size == 32
 
 
+def test_ollama_config_preserves_preexisting_positional_argument_order():
+    """Static-roster settings must not reinterpret legacy positional calls."""
+    config = sonder_config.OllamaConfig(
+        "http://127.0.0.1:12000",
+        True,
+        ("http://127.0.0.2:12000",),
+        ("127.0.0.0/8",),
+        7,
+        90,
+        1_001,
+        4,
+        30,
+        300,
+        2_000,
+        60,
+        301,
+    )
+
+    assert config.worker_max_inflight == 7
+    assert config.worker_queue_depth == 90
+    assert config.worker_admission_timeout_ms == 1_001
+    assert config.worker_failure_threshold == 4
+    assert config.worker_cooldown_seconds == 30
+    assert config.worker_capability_ttl_seconds == 300
+    assert config.worker_probe_timeout_ms == 2_000
+    assert config.startup_timeout_seconds == 60
+    assert config.request_timeout_seconds == 301
+    assert config.worker_pool_max_workers == 16
+    assert config.worker_capability_probe_parallelism == 4
+    assert config.worker_capability_probe_batch_size == 32
+    assert config.worker_status_page_size == 32
+
+
 @pytest.mark.parametrize("maximum", [64, 256])
 def test_typed_ollama_static_roster_capacity_includes_primary(tmp_path, maximum):
     toml = tmp_path / "sonder.toml"
