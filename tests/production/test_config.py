@@ -322,6 +322,139 @@ def test_remote_ollama_workers_require_https_with_consent():
     assert any("workers remote entries must use https" in e for e in excinfo.value.errors)
 
 
+def _loopback_worker_list(total_workers: int) -> str:
+    """Build a distinct primary-plus-worker roster without network access."""
+    assert total_workers >= 1
+    return ",".join(
+        f"http://127.0.0.1:{12_000 + offset}"
+        for offset in range(total_workers - 1)
+    )
+
+
+def test_ollama_static_roster_defaults_are_bounded():
+    config = load_config(env=_CLEAN_ENV)
+
+    assert config.ollama.worker_pool_max_workers == 16
+    assert config.ollama.worker_capability_probe_parallelism == 4
+    assert config.ollama.worker_capability_probe_batch_size == 32
+    assert config.ollama.worker_status_page_size == 32
+
+
+@pytest.mark.parametrize("maximum", [64, 256])
+def test_typed_ollama_static_roster_capacity_includes_primary(tmp_path, maximum):
+    toml = tmp_path / "sonder.toml"
+    toml.write_text(
+        """[ollama]
+worker_pool_max_workers = %d
+worker_capability_probe_parallelism = 8
+worker_capability_probe_batch_size = 128
+worker_status_page_size = 128
+workers = [%s]
+""" % (
+            maximum,
+            ", ".join(
+                '"http://127.0.0.1:%d"' % (12_000 + offset)
+                for offset in range(maximum - 1)
+            ),
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(toml, env=_CLEAN_ENV)
+
+    assert config.ollama.worker_pool_max_workers == maximum
+    assert len(config.ollama.workers) + 1 == maximum
+    assert config.ollama.worker_capability_probe_parallelism == 8
+    assert config.ollama.worker_capability_probe_batch_size == 128
+    assert config.ollama.worker_status_page_size == 128
+
+
+def test_injected_ollama_static_roster_environment_overrides_toml(tmp_path):
+    toml = tmp_path / "sonder.toml"
+    toml.write_text(
+        """[ollama]
+worker_pool_max_workers = 64
+worker_capability_probe_parallelism = 2
+worker_capability_probe_batch_size = 16
+worker_status_page_size = 16
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(
+        toml,
+        env={
+            "SONDER_OLLAMA_POOL_MAX_WORKERS": "256",
+            "SONDER_OLLAMA_WORKER_PROBE_PARALLELISM": "8",
+            "SONDER_OLLAMA_WORKER_PROBE_BATCH_SIZE": "128",
+            "SONDER_OLLAMA_WORKER_STATUS_PAGE_SIZE": "128",
+        },
+    )
+
+    assert config.ollama.worker_pool_max_workers == 256
+    assert config.ollama.worker_capability_probe_parallelism == 8
+    assert config.ollama.worker_capability_probe_batch_size == 128
+    assert config.ollama.worker_status_page_size == 128
+
+
+@pytest.mark.parametrize("maximum", [0, 257])
+def test_typed_ollama_static_roster_capacity_rejects_out_of_range(tmp_path, maximum):
+    toml = tmp_path / "sonder.toml"
+    toml.write_text(
+        "[ollama]\nworker_pool_max_workers = %d\n" % maximum,
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(toml, env=_CLEAN_ENV)
+
+    assert any("worker_pool_max_workers" in error for error in excinfo.value.errors)
+
+
+@pytest.mark.parametrize("maximum, total_workers", [(64, 65), (256, 257)])
+def test_injected_ollama_static_roster_rejects_one_worker_over_capacity(
+    maximum, total_workers,
+):
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(
+            env={
+                "SONDER_OLLAMA_POOL_MAX_WORKERS": str(maximum),
+                "SONDER_OLLAMA_WORKERS": _loopback_worker_list(total_workers),
+            },
+        )
+
+    assert any("worker_pool_max_workers" in error for error in excinfo.value.errors)
+
+
+@pytest.mark.parametrize(
+    "environment, expected",
+    [
+        (
+            {
+                "SONDER_OLLAMA_WORKERS": (
+                    "http://127.0.0.2:11434,http://127.0.0.2:11434/"
+                ),
+            },
+            "duplicate canonical worker",
+        ),
+        (
+            {
+                "OLLAMA_HOST": "http://localhost:11434",
+                "SONDER_OLLAMA_WORKERS": "http://127.0.0.1:11434/",
+            },
+            "duplicates primary",
+        ),
+    ],
+)
+def test_ollama_static_roster_rejects_canonical_endpoint_collisions(
+    environment, expected,
+):
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(env=environment)
+
+    assert any(expected in error for error in excinfo.value.errors)
+
+
 @pytest.mark.parametrize("variable, value, expected", [
     ("OLLAMA_HOST", "http://127.0.0.1:11434/api", "must be an origin"),
     ("OLLAMA_HOST", "http://user:pass@127.0.0.1:11434", "inline credentials"),

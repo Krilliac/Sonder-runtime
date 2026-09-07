@@ -119,8 +119,12 @@ class OllamaConfig:
     allow_remote: bool = False
     workers: tuple[str, ...] = ()
     trusted_origins: tuple[str, ...] = ()
+    worker_pool_max_workers: int = 16
     worker_max_inflight: int = 1
     worker_queue_depth: int = 32
+    worker_capability_probe_parallelism: int = 4
+    worker_capability_probe_batch_size: int = 32
+    worker_status_page_size: int = 32
     worker_admission_timeout_ms: int = 1_000
     worker_failure_threshold: int = 3
     worker_cooldown_seconds: int = 30
@@ -356,6 +360,40 @@ def _is_loopback_host(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def _canonical_ollama_origin(value: object) -> str | None:
+    """Return a comparison identity for one syntactically valid Ollama origin."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parts = urlsplit(value)
+        port = parts.port
+    except ValueError:
+        return None
+    scheme = parts.scheme.casefold()
+    host = (parts.hostname or "").casefold().rstrip(".")
+    if (
+        scheme not in ("http", "https")
+        or not host
+        or port is None
+        or parts.username is not None
+        or parts.password is not None
+        or parts.path not in ("", "/")
+        or parts.query
+        or parts.fragment
+    ):
+        return None
+    if host in ("localhost", "0.0.0.0"):
+        host = "127.0.0.1"
+    elif host == "::":
+        host = "::1"
+    try:
+        host = ipaddress.ip_address(host).compressed
+    except ValueError:
+        pass
+    rendered_host = f"[{host}]" if ":" in host else host
+    return f"{scheme}://{rendered_host}:{port}"
 
 
 def _host_in_trusted_origins(
@@ -735,6 +773,10 @@ def _apply_environment(
         )
     ollama = replace(
         ollama,
+        worker_pool_max_workers=_env_int(
+            "SONDER_OLLAMA_POOL_MAX_WORKERS", env,
+            ollama.worker_pool_max_workers, errors,
+        ),
         worker_max_inflight=_env_int(
             "SONDER_OLLAMA_WORKER_MAX_INFLIGHT", env,
             ollama.worker_max_inflight, errors,
@@ -742,6 +784,18 @@ def _apply_environment(
         worker_queue_depth=_env_int(
             "SONDER_OLLAMA_WORKER_QUEUE_DEPTH", env,
             ollama.worker_queue_depth, errors,
+        ),
+        worker_capability_probe_parallelism=_env_int(
+            "SONDER_OLLAMA_WORKER_PROBE_PARALLELISM", env,
+            ollama.worker_capability_probe_parallelism, errors,
+        ),
+        worker_capability_probe_batch_size=_env_int(
+            "SONDER_OLLAMA_WORKER_PROBE_BATCH_SIZE", env,
+            ollama.worker_capability_probe_batch_size, errors,
+        ),
+        worker_status_page_size=_env_int(
+            "SONDER_OLLAMA_WORKER_STATUS_PAGE_SIZE", env,
+            ollama.worker_status_page_size, errors,
         ),
         worker_admission_timeout_ms=_env_int(
             "SONDER_OLLAMA_WORKER_ADMISSION_TIMEOUT_MS", env,
@@ -985,6 +1039,8 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             "embeddings are protected in transit"
         )
 
+    canonical_primary = _canonical_ollama_origin(config.ollama.url)
+    canonical_workers: list[str] = []
     for worker in config.ollama.workers:
         try:
             worker_parts = urlsplit(worker)
@@ -1023,12 +1079,41 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
                 )
             ):
                 errors.append("[ollama].workers remote entries must use https")
+        canonical_worker = _canonical_ollama_origin(worker)
+        if canonical_worker is not None:
+            canonical_workers.append(canonical_worker)
 
-    if len(config.ollama.workers) > 15:
-        errors.append("[ollama].workers supports at most 15 additional workers")
+    canonical_origins = (
+        {canonical_primary} if canonical_primary is not None else set()
+    )
+    for canonical_worker in canonical_workers:
+        if canonical_worker == canonical_primary:
+            errors.append(
+                "[ollama].workers contains a worker that duplicates primary "
+                "after canonical normalization"
+            )
+        elif canonical_worker in canonical_origins:
+            errors.append(
+                "[ollama].workers contains a duplicate canonical worker origin"
+            )
+        else:
+            canonical_origins.add(canonical_worker)
+    if (
+        config.ollama.worker_pool_max_workers >= 1
+        and len(canonical_origins) > config.ollama.worker_pool_max_workers
+    ):
+        errors.append(
+            "[ollama].worker_pool_max_workers limits the primary-plus-worker "
+            "roster to %d unique origins"
+            % config.ollama.worker_pool_max_workers
+        )
     for name in (
+        "worker_pool_max_workers",
         "worker_max_inflight",
         "worker_queue_depth",
+        "worker_capability_probe_parallelism",
+        "worker_capability_probe_batch_size",
+        "worker_status_page_size",
         "worker_admission_timeout_ms",
         "worker_failure_threshold",
         "worker_cooldown_seconds",
@@ -1038,8 +1123,12 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         if getattr(config.ollama, name) < 1:
             errors.append(f"[ollama].{name} must be >= 1")
     worker_upper_bounds = {
+        "worker_pool_max_workers": 256,
         "worker_max_inflight": 64,
         "worker_queue_depth": 4096,
+        "worker_capability_probe_parallelism": 8,
+        "worker_capability_probe_batch_size": 128,
+        "worker_status_page_size": 128,
         "worker_admission_timeout_ms": 60_000,
         "worker_failure_threshold": 100,
         "worker_cooldown_seconds": 3600,

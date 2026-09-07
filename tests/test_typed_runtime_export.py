@@ -43,6 +43,29 @@ def test_canonical_serve_export_preserves_toml_ollama_workers(monkeypatch):
     )
 
 
+def test_legacy_export_includes_typed_ollama_static_roster_bounds():
+    environment = __import__("os").environ
+    before = dict(environment)
+    try:
+        _export_runtime_environment(
+            SonderConfig(
+                ollama=OllamaConfig(
+                    worker_pool_max_workers=64,
+                    worker_capability_probe_parallelism=8,
+                    worker_capability_probe_batch_size=128,
+                    worker_status_page_size=128,
+                )
+            )
+        )
+        assert environment["SONDER_OLLAMA_POOL_MAX_WORKERS"] == "64"
+        assert environment["SONDER_OLLAMA_WORKER_PROBE_PARALLELISM"] == "8"
+        assert environment["SONDER_OLLAMA_WORKER_PROBE_BATCH_SIZE"] == "128"
+        assert environment["SONDER_OLLAMA_WORKER_STATUS_PAGE_SIZE"] == "128"
+    finally:
+        environment.clear()
+        environment.update(before)
+
+
 def _typed_capacity_config() -> SonderConfig:
     return SonderConfig(
         ollama=OllamaConfig(

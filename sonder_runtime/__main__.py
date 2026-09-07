@@ -543,11 +543,23 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
     # endpoint directly.
     if include_typed_runtime:
         os.environ["OLLAMA_HOST"] = config.ollama.url
+        os.environ["SONDER_OLLAMA_POOL_MAX_WORKERS"] = str(
+            config.ollama.worker_pool_max_workers
+        )
         os.environ["SONDER_OLLAMA_WORKER_MAX_INFLIGHT"] = str(
             config.ollama.worker_max_inflight
         )
         os.environ["SONDER_OLLAMA_WORKER_QUEUE_DEPTH"] = str(
             config.ollama.worker_queue_depth
+        )
+        os.environ["SONDER_OLLAMA_WORKER_PROBE_PARALLELISM"] = str(
+            config.ollama.worker_capability_probe_parallelism
+        )
+        os.environ["SONDER_OLLAMA_WORKER_PROBE_BATCH_SIZE"] = str(
+            config.ollama.worker_capability_probe_batch_size
+        )
+        os.environ["SONDER_OLLAMA_WORKER_STATUS_PAGE_SIZE"] = str(
+            config.ollama.worker_status_page_size
         )
         os.environ["SONDER_OLLAMA_WORKER_ADMISSION_TIMEOUT_MS"] = str(
             config.ollama.worker_admission_timeout_ms

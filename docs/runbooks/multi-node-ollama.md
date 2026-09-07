@@ -25,6 +25,13 @@ The coordinator's local Ollama (`[ollama].url`) and any `[ollama].workers`
 entries form the pool.  Workers are plain Ollama endpoints — they do not
 need a Sonder installation unless they also serve as compute nodes.
 
+`worker_pool_max_workers` counts the primary endpoint plus every additional
+worker. Each endpoint must be unique after canonical normalization, so a
+repeated worker or an alias of the primary endpoint is rejected rather than
+silently removed. The bound keeps one coordinator's roster finite; it does
+not guarantee that a host can sustain that many workers or any particular
+throughput.
+
 ## Prerequisites
 
 - Dedicated private network between nodes (e.g. 10.77.0.0/24).
@@ -179,8 +186,12 @@ recovery.
 
 | Setting | Default | Notes |
 |---|---|---|
+| `worker_pool_max_workers` | 16 | Maximum unique primary-plus-worker roster held by one coordinator. This is a finite configuration bound, not a throughput guarantee. |
 | `worker_max_inflight` | 1 | Concurrent requests per worker.  Increase only if the worker has enough VRAM to serve multiple slots. |
-| `worker_queue_depth` | 32 | Bounded backpressure waiters across the pool. |
+| `worker_queue_depth` | 32 | Bounded backpressure waiters across the whole pool. It is not multiplied by the number of workers. |
+| `worker_capability_probe_parallelism` | 4 | Maximum concurrent worker capability probes for this pool. |
+| `worker_capability_probe_batch_size` | 32 | Maximum stale workers selected by one capability-refresh pass. |
+| `worker_status_page_size` | 32 | Default bounded administrative worker-detail page size. |
 | `worker_failure_threshold` | 3 | Consecutive failures before cooldown. |
 | `worker_cooldown_seconds` | 30 | Seconds a failed worker stays out of rotation. |
 | `worker_capability_ttl_seconds` | 300 | How often model lists are re-probed. |
