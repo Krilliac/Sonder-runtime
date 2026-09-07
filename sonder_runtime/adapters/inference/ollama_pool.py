@@ -446,6 +446,7 @@ class _WorkerState:
     capabilities: WorkerCapabilities | None = None
     compatibility_error: str = ""
     capability_probe_failed: bool = False
+    capability_probe_generation: int = 0
     trips: int = 0
     known_models: frozenset[str] | None = None
     advertisement: WorkerAdvertisement | None = None
@@ -651,6 +652,7 @@ class OllamaWorkerPool:
         self._local_worker_count = len(states) - len(self._configured_remote_origins)
         self._membership_omitted = 0
         self._external_source = None
+        self._active_probe_states = ()
 
     @property
     def membership_limit(self) -> int:
@@ -1016,6 +1018,12 @@ class OllamaWorkerPool:
     def refresh_capabilities(
         self, *, force: bool = False, _membership: bool = False,
     ) -> None:
+        self._refresh_capabilities(force=force, _membership=_membership)
+
+    def _refresh_capabilities(
+        self, *, force: bool = False, _membership: bool = False,
+        _target: _WorkerState | None = None, _lock_owned: bool = False,
+    ) -> None:
         """Update cached capabilities using the configured bounded probe batch.
 
         Circuit-open workers are not probed before their retry deadline unless
@@ -1027,7 +1035,7 @@ class OllamaWorkerPool:
         if self._capability_prober is None:
             logger.debug("no capability prober configured, skipping refresh")
             return
-        if not self._probe_lock.acquire(blocking=False):
+        if not _lock_owned and not self._probe_lock.acquire(blocking=False):
             logger.debug("probe lock contended, skipping refresh")
             return
         try:
@@ -1040,6 +1048,8 @@ class OllamaWorkerPool:
                 for offset in range(state_count):
                     index = (start + offset) % state_count
                     state = self._states[index]
+                    if _target is not None and state is not _target:
+                        continue
                     if state.membership_state is not None and (
                         state.membership_state in ("draining", "expired")
                         or state.membership_expires_at is None
@@ -1060,6 +1070,7 @@ class OllamaWorkerPool:
                         break
                 if last_selected_index is not None and state_count:
                     self._probe_cursor = (last_selected_index + 1) % state_count
+                self._active_probe_states = tuple(candidates)
             if not candidates:
                 logger.debug("no stale/eligible workers to probe")
                 return
@@ -1085,6 +1096,7 @@ class OllamaWorkerPool:
 
             with self._condition:
                 for state, (payload, measured_ms, error) in zip(candidates, outcomes):
+                    state.capability_probe_generation += 1
                     if state.membership_state == "draining" or not any(current is state for current in self._states):
                         continue
                     self._metrics["capability_probes"] += 1
@@ -1137,13 +1149,79 @@ class OllamaWorkerPool:
                     self._record_success(state, latency_ms)
                 self._condition.notify_all()
         finally:
+            with self._condition:
+                self._active_probe_states = ()
+                self._condition.notify_all()
+            if not _lock_owned:
+                self._probe_lock.release()
+
+    def _refresh_for_model(self, model: str, *, admission_timeout: float) -> None:
+        """Probe one fair static unknown/stale worker, joining existing work.
+
+        The same probe lock serializes this with administrative batches, so
+        their configured parallelism ceiling remains global to this pool.
+        Waiters consume the existing global admission queue. Membership lease
+        activation/renewal remains exclusively owned by the controller.
+        """
+        with self._condition:
+            now = self._clock()
+            if self._draining or self._capability_prober is None:
+                return
+            if any(self._membership_admissible(state, now)
+                   and not state.compatibility_error and state.cooldown_until <= now
+                   and self._supports_model(state, model) for state in self._states):
+                return
+            candidates = [state for state in self._states
+                          if state.membership_state is None
+                          and self._membership_admissible(state, now)
+                          and self._capabilities_stale(state, now)
+                          and state.cooldown_until <= now and not state.half_open_inflight]
+            if not candidates:
+                return
+            candidate_ids = {id(state) for state in candidates}
+            # A caller arriving during a probe joins it even if the fair cursor
+            # already advanced. Identity and completion generation prevent a
+            # duplicate probe after either a successful or failed result.
+            target = next((state for state in self._active_probe_states
+                           if id(state) in candidate_ids), None)
+            if target is None:
+                start = self._probe_cursor % len(self._states)
+                target = next(state for state in self._states[start:] + self._states[:start]
+                              if id(state) in candidate_ids)
+            generation = target.capability_probe_generation
+            acquired = self._probe_lock.acquire(blocking=False)
+            if not acquired:
+                if self._waiters >= self._queue_depth:
+                    self._metrics["backpressure_rejections"] += 1
+                    raise WorkerPoolBackpressure("Ollama worker queue is full")
+                self._waiters += 1
+        if not acquired:
+            try:
+                acquired = self._probe_lock.acquire(timeout=max(0.0, admission_timeout))
+            finally:
+                with self._condition:
+                    self._waiters -= 1
+                    self._condition.notify_all()
+            if not acquired:
+                with self._condition:
+                    self._metrics["backpressure_rejections"] += 1
+                raise WorkerPoolBackpressure("timed out waiting for Ollama worker capability")
+        try:
+            with self._condition:
+                if (self._draining or target.capability_probe_generation != generation
+                        or not any(state is target for state in self._states)):
+                    return
+            self._refresh_capabilities(_target=target, _lock_owned=True)
+        finally:
             self._probe_lock.release()
 
     def _supports_model(self, state: _WorkerState, model: str | None) -> bool:
         if not model:
             return True
         if state.capabilities is None:
-            return not state.capability_probe_failed
+            return False
+        if self._capabilities_stale(state, self._clock()):
+            return False
         wanted = _model_key(model)
         return any(_model_key(name) == wanted for name in state.capabilities.models)
 
@@ -1270,8 +1348,7 @@ class OllamaWorkerPool:
                     if queued:
                         self._waiters -= 1
                     available = [state for state in self._states if self._membership_admissible(state, now)]
-                    known = bool(available) and all(state.capabilities is not None for state in available)
-                    if model and known:
+                    if model and available:
                         raise WorkerCapabilityUnavailable(
                             "no Ollama worker advertises model %r" % model
                         )
@@ -1369,14 +1446,14 @@ class OllamaWorkerPool:
         logger.debug(f"pool.request: model={model!r}, idempotent={idempotent}")
         with self._condition:
             self._metrics["logical_requests"] += 1
-        if model:
-            self.refresh_capabilities()
         admission_timeout = (
             self._admission_timeout
             if admission_timeout_seconds is None
             else max(0.0, float(admission_timeout_seconds))
         )
         admission_deadline = time.monotonic() + admission_timeout
+        if model:
+            self._refresh_for_model(model, admission_timeout=admission_timeout)
         attempted: set[str] = set()
         last_error = None
         while True:
@@ -1391,7 +1468,7 @@ class OllamaWorkerPool:
                         0.0, admission_deadline - time.monotonic(),
                     ),
                 )
-            except WorkerPoolUnavailable:
+            except (WorkerPoolUnavailable, WorkerCapabilityUnavailable):
                 if last_error is not None:
                     logger.error(
                         f"all attempted workers failed for model={model!r}, "

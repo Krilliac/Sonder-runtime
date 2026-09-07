@@ -6,6 +6,7 @@ import pytest
 
 from sonder_runtime.adapters.inference.ollama_pool import (
     OllamaWorkerPool,
+    WorkerCapabilityUnavailable,
     _metric_label,
     _default_capability_prober,
     configure_typed_workers,
@@ -434,12 +435,18 @@ def test_half_open_worker_admits_one_trial_and_recovers_on_success():
     assert snap.probing is False
 
 
-def test_model_affinity_orders_workers_lacking_the_model_last():
+def test_model_affinity_requires_capability_evidence_and_never_uses_missing_model():
     clock = FakeClock()
     pool = OllamaWorkerPool(PRIMARY, (SECOND,), time_fn=clock)
     assert pool.note_models("127.0.0.1:11434", ["llama3:latest"]) is True
     assert pool.note_models(SECOND, ["qwen3-coder:30b"]) is True
     assert pool.note_models("nonexistent:1", ["x"]) is False
+    # Inventory hints alone are not verified capability evidence.
+    with pytest.raises(WorkerCapabilityUnavailable):
+        pool.request(lambda _: pytest.fail("unprobed worker dispatched"), model="llama3")
+    pool._capability_prober = lambda origin: {"models": [
+        "llama3:latest" if origin == PRIMARY else "qwen3-coder:30b"]}
+    pool.refresh_capabilities()
 
     chosen = []
 
@@ -454,7 +461,7 @@ def test_model_affinity_orders_workers_lacking_the_model_last():
     pool.request(send, model="LLAMA3:latest")
     assert chosen == [SECOND, PRIMARY, PRIMARY]
 
-    # A worker with recorded inventory is deprioritized but never excluded.
+    # A transport failure cannot authorize another worker missing the model.
     failed = []
 
     def send_failing_second(origin):
@@ -463,9 +470,8 @@ def test_model_affinity_orders_workers_lacking_the_model_last():
             raise URLError("second down")
         return origin
 
-    assert pool.request(
-        send_failing_second, model="qwen3-coder:30b", idempotent=True,
-    ) == PRIMARY
+    with pytest.raises(URLError, match="second down"):
+        pool.request(send_failing_second, model="qwen3-coder:30b", idempotent=True)
     assert failed == [SECOND]
 
 
@@ -500,7 +506,8 @@ def test_pool_never_replays_a_classified_post_response_failure():
 
 
 def test_refresh_inventory_records_models_and_keeps_stale_records_on_error():
-    pool = OllamaWorkerPool(PRIMARY, (SECOND,))
+    pool = OllamaWorkerPool(PRIMARY, (SECOND,), capability_prober=lambda origin: {
+        "models": ["llama3:latest" if origin == PRIMARY else "qwen3-coder:30b"]})
     payloads = {
         PRIMARY: {"models": [{"name": "llama3:latest"}, {"model": "sonder:latest"}, None, {}]},
         SECOND: {"models": [{"name": "qwen3-coder:30b"}]},

@@ -1,3 +1,5 @@
+import pytest
+
 from sonder_runtime.domain.operational_capabilities import (
     build_operational_capabilities,
 )
@@ -8,11 +10,12 @@ from sonder_runtime.platform.config import (
 )
 
 
-def test_64_worker_pool_is_available_only_when_accepting_eligible_work():
-    for admission, eligible, available in (("accepting", 64, True), ("draining", 64, False), ("accepting", 0, False)):
+@pytest.mark.parametrize("count", [16, 64, 256])
+def test_bounded_worker_pool_is_available_only_when_accepting_eligible_work(count):
+    for admission, eligible, available in (("accepting", count, True), ("draining", count, False), ("accepting", 0, False)):
         surface = build_operational_capabilities(config=None, inference_pool_status={
-            "schema_version": 2, "enabled": True, "worker_count": 64,
-            "healthy_worker_count": 64, "eligible_worker_count": eligible,
+            "schema_version": 2, "enabled": True, "worker_count": count,
+            "healthy_worker_count": count, "eligible_worker_count": eligible,
             "admission": admission, "available_capacity": 128,
             "queue": {"waiting": 3, "limit": 32}, "membership_state": "static",
             "workers": [{"origin": "https://private.example:11434"}],

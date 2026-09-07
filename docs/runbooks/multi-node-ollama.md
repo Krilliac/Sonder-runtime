@@ -396,3 +396,14 @@ the host filesystem and hardware honoring synchronization.
 
 Validation uses deterministic fixtures and synthetic loopback TLS servers.
 It does not establish live-cluster compatibility or deployed-node readiness.
+
+The [disposable membership acceptance procedure](inference-membership-acceptance.md)
+separates synthetic 16/64/256-member evidence from live private-cluster checks,
+including revocation, expiry, saturation, DNS policy, cleanup and evidence custody.
+Model-specific static-pool requests probe at most one fair unknown/stale worker;
+concurrent callers join an existing probe through the same global admission
+queue. Missing or failed capability evidence returns capability-unavailable
+without selecting an unprobed worker. Inventory hints alone do not authorize
+model-specific dispatch. Explicit administrator refreshes retain bounded batch
+discovery; model-less requests and default status do not start probes. Remote
+membership activation and renewal remain owned by the explicit controller.
