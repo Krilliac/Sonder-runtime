@@ -67,6 +67,8 @@ _configured_cooldown_seconds: float | None = None
 _configured_admission_timeout_ms: int | None = None
 _configured_capability_ttl_seconds: int | None = None
 _configured_probe_timeout_ms: int | None = None
+_configured_max_inflight: int | None = None
+_configured_queue_depth: int | None = None
 _configuration_lock = threading.RLock()
 
 
@@ -232,6 +234,8 @@ def configure_typed_workers(
     admission_timeout_ms: int | None = None,
     capability_ttl_seconds: int | None = None,
     probe_timeout_ms: int | None = None,
+    max_inflight_per_worker: int | None = None,
+    queue_depth: int | None = None,
 ) -> None:
     logger.debug(f"configuring typed workers: count={len(worker_origins)}, allow_remote={allow_remote}, trusted_origins={trusted_origins!r}")
     logger.info(f"configuring {len(worker_origins)} typed Ollama worker(s), allow_remote={allow_remote}")
@@ -246,7 +250,8 @@ def configure_typed_workers(
     global _configured_workers, _configured_allow_remote, _configured_trusted_origins
     global _configured_failure_threshold, _configured_cooldown_seconds
     global _configured_admission_timeout_ms, _configured_capability_ttl_seconds
-    global _configured_probe_timeout_ms
+    global _configured_probe_timeout_ms, _configured_max_inflight
+    global _configured_queue_depth
     with _configuration_lock:
         _configured_workers = normalized
         _configured_allow_remote = allow_remote
@@ -256,6 +261,8 @@ def configure_typed_workers(
         _configured_admission_timeout_ms = admission_timeout_ms
         _configured_capability_ttl_seconds = capability_ttl_seconds
         _configured_probe_timeout_ms = probe_timeout_ms
+        _configured_max_inflight = max_inflight_per_worker
+        _configured_queue_depth = queue_depth
 
 
 def reset_typed_workers() -> None:
@@ -263,7 +270,8 @@ def reset_typed_workers() -> None:
     global _configured_workers, _configured_allow_remote, _configured_trusted_origins
     global _configured_failure_threshold, _configured_cooldown_seconds
     global _configured_admission_timeout_ms, _configured_capability_ttl_seconds
-    global _configured_probe_timeout_ms
+    global _configured_probe_timeout_ms, _configured_max_inflight
+    global _configured_queue_depth
     with _configuration_lock:
         _configured_workers = None
         _configured_allow_remote = None
@@ -273,6 +281,8 @@ def reset_typed_workers() -> None:
         _configured_admission_timeout_ms = None
         _configured_capability_ttl_seconds = None
         _configured_probe_timeout_ms = None
+        _configured_max_inflight = None
+        _configured_queue_depth = None
 
 
 def has_configured_remote_workers(environment=None) -> bool:
@@ -1245,6 +1255,8 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
         typed_admission = _configured_admission_timeout_ms
         typed_ttl = _configured_capability_ttl_seconds
         typed_probe = _configured_probe_timeout_ms
+        typed_max_inflight = _configured_max_inflight
+        typed_queue_depth = _configured_queue_depth
     use_typed = environment is None and typed_workers is not None and typed_allow_remote is not None
     if use_typed:
         worker_origins = typed_workers
@@ -1297,13 +1309,19 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
         trusted_origins=trusted_origins,
         failure_threshold=failure_threshold,
         cooldown_seconds=cooldown,
-        max_inflight_per_worker=_positive_int(
-            env, "SONDER_OLLAMA_WORKER_MAX_INFLIGHT", _DEFAULT_MAX_INFLIGHT,
-            maximum=_MAX_INFLIGHT_PER_WORKER,
+        max_inflight_per_worker=(
+            typed_max_inflight if use_typed and typed_max_inflight is not None
+            else _positive_int(
+                env, "SONDER_OLLAMA_WORKER_MAX_INFLIGHT", _DEFAULT_MAX_INFLIGHT,
+                maximum=_MAX_INFLIGHT_PER_WORKER,
+            )
         ),
-        queue_depth=_positive_int(
-            env, "SONDER_OLLAMA_WORKER_QUEUE_DEPTH", _DEFAULT_QUEUE_DEPTH,
-            maximum=_MAX_QUEUE_DEPTH,
+        queue_depth=(
+            typed_queue_depth if use_typed and typed_queue_depth is not None
+            else _positive_int(
+                env, "SONDER_OLLAMA_WORKER_QUEUE_DEPTH", _DEFAULT_QUEUE_DEPTH,
+                maximum=_MAX_QUEUE_DEPTH,
+            )
         ),
         admission_timeout_seconds=admission_ms / 1000.0,
         capability_ttl_seconds=(

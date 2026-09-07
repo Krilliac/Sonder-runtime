@@ -180,7 +180,7 @@ recovery.
 | Setting | Default | Notes |
 |---|---|---|
 | `worker_max_inflight` | 1 | Concurrent requests per worker.  Increase only if the worker has enough VRAM to serve multiple slots. |
-| `worker_queue_depth` | 32 | Backpressure queue per worker. |
+| `worker_queue_depth` | 32 | Bounded backpressure waiters across the pool. |
 | `worker_failure_threshold` | 3 | Consecutive failures before cooldown. |
 | `worker_cooldown_seconds` | 30 | Seconds a failed worker stays out of rotation. |
 | `worker_capability_ttl_seconds` | 300 | How often model lists are re-probed. |

@@ -216,18 +216,61 @@ def test_typed_workers_are_authoritative_without_environment_round_trip(monkeypa
         reset_typed_workers()
 
 
+def test_typed_capacity_is_authoritative_without_environment_round_trip(monkeypatch):
+    try:
+        configure_typed_workers(
+            ("https://worker.example:443",),
+            allow_remote=True,
+            max_inflight_per_worker=7,
+            queue_depth=90,
+        )
+        monkeypatch.setenv("SONDER_OLLAMA_WORKER_MAX_INFLIGHT", "invalid")
+        monkeypatch.setenv("SONDER_OLLAMA_WORKER_QUEUE_DEPTH", "invalid")
+        pool = from_environment("http://127.0.0.1:11434")
+        assert {row["capacity"] for row in pool.status()["workers"]} == {7}
+        assert pool.status()["queue"]["limit"] == 90
+    finally:
+        reset_typed_workers()
+
+
 def test_explicit_environment_remains_an_injectable_compatibility_boundary():
     try:
-        configure_typed_workers((), allow_remote=False)
+        configure_typed_workers(
+            ("https://typed-worker.example:443",),
+            allow_remote=True,
+            max_inflight_per_worker=7,
+            queue_depth=90,
+        )
         pool = from_environment(
             "http://127.0.0.1:11434",
-            {"SONDER_OLLAMA_WORKERS": "http://127.0.0.2:11434"},
+            {
+                "SONDER_OLLAMA_WORKERS": "http://127.0.0.2:11434",
+                "SONDER_OLLAMA_WORKER_MAX_INFLIGHT": "3",
+                "SONDER_OLLAMA_WORKER_QUEUE_DEPTH": "11",
+            },
         )
         assert pool.origins == (
             "http://127.0.0.1:11434", "http://127.0.0.2:11434",
         )
+        assert {row["capacity"] for row in pool.status()["workers"]} == {3}
+        assert pool.status()["queue"]["limit"] == 11
     finally:
         reset_typed_workers()
+
+
+def test_reset_typed_workers_clears_capacity_configuration(monkeypatch):
+    configure_typed_workers(
+        ("https://worker.example:443",),
+        allow_remote=True,
+        max_inflight_per_worker=7,
+        queue_depth=90,
+    )
+    reset_typed_workers()
+    monkeypatch.setenv("SONDER_OLLAMA_WORKER_MAX_INFLIGHT", "2")
+    monkeypatch.setenv("SONDER_OLLAMA_WORKER_QUEUE_DEPTH", "9")
+    pool = from_environment("http://127.0.0.1:11434")
+    assert {row["capacity"] for row in pool.status()["workers"]} == {2}
+    assert pool.status()["queue"]["limit"] == 9
 
 
 def test_server_posts_through_the_pool_selected_origin(monkeypatch):
