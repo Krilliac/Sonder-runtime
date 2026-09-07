@@ -89,7 +89,10 @@ def build_operational_capabilities(
             "Authenticated, bounded artifact transfer is enabled by an explicit "
             "receiver grant."
             if artifact_enabled
-            else "Artifact transfer is disabled until an explicit receiver grant is applied."
+            else (
+                "Artifact transfer is disabled until an explicit receiver grant is applied; "
+                "a source-only spool exposes no receiver, sender, or public artifact capability."
+            )
         ),
     )
     memory_capability = _capability(

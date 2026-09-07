@@ -1,8 +1,11 @@
 """Local-only authority for sealed artifact sources.
 
-This is deliberately separate from receiver transfer grants.  A source is
-published only by an injected, in-process capability; it has no wire identity,
-destination, staging path, or network dependency.
+This is deliberately separate from receiver transfer grants. A source is
+published only by a cooperative trusted-in-process host injection; it has no
+wire identity, destination, staging path, or network dependency. That
+injection is not a sandbox against code already able to reflect over the same
+interpreter: untrusted code must be process-isolated before it receives source
+authority.
 """
 from __future__ import annotations
 

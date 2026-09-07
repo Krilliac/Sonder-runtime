@@ -125,6 +125,18 @@ path argument to send, a generic stage CLI command, an MCP method, REPL method,
 or an HTTP handler. If no trusted publisher is wired, outbound send is
 unavailable.
 
+Publisher and reader are cooperative, trusted-in-process interfaces, not a
+same-interpreter object-capability security boundary. The application host may
+inject them only into approved local workload code; no model, MCP, HTTP, CLI,
+REPL, or public-plugin path receives a port. Untrusted extension or model code
+must be process-isolated before a source authority is injected. Binding-issued
+context, exact role, source scope, and publisher provenance checks still reject
+ordinary forged inputs and accidental cross-role wiring, but they do not claim
+to resist reflection by code already controlling the interpreter. Public
+status/capability projections expose neither a port nor source configuration or
+private path, and source-only configuration alone enables no receiver or
+outbound transport.
+
 The source reader must enforce the one derived scope and source limits on every
 inspect/range read. A different source owner or source scope cannot inspect or
 read an existing source artifact.
@@ -132,15 +144,18 @@ read an existing source artifact.
 Tests:
 
 1. with artifact_mobility_source enabled and artifact_transfer disabled,
-   configure_typed_config does not create an artifact HTTP receiver and all
-   artifact routes return the normal not-found result;
-2. source-only construction does not bind a port or call a network client;
+   configure_typed_config composes no mobility-source binding or route, and
+   mobility-source URLs return the normal not-found result without changing
+   existing disabled receiver behavior;
+2. source-only construction does not create a port or call a network client;
 3. a source artifact published under source owner A is unreadable under owner B
    or a changed principal/project scope;
 4. a receiver-store artifact ID and arbitrary filesystem path cannot enter the
    mobility send request;
 5. close/reopen preserves source artifacts within the same source scope;
 6. private-root overlap and issuer-forgery attempts fail closed.
+7. normal public capability/status projection contains no source binding,
+   publisher/reader port, source configuration, or private source/state path.
 
 ## Task 3: add recipient identity attestation and mobility-v1 envelopes
 

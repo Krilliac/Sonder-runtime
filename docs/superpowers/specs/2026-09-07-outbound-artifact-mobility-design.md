@@ -1,7 +1,8 @@
 # Fixed-peer outbound artifact mobility
 
 **Date:** 2026-09-07
-**Status:** Revised proposed design; no production implementation in this branch
+**Status:** Task 1 is accepted; Task 2's local-only source slice is implemented
+and awaiting re-review; Tasks 3–8 remain proposed.
 **Base inspected:** origin/main at 7226959a275021c9d8bb4e792c780fbc2ebd7c8b
 
 ## Purpose
@@ -118,6 +119,17 @@ outside this slice; adding one would need its own permission and provenance
 design. Until an approved local publisher is wired for a workload, that
 workload cannot use outbound mobility. The implementation must fail
 unavailable rather than silently fall back to an ArtifactTransferBinding.
+
+The publisher and paired source reader are cooperative trusted-in-process
+interfaces, not a claim that Python references are opaque or safe against
+reflection in the same interpreter. The application host may inject a port
+only into approved local workload code. No model, MCP, HTTP, CLI, REPL, or
+public-plugin path receives one; untrusted extension or model code must be
+process-isolated before source authority is injected. Binding-issued context,
+role, scope, and provenance validation still catch ordinary forged call inputs
+and accidental cross-role wiring. Public capability/status output contains no
+port, source configuration, or private source/state path, and source-only
+configuration enables neither a receiver nor an outbound transport.
 
 This split avoids two unsafe shortcuts:
 

@@ -30,6 +30,9 @@ def test_default_surface_is_explicitly_local_and_fail_closed():
     assert surface["inference"]["model_sharding"]["available"] is False
     assert surface["mobility"]["memory_replication_transport"]["available"] is False
     assert surface["mobility"]["artifact_transfer_transport"]["available"] is False
+    assert "source-only spool exposes no receiver" in surface["mobility"][
+        "artifact_transfer_transport"
+    ]["reason"]
     assert surface["mobility"]["automatic_memory_migration"]["available"] is False
     assert surface["mobility"]["automatic_artifact_migration"]["available"] is False
 

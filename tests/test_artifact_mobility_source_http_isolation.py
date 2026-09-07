@@ -7,6 +7,9 @@ import threading
 import urllib.error
 import urllib.request
 
+from sonder_runtime.domain.operational_capabilities import (
+    build_operational_capabilities,
+)
 from sonder_runtime.platform.artifact_mobility_source_config import (
     ArtifactMobilitySourceConfig,
 )
@@ -61,6 +64,18 @@ def test_source_only_typed_config_adds_no_mobility_source_http_surface(tmp_path,
     assert receiver._service is None
     assert "_ARTIFACT_MOBILITY_SOURCE_BINDING" not in vars(serve)
     assert not (tmp_path / "private-source").exists()
+
+    # This projection feeds ordinary public status. A source-only setting does
+    # not project a binding, port, source section, or private path into it.
+    projection = json.dumps(build_operational_capabilities(config=config), sort_keys=True)
+    for private_value in (
+        "artifact_mobility_source",
+        "publisher",
+        "reader",
+        config.artifact_mobility_source.store_dir,
+        config.state.home,
+    ):
+        assert private_value not in projection
 
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
