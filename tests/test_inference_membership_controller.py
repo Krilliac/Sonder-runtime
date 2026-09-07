@@ -27,6 +27,13 @@ REPLACEMENT = "https://replacement.example:11434"
 LOCAL = "http://127.0.0.1:11434"
 
 
+def test_application_composition_reexports_the_exact_independent_graph_type():
+    from sonder_runtime.bootstrap.app import Application
+    from sonder_runtime.bootstrap.application_graph import Application as Graph
+
+    assert Application is Graph
+
+
 class Clock:
     def __init__(self):
         self.now = NOW
@@ -636,22 +643,25 @@ def test_entrypoint_legacy_requests_share_typed_membership_admission(
         ollama_pool.reset_typed_workers()
 
 
-@pytest.mark.parametrize("configuration", ["remote_primary", "remote_worker", "local", "local_lab", "invalid_lab"])
+@pytest.mark.parametrize("configuration", ["remote_primary", "remote_worker", "local", "local_lab", "invalid_lab",
+                                             "impostor_remote_primary", "impostor_remote_worker"])
 def test_executable_root_refuses_unbound_remote_membership_in_isolated_process(tmp_path, configuration):
     root = Path(__file__).resolve().parents[1]
+    transport_configuration = configuration.removeprefix("impostor_")
     environment = {name: value for name, value in os.environ.items()
                    if not name.startswith(("SONDER_", "OLLAMA_"))}
     environment.update(SONDER_HOME=str(tmp_path), SONDER_DB=str(tmp_path / "memory.db"),
                        SONDER_FLEET_DB=str(tmp_path / "fleet.db"), SONDER_FLEET_HEARTBEAT="0",
                        SONDER_ALLOW_CLOUD="0", SONDER_WEB_TOOLS="0", SONDER_LIVE_RELOAD="0",
                        SONDER_EMBED_CACHE="0", SONDER_FALLBACK_LOCAL="0", SONDER_HOST="127.0.0.1",
-                       OLLAMA_HOST=REMOTE if configuration == "remote_primary" else LOCAL,
-                       SONDER_OLLAMA_WORKERS=REMOTE if configuration == "remote_worker" else "",
-                       SONDER_ALLOW_REMOTE_OLLAMA="1" if configuration.startswith("remote_") else "0")
+                       OLLAMA_HOST=REMOTE if transport_configuration == "remote_primary" else LOCAL,
+                       SONDER_OLLAMA_WORKERS=REMOTE if transport_configuration == "remote_worker" else "",
+                       SONDER_ALLOW_REMOTE_OLLAMA="1" if transport_configuration.startswith("remote_") else "0")
     # Run the executable branch in a fresh interpreter: no already-imported
     # server module, typed pool cache, or lab acknowledgement can hide its path.
     script = r'''
 import inspect, json, os, runpy, socket, sys
+from types import SimpleNamespace
 import reloadable_mcp
 from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool
 from sonder_runtime.adapters.security import unsafe_lab
@@ -668,6 +678,15 @@ assert (unsafe_lab.ACK_ENV in os.environ) == (mode in ("local_lab", "invalid_lab
 assert "server" not in sys.modules
 assert ollama_pool._configured_pool is None
 result = {"started": False, "calls": [], "error": None}
+finish = reloadable_mcp.ReloadableMCPServer.finish_module_refresh
+def finish_with_impostor(self, module_name, source_path, namespace=None):
+    value = finish(self, module_name, source_path, namespace)
+    if mode.startswith("impostor_"):
+        pool = namespace["OLLAMA_POOL"]
+        namespace["_APP_GRAPH"] = SimpleNamespace(config=object(), inference_pool=pool,
+                                                  inference_membership=SimpleNamespace(_pool=pool))
+    return value
+reloadable_mcp.ReloadableMCPServer.finish_module_refresh = finish_with_impostor
 class Response:
     def __enter__(self): return self
     def __exit__(self, *_): return False
@@ -681,7 +700,7 @@ def run(self):
     result["started"] = True
     namespace = inspect.currentframe().f_back.f_globals
     assert namespace["__name__"] == "__main__"
-    assert namespace["_APP_GRAPH"] is None
+    assert (namespace["_APP_GRAPH"] is None) == (not mode.startswith("impostor_"))
     namespace["dispatch_provider"] = lambda _provider, _path, _payload, transport: transport()
     for _ in range(2):
         namespace["_post"]("/api/generate", {"model": "code"})
@@ -697,9 +716,172 @@ print("ROOT_RESULT=" + json.dumps(result, sort_keys=True))
     assert completed.returncode == 0, completed.stderr[-3000:]
     result = json.loads(next(line.removeprefix("ROOT_RESULT=") for line in completed.stdout.splitlines()
                              if line.startswith("ROOT_RESULT=")))
-    if configuration.startswith("remote_"):
+    if transport_configuration.startswith("remote_"):
         assert result == {"started": False, "calls": [], "error": "WorkerPoolUnavailable"}
     elif configuration == "invalid_lab":
         assert result == {"started": False, "calls": [], "error": "UnsafeLabError"}
     else:
         assert result == {"started": True, "calls": [LOCAL + "/api/generate"] * 2, "error": None}
+
+
+@pytest.mark.parametrize("seam", ["root", "interfaces", "mcp", "run_mcp"])
+@pytest.mark.parametrize("local_configuration", [False, True])
+@pytest.mark.parametrize("impostor", ["application_duck", "application_subclass", "controller_duck",
+                                     "controller_subclass", "pool_duck", "pool_subclass",
+                                     "raw_pool", "foreign_controller", "closed_controller",
+                                     "outgoing_pool", "outgoing_application", "outgoing_controller"])
+def test_legacy_membership_binding_rejects_impostors_before_adapter_or_pool_calls(
+    monkeypatch, tmp_path, seam, impostor, local_configuration,
+):
+    import server
+    from sonder_runtime.bootstrap import app as bootstrap, legacy_interfaces, legacy_mcp, legacy_root
+    from sonder_runtime.adapters.inference import ollama_pool
+    from sonder_runtime.platform.config import SonderConfig, StateConfig
+
+    origin = LOCAL if local_configuration else REMOTE
+    application = bootstrap.build_application(config=SonderConfig(
+        state=StateConfig(home=str(tmp_path)), ollama=OllamaConfig(url=origin, allow_remote=True)))
+    pool, control = application.inference_pool, application.inference_membership
+    proposed = application
+
+    def subclass(value):
+        kind = type("HostileSubclass", (type(value),), {"__eq__": lambda *_: True})
+        result = object.__new__(kind)
+        result.__dict__.update(value.__dict__)
+        return result
+
+    if impostor == "application_duck":
+        proposed = SimpleNamespace(**application.__dict__)
+    elif impostor == "application_subclass":
+        proposed = subclass(application)
+    elif impostor == "controller_duck":
+        proposed = replace(application, inference_membership=SimpleNamespace(_pool=pool))
+    elif impostor == "controller_subclass":
+        proposed = replace(application, inference_membership=subclass(control))
+    elif impostor in ("pool_duck", "pool_subclass", "raw_pool"):
+        replacement = (SimpleNamespace(**pool.__dict__, has_remote_workers=False) if impostor == "pool_duck"
+                       else subclass(pool) if impostor == "pool_subclass"
+                       else OllamaWorkerPool(origin, allow_remote=True))
+        control._pool = replacement
+        proposed = replace(application, inference_pool=replacement)
+    elif impostor == "foreign_controller":
+        control._pool = OllamaWorkerPool(REMOTE, allow_remote=True)
+    elif impostor == "closed_controller":
+        control.close(timeout=0)
+
+    calls = []
+    old_pool = OllamaWorkerPool(LOCAL)
+    monkeypatch.setattr(old_pool, "drain", lambda **_: calls.append("drain"))
+    monkeypatch.setattr(server, "_APP_GRAPH", None)
+    monkeypatch.setattr(server, "OLLAMA_POOL", old_pool)
+    monkeypatch.setattr(server, "BASE", LOCAL)
+    monkeypatch.setattr(legacy_root, "_owned_application", None)
+    monkeypatch.setattr(server.mcp, "run", lambda: calls.append("adapter"))
+    if impostor == "outgoing_pool":
+        old_pool = SimpleNamespace(drain=lambda **_: calls.append("impostor drain"))
+        monkeypatch.setattr(server, "OLLAMA_POOL", old_pool)
+    elif impostor in ("outgoing_application", "outgoing_controller"):
+        if impostor == "outgoing_controller":
+            previous = replace(application, inference_membership=SimpleNamespace(
+                _pool=pool, close=lambda **_: calls.append("impostor close")))
+            old_pool = pool
+            monkeypatch.setattr(server, "OLLAMA_POOL", old_pool)
+        else:
+            previous = SimpleNamespace(close_providers=lambda **_: calls.append("impostor close"))
+        monkeypatch.setattr(server, "_APP_GRAPH", previous)
+        monkeypatch.setattr(legacy_root, "_owned_application", previous)
+    try:
+        if seam == "run_mcp":
+            # A fake pool cannot claim locality to avoid the exact-type check.
+            monkeypatch.setattr(server, "_APP_GRAPH", previous if impostor in (
+                "outgoing_application", "outgoing_controller") else proposed)
+            monkeypatch.setattr(server, "OLLAMA_POOL", old_pool if impostor == "outgoing_pool" else proposed.inference_pool)
+            with pytest.raises(ollama_pool.WorkerPoolUnavailable):
+                server.run_mcp(safety_checked=True)
+        else:
+            bind = {"root": legacy_root.configure_application,
+                    "interfaces": legacy_interfaces.configure_legacy_application,
+                    "mcp": legacy_mcp.configure_legacy_application}[seam]
+            with pytest.raises(ValueError, match="membership binding"):
+                bind(proposed)
+            assert server._APP_GRAPH is (previous if impostor in (
+                "outgoing_application", "outgoing_controller") else None)
+            assert server.OLLAMA_POOL is old_pool
+        assert calls == []
+    finally:
+        control._pool = pool
+        application.close_providers(timeout=2)
+        ollama_pool.reset_typed_workers()
+
+
+def test_owned_default_binding_accepts_genuine_typed_local_application(monkeypatch, tmp_path):
+    from sonder_runtime.bootstrap import app as bootstrap
+    from sonder_runtime.adapters.application_lifecycle import ApplicationLifecycle
+    from sonder_runtime.adapters.inference import ollama_pool
+    from sonder_runtime.platform.config import SonderConfig, StateConfig
+
+    application = bootstrap.build_application(config=SonderConfig(state=StateConfig(home=str(tmp_path))))
+    monkeypatch.setattr(bootstrap, "_application_lifecycle", ApplicationLifecycle(
+        lambda: pytest.fail("owned application fell back to factory")))
+    for name in ("_owned_default_application", "_default_config", "_default_compute_close",
+                 "_default_delegation_close", "_default_inference_close"):
+        monkeypatch.setattr(bootstrap, name, None)
+    try:
+        bootstrap.install_owned_application(application)
+        assert bootstrap.default_app(config=application.config) is application
+        assert application.inference_membership._thread is None
+        bootstrap.stop_owned_application(application)
+    finally:
+        application.close_providers(timeout=2)
+        ollama_pool.reset_typed_workers()
+
+
+@pytest.mark.parametrize("mismatch", ["pool", "primary"])
+def test_direct_mcp_requires_exact_application_pool_and_primary_link(monkeypatch, tmp_path, mismatch):
+    import server
+    from sonder_runtime.bootstrap import app as bootstrap
+    from sonder_runtime.adapters.inference import ollama_pool
+    from sonder_runtime.platform.config import SonderConfig, StateConfig
+
+    application = bootstrap.build_application(config=SonderConfig(state=StateConfig(home=str(tmp_path))))
+    monkeypatch.setattr(server, "_APP_GRAPH", application)
+    monkeypatch.setattr(server, "BASE", REMOTE if mismatch == "primary" else LOCAL)
+    monkeypatch.setattr(server, "OLLAMA_POOL", OllamaWorkerPool(LOCAL) if mismatch == "pool" else application.inference_pool)
+    monkeypatch.setattr(server.mcp, "run", lambda: pytest.fail("mismatched binding reached adapter"))
+    try:
+        with pytest.raises(ollama_pool.WorkerPoolUnavailable):
+            server.run_mcp(safety_checked=True)
+    finally:
+        application.close_providers(timeout=2)
+        ollama_pool.reset_typed_workers()
+
+
+@pytest.mark.parametrize("impostor", ["controller_duck", "pool_duck", "raw_pool"])
+def test_owned_default_binding_rejects_structural_inference_before_install(monkeypatch, tmp_path, impostor):
+    from sonder_runtime.bootstrap import app as bootstrap
+    from sonder_runtime.adapters.inference import ollama_pool
+    from sonder_runtime.platform.config import SonderConfig, StateConfig
+
+    application = bootstrap.build_application(config=SonderConfig(
+        state=StateConfig(home=str(tmp_path)), ollama=OllamaConfig(url=REMOTE, allow_remote=True)))
+    pool, control = application.inference_pool, application.inference_membership
+    if impostor == "controller_duck":
+        proposed = replace(application, inference_membership=SimpleNamespace(_pool=pool))
+    else:
+        replacement = (SimpleNamespace(**pool.__dict__) if impostor == "pool_duck"
+                       else OllamaWorkerPool(REMOTE, allow_remote=True))
+        control._pool = replacement
+        proposed = replace(application, inference_pool=replacement)
+    calls = []
+    monkeypatch.setattr(bootstrap._application_lifecycle, "install_owned", lambda _: calls.append("installed"))
+    for name in ("_owned_default_application", "_default_config", "_default_compute_close",
+                 "_default_delegation_close", "_default_inference_close"):
+        monkeypatch.setattr(bootstrap, name, None)
+    try:
+        with pytest.raises(ValueError, match="membership binding"):
+            bootstrap.install_owned_application(proposed)
+        assert calls == [] and bootstrap._owned_default_application is None
+    finally:
+        control._pool = pool
+        application.close_providers(timeout=2)
+        ollama_pool.reset_typed_workers()

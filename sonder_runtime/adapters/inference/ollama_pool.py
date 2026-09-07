@@ -803,6 +803,10 @@ class OllamaWorkerPool:
         return any(not _is_loopback(state.endpoint.origin) for state in self._states)
 
     @property
+    def has_configured_remote_workers(self) -> bool:
+        return bool(self._configured_remote_origins)
+
+    @property
     def origins(self) -> tuple[str, ...]:
         return tuple(state.endpoint.origin for state in self._states)
 

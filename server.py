@@ -24579,18 +24579,15 @@ def run_mcp(*, safety_checked: bool = False) -> None:
     """Run the MCP adapter only after the process-level lab gate succeeds."""
     if not safety_checked:
         require_mcp_startup_safety()
-    if not ollama_endpoint.is_loopback(BASE) or OLLAMA_POOL.has_remote_workers:
-        # The direct executable root has only an environment-built pool. It
-        # must not expose a remote dispatch path without typed membership.
-        application = _APP_GRAPH
-        controller = getattr(application, "inference_membership", None)
-        if (getattr(application, "config", None) is None
-                or getattr(application, "inference_pool", None) is not OLLAMA_POOL
-                or getattr(controller, "_pool", None) is not OLLAMA_POOL):
-            raise ollama_pool.WorkerPoolUnavailable(
-                "remote Ollama requires the typed application membership controller; "
-                "start with python -m sonder_runtime mcp"
-            )
+    from sonder_runtime.bootstrap.legacy_root import require_mcp_inference_binding
+
+    try:
+        require_mcp_inference_binding(_APP_GRAPH, OLLAMA_POOL, primary_origin=BASE)
+    except ValueError:
+        raise ollama_pool.WorkerPoolUnavailable(
+            "MCP requires a trusted application membership binding for configured workers; "
+            "start with python -m sonder_runtime mcp"
+        ) from None
     try:
         mcp.run()
     finally:

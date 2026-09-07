@@ -7,9 +7,53 @@ import threading
 _owned_application = None
 
 
+def require_inference_application(application, *, expected_pool=None, allow_inactive=False):
+    """Validate the trusted composition without invoking structural lookalikes."""
+    from .application_graph import Application
+    from ..adapters.inference.ollama_pool import OllamaWorkerPool
+    from ..application.inference_membership.controller import MembershipController
+    from ..platform.config import SonderConfig
+
+    if type(application) is not Application or type(application.config) is not SonderConfig:
+        raise ValueError("invalid legacy membership binding: exact typed Application required")
+    pool, controller = application.inference_pool, application.inference_membership
+    if (type(pool) is not OllamaWorkerPool or type(controller) is not MembershipController
+            or (expected_pool is not None and pool is not expected_pool)
+            or controller._pool is not pool):
+        raise ValueError("invalid legacy membership binding: exact pool/controller ownership required")
+    authority = pool._membership_authority
+    if ((allow_inactive is not True and (controller._closed is not False or pool._draining))
+            or pool._membership_clock is None or pool._membership_clock is not controller._clock
+            or type(authority) is not tuple or len(authority) != 2
+            or any(type(value) is not str for value in (*authority, controller._cluster, controller._issuer))
+            or authority[0] != controller._cluster or authority[1] != controller._issuer):
+        raise ValueError("invalid legacy membership binding: configured membership must be active")
+    return pool
+
+
+def require_mcp_inference_binding(application, pool, *, primary_origin):
+    """Allow bare loopback legacy startup; every supplied typed graph is exact."""
+    from .application_graph import Application
+    from ..adapters.inference import ollama_endpoint
+    from ..adapters.inference.ollama_pool import OllamaWorkerPool
+
+    if type(pool) is not OllamaWorkerPool or type(primary_origin) is not str:
+        raise ValueError("invalid legacy membership binding: exact pool and primary required")
+    if ollama_endpoint.is_loopback(primary_origin) and not pool.has_configured_remote_workers:
+        if application is None:
+            return
+        if (type(application) is Application and application.config is None
+                and application.inference_pool is None and application.inference_membership is None):
+            return
+    require_inference_application(application, expected_pool=pool)
+    if primary_origin != ollama_endpoint.normalize(application.config.ollama.url):
+        raise ValueError("invalid legacy membership binding: primary differs from typed configuration")
+
+
 def configure_application(application) -> None:
     """Bind an entrypoint-owned typed graph without replacing caller ownership."""
     global _owned_application
+    pool = require_inference_application(application)
     legacy = runtime()
     if not legacy._APP_GRAPH_LOCK.acquire(timeout=5):
         raise RuntimeError("legacy application composition is busy")
@@ -18,18 +62,24 @@ def configure_application(application) -> None:
         if current is not None and current is not application:
             if current is not _owned_application:
                 raise RuntimeError("legacy runtime retains a caller-owned application")
+            if type(current) is not type(application):
+                raise ValueError("invalid legacy membership binding: exact outgoing Application required")
+        previous_pool = legacy.OLLAMA_POOL
+        if type(previous_pool) is not type(pool):
+            raise ValueError("invalid legacy membership binding: exact outgoing pool required")
+        if current is not None and current is not application:
+            # A former owner may already be closed during re-composition, but
+            # cleanup must still belong to exact trusted types and this pool.
+            require_inference_application(current, expected_pool=previous_pool, allow_inactive=True)
             current.close_providers(timeout=5)
-        pool = getattr(application, "inference_pool", None)
-        if pool is not None:
-            from ..adapters.inference import ollama_endpoint
+        from ..adapters.inference import ollama_endpoint
 
-            previous_pool = legacy.OLLAMA_POOL
-            if previous_pool is not pool:
-                # Preloaded legacy modules must not retain a second admission
-                # path. Existing work finishes against its original pool.
-                previous_pool.drain(timeout_seconds=0)
-            legacy.OLLAMA_POOL = pool
-            legacy.BASE = ollama_endpoint.normalize(application.config.ollama.url)
+        if previous_pool is not pool:
+            # Preloaded legacy modules must not retain a second admission
+            # path. Existing work finishes against its original pool.
+            previous_pool.drain(timeout_seconds=0)
+        legacy.OLLAMA_POOL = pool
+        legacy.BASE = ollama_endpoint.normalize(application.config.ollama.url)
         if current is application:
             return
         legacy._APP_GRAPH = application
@@ -91,4 +141,5 @@ def configure_capacity(
     )
 
 
-__all__ = ["LazyRuntimeProxy", "configure_application", "configure_capacity", "runtime", "runtime_proxy"]
+__all__ = ["LazyRuntimeProxy", "configure_application", "configure_capacity",
+           "require_inference_application", "require_mcp_inference_binding", "runtime", "runtime_proxy"]
