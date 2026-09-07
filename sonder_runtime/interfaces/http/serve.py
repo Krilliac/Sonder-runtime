@@ -47,6 +47,7 @@ from sonder_runtime.interfaces.http.app_control import handle_app_control, is_ap
 _ARTIFACT_TRANSFER_BINDING = None
 _ARTIFACT_TRANSFER_CONFIG = None
 _MEMORY_REPLICATION_RECEIVER = None
+_MEMORY_REPLICATION_SERVICE = None
 _ACCOUNT_LOGOUT_ADMISSION = threading.BoundedSemaphore(2)
 
 import logging as _logging_module
@@ -159,6 +160,36 @@ def configure_memory_replication_receiver(receiver):
         receiver is not None,
     )
     return receiver
+
+
+def configure_memory_replication_service(service):
+    """Install one already-owned local replication service at HTTP startup.
+
+    The HTTP adapter never creates a peer client or chooses a peer.  Starting
+    the service is a local lifecycle transition only; the service exposes an
+    incoming receiver when its fixed typed policy opted into one.  Outbound
+    batches still require a separate explicit ``replicate_once`` call.
+    """
+    if service is not None:
+        for name in ("start", "receiver", "close", "status"):
+            if not callable(getattr(service, name, None)):
+                raise TypeError("memory replication service has an invalid lifecycle")
+        # Complete the candidate before changing the published route.  A
+        # malformed receiver cannot replace a known-good active service.
+        service.start()
+        receiver = service.receiver()
+        if receiver is not None and not callable(getattr(receiver, "receive_bytes", None)):
+            raise TypeError("memory replication service receiver is invalid")
+    else:
+        receiver = None
+
+    global _MEMORY_REPLICATION_SERVICE
+    previous = _MEMORY_REPLICATION_SERVICE
+    configure_memory_replication_receiver(receiver)
+    _MEMORY_REPLICATION_SERVICE = service
+    if previous is not None and previous is not service:
+        previous.close()
+    return service
 
 
 def configure_control_plane_service(service):
@@ -887,6 +918,9 @@ def configure_typed_config(config) -> None:
         ipaddress.ip_network(cidr, strict=False)
         for cidr in server_config.trusted_proxy_cidrs
     )
+    # A typed config application is a new host selection.  No prior receiver
+    # may remain reachable while the normal application owner is rebuilt.
+    configure_memory_replication_service(None)
 _HTTP_SESSION_STATES = OrderedDict()
 _HTTP_SESSION_STATES_LOCK = threading.RLock()
 
@@ -4814,6 +4848,14 @@ class Handler(BaseHTTPRequestHandler):
             )
             from sonder_runtime.bootstrap.app import default_app
             application = default_app()
+            memory_replication_service = getattr(
+                application, "memory_replication", None,
+            )
+            memory_replication_status = (
+                memory_replication_service.status()
+                if memory_replication_service is not None
+                else None
+            )
             try:
                 inference_pool_status = server.OLLAMA_POOL.status()
             except Exception:
@@ -4839,12 +4881,14 @@ class Handler(BaseHTTPRequestHandler):
                 "mcp_runtime": server.mcp_runtime_data(),
                 "npu_fallback": server.npu_fallback_status_data(),
                 "learning_health": server.learning_health_data(),
+                "memory_replication": memory_replication_status,
                 "operational_capabilities": build_operational_capabilities(
                     config=getattr(application, "config", None),
                     inference_pool_status=inference_pool_status,
                     memory_receiver_configured=(
                         _MEMORY_REPLICATION_RECEIVER is not None
                     ),
+                    memory_replication_status=memory_replication_status,
                     managed_work_configured=(
                         _APP_CONTROL_BINDING is not None
                         and getattr(_APP_CONTROL_BINDING, "_work_binding", None)
@@ -6518,6 +6562,18 @@ def main(config=None, *, _server_factory=None, _close_default_resources=True):
         if application is None:
             application = default_app(config=config)
         configure_control_plane_service(application.control_plane_snapshot_service)
+    if application is None and config is not None:
+        from sonder_runtime.bootstrap.app import default_app
+
+        application = default_app(config=config)
+    if application is not None:
+        configure_memory_replication_service(
+            getattr(application, "memory_replication", None),
+        )
+    else:
+        # A compatibility host with no owned Application has no authority to
+        # retain a receiver from a prior typed host selection.
+        configure_memory_replication_service(None)
     port = _selected_listener_port(config)
     # Discovery reads the bound-listener value. Keep it synchronized when the
     # direct compatibility entrypoint overrides the typed configuration with a
@@ -6582,11 +6638,15 @@ def main(config=None, *, _server_factory=None, _close_default_resources=True):
         finally:
             if _ARTIFACT_TRANSFER_BINDING is not None:
                 _ARTIFACT_TRANSFER_BINDING.close()
-            receiver = _MEMORY_REPLICATION_RECEIVER
-            if receiver is not None:
-                close = getattr(receiver, "close", None)
-                if callable(close):
-                    close()
+            if _MEMORY_REPLICATION_SERVICE is not None:
+                configure_memory_replication_service(None)
+            else:
+                receiver = _MEMORY_REPLICATION_RECEIVER
+                if receiver is not None:
+                    close = getattr(receiver, "close", None)
+                    if callable(close):
+                        close()
+                configure_memory_replication_receiver(None)
         _serve_logger.info("HTTP server stopped")
 
 

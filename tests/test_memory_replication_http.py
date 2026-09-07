@@ -129,6 +129,32 @@ def test_memory_sink_posts_canonical_batch_with_auth_and_validates_receipt():
     assert captured["timeout"] == 5.0
 
 
+def test_default_memory_replication_opener_disables_ambient_proxies(monkeypatch):
+    from sonder_runtime.adapters.memory_replication import http_client
+
+    captured = {}
+
+    class Opener:
+        def open(self, request, *, timeout):
+            captured["request"] = request
+            captured["timeout"] = timeout
+            return "opened"
+
+    def build_opener(*handlers):
+        captured["handlers"] = handlers
+        return Opener()
+
+    monkeypatch.setattr(http_client.urllib.request, "build_opener", build_opener)
+
+    assert http_client._default_opener("request", timeout=3.0) == "opened"
+    proxy_handler = next(
+        handler for handler in captured["handlers"]
+        if isinstance(handler, http_client.urllib.request.ProxyHandler)
+    )
+    assert proxy_handler.proxies == {}
+    assert captured["timeout"] == 3.0
+
+
 @pytest.mark.parametrize(
     ("status", "body", "message"),
     (
