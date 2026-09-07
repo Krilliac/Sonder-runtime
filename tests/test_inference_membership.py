@@ -322,6 +322,43 @@ def test_source_outage_preserves_only_unexpired_trust_and_expires_members_at_dea
     assert expired.high_water == current.high_water
 
 
+@pytest.mark.parametrize("workers", [[], [wire_worker(lifecycle_state="revoked")]])
+def test_outage_after_high_water_advance_cannot_retain_revoked_roster(workers):
+    current = active_roster()
+    revoked = snapshot(workers, generation=2)
+    advanced = domain().validate_high_water(
+        revoked, current.high_water, cluster_id="cluster-a", issuer_id="issuer-a",
+        clock=lambda: NOW,
+    )
+    # The durable comparison may advance before the new roster is applied.
+    # Losing the source at this point must not resurrect the older admission.
+    result = reconcile(None, previous=current.roster, high_water=advanced)
+
+    assert result.roster is None
+    assert result.drains == (current.roster.members[0].advertisement,)
+    assert result.additions == result.activations == ()
+    assert result.high_water == advanced
+    with pytest.raises(ValueError, match="rollback"):
+        reconcile(current.roster.snapshot, previous=current.roster, high_water=advanced)
+    recovered = reconcile(revoked, previous=current.roster, high_water=advanced)
+    assert recovered.roster.members == ()
+    assert recovered.high_water == advanced
+
+
+def test_outage_requires_exact_high_water_digest_even_at_equal_generation():
+    current = active_roster()
+    conflicting = replace(current.high_water, digest="0" * 64)
+
+    result = reconcile(None, previous=current.roster, high_water=conflicting)
+
+    assert result.roster is None
+    assert result.drains == (current.roster.members[0].advertisement,)
+    assert result.activations == ()
+    assert result.high_water == conflicting
+    with pytest.raises(ValueError, match="high-water"):
+        reconcile(current.roster.snapshot, previous=current.roster, high_water=conflicting)
+
+
 def test_source_outage_cannot_add_previously_omitted_members_when_limit_grows():
     current = reconcile(snapshot([wire_worker("worker-a"), wire_worker("worker-b")]), max_workers=1)
     result = reconcile(None, previous=current.roster, high_water=current.high_water, max_workers=2)

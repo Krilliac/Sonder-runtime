@@ -374,7 +374,9 @@ def reconcile_membership(
     omitted count makes the finite active limit explicit. New/replaced members
     begin in probation even if supplied with a pre-admission probe. An existing
     member activates only with fresh exact-origin/generation evidence. ``None``
-    means source outage: retain only the old snapshot's unexpired authority.
+    means source outage: retain unexpired authority only when the old snapshot
+    exactly matches the retained high-water generation and digest. Otherwise
+    return no admitted roster and drain the original members.
     There is no implicit local fallback, request replay, or ownership transfer.
     """
     _identity(cluster_id)
@@ -389,6 +391,13 @@ def reconcile_membership(
         if not isinstance(previous, MembershipRoster) or high_water is None:
             raise ValueError("previous roster requires its retained high-water record")
         _authority(previous.snapshot, cluster_id, issuer_id)
+        if candidate is None and _water(previous.snapshot) != high_water:
+            # Persistence may have advanced through a revocation before roster
+            # application. An outage cannot revive that superseded authority.
+            return MembershipReconciliation(
+                None, high_water,
+                drains=tuple(member.advertisement for member in previous.members),
+            )
         if (previous.snapshot.generation > high_water.generation or
             (previous.snapshot.generation == high_water.generation and previous.snapshot.digest != high_water.digest)):
             raise ValueError("previous roster does not match retained high-water")
