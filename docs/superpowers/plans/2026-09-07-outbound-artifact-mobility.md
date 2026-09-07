@@ -26,8 +26,9 @@ are not a safe local export source or a remote identity protocol on their own.
    with a pinned TLS leaf certificate and a pinned recipient attestation before
    any artifact bytes.
 6. Do not use compute.allow_remote or ComputeNode as artifact-copy consent.
-7. Persist immutable local intent before a receiver mutation. Use a
-   compare-and-swap lease so exactly one attempt owns an operation at once.
+7. Persist immutable local intent before a receiver mutation. Hold a
+   nonblocking OS-level exclusive operation lock continuously across every peer
+   call, then use a compare-and-swap lease as an additional fence.
 8. A changed credential, certificate, attestation, grant identity, source
    scope, immutable spec, or destination binding is terminal for an existing
    operation. It requires a new operation; never redirect a resume.
@@ -161,10 +162,10 @@ authorized_source_owner_id, grant_id, grant_revision, can_write, and
 max_object_bytes. Return its canonical SHA-256 and no secret, store path, quota
 usage, raw config, or error detail.
 
-Add an exact mobility-v1 request-header contract to begin and inspect. Legacy
-requests and response shapes remain unchanged. A mobility-v1 response envelope
-must be assembled from the receiver's durable upload row and current
-authorized receiver binding:
+Add an exact mobility-v1 request-header contract to begin. Legacy requests and
+response shapes remain unchanged. A mobility-v1 response envelope must be
+assembled from the receiver's durable upload row and current authorized
+receiver binding:
 
     protocol_version
     recipient_attestation
@@ -173,22 +174,41 @@ authorized receiver binding:
     receipt
 
 The receiver must not manufacture spec or command from a caller-provided echo.
-The envelope endpoint uses the same authenticated binding, TLS/loopback checks,
-body caps, no-proxy trust policy, and redacted logging behavior as artifact
-transfer. It is a destination receiver protocol extension, not an outbound
-controller route.
+The begin envelope endpoint uses the same authenticated binding, TLS/loopback
+checks, body caps, no-proxy trust policy, and redacted logging behavior as
+artifact transfer. It is a destination receiver protocol extension, not an
+outbound controller route.
+
+Add a separate mobility-v1 receipt-inspection action for resume/final
+confirmation. Legacy general upload inspection remains can_read-only. On
+operation creation, the sender generates a 256-bit receipt capability and
+persists it only as protected private journal data encrypted with a key derived
+from the current mobility peer credential and operation ID. Begin transmits
+the capability only over pinned TLS; the receiver stores a keyed verifier
+bound to receiver scope, transfer ID, and durable command. Resume/final
+inspection requires the authenticated bearer, current can_write grant, exact
+transfer ID/command, contract header, and matching receipt capability.
+
+The receipt action returns only the bounded mobility envelope for that exact
+row. It may operate for can_write true/can_read false, but it must not permit
+artifact bytes, artifact metadata, arbitrary upload inspection, upload listing,
+or a general read grant. Do not use the normal read authorizer as a fallback.
 
 Tests:
 
 1. unauthenticated or disabled receiver cannot retrieve an attestation;
 2. the canonical attestation changes when receiver identity, source owner,
    grant ID/revision, write permission, or max object size changes;
-3. legacy begin/inspect responses remain compatible;
-4. mobility-v1 begin and inspect echo the durable command and exact durable
-   spec, including a resumed record;
+3. legacy begin/general-inspect responses remain compatible and read-gated;
+4. mobility-v1 begin and transfer-bound receipt inspection echo the durable
+   command and exact durable spec, including a resumed record;
 5. malformed/missing version header and malformed envelope fail with stable
    codes and do not reveal configuration;
-6. the endpoint cannot be enabled by source-only configuration on a sender.
+6. a can_write true/can_read false receiver resumes and confirms only its own
+   transfer with the right receipt capability, while legacy inspection,
+   artifact metadata, byte-range reads, and wrong-transfer capability attempts
+   remain forbidden; and
+7. the endpoint cannot be enabled by source-only configuration on a sender.
 
 ## Task 4: add a pinned fixed-peer mobility client
 
@@ -209,9 +229,10 @@ to platform CA trust alone.
 The peer first fetches recipient attestation and compares its canonical digest
 and fields with configuration/source_owner_id. It rejects a recipient with no
 write permission or a smaller attested max_object_bytes before begin. It then
-calls mobility-v1 begin or inspect and validates exact protocol version,
-attestation, command, immutable spec, transfer ID, offset, chunk size, and
-state before any append. Seal/final inspect use the same envelope checks.
+calls mobility-v1 begin or transfer-bound receipt inspection and validates
+exact protocol version, attestation, command, immutable spec, transfer ID,
+offset, chunk size, and state before any append. Seal/final confirmation uses
+the same receipt capability and envelope checks.
 
 The client preserves existing body caps, response-length verification,
 chunk-digest validation, proxy disabling, redirect refusal, and no raw network
@@ -225,8 +246,8 @@ Tests:
    protocol version fail before begin/append;
 2. a same-origin/same-label peer with a changed receiver identity/grant
    attestation fails before append;
-3. begin/inspect wrong spec, command, transfer ID, offset, or chunk size fails
-   before append;
+3. begin/receipt-inspection wrong spec, command, transfer ID, offset, chunk
+   size, or capability fails before append;
 4. source size above attested maximum fails locally before begin;
 5. dynamic receiver QUOTA/CAPACITY/FORBIDDEN begin responses send no chunks and
    map only to constrained codes;
@@ -265,12 +286,21 @@ Implement these atomic repository operations:
     recover_expired_leases
     prune_receipt_keep_tombstone
 
+Create a per-operation private lock file and use the platform's nonblocking
+OS-level exclusive locking primitive; never substitute a sentinel file or
+threading lock. Attempt admission is: acquire that lock nonblockingly, then
+acquire_dispatch while continuously holding the lock. Keep the handle open
+until all peer calls and lease-protected state transitions finish.
+
 acquire_dispatch performs a compare-and-swap on state and lease expiry,
 increments an attempt epoch, and writes a random opaque lease token. Every
-renewal and transition predicates on operation ID, attempt epoch, and lease
-token. A second process receives BUSY with no peer call. An expired
-dispatching lease recovers to resumable only; recovery never performs network
-I/O.
+renewal and transition predicates on operation ID, attempt epoch, lease token,
+and an unexpired lease. A second process receives BUSY with no peer call. An
+expired dispatching lease recovers to resumable only; recovery never performs
+network I/O. A recovered attempt cannot run while a paused prior process still
+owns the OS lock. The old process must check the lease immediately before each
+peer call; after expiry it cannot revive its lease and must release the lock
+without another peer call.
 
 Use this exact public lifecycle:
 
@@ -291,15 +321,20 @@ use retryable_blocked. There is no automatic dispatcher.
 Tests:
 
 1. immutable intent exists before a fake peer can observe begin;
-2. two concurrent callers acquire one lease and produce one peer dispatch;
+2. two concurrent callers acquire one OS lock/lease and produce one peer
+   dispatch;
 3. stale token/epoch cannot renew or transition after lease replacement;
 4. a crash/reopen only recovers expired leases and makes no peer call;
-5. receipt expiry/tombstone pruning retains the no-reuse guard;
-6. direct repository reuse of the canonical operation key fails after terminal
+5. a paused sender holds the OS lock while its lease expires; a replacement
+   resume returns BUSY with zero peer calls, the paused sender observes lease
+   expiry before its next peer call and stops, then the replacement acquires a
+   fresh lock/lease and is the only sender allowed to call the peer;
+6. receipt expiry/tombstone pruning retains the no-reuse guard;
+7. direct repository reuse of the canonical operation key fails after terminal
    receipt pruning;
-7. changed source owner/scope, credential generation, or destination-binding
+8. changed source owner/scope, credential generation, or destination-binding
    HMAC is terminal and cannot resume;
-8. raw origin, pins, HMAC, credential, payload, and exception sentinel are
+9. raw origin, pins, HMAC, credential, payload, and exception sentinel are
    absent from rows intended for external projection and all serialized output.
 
 ## Task 6: implement one bounded dispatch service
@@ -310,22 +345,26 @@ Files:
     sonder_runtime/application/ports/artifact_mobility.py
     tests/test_artifact_mobility_service.py
 
-Implement send and resume around the source-only reader, pinned peer, and
-leased repository. Send validates local confirmation and a sealed source
-artifact, creates immutable intent, then acquires a lease. Resume reloads the
-single owner record and acquires a new lease only from an eligible nonterminal
-state.
+Implement send and resume around the source-only reader, pinned peer, private
+OS lock, and leased repository. Send validates local confirmation and a sealed
+source artifact, creates immutable intent, then nonblockingly acquires the
+operation lock and a lease. Resume reloads the single owner record and acquires
+a new lock/lease only from an eligible nonterminal state.
 
 For every attempt:
 
-1. revalidate source binding/scope/spec;
-2. compare current credential generation and private destination-binding HMAC;
-3. verify TLS certificate and recipient attestation;
-4. compare the attested static maximum size;
-5. validate begin/inspect immutable envelope before append;
-6. renew the lease between bounded source chunks;
-7. verify every acknowledgement and final sealed artifact receipt; and
-8. use one lease-guarded constrained transition on completion/failure.
+1. nonblockingly acquire and continuously retain the OS operation lock;
+2. acquire a fresh current journal lease while holding that lock;
+3. revalidate source binding/scope/spec;
+4. compare current credential generation and private destination-binding HMAC;
+5. verify TLS certificate and recipient attestation;
+6. compare the attested static maximum size;
+7. validate begin/transfer-bound receipt immutable envelope before append;
+8. immediately before every peer call, prove the lock is held and renew an
+   unexpired lease;
+9. verify every acknowledgement and final sealed artifact receipt; and
+10. use one lease-guarded constrained transition on completion/failure before
+    releasing the lock.
 
 A lost response becomes resumable only after its lease is released or expires.
 It does not cause a background retry. A receiver verifying state becomes
@@ -336,14 +375,17 @@ A terminal record cannot resume.
 Tests:
 
 1. one stable canonical command is used after a simulated lost response;
-2. resume validates recipient attestation and immutable inspect envelope before
-   the first post-restart append;
+2. resume validates recipient attestation and immutable transfer-bound receipt
+   envelope before the first post-restart append;
 3. same origin/label with changed peer key makes the binding HMAC mismatch
    terminal before a peer connection;
 4. same origin/label with changed remote grant/receiver identity makes
    attestation mismatch terminal before append;
 5. source revocation/scope change between chunks stops the operation;
-6. no timer, worker, polling loop, failover, ownership mutation, or background
+6. a paused sender cannot overlap a replacement sender after its journal lease
+   expires because the replacement cannot take the retained OS lock and the
+   paused sender stops at its next pre-peer-call lease check;
+7. no timer, worker, polling loop, failover, ownership mutation, or background
    network action occurs after a method returns.
 
 ## Task 7: compose lifecycle, capability projection, and narrow CLI
@@ -440,14 +482,15 @@ Reject an implementation if it:
    receiver peer scope to select source artifacts;
 2. enables an HTTP receiver because only a source-only spool is enabled;
 3. identifies a destination only by a display label, DNS origin, or bearer;
-4. appends bytes before certificate, recipient attestation, begin/inspect
-   command, and immutable spec checks;
+4. appends bytes before certificate, recipient attestation, begin/receipt
+   command, capability, and immutable spec checks;
 5. treats a static source cap as proof of dynamic destination quota/capacity;
 6. permits a changed key, grant, receiver identity, source scope, destination
    binding, or certificate to resume an old operation;
-7. lets two dispatch attempts own one operation or lets stale lease work update
-   its state;
+7. lets two dispatch attempts overlap peer calls, lets a paused expired-lease
+   sender resume peer calls, or lets stale lease work update its state;
 8. discards a terminal operation ID instead of retaining its tombstone;
 9. exposes any private endpoint/fingerprint/secret/error/payload data; or
-10. claims automatic migration, failover, ownership transition, or a live
+10. gives a write-only receiver general inspection or artifact-byte access; or
+11. claims automatic migration, failover, ownership transition, or a live
     independent-host TLS proof that has not been executed.

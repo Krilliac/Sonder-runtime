@@ -40,9 +40,9 @@ The first production slice has four deliberately separate authorities:
 1. ArtifactMobilitySourceBinding owns a private local export spool and a
    destination-independent source scope. It is never registered with the HTTP
    server.
-2. ArtifactMobilityBinding owns the source-side journal, operation lease, and
-   fixed-peer client. It is composed by the local application, not by an HTTP
-   request handler.
+2. ArtifactMobilityBinding owns the source-side journal, nonblocking
+   OS-exclusive dispatch lock, operation lease, and fixed-peer client. It is
+   composed by the local application, not by an HTTP request handler.
 3. The destination ArtifactTransferBinding remains the write authority. It
    independently grants the sending source owner access.
 4. A narrow authenticated receiver protocol extension attests the destination
@@ -225,9 +225,9 @@ detail. TLS certificate pinning authenticates the endpoint serving the
 attestation; the expected digest authenticates the configured logical receiver
 and grant contract.
 
-The existing begin and inspect HTTP operations gain a strict request-header
-contract value for mobility-v1. Legacy clients retain their existing response
-shape. With that contract value, begin and inspect return a bounded envelope:
+The existing begin operation gains a strict request-header contract value for
+mobility-v1. Legacy clients retain their existing response shape. With that
+contract value, begin returns a bounded envelope:
 
     protocol_version
     recipient_attestation
@@ -247,10 +247,44 @@ untrusted echo body. The mobility peer rejects an envelope unless:
 6. spec exactly equals the immutable local source spec; and
 7. receipt has a valid transfer ID, bounded chunk size, state, and offset.
 
+### Write-only mobility receipt inspection
+
+The legacy general upload-inspection action remains a read-granted operation.
+It must not be widened for mobility. A recipient configured with can_write true
+and can_read false may use a new, narrowly scoped mobility-v1
+receipt-inspection action only after it has authenticated a specific mobility
+transfer.
+
+When creating an operation, the sender generates a fresh 256-bit receipt
+capability. It persists that capability only as protected private journal
+state, encrypted under a key derived from the current mobility peer credential
+and canonical operation ID; it never appears in a public receipt, log, or
+error. The mobility-v1 begin request sends it only over the pinned TLS
+connection. The receiver stores a keyed verifier bound to its current
+credential, receiver scope, transfer ID, and durable command ID. It never
+returns the capability.
+
+The new receipt-inspection action requires all of:
+
+1. the normal authenticated destination bearer and current write grant;
+2. can_write true, even when can_read is false;
+3. the exact transfer ID and canonical command ID;
+4. the matching transfer-bound receipt capability; and
+5. the mobility-v1 contract header.
+
+It returns only the bounded envelope above, constructed from the same durable
+row. It cannot inspect another upload, list uploads, inspect an arbitrary
+transfer ID without its capability, serve an artifact, or serve a byte range.
+Artifact metadata/byte routes and legacy general upload inspection still
+require can_read true. A receiver with can_write true and can_read false can
+therefore resume or confirm only its own mobility transfer, including the
+final sealed envelope, but gets no general read capability.
+
 The client fetches and validates attestation first. It then sends begin and
-validates the complete envelope before any append request. On resume it
-validates a mobility-v1 inspect envelope before it appends a byte. A receiver
-that changes the same origin, display label, bearer, grant, or receiver identity
+validates the complete envelope before any append request. On resume and final
+confirmation it uses the receipt-inspection action and validates the matching
+mobility-v1 envelope before it appends a byte or marks sealed. A receiver that
+changes the same origin, display label, bearer, grant, or receiver identity
 cannot be accepted merely because its URL still resolves.
 
 The final seal/inspect path must return an envelope with the same attestation
@@ -273,9 +307,22 @@ sharing a command across a different intended receiver binding.
 
 Every operation record has one immutable source_owner_id. The journal refuses
 to open under another source owner or to dispatch an operation through another
-source scope. A local OS/file ownership guard and a database compare-and-swap
-lease ensure at most one dispatch owner acts on an operation at a time, even
-if two local CLI processes race.
+source scope.
+
+Each operation has a private lock file under the mobility state root. An
+attempt must first acquire its OS-level exclusive lock nonblockingly and hold
+the open lock handle continuously across every peer call, including
+attestation, begin, receipt inspection, append, seal, and final confirmation.
+The lock is not a sentinel file and cannot be broken by deleting a path; it is
+the operating system's exclusive byte/file lock. Failure to acquire it returns
+BUSY and performs no peer I/O.
+
+While holding that lock, the attempt then obtains the journal's
+compare-and-swap lease. Both are required. Before every peer call and after
+every blocking local operation, the attempt verifies that its lock handle is
+still held and renews a still-unexpired lease. A lease that has already expired
+cannot be revived by its former holder; that paused sender stops before another
+peer call and releases the lock.
 
 ## Durable journal, leases, and lifecycle
 
@@ -311,7 +358,10 @@ that can mutate the receiver. It uses compare-and-swap operations:
 4. a stale worker cannot update state after another owner acquires a later
    epoch; and
 5. restart recovery changes only expired dispatching leases to resumable. It
-   never contacts a peer during recovery.
+   never contacts a peer during recovery; and
+6. a recovered attempt is eligible only after it nonblockingly acquires the
+   operation's OS lock and then wins a fresh lease. If a paused old sender
+   still holds the lock, recovery/resume returns BUSY without peer I/O.
 
 The explicit state graph is:
 
@@ -350,7 +400,8 @@ reusing an identifier.
 One explicit send or resume invocation performs at most one bounded attempt:
 
 1. read current typed source and mobility config;
-2. acquire the compare-and-swap dispatch lease;
+2. nonblockingly acquire and retain the operation's OS-exclusive dispatch lock,
+   then acquire the compare-and-swap dispatch lease while that lock is held;
 3. inspect the sealed source artifact through the source-only binding and
    require its scope, exact spec, and configured source size limit;
 4. compare the current private destination-binding HMAC and credential
@@ -361,11 +412,13 @@ One explicit send or resume invocation performs at most one bounded attempt:
 7. reject locally if attested max_object_bytes is smaller than source size;
 8. call mobility-v1 begin or inspect and validate the complete immutable
    envelope before the first append;
-9. stream bounded source ranges, renewing the lease and source admission
-   between chunks, and validate every remote acknowledgement;
+9. before every peer call, prove the lock is still held and renew a
+   still-unexpired lease; stream bounded source ranges, rechecking source
+   admission between chunks, and validate every remote acknowledgement;
 10. seal once, validate its envelope/final artifact, write sealed or a
     constrained nonterminal outcome with the same lease; and
-11. release the lease locally. No timer, process, or scheduler resumes it.
+11. release the lease and then the OS lock locally. No timer, process, or
+    scheduler resumes it.
 
 The destination receiver independently admits begin. Dynamic destination quota,
 active-transfer capacity, grant expiry, and per-object limits may change after
@@ -409,7 +462,8 @@ source. automatic_artifact_migration remains unavailable.
 4. The destination independently authorizes the configured source owner for
    writes and independently enforces current size, quota, capacity, and expiry.
 5. The local intent and immutable transport fence exist before receiver
-   mutation, and one compare-and-swap lease permits only one dispatch owner.
+   mutation, and a continuously held OS-exclusive dispatch lock plus a
+   compare-and-swap lease permits only one dispatch owner.
 6. Explicit resume reuses the canonical command only while every immutable
    source and destination fence still matches.
 7. Credential/certificate/grant/receiver-identity changes make an existing
@@ -456,10 +510,17 @@ The implementation must prove:
    capacity rejection remains receiver-enforced and byte-free;
 6. two concurrent resumes produce one remote dispatch, stale lease writes
    fail, crash recovery makes no network call, and a recovered operation needs
-   an explicit resume;
+   an explicit resume. A paused sender whose lease expires while it still owns
+   the OS lock cannot overlap a replacement sender's peer calls: replacement
+   returns BUSY, old sender stops before its next peer call, then replacement
+   may acquire a fresh lock and lease;
 7. receipt pruning preserves a permanent tombstone and rejects operation-ID
    reuse;
 8. malformed origin or URL-looking credential never appears in a serialized
    receipt, log, exception, or configuration error; and
-9. a process-boundary loopback rehearsal is labeled as such, while a real
-   independent-host pinned TLS test remains a deployment gate.
+9. a write-only destination can inspect only its authenticated
+   transfer-bound mobility envelope for resume/final confirmation, while
+   legacy upload inspection, artifact metadata, and artifact bytes remain
+   forbidden; and
+10. a process-boundary loopback rehearsal is labeled as such, while a real
+    independent-host pinned TLS test remains a deployment gate.
