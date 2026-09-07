@@ -9475,6 +9475,84 @@
       "type": "bool"
     },
     {
+      "default": false,
+      "field": "enabled",
+      "section": "memory_replication",
+      "type": "bool"
+    },
+    {
+      "default": "",
+      "field": "local_node_id",
+      "section": "memory_replication",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "project_scope",
+      "section": "memory_replication",
+      "type": "str"
+    },
+    {
+      "default": false,
+      "field": "receiver_enabled",
+      "section": "memory_replication",
+      "type": "bool"
+    },
+    {
+      "default": [],
+      "field": "accepted_source_ids",
+      "section": "memory_replication",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": [],
+      "field": "peers",
+      "section": "memory_replication",
+      "type": "tuple[MemoryReplicationPeerConfig, ...]"
+    },
+    {
+      "default": 5,
+      "field": "request_timeout_seconds",
+      "section": "memory_replication",
+      "type": "int"
+    },
+    {
+      "default": 8388608,
+      "field": "max_request_bytes",
+      "section": "memory_replication",
+      "type": "int"
+    },
+    {
+      "default": 65536,
+      "field": "max_response_bytes",
+      "section": "memory_replication",
+      "type": "int"
+    },
+    {
+      "default": 256,
+      "field": "max_batch_records",
+      "section": "memory_replication",
+      "type": "int"
+    },
+    {
+      "default": "",
+      "field": "node_id",
+      "section": "memory_replication.peers[]",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "project_scope",
+      "section": "memory_replication.peers[]",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "origin",
+      "section": "memory_replication.peers[]",
+      "type": "str"
+    },
+    {
       "default": "json",
       "field": "log_format",
       "section": "observability",
@@ -9712,14 +9790,14 @@
       "type": "int"
     }
   ],
-  "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES",
+  "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
     "commands": 316,
-    "configuration": 126,
+    "configuration": 139,
     "events": 43,
     "tools": 212
   },
-  "digest": "80364fc8f8add390f53f0e61e13678cbc339fa2f3ee7933c3b29b1684f4deeca",
+  "digest": "ae9aa5848f2b846d40e08d06c4e1c1806c82e23c2c2da071e0ae04e6b0b2edd7",
   "events": [
     {
       "name": "session.started",
@@ -10193,7 +10271,8 @@
     "server.py": "9a4262ad4dd80fa47d5a1875a46e1e786d2ae5364cf9257140d5c5072456591c",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
-    "sonder_runtime/platform/config.py": "20eb6d3e8d3ffec7649b3f686c80d3afda45d68b4799dee00372c98cdf5a907c"
+    "sonder_runtime/platform/config.py": "20eb6d3e8d3ffec7649b3f686c80d3afda45d68b4799dee00372c98cdf5a907c",
+    "sonder_runtime/platform/memory_replication_config.py": "900adcdc781592461167f407490835ce6390b4fe0327e403163427c8ad7f5de7"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
   "tools": [
