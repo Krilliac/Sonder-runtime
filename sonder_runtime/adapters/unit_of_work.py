@@ -20,8 +20,14 @@ class UnitOfWorkAdapter:
     self-commit.
     """
 
-    def __init__(self, db_path: str | None = None) -> None:
+    def __init__(
+        self,
+        db_path: str | None = None,
+        *,
+        authoritative_fact_source=None,
+    ) -> None:
         self._db_path = db_path
+        self._authoritative_fact_source = authoritative_fact_source
         self._conn = None
         self.memory = None
         self.automation = AutopilotRepository()
@@ -34,7 +40,10 @@ class UnitOfWorkAdapter:
 
         path = self._db_path or paths.memory_db_path()
         self._conn = memory_store.connect(path)
-        self.memory = MemoryRepositoryAdapter(self._conn)
+        self.memory = MemoryRepositoryAdapter(
+            self._conn,
+            authoritative_fact_source=self._authoritative_fact_source,
+        )
         return self
 
     @property

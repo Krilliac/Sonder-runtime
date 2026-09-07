@@ -116,6 +116,9 @@ def test_epoch_regression_is_rejected_and_export_cursor_is_bounded(tmp_path):
     journal.append((_mutation(),))
     with pytest.raises(MemoryReplicationError, match="epoch"):
         journal.append((_mutation(sequence=2, source_epoch=0)))
+    with pytest.raises(MemoryReplicationError, match="empty"):
+        journal.advance_epoch(2)
+    assert journal.export().source_epoch == 1
     with pytest.raises(ValueError, match="limit"):
         journal.export(limit=0)
     with pytest.raises(ValueError, match="sequence"):
