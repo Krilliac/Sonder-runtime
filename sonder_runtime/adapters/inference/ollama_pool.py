@@ -19,6 +19,7 @@ import hashlib
 import hmac
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 import http.client
 import importlib
 import ipaddress
@@ -37,6 +38,10 @@ import logging
 
 import sonder_runtime.adapters.model_inventory as model_inventory
 from sonder_runtime.domain import ollama_policy
+from sonder_runtime.domain.inference_membership import (
+    CapabilityEvidence, MembershipHighWater, MembershipReconciliation,
+    MembershipRoster, MembershipSnapshot, WorkerAdvertisement,
+)
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.platform.logging import Redactor
 from sonder_runtime.platform.metrics import MetricsRegistry, default_registry
@@ -89,6 +94,7 @@ _configured_probe_parallelism: int | None = None
 _configured_probe_batch_size: int | None = None
 _configured_status_page_size: int | None = None
 _configuration_lock = threading.RLock()
+_configured_pool = None
 
 
 class WorkerPoolError(urllib.error.URLError):
@@ -295,8 +301,9 @@ def configure_typed_workers(
     global _configured_probe_timeout_ms, _configured_max_inflight
     global _configured_queue_depth, _configured_max_workers
     global _configured_probe_parallelism, _configured_probe_batch_size
-    global _configured_status_page_size
+    global _configured_status_page_size, _configured_pool
     with _configuration_lock:
+        _configured_pool = None
         _configured_workers = normalized
         _configured_allow_remote = allow_remote
         _configured_trusted_origins = trusted_origins
@@ -321,8 +328,9 @@ def reset_typed_workers() -> None:
     global _configured_probe_timeout_ms, _configured_max_inflight
     global _configured_queue_depth, _configured_max_workers
     global _configured_probe_parallelism, _configured_probe_batch_size
-    global _configured_status_page_size
+    global _configured_status_page_size, _configured_pool
     with _configuration_lock:
+        _configured_pool = None
         _configured_workers = None
         _configured_allow_remote = None
         _configured_trusted_origins = None
@@ -437,6 +445,11 @@ class _WorkerState:
     capability_probe_failed: bool = False
     trips: int = 0
     known_models: frozenset[str] | None = None
+    advertisement: WorkerAdvertisement | None = None
+    membership_state: str | None = None
+    membership_expires_at: datetime | None = None
+    membership_evidence: CapabilityEvidence | None = None
+    capability_checked_at: datetime | None = None
 
 
 def _worker_id(origin: str) -> str:
@@ -618,10 +631,163 @@ class OllamaWorkerPool:
         }
         self._metrics_observer = metrics
         self._redactor = redactor or Redactor()
+        self._membership_clock = None
+        self._membership_authority = None
+        self._membership_high_water = None
+        self._configured_remote_origins = frozenset(
+            origin for origin in normalized_origins if not _is_loopback(origin))
+        self._local_worker_count = len(states) - len(self._configured_remote_origins)
+        self._membership_omitted = 0
+
+    @property
+    def membership_limit(self) -> int:
+        return max(1, self._max_workers - self._local_worker_count)
+
+    def configure_membership(self, *, cluster_id, issuer_id, clock) -> None:
+        # Validate primitive authority fields before changing admission state.
+        MembershipHighWater(cluster_id, issuer_id, 1, "0" * 64)
+        with self._condition:
+            if self._membership_clock is not None:
+                raise ValueError("membership controller is already configured")
+            if any(state.inflight and not _is_loopback(state.endpoint.origin) for state in self._states):
+                raise ValueError("cannot attach membership while remote work is in flight")
+            self._membership_clock = clock
+            self._membership_authority = (cluster_id, issuer_id)
+            for state in self._states:
+                if not _is_loopback(state.endpoint.origin):
+                    state.membership_state = "probation"
+                    state.capabilities = None
+            self._roster_generation += 1
+
+    def validate_membership_snapshot(self, snapshot: MembershipSnapshot) -> None:
+        if type(snapshot) is not MembershipSnapshot or self._membership_authority is None:
+            raise ValueError("verified configured membership snapshot required")
+        if (snapshot.cluster_id, snapshot.issuer_id) != self._membership_authority:
+            raise ValueError("membership authority differs from static configuration")
+        if len(snapshot.workers) > self.membership_limit:
+            raise ValueError("membership exceeds configured remote roster bound")
+        if any(worker.origin not in self._configured_remote_origins for worker in snapshot.workers):
+            raise ValueError("membership origin is not an exact configured remote origin")
+
+    def apply_membership(self, result: MembershipReconciliation) -> None:
+        """Atomically publish a validated roster; retain original draining states.
+
+        Live and draining states together never exceed the configured limit.
+        When drains occupy all slots, new members wait for a later refresh.
+        Endpoint objects attached to in-flight work are never rewritten.
+        """
+        if type(result) is not MembershipReconciliation or self._membership_authority is None:
+            raise ValueError("exact configured membership reconciliation required")
+        if result.roster is not None:
+            self.validate_membership_snapshot(result.roster.snapshot)
+        water = result.high_water
+        if water is not None and (water.cluster_id, water.issuer_id) != self._membership_authority:
+            raise ValueError("membership high-water authority mismatch")
+        with self._condition:
+            old_water = self._membership_high_water
+            if old_water is not None and (water is None or water.generation < old_water.generation
+                    or (water.generation == old_water.generation and water.digest != old_water.digest)):
+                raise ValueError("membership high-water cannot roll back or conflict")
+            self._membership_high_water = water
+            members = result.roster.members if result.roster is not None else ()
+            desired = {(member.advertisement.worker_id, member.advertisement.origin,
+                        member.advertisement.member_generation): member for member in members}
+            new_admissions = {(worker.worker_id, worker.origin, worker.member_generation)
+                              for worker in result.additions}
+            retained = []
+            existing = {}
+            for state in self._states:
+                if state.membership_state is None:
+                    retained.append(state)
+                    continue
+                advertisement = state.advertisement
+                key = ((advertisement.worker_id, advertisement.origin, advertisement.member_generation)
+                       if advertisement is not None else None)
+                if key in desired and state.membership_state != "draining":
+                    existing[key] = state
+                else:
+                    state.membership_state = "draining"
+                    if state.inflight:
+                        retained.append(state)
+            omitted = result.omitted_worker_count
+            for key, member in desired.items():
+                state = existing.get(key)
+                if state is None:
+                    if len(retained) + len(existing) >= self._max_workers:
+                        omitted += 1
+                        continue
+                    worker = member.advertisement
+                    state = _WorkerState(WorkerEndpoint(worker.origin, worker.worker_id,
+                                                       _metric_label(len(retained))), advertisement=worker)
+                else:
+                    existing.pop(key)
+                    if key in new_admissions:
+                        # A lease renewed after expiry must obtain new evidence;
+                        # a still-fresh capability cache predates this admission.
+                        state.capabilities = None
+                        state.known_models = None
+                state.membership_state = member.lifecycle_state
+                state.membership_expires_at = result.roster.snapshot.expires_at
+                state.membership_evidence = member.evidence
+                retained.append(state)
+            self._states = retained
+            self._membership_omitted = omitted
+            self._roster_generation += 1
+            self._condition.notify_all()
+
+    def stop_membership(self) -> None:
+        with self._condition:
+            for state in self._states:
+                if state.membership_state is not None:
+                    state.membership_state = "draining"
+            self._prune_drained()
+            self._condition.notify_all()
+
+    def _prune_drained(self) -> None:
+        remaining = [state for state in self._states
+                     if state.membership_state != "draining" or state.inflight]
+        if len(remaining) != len(self._states):
+            self._states = remaining
+            self._roster_generation += 1
+
+    def _membership_admissible(self, state: _WorkerState, now: float) -> bool:
+        if state.membership_state is None:
+            return True
+        wall_now = self._membership_clock()
+        return (state.membership_state == "active" and state.membership_expires_at is not None
+                and wall_now < state.membership_expires_at and state.membership_evidence is not None
+                and state.membership_evidence.checked_at <= wall_now < state.membership_evidence.expires_at
+                and not self._capabilities_stale(state, now) and not state.capability_probe_failed)
+
+    def refresh_membership_capabilities(self) -> None:
+        self.refresh_capabilities(_membership=True)
+
+    def membership_evidence(self, roster: MembershipRoster) -> tuple[CapabilityEvidence, ...]:
+        if type(roster) is not MembershipRoster:
+            raise ValueError("exact membership roster required")
+        now = self._clock()
+        wall_now = self._membership_clock()
+        with self._condition:
+            evidence = []
+            for state in self._states:
+                if (state.advertisement is None or state.membership_state in ("draining", "expired")
+                        or self._capabilities_stale(state, now) or state.capability_probe_failed
+                        or state.compatibility_error or state.cooldown_until > now):
+                    continue
+                worker = state.advertisement
+                checked = state.capability_checked_at
+                if checked is None:
+                    continue
+                expires = min(checked + timedelta(seconds=self._capability_ttl), roster.snapshot.expires_at)
+                if checked <= wall_now < expires:
+                    evidence.append(CapabilityEvidence(worker.worker_id, worker.origin,
+                                                       worker.member_generation, checked, expires))
+            return tuple(evidence)
 
     @property
     def enabled(self) -> bool:
-        return len(self._states) > 1
+        return len(self._states) > 1 or (
+            self._membership_clock is not None and bool(self._configured_remote_origins))
 
     @property
     def has_remote_workers(self) -> bool:
@@ -787,7 +953,7 @@ class OllamaWorkerPool:
                 )
 
     def refresh_capabilities(
-        self, *, force: bool = False,
+        self, *, force: bool = False, _membership: bool = False,
     ) -> None:
         """Update cached capabilities using the configured bounded probe batch.
 
@@ -813,6 +979,14 @@ class OllamaWorkerPool:
                 for offset in range(state_count):
                     index = (start + offset) % state_count
                     state = self._states[index]
+                    if state.membership_state is not None and (
+                        state.membership_state in ("draining", "expired")
+                        or state.membership_expires_at is None
+                        or self._membership_clock() >= state.membership_expires_at
+                    ):
+                        continue
+                    if _membership and state.membership_state is None:
+                        continue
                     if not (
                         (force or self._capabilities_stale(state, now))
                         and (force or state.cooldown_until <= now)
@@ -850,6 +1024,8 @@ class OllamaWorkerPool:
 
             with self._condition:
                 for state, (payload, measured_ms, error) in zip(candidates, outcomes):
+                    if state.membership_state == "draining" or not any(current is state for current in self._states):
+                        continue
                     self._metrics["capability_probes"] += 1
                     if error is not None:
                         logger.debug(f"capability probe failed for {state.endpoint.worker_id}: {_safe_error(error)}")
@@ -893,6 +1069,8 @@ class OllamaWorkerPool:
                         f"effective_max_inflight={capabilities.effective_max_inflight}, latency={latency_ms:.1f}ms"
                     )
                     state.capabilities = capabilities
+                    if state.membership_state is not None:
+                        state.capability_checked_at = self._membership_clock()
                     state.compatibility_error = ""
                     state.capability_probe_failed = False
                     self._record_success(state, latency_ms)
@@ -953,6 +1131,7 @@ class OllamaWorkerPool:
         candidates = [
             state for state in self._states
             if state.endpoint.worker_id not in excluded
+            and self._membership_admissible(state, now)
             and not state.compatibility_error
             and self._supports_model(state, model)
             and state.cooldown_until <= now
@@ -1020,13 +1199,15 @@ class OllamaWorkerPool:
                 remaining_states = [
                     state for state in self._states
                     if state.endpoint.worker_id not in excluded
+                    and self._membership_admissible(state, now)
                     and not state.compatibility_error
                     and self._supports_model(state, model)
                 ]
                 if not remaining_states:
                     if queued:
                         self._waiters -= 1
-                    known = all(state.capabilities is not None for state in self._states)
+                    available = [state for state in self._states if self._membership_admissible(state, now)]
+                    known = bool(available) and all(state.capabilities is not None for state in available)
                     if model and known:
                         raise WorkerCapabilityUnavailable(
                             "no Ollama worker advertises model %r" % model
@@ -1109,6 +1290,7 @@ class OllamaWorkerPool:
                     result=result,
                     elapsed_seconds=max(0.0, latency_ms / 1000.0),
                 )
+            self._prune_drained()
             self._condition.notify_all()
 
     def request(
@@ -1135,6 +1317,9 @@ class OllamaWorkerPool:
         attempted: set[str] = set()
         last_error = None
         while True:
+            if len(attempted) >= self._max_workers:
+                # Reconciliation cannot grow one logical request's retry set.
+                raise last_error or WorkerPoolUnavailable("Ollama worker attempt limit reached")
             try:
                 state = self._acquire(
                     model=model,
@@ -1221,7 +1406,8 @@ class OllamaWorkerPool:
         """Copy one selected worker while the pool condition is held."""
         stale = self._capabilities_stale(state, now)
         healthy = (
-            not state.compatibility_error
+            self._membership_admissible(state, now)
+            and not state.compatibility_error
             and not (
                 state.capabilities is None
                 and state.capability_probe_failed
@@ -1231,6 +1417,14 @@ class OllamaWorkerPool:
         capacity = self._capacity(state)
         if self._draining:
             label = "draining" if state.inflight else "drained"
+        elif state.membership_state == "draining":
+            label = "draining"
+        elif state.membership_state is not None and state.membership_expires_at is not None and (
+            self._membership_clock() >= state.membership_expires_at
+        ):
+            label = "expired"
+        elif state.membership_state is not None and not self._membership_admissible(state, now):
+            label = state.membership_state if state.membership_state != "active" else "probation"
         elif state.compatibility_error:
             label = "incompatible"
         elif state.cooldown_until > now:
@@ -1355,7 +1549,7 @@ class OllamaWorkerPool:
         for state in self._states:
             remote += not _is_loopback(state.endpoint.origin)
             inflight += state.inflight
-            healthy_now = (not state.compatibility_error
+            healthy_now = (self._membership_admissible(state, now) and not state.compatibility_error
                            and not (state.capabilities is None and state.capability_probe_failed)
                            and state.cooldown_until <= now)
             healthy += healthy_now
@@ -1376,7 +1570,7 @@ class OllamaWorkerPool:
             "roster_generation": self._roster_generation,
             "membership_mode": "static",
             "membership_state": "static",
-            "enabled": total > 1,
+            "enabled": self.enabled,
             "admission": "draining" if self._draining else "accepting",
             "worker_count": total,
             "configured_worker_limit": self._max_workers,
@@ -1385,7 +1579,9 @@ class OllamaWorkerPool:
             "healthy_worker_count": healthy,
             "eligible_worker_count": eligible,
             "unhealthy_worker_count": total - healthy,
-            "draining_worker_count": total if self._draining else 0,
+            "draining_worker_count": total if self._draining else sum(
+                state.membership_state == "draining" for state in self._states),
+            "membership_omitted_worker_count": self._membership_omitted,
             "available_capacity": capacity,
             "inflight": inflight,
             "refresh_state": refresh_state,
@@ -1509,12 +1705,27 @@ class OllamaWorkerPool:
         return tuple(lines)
 
 
+def configure_typed_pool(pool: OllamaWorkerPool) -> None:
+    """Bind compatibility lookup to the pool owned by the typed application."""
+    global _configured_pool
+    if type(pool) is not OllamaWorkerPool:
+        raise ValueError("exact typed application pool required")
+    with _configuration_lock:
+        if _configured_workers is None or tuple(pool.origins[1:]) != _configured_workers:
+            raise ValueError("application pool does not match typed workers")
+        _configured_pool = (pool.origins[0], pool)
+
+
 def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
     """Build the pool from consented, bounded environment configuration."""
     logger.debug(f"from_environment: primary_origin={primary_origin!r}")
     logger.info(f"building Ollama worker pool from environment, primary_origin={primary_origin!r}")
     env = os.environ if environment is None else environment
     with _configuration_lock:
+        if environment is None and _configured_pool is not None:
+            if ollama_policy.normalize(primary_origin).rstrip("/") != _configured_pool[0]:
+                raise ValueError("primary differs from the composed typed pool")
+            return _configured_pool[1]
         typed_workers = _configured_workers
         typed_allow_remote = _configured_allow_remote
         typed_trusted_origins = _configured_trusted_origins
@@ -1667,6 +1878,7 @@ __all__ = [
     "WorkerPoolUnavailable",
     "WorkerSnapshot",
     "configure_typed_workers",
+    "configure_typed_pool",
     "from_environment",
     "has_configured_remote_workers",
     "parse_worker_origins",

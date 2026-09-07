@@ -221,6 +221,8 @@ class Application:
     compute_refresh_page: Callable[..., dict] | None = None
     close_compute: Callable[..., None] | None = None
     close_delegation: Callable[..., None] | None = None
+    inference_pool: Any | None = None
+    inference_membership: Any | None = None
 
     @property
     def private_source_paths(self) -> tuple[str, ...]:
@@ -318,7 +320,14 @@ class Application:
                     self.close_compute(timeout=remaining)
         finally:
             remaining = None if timeout is None else max(0, timeout - (monotonic() - started))
-            self.specialized_providers.close(timeout=remaining)
+            try:
+                if self.inference_membership is not None and not self.inference_membership.close(
+                    timeout=5 if remaining is None else min(30, remaining)
+                ):
+                    raise TimeoutError("inference membership refresh has not stopped")
+            finally:
+                remaining = None if timeout is None else max(0, timeout - (monotonic() - started))
+                self.specialized_providers.close(timeout=remaining)
 
 
 # Compatibility name for callers that used the bootstrap-private selector.
@@ -349,6 +358,7 @@ def build_application(
     """
     logger.info(f"build_application starting, profile={profile!r}")
     logger.debug(f"build_application starting, profile={profile!r}, config_provided={config is not None}")
+    inference_pool = inference_membership = None
     if config is None and any(name.startswith("SONDER_CHILD_STORAGE_") for name in os.environ):
         # Compatibility entrypoints must not ignore an explicit backend opt-in.
         from ..platform.config import load_config
@@ -392,6 +402,17 @@ def build_application(
             ),
             capability_probe_batch_size=config.ollama.worker_capability_probe_batch_size,
             status_page_size=config.ollama.worker_status_page_size,
+        )
+        from datetime import datetime, timezone
+        from ..adapters.inference.static_membership import StaticMembershipSource
+        from ..application.inference_membership.controller import MembershipController
+        membership_clock = lambda: datetime.now(timezone.utc)
+        static_source = StaticMembershipSource(config.ollama, clock=membership_clock)
+        inference_pool = ollama_pool.from_environment(config.ollama.url)
+        inference_membership = MembershipController(
+            static_source, inference_pool, clock=membership_clock,
+            cluster_id=static_source.cluster_id, issuer_id=static_source.issuer_id,
+            refresh_interval_seconds=max(1, min(30, config.ollama.worker_capability_ttl_seconds / 2)),
         )
     if profile not in PROFILES:
         raise ValueError(f"unknown profile {profile!r}; expected {PROFILES}")
@@ -1422,6 +1443,8 @@ def build_application(
         compute_refresh_page=compute_refresh_page,
         close_compute=close_compute,
         close_delegation=close_delegation,
+        inference_pool=inference_pool,
+        inference_membership=inference_membership,
         delegation_service=get_delegation_service,
         agent_lanes=get_agent_lanes,
         agent_workflow_service=get_agent_workflow_service,
@@ -1437,12 +1460,15 @@ def build_application(
         except Exception:
             application.close_providers(timeout=5)
             raise
+    if inference_pool is not None:
+        ollama_pool.configure_typed_pool(inference_pool)
     return application
 
 
 _default_config: SonderConfig | None = None
 _default_compute_close = None
 _default_delegation_close = None
+_default_inference_close = None
 _owned_default_application = None
 
 
@@ -1459,7 +1485,13 @@ def close_default_runtime_resources(timeout=5):
         if _default_delegation_close is not None:
             _default_delegation_close(timeout=timeout)
     finally:
-        close_default_compute(timeout=max(0, timeout - (monotonic() - started)))
+        try:
+            close_default_compute(timeout=max(0, timeout - (monotonic() - started)))
+        finally:
+            if _default_inference_close is not None and not _default_inference_close(
+                timeout=min(30, max(0, timeout - (monotonic() - started)))
+            ):
+                raise TimeoutError("inference membership refresh has not stopped")
 
 
 def _close_default_at_exit():
@@ -1484,7 +1516,7 @@ _application_lifecycle = ApplicationLifecycle(_build_default_application)
 
 def install_owned_application(application: Application) -> None:
     """Private required-new child composition; never an external factory seam."""
-    global _owned_default_application, _default_config, _default_compute_close, _default_delegation_close
+    global _owned_default_application, _default_config, _default_compute_close, _default_delegation_close, _default_inference_close
     if type(application) is not Application or not isinstance(application.config, SonderConfig):
         raise TypeError("exact configured Application required")
     _application_lifecycle.install_owned(application)
@@ -1492,21 +1524,23 @@ def install_owned_application(application: Application) -> None:
     _default_config = application.config
     _default_compute_close = application.close_compute
     _default_delegation_close = application.close_delegation
+    _default_inference_close = application.inference_membership.close if application.inference_membership else None
 
 
 def stop_owned_application(application: Application) -> None:
     """Freeze compatibility lookup; the live host still owns actual cleanup."""
-    global _default_compute_close, _default_delegation_close
+    global _default_compute_close, _default_delegation_close, _default_inference_close
     if application is not _owned_default_application:
         raise RuntimeError("exact owned Application required")
     _application_lifecycle.stop_owned(application)
     _default_compute_close = _default_delegation_close = None
+    _default_inference_close = None
 
 
 def default_app(*, config: SonderConfig | None = None) -> Application:
     """Process-wide default graph for compatibility shims."""
     logger.debug(f"default_app called, config_provided={config is not None}")
-    global _default_config, _default_compute_close, _default_delegation_close
+    global _default_config, _default_compute_close, _default_delegation_close, _default_inference_close
     if _owned_default_application is not None:
         if config is not None and config is not _owned_default_application.config:
             raise RuntimeError("owned application config selection is immutable")
@@ -1524,6 +1558,8 @@ def default_app(*, config: SonderConfig | None = None) -> Application:
     application = _application_lifecycle.get()
     _default_compute_close = getattr(application, "close_compute", None)
     _default_delegation_close = getattr(application, "close_delegation", None)
+    controller = getattr(application, "inference_membership", None)
+    _default_inference_close = controller.close if controller is not None else None
     if config is not None and application.config is not config:
         logger.critical("default application was already built with a different config object -- process-wide state is inconsistent and cannot be recovered")
         raise RuntimeError("default application was already built without this config")
@@ -1531,12 +1567,13 @@ def default_app(*, config: SonderConfig | None = None) -> Application:
 
 
 def reset_for_tests() -> None:
-    global _default_config, _default_compute_close, _default_delegation_close
+    global _default_config, _default_compute_close, _default_delegation_close, _default_inference_close
     if _owned_default_application is not None:
         raise RuntimeError("owned application cannot be reset")
     close_default_runtime_resources()
     _default_compute_close = None
     _default_delegation_close = None
+    _default_inference_close = None
     _default_config = None
     _application_lifecycle.reset()
     runtime_paths.reset_home()

@@ -3,8 +3,13 @@ from __future__ import annotations
 
 import json
 import threading
+from datetime import datetime, timezone
 
 import pytest
+
+from sonder_runtime.adapters.inference.static_membership import StaticMembershipSource
+from sonder_runtime.application.inference_membership.controller import MembershipController
+from sonder_runtime.platform.config import OllamaConfig
 
 from sonder_runtime.adapters.inference.ollama_pool import (
     OllamaWorkerPool,
@@ -249,6 +254,58 @@ def test_refresh_never_materializes_worker_snapshots(monkeypatch, exit_path):
         if exit_path == "contended":
             pool._probe_lock.release()
     assert len(probes) == (2 if exit_path == "probed" else 0)
+
+
+def test_membership_refresh_honors_configured_probe_and_page_limits_at_64_workers(monkeypatch):
+    origins = tuple("https://w%d.example:11434" % i for i in range(64))
+    config = OllamaConfig(url=origins[0], workers=origins[1:], allow_remote=True,
+                          worker_pool_max_workers=64)
+    now = lambda: datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
+    source = StaticMembershipSource(config, clock=now)
+    lock, entered, release = threading.Lock(), threading.Event(), threading.Event()
+    calls = []
+    active = peak = 0
+
+    def probe(origin):
+        nonlocal active, peak
+        with lock:
+            calls.append(origin)
+            active += 1
+            peak = max(peak, active)
+            if active == 2:
+                entered.set()
+        assert release.wait(3)
+        with lock:
+            active -= 1
+        return {"models": ["code"]}
+
+    pool = OllamaWorkerPool(origins[0], origins[1:], allow_remote=True, max_workers=64,
+                            capability_probe_batch_size=5, capability_probe_parallelism=2,
+                            capability_prober=probe)
+    control = MembershipController(source, pool, clock=now, cluster_id=source.cluster_id,
+                                   issuer_id=source.issuer_id, refresh_interval_seconds=60)
+    records = []
+    original = pool._snapshot
+    monkeypatch.setattr(pool, "_snapshot", lambda state, stamp: records.append(state) or original(state, stamp))
+    outcomes = []
+    thread = threading.Thread(target=lambda: outcomes.append(control.refresh(timeout_seconds=3)))
+    try:
+        control.refresh(timeout_seconds=2, probe=False)
+        thread.start()
+        assert entered.wait(2)
+        assert len(calls) == 2
+        release.set()
+        thread.join(3)
+        assert not thread.is_alive() and len(outcomes) == 1
+        assert len(calls) == 5 and peak == 2
+        assert records == []
+        assert pool.summary()["eligible_worker_count"] == 5
+        assert len(pool.status(page_size=1)["workers"]) == len(records) == 1
+    finally:
+        release.set()
+        if thread.ident is not None:
+            thread.join(3)
+        assert control.close(timeout=2)
 
 
 def test_status_pages_are_bounded_safe_and_report_active_limits():

@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 281,
+      "file_count": 282,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -146,6 +146,7 @@
         "sonder_runtime/adapters/inference/ollama_vision.py",
         "sonder_runtime/adapters/inference/openai_compat.py",
         "sonder_runtime/adapters/inference/openai_compat_gateway.py",
+        "sonder_runtime/adapters/inference/static_membership.py",
         "sonder_runtime/adapters/inference/telemetry.py",
         "sonder_runtime/adapters/inference/vision.py",
         "sonder_runtime/adapters/inference_telemetry.py",
@@ -330,7 +331,7 @@
       ]
     },
     {
-      "file_count": 306,
+      "file_count": 308,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -418,6 +419,8 @@
         "sonder_runtime/application/extensions/provenance_inventory.py",
         "sonder_runtime/application/extensions/quarantine.py",
         "sonder_runtime/application/extensions/registry.py",
+        "sonder_runtime/application/inference_membership/__init__.py",
+        "sonder_runtime/application/inference_membership/controller.py",
         "sonder_runtime/application/inspection/__init__.py",
         "sonder_runtime/application/inspection/use_cases.py",
         "sonder_runtime/application/instruction_discovery/__init__.py",
