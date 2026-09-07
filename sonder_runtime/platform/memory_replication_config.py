@@ -117,7 +117,11 @@ def memory_replication_errors(config) -> list[str]:
     enabled = section.enabled is True
     receiver_enabled = section.receiver_enabled is True
 
-    if section.local_node_id:
+    if not isinstance(section.local_node_id, str):
+        errors.append(
+            "[memory_replication].local_node_id must be a bounded stable identity"
+        )
+    elif section.local_node_id:
         if not _is_identity(section.local_node_id):
             errors.append(
                 "[memory_replication].local_node_id must be a bounded stable identity"
@@ -127,7 +131,11 @@ def memory_replication_errors(config) -> list[str]:
             "[memory_replication].local_node_id must be a bounded stable identity"
         )
 
-    if section.project_scope:
+    if not isinstance(section.project_scope, str):
+        errors.append(
+            "[memory_replication].project_scope must be an exact bounded scope"
+        )
+    elif section.project_scope:
         if not _is_project_scope(section.project_scope):
             errors.append(
                 "[memory_replication].project_scope must be an exact bounded scope"
@@ -224,9 +232,10 @@ def memory_replication_errors(config) -> list[str]:
         else:
             api_key = getattr(secrets, "api_key", None)
             artifact_key = getattr(secrets, "artifact_transfer_key", None)
-            if key == api_key or key == artifact_key:
+            auth_secret = getattr(secrets, "auth_secret", None)
+            if key == api_key or key == artifact_key or key == auth_secret:
                 errors.append(
-                    "memory replication dedicated key must be distinct from API and artifact-transfer keys"
+                    "memory replication dedicated key must be distinct from API, artifact-transfer, and auth secrets"
                 )
         if receiver_enabled:
             if not accepted:

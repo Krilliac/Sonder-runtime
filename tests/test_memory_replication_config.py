@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import pytest
 
+from sonder_runtime.platform import config_environment
 from sonder_runtime.platform.config import ConfigError, Secrets, SonderConfig, load_config
 from sonder_runtime.platform.memory_replication_config import (
     MemoryReplicationConfig,
@@ -156,6 +157,7 @@ def test_toml_secret_is_rejected_without_reflecting_its_value(tmp_path):
             "SONDER_MEMORY_REPLICATION_KEY": _key(),
             "SONDER_ARTIFACT_TRANSFER_KEY": _key(),
         }, "distinct"),
+        ({"SONDER_MEMORY_REPLICATION_KEY": _key(), "SONDER_AUTH_SECRET": _key()}, "distinct"),
     ],
 )
 def test_enabled_config_requires_distinct_dedicated_secret(tmp_path, env, expected):
@@ -280,3 +282,105 @@ def test_direct_typed_config_rejects_nonstring_sources_without_raising():
     errors = memory_replication_errors(config)
 
     assert any("accepted_source_ids must contain" in message for message in errors)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (None, 0, [], b"not-a-text-secret", {"secret": "not-a-text-secret"}),
+)
+def test_injected_replication_key_requires_a_string_before_normalization(value):
+    with pytest.raises(ConfigError) as error:
+        load_config(env={"SONDER_MEMORY_REPLICATION_KEY": value})
+
+    assert error.value.errors == ("SONDER_MEMORY_REPLICATION_KEY must be a string",)
+    assert "not-a-text-secret" not in str(error.value)
+    assert "not-a-text-secret" not in repr(error.value)
+
+
+@pytest.mark.parametrize("field", ("local_node_id", "project_scope"))
+@pytest.mark.parametrize("value", (None, 0, False, [], {}))
+def test_disabled_typed_config_rejects_falsey_nonstring_identity_or_scope(field, value):
+    config = replace(
+        SonderConfig(),
+        memory_replication=replace(MemoryReplicationConfig(), **{field: value}),
+    )
+
+    errors = memory_replication_errors(config)
+
+    expected = f"[memory_replication].{field} must be " + (
+        "a bounded stable identity" if field == "local_node_id"
+        else "an exact bounded scope"
+    )
+    assert errors == [expected]
+
+
+@pytest.mark.parametrize(
+    "secret_name",
+    (
+        "SONDER_MEMORY_REPLICATION_KEY",
+        "SONDER_ARTIFACT_TRANSFER_KEY",
+        "SONDER_AUTH_SECRET",
+    ),
+)
+def test_secrets_parser_rejects_control_characters_without_echo(tmp_path, secret_name):
+    secrets = tmp_path / "secrets.env"
+    fragment = "https://private-secret.example/control"
+    secrets.write_text(f"{secret_name}={fragment}\t", encoding="utf-8")
+
+    with pytest.raises(config_environment.EnvironmentFileError) as error:
+        config_environment.parse_env_file(secrets)
+
+    assert "malformed secrets environment input" in str(error.value)
+    assert fragment not in str(error.value)
+    assert fragment not in repr(error.value)
+
+
+def test_malformed_secrets_file_after_blank_and_comment_never_echoes_input(tmp_path):
+    secrets = tmp_path / "secrets.env"
+    fragment = "https://private-secret.example/continuation"
+    secrets.write_text(
+        "SONDER_MEMORY_REPLICATION_KEY=" + _key() + "\n# ordinary comment\n\n" + fragment,
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError) as error:
+        load_config(secrets_path=secrets, env={})
+
+    assert "expected KEY=VALUE" in str(error.value)
+    assert "got" not in str(error.value)
+    assert fragment not in str(error.value)
+    assert fragment not in repr(error.value)
+
+
+@pytest.mark.parametrize("separator", ("\r", "\u0085", "\u2028", "\u2029"))
+def test_secrets_parser_rejects_noncanonical_line_separator_without_echo(
+    tmp_path, separator
+):
+    secrets = tmp_path / "secrets.env"
+    fragment = "https://private-secret.example/line-separator"
+    secrets.write_text(
+        "SONDER_MEMORY_REPLICATION_KEY=" + _key() + separator + fragment,
+        encoding="utf-8",
+    )
+
+    with pytest.raises(config_environment.EnvironmentFileError) as error:
+        config_environment.parse_env_file(secrets)
+
+    assert "malformed secrets environment input" in str(error.value)
+    assert fragment not in str(error.value)
+    assert fragment not in repr(error.value)
+
+
+def test_secrets_parser_rejects_invalid_utf8_without_echo(tmp_path):
+    secrets = tmp_path / "secrets.env"
+    fragment = "https://private-secret.example/invalid-utf8"
+    secrets.write_bytes(
+        b"SONDER_MEMORY_REPLICATION_KEY=" + fragment.encode("ascii") + b"\xff"
+    )
+
+    with pytest.raises(config_environment.EnvironmentFileError) as error:
+        config_environment.parse_env_file(secrets)
+
+    assert "malformed secrets environment input" in str(error.value)
+    assert fragment not in str(error.value)
+    assert fragment not in repr(error.value)

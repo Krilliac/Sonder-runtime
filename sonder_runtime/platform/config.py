@@ -913,11 +913,15 @@ def _apply_environment(
         secrets = replace(secrets, api_key=env["SONDER_API_KEY"].strip())
     if env.get("SONDER_ARTIFACT_TRANSFER_KEY", "").strip():
         secrets = replace(secrets, artifact_transfer_key=env["SONDER_ARTIFACT_TRANSFER_KEY"].strip())
-    if env.get("SONDER_MEMORY_REPLICATION_KEY", "").strip():
-        secrets = replace(
-            secrets,
-            memory_replication_key=env["SONDER_MEMORY_REPLICATION_KEY"].strip(),
-        )
+    if "SONDER_MEMORY_REPLICATION_KEY" in env:
+        replication_key = env["SONDER_MEMORY_REPLICATION_KEY"]
+        if type(replication_key) is not str:
+            errors.append("SONDER_MEMORY_REPLICATION_KEY must be a string")
+        elif replication_key.strip():
+            secrets = replace(
+                secrets,
+                memory_replication_key=replication_key.strip(),
+            )
     if env.get("SONDER_AUTH_SECRET", "").strip():
         secrets = replace(secrets, auth_secret=env["SONDER_AUTH_SECRET"].strip())
     if env.get("SONDER_BACKUP_KEY_FILE", "").strip():
