@@ -1,9 +1,12 @@
 """Private HTTP app-control composition, with no lane execution authority."""
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict
 import hashlib
 import hmac
 import json
+import os
 from pathlib import Path
 import re
 import secrets
@@ -35,6 +38,7 @@ from ..application.ports.app_control import (
     text,
 )
 from ..platform.app_control_config import app_control_errors, app_control_transport
+from ..platform import paths as runtime_paths
 from .app_control import AppProjectGrantCatalog
 
 from ..application.ports.app_control_http import ControlError
@@ -111,10 +115,16 @@ class AppControlBinding:
             lanes_provider,
         )
         self._clock, self.store, self._initial = clock, None, None
+        self._private_inventory_scope = ContextVar(
+            "app_control_private_inventory_scope", default=None
+        )
         self.catalog = AppProjectGrantCatalog(
             config_provider=config_provider,
             workspace_roots=lambda: self._config_provider().state.workspace_roots,
             private_inventory=self._private,
+            private_inventory_snapshot=lambda inventory: self._private(
+                inventory=inventory
+            ),
             clock=clock,
         )
 
@@ -125,6 +135,92 @@ class AppControlBinding:
         return authority.issue_selection(
             account_token=account_token, control_token=control_token, context=context
         )
+
+    def _private_requirements(self, config):
+        return ControlPlanePaths(
+            databases=(Path(self._fleet_path()), Path(self._account_path())),
+            files=tuple(Path(p) for p in config.private_source_paths),
+        )
+
+    @staticmethod
+    def _private_scope_digest(required):
+        """Fingerprint trusted path-resolution inputs without retaining values."""
+        digest = hashlib.sha256()
+        try:
+            configured = runtime_paths._configured_home()
+            values = (*sorted(os.environ.items()), ("cwd", os.getcwd()))
+            for name, value in (*values, ("configured_home", configured or "")):
+                digest.update(os.fsencode(name))
+                digest.update(b"\0")
+                digest.update(os.fsencode(str(value)))
+                digest.update(b"\0")
+            for name in (
+                "databases",
+                "files",
+                "owned_directories",
+                "owner_lock_directories",
+                "audit_files",
+                "atomic_files",
+            ):
+                for value in getattr(required, name):
+                    digest.update(os.fsencode(name))
+                    digest.update(b"\0")
+                    digest.update(os.fsencode(str(value)))
+                    digest.update(b"\0")
+        except (OSError, TypeError, UnicodeError, ValueError):
+            raise PermissionError("private inventory scope unavailable") from None
+        return digest.digest()
+
+    def _scoped_private_inventory(self, *, config=None, required=None):
+        """Return the current owned-operation snapshot after its live fence.
+
+        A scope establishes coverage once at entry.  Later users still bind it
+        to the current configuration object, exact normalized source paths, and
+        the process inputs that select control-plane paths.  This avoids
+        repeatedly re-canonicalizing every protected sidecar during one owned
+        operation while never carrying a snapshot into a different operation.
+        """
+        config = self._config_provider() if config is None else config
+        required = (
+            self._private_requirements(config) if required is None else required
+        )
+        entry = self._private_inventory_scope.get()
+        if (
+            type(entry) is not tuple
+            or len(entry) != 4
+            or entry[0] is not config
+            or entry[1] != self._private_scope_digest(required)
+            or entry[2] != required
+            or type(entry[3]) is not ControlPlaneInventory
+        ):
+            return None
+        return entry[3]
+
+    def _refresh_scoped_private_inventory(self, inventory):
+        if self._private_inventory_scope.get() is None:
+            return
+        config = self._config_provider()
+        required = self._private_requirements(config)
+        if type(inventory) is not ControlPlaneInventory or not inventory.covers(required):
+            raise PermissionError("private inventory snapshot unavailable")
+        self._private_inventory_scope.set(
+            (config, self._private_scope_digest(required), required, inventory)
+        )
+
+    @contextmanager
+    def private_inventory_scope(self, inventory):
+        """Reuse one trusted snapshot only within an owned logical operation."""
+        config = self._config_provider()
+        required = self._private_requirements(config)
+        if type(inventory) is not ControlPlaneInventory or not inventory.covers(required):
+            raise PermissionError("private inventory snapshot unavailable")
+        token = self._private_inventory_scope.set(
+            (config, self._private_scope_digest(required), required, inventory)
+        )
+        try:
+            yield inventory
+        finally:
+            self._private_inventory_scope.reset(token)
 
     def _private(self, *, context_roots=(), inventory=None):
         config = self._config_provider()
@@ -138,19 +234,23 @@ class AppControlBinding:
         )
         if not 1 <= len(roots) <= 256 or any(not p.is_dir() for p in roots):
             raise PermissionError("complete model roots unavailable")
-        required = ControlPlanePaths(
-            databases=(Path(self._fleet_path()), Path(self._account_path())),
-            files=tuple(Path(p) for p in config.private_source_paths),
-        )
+        required = self._private_requirements(config)
+        scoped = self._scoped_private_inventory(config=config, required=required)
         if inventory is None:
-            inventory = self._inventory()
-            inventory.require_disjoint(roots)
-            live_control_plane_inventory(additional=lambda: required).require_disjoint(
-                roots
-            )
+            inventory = scoped
+            if inventory is None:
+                inventory = self._inventory()
+                inventory.require_disjoint(roots)
+                live_control_plane_inventory(
+                    additional=lambda: required
+                ).require_disjoint(roots)
+                self._refresh_scoped_private_inventory(inventory)
+            else:
+                inventory.require_disjoint(roots)
         else:
-            if type(inventory) is not ControlPlaneInventory or not inventory.covers(
-                required
+            if inventory is not scoped and (
+                type(inventory) is not ControlPlaneInventory
+                or not inventory.covers(required)
             ):
                 raise PermissionError("private inventory snapshot unavailable")
             inventory.require_disjoint(roots)
@@ -192,7 +292,7 @@ class AppControlBinding:
                 )
         return identity
 
-    def _config(self):
+    def _config(self, *, inventory=None):
         config = self._config_provider()
         if (
             not config.app_control.enabled
@@ -209,7 +309,7 @@ class AppControlBinding:
             or secret == admin_auth.PUBLIC_DEV_SECRET
         ):
             raise ControlError(503, "APP_CONTROL_UNAVAILABLE")
-        self._private()
+        self._private(inventory=inventory)
         self._source()
         return config
 
@@ -254,8 +354,10 @@ class AppControlBinding:
             raise ControlError(401, "APP_CONTROL_AUTH_REQUIRED")
         return account
 
-    def _grant(self, account, project):
-        return self.catalog.resolve(project, account.username, account.role)
+    def _grant(self, account, project, *, inventory=None):
+        return self.catalog.resolve(
+            project, account.username, account.role, inventory=inventory
+        )
 
     def _current(self, conn, token, account, grant):
         self._account(conn, token, account)

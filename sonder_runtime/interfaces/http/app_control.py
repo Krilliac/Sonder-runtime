@@ -1,6 +1,6 @@
 """Early bounded wire boundary for private app-control metadata."""
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import re
 import threading
 import time
@@ -163,9 +163,12 @@ def handle_app_control(
 
     try:
         peer = handler._peer()
-        with _admit(peer):
+        with _admit(peer), ExitStack() as scopes:
             if binding is None or binding.store is None:
                 raise ControlError(503, "APP_CONTROL_UNAVAILABLE")
+            scopes.enter_context(
+                binding.private_inventory_scope(binding._private())
+            )
             config = binding._config()
             origin = _header(handler, "Origin")
             authorization = _header(handler, "Authorization")

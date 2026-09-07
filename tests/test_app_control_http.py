@@ -120,6 +120,66 @@ def test_private_reuses_a_prevalidated_inventory_snapshot(control, monkeypatch):
     assert calls == []
 
 
+def test_private_inventory_scope_reuses_matching_snapshot_and_refreshes_env(
+    control, monkeypatch, tmp_path
+):
+    binding, _, _, _, catalog, _ = control
+    db = Path(binding._account_path())
+    fleet = Path(binding._fleet_path())
+    snapshot = live_control_plane_inventory(
+        additional=lambda: ControlPlanePaths(
+            databases=(db, fleet), files=(catalog,)
+        )
+    )
+    original = binding._inventory
+    calls = []
+
+    def inventory():
+        calls.append(True)
+        return original()
+
+    monkeypatch.setattr(binding, "_inventory", inventory)
+    with binding.private_inventory_scope(snapshot):
+        binding._private()
+        assert calls == []
+        monkeypatch.setenv(
+            "SONDER_SYSTEM_PROFILE",
+            str(tmp_path.parent / "sibling-profile" / "profile.md"),
+        )
+        binding._private()
+        assert calls == [True]
+
+
+def test_private_inventory_scope_rejects_changed_control_source(control, monkeypatch):
+    binding, _, _, _, catalog, _ = control
+    db = Path(binding._account_path())
+    fleet = Path(binding._fleet_path())
+    snapshot = live_control_plane_inventory(
+        additional=lambda: ControlPlanePaths(
+            databases=(db, fleet), files=(catalog,)
+        )
+    )
+    changed = fleet.with_name("replacement-fleet.db")
+    changed.touch()
+    original = binding._fleet_path
+    original_inventory = binding._inventory
+    calls = []
+
+    def inventory():
+        calls.append(True)
+        return original_inventory()
+
+    monkeypatch.setattr(binding, "_inventory", inventory)
+    try:
+        with binding.private_inventory_scope(snapshot):
+            binding._fleet_path = lambda: changed
+            with pytest.raises(PermissionError, match="private inventory"):
+                binding._private()
+        assert calls == [True]
+    finally:
+        binding._fleet_path = original
+
+
 def test_private_snapshot_rejects_changed_private_source(control):
     binding, _, _, _, catalog, _ = control
     from sonder_runtime.adapters.security.control_plane_paths import (
@@ -857,6 +917,7 @@ def test_actual_http_two_account_binding_isolation(http_control, control):
 
 
 def test_wire_does_not_publish_second_response_after_writer_failure(control):
+    from contextlib import nullcontext
     from email.message import Message
     from types import SimpleNamespace
     from sonder_runtime.interfaces.http.app_control import handle_app_control
@@ -867,6 +928,8 @@ def test_wire_does_not_publish_second_response_after_writer_failure(control):
     headers["Content-Length"] = "2"
     headers["X-Sonder-Account-Token"] = token
     replies = []
+    scopes = []
+    marker = object()
 
     def write(*args, **kwargs):
         replies.append(args)
@@ -883,11 +946,15 @@ def test_wire_does_not_publish_second_response_after_writer_failure(control):
     )
     fake = SimpleNamespace(
         store=object(),
+        _private=lambda: marker,
         _config=lambda: state["config"],
+        private_inventory_scope=lambda inventory: (
+            scopes.append(inventory) or nullcontext()
+        ),
         transport_allowed=lambda **kwargs: True,
         perform=lambda action, payload, **kwargs: kwargs["publish"](201, {"ok": True}),
     )
     assert handle_app_control(
         handler, "POST", fake, deployment_authorized=lambda *_: True
     )
-    assert len(replies) == 1 and handler.close_connection
+    assert len(replies) == 1 and handler.close_connection and scopes == [marker]

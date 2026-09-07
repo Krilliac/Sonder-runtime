@@ -1,5 +1,6 @@
 """Explicit recovery controls composed only by the owning runtime."""
 
+from contextlib import contextmanager
 from dataclasses import asdict
 from types import SimpleNamespace
 import time
@@ -68,6 +69,7 @@ class AppWorkRecoveryHttpBinding:
             executor=ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="app-recovery"
             ),
+            operation_scope=self._recovery_scope,
         )
         registration = None
         try:
@@ -86,6 +88,13 @@ class AppWorkRecoveryHttpBinding:
         if self._require_owned(self.work.application) is not self.registry:
             raise PermissionError("exact owned recovery registry unavailable")
         return inventory
+
+    @contextmanager
+    def _recovery_scope(self, selection):
+        """Start each explicit callback with one fresh, bounded inventory."""
+        inventory = self.require_current()
+        with self.control.private_inventory_scope(inventory):
+            yield
 
     def _attempt(self, selection):
         work = self.work

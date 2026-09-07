@@ -1,5 +1,6 @@
 """Bounded runtime-owned explicit recovery, with no action replay on ambiguity."""
 
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import hashlib
@@ -29,21 +30,39 @@ class _Entry:
     released: bool = False
 
 
+def _no_operation_scope(_selection):
+    return nullcontext()
+
+
 class AppWorkRecoveryRegistry:
     def __init__(
-        self, *, application, authority, attempt_factory, executor, max_attempts=32
+        self,
+        *,
+        application,
+        authority,
+        attempt_factory,
+        executor,
+        operation_scope=None,
+        max_attempts=32,
     ):
         if (
             application is None
             or authority is None
             or not callable(attempt_factory)
             or not isinstance(executor, ThreadPoolExecutor)
+            or operation_scope is not None
+            and not callable(operation_scope)
             or type(max_attempts) is not int
             or not 1 <= max_attempts <= 32
         ):
             raise TypeError("exact private bounded recovery composition required")
         self._application, self._authority = application, authority
         self._factory, self._executor = attempt_factory, executor
+        self._operation_scope = (
+            operation_scope
+            if operation_scope is not None
+            else _no_operation_scope
+        )
         self._limit, self._lock = max_attempts, RLock()
         self._close_lock = Lock()
         self._entries = {}
@@ -160,43 +179,55 @@ class AppWorkRecoveryRegistry:
             with self._lock:
                 if self._closed or (entry.uncertain and action != "close"):
                     return
-            if action == "close":
-                self._release(entry)
+            scope = (
+                nullcontext()
+                if action == "close"
+                else self._operation_scope(entry.selection)
+            )
+            with scope:
                 with self._lock:
-                    entry.phase, entry.code = "closed", "LOCAL_HANDLE_CLOSED"
-                return
-            self._live(entry.selection)
-            if action == "prepare":
-                attempt = self._factory(entry.selection)
-                if (
-                    type(attempt) is not AppWorkRecoveryAttempt
-                    or attempt._application is not self.application
-                    or attempt._authority is not self._authority
-                    or attempt._selection is not entry.selection
-                ):
-                    raise PermissionError("exact owned recovery attempt required")
-                entry.attempt = attempt
-                self._authority.release_retained(entry.lease)
-                entry.lease = None
-                prepared = attempt.prepare(
-                    work_id=entry.inputs[0],
-                    attachment_command_id=entry.inputs[1],
-                    completion_command_id=entry.inputs[2],
-                )
-                with self._lock:
-                    entry.prepared, entry.work = prepared, prepared.work
-                    entry.phase, entry.code = "prepared", "EXPLICIT_ATTACHMENT_REQUIRED"
-            else:
-                result = getattr(entry.attempt, action)(entry.prepared)
-                if type(result) is not AppRecoveryView:
-                    raise TypeError("exact recovery view required")
-                with self._lock:
-                    entry.work, entry.phase, entry.code = (
-                        result.work,
-                        result.phase,
-                        result.code,
+                    if self._closed or (entry.uncertain and action != "close"):
+                        return
+                if action == "close":
+                    self._release(entry)
+                    with self._lock:
+                        entry.phase, entry.code = "closed", "LOCAL_HANDLE_CLOSED"
+                    return
+                self._live(entry.selection)
+                if action == "prepare":
+                    attempt = self._factory(entry.selection)
+                    if (
+                        type(attempt) is not AppWorkRecoveryAttempt
+                        or attempt._application is not self.application
+                        or attempt._authority is not self._authority
+                        or attempt._selection is not entry.selection
+                    ):
+                        raise PermissionError("exact owned recovery attempt required")
+                    entry.attempt = attempt
+                    self._authority.release_retained(entry.lease)
+                    entry.lease = None
+                    prepared = attempt.prepare(
+                        work_id=entry.inputs[0],
+                        attachment_command_id=entry.inputs[1],
+                        completion_command_id=entry.inputs[2],
                     )
-                    entry.approval = result.approval
+                    with self._lock:
+                        entry.prepared, entry.work = prepared, prepared.work
+                        entry.phase, entry.code = (
+                            "prepared",
+                            "EXPLICIT_ATTACHMENT_REQUIRED",
+                        )
+                else:
+                    result = getattr(entry.attempt, action)(entry.prepared)
+                    if type(result) is not AppRecoveryView:
+                        raise TypeError("exact recovery view required")
+                    with self._lock:
+                        entry.work, entry.phase, entry.code = (
+                            result.work,
+                            result.phase,
+                            result.code,
+                        )
+                        entry.approval = result.approval
         except BaseException:
             with self._lock:
                 entry.uncertain = True

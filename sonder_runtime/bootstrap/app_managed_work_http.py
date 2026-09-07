@@ -129,8 +129,10 @@ class _AppWorkbench(PreparedWorkbenchAdapter):
     def execute_prepared_workbench(
         self, prepared, *, admitted_context, managed_factory
     ):
-        self.service.inventory()
-        with control_plane_scope(self.service.private_paths()), managed_root_scope(
+        inventory = self.service.inventory()
+        with self.service.control.private_inventory_scope(
+            inventory
+        ), control_plane_scope(self.service.private_paths()), managed_root_scope(
             lambda: admitted_context.workspace_roots
         ):
             return super().execute_prepared_workbench(
@@ -236,9 +238,12 @@ class AppManagedWorkHttpBinding:
         )
 
     def inventory(self):
-        result = live_control_plane_inventory(additional=self.private_paths)
+        result = self.control._scoped_private_inventory()
+        if result is None:
+            result = live_control_plane_inventory(additional=self.private_paths)
         result.require_disjoint(self.model_roots())
         self.control._private(inventory=result)
+        self.control._refresh_scoped_private_inventory(result)
         return result
 
     def policy(self, context):

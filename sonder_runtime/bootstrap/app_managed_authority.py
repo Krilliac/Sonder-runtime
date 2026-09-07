@@ -46,6 +46,8 @@ class AppAdmission:
     active: bool = True
     connection: object = None
     key_digest: str = ""
+    private_inventory: object = field(default=None, repr=False)
+    private_inventory_identity: tuple = field(default=(), repr=False)
 
     def __reduce__(self):
         raise TypeError("app admission cannot be persisted")
@@ -112,6 +114,11 @@ def _selection_identity(selection):
         original,
         id(selection._issuer),
     )
+
+
+def _private_inventory_identity(selection, context, key_digest):
+    """Bind a one-admission inventory to the exact control-plane admission."""
+    return (_selection_identity(selection), id(context), key_digest)
 
 
 class AppManagedAuthority:
@@ -335,13 +342,38 @@ class AppManagedAuthority:
                 )
             return result
 
-    def _selection(self, selection):
+    def _selection(self, selection, *, inventory=None):
         self._outside_work_callback()
         with self._lock:
             self._issued_locked(selection)
         _context_within(selection.context, selection.original_context)
-        self.binding._private(context_roots=selection.original_context.workspace_roots)
+        self.binding._private(
+            context_roots=selection.original_context.workspace_roots,
+            inventory=inventory,
+        )
         return selection
+
+    def _model_writable_roots(self, admission):
+        """Read live configured roots from the current exact admission snapshot."""
+        with self._lock:
+            scope = self._admissions.get(id(admission))
+            if (
+                type(admission) is not AppAdmission
+                or scope is None
+                or scope["token"] is not admission
+                or scope["thread"] != threading.get_ident()
+                or scope["private_inventory"] is not admission.private_inventory
+                or scope["private_inventory_identity"]
+                != admission.private_inventory_identity
+                or admission.private_inventory_identity
+                != _private_inventory_identity(
+                    admission.selection, admission.context, admission.key_digest
+                )
+            ):
+                raise PermissionError("exact private admission required for model roots")
+        return self.binding._config(
+            inventory=admission.private_inventory
+        ).state.workspace_roots
 
     @contextmanager
     def admit(self, subject, context):
@@ -378,13 +410,20 @@ class AppManagedAuthority:
     def _admit(self, subject, context):
         registration = None
         if type(subject) is AppHostSelection:
-            selection = self._selection(subject)
+            with self._lock:
+                selection = self._issued_locked(subject)
         else:
             with self._lock:
                 registration = self._parents.get(subject)
             if registration is None:
                 raise PermissionError("active app parent registration unavailable")
-            selection = self._selection(registration.selection)
+            with self._lock:
+                selection = self._issued_locked(registration.selection)
+        binding = self.binding
+        inventory = binding._private(
+            context_roots=selection.original_context.workspace_roots
+        )
+        selection = self._selection(selection, inventory=inventory)
         if context.source == "worker":
             with self._lock:
                 proof = self._workers.get(id(context))
@@ -399,9 +438,8 @@ class AppManagedAuthority:
                 raise PermissionError("worker grant expired")
         else:
             _context_within(context, selection.context)
-        binding = self.binding
-        binding._config()
-        binding._private(context_roots=context.workspace_roots)
+        binding._config(inventory=inventory)
+        binding._private(context_roots=context.workspace_roots, inventory=inventory)
         conn = binding._open()
         admission = None
         try:
@@ -424,8 +462,10 @@ class AppManagedAuthority:
                     or account.role != "admin"
                 ):
                     raise PermissionError("exact app account session is no longer live")
-                binding._config()
-                grant = binding._grant(account, selection.control.grant.project_handle)
+                binding._config(inventory=inventory)
+                grant = binding._grant(
+                    account, selection.control.grant.project_handle, inventory=inventory
+                )
                 if grant_snapshot(grant) != selection.control.grant:
                     raise PermissionError("original app grant changed")
                 admission = AppAdmission(
@@ -435,6 +475,10 @@ class AppManagedAuthority:
                     self._issuer,
                     threading.get_ident(),
                     registration,
+                    private_inventory=inventory,
+                    private_inventory_identity=_private_inventory_identity(
+                        selection, context, key_digest
+                    ),
                 )
                 admission.key_digest = key_digest
                 with self._lock:
@@ -449,6 +493,8 @@ class AppManagedAuthority:
                         selection=selection,
                         account=account,
                         key_digest=admission.key_digest,
+                        private_inventory=admission.private_inventory,
+                        private_inventory_identity=admission.private_inventory_identity,
                         connection=None,
                     )
                 yield admission
@@ -472,6 +518,9 @@ class AppManagedAuthority:
                 or scope["selection"] is not admission.selection
                 or scope["account"] != admission.account
                 or scope["key_digest"] != admission.key_digest
+                or scope["private_inventory"] is not admission.private_inventory
+                or scope["private_inventory_identity"]
+                != admission.private_inventory_identity
                 or scope["connection"] is not None
                 and scope["connection"] is not connection
             ):
@@ -483,11 +532,16 @@ class AppManagedAuthority:
             or admission._issuer is not self._issuer
             or admission.thread != threading.get_ident()
             or admission.context is not context
+            or admission.private_inventory_identity
+            != _private_inventory_identity(
+                admission.selection, context, admission.key_digest
+            )
             or not connection.in_transaction
             or admission.connection is not None
             and admission.connection is not connection
         ):
             raise PermissionError("exact live app transaction admission required")
+        self.binding._config(inventory=admission.private_inventory)
         if (
             admission.account.expires_at <= time.time()
             or admission.key_digest
@@ -495,7 +549,9 @@ class AppManagedAuthority:
         ):
             raise PermissionError("account admission expired or signing key changed")
         admission.connection = connection
-        selection = self._selection(admission.selection)
+        selection = self._selection(
+            admission.selection, inventory=admission.private_inventory
+        )
         try:
             session, binding, slot = self.binding.store.atomic(
                 lambda tx: tx.require_selection(
@@ -516,7 +572,11 @@ class AppManagedAuthority:
             or slot != selection.slot
         ):
             raise PermissionError("sealed app selection changed")
-        current = self.binding._grant(admission.account, session.grant.project_handle)
+        current = self.binding._grant(
+            admission.account,
+            session.grant.project_handle,
+            inventory=admission.private_inventory,
+        )
         if grant_snapshot(current) != session.grant:
             raise PermissionError("app catalog changed")
         if not set(selection.allowed_tools).issubset(self.lanes.allowed_tools):
@@ -647,7 +707,7 @@ class AppManagedAuthority:
             projection_codec=projection_codec,
             command_codec=command_codec,
             terminal_result_codec=terminal_result_codec,
-            model_writable_roots=lambda: self.binding._config().state.workspace_roots,
+            managed_model_writable_roots=self._model_writable_roots,
         )
 
     def register_parent(self, bound, record, context):
