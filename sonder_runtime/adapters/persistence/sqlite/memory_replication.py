@@ -326,20 +326,22 @@ class SQLiteMemoryReplicationJournal:
             raise MemoryReplicationError("source epoch must be positive")
         with self._session() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            current = self._meta(connection)[0]
+            current, next_sequence, _persisted_scope = self._meta(connection)
             if source_epoch <= current:
                 raise MemoryReplicationError("source epoch must advance")
-            if connection.execute(
+            has_records = connection.execute(
                 "SELECT 1 FROM memory_replication_log WHERE source_id=? LIMIT 1",
                 (self.source_id,),
-            ).fetchone() is not None:
+            ).fetchone() is not None
+            if has_records or next_sequence != 1:
                 # The bounded batch schema carries one source epoch for every
                 # exported record.  With sequence keyed only by source, a
-                # rollover after an append would create a mixed-epoch page.
-                # Keep the existing journal truthful until an archival rollover
-                # protocol exists.
+                # rollover after an allocated sequence would make a fresh
+                # projection reject the first record of the new epoch.  Keep
+                # the cursor truthful until an explicit bootstrap/archive
+                # rollover protocol exists.
                 raise MemoryReplicationError(
-                    "source epoch can advance only while the journal is empty"
+                    "source epoch can advance only from an empty bootstrap cursor"
                 )
             connection.execute(
                 "UPDATE memory_replication_meta SET source_epoch=? WHERE source_id=?",

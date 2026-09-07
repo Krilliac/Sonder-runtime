@@ -23,10 +23,13 @@ composition belong outside the HTTP adapter.
 across explicitly trusted private nodes, while automatic takeover, consensus,
 unbounded scale, and installed-runtime changes remain out of scope.
 
-**Status:** Blocked deliberately at discovery. No production source code is
-included in this branch because the smallest apparent configuration slice
-would expose a receiver for an otherwise unpopulated journal and would not
-replicate the live memory store.
+**Status:** Task 1 is implemented locally for one explicit write set: a
+project-scoped `fact` source can be injected into a unit of work and records
+its materialized row, source state, and journal mutation in one SQLite
+transaction. It remains deliberately uncomposed: no normal runtime root
+injects it, and no receiver, configuration, HTTP route, peer, or retry service
+exists. Ordinary runtime memory writes therefore remain legacy and are not
+represented as live replication.
 
 ---
 
@@ -158,11 +161,18 @@ It must not start a background retry loop, promote a node, change ownership,
 infer quorum, or make a global scalability claim. A two-PC pair remains a
 data-copy arrangement, never an independent-witness takeover system.
 
-## Implementation order once the contracts are accepted
+## Remaining implementation order after Task 1
 
-1. Add the authoritative write port and migration only for the named entity
-   set. Prove red/green tests for atomic source state plus journal records,
-   deterministic sequence allocation, updates, and tombstones.
+1. **Complete locally for `fact` only.** The injected writer owns source
+   identity, epoch, sequence, per-fact version, and tombstones. Direct calls
+   own one SQLite transaction; injected unit-of-work calls use a source
+   savepoint within the unit's outer transaction. In this fact-only path, a
+   rollback after a supported write removes the fact, source state, journal
+   record, and source cursor.
+   Epoch advance is fail-closed unless the source cursor is bootstrap-safe:
+   the journal has no records and `next_sequence == 1`. Pruning does not make
+   an already allocated cursor eligible for rollover. Interactions, outcomes,
+   preferences, and lessons remain outside this contract.
 2. Add the receive-and-project sink. Prove a real HTTP handler test where a
    trusted batch is visible through the target's normal memory read path only
    after a matching receipt is returned; prove a projection failure returns no
@@ -190,12 +200,15 @@ receipt as failover evidence. Any next artifact slice should therefore use
 one explicit, fixed peer grant and a caller-owned `replicate_once` command;
 it must not be coupled to a memory receiver or presented as resource pooling.
 
-## Guarantees after this discovery-only branch
+## Current branch limits after Task 1
 
-- Existing journal, HTTP, projection, and artifact-transfer tests remain
-  passing at the inspected revision.
-- No listener, credential, configuration, installation, or runtime behavior
-  has changed.
+- The source contract supports only explicitly injected, project-scoped
+  `fact` writes. Default and other legacy memory paths remain unjournaled.
+- A legacy self-committing operation used in the same injected unit of work
+  can commit its outer transaction; this initial rollback guarantee is limited
+  to the fact-only source path.
+- No listener, credential, configuration, normal composition root, receiver,
+  projection lifecycle, peer delivery, or retry behavior has changed.
 - The branch does not claim that normal runtime memory is replicated, mobile,
   highly available, automatically recoverable, sharded, or infinitely
   scalable.

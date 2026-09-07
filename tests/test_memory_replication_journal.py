@@ -1,5 +1,3 @@
-from datetime import datetime, timezone
-
 import pytest
 
 from sonder_runtime.domain.memory.replication import (
@@ -123,6 +121,23 @@ def test_epoch_regression_is_rejected_and_export_cursor_is_bounded(tmp_path):
         journal.export(limit=0)
     with pytest.raises(ValueError, match="sequence"):
         journal.export(after_sequence=-1)
+
+
+def test_epoch_rollover_rejects_a_fully_pruned_nonbootstrap_cursor(tmp_path):
+    journal = SQLiteMemoryReplicationJournal(tmp_path / "memory.db")
+    journal.append(
+        (
+            _mutation(),
+            _mutation(sequence=2, version=2, operation="delete", payload={}),
+        )
+    )
+    assert journal.prune_before(3, retain_tombstones=False) == 2
+    assert journal.export().records == ()
+
+    with pytest.raises(MemoryReplicationError, match="bootstrap"):
+        journal.advance_epoch(2)
+
+    assert journal.export().source_epoch == 1
 
 
 def test_unscoped_project_filter_is_rejected_to_preserve_cursor_continuity(tmp_path):

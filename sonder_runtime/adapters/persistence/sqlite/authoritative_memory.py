@@ -295,19 +295,21 @@ class SQLiteAuthoritativeFactSource:
         ):
             raise MemoryReplicationError("source epoch must be positive")
         with self._transaction(connection):
-            current_epoch, _sequence = self._source_cursor(connection)
+            current_epoch, next_sequence = self._source_cursor(connection)
             if source_epoch <= current_epoch:
                 raise MemoryReplicationError("source epoch must advance")
-            if connection.execute(
+            has_records = connection.execute(
                 "SELECT 1 FROM memory_replication_log WHERE source_id=? LIMIT 1",
                 (self.source_id,),
-            ).fetchone() is not None:
+            ).fetchone() is not None
+            if has_records or next_sequence != 1:
                 # This journal schema keys sequence by source, not epoch.  A
-                # rollover after an append would mix epochs in one export page
-                # and make the batch contract lie.  A future epoch rollover
-                # therefore needs an explicit archival/migration protocol.
+                # rollover after any allocated sequence would make a fresh
+                # projection reject the first record of the new epoch.  A
+                # fully pruned history still has an advanced cursor, so a
+                # future rollover needs an explicit bootstrap/archive protocol.
                 raise MemoryReplicationError(
-                    "source epoch can advance only while the journal is empty"
+                    "source epoch can advance only from an empty bootstrap cursor"
                 )
             connection.execute(
                 "UPDATE memory_replication_meta SET source_epoch=? "

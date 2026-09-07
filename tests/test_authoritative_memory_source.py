@@ -215,6 +215,35 @@ def test_unit_of_work_routes_an_explicit_authoritative_fact_source(tmp_path):
         journal.close()
 
 
+def test_authoritative_fact_uow_rolls_back_source_state_after_later_failure(tmp_path):
+    """An injected source must share the UoW's rollback boundary."""
+    path = tmp_path / "memory.db"
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+
+    with pytest.raises(RuntimeError, match="abort unit of work"):
+        with UnitOfWorkAdapter(
+            str(path), authoritative_fact_source=source
+        ) as unit_of_work:
+            unit_of_work.memory.add_fact(
+                "fact-1", "repo-a", "must roll back with the unit of work"
+            )
+            raise RuntimeError("abort unit of work")
+
+    connection = connect(path)
+    try:
+        assert facts_for_project(connection, "repo-a") == []
+        for table in (
+            "memory_authoritative_fact_state",
+            "memory_replication_log",
+            "memory_replication_meta",
+        ):
+            assert connection.execute(
+                f"SELECT COUNT(*) FROM {table}"
+            ).fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
 def test_default_unit_of_work_preserves_the_legacy_unjournaled_fact_path(tmp_path):
     path = tmp_path / "memory.db"
 
@@ -269,6 +298,40 @@ def test_authoritative_fact_source_rejects_epoch_rollover_after_a_mutation(tmp_p
         ("node-a",),
     ).fetchone()[0] == 1
     connection.close()
+
+
+def test_authoritative_fact_source_rejects_epoch_rollover_after_full_prune(tmp_path):
+    path = tmp_path / "memory.db"
+    connection = connect(path)
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    source.add_fact(connection, "fact-1", "repo-a", "first value")
+    assert source.delete_fact(connection, "fact-1", "repo-a") is True
+    connection.close()
+
+    journal = SQLiteMemoryReplicationJournal(
+        path,
+        source_id="node-a",
+        project_scope="repo-a",
+    )
+    try:
+        assert journal.prune_before(3, retain_tombstones=False) == 2
+        assert journal.export().records == ()
+    finally:
+        journal.close()
+
+    reopened = connect(path)
+    try:
+        with pytest.raises(MemoryReplicationError, match="bootstrap"):
+            source.advance_epoch(reopened, 2)
+        assert tuple(
+            reopened.execute(
+                "SELECT source_epoch,next_sequence FROM memory_replication_meta "
+                "WHERE source_id=?",
+                ("node-a",),
+            ).fetchone()
+        ) == (1, 3)
+    finally:
+        reopened.close()
 
 
 def test_authoritative_fact_source_refuses_a_second_source_for_the_same_fact(tmp_path):

@@ -14,10 +14,13 @@ class UnitOfWorkAdapter:
     operations event sink owns its own store.  The memory repository is bound
     to the connection opened when the scope is entered.
 
-    Some legacy memory-store operations still self-commit, so rollback does
-    not yet undo those operations.  This adapter owns the connection lifecycle
-    today; the transaction boundary tightens as those operations migrate off
-    self-commit.
+    Some legacy memory-store operations still self-commit, so the default path
+    preserves their existing behavior.  An explicitly injected authoritative
+    fact source is different: this unit opens an outer SQLite transaction
+    before exposing its repository, so the source's nested savepoint remains
+    rollbackable with the unit of work.  Other legacy operations are not
+    converted by that opt-in source boundary and can still self-commit, so
+    callers that need this guarantee keep the initial fact-only path separate.
     """
 
     def __init__(
@@ -40,10 +43,25 @@ class UnitOfWorkAdapter:
 
         path = self._db_path or paths.memory_db_path()
         self._conn = memory_store.connect(path)
-        self.memory = MemoryRepositoryAdapter(
-            self._conn,
-            authoritative_fact_source=self._authoritative_fact_source,
-        )
+        try:
+            self.memory = MemoryRepositoryAdapter(
+                self._conn,
+                authoritative_fact_source=self._authoritative_fact_source,
+            )
+            if self._authoritative_fact_source is not None:
+                # SQLite's ``in_transaction`` is then true before a supported
+                # source write.  SQLiteAuthoritativeFactSource uses a
+                # savepoint in that case and never commits the UoW's outer
+                # boundary itself.
+                self._conn.execute("BEGIN IMMEDIATE")
+        except BaseException:
+            try:
+                self._conn.rollback()
+            finally:
+                self._conn.close()
+                self._conn = None
+                self.memory = None
+            raise
         return self
 
     @property
