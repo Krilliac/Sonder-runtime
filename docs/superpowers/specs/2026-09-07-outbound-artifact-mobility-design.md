@@ -225,6 +225,11 @@ detail. TLS certificate pinning authenticates the endpoint serving the
 attestation; the expected digest authenticates the configured logical receiver
 and grant contract.
 
+mobility-v1 requires a present, valid receiver_identity_id before the receiver
+creates, deduplicates, or exposes a mobility row. A missing identity is a
+stable, no-detail mobility-v1 rejection; it must not weaken or alter the
+unchanged legacy receiver protocol.
+
 The existing begin operation gains a strict request-header contract value for
 mobility-v1. Legacy clients retain their existing response shape. With that
 contract value, begin returns a bounded envelope:
@@ -263,6 +268,24 @@ error. The mobility-v1 begin request sends it only over the pinned TLS
 connection. The receiver stores a keyed verifier bound to its current
 credential, receiver scope, transfer ID, and durable command ID. It never
 returns the capability.
+
+On first mobility-v1 begin, durable-row creation atomically stores that
+verifier and the row's immutable command/spec binding. A mobility-v1 replay of
+an existing command must first validate the supplied capability against that
+original verifier before it returns any envelope. It must not replace, rekey,
+or otherwise mutate the stored verifier, capability binding, immutable command,
+spec, or receipt state from a replay. A missing or mismatched capability fails
+with a stable authorization/protocol code and no envelope or receipt data.
+
+A request without the mobility-v1 header is strictly legacy. It must not
+select, replay, downgrade, mutate, or return the protected mobility receipt or
+envelope for a mobility-v1 row. If a legacy request names an existing
+mobility-v1 command, the receiver rejects it with a stable no-detail version
+code before constructing a response. Conversely, a mobility-v1 replay that
+finds a legacy row with no stored mobility verifier is rejected and cannot
+install one; the sender must create a fresh canonical operation. These rules
+preserve legacy shapes for legacy rows without allowing version downgrade to
+reveal a protected receipt or replace the original capability.
 
 The new receipt-inspection action requires all of:
 
@@ -522,5 +545,9 @@ The implementation must prove:
    transfer-bound mobility envelope for resume/final confirmation, while
    legacy upload inspection, artifact metadata, and artifact bytes remain
    forbidden; and
-10. a process-boundary loopback rehearsal is labeled as such, while a real
+10. a mobility-v1 begin/replay requires the original stored verifier and a
+    receiver_identity_id, rejects a missing/wrong capability without replacing
+    it, and does not let a legacy request return a mobility receipt/envelope or
+    downgrade a mobility row; and
+11. a process-boundary loopback rehearsal is labeled as such, while a real
     independent-host pinned TLS test remains a deployment gate.

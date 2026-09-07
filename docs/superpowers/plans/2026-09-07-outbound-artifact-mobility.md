@@ -174,7 +174,10 @@ receiver binding:
     receipt
 
 The receiver must not manufacture spec or command from a caller-provided echo.
-The begin envelope endpoint uses the same authenticated binding, TLS/loopback
+It must reject mobility-v1 before row creation/deduplication when
+receiver_identity_id is missing or invalid, with a stable no-detail result;
+this leaves legacy begin behavior unchanged. The begin envelope endpoint uses
+the same authenticated binding, TLS/loopback
 checks, body caps, no-proxy trust policy, and redacted logging behavior as
 artifact transfer. It is a destination receiver protocol extension, not an
 outbound controller route.
@@ -189,6 +192,20 @@ bound to receiver scope, transfer ID, and durable command. Resume/final
 inspection requires the authenticated bearer, current can_write grant, exact
 transfer ID/command, contract header, and matching receipt capability.
 
+First mobility-v1 begin atomically stores the verifier with the immutable
+durable row. A replay of that same mobility-v1 command must verify the incoming
+capability against the original stored verifier before building an envelope; it
+must not replace the verifier/capability binding, immutable command/spec, or
+receipt state. A missing or wrong capability receives only a stable
+authorization/protocol result, with no envelope or receipt data.
+
+Header absence is a strict legacy request. A legacy request that resolves to a
+mobility-v1 row must be rejected before it can return or mutate its protected
+mobility receipt/envelope, and it cannot downgrade that row. A mobility-v1
+request resolving to a legacy row without a verifier must also be rejected; it
+cannot retrofit a verifier/capability into legacy state. Both cases require a
+fresh canonical operation where mobility-v1 is needed.
+
 The receipt action returns only the bounded mobility envelope for that exact
 row. It may operate for can_write true/can_read false, but it must not permit
 artifact bytes, artifact metadata, arbitrary upload inspection, upload listing,
@@ -199,16 +216,24 @@ Tests:
 1. unauthenticated or disabled receiver cannot retrieve an attestation;
 2. the canonical attestation changes when receiver identity, source owner,
    grant ID/revision, write permission, or max object size changes;
-3. legacy begin/general-inspect responses remain compatible and read-gated;
+3. legacy begin/general-inspect responses remain compatible and read-gated,
+   while a missing receiver_identity_id rejects mobility-v1 before row creation
+   or envelope construction without changing legacy behavior;
 4. mobility-v1 begin and transfer-bound receipt inspection echo the durable
    command and exact durable spec, including a resumed record;
-5. malformed/missing version header and malformed envelope fail with stable
+5. a replay verifies the original stored verifier/capability, rejects a
+   missing/wrong capability without returning an envelope or replacing the
+   verifier, and preserves the immutable durable row;
+6. header-absent legacy requests cannot read, return, mutate, or downgrade a
+   mobility-v1 receipt/envelope, while a mobility-v1 request cannot install a
+   verifier onto a legacy row;
+7. malformed/missing version header and malformed envelope fail with stable
    codes and do not reveal configuration;
-6. a can_write true/can_read false receiver resumes and confirms only its own
+8. a can_write true/can_read false receiver resumes and confirms only its own
    transfer with the right receipt capability, while legacy inspection,
    artifact metadata, byte-range reads, and wrong-transfer capability attempts
    remain forbidden; and
-7. the endpoint cannot be enabled by source-only configuration on a sender.
+9. the endpoint cannot be enabled by source-only configuration on a sender.
 
 ## Task 4: add a pinned fixed-peer mobility client
 
