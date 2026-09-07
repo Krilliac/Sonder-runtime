@@ -120,6 +120,58 @@ class _TestFenceRepository:
         return lease
 
 
+class _FenceClock:
+    """Deterministic clock for a request-fence time-crossing regression."""
+
+    def __init__(self, value=1000.0):
+        self.value = value
+
+    def __call__(self):
+        return self.value
+
+
+class _AssertionCrossingFenceRepository:
+    """Advance real time after the second assertion, before renewal starts."""
+
+    def __init__(self, clock):
+        self._clock = clock
+        self.assertion_times = []
+        self.renewal_times = []
+        self._assertion_count = 0
+
+    def assert_current_lease(self, lease, *, lock, now):
+        self.assertion_times.append(now)
+        self._assertion_count += 1
+        if self._assertion_count == 2:
+            self._clock.value = 1003.0
+
+    def renew_dispatch(self, lease, *, lock, now, lease_seconds):
+        self.renewal_times.append(now)
+        if now >= lease.expires_at:
+            raise MobilityJournalError("LEASE_LOST")
+        return replace(lease, expires_at=now + lease_seconds)
+
+
+class _RenewalCrossingFenceRepository:
+    """Advance real time after a successful renewal returns its new lease."""
+
+    def __init__(self, clock):
+        self._clock = clock
+        self.assertion_times = []
+        self.renewal_times = []
+
+    def assert_current_lease(self, lease, *, lock, now):
+        self.assertion_times.append(now)
+
+    def renew_dispatch(self, lease, *, lock, now, lease_seconds):
+        self.renewal_times.append(now)
+        if now >= lease.expires_at:
+            raise MobilityJournalError("LEASE_LOST")
+        renewed = replace(lease, expires_at=now + lease_seconds)
+        self._clock.value = 1003.0
+        return renewed
+
+
 def _test_attempt_fences(targets, request_fences):
     expected = tuple(targets)
     if isinstance(request_fences, _RequestFences):
@@ -579,6 +631,85 @@ def test_nested_attestation_expiry_stops_before_later_configured_peer_request(
         expected[0]
     ]
     assert [request[3] for request in connections.requests] == [None]
+
+
+def test_fresh_renewal_time_blocks_configured_begin_after_assertion_crosses_expiry(
+    tmp_path,
+):
+    """The later nested POST must not use the assertion's stale timestamp."""
+    config, attestation = _config(tmp_path)
+    spec = _spec()
+    opening = _envelope(attestation, spec)
+    connections = _Connections([_Response(attestation), _Response(opening)])
+    peer = _configured_peer(config, connections)
+    clock = _FenceClock()
+    repository = _AssertionCrossingFenceRepository(clock)
+    fences = mobility._AttemptRequestFences(
+        repository=repository,
+        lease=mobility.DispatchLease(
+            operation_id="f" * 32,
+            source_owner_id="source-a",
+            epoch=1,
+            token="e" * 64,
+            expires_at=1002.0,
+        ),
+        lock=object(),
+        now=clock,
+        lease_seconds=2,
+        targets=(
+            ("GET", "/v1/artifact-transfers/recipient-attestation"),
+            ("POST", "/v1/artifact-transfers"),
+        ),
+    )
+
+    try:
+        with pytest.raises(MobilityJournalError, match="LEASE_LOST"):
+            with peer._request_fence_scope(fences):
+                peer.begin(spec, "mobility-v1.command-a", _CAPABILITY)
+    finally:
+        fences.close()
+
+    assert repository.assertion_times == [1000.0, 1000.0]
+    assert repository.renewal_times == [1000.0, 1003.0]
+    assert [
+        (request[1], request[2], request[3]) for request in connections.requests
+    ] == [("GET", "/v1/artifact-transfers/recipient-attestation", None)]
+
+
+def test_post_renewal_time_blocks_configured_transport_after_renewal_crosses_expiry(
+    tmp_path,
+):
+    """A renewal that blocks past its returned expiry cannot start a request."""
+    config, attestation = _config(tmp_path)
+    connections = _Connections([_Response(attestation)])
+    peer = _configured_peer(config, connections)
+    clock = _FenceClock()
+    repository = _RenewalCrossingFenceRepository(clock)
+    fences = mobility._AttemptRequestFences(
+        repository=repository,
+        lease=mobility.DispatchLease(
+            operation_id="f" * 32,
+            source_owner_id="source-a",
+            epoch=1,
+            token="e" * 64,
+            expires_at=1002.0,
+        ),
+        lock=object(),
+        now=clock,
+        lease_seconds=2,
+        targets=(("GET", "/v1/artifact-transfers/recipient-attestation"),),
+    )
+
+    try:
+        with pytest.raises(MobilityJournalError, match="LEASE_LOST"):
+            with peer._request_fence_scope(fences):
+                peer.recipient_attestation(_spec())
+    finally:
+        fences.close()
+
+    assert repository.assertion_times == [1000.0]
+    assert repository.renewal_times == [1000.0]
+    assert connections.requests == []
 
 
 @pytest.mark.parametrize(

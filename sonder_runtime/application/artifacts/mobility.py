@@ -772,16 +772,27 @@ class _AttemptRequestFences(_ArtifactMobilityPeerRequestFences):
         ):
             self.close()
             raise TransferError("MOBILITY_INTEGRITY")
-        timestamp = self._now()
+        assertion_now = self._now()
         self._repository.assert_current_lease(
-            self._lease, lock=self._lock, now=timestamp
+            self._lease, lock=self._lock, now=assertion_now
         )
-        self._lease = self._repository.renew_dispatch(
+        # The assertion may have blocked on SQLite.  Renew with a new clock
+        # sample so a lease that expired while it ran cannot be revived using
+        # the assertion's stale timestamp.
+        renewal_now = self._now()
+        renewed_lease = self._repository.renew_dispatch(
             self._lease,
             lock=self._lock,
-            now=timestamp,
+            now=renewal_now,
             lease_seconds=self._lease_seconds,
         )
+        # Renewal can also block.  Prove the returned lease is still live at
+        # the only point the peer may proceed to its concrete transport call.
+        transport_now = self._now()
+        if renewed_lease.expires_at <= transport_now:
+            self.close()
+            _fail("LEASE_LOST")
+        self._lease = renewed_lease
         self._index += 1
 
     def finish(self) -> DispatchLease:
