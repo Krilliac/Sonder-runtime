@@ -215,6 +215,35 @@ def test_unit_of_work_routes_an_explicit_authoritative_fact_source(tmp_path):
         journal.close()
 
 
+def test_untouched_authoritative_fact_uow_does_not_reserve_writer_lock(tmp_path):
+    """Opening an opt-in UoW must not block a separate SQLite writer."""
+    path = tmp_path / "memory.db"
+    peer = connect(path)
+    peer.execute("PRAGMA busy_timeout=0")
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+
+    try:
+        with UnitOfWorkAdapter(
+            str(path), authoritative_fact_source=source
+        ) as unit_of_work:
+            peer.execute(
+                "INSERT INTO facts(id,project,text,embedding) VALUES(?,?,?,?)",
+                ("peer-fact", "repo-a", "peer writer remains available", None),
+            )
+            peer.commit()
+
+            assert unit_of_work.memory.facts_for_project("repo-a") == [
+                {
+                    "id": "peer-fact",
+                    "project": "repo-a",
+                    "text": "peer writer remains available",
+                    "embedding": None,
+                }
+            ]
+    finally:
+        peer.close()
+
+
 def test_authoritative_fact_uow_rolls_back_source_state_after_later_failure(tmp_path):
     """An injected source must share the UoW's rollback boundary."""
     path = tmp_path / "memory.db"

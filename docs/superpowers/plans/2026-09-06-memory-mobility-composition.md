@@ -166,9 +166,10 @@ data-copy arrangement, never an independent-witness takeover system.
 1. **Complete locally for `fact` only.** The injected writer owns source
    identity, epoch, sequence, per-fact version, and tombstones. Direct calls
    own one SQLite transaction; injected unit-of-work calls use a source
-   savepoint within the unit's outer transaction. In this fact-only path, a
-   rollback after a supported write removes the fact, source state, journal
-   record, and source cursor.
+   savepoint within an outer transaction opened lazily when the supported
+   write is attempted. An untouched injected unit does not reserve SQLite's
+   writer lock. In this fact-only path, a rollback after a supported write
+   removes the fact, source state, journal record, and source cursor.
    Epoch advance is fail-closed unless the source cursor is bootstrap-safe:
    the journal has no records and `next_sequence == 1`. Pruning does not make
    an already allocated cursor eligible for rollover. Interactions, outcomes,
