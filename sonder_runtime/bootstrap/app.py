@@ -1557,6 +1557,23 @@ def default_app(*, config: SonderConfig | None = None) -> Application:
     return application
 
 
+def _artifact_mobility_operator_application() -> Application:
+    """Use only the host's existing exact graph or canonical first-start files.
+
+    No caller arguments or environment configuration selectors enter this path.
+    Once composed, the default/owned graph pins this authority until host reset.
+    """
+    if _owned_default_application is not None or _default_config is not None:
+        application = default_app()
+    else:
+        from .artifact_mobility import _load_mobility_host_config
+        application = default_app(config=_load_mobility_host_config())
+    if type(application) is not Application or type(application.config) is not SonderConfig:
+        from ..application.artifacts.mobility import MobilityJournalError
+        raise MobilityJournalError("UNAVAILABLE")
+    return application
+
+
 def reset_for_tests() -> None:
     global _default_config, _default_compute_close, _default_delegation_close, _default_artifact_mobility_close
     if _owned_default_application is not None:

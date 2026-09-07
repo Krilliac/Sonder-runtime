@@ -2,7 +2,8 @@
 
 No HTTP/MCP/REPL surface receives this binding or a source port. The optional
 source binding is an exact, host-owned typed object, never a plugin callback.
-A default graph has no trusted producer and therefore cannot send or resume.
+An explicitly enabled host source is reopened privately; operator input can
+select only an already sealed artifact, never a publisher or source path.
 """
 from __future__ import annotations
 
@@ -229,11 +230,22 @@ def compose_artifact_mobility(config_provider, *, source_binding: ArtifactMobili
     lock = RLock()
 
     def get_binding():
-        nonlocal binding
+        nonlocal binding, source_binding
         with lock:
             if closed:
                 raise MobilityJournalError('UNAVAILABLE')
             if binding is None:
+                config = config_provider()
+                if source_binding is None and type(config) is SonderConfig:
+                    validate_deployment(config)
+                    if config.artifact_mobility_source.enabled:
+                        # These capability objects belong to this Application's
+                        # trusted source composition, never to the CLI caller.
+                        # Reopening preserves sealed provenance in the source
+                        # spool; no public surface receives its publisher.
+                        source_binding = ArtifactMobilitySourceBinding(
+                            config_provider, publisher_capability=object(),
+                            reader_capability=object())
                 binding = ArtifactMobilityBinding(config_provider, source_binding=source_binding)
             return binding
 
@@ -250,11 +262,14 @@ def compose_artifact_mobility(config_provider, *, source_binding: ArtifactMobili
             return mobility_error_projection(error)
 
     def available():
-        if closed or source_binding is None:
+        if closed:
             return False
         try:
             config = config_provider()
             validate_deployment(config)
+            ArtifactMobilitySourceBinding._check_store_roots(config)
+            if source_binding is None:
+                return bool(config.artifact_mobility_source.enabled and config.artifact_mobility.enabled)
             return bool(config.artifact_mobility_source.enabled and config.artifact_mobility.enabled
                 and not artifact_mobility_errors(config)
                 and source_binding._publisher_capability is not None
@@ -275,3 +290,49 @@ def compose_artifact_mobility(config_provider, *, source_binding: ArtifactMobili
             source_binding.close()
 
     return get_binding, status, listing, available, close
+
+
+def _canonical_mobility_host_home():
+    """Resolve the OS account's provisioning root without environment selectors."""
+    import os
+    import sys
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        function = ctypes.windll.shell32.SHGetFolderPathW
+        function.argtypes = (wintypes.HWND, ctypes.c_int, wintypes.HANDLE,
+            wintypes.DWORD, wintypes.LPWSTR)
+        function.restype = ctypes.c_long
+        buffer = ctypes.create_unicode_buffer(32768)
+        if function(None, 0x001C, None, 0, buffer) != 0 or not buffer.value:
+            raise MobilityJournalError("UNAVAILABLE")
+        return Path(buffer.value) / "sonder"
+    import pwd
+    account_home = Path(pwd.getpwuid(os.geteuid()).pw_dir)
+    if sys.platform == "darwin":
+        return account_home / "Library" / "Application Support" / "sonder"
+    return account_home / ".local" / "share" / "sonder"
+
+
+def _load_mobility_host_config():
+    """First-start provisioning only: canonical files, no ambient overrides.
+
+    The host must provision sonder.toml with explicit absolute state.home and
+    source settings, plus sonder.env for its peer credential. Missing/invalid
+    provisioning fails closed. A running owned Application never reloads here.
+    """
+    import tomllib
+    from ..platform.config import load_config
+    try:
+        home = _canonical_mobility_host_home()
+        configuration = home / "sonder.toml"
+        with configuration.open("rb") as stream:
+            state_home = tomllib.load(stream).get("state", {}).get("home")
+        if not isinstance(state_home, str) or not Path(state_home).is_absolute():
+            raise ValueError
+        config = load_config(configuration, secrets_path=home / "sonder.env", env={})
+        if config.state.home != state_home:
+            raise ValueError
+        return config
+    except Exception:
+        raise MobilityJournalError("UNAVAILABLE") from None
