@@ -344,6 +344,21 @@ class SQLiteFactReplicationSink:
         _validate_source(identity, project_scope)
         if not hasattr(connection, "execute") or not hasattr(connection, "in_transaction"):
             raise TypeError("a SQLite connection is required")
+        # Python 3.12's ``autocommit=True`` leaves SQLite in autocommit mode:
+        # ``Connection.commit()`` is a no-op even after this sink issues an
+        # explicit BEGIN.  ``autocommit=False`` immediately opens another
+        # transaction after commit, which violates this sink's owned
+        # transaction boundary.  A receipt must follow a commit that another
+        # connection can observe, so support only legacy transaction control.
+        autocommit = getattr(connection, "autocommit", None)
+        if autocommit is True:
+            raise ValueError(
+                "fact replication sink does not support sqlite autocommit=True"
+            )
+        if autocommit is False:
+            raise ValueError(
+                "fact replication sink does not support sqlite autocommit=False"
+            )
         if connection.in_transaction:
             raise RuntimeError(
                 "fact replication sink requires a connection outside a transaction"
@@ -378,11 +393,17 @@ class SQLiteFactReplicationSink:
         self._connection.execute("BEGIN IMMEDIATE")
         try:
             yield
-        except Exception:
-            self._connection.rollback()
-            raise
-        else:
             self._connection.commit()
+        except BaseException:
+            # A failed COMMIT can leave the transaction open with its pending
+            # journal and projection rows.  Make one bounded best-effort
+            # rollback before returning any failure so an exact retry is not
+            # blocked by this connection's stranded transaction.
+            try:
+                self._connection.rollback()
+            except sqlite3.Error:
+                pass
+            raise
 
     def apply(self, batch: MemoryReplicationBatch) -> MemoryReplicaReceipt:
         if not isinstance(batch, MemoryReplicationBatch):

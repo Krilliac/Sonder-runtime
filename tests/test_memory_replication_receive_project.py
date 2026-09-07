@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from email.message import Message
 from io import BytesIO
 import json
+import sqlite3
 
 import pytest
 
@@ -118,7 +119,12 @@ def test_fact_receiver_projects_the_normal_target_store_before_emitting_receipt(
     source_journal = SQLiteMemoryReplicationJournal(
         source_path, source_id="node-a", project_scope="repo-a",
     )
-    target = connect(tmp_path / "target.db")
+    target_path = tmp_path / "target.db"
+    target = connect(target_path)
+    # Keep a second connection open before the receive.  The receipt callback
+    # must observe the committed normal fact through this independent reader,
+    # never through the writer that applied the batch.
+    observer = sqlite3.connect(target_path, isolation_level=None)
     try:
         batch = source_journal.export()
         receiver = _receiver(target)
@@ -129,13 +135,12 @@ def test_fact_receiver_projects_the_normal_target_store_before_emitting_receipt(
             assert payload["object"] == "memory_replication_receipt"
             receipt = MemoryReplicaReceipt.from_dict(payload["receipt"])
             assert receipt.batch_digest == batch.digest
-            assert facts_for_project(target, "repo-a") == [
-                {
-                    "id": "fact-1",
-                    "project": "repo-a",
-                    "text": "authoritative source",
-                    "embedding": None,
-                }
+            assert observer.execute(
+                "SELECT id,project,text,embedding FROM facts "
+                "WHERE project=? ORDER BY id",
+                ("repo-a",),
+            ).fetchall() == [
+                ("fact-1", "repo-a", "authoritative source", None),
             ]
 
         handler = _Handler(_wire(batch), before_response=_assert_projection_precedes_receipt)
@@ -143,8 +148,42 @@ def test_fact_receiver_projects_the_normal_target_store_before_emitting_receipt(
         assert handler.responses[0][0] == 202
         assert handler._request_body_consumed is True
     finally:
+        observer.close()
         target.close()
         source_journal.close()
+
+
+@pytest.mark.skipif(
+    not hasattr(sqlite3.Connection, "autocommit"),
+    reason="Python 3.12 sqlite autocommit mode is unavailable",
+)
+@pytest.mark.parametrize(
+    ("autocommit", "error"),
+    ((True, r"autocommit=True"), (False, r"autocommit=False")),
+)
+def test_fact_projecting_sink_rejects_unsupported_sqlite_autocommit_before_mutation(
+    tmp_path, autocommit, error,
+):
+    """A mode outside the sink's explicit commit contract cannot produce a receipt."""
+    target_path = tmp_path / "target.db"
+    initialized = connect(target_path)
+    initialized.close()
+    unsupported = sqlite3.connect(target_path, autocommit=autocommit)
+    observer = sqlite3.connect(target_path, isolation_level=None)
+    try:
+        with pytest.raises(ValueError, match=error):
+            SQLiteFactReplicationSink(
+                "node-b", unsupported, project_scope="repo-a",
+            )
+
+        assert observer.execute("SELECT COUNT(*) FROM facts").fetchone()[0] == 0
+        assert observer.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='table' AND name LIKE 'memory_projection_%'"
+        ).fetchone()[0] == 0
+    finally:
+        observer.close()
+        unsupported.close()
 
 
 def test_projection_failure_returns_no_receipt_rolls_back_journal_and_retries_exact_batch(tmp_path):
@@ -195,6 +234,67 @@ def test_projection_failure_returns_no_receipt_rolls_back_journal_and_retries_ex
         )
         assert facts_for_project(target, "repo-a")[0]["text"] == "retry after target repair"
     finally:
+        target.close()
+
+
+def test_commit_failure_rolls_back_every_target_state_and_allows_exact_retry(tmp_path):
+    """A DELETE-mode reader lock cannot strand an uncommitted received page."""
+    target_path = tmp_path / "target.db"
+    target = connect(target_path)
+    reader = None
+    observer = None
+    try:
+        assert target.execute("PRAGMA journal_mode=DELETE").fetchone()[0].lower() == "delete"
+        target.execute("PRAGMA busy_timeout=0")
+        sink = SQLiteFactReplicationSink(
+            "node-b", target, project_scope="repo-a",
+        )
+        batch = _batch(_fact(text="retry after commit lock clears"))
+
+        reader = sqlite3.connect(target_path, isolation_level=None, timeout=0)
+        reader.execute("PRAGMA busy_timeout=0")
+        reader.execute("BEGIN")
+        reader.execute("SELECT COUNT(*) FROM facts").fetchone()
+
+        receipt = None
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            receipt = sink.apply(batch)
+        assert receipt is None
+        assert target.in_transaction is False
+
+        observer = sqlite3.connect(target_path, isolation_level=None, timeout=0)
+        for table in (
+            "facts",
+            "memory_replication_log",
+            "memory_replication_meta",
+            "memory_projection_log",
+            "memory_projection_state",
+            "memory_projection_cursors",
+        ):
+            assert observer.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+        observer.close()
+        observer = None
+
+        reader.execute("ROLLBACK")
+        reader.close()
+        reader = None
+
+        receipt = sink.apply(batch)
+        assert receipt.durable is True
+        assert receipt.inserted_records == 1
+        assert facts_for_project(target, "repo-a") == [
+            {
+                "id": "fact-1",
+                "project": "repo-a",
+                "text": "retry after commit lock clears",
+                "embedding": None,
+            }
+        ]
+    finally:
+        if observer is not None:
+            observer.close()
+        if reader is not None:
+            reader.close()
         target.close()
 
 
