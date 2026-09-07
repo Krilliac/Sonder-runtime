@@ -436,6 +436,21 @@ def test_the_hardware_report_is_graded_safe_rather_than_exempted():
         )
 
 
+def test_recovery_posture_is_mapped_and_graded_as_the_read_only_projection():
+    """`/recovery` must stay visible to the gate without acquiring ownership.
+
+    The REPL branch invokes a local formatter rather than a registered MCP
+    tool.  Mapping it to its catalogued native command keeps the permission
+    floor complete and lets `plan` retain its read-only posture.
+    """
+    maps = _maps()
+    assert maps["console"].get("/recovery") == ("recovery",)
+    assert pm.risk_of("recovery") == "safe"
+    assert pm.decide(
+        "recovery", mode=pm.PLAN, rule_lookup=lambda _tool: None,
+    ).action == pm.ALLOW
+
+
 def test_location_is_gated_rather_than_excused():
     """`/location` grants IP-geolocation consent, so it is not display only.
 

@@ -766,11 +766,10 @@ class SonderApi {
     Map<String, dynamic>? body,
   }) async {
     final uri = _uri('/v1/agent-lanes$path').replace(queryParameters: query);
-    final response =
-        await (body == null
-                ? _requestGet(uri, headers: _headers())
-                : _requestPost(uri, headers: _headers(), body: jsonEncode(body)))
-            .timeout(const Duration(seconds: 35));
+    final response = await (body == null
+            ? _requestGet(uri, headers: _headers())
+            : _requestPost(uri, headers: _headers(), body: jsonEncode(body)))
+        .timeout(const Duration(seconds: 35));
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw _responseException(
         response,
@@ -787,30 +786,32 @@ class SonderApi {
   Future<AgentLanePage> agentLanes({
     int cursor = 0,
     String? parentSessionId,
-  }) async => AgentLanePage.fromJson(
-    await _agentRequest(
-      '',
-      query: {
-        'cursor': '$cursor',
-        'limit': '50',
-        if (parentSessionId != null) 'parent_session_id': parentSessionId,
-      },
-    ),
-  );
+  }) async =>
+      AgentLanePage.fromJson(
+        await _agentRequest(
+          '',
+          query: {
+            'cursor': '$cursor',
+            'limit': '50',
+            if (parentSessionId != null) 'parent_session_id': parentSessionId,
+          },
+        ),
+      );
   Future<AgentSnapshot> agentInspect(
     String id, {
     int cursor = 0,
     bool wait = false,
-  }) async => AgentSnapshot.fromJson(
-    await _agentRequest(
-      '/${Uri.encodeComponent(id)}${wait ? '/wait' : ''}',
-      query: {
-        'cursor': '$cursor',
-        'limit': '100',
-        if (wait) 'timeout_seconds': '25',
-      },
-    ),
-  );
+  }) async =>
+      AgentSnapshot.fromJson(
+        await _agentRequest(
+          '/${Uri.encodeComponent(id)}${wait ? '/wait' : ''}',
+          query: {
+            'cursor': '$cursor',
+            'limit': '100',
+            if (wait) 'timeout_seconds': '25',
+          },
+        ),
+      );
   Future<AgentReceipt> agentCommand(
     String id,
     String action, {
@@ -834,26 +835,27 @@ class SonderApi {
   Future<AgentReportPage> agentReports(
     String parentSessionId, {
     int cursor = 0,
-  }) async => AgentReportPage.fromJson(
-    await _agentRequest(
-      '/reports',
-      query: {
-        'parent_session_id': parentSessionId,
-        'cursor': '$cursor',
-        'limit': '50',
-      },
-    ),
-  );
+  }) async =>
+      AgentReportPage.fromJson(
+        await _agentRequest(
+          '/reports',
+          query: {
+            'parent_session_id': parentSessionId,
+            'cursor': '$cursor',
+            'limit': '50',
+          },
+        ),
+      );
   Future<AgentReceipt> agentAcknowledge(
     String id, {
     required String commandId,
-  }) async => AgentReceipt.fromJson(
-    await _agentRequest(
-      '/reports/${Uri.encodeComponent(id)}/ack',
-      body: {'command_id': commandId},
-    ),
-  );
-
+  }) async =>
+      AgentReceipt.fromJson(
+        await _agentRequest(
+          '/reports/${Uri.encodeComponent(id)}/ack',
+          body: {'command_id': commandId},
+        ),
+      );
 
   final String baseUrl; // e.g. https://sonder.example.com
   final AccountSession? accountSession;
@@ -951,8 +953,9 @@ class SonderApi {
         'success,message,country,country_code,region,region_code,city,'
         'timezone';
     try {
-      final response = await _requestGet(Uri.parse('https://ipwho.is/?fields=$fields'))
-          .timeout(const Duration(seconds: 10));
+      final response =
+          await _requestGet(Uri.parse('https://ipwho.is/?fields=$fields'))
+              .timeout(const Duration(seconds: 10));
       if (response.statusCode != 200) return null;
       final decoded = jsonDecode(utf8.decode(response.bodyBytes));
       if (decoded is! Map<String, dynamic> || decoded['success'] == false) {
@@ -1078,7 +1081,8 @@ class SonderApi {
   Future<UpdateStatus?> fetchUpdateStatus() async {
     late http.Response resp;
     try {
-      resp = await _requestGet(_uri('/v1/admin/updates/status'), headers: _headers())
+      resp = await _requestGet(_uri('/v1/admin/updates/status'),
+              headers: _headers())
           .timeout(const Duration(seconds: 15));
     } catch (e) {
       throw SonderException('Cannot reach server: $e');
@@ -1265,11 +1269,10 @@ class SonderApi {
     late http.Response resp;
     try {
       resp = await _requestPost(
-            _uri('/v1/permission-mode'),
-            headers: _headers(),
-            body: jsonEncode({'mode': wanted}),
-          )
-          .timeout(const Duration(seconds: 10));
+        _uri('/v1/permission-mode'),
+        headers: _headers(),
+        body: jsonEncode({'mode': wanted}),
+      ).timeout(const Duration(seconds: 10));
     } catch (e) {
       throw SonderException('Cannot reach server: $e');
     }
@@ -1471,12 +1474,17 @@ class SonderApi {
       throw SonderException('No account session for this server.');
     }
     try {
-      final response = await _requestPost(_uri('/v1/sonder/logout'), headers: _headers(), body: '{}').timeout(const Duration(seconds: 20));
-      if (response.statusCode != 200 || jsonDecode(response.body)['ok'] != true) {
-        throw SonderException('Account revocation was not confirmed. Retry sign out.');
+      final response = await _requestPost(_uri('/v1/sonder/logout'),
+              headers: _headers(), body: '{}')
+          .timeout(const Duration(seconds: 20));
+      if (response.statusCode != 200 ||
+          jsonDecode(response.body)['ok'] != true) {
+        throw SonderException(
+            'Account revocation was not confirmed. Retry sign out.');
       }
     } catch (_) {
-      throw SonderException('Account revocation was not confirmed. Retry sign out.');
+      throw SonderException(
+          'Account revocation was not confirmed. Retry sign out.');
     }
   }
 
@@ -1489,11 +1497,10 @@ class SonderApi {
     late http.Response resp;
     try {
       resp = await _requestPost(
-            _uri('/v1/sonder/login'),
-            headers: _headers(),
-            body: jsonEncode({'username': username, 'password': password}),
-          )
-          .timeout(const Duration(seconds: 20));
+        _uri('/v1/sonder/login'),
+        headers: _headers(),
+        body: jsonEncode({'username': username, 'password': password}),
+      ).timeout(const Duration(seconds: 20));
     } catch (e) {
       throw SonderException('Login could not be completed.');
     }
@@ -1513,11 +1520,10 @@ class SonderApi {
     late http.Response resp;
     try {
       resp = await _requestPost(
-            _uri(path),
-            headers: _headers(),
-            body: jsonEncode({'username': username, 'password': password}),
-          )
-          .timeout(const Duration(seconds: 20));
+        _uri(path),
+        headers: _headers(),
+        body: jsonEncode({'username': username, 'password': password}),
+      ).timeout(const Duration(seconds: 20));
     } catch (e) {
       throw SonderException('Account request could not be completed.');
     }
@@ -1672,12 +1678,12 @@ class SystemInfo {
               json['deployment'] as Map<String, dynamic>,
             )
           : null,
-      operationalCapabilities: json['operational_capabilities']
-              is Map<String, dynamic>
-          ? OperationalCapabilitiesInfo.fromJson(
-              json['operational_capabilities'] as Map<String, dynamic>,
-            )
-          : null,
+      operationalCapabilities:
+          json['operational_capabilities'] is Map<String, dynamic>
+              ? OperationalCapabilitiesInfo.fromJson(
+                  json['operational_capabilities'] as Map<String, dynamic>,
+                )
+              : null,
       context: json['context'] is Map<String, dynamic>
           ? ContextHealth.fromJson(json['context'] as Map<String, dynamic>)
           : null,
@@ -1747,6 +1753,44 @@ class DeploymentCapabilityInfo {
   }
 }
 
+class RecoveryPostureInfo {
+  final bool automaticTakeoverAvailable;
+  final bool automaticFailbackAvailable;
+  final bool independentWitnessRequired;
+  final String reason;
+
+  const RecoveryPostureInfo({
+    required this.automaticTakeoverAvailable,
+    required this.automaticFailbackAvailable,
+    required this.independentWitnessRequired,
+    required this.reason,
+  });
+
+  factory RecoveryPostureInfo.fromJson(Map<String, dynamic> json) {
+    return RecoveryPostureInfo(
+      automaticTakeoverAvailable: _asBool(
+        json['automatic_takeover_available'],
+      ),
+      automaticFailbackAvailable: _asBool(
+        json['automatic_failback_available'],
+      ),
+      independentWitnessRequired: _asBool(
+        json['independent_witness_required'],
+      ),
+      reason: json['reason']?.toString() ?? '',
+    );
+  }
+
+  String get summary {
+    if (automaticTakeoverAvailable || automaticFailbackAvailable) {
+      return 'Automatic recovery availability is reported above.';
+    }
+    return independentWitnessRequired
+        ? 'Automatic takeover and failback unavailable; independent witness required.'
+        : 'Automatic takeover and failback unavailable.';
+  }
+}
+
 class DeploymentInfo {
   final String profile;
   final String profileId;
@@ -1757,6 +1801,7 @@ class DeploymentInfo {
   final bool preferenceConfersAuthority;
   final String partitionPolicy;
   final Map<String, DeploymentCapabilityInfo> capabilities;
+  final RecoveryPostureInfo? recoveryPosture;
 
   const DeploymentInfo({
     required this.profile,
@@ -1768,6 +1813,7 @@ class DeploymentInfo {
     required this.preferenceConfersAuthority,
     required this.partitionPolicy,
     required this.capabilities,
+    this.recoveryPosture,
   });
 
   factory DeploymentInfo.fromJson(Map<String, dynamic> json) {
@@ -1799,11 +1845,17 @@ class DeploymentInfo {
       ),
       partitionPolicy: json['partition_policy']?.toString() ?? '',
       capabilities: Map.unmodifiable(capabilities),
+      recoveryPosture: json['recovery_posture'] is Map
+          ? RecoveryPostureInfo.fromJson(
+              Map<String, dynamic>.from(json['recovery_posture'] as Map),
+            )
+          : null,
     );
   }
 
   DeploymentCapabilityInfo capability(String name) =>
-      capabilities[name] ?? const DeploymentCapabilityInfo(
+      capabilities[name] ??
+      const DeploymentCapabilityInfo(
         available: false,
         reason: 'The runtime did not report this capability.',
       );
@@ -1816,8 +1868,9 @@ class DeploymentInfo {
     return 'Unknown';
   }
 
-  String get membersLabel =>
-      configuredMembers.isEmpty ? 'None reported' : configuredMembers.join(', ');
+  String get membersLabel => configuredMembers.isEmpty
+      ? 'None reported'
+      : configuredMembers.join(', ');
 }
 
 /// Read-only distributed capability projection from the runtime status API.
@@ -1881,9 +1934,7 @@ class OperationalCapabilitiesInfo {
   factory OperationalCapabilitiesInfo.fromJson(Map<String, dynamic> json) {
     Map<String, dynamic> section(String key) {
       final value = json[key];
-      return value is Map<String, dynamic>
-          ? value
-          : const <String, dynamic>{};
+      return value is Map<String, dynamic> ? value : const <String, dynamic>{};
     }
 
     OperationalCapabilityInfo capability(
@@ -3360,14 +3411,27 @@ class _NoRedirectClient extends http.BaseClient {
     request.followRedirects = false;
     return inner.send(request);
   }
+
   @override
   void close() => inner.close();
 }
-Future<http.Response> _requestGet(Uri uri, {Map<String, String>? headers}) async {
+
+Future<http.Response> _requestGet(Uri uri,
+    {Map<String, String>? headers}) async {
   final client = _NoRedirectClient(http.Client());
-  try { return await client.get(uri, headers: headers); } finally { client.close(); }
+  try {
+    return await client.get(uri, headers: headers);
+  } finally {
+    client.close();
+  }
 }
-Future<http.Response> _requestPost(Uri uri, {Map<String, String>? headers, Object? body}) async {
+
+Future<http.Response> _requestPost(Uri uri,
+    {Map<String, String>? headers, Object? body}) async {
   final client = _NoRedirectClient(http.Client());
-  try { return await client.post(uri, headers: headers, body: body); } finally { client.close(); }
+  try {
+    return await client.post(uri, headers: headers, body: body);
+  } finally {
+    client.close();
+  }
 }
