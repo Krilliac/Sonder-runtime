@@ -25,6 +25,7 @@ def receiver(tmp_path, monkeypatch):
         artifact_transfer=ArtifactTransferConfig(
             enabled=True, store_dir=str(tmp_path / "private"),
             principal_id="alice", project_id="project-a", peer_node_id="peer-b",
+            receiver_identity_id="receiver-a",
             grant_id="grant-a", expires_at=int(time.time()) + 3600,
             can_read=True, can_write=True,
         ),
@@ -66,6 +67,415 @@ def begin(receiver, data=b"abc", **extra):
                  "media_type": "application/octet-stream"},
         "command_id": "begin-one", **extra,
     })
+
+
+def mobility_headers(capability="a" * 64):
+    return {
+        "X-Sonder-Artifact-Mobility-Version": "mobility-v1",
+        "X-Sonder-Artifact-Mobility-Receipt-Capability": capability,
+    }
+
+
+def test_mobility_v1_begin_returns_a_durable_envelope(receiver):
+    data = b"mobility receiver contract"
+    status, _, body = request(
+        receiver,
+        "POST",
+        "/v1/artifact-transfers",
+        {
+            "spec": {
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "size_bytes": len(data),
+                "media_type": "application/octet-stream",
+            },
+            "command_id": "mobility-begin",
+        },
+        headers=mobility_headers(),
+    )
+    assert status == 200, body
+    envelope = json.loads(body)
+    assert set(envelope) == {
+        "protocol_version",
+        "recipient_attestation",
+        "command_id",
+        "spec",
+        "receipt",
+    }
+    assert envelope["protocol_version"] == "mobility-v1"
+    assert envelope["command_id"] == "mobility-begin"
+    assert envelope["spec"]["sha256"] == hashlib.sha256(data).hexdigest()
+    assert envelope["receipt"]["transfer_id"]
+
+
+def test_mobility_attestation_is_canonical_and_binding_scoped(receiver):
+    status, _, body = request(
+        receiver, "GET", "/v1/artifact-transfers/recipient-attestation"
+    )
+    assert status == 200, body
+    attestation = json.loads(body)
+    expected = {
+        "protocol_version",
+        "receiver_identity_id",
+        "principal_id",
+        "project_id",
+        "authorized_source_owner_id",
+        "grant_id",
+        "grant_revision",
+        "can_write",
+        "max_object_bytes",
+        "sha256",
+    }
+    assert set(attestation) == expected
+    canonical = {name: value for name, value in attestation.items() if name != "sha256"}
+    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("ascii")
+    assert attestation["sha256"] == hashlib.sha256(encoded).hexdigest()
+    assert "private" not in json.dumps(attestation)
+    prior = attestation["sha256"]
+    changes = {
+        "receiver_identity_id": "receiver-b",
+        "peer_node_id": "source-owner-b",
+        "grant_id": "grant-b",
+        "grant_revision": 2,
+        "can_write": False,
+        "max_object_bytes": 4096,
+    }
+    for name, value in changes.items():
+        current = receiver[1]
+        current[0] = replace(
+            current[0], artifact_transfer=replace(current[0].artifact_transfer, **{name: value})
+        )
+        status, _, body = request(
+            receiver, "GET", "/v1/artifact-transfers/recipient-attestation"
+        )
+        assert status == 200, body
+        changed = json.loads(body)
+        assert changed["sha256"] != prior
+        prior = changed["sha256"]
+
+
+def test_mobility_attestation_requires_the_receiver_binding(receiver, monkeypatch):
+    path = "/v1/artifact-transfers/recipient-attestation"
+    assert request(receiver, "GET", path, key="wrong-transfer-bearer")[0] == 401
+    monkeypatch.setattr(serve, "_ARTIFACT_TRANSFER_BINDING", None)
+    assert request(receiver, "GET", path)[0] == 503
+
+
+def test_mobility_attestation_is_unavailable_when_receiver_is_disabled(receiver):
+    current = receiver[1]
+    current[0] = replace(
+        current[0], artifact_transfer=replace(current[0].artifact_transfer, enabled=False)
+    )
+    assert request(receiver, "GET", "/v1/artifact-transfers/recipient-attestation")[0] == 503
+
+
+def test_missing_receiver_identity_rejects_mobility_before_legacy_dedup(receiver):
+    current = receiver[1]
+    current[0] = replace(
+        current[0], artifact_transfer=replace(current[0].artifact_transfer, receiver_identity_id="")
+    )
+    data = b"identity required before mobility row"
+    payload = {
+        "spec": {
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "size_bytes": len(data),
+            "media_type": "application/octet-stream",
+        },
+        "command_id": "identity-required",
+    }
+    status, _, body = request(
+        receiver, "POST", "/v1/artifact-transfers", payload, headers=mobility_headers()
+    )
+    assert status == 403
+    assert json.loads(body) == {"error": {"code": "FORBIDDEN"}}
+    status, _, body = request(receiver, "POST", "/v1/artifact-transfers", payload)
+    assert status == 200, body
+    assert "protocol_version" not in json.loads(body)
+
+
+def test_write_only_mobility_receipt_is_capability_and_transfer_bound(receiver):
+    current = receiver[1]
+    current[0] = replace(
+        current[0], artifact_transfer=replace(current[0].artifact_transfer, can_read=False)
+    )
+    data = b"write-only mobility receipt"
+    status, _, body = request(
+        receiver,
+        "POST",
+        "/v1/artifact-transfers",
+        {
+            "spec": {
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "size_bytes": len(data),
+                "media_type": "application/octet-stream",
+            },
+            "command_id": "write-only-begin",
+        },
+        headers=mobility_headers(),
+    )
+    assert status == 200, body
+    envelope = json.loads(body)
+    transfer_id = envelope["receipt"]["transfer_id"]
+    status, _, body = request(
+        receiver,
+        "POST",
+        f"/v1/artifact-transfers/{transfer_id}/mobility-receipt",
+        {"command_id": "write-only-begin"},
+        headers=mobility_headers(),
+    )
+    assert status == 200, body
+    assert json.loads(body) == envelope
+    assert request(receiver, "GET", f"/v1/artifact-transfers/{transfer_id}")[0] == 403
+    assert request(receiver, "GET", f"/v1/artifacts/{transfer_id}")[0] == 403
+    status, _, body = request(
+        receiver,
+        "POST",
+        f"/v1/artifact-transfers/{transfer_id}/mobility-receipt",
+        {"command_id": "write-only-begin"},
+        headers=mobility_headers("c" * 64),
+    )
+    assert status == 403
+    assert json.loads(body) == {"error": {"code": "FORBIDDEN"}}
+    status, _, body = request(
+        receiver,
+        "POST",
+        "/v1/artifact-transfers/" + "f" * 32 + "/mobility-receipt",
+        {"command_id": "write-only-begin"},
+        headers=mobility_headers(),
+    )
+    assert status == 403
+    assert json.loads(body) == {"error": {"code": "FORBIDDEN"}}
+    status, _, body = request(
+        receiver,
+        "POST",
+        f"/v1/artifact-transfers/{transfer_id}/mobility-receipt",
+        {"command_id": "write-only-begin"},
+        headers={"X-Sonder-Artifact-Mobility-Version": "mobility-v1"},
+    )
+    assert status == 400
+    assert "recipient_attestation" not in body.decode()
+    assert "private" not in body.decode()
+
+
+def test_mobility_headers_are_strict_and_value_free(receiver):
+    secretish = "https://capability.example.invalid/private"
+    status, _, body = request(
+        receiver,
+        "POST",
+        "/v1/artifact-transfers",
+        {
+            "spec": {
+                "sha256": hashlib.sha256(b"x").hexdigest(),
+                "size_bytes": 1,
+                "media_type": "application/octet-stream",
+            },
+            "command_id": "bad-header",
+        },
+        headers={
+            "X-Sonder-Artifact-Mobility-Version": "mobility-v1",
+            "X-Sonder-Artifact-Mobility-Receipt-Capability": secretish,
+        },
+    )
+    assert status == 400
+    assert json.loads(body) == {"error": {"code": "MOBILITY_PROTOCOL"}}
+    assert secretish not in body.decode()
+    status, _, body = request(
+        receiver,
+        "POST",
+        "/v1/artifact-transfers",
+        {
+            "spec": {
+                "sha256": hashlib.sha256(b"y").hexdigest(),
+                "size_bytes": 1,
+                "media_type": "application/octet-stream",
+            },
+            "command_id": "empty-version-header",
+        },
+        headers={"X-Sonder-Artifact-Mobility-Version": ""},
+    )
+    assert status == 400
+    assert json.loads(body) == {"error": {"code": "MOBILITY_PROTOCOL"}}
+    status, _, body = request(
+        receiver,
+        "GET",
+        "/v1/artifact-transfers/" + "a" * 32,
+        headers=mobility_headers(),
+    )
+    assert status == 400
+    assert json.loads(body) == {"error": {"code": "MOBILITY_PROTOCOL"}}
+
+
+def test_duplicate_mobility_headers_are_rejected_without_echo(receiver):
+    connection = http.client.HTTPConnection(*receiver[0], timeout=10)
+    payload = json.dumps(
+        {
+            "spec": {
+                "sha256": hashlib.sha256(b"x").hexdigest(),
+                "size_bytes": 1,
+                "media_type": "application/octet-stream",
+            },
+            "command_id": "duplicate-mobility-header",
+        }
+    ).encode()
+    connection.putrequest("POST", "/v1/artifact-transfers")
+    connection.putheader("Authorization", "Bearer " + receiver[1][0].secrets.artifact_transfer_key)
+    connection.putheader("Content-Length", str(len(payload)))
+    connection.putheader("Content-Type", "application/json")
+    connection.putheader("X-Sonder-Artifact-Mobility-Version", "mobility-v1")
+    connection.putheader("X-Sonder-Artifact-Mobility-Version", "mobility-v1")
+    connection.endheaders(payload)
+    response = connection.getresponse()
+    body = response.read()
+    connection.close()
+    assert response.status == 400
+    assert json.loads(body) == {"error": {"code": "INVALID_HEADERS"}}
+    assert "duplicate-mobility-header" not in body.decode()
+
+
+def test_mobility_rows_require_the_versioned_capability_for_append(receiver):
+    data = b"versioned mobility append"
+    status, _, body = request(
+        receiver,
+        "POST",
+        "/v1/artifact-transfers",
+        {
+            "spec": {
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "size_bytes": len(data),
+                "media_type": "application/octet-stream",
+            },
+            "command_id": "versioned-append",
+        },
+        headers=mobility_headers(),
+    )
+    assert status == 200, body
+    transfer_id = json.loads(body)["receipt"]["transfer_id"]
+    upload_path = f"/v1/artifact-transfers/{transfer_id}/chunks/0"
+    upload_headers = {
+        "Content-Type": "application/octet-stream",
+        "X-Sonder-Chunk-Sha256": hashlib.sha256(data).hexdigest(),
+    }
+    status, _, body = request(receiver, "PUT", upload_path, raw=data, headers=upload_headers)
+    assert status == 400
+    assert json.loads(body) == {"error": {"code": "MOBILITY_PROTOCOL"}}
+    status, _, body = request(
+        receiver,
+        "PUT",
+        upload_path,
+        raw=data,
+        headers={**upload_headers, **mobility_headers()},
+    )
+    assert status == 200, body
+    assert json.loads(body)["next_offset"] == len(data)
+    status, _, body = request(
+        receiver,
+        "POST",
+        f"/v1/artifact-transfers/{transfer_id}/mobility-receipt",
+        {"command_id": "versioned-append"},
+        headers=mobility_headers(),
+    )
+    assert status == 200, body
+    assert json.loads(body)["receipt"]["offset"] == len(data)
+
+
+def test_mobility_seal_and_final_confirmation_stay_versioned(receiver):
+    data = b"versioned mobility seal"
+    status, _, body = request(
+        receiver,
+        "POST",
+        "/v1/artifact-transfers",
+        {
+            "spec": {
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "size_bytes": len(data),
+                "media_type": "application/octet-stream",
+            },
+            "command_id": "versioned-seal",
+        },
+        headers=mobility_headers(),
+    )
+    assert status == 200, body
+    transfer_id = json.loads(body)["receipt"]["transfer_id"]
+    assert request(
+        receiver,
+        "PUT",
+        f"/v1/artifact-transfers/{transfer_id}/chunks/0",
+        raw=data,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "X-Sonder-Chunk-Sha256": hashlib.sha256(data).hexdigest(),
+            **mobility_headers(),
+        },
+    )[0] == 200
+    seal_path = f"/v1/artifact-transfers/{transfer_id}/seal"
+    assert request(receiver, "POST", seal_path, {"command_id": "seal-v1"})[0] == 400
+    status, _, body = request(
+        receiver,
+        "POST",
+        seal_path,
+        {"command_id": "seal-v1"},
+        headers=mobility_headers(),
+    )
+    assert status in (200, 202), body
+    assert set(json.loads(body)) == {
+        "protocol_version", "recipient_attestation", "command_id", "spec", "receipt"
+    }
+    until = time.monotonic() + 10
+    while time.monotonic() < until:
+        status, _, body = request(
+            receiver,
+            "POST",
+            f"/v1/artifact-transfers/{transfer_id}/mobility-receipt",
+            {"command_id": "versioned-seal"},
+            headers=mobility_headers(),
+        )
+        assert status == 200, body
+        final = json.loads(body)
+        if final["receipt"]["state"] == "sealed":
+            break
+        time.sleep(.01)
+    assert final["receipt"]["state"] == "sealed"
+    assert request(receiver, "GET", f"/v1/artifacts/{transfer_id}")[0] == 400
+
+
+def test_mobility_abort_is_versioned_and_capability_bound(receiver):
+    data = b"versioned mobility abort"
+    status, _, body = request(
+        receiver,
+        "POST",
+        "/v1/artifact-transfers",
+        {
+            "spec": {
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "size_bytes": len(data),
+                "media_type": "application/octet-stream",
+            },
+            "command_id": "versioned-abort",
+        },
+        headers=mobility_headers(),
+    )
+    assert status == 200, body
+    transfer_id = json.loads(body)["receipt"]["transfer_id"]
+    abort_path = f"/v1/artifact-transfers/{transfer_id}/abort"
+    assert request(receiver, "POST", abort_path, {"command_id": "abort-v1"})[0] == 400
+    status, _, body = request(
+        receiver,
+        "POST",
+        abort_path,
+        {"command_id": "abort-v1"},
+        headers=mobility_headers(),
+    )
+    assert status == 200, body
+    aborted = json.loads(body)
+    assert aborted["receipt"]["state"] == "aborted"
+    status, _, body = request(
+        receiver,
+        "POST",
+        f"/v1/artifact-transfers/{transfer_id}/mobility-receipt",
+        {"command_id": "versioned-abort"},
+        headers=mobility_headers(),
+    )
+    assert status == 200, body
+    assert json.loads(body)["receipt"]["state"] == "aborted"
 
 
 def test_real_handler_round_trip(receiver):

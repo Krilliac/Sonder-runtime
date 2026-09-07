@@ -10,7 +10,7 @@ class ArtifactTransferHttpResult:
     body: dict | ArtifactRange
 
 
-def dispatch_artifact_transfer(service, action, payload, context, *, body=b""):
+def dispatch_artifact_transfer(service, action, payload, context, *, body=b"", mobility=None):
     if not isinstance(payload, dict):
         raise TransferError("INVALID_REQUEST")
     schemas = {
@@ -19,30 +19,62 @@ def dispatch_artifact_transfer(service, action, payload, context, *, body=b""):
         "append": {"transfer_id", "offset", "chunk_sha256"},
         "seal": {"transfer_id", "command_id"},
         "abort": {"transfer_id", "command_id"},
+        "mobility_receipt": {"transfer_id", "command_id"},
         "artifact": {"artifact_id"},
         "range": {"artifact_id", "offset", "length"},
     }
     if action not in schemas or set(payload) != schemas[action]:
         raise TransferError("INVALID_REQUEST")
     if action == "begin":
-        result = service.begin_upload(payload["spec"], payload["command_id"], context)
+        if mobility is None:
+            result = service.begin_upload(payload["spec"], payload["command_id"], context)
+        else:
+            result = service.begin_mobility_upload(
+                payload["spec"], payload["command_id"], mobility, context
+            )
     elif action == "inspect":
         result = service.inspect_upload(payload["transfer_id"], context)
     elif action == "append":
-        result = service.append_chunk(
-            payload["transfer_id"],
-            payload["offset"],
-            payload["chunk_sha256"],
-            body,
-            context,
-        )
+        if mobility is None:
+            result = service.append_chunk(
+                payload["transfer_id"],
+                payload["offset"],
+                payload["chunk_sha256"],
+                body,
+                context,
+            )
+        else:
+            result = service.append_mobility_chunk(
+                payload["transfer_id"],
+                payload["offset"],
+                payload["chunk_sha256"],
+                body,
+                mobility,
+                context,
+            )
     elif action == "seal":
-        result = service.seal_upload(
-            payload["transfer_id"], payload["command_id"], context
-        )
+        if mobility is None:
+            result = service.seal_upload(
+                payload["transfer_id"], payload["command_id"], context
+            )
+        else:
+            result = service.seal_mobility_upload(
+                payload["transfer_id"], payload["command_id"], mobility, context
+            )
     elif action == "abort":
-        result = service.abort_upload(
-            payload["transfer_id"], payload["command_id"], context
+        if mobility is None:
+            result = service.abort_upload(
+                payload["transfer_id"], payload["command_id"], context
+            )
+        else:
+            result = service.abort_mobility_upload(
+                payload["transfer_id"], payload["command_id"], mobility, context
+            )
+    elif action == "mobility_receipt":
+        if mobility is None:
+            raise TransferError("MOBILITY_PROTOCOL")
+        result = service.inspect_mobility_upload(
+            payload["transfer_id"], payload["command_id"], mobility, context
         )
     elif action == "artifact":
         result = service.inspect_artifact(payload["artifact_id"], context)
