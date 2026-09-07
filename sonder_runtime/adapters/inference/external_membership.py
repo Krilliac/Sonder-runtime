@@ -243,7 +243,12 @@ class _PinnedTransport:
             response.begin()
             version_not_found = (response.status == 404 and method == "GET"
                 and path == "/api/version" and data is None
-                and response.getheader("Content-Encoding", "identity") == "identity")
+                and response.getheader("Content-Encoding", "identity") == "identity"
+                and response.headers.get_all("Content-Length") == ["0"]
+                and response.getheader("Transfer-Encoding") is None
+                # HTTPResponse.read() trusts Content-Length: 0 and would hide
+                # an extra body. Require actual EOF on the bounded raw reader.
+                and reader.read(1) == b"")
             if response.status != 200 or response.getheader("Content-Encoding", "identity") != "identity":
                 raise ValueError
             length = response.getheader("Content-Length")
@@ -313,6 +318,11 @@ class ExternalMembershipSource:
             self._transport = _PinnedTransport(config, secrets)
         except Exception:
             raise MembershipSourceError("external membership unavailable") from None
+
+        # All historical server/MCP/HTTP/REPL embedding operations share this
+        # adapter. A typed provider closure alone cannot fence those callers.
+        from .ollama_endpoint import _restrict_for_external_membership
+        _restrict_for_external_membership(self)
 
     def read_snapshot(self, *, limits):
         try:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import weakref
 import urllib.parse
 import urllib.request
 
@@ -16,6 +17,30 @@ DEFAULT_HOST = ollama_policy.DEFAULT_HOST
 REMOTE_OPT_IN = ollama_policy.REMOTE_OPT_IN
 _configured_endpoint: str | None = None
 _configuration_lock = threading.RLock()
+
+
+# The staged live reloader explicitly preserves these guarded process-owned
+# resources. Reloading this adapter must never revoke an external owner's fence.
+if "_embedding_policy_lock" not in globals():
+    _embedding_policy_lock = threading.RLock()
+if "_external_membership_owners" not in globals():
+    _external_membership_owners = weakref.WeakSet()
+
+
+def _restrict_for_external_membership(owner):
+    """Deny the process-default adapter while an external source is owned.
+
+    Sources retain this fence when closed, expired or revoked. Weak ownership
+    permits an unrelated static-only application after every external owner
+    has actually gone away; there is no caller-controlled enable switch.
+    """
+    with _embedding_policy_lock:
+        _external_membership_owners.add(owner)
+
+
+def _default_embeddings_disabled():
+    with _embedding_policy_lock:
+        return bool(_external_membership_owners)
 
 
 def configure_typed_endpoint(value: str | None) -> None:

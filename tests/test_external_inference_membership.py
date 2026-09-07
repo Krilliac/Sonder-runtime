@@ -157,6 +157,82 @@ def test_tls_authority_is_captured_and_temporary_credentials_are_removed(source,
     assert all(not path.exists() and not path.parent.exists() for path in temporary)
 
 
+def test_external_default_fence_survives_source_close_and_static_composition(source, monkeypatch):
+    from sonder_runtime.bootstrap import app as bootstrap
+    from sonder_runtime.platform.config import SonderConfig
+    from sonder_runtime.adapters import embeddings
+    from sonder_runtime.application.context import local_owner_context
+    from sonder_runtime.application.ports.specialized_lifecycle import EmbeddingRequest
+    value, _, _ = source
+    custom_calls = []
+    def custom(request, context):
+        custom_calls.extend(request.texts)
+        return [[1.0] for _ in request.texts]
+    application = bootstrap.build_application(config=SonderConfig(), embedding_provider=custom)
+    monkeypatch.setattr(embeddings.ollama_endpoint._OPENER, "open", lambda *_a, **_kw: pytest.fail("generic embedding escape"))
+    try:
+        assert value.close(timeout=1)
+        assert embeddings.embed("private text") is None
+        provider = application.specialized_providers.registrations[0].provider
+        assert len(provider.embed(EmbeddingRequest(("custom text",), "custom"),
+                   local_owner_context(correlation_id="custom-embedding")).embeddings) == 1
+        assert custom_calls == ["custom text"]
+        assert embeddings.serving_model_revision() == ""
+    finally:
+        application.close_providers(timeout=1)
+
+
+@pytest.mark.parametrize("module_name", ["embeddings", "ollama_endpoint"])
+def test_external_embedding_fence_survives_real_staged_live_reload(source, monkeypatch, module_name):
+    import sys
+    import types
+    from sonder_runtime.adapters import embeddings
+    from sonder_runtime.adapters.web import live_reload
+    original = embeddings if module_name == "embeddings" else embeddings.ollama_endpoint
+    original_policy = embeddings.ollama_endpoint
+    # Restore all aliases the real staged reloader updates when this test ends.
+    for module in tuple(sys.modules.values()):
+        if isinstance(module, types.ModuleType):
+            for name, value in tuple(vars(module).items()):
+                if value is original: monkeypatch.setattr(module, name, original)
+    for name, module in tuple(sys.modules.items()):
+        if module is original: monkeypatch.setitem(sys.modules, name, original)
+    candidate = live_reload._stage_module_reload(original)
+    adapter = candidate if module_name == "embeddings" else embeddings
+    policy = adapter.ollama_endpoint
+    monkeypatch.setattr(policy._OPENER, "open", lambda *_a, **_kw: pytest.fail("reload opened generic embedding transport"))
+    assert candidate is not original
+    assert policy._external_membership_owners is original_policy._external_membership_owners
+    assert policy._embedding_policy_lock is original_policy._embedding_policy_lock
+    assert adapter.embed("sensitive text after reload") is None
+
+
+@pytest.mark.parametrize("compose_during_embed", [False, True])
+def test_default_embedding_dispatch_rechecks_owned_external_source(tmp_path, monkeypatch, compose_during_embed):
+    from sonder_runtime.adapters import embeddings
+    monkeypatch.setenv("SONDER_EMBED_REVISION", "static-test-revision")
+    monkeypatch.setenv("SONDER_EMBED_DIM", "1")
+    monkeypatch.setattr(embeddings, "_npu_prefer_active", lambda: False)
+    monkeypatch.setattr(embeddings, "_npu_shadow_embed", lambda *_a: None)
+    owners, calls = [], []
+    def accelerate(*_a):
+        if compose_during_embed:
+            owners.append(ExternalMembershipSource(configuration(tmp_path), credentials(tmp_path), clock=lambda: NOW))
+        return None
+    monkeypatch.setattr(embeddings, "_accelerated_embed", accelerate)
+    def opened(request, **_kw):
+        calls.append(request.data)
+        return io.BytesIO(b'{"embedding":[1.0]}')
+    monkeypatch.setattr(embeddings.ollama_endpoint._OPENER, "open", opened)
+    try:
+        result = embeddings.embed("dispatch-private-text", base="http://127.0.0.1:11434", model="test-embed")
+        assert result == (None if compose_during_embed else [1.0])
+        assert len(calls) == (0 if compose_during_embed else 1)
+        if calls: assert json.loads(calls[0])["prompt"] == "dispatch-private-text"
+    finally:
+        for owner in owners: owner.close(timeout=1)
+
+
 @pytest.mark.parametrize("failure", ["signature", "cluster", "issuer", "protocol", "expired", "future",
     "origin", "identity", "trust_root", "san_policy", "cidr_policy", "credentials", "oversized", "over_items", "noncanonical"])
 def test_external_authority_cannot_change_configured_trust(source, monkeypatch, failure):
@@ -188,7 +264,9 @@ def test_external_authority_cannot_change_configured_trust(source, monkeypatch, 
 
 @pytest.mark.parametrize("failure", ["mixed_dns", "out_of_cidr", "empty_dns", "wrong_san", "wildcard_san", "redirect",
                                       "client_cert", "server_cert", "oversized", "partial_status", "partial_body", "server_error",
-                                      "version_missing", "post_version_missing", "inference_missing", "tags_missing"])
+                                      "version_missing", "post_version_missing", "inference_missing", "tags_missing",
+                                      "version_body", "version_unknown_length", "version_chunked", "version_truncated",
+                                      "version_oversized", "version_hidden_body", "version_compressed", "version_duplicate_length"])
 def test_pinned_transport_rejects_boundary_failures(tmp_path, monkeypatch, failure):
     from sonder_runtime.adapters.inference import external_membership as module
     config = configuration(tmp_path)
@@ -218,6 +296,20 @@ def test_pinned_transport_rejects_boundary_failures(tmp_path, monkeypatch, failu
             if failure.endswith("missing"):
                 status = b"200 OK" if failure == "version_missing" and b"GET /api/tags " in self.request else b"404 Not Found"
                 body = b'{"models":[{"name":"code"}]}'
+                if failure == "version_missing" and status.startswith(b"404"): body = b""
+            if failure in ("version_body", "version_unknown_length", "version_chunked", "version_truncated",
+                           "version_oversized", "version_hidden_body", "version_compressed", "version_duplicate_length"):
+                headers, body = {
+                    "version_body": (b"Content-Length: 7\r\n", b"private"),
+                    "version_unknown_length": (b"", b""),
+                    "version_chunked": (b"Transfer-Encoding: chunked\r\nContent-Length: 0\r\n", b"0\r\n\r\n"),
+                    "version_truncated": (b"Content-Length: 7\r\n", b""),
+                    "version_oversized": (b"Content-Length: 1048577\r\n", b"private"),
+                    "version_hidden_body": (b"Content-Length: 0\r\n", b"private"),
+                    "version_compressed": (b"Content-Length: 0\r\nContent-Encoding: gzip\r\n", b""),
+                    "version_duplicate_length": (b"Content-Length: 0\r\nContent-Length: 7\r\n", b"private"),
+                }[failure]
+                return io.BytesIO(b"HTTP/1.1 404 Not Found\r\n" + headers + b"\r\n" + body)
             return io.BytesIO(b"HTTP/1.1 " + status + b"\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
     class Context:
         check_hostname = True
@@ -244,11 +336,12 @@ def test_pinned_transport_rejects_boundary_failures(tmp_path, monkeypatch, failu
             return
         with pytest.raises((MembershipSourceError, ModelCallError)) as caught:
             path = {"post_version_missing":"/api/version", "inference_missing":"/api/generate", "tags_missing":"/api/tags"}.get(failure, "/v1/membership")
+            if failure.startswith("version_"): path = "/api/version"
             source._transport.retrieve(source._source_policy, path=path, timeout=1, max_bytes=1048576,
                 method="POST" if failure == "post_version_missing" else "GET")
         for private in ("registry.example", "secret client certificate", "secret certificate chain", str(tmp_path), "private.pem"):
             assert private not in str(caught.value) and private not in repr(caught.value)
-        if failure in ("redirect", "oversized", "partial_status", "partial_body", "server_error", "post_version_missing", "inference_missing", "tags_missing"):
+        if failure in ("redirect", "oversized", "partial_status", "partial_body", "server_error", "post_version_missing", "inference_missing", "tags_missing") or failure.startswith("version_"):
             from sonder_runtime.adapters.inference.ollama_pool import OllamaWorkerPool
             assert type(caught.value) is ModelCallError
             assert not OllamaWorkerPool._retryable(caught.value)
@@ -638,10 +731,25 @@ def test_real_entrypoints_keep_external_admission_transport_and_local_choice(
         monkeypatch.setattr(bootstrap, name, None)
     monkeypatch.setattr(entrypoint, "_load_config", lambda _: config)
     monkeypatch.setattr(entrypoint, "_export_runtime_environment", lambda *_a, **_kw: None)
+    monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")  # matches typed consent; the membership fence must still win
     monkeypatch.setattr(bridge_migration, "require_epoch_2", lambda _: None)
     monkeypatch.setattr(migrations, "migrate_all", lambda **_: None)
     monkeypatch.setattr(operations_store, "OperationsStore", lambda: SimpleNamespace(prune_events=lambda _: 0))
     monkeypatch.setattr(server, "dispatch_provider", lambda _provider, _path, _payload, send: send())
+    # Exercise real legacy operations, retaining the embedding adapter and
+    # final generic opener. Isolate persistence and the unrelated generation.
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "legacy-memory.db"))
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server, "_capture_preferences", lambda *_a, **_kw: None)
+    monkeypatch.setattr(server, "_make_generate", lambda *_a, **_kw: lambda *_a, **_kw: "answer")
+    monkeypatch.setattr(server.orchestrator, "run_with_learning", lambda *_a, **_kw: ("answer", "interaction"))
+    monkeypatch.setattr(server, "_gateway_generate_text", lambda *_a, **_kw: "Use pathlib.Path for path joins.")
+    monkeypatch.setattr(server, "_record_outcome_and_maybe_distill", lambda *_a, **_kw:
+                        {"lesson_id": None, "distillation_deferred": True})
+    real_repl_main = repl.main
+    monkeypatch.setattr(repl, "_startup_banner", lambda *_a: "")
+    monkeypatch.setattr(repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(repl, "_named_command_gate", lambda *_a: (True, ""))
     local_calls, remote_calls, source_calls, checked = [], [], [], []
     embedding_active, generic_embedding_requests = [False], []
     def local_transport(request, **kwargs):
@@ -680,6 +788,28 @@ def test_real_entrypoints_keep_external_admission_transport_and_local_choice(
                 with pytest.raises(RuntimeError, match="^default embeddings unavailable in external membership mode$"):
                     embedding.embed(EmbeddingRequest(("sensitive embedding text",), "embed-test"),
                                     local_owner_context(correlation_id="external-embedding"))
+                assert "fact" in server.sonder_remember_fact("sensitive embedding text", project="external-test")
+                assert generic_embedding_requests == []
+                assert "Example recorded" in server.learn_from_example("sensitive embedding text", "use pathlib")
+                assert server._answer(None, "sensitive embedding text", "code", "", 0.2, 32,
+                    2048, "session", None, [], augment=False)[0] == "answer"
+                candidate = server._prepare_lesson_candidate_bounded(
+                    {"task": "sensitive embedding text", "response": "use pathlib"}, "tests_passed")
+                assert candidate["embedding"] is None
+                mcp_fact = server.mcp._tool_manager.get_tool("sonder_remember_fact").fn
+                assert "fact" in mcp_fact("sensitive embedding text", project="external-mcp")
+                http_result = serve._dispatch_catalogued_tool(
+                    '/sonder_remember_fact text="sensitive embedding text" project=external-http',
+                    SimpleNamespace(token=""), context={"mode": "local-open"})
+                assert "fact" in http_result
+                lines = iter(("/fact sensitive embedding text", "/exit"))
+                monkeypatch.setattr(repl, "_read_input", lambda *_a, **_kw: next(lines))
+                real_repl_main()
+                # Explicit endpoint/model arguments are still the default
+                # adapter, and cannot serve as an escape hatch.
+                assert server.embeddings.embed("sensitive embedding text", base=local, model="embed-test") is None
+                assert server.embeddings.embed_result("sensitive embedding text") is None
+                assert isinstance(server.memory_embedding_backfill(limit=1, apply=True), str)
             finally:
                 embedding_active[0] = False
             assert generic_embedding_requests == []

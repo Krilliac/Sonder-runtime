@@ -112,6 +112,8 @@ def local_manifest_revision(model=None, models_root=None):
 
 def serving_model_revision(model=None, base=None, timeout=0.5):
     """Read the digest advertised by the Ollama endpoint serving this model."""
+    if ollama_endpoint._default_embeddings_disabled():
+        return ""
     identity = canonical_model_name(model or EMBED_MODEL)
     try:
         selected_base = ollama_endpoint.configured_origin(base or BASE)
@@ -371,6 +373,9 @@ def embed(text, timeout=30, base=None, model=None):
     _EMBED_STATE.accelerated = False
     _EMBED_STATE.simulated = False
     _EMBED_STATE.fallback_reason = ""
+    if ollama_endpoint._default_embeddings_disabled():
+        _EMBED_STATE.fallback_reason = "external_membership"
+        return None
     npu_fallback_pending = False
     try:
         selected_base = ollama_endpoint.configured_origin(base or BASE)
@@ -468,7 +473,15 @@ def embed(text, timeout=30, base=None, model=None):
         headers={"Content-Type": "application/json"},
     )
     try:
-        with ollama_endpoint.open_url(req, timeout=timeout) as resp:
+        # Recheck at the actual body-dispatch boundary. Source composition
+        # shares this lock, so an earlier embed cannot send after the external
+        # owner registers while provenance/cache/acceleration was in progress.
+        with ollama_endpoint._embedding_policy_lock:
+            if ollama_endpoint._external_membership_owners:
+                _EMBED_STATE.fallback_reason = "external_membership"
+                return None
+            response = ollama_endpoint.open_url(req, timeout=timeout)
+        with response as resp:
             data = json.loads(resp.read().decode("utf-8"))
             vector = data.get("embedding") if isinstance(data, dict) else None
             revision_after = (

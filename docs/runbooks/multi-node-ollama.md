@@ -296,6 +296,17 @@ including with `local_fallback = true` and with valid admitted members. It
 fails before using the generic Ollama transport; typed custom embedding
 providers remain explicitly supplied integrations. Static-mode default
 embeddings retain their existing behavior.
+This restriction also covers the shared legacy adapter used by answer capture,
+fact memory, lesson distillation, examples, and embedding backfill, including
+MCP, HTTP, REPL and bound-direct calls. Those legacy operations retain their
+existing soft-failure behavior and can store memory without vectors. The
+process-default adapter stays disabled while any composed external source is
+still owned, including a closed, expired or revoked source. Constructing an
+unrelated static graph cannot clear that restriction; a static-only process
+with no external source retains default embeddings. Dispatch rechecks the
+restriction before handing any embedding body to the generic opener.
+The ownership fence also survives staged live reloads of the embedding and
+endpoint-policy modules.
 
 Standalone preflight and doctor Ollama checks are explicitly deferred in
 external mode. They perform no registry or worker I/O and expose no endpoint
@@ -313,6 +324,9 @@ used. A signed advertisement cannot change any transport or credential policy.
 Only a body-free `GET /api/version` 404 retains the older-worker compatibility
 fallback to `/api/tags`. Other response-bearing failures remain closed and
 cannot trigger inference replay.
+This exception requires identity encoding, exactly one `Content-Length: 0`,
+no transfer encoding, and EOF on the bounded raw reader. Unknown, nonempty,
+truncated, oversized, transfer-encoded or extra response bodies are rejected.
 
 The signed response is compact ASCII JSON with sorted keys and no whitespace
 or trailing newline: `{"payload":...,"signature":"..."}`. The payload has

@@ -75,7 +75,7 @@ def _isolate_fleet_ledger(_isolate_runtime_home):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_typed_ollama_endpoint():
+def _isolate_typed_ollama_endpoint(monkeypatch):
     """Restore the process-global typed Ollama endpoint around each test.
 
     ``bootstrap.app`` pins the typed endpoint (``configure_typed_endpoint``)
@@ -89,6 +89,11 @@ def _isolate_typed_ollama_endpoint():
     the endpoint still sees its own value while it runs.
     """
     from sonder_runtime.adapters.inference import ollama_endpoint
+    import weakref
+
+    # Each test owns its composed sources. Keep unrelated external-source
+    # cycles from another test from restricting this test's static adapter.
+    monkeypatch.setattr(ollama_endpoint, "_external_membership_owners", weakref.WeakSet())
 
     with ollama_endpoint._configuration_lock:
         before = ollama_endpoint._configured_endpoint
