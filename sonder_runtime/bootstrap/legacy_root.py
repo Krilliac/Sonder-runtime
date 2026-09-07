@@ -11,6 +11,7 @@ def require_inference_application(application, *, expected_pool=None, allow_inac
     """Validate the trusted composition without invoking structural lookalikes."""
     from .application_graph import Application
     from ..adapters.inference.ollama_pool import OllamaWorkerPool
+    from ..adapters.inference.static_membership import StaticMembershipSource, configured_worker_origins
     from ..application.inference_membership.controller import MembershipController
     from ..platform.config import SonderConfig
 
@@ -21,6 +22,26 @@ def require_inference_application(application, *, expected_pool=None, allow_inac
             or (expected_pool is not None and pool is not expected_pool)
             or controller._pool is not pool):
         raise ValueError("invalid legacy membership binding: exact pool/controller ownership required")
+    configured = configured_worker_origins(application.config.ollama)
+    source = controller._source
+    if type(source) is not StaticMembershipSource:
+        raise ValueError("invalid legacy membership binding: exact static configuration source required")
+    for origins in (pool.configured_origins, source.configured_origins):
+        if (type(origins) is not tuple or any(type(origin) is not str for origin in origins)
+                or origins != configured):
+            raise ValueError("invalid legacy membership binding: configured origins differ")
+    # The source is configuration-derived, with the same expiry/capacity policy
+    # and clock as its controller. No external source is admitted by Task 5.
+    source_origins = configured_worker_origins(source._configuration)
+    if (source_origins != configured or source._clock is not controller._clock
+            or source._configuration.worker_capability_ttl_seconds != application.config.ollama.worker_capability_ttl_seconds
+            or source._configuration.worker_max_inflight != application.config.ollama.worker_max_inflight
+            or any(type(value) is not str for value in (
+                source.cluster_id, source.issuer_id, controller._cluster, controller._issuer))
+            or source.cluster_id != StaticMembershipSource.cluster_id
+            or source.issuer_id != StaticMembershipSource.issuer_id
+            or source.cluster_id != controller._cluster or source.issuer_id != controller._issuer):
+        raise ValueError("invalid legacy membership binding: static source authority/configuration differs")
     authority = pool._membership_authority
     if ((allow_inactive is not True and (controller._closed is not False or pool._draining))
             or pool._membership_clock is None or pool._membership_clock is not controller._clock
@@ -39,6 +60,10 @@ def require_mcp_inference_binding(application, pool, *, primary_origin):
 
     if type(pool) is not OllamaWorkerPool or type(primary_origin) is not str:
         raise ValueError("invalid legacy membership binding: exact pool and primary required")
+    origins = pool.configured_origins
+    if (type(origins) is not tuple or not origins or any(type(origin) is not str for origin in origins)
+            or origins[0] != ollama_endpoint.normalize(primary_origin)):
+        raise ValueError("invalid legacy membership binding: primary differs from configured pool")
     if ollama_endpoint.is_loopback(primary_origin) and not pool.has_configured_remote_workers:
         if application is None:
             return

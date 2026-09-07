@@ -600,6 +600,8 @@ class OllamaWorkerPool:
             f"Ollama worker pool initialized with {len(states)} worker(s), "
             f"max_inflight={max_inflight_per_worker}, queue_depth={queue_depth}"
         )
+        # Startup authority is independent of the live, drainable roster.
+        self._configured_origins = tuple(normalized_origins)
         self._states = states
         self._failure_threshold = int(failure_threshold)
         self._cooldown_seconds = float(cooldown_seconds)
@@ -805,6 +807,11 @@ class OllamaWorkerPool:
     @property
     def has_configured_remote_workers(self) -> bool:
         return bool(self._configured_remote_origins)
+
+    @property
+    def configured_origins(self) -> tuple[str, ...]:
+        """Immutable normalized primary and workers supplied at construction."""
+        return self._configured_origins
 
     @property
     def origins(self) -> tuple[str, ...]:
@@ -1736,13 +1743,21 @@ class OllamaWorkerPool:
 
 def configure_typed_pool(pool: OllamaWorkerPool) -> None:
     """Bind compatibility lookup to the pool owned by the typed application."""
+    import sonder_runtime.adapters.inference.ollama_endpoint as ollama_endpoint
+
     global _configured_pool
     if type(pool) is not OllamaWorkerPool:
         raise ValueError("exact typed application pool required")
+    with ollama_endpoint._configuration_lock:
+        primary = ollama_endpoint._configured_endpoint
     with _configuration_lock:
-        if _configured_workers is None or tuple(pool.origins[1:]) != _configured_workers:
-            raise ValueError("application pool does not match typed workers")
-        _configured_pool = (pool.origins[0], pool)
+        origins = pool.configured_origins
+        if (type(primary) is not str or type(_configured_workers) is not tuple
+                or type(origins) is not tuple or not origins
+                or any(type(origin) is not str for origin in (*origins, *_configured_workers))
+                or origins != (ollama_policy.normalize(primary).rstrip("/"), *_configured_workers)):
+            raise ValueError("application pool does not match typed configured origins")
+        _configured_pool = (origins[0], pool)
 
 
 def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:

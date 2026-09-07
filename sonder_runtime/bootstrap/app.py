@@ -1374,10 +1374,13 @@ def default_app(*, config: SonderConfig | None = None) -> Application:
     """Process-wide default graph for compatibility shims."""
     logger.debug(f"default_app called, config_provided={config is not None}")
     global _default_config, _default_compute_close, _default_delegation_close, _default_inference_close
+    from .legacy_root import require_inference_application
     if _owned_default_application is not None:
         if config is not None and config is not _owned_default_application.config:
             raise RuntimeError("owned application config selection is immutable")
-        return _application_lifecycle.get()
+        application = _application_lifecycle.get()
+        require_inference_application(application)
+        return application
     if config is not None:
         if not isinstance(config, SonderConfig):
             raise TypeError("config must be a SonderConfig when provided")
@@ -1389,6 +1392,11 @@ def default_app(*, config: SonderConfig | None = None) -> Application:
             _default_config = config
             _application_lifecycle.reset()
     application = _application_lifecycle.get()
+    if type(application) is not Application:
+        raise ValueError("invalid legacy membership binding: exact default Application required")
+    if (application.config is not None or application.inference_pool is not None
+            or application.inference_membership is not None):
+        require_inference_application(application)
     _default_compute_close = getattr(application, "close_compute", None)
     _default_delegation_close = getattr(application, "close_delegation", None)
     controller = getattr(application, "inference_membership", None)

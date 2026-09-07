@@ -37,7 +37,7 @@ def test_lifecycle_builds_once_under_concurrent_access() -> None:
 
 def test_bootstrap_compatibility_functions_use_packaged_lifecycle(monkeypatch) -> None:
     bootstrap_app.reset_for_tests()
-    sentinel = object()
+    sentinel = bootstrap_app.build_application()
     monkeypatch.setattr(bootstrap_app, "build_application", lambda: sentinel)
 
     assert bootstrap_app.default_app() is sentinel
