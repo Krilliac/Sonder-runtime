@@ -31,6 +31,27 @@ unbounded system.
 | Status | Pool status and terminal status render every worker. | Large rosters need paged, bounded operator output. |
 | Capability reporting | Request-level pooling is explicit; model sharding and indefinite scale are unavailable. | These statements must remain true after this work. |
 
+### Existing hard limits at the design baseline
+
+The implementation must replace only the roster and refresh limits named in
+this design. The following current `ollama_pool.py` bounds remain load-bearing
+until a task explicitly replaces them with an equal or narrower bound:
+
+| Surface | Existing hard bound or behavior |
+| --- | --- |
+| Roster | `_MAX_WORKERS` is 16 total origins, including primary; parser and typed config permit at most 15 additional workers. |
+| Worker model inventory and diagnostics | A probe retains at most 2,048 model names per worker; each accepted name is at most 256 characters; version text is at most 80 characters; cached safe error text is at most 200 characters. |
+| Admission | Per-worker inflight is 1 through 64; the constructor currently permits a shared queue of 0 through 4,096, while typed configuration requires 1 through 4,096. |
+| Retry and circuit state | Admission timeout is 0 through 60 seconds, failure threshold 1 through 100, cooldown base is 1 through 3,600 seconds with an exponential multiplier capped at 8, and capability TTL is 1 through 86,400 seconds. |
+| Probe transport | One `/api/version` or `/api/tags` response is at most 1,048,576 bytes; legacy probe timeout is at most 30 seconds; refresh starts at most four probes concurrently but currently selects every stale worker. |
+| Metric cardinality | Exactly sixteen ordinal slots (`w0` through `w15`) plus `overflow`; labels never contain an origin. Current slots are construction-order labels and have no churn-lifetime rule. |
+| Current status | `status()` returns every worker and every retained model name; `server.py:status()` also refreshes workers and queries tags/residency. Neither response has a page or serialized-byte ceiling. |
+
+The new plan must preserve the existing response-size, name-length, retry,
+timeout, queue, and metric-label bounds while making roster, batch, and status
+bounds explicit. It must not treat a larger 64- or 256-member test roster as
+permission to remove any of them.
+
 Typed capacity propagation is a prerequisite. Canonical typed composition must
 pass configured inflight and queue limits directly to the pool. Stale
 compatibility environment values must not override them.
@@ -98,8 +119,11 @@ one bounded request may use one eligible worker.
 
 Add a field named worker_pool_max_workers to the typed Ollama configuration.
 It includes the primary Ollama endpoint and defaults to 16, preserving current
-behavior. Validation canonicalizes origins, rejects duplicates, and rejects a
-unique roster larger than the configured limit.
+behavior. Validation canonicalizes the primary and every worker origin before
+counting. It rejects a repeated worker and a worker that canonicalizes to the
+primary; it must not silently deduplicate either case. The same rule applies
+at the legacy injected-environment seam and at the pool constructor, so a
+bypass of typed configuration cannot make two identities share one endpoint.
 
 The initial allowed interval is 1 through 256 total workers. It means that
 one coordinator has a tested finite roster bound; it does not promise that a
@@ -115,8 +139,12 @@ Static-roster requirements:
 - Replace the fixed worker-count check with an instance-level maximum.
 - Keep per-worker inflight at 1 through 64.
 - Keep queue depth at 1 through 4096 across the whole pool.
-- Retain the sixteen-label metric limit and aggregate later workers under the
-  overflow label.
+- Retain sixteen named metric slots plus `overflow`. Bind each named slot to
+  its first admitted stable identity for the process lifetime; never assign a
+  departed identity's slot to a different identity, and retain only the
+  sixteen bindings. A returning identity recovers its old slot; every other
+  identity uses `overflow`. The binding is private and never becomes a metric
+  label.
 - Probe stale workers in fair, bounded batches.
 - Return a stable summary and cursor-paged detail. Terminal output shows a
   bounded first page and omitted-record count.
@@ -136,12 +164,37 @@ Each worker advertisement contains an opaque stable worker identity, HTTPS
 origin, member generation, lifecycle state, supported model keys, and
 advertised capacity. Identity is never derived from origin.
 
+The verified signed envelope has a SHA-256 digest. Before the controller may
+apply it, a durable high-water store compares and atomically persists
+`{cluster_id, issuer_id, generation, digest}`. The configured cluster and
+issuer must match exactly. A lower generation is rejected as replay; an equal
+generation with a different digest is rejected as equivocation; an equal
+generation with the same digest is an idempotent reread only while that
+snapshot is unexpired. A higher generation is fsync-persisted before roster
+mutation. If persistence fails, the candidate is rejected and the prior
+roster can remain usable only until its already-recorded expiry. The store
+keeps one record for the configured cluster and issuer and survives a process
+restart. It has no automatic reset or issuer rotation; changing either needs
+an explicit operator migration with an auditable new store state.
+
 The external adapter owns mutually authenticated TLS, issuer or signature
 verification, trust-anchor configuration, response-size limits, redirect
-refusal, and clock checks. A pure domain contract owns shape validation,
-duplicate identity rejection, monotonic generation, expiry bounds, and
-immutable snapshot semantics. The pool sees only a validated roster and never
-contacts a registry while holding its admission lock.
+refusal, and clock checks. An advertised member may be admitted only when it
+matches a configured bounded endpoint policy for that stable member identity:
+the exact canonical HTTPS origin, expected DNS name or IP SAN, and permitted
+network CIDRs. `trusted_origins`, a DNS response, and a capability probe are
+not substitutes for this allowlist. The adapter resolves an allowed DNS name
+once for a connection, rejects a mixed or out-of-policy answer, connects to
+that resolved address without a second resolver lookup, sends the configured
+SNI, and verifies the exact configured SAN through the configured private
+trust anchor. IP-literal policies require an exact IP SAN. The worker request
+uses a client certificate; missing or invalid client authentication, a
+redirect, an SAN mismatch, or a rebinding attempt fails closed.
+
+A pure domain contract owns shape validation, duplicate identity rejection,
+monotonic generation, digest equality, expiry bounds, and immutable snapshot
+semantics. The pool sees only a validated roster and never contacts a registry
+while holding its admission lock.
 
 The membership controller owns one runtime-managed refresh loop. It obtains a
 snapshot outside the pool lock, validates it, then atomically reconciles the
@@ -191,6 +244,10 @@ defaults.
 | worker_capability_probe_parallelism | 4 | 1 through 8 | Maximum in-process capability probes for this pool. |
 | worker_capability_probe_batch_size | 32 | 1 through 128 | Maximum stale workers selected in one refresh pass. |
 | worker_status_page_size | 32 | 1 through 128 | Default administrative worker-detail page. |
+| worker_status_max_serialized_bytes | 65,536 | fixed | Absolute UTF-8 encoded response ceiling for one administrative detail page; a page truncates at a complete record boundary. |
+| worker_status_model_preview_count | 8 | fixed | Maximum sorted, sanitized model-name previews per worker; `model_count` reports the retained total. |
+| membership_snapshot_max_advertisements | 4,096 | 1 through 4,096 | Maximum advertised members parsed from one external signed snapshot. |
+| membership_snapshot_max_bytes | 1,048,576 | 1 through 1,048,576 | Maximum serialized signed snapshot bytes read before parsing or signature verification. |
 
 The equivalent environment names are SONDER_OLLAMA_POOL_MAX_WORKERS,
 SONDER_OLLAMA_WORKER_PROBE_PARALLELISM,
@@ -200,10 +257,14 @@ over ambient environment state. An explicitly injected environment map remains
 a compatibility test seam.
 
 Dynamic mode is off by default. Its configuration requires a mode, nonempty
-cluster identity, protocol version, refresh interval, bounded snapshot size,
-and an explicit local-fallback decision. External mode additionally requires a
-membership adapter, trust anchor, and mutually authenticated transport. A
-registry URL alone cannot activate membership.
+cluster identity, issuer identity, protocol version, refresh interval, bounded
+snapshot item and byte limits, and an explicit local-fallback decision.
+External mode additionally requires a membership adapter, trust anchor,
+secret-backed client certificate, source origin, and a bounded member endpoint
+policy keyed by stable member identity. Each policy contains one exact origin,
+one exact expected SAN name or IP, and permitted connection CIDRs. A registry
+URL, a broad DNS suffix, a registry-supplied trust anchor, or a worker model
+list alone cannot activate membership.
 
 The dynamic snapshot maximum bounds a registry response. The active roster
 remains bounded by worker_pool_max_workers. When a snapshot contains more
@@ -217,15 +278,54 @@ Routing remains latency-aware least-inflight inside the active roster. Only
 workers whose membership, capability, circuit, and capacity state are eligible
 are candidates.
 
-Pool status becomes versioned and splits totals from one bounded detail page.
-It includes roster generation, membership mode and state, configured,
-eligible, draining, unhealthy, and available-capacity counts; the global queue
-state; a bounded worker list; an opaque next cursor; and a complete flag.
+`server.py:status()` becomes a cached, non-probing summary. It may read the
+already-held pool state, but must not call `refresh_capabilities`,
+`refresh_inventory`, `/api/tags`, `/api/ps`, DNS, or a worker endpoint. If a
+field has never been refreshed, it reports `unknown` or `not_refreshed`; it
+does not turn a routine status poll into fleet traffic. The default summary has
+only bounded totals, queue state, routing statement, refresh age/state, and
+the existing explicit whole-request/no-sharding statement.
 
-Worker details contain stable identity, lifecycle state, inflight capacity,
-bounded error class, and capability freshness. They never contain credentials,
-TLS material, prompts, response bodies, workspace paths, or unbounded model
-lists. Configured origins remain administrator-only.
+One separately named administrator-authorized operation,
+`ollama_pool_admin_status`, owns cached detail and explicit refresh. It checks
+the existing administrator gate before it reveals origins, model previews, or
+starts network work. Its `refresh=false` path returns a cached page only. Its
+`refresh=true` path can run exactly one stale-worker refresh using configured
+batch size (at most 128) and configured parallelism (at most 8); callers cannot
+override those limits. The operation accepts a cursor and page size of 1
+through 128, returns at most 65,536 UTF-8 bytes, and binds an opaque cursor to
+the roster generation and request principal. A stale, malformed, or
+cross-principal cursor is rejected without probing. HTTP detail routes use the
+same administrator decision; the app and REPL consume the non-probing summary
+unless an authorized operator explicitly requests a page.
+
+Pool detail is versioned and includes roster generation, membership mode and
+state, configured, eligible, draining, unhealthy, omitted, and
+available-capacity counts; global queue state; a bounded worker list; opaque
+next cursor; `complete`; and `serialized_bytes`. If the byte ceiling is reached
+the page stops before the next record, sets `complete=false`, and returns a
+cursor for that omitted record. It never emits a partial JSON record.
+
+A worker record has stable identity, lifecycle state, inflight capacity,
+capability freshness, fixed `error_category`, `model_count`, and at most eight
+sanitized model previews. `error_category` is one of `none`, `transport`,
+`timeout`, `protocol`, `capability`, `authorization`, or `unknown`; it never
+contains an exception string. Model previews are sorted, each at most 128
+characters, and are omitted rather than replaced with an unbounded raw model
+list. Records never contain credentials, TLS material, prompts, response
+bodies, workspace paths, raw exception content, or inventory payloads.
+Configured origins remain administrator-only.
+
+For a model-specific request, fresh positive capability evidence is required
+before routing. If no fresh supporting worker exists, the pool may select one
+fairly rotated unknown or stale eligible worker and run one targeted capability
+probe outside the admission lock. That request starts at most one such probe,
+joins an existing single-flight probe for the same worker, and neither fans out
+to the roster nor retries the model request. Success makes only that cached
+worker eligible; a missing model, timeout, contention, or failed probe returns
+the bounded capability-unavailable result. A request without a model hint does
+not trigger this targeted probe. Status refresh remains an explicit operation
+and is not a membership-discovery mechanism.
 
 The REPL and app show eligible/total workers, queue occupancy, available
 capacity, and one of static, membership-current, membership-stale, or
@@ -240,22 +340,39 @@ unavailable.
 - Defaults retain 16 total workers and reject a seventeenth unique member.
 - Typed 64-worker and 256-worker configurations ignore stale ambient capacity
   environment values.
-- A 64-worker configured limit rejects a sixty-fifth unique origin.
-- Duplicate normalized origins are rejected before scheduling.
+- Typed and injected-legacy 64-worker and 256-worker configurations accept
+  exactly that many canonical total origins, including primary, and reject the
+  next unique origin.
+- Duplicate normalized workers and a primary/worker duplicate are rejected
+  before scheduling; neither typed nor legacy paths silently collapse them.
 - Queue depth remains global as roster size changes.
 - Probe launches do not exceed configured parallelism or batch size; fake
   clock tests prove fair progress through multiple batches.
-- Status ordering, cursor validation, roster-generation invalidation, output
-  size, and secret/body redaction are tested.
-- Metrics retain sixteen worker labels plus overflow.
+- Status tests use 2,048 valid models, hostile long names, credential-shaped
+  errors, and body-shaped errors. They prove model count/preview bounds, a
+  65,536-byte serialized ceiling, cursor invalidation, no raw error/body leak,
+  and no default status probe.
+- Metrics retain sixteen worker labels plus overflow. Add/remove/reorder churn
+  proves a named slot never changes identity during a process lifetime and the
+  binding map stays at sixteen entries.
+- Model-specific routing tests prove one targeted unknown-capability probe per
+  request, single-flight joining, no probe for an omitted model hint, and no
+  response-bearing replay.
 
 ### Dynamic membership
 
 - Domain tests reject duplicate identities, bad protocol versions, expiry
-  inversions, large snapshots, and generation rollback.
-- Adapter tests reject redirects, bad client identity, untrusted issuer,
-  oversized body, signature failure, certificate binding mismatch, and
-  non-HTTPS member origin.
+  inversions, large snapshots, and generation rollback or same-generation
+  digest conflict.
+- Durable-store tests restart the controller, reject an older generation and
+  equal-generation different digest, permit only an equal digest while
+  unexpired, and prove a persistence failure cannot mutate the roster.
+- Adapter tests reject redirects, missing or bad client identity, untrusted
+  issuer, oversized body, signature failure, source/membership cluster or
+  issuer mismatch, an unallowlisted member origin, certificate SAN mismatch,
+  and a resolver answer outside the exact member CIDR policy. A rebinding test
+  proves the connection uses the first validated resolution rather than a
+  second DNS lookup.
 - Controller tests use an injected clock and source for active, draining,
   expired, revoked, endpoint-replaced, and outage behavior.
 - Pool tests prove that a roster update never changes an in-flight endpoint or
@@ -306,11 +423,19 @@ model-sharded execution.
 ## Review checklist
 
 - Every remote endpoint still passes consent and TLS checks.
+- Dynamic endpoints additionally match a configured member identity, exact
+  origin, SAN, and connection CIDR policy; DNS cannot create or swap one.
 - Membership validation is separate from capability probes and scheduling.
+- A durable `{cluster, issuer, generation, digest}` high-water record is
+  written before a newer external roster is applied.
 - Network work happens outside pool locks.
-- Every inventory and status surface is bounded and paged.
-- Queue, probe, metric, and log cardinality remain bounded at 256 and under
-  external-membership test inputs.
+- Default `server.py:status()` is cached and non-probing; only the explicit
+  administrator operation can refresh bounded worker state or reveal detail.
+- Every inventory and status surface is bounded, paged, and capped at a
+  complete-record serialized byte limit.
+- Active roster, queue, probe, metric, and log cardinality remain bounded at
+  256; external snapshot parsing and endpoint policy inventory remain bounded
+  at 4,096 records and 1 MiB under adversarial external-membership inputs.
 - App and REPL retain explicit unavailable sharding and indefinite-scale
   states.
 - Static configuration is the default; dynamic mode requires authenticated
