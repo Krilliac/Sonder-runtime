@@ -246,20 +246,41 @@ def memory_replication_errors(config) -> list[str]:
                 "memory replication requires a dedicated 32..512 character secret"
             )
         else:
-            api_key = getattr(secrets, "api_key", None)
-            artifact_key = getattr(secrets, "artifact_transfer_key", None)
-            auth_secret = getattr(secrets, "auth_secret", None)
-            if not all(
-                type(value) is str
-                for value in (key, api_key, artifact_key, auth_secret)
-            ):
+            state_integrity_key = getattr(
+                secrets, "memory_replication_state_integrity_key", None,
+            )
+            if not _dedicated_secret_is_valid(state_integrity_key):
                 errors.append(
-                    "memory replication secret separation requires exact builtin strings"
+                    "memory replication requires a dedicated local state-integrity "
+                    "32..512 character secret"
                 )
-            elif key == api_key or key == artifact_key or key == auth_secret:
-                errors.append(
-                    "memory replication dedicated key must be distinct from API, artifact-transfer, and auth secrets"
-                )
+            else:
+                api_key = getattr(secrets, "api_key", None)
+                artifact_key = getattr(secrets, "artifact_transfer_key", None)
+                auth_secret = getattr(secrets, "auth_secret", None)
+                if not all(
+                    type(value) is str
+                    for value in (
+                        key, state_integrity_key, api_key, artifact_key, auth_secret,
+                    )
+                ):
+                    errors.append(
+                        "memory replication secret separation requires exact builtin strings"
+                    )
+                elif key == api_key or key == artifact_key or key == auth_secret:
+                    errors.append(
+                        "memory replication dedicated key must be distinct from API, artifact-transfer, and auth secrets"
+                    )
+                elif (
+                    state_integrity_key == key
+                    or state_integrity_key == api_key
+                    or state_integrity_key == artifact_key
+                    or state_integrity_key == auth_secret
+                ):
+                    errors.append(
+                        "memory replication local state-integrity secret must be distinct "
+                        "from replication peer, API, artifact-transfer, and auth secrets"
+                    )
         if receiver_enabled:
             if not accepted:
                 errors.append(

@@ -24,6 +24,10 @@ def _key(char: str = "k") -> str:
     return "memory-replication-" + char * 40
 
 
+def _state_key(char: str = "s") -> str:
+    return "memory-replication-state-" + char * 40
+
+
 def _toml(*, peer_scope: str = "repo-a", origin: str = "https://node-b.example:8443") -> str:
     return f'''[memory_replication]
 enabled = true
@@ -46,7 +50,10 @@ origin = "{origin}"
 def _load(tmp_path, text: str, *, env: dict[str, str] | None = None):
     path = tmp_path / "sonder.toml"
     path.write_text(text, encoding="utf-8")
-    effective_env = {"SONDER_MEMORY_REPLICATION_KEY": _key()}
+    effective_env = {
+        "SONDER_MEMORY_REPLICATION_KEY": _key(),
+        "SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY": _state_key(),
+    }
     if env is not None:
         effective_env.update(env)
     return load_config(path, env=effective_env)
@@ -66,7 +73,14 @@ def _direct_enabled_config(
 ) -> SonderConfig:
     return SonderConfig(
         server=ServerConfig() if server is None else server,
-        secrets=Secrets(memory_replication_key=_key()) if secrets is None else secrets,
+        secrets=(
+            Secrets(
+                memory_replication_key=_key(),
+                memory_replication_state_integrity_key=_state_key(),
+            )
+            if secrets is None
+            else secrets
+        ),
         memory_replication=MemoryReplicationConfig(
             enabled=True,
             local_node_id=local_node_id,
@@ -124,16 +138,122 @@ def test_dedicated_secret_loads_from_the_secrets_environment_file(tmp_path):
     path.write_text(_toml(), encoding="utf-8")
     secrets_path = tmp_path / "sonder.secrets.env"
     key = _key("s")
+    state_key = _state_key("s")
     secrets_path.write_text(
-        f"SONDER_MEMORY_REPLICATION_KEY={key}\n",
+        "SONDER_MEMORY_REPLICATION_KEY=" + key + "\n"
+        "SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY=" + state_key + "\n",
         encoding="utf-8",
     )
 
     config = load_config(path, secrets_path=secrets_path, env={})
 
     assert config.secrets.memory_replication_key == key
+    assert config.secrets.memory_replication_state_integrity_key == state_key
     assert key not in repr(config)
     assert config.as_redacted_dict()["secrets"]["memory_replication_key"] == "[set]"
+
+
+def test_local_state_integrity_secret_is_environment_only_and_redacted(tmp_path):
+    path = tmp_path / "sonder.toml"
+    path.write_text(_toml(), encoding="utf-8")
+    secrets_path = tmp_path / "sonder.secrets.env"
+    peer_key = _key("p")
+    state_key = _state_key("l")
+    secrets_path.write_text(
+        "SONDER_MEMORY_REPLICATION_KEY=" + peer_key + "\n"
+        "SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY=" + state_key + "\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(path, secrets_path=secrets_path, env={})
+
+    assert config.secrets.memory_replication_key == peer_key
+    assert config.secrets.memory_replication_state_integrity_key == state_key
+    rendered = repr(config.as_redacted_dict()) + repr(config)
+    assert peer_key not in rendered
+    assert state_key not in rendered
+    assert (
+        config.as_redacted_dict()["secrets"]
+        ["memory_replication_state_integrity_key"]
+        == "[set]"
+    )
+
+
+def test_state_integrity_secret_is_rejected_from_toml(tmp_path):
+    state_key = _state_key("t")
+    text = _toml().replace(
+        "\n[[memory_replication.peers]]",
+        "\nmemory_replication_state_integrity_key = \"" + state_key
+        + "\"\n\n[[memory_replication.peers]]",
+    )
+
+    with pytest.raises(ConfigError) as error:
+        _load(tmp_path, text, env={
+            "SONDER_MEMORY_REPLICATION_KEY": _key(),
+            "SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY": _state_key(),
+        })
+
+    assert "secrets environment file" in str(error.value)
+    assert state_key not in str(error.value)
+
+
+def test_enabled_config_requires_a_distinct_local_state_integrity_secret(tmp_path):
+    shared = _key("x")
+
+    with pytest.raises(ConfigError) as error:
+        _load(tmp_path, _toml(), env={
+            "SONDER_MEMORY_REPLICATION_KEY": shared,
+            "SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY": shared,
+        })
+
+    assert "state-integrity" in str(error.value)
+    assert shared not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "memory_replication_key",
+        "api_key",
+        "artifact_transfer_key",
+        "auth_secret",
+    ),
+)
+def test_direct_typed_config_rejects_state_key_reuse_with_every_secret_boundary(field):
+    state_key = _state_key("r")
+    values = {
+        "memory_replication_key": _key(),
+        "memory_replication_state_integrity_key": state_key,
+        "api_key": "api-" + "a" * 40,
+        "artifact_transfer_key": "artifact-" + "b" * 40,
+        "auth_secret": "auth-" + "c" * 40,
+    }
+    values[field] = state_key
+
+    errors = memory_replication_errors(
+        _direct_enabled_config(secrets=Secrets(**values))
+    )
+
+    assert errors == [
+        "memory replication local state-integrity secret must be distinct "
+        "from replication peer, API, artifact-transfer, and auth secrets"
+    ]
+    assert state_key not in repr(errors)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (None, 0, [], b"not-a-text-state-secret", {"secret": "not-a-text-state-secret"}),
+)
+def test_injected_state_integrity_key_requires_a_string_before_normalization(value):
+    with pytest.raises(ConfigError) as error:
+        load_config(env={"SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY": value})
+
+    assert error.value.errors == (
+        "SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY must be a string",
+    )
+    assert "not-a-text-state-secret" not in str(error.value)
+    assert "not-a-text-state-secret" not in repr(error.value)
 
 
 def test_topology_never_falls_back_to_injected_environment_values(tmp_path):
@@ -300,7 +420,10 @@ def test_direct_typed_config_cannot_enable_receiver_without_global_enablement():
 
 def test_direct_typed_config_rejects_nonstring_sources_without_raising():
     config = SonderConfig(
-        secrets=Secrets(memory_replication_key=_key()),
+        secrets=Secrets(
+            memory_replication_key=_key(),
+            memory_replication_state_integrity_key=_state_key(),
+        ),
         memory_replication=MemoryReplicationConfig(
             enabled=True,
             local_node_id="node-a",
@@ -329,6 +452,7 @@ def test_direct_typed_config_rejects_dedicated_secret_str_subclass_before_equali
     config = SonderConfig(
         secrets=Secrets(
             memory_replication_key=EvasiveSecret(key),
+            memory_replication_state_integrity_key=_state_key(),
             auth_secret=key,
         ),
         memory_replication=MemoryReplicationConfig(
@@ -363,7 +487,11 @@ def test_direct_typed_config_rejects_subclassed_comparison_secret_before_equalit
 
     key = _key("c")
     config = _direct_enabled_config(
-        secrets=Secrets(memory_replication_key=key, **{field: UnequalSecret(key)}),
+        secrets=Secrets(
+            memory_replication_key=key,
+            memory_replication_state_integrity_key=_state_key(),
+            **{field: UnequalSecret(key)},
+        ),
     )
 
     errors = memory_replication_errors(config)
@@ -487,6 +615,7 @@ def test_disabled_typed_config_rejects_falsey_nonstring_identity_or_scope(field,
     "secret_name",
     (
         "SONDER_MEMORY_REPLICATION_KEY",
+        "SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY",
         "SONDER_ARTIFACT_TRANSFER_KEY",
         "SONDER_AUTH_SECRET",
     ),

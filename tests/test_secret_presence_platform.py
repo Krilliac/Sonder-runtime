@@ -21,6 +21,7 @@ def test_config_secret_redaction_uses_platform_policy():
         "backup_key_file": "[unset]",
         "artifact_transfer_key": "[unset]",
         "memory_replication_key": "[unset]",
+        "memory_replication_state_integrity_key": "[unset]",
     }
 
 
@@ -30,6 +31,7 @@ def test_secrets_repr_omits_all_secret_values():
         auth_secret="private-auth-secret",
         artifact_transfer_key="private-artifact-key",
         memory_replication_key="private-memory-key",
+        memory_replication_state_integrity_key="private-memory-state-key",
         backup_key_file="C:/private/backup.key",
     )
 
@@ -41,6 +43,7 @@ def test_secrets_repr_omits_all_secret_values():
         "private-auth-secret",
         "private-artifact-key",
         "private-memory-key",
+        "private-memory-state-key",
         "C:/private/backup.key",
     ):
         assert value not in rendered_secrets

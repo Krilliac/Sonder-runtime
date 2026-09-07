@@ -79,3 +79,35 @@ replay only.  It does not elect an owner, provide quorum, fence processes,
 replicate control state, or claim automatic takeover/failback or high
 availability.  Those guarantees require a separately reviewed replication and
 consensus provider around these receipts.
+
+## Local explicit-service checkpoint
+
+The enabled trusted-peer service keeps its local send cursor and last bounded
+receipt/failure evidence in two private files under the runtime state home:
+a checkpoint and a linked high-water journal anchor.  The anchor records the
+last fully acknowledged cursor, source epoch, and mutation digest.  It is
+written after the checkpoint, and a result is returned as `replicated` only
+after both locally authenticated documents have been flushed and replaced.
+A crash or write failure between those steps leaves a pair mismatch; the next
+start fails closed instead of advancing or replaying from an unproven cursor.
+
+The documents use exact canonical JSON, reject duplicate keys and non-finite
+numbers, and are authenticated with the local-only
+`SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY`.  Set that key only in the
+secrets environment source.  It must differ from the replication bearer,
+general API key, artifact-transfer key, and auth secret.  It is never sent to
+a peer.  On Windows, document replacement requests write-through behavior;
+on POSIX, the file and parent directory are flushed after replacement.
+
+Before a later explicit send, the service checks the anchor against the local
+journal record before constructing a peer client.  Replacing or rolling back
+only the checkpoint or only the anchor is detected from their authenticated
+generation/digest link and blocks the service.  This does not add a background
+retry, automatic repair, peer discovery, promotion, takeover, or failback.
+
+This is a runtime-local integrity boundary, not an external rollback oracle.
+An actor who can replace the entire runtime state directory with one older,
+mutually consistent signed checkpoint-and-anchor snapshot can make that old
+state appear valid.  Detecting that host/filesystem rollback requires an
+independent external, TPM-backed, or remote monotonic anchor, which Sonder does
+not configure or claim here.

@@ -66,6 +66,7 @@ SECRET_ENV_KEYS = (
     "SONDER_API_KEY",
     "SONDER_ARTIFACT_TRANSFER_KEY",
     "SONDER_MEMORY_REPLICATION_KEY",
+    "SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY",
     "SONDER_AUTH_SECRET",
     "SONDER_BACKUP_KEY_FILE",
     "SONDER_LAUNCHER_HEALTH_TOKEN",
@@ -73,6 +74,7 @@ SECRET_ENV_KEYS = (
 _SECRET_TOML_KEYS = frozenset(
     {
         "api_key", "artifact_transfer_key", "memory_replication_key",
+        "memory_replication_state_integrity_key",
         "auth_secret", "backup_key", "backup_key_file", "secret", "token",
     }
 )
@@ -239,12 +241,16 @@ class Secrets:
     backup_key_file: str = field(default="", repr=False)
     artifact_transfer_key: str = field(default="", repr=False)
     memory_replication_key: str = field(default="", repr=False)
+    memory_replication_state_integrity_key: str = field(default="", repr=False)
 
     def as_redacted_dict(self) -> dict:
         return {
             "api_key": redact_presence(self.api_key),
             "artifact_transfer_key": redact_presence(self.artifact_transfer_key),
             "memory_replication_key": redact_presence(self.memory_replication_key),
+            "memory_replication_state_integrity_key": redact_presence(
+                self.memory_replication_state_integrity_key
+            ),
             "auth_secret": redact_presence(self.auth_secret),
             "backup_key_file": redact_presence(self.backup_key_file),
         }
@@ -931,6 +937,17 @@ def _apply_environment(
             secrets = replace(
                 secrets,
                 memory_replication_key=replication_key.strip(),
+            )
+    if "SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY" in env:
+        state_integrity_key = env["SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY"]
+        if type(state_integrity_key) is not str:
+            errors.append(
+                "SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY must be a string"
+            )
+        elif state_integrity_key.strip():
+            secrets = replace(
+                secrets,
+                memory_replication_state_integrity_key=state_integrity_key.strip(),
             )
     if env.get("SONDER_AUTH_SECRET", "").strip():
         secrets = replace(secrets, auth_secret=env["SONDER_AUTH_SECRET"].strip())

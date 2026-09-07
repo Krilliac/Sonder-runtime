@@ -14,6 +14,7 @@ from copy import deepcopy
 import hashlib
 import hmac
 import json
+import math
 import os
 from pathlib import Path
 from threading import RLock
@@ -35,10 +36,13 @@ from sonder_runtime.platform.memory_replication_config import (
 
 
 _STATE_FILE_NAME = "memory-replication-state.json"
-_STATE_SCHEMA_VERSION = 1
+_ANCHOR_FILE_NAME = "memory-replication-anchor.json"
+_STATE_SCHEMA_VERSION = 2
 _STATE_MAX_BYTES = 16 * 1024
 _STATE_LOCK_TIMEOUT_SECONDS = 1.0
 _STATE_MAX_INTEGER = (1 << 63) - 1
+_MOVEFILE_REPLACE_EXISTING = 0x00000001
+_MOVEFILE_WRITE_THROUGH = 0x00000008
 _STATE_FAILURE_REASONS = frozenset({
     "sink_failure",
     "sink_identity_changed",
@@ -63,6 +67,7 @@ class _ReplicationStateError(RuntimeError):
 
 
 def _canonical_state_bytes(payload: dict[str, object]) -> bytes:
+    """Encode the one accepted on-disk representation of local state."""
     return json.dumps(
         payload,
         sort_keys=True,
@@ -70,6 +75,21 @@ def _canonical_state_bytes(payload: dict[str, object]) -> bytes:
         ensure_ascii=True,
         allow_nan=False,
     ).encode("ascii")
+
+
+def _state_integrity_tag_for_key(
+    key: str,
+    body: dict[str, object],
+    *,
+    domain: str,
+) -> str:
+    """Tag one local-only state document with a domain-separated MAC."""
+    if type(key) is not str or domain not in {"checkpoint", "anchor"}:
+        raise TypeError("local state integrity inputs are invalid")
+    prefix = b"sonder.memory-replication.local-state.v1\0" + domain.encode("ascii") + b"\0"
+    return hmac.new(
+        key.encode("ascii"), prefix + _canonical_state_bytes(body), hashlib.sha256,
+    ).hexdigest()
 
 
 def _is_state_integer(value: object, *, minimum: int = 0) -> bool:
@@ -89,14 +109,26 @@ def _state_path_for_config(config: SonderConfig) -> Path:
     return Path(runtime_paths.state_path(_STATE_FILE_NAME))
 
 
-def _state_integrity_tag(config: SonderConfig, body: dict[str, object]) -> str:
-    key = config.secrets.memory_replication_key
-    # The typed configuration boundary has already proved this is an exact
-    # printable builtin string.  The tag is a tamper detector, never a stored
-    # credential or an external authorization token.
-    return hmac.new(
-        key.encode("ascii"), _canonical_state_bytes(body), hashlib.sha256,
-    ).hexdigest()
+def _anchor_path_for_state_path(state_path: Path) -> Path:
+    return state_path.with_name(_ANCHOR_FILE_NAME)
+
+
+def _state_integrity_tag(
+    config: SonderConfig,
+    body: dict[str, object],
+    *,
+    domain: str,
+) -> str:
+    """Use only the dedicated local integrity secret, never the peer bearer."""
+    key = config.secrets.memory_replication_state_integrity_key
+    # Configuration validates this exact printable built-in string before any
+    # service instance can exist.  Keep this narrow check here too so direct
+    # calls cannot silently turn a wire credential into local state authority.
+    if type(key) is not str:
+        raise TypeError("local state integrity secret is invalid")
+    return _state_integrity_tag_for_key(
+        key, body, domain=domain,
+    )
 
 
 def _private_state_file_is_safe(path: Path) -> bool:
@@ -294,65 +326,207 @@ def _state_to_attempt(
     }
 
 
+def _reject_duplicate_json_object(
+    pairs: list[tuple[object, object]],
+) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if type(key) is not str or key in value:
+            raise ValueError("duplicate or invalid JSON object key")
+        value[key] = item
+    return value
+
+
+def _parse_finite_json_float(token: str) -> float:
+    value = float(token)
+    if not math.isfinite(value):
+        raise ValueError("non-finite JSON number")
+    return value
+
+
+def _reject_json_constant(_token: str) -> object:
+    raise ValueError("non-finite JSON constant")
+
+
+def _strict_state_document(raw_bytes: bytes) -> dict[str, object]:
+    """Decode only exact canonical JSON before examining its MAC or fields."""
+    try:
+        decoded = json.loads(
+            raw_bytes.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_json_object,
+            parse_float=_parse_finite_json_float,
+            parse_constant=_reject_json_constant,
+        )
+        if type(decoded) is not dict or raw_bytes != _canonical_state_bytes(decoded):
+            raise ValueError("noncanonical local state")
+    except (
+        UnicodeDecodeError,
+        ValueError,
+        TypeError,
+        OverflowError,
+        RecursionError,
+    ) as exc:
+        raise _ReplicationStateError("corrupt") from exc
+    return decoded
+
+
+def _is_sha256_hex(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _read_signed_state_document(
+    path: Path,
+    *,
+    config: SonderConfig,
+    domain: str,
+    expected_keys: frozenset[str],
+) -> dict[str, object] | None:
+    raw_bytes = _read_state_bytes(path)
+    if raw_bytes is None:
+        return None
+    raw = _strict_state_document(raw_bytes)
+    if frozenset(raw) != expected_keys:
+        raise _ReplicationStateError("corrupt")
+    integrity = raw["integrity"]
+    if not _is_sha256_hex(integrity):
+        raise _ReplicationStateError("corrupt")
+    body = {key: value for key, value in raw.items() if key != "integrity"}
+    try:
+        expected_integrity = _state_integrity_tag(config, body, domain=domain)
+    except (TypeError, ValueError, UnicodeError, RecursionError) as exc:
+        raise _ReplicationStateError("corrupt") from exc
+    if not hmac.compare_digest(expected_integrity, integrity):
+        raise _ReplicationStateError("incompatible")
+    return body
+
+
 def _read_persisted_state(
     path: Path,
     *,
     config: SonderConfig,
     peer_ids: tuple[str, ...],
-) -> tuple[int, int, dict[str, object]] | None:
-    raw_bytes = _read_state_bytes(path)
-    if raw_bytes is None:
+) -> tuple[int, int, dict[str, object], int, str] | None:
+    """Restore a linked checkpoint and high-water anchor as one local unit.
+
+    A lone document or a generation/digest mismatch is intentionally not
+    recovered.  It can result from a crash between the two write-through
+    replacements or a one-file rollback, and proceeding would risk skipping
+    a record that was never durably acknowledged in this local evidence.
+    """
+    checkpoint = _read_signed_state_document(
+        path,
+        config=config,
+        domain="checkpoint",
+        expected_keys=frozenset({
+            "schema_version", "generation", "source_id", "project_scope",
+            "cursor", "last_attempt", "integrity",
+        }),
+    )
+    anchor = _read_signed_state_document(
+        _anchor_path_for_state_path(path),
+        config=config,
+        domain="anchor",
+        expected_keys=frozenset({
+            "schema_version", "generation", "source_id", "project_scope",
+            "acknowledged_cursor", "acknowledged_source_epoch",
+            "record_digest", "checkpoint_digest", "integrity",
+        }),
+    )
+    if checkpoint is None and anchor is None:
         return None
-    try:
-        raw = json.loads(raw_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
-        raise _ReplicationStateError("corrupt") from exc
-    if type(raw) is not dict or set(raw) != {
-        "schema_version",
-        "generation",
-        "source_id",
-        "project_scope",
-        "cursor",
-        "last_attempt",
-        "integrity",
-    }:
-        raise _ReplicationStateError("corrupt")
-    integrity = raw["integrity"]
-    body = {key: value for key, value in raw.items() if key != "integrity"}
-    if type(integrity) is not str or len(integrity) != 64:
-        raise _ReplicationStateError("corrupt")
-    try:
-        expected_integrity = _state_integrity_tag(config, body)
-    except (TypeError, ValueError, UnicodeError, RecursionError) as exc:
-        # Python's permissive JSON parser accepts values such as NaN.  They
-        # are not canonical checkpoint evidence and must become a bounded
-        # corrupt-state result rather than escape from service start.
-        raise _ReplicationStateError("corrupt") from exc
-    if not hmac.compare_digest(expected_integrity, integrity):
+    if checkpoint is None or anchor is None:
         raise _ReplicationStateError("incompatible")
-    if raw["schema_version"] != _STATE_SCHEMA_VERSION:
+
+    if (
+        checkpoint["schema_version"] != _STATE_SCHEMA_VERSION
+        or anchor["schema_version"] != _STATE_SCHEMA_VERSION
+    ):
         raise _ReplicationStateError("incompatible")
-    generation = raw["generation"]
-    cursor = raw["cursor"]
+    generation = checkpoint["generation"]
+    cursor = checkpoint["cursor"]
+    anchor_generation = anchor["generation"]
+    acknowledged_cursor = anchor["acknowledged_cursor"]
+    acknowledged_epoch = anchor["acknowledged_source_epoch"]
+    record_digest = anchor["record_digest"]
     if (
         not _is_state_integer(generation, minimum=1)
         or not _is_state_integer(cursor)
+        or not _is_state_integer(anchor_generation, minimum=1)
+        or not _is_state_integer(acknowledged_cursor)
+        or not _is_state_integer(acknowledged_epoch)
+        or type(record_digest) is not str
+        or not _is_sha256_hex(anchor["checkpoint_digest"])
     ):
         raise _ReplicationStateError("corrupt")
     if (
-        type(raw["source_id"]) is not str
-        or type(raw["project_scope"]) is not str
-        or raw["source_id"] != config.memory_replication.local_node_id
-        or raw["project_scope"] != config.memory_replication.project_scope
+        type(checkpoint["source_id"]) is not str
+        or type(checkpoint["project_scope"]) is not str
+        or type(anchor["source_id"]) is not str
+        or type(anchor["project_scope"]) is not str
+    ):
+        raise _ReplicationStateError("corrupt")
+    if (
+        checkpoint["source_id"] != config.memory_replication.local_node_id
+        or checkpoint["project_scope"] != config.memory_replication.project_scope
+        or anchor["source_id"] != checkpoint["source_id"]
+        or anchor["project_scope"] != checkpoint["project_scope"]
+        or anchor_generation != generation
+        or acknowledged_cursor != cursor
+        or anchor["checkpoint_digest"] != hashlib.sha256(
+            _canonical_state_bytes(checkpoint)
+        ).hexdigest()
     ):
         raise _ReplicationStateError("incompatible")
-    return generation, cursor, _state_to_attempt(
-        raw["last_attempt"], peer_ids=peer_ids, cursor=cursor,
+    if acknowledged_cursor == 0:
+        if acknowledged_epoch != 0 or record_digest != "":
+            raise _ReplicationStateError("corrupt")
+    elif acknowledged_epoch < 1 or not _is_sha256_hex(record_digest):
+        raise _ReplicationStateError("corrupt")
+    return (
+        generation,
+        cursor,
+        _state_to_attempt(
+            checkpoint["last_attempt"], peer_ids=peer_ids, cursor=cursor,
+        ),
+        acknowledged_epoch,
+        record_digest,
     )
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _windows_move_file_ex(source: Path, destination: Path, flags: int) -> None:
+    """Replace a state document with the Windows write-through contract."""
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    move_file_ex = kernel32.MoveFileExW
+    move_file_ex.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32)
+    move_file_ex.restype = ctypes.c_int
+    if not move_file_ex(str(source), str(destination), flags):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _replace_private_state(temporary: Path, path: Path) -> None:
+    if _is_windows():
+        _windows_move_file_ex(
+            temporary,
+            path,
+            _MOVEFILE_REPLACE_EXISTING | _MOVEFILE_WRITE_THROUGH,
+        )
+    else:
+        os.replace(temporary, path)
+
+
 def _write_private_state(path: Path, payload: dict[str, object]) -> None:
-    encoded = _canonical_state_bytes(payload) + b"\n"
+    """Write an exact private state document and flush its replacement."""
+    encoded = _canonical_state_bytes(payload)
     if not encoded or len(encoded) > _STATE_MAX_BYTES:
         raise _ReplicationStateError("unavailable")
     temporary: Path | None = None
@@ -369,10 +543,12 @@ def _write_private_state(path: Path, payload: dict[str, object]) -> None:
                 if written <= 0:
                     raise OSError("private state write made no progress")
                 view = view[written:]
+            # On Windows this maps to the CRT's durable file-buffer flush;
+            # MoveFileExW below then requests write-through replacement.
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        os.replace(temporary, path)
+        _replace_private_state(temporary, path)
         if os.name == "posix":
             directory_descriptor = os.open(str(path.parent), os.O_RDONLY)
             try:
@@ -381,7 +557,7 @@ def _write_private_state(path: Path, payload: dict[str, object]) -> None:
                 os.close(directory_descriptor)
     except _ReplicationStateError:
         raise
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise _ReplicationStateError("unavailable") from exc
     finally:
         if temporary is not None:
@@ -520,6 +696,8 @@ class MemoryReplicationService:
         self._last_attempt: dict[str, object] | None = None
         self._state_path: Path | None = None
         self._state_generation = 0
+        self._anchor_source_epoch = 0
+        self._anchor_record_digest = ""
         self._state_loaded = False
         self._persistence_state = "uninitialized"
         self._state_fault: str | None = None
@@ -558,9 +736,11 @@ class MemoryReplicationService:
         if loaded is None:
             self._persistence_state = "empty"
             return
-        generation, cursor, attempt = loaded
+        generation, cursor, attempt, anchor_epoch, anchor_digest = loaded
         self._state_generation = generation
         self._cursor = cursor
+        self._anchor_source_epoch = anchor_epoch
+        self._anchor_record_digest = anchor_digest
         self._last_attempt = attempt
         self._persistence_state = "restored"
 
@@ -572,24 +752,62 @@ class MemoryReplicationService:
             reason="state_unavailable", cursor=self._cursor,
         )
 
-    def _persist_attempt(self, *, cursor: int, attempt: dict[str, object]) -> None:
-        """Atomically publish the next local cursor/attempt checkpoint.
+    def _persist_attempt(
+        self,
+        *,
+        cursor: int,
+        attempt: dict[str, object],
+        acknowledged_anchor: tuple[int, int, str] | None = None,
+    ) -> None:
+        """Durably publish one linked checkpoint and high-water anchor.
 
-        The checkpoint is written before the in-memory cursor moves.  A write
-        failure therefore never returns an outcome that claims a restart-safe
-        receipt, and a later operator action can safely retry the exact page.
+        The checkpoint is deliberately replaced first and the linked anchor
+        second.  A crash or failure between them leaves a detectable mismatch,
+        never a state that silently skips a page whose receipt was not proven
+        durable in both local documents.  The in-memory cursor moves only
+        after both write-through replacements complete.
         """
         if self._state_fault is not None:
             raise DependencyUnavailable("memory replication state is unavailable")
         state_path = self._state_file_for_operation()
         if (
             not _is_state_integer(cursor)
+            or cursor < self._cursor
             or self._state_generation >= _STATE_MAX_INTEGER
         ):
             self._record_state_fault("unavailable")
             raise DependencyUnavailable("memory replication state is unavailable")
+
+        if acknowledged_anchor is None:
+            if cursor != self._cursor:
+                self._record_state_fault("unavailable")
+                raise DependencyUnavailable("memory replication state is unavailable")
+            acknowledged_cursor = self._cursor
+            acknowledged_epoch = self._anchor_source_epoch
+            record_digest = self._anchor_record_digest
+        else:
+            acknowledged_cursor, acknowledged_epoch, record_digest = acknowledged_anchor
+            if (
+                not _is_state_integer(acknowledged_cursor)
+                or not _is_state_integer(acknowledged_epoch)
+                or acknowledged_cursor != cursor
+                or cursor <= self._cursor
+            ):
+                self._record_state_fault("unavailable")
+                raise DependencyUnavailable("memory replication state is unavailable")
+
+        if acknowledged_cursor == 0:
+            anchor_is_valid = acknowledged_epoch == 0 and record_digest == ""
+        else:
+            anchor_is_valid = (
+                acknowledged_epoch >= 1 and _is_sha256_hex(record_digest)
+            )
+        if not anchor_is_valid:
+            self._record_state_fault("unavailable")
+            raise DependencyUnavailable("memory replication state is unavailable")
+
         next_generation = self._state_generation + 1
-        body: dict[str, object] = {
+        checkpoint_body: dict[str, object] = {
             "schema_version": _STATE_SCHEMA_VERSION,
             "generation": next_generation,
             "source_id": self._section.local_node_id,
@@ -597,9 +815,29 @@ class MemoryReplicationService:
             "cursor": cursor,
             "last_attempt": _attempt_to_state(attempt),
         }
-        payload = {
-            **body,
-            "integrity": _state_integrity_tag(self._config, body),
+        checkpoint_payload = {
+            **checkpoint_body,
+            "integrity": _state_integrity_tag(
+                self._config, checkpoint_body, domain="checkpoint",
+            ),
+        }
+        anchor_body: dict[str, object] = {
+            "schema_version": _STATE_SCHEMA_VERSION,
+            "generation": next_generation,
+            "source_id": self._section.local_node_id,
+            "project_scope": self._section.project_scope,
+            "acknowledged_cursor": acknowledged_cursor,
+            "acknowledged_source_epoch": acknowledged_epoch,
+            "record_digest": record_digest,
+            "checkpoint_digest": hashlib.sha256(
+                _canonical_state_bytes(checkpoint_body)
+            ).hexdigest(),
+        }
+        anchor_payload = {
+            **anchor_body,
+            "integrity": _state_integrity_tag(
+                self._config, anchor_body, domain="anchor",
+            ),
         }
         try:
             with file_lock(state_path, timeout=_STATE_LOCK_TIMEOUT_SECONDS):
@@ -608,18 +846,40 @@ class MemoryReplicationService:
                     config=self._config,
                     peer_ids=self._peer_ids(),
                 )
-                current_generation = 0 if current is None else current[0]
-                if current_generation != self._state_generation:
+                if current is None:
+                    current_generation = 0
+                    current_cursor = 0
+                    current_anchor_epoch = 0
+                    current_anchor_digest = ""
+                else:
+                    (
+                        current_generation,
+                        current_cursor,
+                        _current_attempt,
+                        current_anchor_epoch,
+                        current_anchor_digest,
+                    ) = current
+                if (
+                    current_generation != self._state_generation
+                    or current_cursor != self._cursor
+                    or current_anchor_epoch != self._anchor_source_epoch
+                    or current_anchor_digest != self._anchor_record_digest
+                ):
                     raise _ReplicationStateError("changed")
-                _write_private_state(state_path, payload)
+                _write_private_state(state_path, checkpoint_payload)
+                _write_private_state(
+                    _anchor_path_for_state_path(state_path), anchor_payload,
+                )
         except _ReplicationStateError as error:
             self._record_state_fault(error.state)
             raise DependencyUnavailable("memory replication state is unavailable") from None
-        except (OSError, RuntimeError, ValueError, TypeError):
+        except Exception:
             self._record_state_fault("unavailable")
             raise DependencyUnavailable("memory replication state is unavailable") from None
         self._state_generation = next_generation
         self._cursor = cursor
+        self._anchor_source_epoch = acknowledged_epoch
+        self._anchor_record_digest = record_digest
         self._last_attempt = attempt
         self._persistence_state = "persisted"
 
@@ -704,6 +964,78 @@ class MemoryReplicationService:
             "inserted_records": outcome.inserted_records,
         }
 
+    def _journal_record_digest(
+        self,
+        journal,
+        *,
+        cursor: int,
+        source_epoch: int,
+    ) -> str:
+        """Read exactly the acknowledged source record without contacting a peer."""
+        if (
+            not _is_state_integer(cursor, minimum=1)
+            or not _is_state_integer(source_epoch, minimum=1)
+        ):
+            raise _ReplicationStateError("journal_regressed")
+        batch = journal.export(
+            after_sequence=cursor - 1,
+            limit=1,
+            project=self._section.project_scope,
+        )
+        try:
+            records = batch.records
+            record = records[0] if type(records) is tuple and len(records) == 1 else None
+            digest = None if record is None else record.digest
+            valid = (
+                batch.source_id == self._section.local_node_id
+                and batch.source_epoch == source_epoch
+                and batch.after_sequence == cursor - 1
+                and batch.next_sequence == cursor
+                and record is not None
+                and record.source_id == self._section.local_node_id
+                and record.source_epoch == source_epoch
+                and record.sequence == cursor
+                and record.project == self._section.project_scope
+                and _is_sha256_hex(digest)
+            )
+        except Exception as exc:
+            raise _ReplicationStateError("journal_regressed") from exc
+        if not valid:
+            raise _ReplicationStateError("journal_regressed")
+        return digest
+
+    def _verify_journal_anchor(self, journal) -> None:
+        """Fail closed if current source evidence no longer covers the cursor."""
+        if self._cursor == 0:
+            if self._anchor_source_epoch != 0 or self._anchor_record_digest != "":
+                raise _ReplicationStateError("journal_regressed")
+            return
+        digest = self._journal_record_digest(
+            journal,
+            cursor=self._cursor,
+            source_epoch=self._anchor_source_epoch,
+        )
+        if not hmac.compare_digest(digest, self._anchor_record_digest):
+            raise _ReplicationStateError("journal_regressed")
+
+    def _anchor_for_replicated_outcome(self, journal, outcome) -> tuple[int, int, str]:
+        """Derive a monotonic anchor from the final record of a full receipt page."""
+        try:
+            cursor = outcome.next_sequence
+            source_epoch = outcome.source_epoch
+        except Exception as exc:
+            raise _ReplicationStateError("journal_regressed") from exc
+        if (
+            not _is_state_integer(cursor, minimum=1)
+            or not _is_state_integer(source_epoch, minimum=1)
+            or cursor <= self._cursor
+        ):
+            raise _ReplicationStateError("journal_regressed")
+        digest = self._journal_record_digest(
+            journal, cursor=cursor, source_epoch=source_epoch,
+        )
+        return cursor, source_epoch, digest
+
     def replicate_once(self):
         """Send one bounded current page to every fixed configured peer.
 
@@ -720,6 +1052,18 @@ class MemoryReplicationService:
                 raise DependencyUnavailable("memory replication state is unavailable")
             try:
                 journal = self._journal_for_attempt()
+                self._verify_journal_anchor(journal)
+            except _ReplicationStateError as error:
+                self._record_state_fault(error.state)
+                raise DependencyUnavailable("memory replication state is unavailable") from None
+            except Exception:
+                failure = self._failed_attempt(
+                    reason="source_unavailable", cursor=self._cursor,
+                )
+                self._persist_attempt(cursor=self._cursor, attempt=failure)
+                raise DependencyUnavailable("memory replication source is unavailable") from None
+
+            try:
                 coordinator = MemoryReplicationCoordinator(
                     journal,
                     self._sinks_for_attempt(),
@@ -743,7 +1087,28 @@ class MemoryReplicationService:
                 if outcome.status == "replicated"
                 else self._cursor
             )
-            self._persist_attempt(cursor=next_cursor, attempt=attempt)
+            if outcome.status == "replicated":
+                try:
+                    acknowledged_anchor = self._anchor_for_replicated_outcome(
+                        journal, outcome,
+                    )
+                except _ReplicationStateError as error:
+                    self._record_state_fault(error.state)
+                    raise DependencyUnavailable(
+                        "memory replication state is unavailable"
+                    ) from None
+                except Exception:
+                    self._record_state_fault("unavailable")
+                    raise DependencyUnavailable(
+                        "memory replication state is unavailable"
+                    ) from None
+            else:
+                acknowledged_anchor = None
+            self._persist_attempt(
+                cursor=next_cursor,
+                attempt=attempt,
+                acknowledged_anchor=acknowledged_anchor,
+            )
             return outcome
 
     def receiver(self) -> MemoryReplicationReceiver | None:
