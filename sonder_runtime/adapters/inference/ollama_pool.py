@@ -788,19 +788,21 @@ class OllamaWorkerPool:
 
     def refresh_capabilities(
         self, *, force: bool = False,
-    ) -> tuple[WorkerSnapshot, ...]:
-        """Probe stale workers concurrently and retain deterministic state order.
+    ) -> None:
+        """Update cached capabilities using the configured bounded probe batch.
 
         Circuit-open workers are not probed before their retry deadline unless
         ``force`` is explicitly requested by an operator-facing caller.
+        Presentation is separate: callers may request a cached status page
+        after refresh without constructing whole-roster snapshots here.
         """
         logger.debug(f"refresh_capabilities called, force={force}")
         if self._capability_prober is None:
             logger.debug("no capability prober configured, skipping refresh")
-            return self.snapshots()
+            return
         if not self._probe_lock.acquire(blocking=False):
             logger.debug("probe lock contended, skipping refresh")
-            return self.snapshots()
+            return
         try:
             now = self._clock()
             with self._condition:
@@ -825,7 +827,7 @@ class OllamaWorkerPool:
                     self._probe_cursor = (last_selected_index + 1) % state_count
             if not candidates:
                 logger.debug("no stale/eligible workers to probe")
-                return self.snapshots()
+                return
 
             def run(state: _WorkerState):
                 started = self._clock()
@@ -895,7 +897,6 @@ class OllamaWorkerPool:
                     state.capability_probe_failed = False
                     self._record_success(state, latency_ms)
                 self._condition.notify_all()
-            return self.snapshots()
         finally:
             self._probe_lock.release()
 

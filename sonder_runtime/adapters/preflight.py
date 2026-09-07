@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import sonder_runtime.adapters.persistence.migrations as sonder_migrations
+from sonder_runtime.adapters.inference import ollama_endpoint
 from sonder_runtime.platform.config import SonderConfig
 
 from ..application.ports.preflight import CheckResult, PreflightReport
@@ -108,12 +109,15 @@ def _check_ollama_origin(
     name: str,
     required: bool,
     timeout: float,
+    allow_remote: bool = False,
 ) -> CheckResult:
     url = origin.rstrip("/") + "/api/tags"
     host = urlsplit(origin).hostname or ""
     try:
         request = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with ollama_endpoint.open_url(
+            request, timeout=timeout, allow_remote=allow_remote is True,
+        ) as response:
             if response.status != 200:
                 return CheckResult(
                     name, False, required, f"{host}: HTTP {response.status}"
@@ -136,6 +140,7 @@ def _check_ollama(config: SonderConfig, *, timeout: float = 5.0) -> CheckResult:
         name="ollama",
         required=True,
         timeout=timeout,
+        allow_remote=config.ollama.allow_remote,
     )
 
 
@@ -154,6 +159,7 @@ def _check_ollama_workers(
             name="ollama_worker_%d" % index,
             required=False,
             timeout=timeout,
+            allow_remote=config.ollama.allow_remote,
         )
 
     with owned_runtime_pool(max_workers=min(4, len(entries))) as executor:

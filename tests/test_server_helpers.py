@@ -74,6 +74,44 @@ def test_pool_admin_status_never_exposes_unexpected_failure_text(monkeypatch):
     assert json.loads(server.ollama_pool_admin_status(refresh=True)) == {"error": "unknown"}
 
 
+def test_pool_admin_refresh_only_materializes_requested_page(monkeypatch):
+    from sonder_runtime.adapters.inference.ollama_pool import OllamaWorkerPool
+
+    probes, snapshots, records = [], [], []
+    pool = OllamaWorkerPool(
+        "http://127.0.0.1:11434",
+        tuple("http://127.0.0.1:%d" % port for port in range(12000, 12063)),
+        max_workers=64, capability_probe_parallelism=1,
+        capability_probe_batch_size=2,
+        capability_prober=lambda origin: probes.append(origin) or {"models": ("safe-model",)},
+    )
+    original_snapshot = pool._snapshot
+    original_record = pool._status_worker_record
+
+    def snapshot(state, now):
+        snapshots.append(state.endpoint.origin)
+        return original_snapshot(state, now)
+
+    def record(worker):
+        records.append(worker.origin)
+        return original_record(worker)
+
+    monkeypatch.setattr(pool, "_snapshot", snapshot)
+    monkeypatch.setattr(pool, "_status_worker_record", record)
+    monkeypatch.setattr(server, "OLLAMA_POOL", pool)
+    monkeypatch.setattr(server, "_deployment_authenticates_callers", lambda: False)
+
+    page = json.loads(server.ollama_pool_admin_status(refresh=True, page_size=1))
+
+    assert "error" not in page
+    assert len(probes) == 2
+    assert snapshots == ["http://127.0.0.1:11434"]
+    assert records == snapshots
+    assert page["worker_count"] == 64
+    assert len(page["workers"]) == 1
+    assert page["workers"][0]["model_preview"] == ["safe-model"]
+
+
 def _host_repo_result(project, output="grounded result"):
     return server.autopilot_controller.HostTaskResult(
         output=(

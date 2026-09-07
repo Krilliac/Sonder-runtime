@@ -226,6 +226,31 @@ def test_refresh_never_starts_more_than_configured_parallel_probes():
     assert peak == 2
 
 
+@pytest.mark.parametrize("exit_path", ["no_prober", "contended", "fresh", "probed"])
+def test_refresh_never_materializes_worker_snapshots(monkeypatch, exit_path):
+    primary, workers = _roster(64)
+    probes = []
+    pool = OllamaWorkerPool(
+        primary, workers, max_workers=64,
+        capability_probe_parallelism=1, capability_probe_batch_size=2,
+        capability_prober=None if exit_path == "no_prober" else (
+            lambda origin: probes.append(origin) or {"models": ()}
+        ),
+    )
+    if exit_path == "fresh":
+        # A wholly fresh roster should do no probe or presentation work.
+        monkeypatch.setattr(pool, "_capabilities_stale", lambda *_: False)
+    if exit_path == "contended":
+        assert pool._probe_lock.acquire(blocking=False)
+    monkeypatch.setattr(pool, "_snapshot", lambda *_: pytest.fail("snapshot during refresh"))
+    try:
+        assert pool.refresh_capabilities() is None
+    finally:
+        if exit_path == "contended":
+            pool._probe_lock.release()
+    assert len(probes) == (2 if exit_path == "probed" else 0)
+
+
 def test_status_pages_are_bounded_safe_and_report_active_limits():
     primary, workers = _roster(3)
     models = tuple("model-%04d-%s" % (index, "x" * 180) for index in range(2_048))

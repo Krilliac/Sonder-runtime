@@ -127,7 +127,7 @@ def test_optional_worker_outage_is_reported_as_degraded_not_failed(
             raise URLError("worker offline")
         return Response()
 
-    monkeypatch.setattr(sonder_preflight.urllib.request, "urlopen", open_url)
+    monkeypatch.setattr(sonder_preflight.ollama_endpoint._OPENER, "open", open_url)
     report = sonder_preflight.run_preflight(config, ollama_timeout=0.1)
 
     worker = next(row for row in report.checks if row.name == "ollama_worker_1")
