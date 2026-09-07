@@ -1333,6 +1333,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /agentretry <id>   explicitly retry persisted interrupted/failed master work
   /weather <place>   get sourced live conditions and a short forecast
   /asset <n> <brief> generate a general icon/audio/model/scene artifact pack
+  /artifact-mobility list | status <id>  read local copy receipts
   /artifactcheck ... ground a file/pack: /artifactcheck <path> [| recipe]
   /forge [name]      build and run the dependency-free reference game suite
   /game ...          generate/test a game: /game cpp 3d name | concept
@@ -1787,6 +1788,24 @@ def _approve_lane_command(arguments):
     if _confirm("run this lane action?\n" + detail + "\n" + terminal_text(decision.reason)):
         return True, ""
     return False, "operator declined"
+
+
+def _artifact_mobility_command(arg):
+    """Read-only local receipt view; no publisher or outbound mutation port."""
+    parts = arg.split()
+    if parts == ["list"] or not parts:
+        action = "list"
+    elif len(parts) == 2 and parts[0] == "status":
+        action = "status"
+    else:
+        return json.dumps({"outcome_code": "INVALID_REQUEST"})
+    try:
+        application = server._application()
+        payload = (application.artifact_mobility_list() if action == "list"
+            else application.artifact_mobility_status(parts[1]))
+        return json.dumps(payload, sort_keys=True)
+    except Exception:
+        return json.dumps({"outcome_code": "UNAVAILABLE"})
 
 
 def _lanes_command(arg):
@@ -2731,6 +2750,8 @@ def main(*, machine_output=False):
                 print(server.preference_command(arg))
             elif cmd in ("/improve", "/improvements"):
                 print(server.system_improvement_report(session=session_id, project=project))
+            elif cmd == "/artifact-mobility":
+                print(_artifact_mobility_command(arg))
             elif cmd == "/lanes":
                 print(_lanes_command(arg))
             elif cmd == "/recover":

@@ -685,6 +685,16 @@
     },
     {
       "aliases": [],
+      "category": "system",
+      "name": "/artifact-mobility",
+      "native": true,
+      "params": [],
+      "risk": "safe",
+      "summary": "",
+      "tool": ""
+    },
+    {
+      "aliases": [],
       "category": "creative",
       "name": "/artifact_generate",
       "native": false,
@@ -9834,12 +9844,12 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES",
   "counts": {
-    "commands": 316,
+    "commands": 317,
     "configuration": 146,
     "events": 43,
     "tools": 212
   },
-  "digest": "24620b378a2527998d2a1295d94a1cdf781580234f811006c004b653d1f8b6cc",
+  "digest": "46ae2b02d0051b4f458d2929a74227e378aa4df7da3f209432ace5d427b1c101",
   "events": [
     {
       "name": "session.started",

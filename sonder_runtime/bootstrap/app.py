@@ -9,7 +9,7 @@ no hardware, and contacts no services; construction happens inside
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 import importlib
@@ -151,6 +151,7 @@ from ..application.workflows.use_cases import WorkflowService
 from ..application.context_integration import ContextPlanningFacade
 from ..application.control_plane import ControlPlaneSnapshotService
 from ..application.context import OperationContext
+from .artifact_mobility_source import ArtifactMobilitySourceBinding
 from ..platform.config import SonderConfig
 from ..platform import paths as runtime_paths
 from ..adapters.inference import ollama_endpoint
@@ -221,6 +222,19 @@ class Application:
     compute_refresh_page: Callable[..., dict] | None = None
     close_compute: Callable[..., None] | None = None
     close_delegation: Callable[..., None] | None = None
+
+    artifact_mobility_status: Callable[[str], dict] | None = None
+    artifact_mobility_list: Callable[[], dict] | None = None
+    close_artifact_mobility: Callable[[], None] | None = field(default=None, repr=False)
+    _artifact_mobility_binding: Callable[[], object] | None = field(default=None, repr=False)
+    _artifact_mobility_available: Callable[[], bool] | None = field(default=None, repr=False)
+
+    def operational_capabilities(self):
+        from ..domain.operational_capabilities import build_operational_capabilities
+        return build_operational_capabilities(config=self.config,
+            fixed_peer_artifact_copy_configured=(
+                self._artifact_mobility_available is not None
+                and self._artifact_mobility_available()))
 
     @property
     def private_source_paths(self) -> tuple[str, ...]:
@@ -308,6 +322,8 @@ class Application:
     def close_providers(self, timeout: float | None = None) -> None:
         """Quiesce and unpublish composed providers before process shutdown."""
         started = monotonic()
+        if self.close_artifact_mobility is not None:
+            self.close_artifact_mobility()
         try:
             try:
                 if self.close_delegation is not None:
@@ -340,6 +356,7 @@ def build_application(
     extension_provenance: ProvenanceInventory | None = None,
     control_plane_snapshot_service: ControlPlaneSnapshotService | None = None,
     child_repository_factory=None,
+    _artifact_mobility_source_binding: ArtifactMobilitySourceBinding | None = None,
 ) -> Application:
     """Assemble one application graph for the selected profile.
 
@@ -1343,6 +1360,12 @@ def build_application(
         permissions=(PermissionModesEvaluator(policy_names=POLICY_NAMES),),
     )
 
+    from .artifact_mobility import compose_artifact_mobility
+    mobility_binding, mobility_status, mobility_list, mobility_available, mobility_close = (
+        compose_artifact_mobility(lambda: config,
+            source_binding=_artifact_mobility_source_binding)
+    )
+
     logger.info(f"application graph assembled, profile={profile!r}")
     logger.debug(f"assembling Application graph for profile={profile!r}")
     application = Application(
@@ -1416,6 +1439,11 @@ def build_application(
         compute_refresh_page=compute_refresh_page,
         close_compute=close_compute,
         close_delegation=close_delegation,
+        artifact_mobility_status=mobility_status,
+        artifact_mobility_list=mobility_list,
+        close_artifact_mobility=mobility_close,
+        _artifact_mobility_binding=mobility_binding,
+        _artifact_mobility_available=mobility_available,
         delegation_service=get_delegation_service,
         agent_lanes=get_agent_lanes,
         agent_workflow_service=get_agent_workflow_service,
@@ -1437,6 +1465,7 @@ def build_application(
 _default_config: SonderConfig | None = None
 _default_compute_close = None
 _default_delegation_close = None
+_default_artifact_mobility_close = None
 _owned_default_application = None
 
 
@@ -1449,6 +1478,8 @@ def close_default_runtime_resources(timeout=5):
     """Close only the already composed default graph, without creating one."""
     timeout = 5 if timeout is None else max(0, timeout)
     started = monotonic()
+    if _default_artifact_mobility_close is not None:
+        _default_artifact_mobility_close()
     try:
         if _default_delegation_close is not None:
             _default_delegation_close(timeout=timeout)
@@ -1478,7 +1509,7 @@ _application_lifecycle = ApplicationLifecycle(_build_default_application)
 
 def install_owned_application(application: Application) -> None:
     """Private required-new child composition; never an external factory seam."""
-    global _owned_default_application, _default_config, _default_compute_close, _default_delegation_close
+    global _owned_default_application, _default_config, _default_compute_close, _default_delegation_close, _default_artifact_mobility_close
     if type(application) is not Application or not isinstance(application.config, SonderConfig):
         raise TypeError("exact configured Application required")
     _application_lifecycle.install_owned(application)
@@ -1486,21 +1517,22 @@ def install_owned_application(application: Application) -> None:
     _default_config = application.config
     _default_compute_close = application.close_compute
     _default_delegation_close = application.close_delegation
+    _default_artifact_mobility_close = application.close_artifact_mobility
 
 
 def stop_owned_application(application: Application) -> None:
     """Freeze compatibility lookup; the live host still owns actual cleanup."""
-    global _default_compute_close, _default_delegation_close
+    global _default_compute_close, _default_delegation_close, _default_artifact_mobility_close
     if application is not _owned_default_application:
         raise RuntimeError("exact owned Application required")
     _application_lifecycle.stop_owned(application)
-    _default_compute_close = _default_delegation_close = None
+    _default_compute_close = _default_delegation_close = _default_artifact_mobility_close = None
 
 
 def default_app(*, config: SonderConfig | None = None) -> Application:
     """Process-wide default graph for compatibility shims."""
     logger.debug(f"default_app called, config_provided={config is not None}")
-    global _default_config, _default_compute_close, _default_delegation_close
+    global _default_config, _default_compute_close, _default_delegation_close, _default_artifact_mobility_close
     if _owned_default_application is not None:
         if config is not None and config is not _owned_default_application.config:
             raise RuntimeError("owned application config selection is immutable")
@@ -1518,6 +1550,7 @@ def default_app(*, config: SonderConfig | None = None) -> Application:
     application = _application_lifecycle.get()
     _default_compute_close = getattr(application, "close_compute", None)
     _default_delegation_close = getattr(application, "close_delegation", None)
+    _default_artifact_mobility_close = getattr(application, "close_artifact_mobility", None)
     if config is not None and application.config is not config:
         logger.critical("default application was already built with a different config object -- process-wide state is inconsistent and cannot be recovered")
         raise RuntimeError("default application was already built without this config")
@@ -1525,12 +1558,13 @@ def default_app(*, config: SonderConfig | None = None) -> Application:
 
 
 def reset_for_tests() -> None:
-    global _default_config, _default_compute_close, _default_delegation_close
+    global _default_config, _default_compute_close, _default_delegation_close, _default_artifact_mobility_close
     if _owned_default_application is not None:
         raise RuntimeError("owned application cannot be reset")
     close_default_runtime_resources()
     _default_compute_close = None
     _default_delegation_close = None
+    _default_artifact_mobility_close = None
     _default_config = None
     _application_lifecycle.reset()
     runtime_paths.reset_home()

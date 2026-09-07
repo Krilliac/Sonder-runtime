@@ -62,6 +62,7 @@ def build_operational_capabilities(
     inference_pool_status: object = None,
     memory_receiver_configured: bool = False,
     managed_work_configured: bool = False,
+    fixed_peer_artifact_copy_configured: bool = False,
 ) -> dict[str, object]:
     """Build an admin-safe, non-probing capability snapshot.
 
@@ -153,6 +154,13 @@ def build_operational_capabilities(
             "automatic_memory_migration": _capability(
                 False,
                 "Memory ownership, discovery, election, and automatic migration are not integrated.",
+            ),
+            "fixed_peer_artifact_copy": _capability(
+                bool(fixed_peer_artifact_copy_configured
+                    and getattr(getattr(config, "artifact_mobility_source", None), "enabled", False)
+                    and getattr(getattr(config, "artifact_mobility", None), "enabled", False)),
+                "Operator-invoked copy requires a pre-admitted source-only artifact "
+                "and a composed trusted local source and fixed outbound binding.",
             ),
             "automatic_artifact_migration": _capability(
                 False,

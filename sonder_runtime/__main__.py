@@ -1006,6 +1006,41 @@ def cmd_eval_history(args) -> int:
     return 0
 
 
+def cmd_artifact_mobility(args) -> int:
+    """Local operator-only adapter; never registered as a model-facing tool."""
+    from sonder_runtime.bootstrap.app import build_application
+    from sonder_runtime.bootstrap.artifact_mobility import mobility_error_projection
+    application = None
+    try:
+        config = _load_config(args)
+        application = build_application(config=config)
+        if args.mobility_command == "status":
+            payload = application.artifact_mobility_status(args.operation_id)
+        elif args.mobility_command == "list":
+            payload = application.artifact_mobility_list()
+        elif args.mobility_command == "send":
+            payload = application._artifact_mobility_binding().send(
+                args.source_artifact, confirm_destination=args.confirm_destination)
+        elif args.mobility_command == "resume":
+            payload = application._artifact_mobility_binding().resume(args.operation_id)
+        else:
+            payload = {"outcome_code": "INVALID_REQUEST"}
+        _emit(payload, as_json=args.json)
+        return 2 if set(payload) == {"outcome_code"} else 0
+    except Exception as error:
+        _emit(mobility_error_projection(error), as_json=args.json)
+        return 2
+    finally:
+        if application is not None:
+            application.close_artifact_mobility()
+
+
+class _MobilityArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        # argparse's normal error echoes rejected arguments, including URLs.
+        self.exit(2, "artifact-mobility: INVALID_REQUEST\n")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m sonder_runtime",
@@ -1206,11 +1241,31 @@ def build_parser() -> argparse.ArgumentParser:
     hp.add_argument("--json", action="store_true")
     hp.set_defaults(func=cmd_eval_history)
 
+    p = sub.add_parser("artifact-mobility", help="explicit local fixed-peer artifact copy")
+    p.error = lambda message: parser.exit(2, "artifact-mobility: INVALID_REQUEST\n")
+    mobility_sub = p.add_subparsers(dest="mobility_command", required=True,
+        parser_class=_MobilityArgumentParser)
+    for action in ("send", "resume", "status", "list"):
+        mp = mobility_sub.add_parser(action, allow_abbrev=False)
+        mp.add_argument("--config", help="path to sonder.toml")
+        mp.add_argument("--secrets", help="path to the secrets env file")
+        mp.add_argument("--json", action="store_true")
+        if action == "send":
+            mp.add_argument("--source-artifact", required=True)
+            mp.add_argument("--confirm-destination", required=True)
+        elif action in ("resume", "status"):
+            mp.add_argument("--operation-id", required=True)
+        mp.set_defaults(func=cmd_artifact_mobility)
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    command_args = sys.argv[1:] if argv is None else argv
+    if command_args and command_args[0] == "artifact-mobility":
+        parser.error = lambda message: parser.exit(2, "artifact-mobility: INVALID_REQUEST\n")
+    args = parser.parse_args(argv)
     try:
         return args.func(args)
     except sonder_config.ConfigError as exc:
