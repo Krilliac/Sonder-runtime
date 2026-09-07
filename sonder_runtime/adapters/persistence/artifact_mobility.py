@@ -24,6 +24,9 @@ import stat
 import threading
 from typing import Iterator
 
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
 from sonder_runtime.adapters.persistence.owned_sqlite import (
     connect as owned_sqlite_connect,
 )
@@ -31,6 +34,7 @@ from sonder_runtime.application.artifacts.mobility import (
     DISPATCH_ELIGIBLE_STATES,
     LEASE_TRANSITIONS,
     MAX_ATTEMPTS,
+    MAX_RECEIPT_TTL_SECONDS,
     TERMINAL_STATES,
     DispatchLease,
     MobilityImmutableFence,
@@ -52,7 +56,7 @@ _DATABASE_ENTRIES = (
 )
 _OPERATION_ID = re.compile(r"[0-9a-f]{32}")
 _CAPABILITY = re.compile(r"[0-9a-f]{64}")
-_PROTECTED_CAPABILITY = re.compile(r"v1\.[0-9a-f]{32}\.[0-9a-f]{64}\.[0-9a-f]{64}")
+_PROTECTED_CAPABILITY = re.compile(r"v1\.[0-9a-f]{24}\.[0-9a-f]{96}")
 _LOCK_PREFIX = "mobility-operation-"
 _LOCK_SUFFIX = ".lock"
 _OUTCOME_CODES = frozenset(
@@ -268,13 +272,7 @@ class SQLiteArtifactMobilityJournal:
     def protect_receipt_capability(
         capability: str, credential_material: object, operation_id: str
     ) -> str:
-        """Persist an authenticated fixed-size private envelope, never plaintext.
-
-        The per-operation key derives from current credential material and the
-        canonical ID.  A fresh 128-bit nonce feeds an HMAC-SHA-256 PRF stream
-        for this one 256-bit value; a distinct encrypt-then-MAC tag binds nonce
-        and ciphertext.  It is deliberately not a general encryption API.
-        """
+        """Persist an AES-256-GCM envelope, never the raw capability."""
         identity = _operation_id(operation_id, code="INVALID_CAPABILITY")
         if not isinstance(capability, str) or _CAPABILITY.fullmatch(capability) is None:
             _fail("INVALID_CAPABILITY")
@@ -284,14 +282,13 @@ class SQLiteArtifactMobilityJournal:
             _fail("INVALID_CAPABILITY")
         if len(plaintext) != 32:
             _fail("INVALID_CAPABILITY")
-        nonce = secrets.token_bytes(16)
-        key = _receipt_key(credential_material, identity)
-        stream = hmac.new(key, b"enc-v1/" + nonce, "sha256").digest()
-        ciphertext = bytes(
-            left ^ right for left, right in zip(plaintext, stream, strict=True)
+        nonce = secrets.token_bytes(12)
+        ciphertext = AESGCM(_receipt_key(credential_material, identity)).encrypt(
+            nonce,
+            plaintext,
+            identity.encode("ascii"),
         )
-        tag = hmac.new(key, b"auth-v1/" + nonce + ciphertext, "sha256").digest()
-        return "v1." + nonce.hex() + "." + ciphertext.hex() + "." + tag.hex()
+        return "v1." + nonce.hex() + "." + ciphertext.hex()
 
     @staticmethod
     def recover_receipt_capability(
@@ -304,23 +301,21 @@ class SQLiteArtifactMobilityJournal:
             or _PROTECTED_CAPABILITY.fullmatch(protected) is None
         ):
             _fail("INTEGRITY")
-        _version, nonce_hex, ciphertext_hex, tag_hex = protected.split(".")
+        _version, nonce_hex, ciphertext_hex = protected.split(".")
         try:
             nonce = bytes.fromhex(nonce_hex)
             ciphertext = bytes.fromhex(ciphertext_hex)
-            supplied_tag = bytes.fromhex(tag_hex)
         except ValueError:
             _fail("INTEGRITY")
-        key = _receipt_key(credential_material, identity)
-        expected_tag = hmac.new(
-            key, b"auth-v1/" + nonce + ciphertext, "sha256"
-        ).digest()
-        if not hmac.compare_digest(supplied_tag, expected_tag):
+        try:
+            plaintext = AESGCM(_receipt_key(credential_material, identity)).decrypt(
+                nonce,
+                ciphertext,
+                identity.encode("ascii"),
+            )
+        except (InvalidTag, ValueError):
             _fail("IMMUTABLE_FENCE")
-        stream = hmac.new(key, b"enc-v1/" + nonce, "sha256").digest()
-        capability = bytes(
-            left ^ right for left, right in zip(ciphertext, stream, strict=True)
-        ).hex()
+        capability = plaintext.hex()
         if _CAPABILITY.fullmatch(capability) is None:
             _fail("INTEGRITY")
         return capability
@@ -582,10 +577,30 @@ class SQLiteArtifactMobilityJournal:
             None if receipt is None else receipt.revision,
         )
 
+    @staticmethod
+    def _require_initial_operation(operation: MobilityOperation) -> None:
+        """Reject direct writes that would bypass the journal lifecycle."""
+        if (
+            operation.state != "ready"
+            or operation.outcome_code != ""
+            or operation.attempt_epoch != 0
+            or operation.lease_token is not None
+            or operation.lease_expires_at is not None
+            or operation.receipt is not None
+            or operation.updated_at != operation.created_at
+            or not (
+                operation.created_at
+                < operation.receipt_expires_at
+                <= operation.created_at + MAX_RECEIPT_TTL_SECONDS
+            )
+        ):
+            _fail("INVALID_REQUEST")
+
     def create_operation(self, operation: MobilityOperation) -> MobilityOperation:
         """Write immutable intent before an outside component can be contacted."""
         if not isinstance(operation, MobilityOperation):
             _fail("INVALID_REQUEST")
+        self._require_initial_operation(operation)
         try:
             with self._connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")

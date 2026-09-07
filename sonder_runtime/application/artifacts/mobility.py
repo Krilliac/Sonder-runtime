@@ -28,7 +28,7 @@ _OPERATION_ID = re.compile(r"[0-9a-f]{32}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _IDENTIFIER = re.compile(r"[!-~]{1,128}")
 _COMMAND = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
-_PROTECTED_CAPABILITY = re.compile(r"v1\.[0-9a-f]{32}\.[0-9a-f]{64}\.[0-9a-f]{64}")
+_PROTECTED_CAPABILITY = re.compile(r"v1\.[0-9a-f]{24}\.[0-9a-f]{96}")
 _CAPABILITY = re.compile(r"[0-9a-f]{64}")
 
 MAX_RECEIPT_TTL_SECONDS = 31 * 24 * 60 * 60
@@ -167,9 +167,9 @@ class ReceiptCapabilityProtector(Protocol):
     """Adapter-owned encryption seam for one private journal capability.
 
     The application generates the opaque 256-bit capability and operation ID,
-    while the persistence adapter derives a keyed authenticated envelope from
-    current trusted peer credential material and stores only that envelope.
-    This keeps key handling outside the application layer.
+    while the persistence adapter derives an AEAD key from current trusted peer
+    credential material and stores only the encrypted envelope. This keeps key
+    handling and the cryptographic dependency outside the application layer.
     """
 
     def protect_receipt_capability(

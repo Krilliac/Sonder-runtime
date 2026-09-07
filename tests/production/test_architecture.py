@@ -395,6 +395,43 @@ def test_checker_detects_a_violation(tmp_path):
     assert "domain may not import" in result.stdout
 
 
+def test_checker_rejects_cryptography_outside_the_exact_mobility_adapter(tmp_path):
+    """The receipt-envelope allowance cannot widen to persistence as a whole."""
+    shutil.copytree(_REPO_ROOT / "sonder_runtime", tmp_path / "sonder_runtime")
+    (tmp_path / "scripts").mkdir()
+    checker = tmp_path / "scripts" / "check_architecture.py"
+    shutil.copy2(_REPO_ROOT / "scripts" / "check_architecture.py", checker)
+    offender = (
+        tmp_path
+        / "sonder_runtime"
+        / "adapters"
+        / "persistence"
+        / "_test_unapproved_cryptography.py"
+    )
+    offender.write_text("import cryptography\n", encoding="utf-8")
+
+    for command in (["git", "init", "-q"], ["git", "add", "-A"]):
+        staged = subprocess.run(
+            command, cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        )
+        if staged.returncode != 0:
+            pytest.skip(
+                "git is required to stage the isolated copy: %s"
+                % (staged.stderr.strip() or staged.stdout.strip())
+            )
+
+    result = subprocess.run(
+        [sys.executable, str(checker)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 1
+    assert "adapters layer may not import root/third-party module 'cryptography'" in (
+        result.stdout
+    )
+
+
 # Every reviewed migration boundary the ratchet must keep closed.  One
 # behavior, one list: each entry is asserted individually against a single
 # checker run below.  This used to be a 45-way parametrize that rebuilt the

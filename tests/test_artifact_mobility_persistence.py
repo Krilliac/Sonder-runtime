@@ -7,6 +7,7 @@ bounded attempt around these local primitives.
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import multiprocessing
 import sqlite3
@@ -18,6 +19,7 @@ from sonder_runtime.adapters.persistence.artifact_mobility import (
 )
 from sonder_runtime.application.artifacts.mobility import (
     ArtifactMobilityJournal,
+    MAX_RECEIPT_TTL_SECONDS,
     MobilityImmutableFence,
     MobilityJournalError,
     MobilityOperationRequest,
@@ -134,6 +136,46 @@ def test_service_generates_immutable_operation_before_any_simulated_peer_work(tm
     assert peer_calls == []
     assert "operation_id" not in MobilityOperationRequest.__dataclass_fields__
     assert "remote_command_id" not in MobilityOperationRequest.__dataclass_fields__
+
+
+def test_repository_rejects_direct_noncanonical_initial_operations(tmp_path):
+    """Only a new ready intent may enter the lifecycle/tombstone store."""
+    seed_repository, service = _journal(tmp_path / "seed")
+    operation = service.create_operation(_request(), credential_material="c" * 48)
+    target = SQLiteArtifactMobilityJournal(tmp_path / "target")
+    candidates = (
+        replace(
+            operation,
+            state="terminal_blocked",
+            outcome_code="IMMUTABLE_FENCE",
+        ),
+        replace(
+            operation,
+            state="dispatching",
+            attempt_epoch=1,
+            lease_token="f" * 64,
+            lease_expires_at=1002.0,
+        ),
+        replace(operation, receipt=_checkpoint(operation)),
+        replace(operation, outcome_code="MOBILITY_PROTOCOL"),
+        replace(operation, updated_at=1001.0),
+        replace(
+            operation,
+            receipt_expires_at=operation.created_at + MAX_RECEIPT_TTL_SECONDS + 1,
+        ),
+    )
+
+    for candidate in candidates:
+        with pytest.raises(MobilityJournalError, match="INVALID_REQUEST"):
+            target.create_operation(candidate)
+
+    assert target.list_public_status(operation.source_owner_id) == ()
+    assert not target.tombstone_exists(
+        operation.source_owner_id,
+        operation.destination_scope_id,
+        operation.operation_id,
+    )
+    seed_repository.close()
 
 
 def test_lifecycle_lease_cas_and_stale_epoch_token_are_fenced(tmp_path):
@@ -550,6 +592,10 @@ def test_receipt_capability_is_protected_at_rest_and_requires_current_key_materi
 ):
     repository, service = _journal(tmp_path)
     operation = service.create_operation(_request(), credential_material="c" * 48)
+    version, nonce, ciphertext = operation.protected_receipt_capability.split(".")
+    assert version == "v1"
+    assert len(nonce) == 24
+    assert len(ciphertext) == 96
     assert (
         service.receipt_capability_for(operation, credential_material="c" * 48)
         == "b" * 64

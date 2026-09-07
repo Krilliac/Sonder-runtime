@@ -49,6 +49,8 @@ PLATFORM_SUBPROCESS_MODULES = frozenset({
 NPU_ACCELERATOR_EXTERNALS = frozenset({"numpy", "onnxruntime", "tokenizers"})
 FILESYSTEM_OPTIONAL_EXTERNALS = frozenset({"yaml"})
 PLATFORM_OPTIONAL_EXTERNALS = frozenset({"prometheus_client", "psutil"})
+PERSISTENCE_CRYPTO_PATH = "sonder_runtime/adapters/persistence/artifact_mobility.py"
+PERSISTENCE_CRYPTO_EXTERNALS = frozenset({"cryptography"})
 DOMAIN_PURE_URL_MODULES = frozenset({
     "sonder_runtime/domain/ollama_policy.py",
 })
@@ -745,6 +747,12 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
                 layer == "adapters"
                 and rel.as_posix() == "sonder_runtime/adapters/updates/service.py"
                 and top in UPDATES_EXTERNALS
+            ):
+                continue
+            if (
+                layer == "adapters"
+                and rel.as_posix() == PERSISTENCE_CRYPTO_PATH
+                and top in PERSISTENCE_CRYPTO_EXTERNALS
             ):
                 continue
             if (
