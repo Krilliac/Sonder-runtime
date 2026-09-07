@@ -330,7 +330,7 @@
       ]
     },
     {
-      "file_count": 305,
+      "file_count": 306,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -493,6 +493,7 @@
         "sonder_runtime/application/ports/filesystem.py",
         "sonder_runtime/application/ports/host_final.py",
         "sonder_runtime/application/ports/host_turn_links.py",
+        "sonder_runtime/application/ports/inference_membership.py",
         "sonder_runtime/application/ports/jobs.py",
         "sonder_runtime/application/ports/lane_continuation.py",
         "sonder_runtime/application/ports/managed_authority.py",
@@ -695,7 +696,7 @@
       ]
     },
     {
-      "file_count": 182,
+      "file_count": 183,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -787,6 +788,7 @@
         "sonder_runtime/domain/health_formatting.py",
         "sonder_runtime/domain/identifier_resolution.py",
         "sonder_runtime/domain/improvement_report_formatting.py",
+        "sonder_runtime/domain/inference_membership.py",
         "sonder_runtime/domain/inference_profiles.py",
         "sonder_runtime/domain/interaction_footer.py",
         "sonder_runtime/domain/launcher_health.py",
