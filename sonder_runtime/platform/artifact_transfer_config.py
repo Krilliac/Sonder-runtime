@@ -22,6 +22,10 @@ class ArtifactTransferConfig:
     ttl_seconds: int = 3600
 
 
+def _is_exact_string(value: object) -> bool:
+    return type(value) is str
+
+
 def artifact_transfer_errors(config) -> list[str]:
     section = config.artifact_transfer
     errors = []
@@ -30,7 +34,7 @@ def artifact_transfer_errors(config) -> list[str]:
             errors.append(f"[artifact_transfer].{name} must be a boolean")
     for name in ("principal_id", "project_id", "peer_node_id", "grant_id"):
         value = getattr(section, name)
-        if not isinstance(value, str) or len(value) > 128 or any(
+        if not _is_exact_string(value) or len(value) > 128 or any(
             ord(char) < 33 or ord(char) == 127 for char in value
         ) or (section.enabled and not value):
             errors.append(f"[artifact_transfer].{name} must be a bounded nonempty identifier when enabled")
@@ -42,7 +46,7 @@ def artifact_transfer_errors(config) -> list[str]:
         value = getattr(section, name)
         if type(value) is not int or not low <= value <= high:
             errors.append(f"[artifact_transfer].{name} must be an integer in {low}..{high}")
-    if not isinstance(section.store_dir, str) or len(section.store_dir) > 4096 or (
+    if not _is_exact_string(section.store_dir) or len(section.store_dir) > 4096 or (
         section.store_dir and (not Path(section.store_dir).is_absolute()
                               or any(ord(char) < 32 for char in section.store_dir))
     ):
@@ -52,12 +56,18 @@ def artifact_transfer_errors(config) -> list[str]:
             errors.append("[artifact_transfer].expires_at must be in the future")
         if not section.can_read and not section.can_write:
             errors.append("[artifact_transfer] requires an explicit read or write grant")
-        key = config.secrets.artifact_transfer_key
-        if not isinstance(key, str) or not 32 <= len(key) <= 512 or any(
+        secrets = getattr(config, "secrets", None)
+        key = getattr(secrets, "artifact_transfer_key", None)
+        api_key = getattr(secrets, "api_key", None)
+        if not all(_is_exact_string(value) for value in (key, api_key)):
+            errors.append(
+                "artifact transfer key separation requires exact builtin strings"
+            )
+        elif not 32 <= len(key) <= 512 or any(
             ord(char) < 33 or ord(char) > 126 for char in key
         ):
             errors.append("artifact transfer requires a dedicated 32..512 character secret")
-        elif key == config.secrets.api_key:
+        elif key == api_key:
             errors.append("artifact transfer dedicated key must be distinct from the global API key")
     return errors
 

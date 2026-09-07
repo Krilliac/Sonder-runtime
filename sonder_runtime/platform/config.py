@@ -382,7 +382,17 @@ class ConfigError(ValueError):
         self.errors = tuple(errors)
 
 
-def _is_loopback_host(host: str) -> bool:
+def _is_exact_string(value: object) -> bool:
+    return type(value) is str
+
+
+def _has_minimum_api_key(value: object) -> bool:
+    return _is_exact_string(value) and len(value) >= MIN_API_KEY_LENGTH
+
+
+def _is_loopback_host(host: object) -> bool:
+    if not _is_exact_string(host):
+        return False
     if host in ("localhost",):
         return True
     try:
@@ -986,16 +996,34 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         errors.append(
             f"unsupported configuration schema_version {config.schema_version}"
         )
-    if config.profile not in PROFILES:
+    profile = config.profile
+    profile_is_exact_string = _is_exact_string(profile)
+    if not profile_is_exact_string:
+        errors.append("profile must be an exact builtin string")
+    elif profile not in PROFILES:
         errors.append(
-            f"unknown profile {config.profile!r}; expected one of {PROFILES}"
+            f"unknown profile {profile!r}; expected one of {PROFILES}"
         )
 
     server = config.server
+    server_host = server.host
+    host_is_exact_string = _is_exact_string(server_host)
+    auth_mode = server.auth_mode
+    auth_mode_is_exact_string = _is_exact_string(auth_mode)
+    require_account = server.require_account
+    tls_terminated_by_proxy = server.tls_terminated_by_proxy
     if not 1 <= server.port <= 65_535:
         errors.append(f"[server].port out of range: {server.port}")
-    if server.auth_mode not in ("api-key", "account", "both", "either"):
-        errors.append(f"[server].auth_mode invalid: {server.auth_mode!r}")
+    if not auth_mode_is_exact_string:
+        errors.append("[server].auth_mode must be an exact builtin string")
+    elif auth_mode not in ("api-key", "account", "both", "either"):
+        errors.append(f"[server].auth_mode invalid: {auth_mode!r}")
+    if not host_is_exact_string:
+        errors.append("[server].host must be an exact builtin string")
+    if type(require_account) is not bool:
+        errors.append("[server].require_account must be a boolean")
+    if type(tls_terminated_by_proxy) is not bool:
+        errors.append("[server].tls_terminated_by_proxy must be a boolean")
     if server.max_request_bytes <= 0 or server.max_request_bytes > 16 * 1024 * 1024:
         errors.append("[server].max_request_bytes must be within 1..16MiB")
     if server.max_concurrent_requests < 1:
@@ -1021,23 +1049,24 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         except ValueError:
             errors.append(f"[server].trusted_proxy_cidrs entry invalid: {cidr!r}")
 
-    loopback = _is_loopback_host(server.host)
-    if not loopback:
+    api_key = getattr(config.secrets, "api_key", None)
+    loopback = _is_loopback_host(server_host) if host_is_exact_string else False
+    if host_is_exact_string and not loopback:
         # SPEC-2 remote exposure rules: non-loopback binding requires an
         # explicit TLS-proxy declaration AND strong authentication.  There
         # is no override; the reference topology keeps Sonder on loopback.
-        if not server.tls_terminated_by_proxy:
+        if tls_terminated_by_proxy is not True:
             errors.append(
-                f"[server].host {server.host!r} is not loopback: non-loopback "
+                f"[server].host {server_host!r} is not loopback: non-loopback "
                 "binding without tls_terminated_by_proxy=true is prohibited"
             )
-        if len(config.secrets.api_key) < MIN_API_KEY_LENGTH:
+        if not _has_minimum_api_key(api_key):
             errors.append(
                 "non-loopback binding requires SONDER_API_KEY of at least "
                 f"{MIN_API_KEY_LENGTH} characters in the secrets file"
             )
-    if config.profile == "server-private":
-        if len(config.secrets.api_key) < MIN_API_KEY_LENGTH:
+    if profile_is_exact_string and profile == "server-private":
+        if not _has_minimum_api_key(api_key):
             errors.append(
                 "profile server-private requires SONDER_API_KEY of at least "
                 f"{MIN_API_KEY_LENGTH} characters"
@@ -1045,17 +1074,21 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
 
     effective_auth_mode = (
         "account"
-        if server.require_account and server.auth_mode == "api-key"
-        else server.auth_mode
+        if require_account is True and auth_mode_is_exact_string and auth_mode == "api-key"
+        else auth_mode if auth_mode_is_exact_string else ""
     )
-    if (
-        effective_auth_mode in ACCOUNT_BEARING_AUTH_MODES
-        and config.secrets.auth_secret == BUILTIN_DEV_AUTH_SECRET
-    ):
-        errors.append(
-            f"[server].auth_mode {server.auth_mode!r} may not use the built-in "
-            "development auth secret; set SONDER_AUTH_SECRET to a private value"
-        )
+    if effective_auth_mode in ACCOUNT_BEARING_AUTH_MODES:
+        auth_secret = getattr(config.secrets, "auth_secret", None)
+        if not _is_exact_string(auth_secret):
+            errors.append(
+                "[server].auth_secret must be an exact builtin string for "
+                "account-bearing authentication"
+            )
+        elif auth_secret == BUILTIN_DEV_AUTH_SECRET:
+            errors.append(
+                f"[server].auth_mode {auth_mode!r} may not use the built-in "
+                "development auth secret; set SONDER_AUTH_SECRET to a private value"
+            )
 
     if config.state.minimum_free_disk_bytes < 0:
         errors.append("[state].minimum_free_disk_bytes must be >= 0")

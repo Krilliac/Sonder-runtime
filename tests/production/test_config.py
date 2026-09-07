@@ -7,6 +7,13 @@ import pytest
 
 import sonder_config
 from sonder_config import ConfigError, load_config
+from sonder_runtime.platform import config as platform_config
+from sonder_runtime.platform.config import (
+    BUILTIN_DEV_AUTH_SECRET,
+    Secrets,
+    ServerConfig,
+    SonderConfig,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -90,6 +97,76 @@ tls_terminated_by_proxy = true
     )
     config = load_config(toml, env={"SONDER_API_KEY": _strong_key()})
     assert config.server.host == "0.0.0.0"
+
+
+def test_direct_typed_host_subclass_cannot_claim_loopback():
+    class PretendLoopback(str):
+        def __eq__(self, other):
+            return other == "localhost"
+
+    errors: list[str] = []
+    platform_config._validate(
+        SonderConfig(server=ServerConfig(host=PretendLoopback("0.0.0.0"))),
+        errors,
+    )
+
+    assert errors == ["[server].host must be an exact builtin string"]
+
+
+def test_direct_typed_nonloopback_key_length_requires_builtin_string():
+    class LongKey(str):
+        def __len__(self):
+            return sonder_config.MIN_API_KEY_LENGTH
+
+    errors: list[str] = []
+    platform_config._validate(
+        SonderConfig(
+            server=ServerConfig(
+                host="0.0.0.0",
+                tls_terminated_by_proxy=True,
+            ),
+            secrets=Secrets(api_key=LongKey("short")),
+        ),
+        errors,
+    )
+
+    assert errors == [
+        "non-loopback binding requires SONDER_API_KEY of at least "
+        f"{sonder_config.MIN_API_KEY_LENGTH} characters in the secrets file",
+    ]
+
+
+def test_direct_typed_builtin_auth_secret_subclass_cannot_hide_development_key():
+    class UnequalSecret(str):
+        def __eq__(self, other):
+            return False
+
+    errors: list[str] = []
+    platform_config._validate(
+        SonderConfig(
+            server=ServerConfig(auth_mode="account"),
+            secrets=Secrets(auth_secret=UnequalSecret(BUILTIN_DEV_AUTH_SECRET)),
+        ),
+        errors,
+    )
+
+    assert errors == [
+        "[server].auth_secret must be an exact builtin string for "
+        "account-bearing authentication",
+    ]
+
+
+def test_direct_typed_builtin_bind_values_remain_valid():
+    errors: list[str] = []
+    platform_config._validate(
+        SonderConfig(
+            server=ServerConfig(host="127.0.0.1", auth_mode="account"),
+            secrets=Secrets(auth_secret="private-account-secret"),
+        ),
+        errors,
+    )
+
+    assert errors == []
 
 
 def test_server_private_profile_requires_strong_key(tmp_path):

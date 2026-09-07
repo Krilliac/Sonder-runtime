@@ -2442,6 +2442,101 @@ def test_non_loopback_bind_fails_without_strong_auth():
     )
 
 
+def test_bind_gate_rejects_host_subclass_before_unsafe_or_loopback_checks(monkeypatch):
+    class PretendLoopback(str):
+        def strip(self, chars=None):
+            return "127.0.0.1"
+
+    calls = []
+    monkeypatch.setattr(
+        ts.unsafe_lab,
+        "require_startup",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    with pytest.raises(RuntimeError, match="exact builtin string"):
+        ts._validate_bind_security(
+            PretendLoopback("0.0.0.0"),
+            api_key="k" * 32,
+            auth_mode="api-key",
+            auth_secret="",
+            tls_terminated_by_proxy=True,
+        )
+
+    assert calls == []
+
+
+def test_bind_gate_rejects_subclassed_api_key_before_length_check():
+    class LongKey(str):
+        def __len__(self):
+            return runtime_config.MIN_API_KEY_LENGTH
+
+    with pytest.raises(RuntimeError, match="API key must be an exact builtin string"):
+        ts._validate_bind_security(
+            "0.0.0.0",
+            api_key=LongKey("short"),
+            auth_mode="api-key",
+            auth_secret="",
+            tls_terminated_by_proxy=True,
+        )
+
+
+def test_bind_gate_rejects_subclassed_account_secret_before_length_check():
+    class LongSecret(str):
+        def __len__(self):
+            return ts.MIN_ACCOUNT_SECRET_LENGTH
+
+    with pytest.raises(RuntimeError, match="auth secret must be an exact builtin string"):
+        ts._validate_bind_security(
+            "0.0.0.0",
+            api_key="",
+            auth_mode="account",
+            auth_secret=LongSecret("short"),
+            tls_terminated_by_proxy=True,
+        )
+
+
+def test_bind_gate_rejects_nonboolean_tls_proxy_declaration():
+    with pytest.raises(RuntimeError, match="TLS proxy declaration must be a boolean"):
+        ts._validate_bind_security(
+            "0.0.0.0",
+            api_key="k" * runtime_config.MIN_API_KEY_LENGTH,
+            auth_mode="api-key",
+            auth_secret="",
+            tls_terminated_by_proxy=1,
+        )
+
+
+def test_bind_gate_rejects_subclassed_global_mode_before_effective_mode(monkeypatch):
+    class ExplodingMode(str):
+        def __eq__(self, other):
+            raise AssertionError("the final bind gate must not compare a subclassed mode")
+
+    monkeypatch.setattr(ts, "AUTH_MODE", ExplodingMode("api-key"))
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_SECRET", "")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+
+    with pytest.raises(RuntimeError, match="bind auth mode must be an exact builtin string"):
+        ts._validate_bind_security("127.0.0.1")
+
+
+def test_typed_config_rejects_subclassed_mode_before_loopback_downgrade():
+    from sonder_runtime.platform.config import Secrets, ServerConfig, SonderConfig
+
+    class PretendApiKey(str):
+        def __eq__(self, other):
+            return other == "api-key"
+
+    config = SonderConfig(
+        server=ServerConfig(host="127.0.0.1", auth_mode=PretendApiKey("account")),
+        secrets=Secrets(api_key=""),
+    )
+
+    with pytest.raises(RuntimeError, match="bind auth mode must be an exact builtin string"):
+        ts.configure_typed_config(config)
+
+
 def test_sonder_health_requires_exact_private_loopback_challenge(monkeypatch):
     token = "health-proof-" + ("x" * 32)
     nonce = sonder_health.new_nonce()

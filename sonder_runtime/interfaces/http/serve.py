@@ -808,6 +808,16 @@ HTTP_SESSION_STATE_OWNER_LIMIT = max(1, min(
 
 def configure_typed_config(config) -> None:
     """Bind validated ``SonderConfig`` values at the HTTP boundary."""
+    server_config = config.server
+    _require_exact_bind_values(
+        server_config.host,
+        config.secrets.api_key,
+        server_config.auth_mode,
+        config.secrets.auth_secret,
+        require_account=server_config.require_account,
+    )
+    if type(server_config.tls_terminated_by_proxy) is not bool:
+        raise RuntimeError("bind TLS proxy declaration must be a boolean")
     _serve_logger.debug("configure_typed_config: binding server config to HTTP boundary")
     _serve_logger.info(f"Applying typed server configuration, host={config.server.host!r}, port={config.server.port}, auth_mode={config.server.auth_mode!r}")
     global CONFIGURED_PORT, API_KEY, AUTH_SECRET, HOST, REQUIRE_ACCOUNT, AUTH_MODE, CORS_ORIGINS
@@ -846,7 +856,6 @@ def configure_typed_config(config) -> None:
     _APP_CONTROL_CONFIG = config
     candidate_control._config_provider = lambda: _APP_CONTROL_CONFIG
     _APP_CONTROL_BINDING = candidate_control
-    server_config = config.server
     from sonder_runtime.adapters.web import listener_probe
     listener_probe.configure_typed_config(config)
     CONFIGURED_PORT = server_config.port
@@ -1635,13 +1644,36 @@ def _system_operation_authority_error(operation, context):
 
 
 def _is_loopback_host(host):
-    value = (host or "").strip().strip("[]").lower()
+    if type(host) is not str:
+        return False
+    value = host.strip().strip("[]").lower()
     if value == "localhost":
         return True
     try:
         return ipaddress.ip_address(value).is_loopback
     except ValueError:
         return False
+
+
+def _require_exact_bind_values(
+    host,
+    api_key,
+    auth_mode,
+    auth_secret,
+    *,
+    require_account=None,
+):
+    """Reject direct typed values before a bind-time security comparison."""
+    if type(host) is not str:
+        raise RuntimeError("bind host must be an exact builtin string")
+    if type(api_key) is not str:
+        raise RuntimeError("bind API key must be an exact builtin string")
+    if type(auth_mode) is not str:
+        raise RuntimeError("bind auth mode must be an exact builtin string")
+    if type(auth_secret) is not str:
+        raise RuntimeError("bind auth secret must be an exact builtin string")
+    if require_account is not None and type(require_account) is not bool:
+        raise RuntimeError("bind account requirement must be a boolean")
 
 
 def _a2a_discovery_base_url():
@@ -1690,14 +1722,31 @@ def _validate_bind_security(
     auth_secret=None,
     tls_terminated_by_proxy=None,
 ):
-    _serve_logger.debug(f"_validate_bind_security: host={host!r}, auth_mode={auth_mode!r}, tls_proxy={tls_terminated_by_proxy}")
+    api_key = API_KEY if api_key is None else api_key
+    auth_secret = AUTH_SECRET if auth_secret is None else auth_secret
+    raw_mode = AUTH_MODE if auth_mode is None else auth_mode
+    _require_exact_bind_values(
+        host,
+        api_key,
+        raw_mode,
+        auth_secret,
+        require_account=REQUIRE_ACCOUNT if auth_mode is None else None,
+    )
+    mode = _effective_auth_mode() if auth_mode is None else raw_mode
+    if mode not in ("api-key", "account", "both", "either", "local-open"):
+        raise RuntimeError("invalid bind auth mode")
+    if tls_terminated_by_proxy is None:
+        tls_terminated_by_proxy = _env_flag("SONDER_TLS_TERMINATED_BY_PROXY")
+    elif type(tls_terminated_by_proxy) is not bool:
+        raise RuntimeError("bind TLS proxy declaration must be a boolean")
+    _serve_logger.debug(
+        f"_validate_bind_security: host={host!r}, auth_mode={mode!r}, "
+        f"tls_proxy={tls_terminated_by_proxy}"
+    )
     _serve_logger.info(f"Validating bind security, host={host!r}")
     # Unsafe lab acknowledgement tightens exposure: unlike normal served mode,
     # there is deliberately no authenticated non-loopback topology available.
     unsafe_lab.require_startup(host=host)
-    api_key = API_KEY if api_key is None else api_key
-    mode = _effective_auth_mode() if auth_mode is None else auth_mode
-    auth_secret = AUTH_SECRET if auth_secret is None else auth_secret
     if mode == "api-key" and not api_key:
         _serve_logger.critical(f"bind security validation failed: api-key auth mode requires SONDER_API_KEY, host={host!r}")
         raise RuntimeError("api-key auth mode requires SONDER_API_KEY")
@@ -1714,9 +1763,7 @@ def _validate_bind_security(
     # the last responsible moment, immediately before ``serve_forever`` can
     # bind.  An operator who uses the direct entrypoint must make the same
     # explicit reverse-proxy assertion as a configured deployment.
-    if tls_terminated_by_proxy is None:
-        tls_terminated_by_proxy = _env_flag("SONDER_TLS_TERMINATED_BY_PROXY")
-    if not tls_terminated_by_proxy:
+    if tls_terminated_by_proxy is not True:
         _serve_logger.critical(f"bind security violation: non-loopback host={host!r} without TLS proxy declaration, refusing to start")
         raise RuntimeError(
             "non-loopback bind requires SONDER_TLS_TERMINATED_BY_PROXY=1 "
