@@ -58,9 +58,12 @@ def _begin(binding, context, *, command="mobility-begin", capability="a" * 64):
     )
 
 
-class _MobilitySealResult:
+class _SealResult:
     def __init__(self, result):
         self.result = result
+
+    def seal_upload(self, *_args):
+        return self.result
 
     def seal_mobility_upload(self, *_args):
         return self.result
@@ -104,26 +107,34 @@ def _receipt(state, **extra):
 
 
 @pytest.mark.parametrize(
-    ("result", "expected_status"),
+    ("result", "mobility", "expected_status"),
     [
-        (_envelope(_receipt("verifying")), 202),
-        (_envelope(_receipt("sealed", artifact={})), 200),
+        (_envelope(_receipt("verifying")), True, 202),
+        (_envelope(_receipt("sealed", artifact={})), True, 200),
         (
             _envelope({"state": "verifying"}),
+            True,
             200,
         ),
-        (_envelope(_receipt(["verifying"])), 200),
+        (_envelope(_receipt(["verifying"])), True, 200),
+        (
+            {**_envelope({"state": "verifying"}), "state": "verifying"},
+            True,
+            200,
+        ),
+        ({"protocol_version": "unknown-v2", "state": "verifying"}, True, 200),
+        ({"state": "verifying"}, False, 202),
     ],
 )
-def test_mobility_envelope_status_uses_only_a_valid_nested_receipt(
-    result, expected_status
+def test_status_mapping_separates_legacy_and_mobility_response_shapes(
+    result, mobility, expected_status
 ):
     response = dispatch_artifact_transfer(
-        _MobilitySealResult(result),
+        _SealResult(result),
         "seal",
         {"transfer_id": "a" * 32, "command_id": "mobility-seal"},
         object(),
-        mobility=object(),
+        mobility=object() if mobility else None,
     )
     assert response.status_code == expected_status
 

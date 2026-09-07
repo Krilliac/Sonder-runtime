@@ -31,9 +31,10 @@ def _response_state(result):
     """Read only the fixed receipt state shape emitted by transfer services."""
     if not isinstance(result, dict):
         return None
-    if result.get("state") == "verifying":
-        # Preserve the legacy receipt result exactly.
-        return "verifying"
+    if "protocol_version" not in result:
+        # Preserve the legacy receipt result exactly. A protocol discriminator
+        # always selects strict envelope parsing, even when it is unknown.
+        return "verifying" if result.get("state") == "verifying" else None
     if (
         set(result) != _MOBILITY_ENVELOPE_FIELDS
         or result.get("protocol_version") != "mobility-v1"
