@@ -11,10 +11,16 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from copy import deepcopy
+import hashlib
+import hmac
+import json
+import os
 from pathlib import Path
 from threading import RLock
 from typing import Any
+import uuid
 
+from sonder_runtime.adapters.filesystem.atomic_json import file_lock
 from sonder_runtime.application.memory.replication import (
     MemoryReplicationCoordinator,
     MemoryReplicationReceiver,
@@ -27,6 +33,364 @@ from sonder_runtime.platform.memory_replication_config import (
     memory_replication_errors,
 )
 
+
+_STATE_FILE_NAME = "memory-replication-state.json"
+_STATE_SCHEMA_VERSION = 1
+_STATE_MAX_BYTES = 16 * 1024
+_STATE_LOCK_TIMEOUT_SECONDS = 1.0
+_STATE_MAX_INTEGER = (1 << 63) - 1
+_STATE_FAILURE_REASONS = frozenset({
+    "sink_failure",
+    "sink_identity_changed",
+    "invalid_receipt",
+    "receipt_identity_mismatch",
+    "receipt_source_mismatch",
+    "receipt_epoch_mismatch",
+    "receipt_sequence_mismatch",
+    "receipt_digest_mismatch",
+    "receipt_not_durable",
+    "receipt_inserted_count_mismatch",
+    "source_unavailable",
+})
+
+
+class _ReplicationStateError(RuntimeError):
+    """A bounded, non-disclosing local-state failure."""
+
+    def __init__(self, state: str) -> None:
+        super().__init__(state)
+        self.state = state
+
+
+def _canonical_state_bytes(payload: dict[str, object]) -> bytes:
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+
+
+def _is_state_integer(value: object, *, minimum: int = 0) -> bool:
+    return (
+        type(value) is int
+        and minimum <= value <= _STATE_MAX_INTEGER
+    )
+
+
+def _state_path_for_config(config: SonderConfig) -> Path:
+    """Resolve the private state file only after local service start."""
+    state_home = config.state.home
+    if type(state_home) is str and state_home:
+        return Path(state_home) / _STATE_FILE_NAME
+    from sonder_runtime.platform import paths as runtime_paths
+
+    return Path(runtime_paths.state_path(_STATE_FILE_NAME))
+
+
+def _state_integrity_tag(config: SonderConfig, body: dict[str, object]) -> str:
+    key = config.secrets.memory_replication_key
+    # The typed configuration boundary has already proved this is an exact
+    # printable builtin string.  The tag is a tamper detector, never a stored
+    # credential or an external authorization token.
+    return hmac.new(
+        key.encode("ascii"), _canonical_state_bytes(body), hashlib.sha256,
+    ).hexdigest()
+
+
+def _private_state_file_is_safe(path: Path) -> bool:
+    if os.name != "posix":
+        return True
+    try:
+        return path.stat().st_mode & 0o077 == 0
+    except OSError:
+        return False
+
+
+def _read_state_bytes(path: Path) -> bytes | None:
+    try:
+        if not path.exists():
+            return None
+        if not path.is_file() or not _private_state_file_is_safe(path):
+            raise _ReplicationStateError("unavailable")
+        with path.open("rb") as handle:
+            raw = handle.read(_STATE_MAX_BYTES + 1)
+    except _ReplicationStateError:
+        raise
+    except OSError as exc:
+        raise _ReplicationStateError("unavailable") from exc
+    if not raw or len(raw) > _STATE_MAX_BYTES:
+        raise _ReplicationStateError("corrupt")
+    return raw
+
+
+def _attempt_to_state(attempt: dict[str, object]) -> dict[str, object]:
+    receipts = attempt["durable_receipts"]
+    reasons = attempt["failure_reasons"]
+    return {
+        "status": attempt["status"],
+        "source_epoch": attempt["source_epoch"],
+        "after_sequence": attempt["after_sequence"],
+        "next_sequence": attempt["next_sequence"],
+        "durable_receipts": [
+            {
+                "peer_id": receipt["peer_id"],
+                "source_epoch": receipt["source_epoch"],
+                "next_sequence": receipt["next_sequence"],
+            }
+            for receipt in receipts
+        ],
+        "failed_peer_ids": list(attempt["failed_peer_ids"]),
+        "failure_reasons": [
+            {"peer_id": peer_id, "reason": reason}
+            for peer_id, reason in reasons
+        ],
+        "inserted_records": attempt["inserted_records"],
+    }
+
+
+def _state_to_attempt(
+    raw: object,
+    *,
+    peer_ids: tuple[str, ...],
+    cursor: int,
+) -> dict[str, object]:
+    if type(raw) is not dict or set(raw) != {
+        "status",
+        "source_epoch",
+        "after_sequence",
+        "next_sequence",
+        "durable_receipts",
+        "failed_peer_ids",
+        "failure_reasons",
+        "inserted_records",
+    }:
+        raise _ReplicationStateError("corrupt")
+    status = raw["status"]
+    source_epoch = raw["source_epoch"]
+    after_sequence = raw["after_sequence"]
+    next_sequence = raw["next_sequence"]
+    inserted_records = raw["inserted_records"]
+    if (
+        type(status) is not str
+        or status not in {"empty", "replicated", "pending", "failed"}
+        or not _is_state_integer(source_epoch)
+        or not _is_state_integer(after_sequence)
+        or not _is_state_integer(next_sequence)
+        or next_sequence < after_sequence
+        or not _is_state_integer(inserted_records)
+    ):
+        raise _ReplicationStateError("corrupt")
+    receipts = raw["durable_receipts"]
+    failed_peer_ids = raw["failed_peer_ids"]
+    failure_reasons = raw["failure_reasons"]
+    if (
+        type(receipts) is not list
+        or type(failed_peer_ids) is not list
+        or type(failure_reasons) is not list
+        or len(receipts) > len(peer_ids)
+        or len(failed_peer_ids) > len(peer_ids)
+        or len(failure_reasons) > len(peer_ids) + 1
+    ):
+        raise _ReplicationStateError("corrupt")
+    receipt_rows: list[dict[str, object]] = []
+    receipt_ids: list[str] = []
+    for receipt in receipts:
+        if type(receipt) is not dict or set(receipt) != {
+            "peer_id", "source_epoch", "next_sequence",
+        }:
+            raise _ReplicationStateError("corrupt")
+        peer_id = receipt["peer_id"]
+        receipt_epoch = receipt["source_epoch"]
+        receipt_next_sequence = receipt["next_sequence"]
+        if (
+            type(peer_id) is not str
+            or peer_id not in peer_ids
+            or peer_id in receipt_ids
+            or not _is_state_integer(receipt_epoch, minimum=1)
+            or not _is_state_integer(receipt_next_sequence)
+            or receipt_epoch != source_epoch
+            or receipt_next_sequence != next_sequence
+        ):
+            raise _ReplicationStateError("corrupt")
+        receipt_ids.append(peer_id)
+        receipt_rows.append(
+            {
+                "peer_id": peer_id,
+                "source_epoch": receipt_epoch,
+                "next_sequence": receipt_next_sequence,
+            }
+        )
+    if (
+        any(type(peer_id) is not str or peer_id not in peer_ids
+            for peer_id in failed_peer_ids)
+        or len(set(failed_peer_ids)) != len(failed_peer_ids)
+    ):
+        raise _ReplicationStateError("corrupt")
+    reason_rows: list[tuple[str, str]] = []
+    for item in failure_reasons:
+        if type(item) is not dict or set(item) != {"peer_id", "reason"}:
+            raise _ReplicationStateError("corrupt")
+        peer_id = item["peer_id"]
+        reason = item["reason"]
+        if (
+            type(peer_id) is not str
+            or type(reason) is not str
+            or reason not in _STATE_FAILURE_REASONS
+        ):
+            raise _ReplicationStateError("corrupt")
+        reason_rows.append((peer_id, reason))
+    if status == "failed":
+        if (
+            source_epoch != 0
+            or after_sequence != cursor
+            or next_sequence != cursor
+            or receipt_rows
+            or failed_peer_ids
+            or reason_rows != [("source", "source_unavailable")]
+        ):
+            raise _ReplicationStateError("corrupt")
+    elif (
+        source_epoch < 1
+        or tuple(peer_id for peer_id, _reason in reason_rows)
+        != tuple(failed_peer_ids)
+        or set(receipt_ids) & set(failed_peer_ids)
+    ):
+        raise _ReplicationStateError("corrupt")
+    elif status == "replicated" and (
+        next_sequence <= after_sequence
+        or cursor != next_sequence
+        or tuple(receipt_ids) != peer_ids
+        or failed_peer_ids
+        or reason_rows
+    ):
+        raise _ReplicationStateError("corrupt")
+    elif status == "pending" and (
+        next_sequence <= after_sequence
+        or cursor != after_sequence
+        or not failed_peer_ids
+    ):
+        raise _ReplicationStateError("corrupt")
+    elif status == "empty" and (
+        cursor != after_sequence
+        or next_sequence != cursor
+        or receipt_rows
+        or failed_peer_ids
+        or reason_rows
+        or inserted_records != 0
+    ):
+        raise _ReplicationStateError("corrupt")
+    return {
+        "status": status,
+        "source_epoch": source_epoch,
+        "after_sequence": after_sequence,
+        "next_sequence": next_sequence,
+        "durable_receipt_peer_ids": tuple(receipt_ids),
+        "durable_receipts": tuple(receipt_rows),
+        "failed_peer_ids": tuple(failed_peer_ids),
+        "failure_reasons": tuple(reason_rows),
+        "inserted_records": inserted_records,
+    }
+
+
+def _read_persisted_state(
+    path: Path,
+    *,
+    config: SonderConfig,
+    peer_ids: tuple[str, ...],
+) -> tuple[int, int, dict[str, object]] | None:
+    raw_bytes = _read_state_bytes(path)
+    if raw_bytes is None:
+        return None
+    try:
+        raw = json.loads(raw_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        raise _ReplicationStateError("corrupt") from exc
+    if type(raw) is not dict or set(raw) != {
+        "schema_version",
+        "generation",
+        "source_id",
+        "project_scope",
+        "cursor",
+        "last_attempt",
+        "integrity",
+    }:
+        raise _ReplicationStateError("corrupt")
+    integrity = raw["integrity"]
+    body = {key: value for key, value in raw.items() if key != "integrity"}
+    if type(integrity) is not str or len(integrity) != 64:
+        raise _ReplicationStateError("corrupt")
+    try:
+        expected_integrity = _state_integrity_tag(config, body)
+    except (TypeError, ValueError, UnicodeError, RecursionError) as exc:
+        # Python's permissive JSON parser accepts values such as NaN.  They
+        # are not canonical checkpoint evidence and must become a bounded
+        # corrupt-state result rather than escape from service start.
+        raise _ReplicationStateError("corrupt") from exc
+    if not hmac.compare_digest(expected_integrity, integrity):
+        raise _ReplicationStateError("incompatible")
+    if raw["schema_version"] != _STATE_SCHEMA_VERSION:
+        raise _ReplicationStateError("incompatible")
+    generation = raw["generation"]
+    cursor = raw["cursor"]
+    if (
+        not _is_state_integer(generation, minimum=1)
+        or not _is_state_integer(cursor)
+    ):
+        raise _ReplicationStateError("corrupt")
+    if (
+        type(raw["source_id"]) is not str
+        or type(raw["project_scope"]) is not str
+        or raw["source_id"] != config.memory_replication.local_node_id
+        or raw["project_scope"] != config.memory_replication.project_scope
+    ):
+        raise _ReplicationStateError("incompatible")
+    return generation, cursor, _state_to_attempt(
+        raw["last_attempt"], peer_ids=peer_ids, cursor=cursor,
+    )
+
+
+def _write_private_state(path: Path, payload: dict[str, object]) -> None:
+    encoded = _canonical_state_bytes(payload) + b"\n"
+    if not encoded or len(encoded) > _STATE_MAX_BYTES:
+        raise _ReplicationStateError("unavailable")
+    temporary: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(".%s.%s.tmp" % (path.name, uuid.uuid4().hex))
+        descriptor = os.open(
+            str(temporary), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600,
+        )
+        try:
+            view = memoryview(encoded)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError("private state write made no progress")
+                view = view[written:]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
+        if os.name == "posix":
+            directory_descriptor = os.open(str(path.parent), os.O_RDONLY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+    except _ReplicationStateError:
+        raise
+    except OSError as exc:
+        raise _ReplicationStateError("unavailable") from exc
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
 
 def _default_database_path(config: SonderConfig) -> Path:
     """Resolve the normal memory database only at an explicit operation."""
@@ -154,6 +518,11 @@ class MemoryReplicationService:
         self._receiver_sink = None
         self._cursor = 0
         self._last_attempt: dict[str, object] | None = None
+        self._state_path: Path | None = None
+        self._state_generation = 0
+        self._state_loaded = False
+        self._persistence_state = "uninitialized"
+        self._state_fault: str | None = None
 
     @property
     def config(self) -> SonderConfig:
@@ -164,10 +533,101 @@ class MemoryReplicationService:
         if self._closed:
             raise RuntimeError("memory replication service is closed")
 
+    def _state_file_for_operation(self) -> Path:
+        if self._state_path is None:
+            self._state_path = _state_path_for_config(self._config)
+        return self._state_path
+
+    def _peer_ids(self) -> tuple[str, ...]:
+        return tuple(peer.node_id for peer in self._section.peers)
+
+    def _restore_persisted_state(self) -> None:
+        """Load one compact local checkpoint without opening a peer or journal."""
+        if self._state_loaded:
+            return
+        self._state_loaded = True
+        try:
+            loaded = _read_persisted_state(
+                self._state_file_for_operation(),
+                config=self._config,
+                peer_ids=self._peer_ids(),
+            )
+        except _ReplicationStateError as error:
+            self._record_state_fault(error.state)
+            return
+        if loaded is None:
+            self._persistence_state = "empty"
+            return
+        generation, cursor, attempt = loaded
+        self._state_generation = generation
+        self._cursor = cursor
+        self._last_attempt = attempt
+        self._persistence_state = "restored"
+
+    def _record_state_fault(self, state: str) -> None:
+        """Fail closed without leaving prior receipt evidence as current."""
+        self._state_fault = state
+        self._persistence_state = state
+        self._last_attempt = self._failed_attempt(
+            reason="state_unavailable", cursor=self._cursor,
+        )
+
+    def _persist_attempt(self, *, cursor: int, attempt: dict[str, object]) -> None:
+        """Atomically publish the next local cursor/attempt checkpoint.
+
+        The checkpoint is written before the in-memory cursor moves.  A write
+        failure therefore never returns an outcome that claims a restart-safe
+        receipt, and a later operator action can safely retry the exact page.
+        """
+        if self._state_fault is not None:
+            raise DependencyUnavailable("memory replication state is unavailable")
+        state_path = self._state_file_for_operation()
+        if (
+            not _is_state_integer(cursor)
+            or self._state_generation >= _STATE_MAX_INTEGER
+        ):
+            self._record_state_fault("unavailable")
+            raise DependencyUnavailable("memory replication state is unavailable")
+        next_generation = self._state_generation + 1
+        body: dict[str, object] = {
+            "schema_version": _STATE_SCHEMA_VERSION,
+            "generation": next_generation,
+            "source_id": self._section.local_node_id,
+            "project_scope": self._section.project_scope,
+            "cursor": cursor,
+            "last_attempt": _attempt_to_state(attempt),
+        }
+        payload = {
+            **body,
+            "integrity": _state_integrity_tag(self._config, body),
+        }
+        try:
+            with file_lock(state_path, timeout=_STATE_LOCK_TIMEOUT_SECONDS):
+                current = _read_persisted_state(
+                    state_path,
+                    config=self._config,
+                    peer_ids=self._peer_ids(),
+                )
+                current_generation = 0 if current is None else current[0]
+                if current_generation != self._state_generation:
+                    raise _ReplicationStateError("changed")
+                _write_private_state(state_path, payload)
+        except _ReplicationStateError as error:
+            self._record_state_fault(error.state)
+            raise DependencyUnavailable("memory replication state is unavailable") from None
+        except (OSError, RuntimeError, ValueError, TypeError):
+            self._record_state_fault("unavailable")
+            raise DependencyUnavailable("memory replication state is unavailable") from None
+        self._state_generation = next_generation
+        self._cursor = cursor
+        self._last_attempt = attempt
+        self._persistence_state = "persisted"
+
     def start(self) -> dict[str, object]:
         """Mark the local service ready without opening a peer connection."""
         with self._lock:
             self._require_live()
+            self._restore_persisted_state()
             self._started = True
             return self.status()
 
@@ -256,6 +716,8 @@ class MemoryReplicationService:
             self._require_live()
             if not self._started:
                 raise RuntimeError("memory replication service must be started")
+            if self._state_fault is not None:
+                raise DependencyUnavailable("memory replication state is unavailable")
             try:
                 journal = self._journal_for_attempt()
                 coordinator = MemoryReplicationCoordinator(
@@ -269,14 +731,19 @@ class MemoryReplicationService:
                 )
                 outcome = coordinator.replicate(after_sequence=self._cursor)
             except Exception:
-                self._last_attempt = self._failed_attempt(
+                failure = self._failed_attempt(
                     reason="source_unavailable", cursor=self._cursor,
                 )
+                self._persist_attempt(cursor=self._cursor, attempt=failure)
                 raise DependencyUnavailable("memory replication source is unavailable") from None
 
-            self._last_attempt = self._attempt_view(outcome)
-            if outcome.status == "replicated":
-                self._cursor = outcome.next_sequence
+            attempt = self._attempt_view(outcome)
+            next_cursor = (
+                outcome.next_sequence
+                if outcome.status == "replicated"
+                else self._cursor
+            )
+            self._persist_attempt(cursor=next_cursor, attempt=attempt)
             return outcome
 
     def receiver(self) -> MemoryReplicationReceiver | None:
@@ -338,6 +805,12 @@ class MemoryReplicationService:
                     "source_id": self._section.local_node_id,
                     "project_scope": self._section.project_scope,
                     "cursor": self._cursor,
+                },
+                "persistence": {
+                    "state": self._persistence_state,
+                    "generation": self._state_generation,
+                    "restart_safe": self._state_fault is None
+                    and self._state_loaded,
                 },
                 "last_attempt": (
                     None

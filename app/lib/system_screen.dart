@@ -2509,6 +2509,12 @@ class _OperationalCapabilitiesPanel extends StatelessWidget {
         : 'Unavailable — ${capability.reason}';
   }
 
+  String _automaticAvailabilityValue(bool available, String action) {
+    return available
+        ? 'Available'
+        : 'Unavailable — automatic $action is not available.';
+  }
+
   @override
   Widget build(BuildContext context) {
     return Column(
@@ -2546,6 +2552,22 @@ class _OperationalCapabilitiesPanel extends StatelessWidget {
           label: 'Memory replication',
           value: _capabilityValue(info.memoryReplicationTransport),
           ok: info.memoryReplicationTransport.available,
+        ),
+        _StatusRow(
+          label: 'Automatic takeover',
+          value: _automaticAvailabilityValue(
+            info.automaticTakeoverAvailable,
+            'takeover',
+          ),
+          ok: info.automaticTakeoverAvailable,
+        ),
+        _StatusRow(
+          label: 'Automatic failback',
+          value: _automaticAvailabilityValue(
+            info.automaticFailbackAvailable,
+            'failback',
+          ),
+          ok: info.automaticFailbackAvailable,
         ),
         _StatusRow(
           label: 'Artifact transfer',

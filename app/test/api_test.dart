@@ -967,6 +967,8 @@ void main() {
           },
         },
         'mobility': {
+          'automatic_takeover_available': false,
+          'automatic_failback_available': false,
           'memory_replication_transport': {
             'available': true,
             'reason': 'Receiver injected.',
@@ -997,7 +999,18 @@ void main() {
     expect(capabilities.requestLevelPooling.available, isTrue);
     expect(capabilities.modelSharding.available, isFalse);
     expect(capabilities.memoryReplicationTransport.available, isTrue);
+    expect(capabilities.automaticTakeoverAvailable, isFalse);
+    expect(capabilities.automaticFailbackAvailable, isFalse);
     expect(capabilities.automaticArtifactMigration.available, isFalse);
+  });
+
+  test('operational capability defaults automatic recovery flags to unavailable', () {
+    final capabilities = OperationalCapabilitiesInfo.fromJson({
+      'mobility': const <String, dynamic>{},
+    });
+
+    expect(capabilities.automaticTakeoverAvailable, isFalse);
+    expect(capabilities.automaticFailbackAvailable, isFalse);
   });
 
   test('system info parses shared live execution counts', () {

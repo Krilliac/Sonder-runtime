@@ -649,6 +649,8 @@ void main() {
           },
         },
         'mobility': {
+          'automatic_takeover_available': false,
+          'automatic_failback_available': false,
           'memory_replication_transport': {
             'available': true,
             'reason': 'Receiver injected.',
@@ -695,6 +697,14 @@ void main() {
     expect(find.text('1/2 healthy workers; Available — Requests may route to one worker.'), findsOneWidget);
     expect(find.textContaining('Unavailable — Tensor sharding is not integrated.'), findsOneWidget);
     expect(find.textContaining('Unavailable — External provider required.'), findsOneWidget);
+    expect(
+      find.text('Unavailable — automatic takeover is not available.'),
+      findsOneWidget,
+    );
+    expect(
+      find.text('Unavailable — automatic failback is not available.'),
+      findsOneWidget,
+    );
     expect(tester.takeException(), isNull);
   });
 

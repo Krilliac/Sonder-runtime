@@ -6,6 +6,8 @@ two-host listener, TLS deployment, peer discovery, or retry loop.
 from __future__ import annotations
 
 from dataclasses import replace
+import json
+import os
 
 import pytest
 
@@ -18,7 +20,10 @@ from sonder_runtime.adapters.persistence.sqlite.memory_replication import (
 )
 from sonder_runtime.application.memory.replication import MemoryReplicationReceiver
 from sonder_runtime.domain.common.errors import DependencyUnavailable
-from sonder_runtime.domain.memory.replication import MemoryReplicationError
+from sonder_runtime.domain.memory.replication import (
+    MemoryReplicaReceipt,
+    MemoryReplicationError,
+)
 from sonder_runtime.domain.operational_capabilities import (
     build_operational_capabilities,
 )
@@ -68,14 +73,31 @@ def _config(tmp_path, *, receiver_enabled: bool = True) -> SonderConfig:
     )
 
 
-def _write_authoritative_fact(path):
+def _write_authoritative_fact(
+    path,
+    *,
+    fact_id: str = "fact-1",
+    text: str = "authoritative source",
+):
     connection = connect(path)
     try:
         SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a").add_fact(
-            connection, "fact-1", "repo-a", "authoritative source",
+            connection, fact_id, "repo-a", text,
         )
     finally:
         connection.close()
+
+
+def _durable_receipt(peer_id, batch):
+    return MemoryReplicaReceipt(
+        replica_id=peer_id,
+        source_id=batch.source_id,
+        source_epoch=batch.source_epoch,
+        next_sequence=batch.next_sequence,
+        batch_digest=batch.digest,
+        durable=True,
+        inserted_records=len(batch.records),
+    )
 
 
 def test_disabled_config_constructs_no_service_or_peer_client(tmp_path):
@@ -278,6 +300,10 @@ def test_service_is_local_until_explicit_start_and_replication(tmp_path):
     after_start = service.status()
     assert after_start["started"] is True
     assert after_start["last_attempt"] is None
+    assert after_start["persistence"] == {
+        "state": "empty", "generation": 0, "restart_safe": True,
+    }
+    assert not (tmp_path / "state" / "memory-replication-state.json").exists()
     assert constructed == []
     service.close()
     assert service.status()["closed"] is True
@@ -479,3 +505,276 @@ def test_enabled_service_capability_is_fact_only_and_denies_takeover(tmp_path):
     )
     with pytest.raises(ConfigError):
         MemoryReplicationService(invalid, database_path=tmp_path / "other.db")
+
+
+def test_restart_restores_persisted_cursor_and_durable_receipt(tmp_path, monkeypatch):
+    from sonder_runtime.bootstrap import memory_replication as module
+    from sonder_runtime.bootstrap.memory_replication import (
+        compose_memory_replication_service,
+    )
+
+    source_path = tmp_path / "source.db"
+    _write_authoritative_fact(source_path)
+    fsyncs = []
+    original_fsync = module.os.fsync
+    monkeypatch.setattr(
+        module.os,
+        "fsync",
+        lambda descriptor: fsyncs.append(descriptor) or original_fsync(descriptor),
+    )
+    sent = []
+
+    class Peer:
+        identity = "node-b"
+
+        def apply(self, batch):
+            sent.append(batch)
+            return _durable_receipt(self.identity, batch)
+
+    first = compose_memory_replication_service(
+        _config(tmp_path), database_path=source_path,
+        sink_factory=lambda **_kwargs: Peer(),
+    )
+    assert first is not None
+    first.start()
+    assert first.replicate_once().status == "replicated"
+    state_path = tmp_path / "state" / "memory-replication-state.json"
+    stored = json.loads(state_path.read_text(encoding="utf-8"))
+    assert stored["cursor"] == 1
+    assert stored["last_attempt"]["durable_receipts"] == [
+        {"next_sequence": 1, "peer_id": "node-b", "source_epoch": 1},
+    ]
+    assert _key() not in state_path.read_text(encoding="utf-8")
+    assert "node-b.example" not in state_path.read_text(encoding="utf-8")
+    assert fsyncs
+    if os.name == "posix":
+        assert state_path.stat().st_mode & 0o077 == 0
+    first.close()
+
+    _write_authoritative_fact(
+        source_path, fact_id="fact-2", text="later authoritative source",
+    )
+    second = compose_memory_replication_service(
+        _config(tmp_path), database_path=source_path,
+        sink_factory=lambda **_kwargs: Peer(),
+    )
+    assert second is not None
+    second.start()
+    restored = second.status()
+    assert restored["persistence"]["state"] == "restored"
+    assert restored["journal"]["cursor"] == 1
+    assert restored["last_attempt"]["durable_receipt_peer_ids"] == ("node-b",)
+    assert second.replicate_once().status == "replicated"
+    assert sent[-1].after_sequence == 1
+
+
+def test_restart_restores_partial_attempt_for_exact_operator_retry(tmp_path):
+    from sonder_runtime.bootstrap.memory_replication import (
+        compose_memory_replication_service,
+    )
+
+    source_path = tmp_path / "source.db"
+    _write_authoritative_fact(source_path)
+    base = _config(tmp_path, receiver_enabled=False)
+    section = replace(
+        base.memory_replication,
+        peers=(
+            MemoryReplicationPeerConfig(
+                node_id="node-b", project_scope="repo-a",
+                origin="https://node-b.example:8443",
+            ),
+            MemoryReplicationPeerConfig(
+                node_id="node-c", project_scope="repo-a",
+                origin="https://node-c.example:8443",
+            ),
+        ),
+    )
+    config = replace(base, memory_replication=section)
+
+    class FirstAttemptPeer:
+        def __init__(self, peer_id):
+            self.identity = peer_id
+
+        def apply(self, batch):
+            if self.identity == "node-c":
+                raise DependencyUnavailable("configured peer stopped")
+            return _durable_receipt(self.identity, batch)
+
+    first = compose_memory_replication_service(
+        config,
+        database_path=source_path,
+        sink_factory=lambda *, peer, **_kwargs: FirstAttemptPeer(peer.node_id),
+    )
+    assert first is not None
+    first.start()
+    pending = first.replicate_once()
+    assert pending.status == "pending"
+    assert pending.replica_ids == ("node-a", "node-b")
+    first.close()
+
+    retries = []
+
+    class RetryPeer:
+        def __init__(self, peer_id):
+            self.identity = peer_id
+
+        def apply(self, batch):
+            retries.append((self.identity, batch.after_sequence))
+            return _durable_receipt(self.identity, batch)
+
+    second = compose_memory_replication_service(
+        config,
+        database_path=source_path,
+        sink_factory=lambda *, peer, **_kwargs: RetryPeer(peer.node_id),
+    )
+    assert second is not None
+    second.start()
+    restored = second.status()
+    assert restored["persistence"]["state"] == "restored"
+    assert restored["journal"]["cursor"] == 0
+    assert restored["last_attempt"]["durable_receipt_peer_ids"] == ("node-b",)
+    assert restored["last_attempt"]["failed_peer_ids"] == ("node-c",)
+    assert second.replicate_once().status == "replicated"
+    assert retries == [("node-b", 0), ("node-c", 0)]
+
+
+def test_restart_restores_failed_attempt_and_refuses_corrupt_or_incompatible_state(
+    tmp_path,
+):
+    from sonder_runtime.bootstrap.memory_replication import (
+        compose_memory_replication_service,
+    )
+
+    source_path = tmp_path / "source.db"
+    _write_authoritative_fact(source_path)
+    config = _config(tmp_path, receiver_enabled=False)
+    first = compose_memory_replication_service(
+        config,
+        database_path=source_path,
+        journal_factory=lambda **_kwargs: (_ for _ in ()).throw(OSError("offline")),
+    )
+    assert first is not None
+    first.start()
+    with pytest.raises(DependencyUnavailable, match="source"):
+        first.replicate_once()
+    first.close()
+
+    resumed_calls = []
+
+    class Peer:
+        identity = "node-b"
+
+        def apply(self, batch):
+            resumed_calls.append(batch.after_sequence)
+            return _durable_receipt(self.identity, batch)
+
+    resumed = compose_memory_replication_service(
+        config, database_path=source_path,
+        sink_factory=lambda **_kwargs: Peer(),
+    )
+    assert resumed is not None
+    resumed.start()
+    assert resumed.status()["last_attempt"]["status"] == "failed"
+    assert resumed.replicate_once().status == "replicated"
+    assert resumed_calls == [0]
+    resumed.close()
+
+    incompatible = replace(
+        config,
+        memory_replication=replace(config.memory_replication, local_node_id="node-c"),
+    )
+    blocked = compose_memory_replication_service(
+        incompatible, database_path=source_path,
+        sink_factory=lambda **_kwargs: pytest.fail("invalid state must not contact a peer"),
+    )
+    assert blocked is not None
+    blocked.start()
+    assert blocked.status()["persistence"]["state"] == "incompatible"
+    with pytest.raises(DependencyUnavailable, match="state"):
+        blocked.replicate_once()
+
+    state_path = tmp_path / "state" / "memory-replication-state.json"
+    noncanonical = json.loads(state_path.read_text(encoding="utf-8"))
+    noncanonical["schema_version"] = float("nan")
+    state_path.write_text(json.dumps(noncanonical), encoding="utf-8")
+    noncanonical_state = compose_memory_replication_service(
+        config, database_path=source_path,
+        sink_factory=lambda **_kwargs: pytest.fail("noncanonical state must not contact a peer"),
+    )
+    assert noncanonical_state is not None
+    noncanonical_state.start()
+    assert noncanonical_state.status()["persistence"]["state"] == "corrupt"
+    with pytest.raises(DependencyUnavailable, match="state"):
+        noncanonical_state.replicate_once()
+
+    tampered = dict(noncanonical)
+    tampered["schema_version"] = 1
+    tampered["integrity"] = "0" * 64
+    state_path.write_text(json.dumps(tampered), encoding="utf-8")
+    tampered_state = compose_memory_replication_service(
+        config, database_path=source_path,
+        sink_factory=lambda **_kwargs: pytest.fail("tampered state must not contact a peer"),
+    )
+    assert tampered_state is not None
+    tampered_state.start()
+    assert tampered_state.status()["persistence"]["state"] == "incompatible"
+    with pytest.raises(DependencyUnavailable, match="state"):
+        tampered_state.replicate_once()
+
+    state_path.write_text("{not-json", encoding="utf-8")
+    corrupt = compose_memory_replication_service(
+        config, database_path=source_path,
+        sink_factory=lambda **_kwargs: pytest.fail("corrupt state must not contact a peer"),
+    )
+    assert corrupt is not None
+    corrupt.start()
+    assert corrupt.status()["persistence"]["state"] == "corrupt"
+    with pytest.raises(DependencyUnavailable, match="state"):
+        corrupt.replicate_once()
+
+
+def test_state_write_failure_never_returns_a_success_shaped_attempt(
+    tmp_path,
+    monkeypatch,
+):
+    from sonder_runtime.bootstrap import memory_replication as module
+    from sonder_runtime.bootstrap.memory_replication import (
+        compose_memory_replication_service,
+    )
+
+    source_path = tmp_path / "source.db"
+    _write_authoritative_fact(source_path)
+    peer_calls = []
+
+    class Peer:
+        identity = "node-b"
+
+        def apply(self, batch):
+            peer_calls.append(batch.after_sequence)
+            return _durable_receipt(self.identity, batch)
+
+    monkeypatch.setattr(
+        module,
+        "_write_private_state",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            module._ReplicationStateError("unavailable"),
+        ),
+    )
+    service = compose_memory_replication_service(
+        _config(tmp_path), database_path=source_path,
+        sink_factory=lambda **_kwargs: Peer(),
+    )
+    assert service is not None
+    service.start()
+
+    with pytest.raises(DependencyUnavailable, match="state"):
+        service.replicate_once()
+
+    status = service.status()
+    assert status["persistence"]["state"] == "unavailable"
+    assert status["last_attempt"]["status"] == "failed"
+    assert status["last_attempt"]["durable_receipt_peer_ids"] == ()
+    assert peer_calls == [0]
+    with pytest.raises(DependencyUnavailable, match="state"):
+        service.replicate_once()
+    assert peer_calls == [0]
