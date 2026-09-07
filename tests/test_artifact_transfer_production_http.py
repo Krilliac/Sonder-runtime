@@ -415,8 +415,9 @@ def test_mobility_seal_and_final_confirmation_stay_versioned(receiver):
         {"command_id": "seal-v1"},
         headers=mobility_headers(),
     )
-    assert status in (200, 202), body
-    assert set(json.loads(body)) == {
+    initial = json.loads(body)
+    assert status == (202 if initial["receipt"]["state"] == "verifying" else 200), body
+    assert set(initial) == {
         "protocol_version", "recipient_attestation", "command_id", "spec", "receipt"
     }
     until = time.monotonic() + 10
@@ -428,8 +429,8 @@ def test_mobility_seal_and_final_confirmation_stay_versioned(receiver):
             {"command_id": "versioned-seal"},
             headers=mobility_headers(),
         )
-        assert status == 200, body
         final = json.loads(body)
+        assert status == (202 if final["receipt"]["state"] == "verifying" else 200), body
         if final["receipt"]["state"] == "sealed":
             break
         time.sleep(.01)

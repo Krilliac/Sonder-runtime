@@ -3,11 +3,59 @@
 from dataclasses import dataclass
 from ....application.artifacts.transfer import ArtifactRange, TransferError
 
+_MOBILITY_ENVELOPE_FIELDS = frozenset(
+    {
+        "protocol_version",
+        "recipient_attestation",
+        "command_id",
+        "spec",
+        "receipt",
+    }
+)
+_MOBILITY_RECEIPT_FIELDS = frozenset(
+    {"transfer_id", "state", "offset", "chunk_bytes", "expires_at", "revision"}
+)
+_MOBILITY_SEALED_RECEIPT_FIELDS = _MOBILITY_RECEIPT_FIELDS | {"artifact"}
+_MOBILITY_RECEIPT_STATES = frozenset(
+    {"open", "verifying", "sealed", "aborted", "failed"}
+)
+
 
 @dataclass(frozen=True)
 class ArtifactTransferHttpResult:
     status_code: int
     body: dict | ArtifactRange
+
+
+def _response_state(result):
+    """Read only the fixed receipt state shape emitted by transfer services."""
+    if not isinstance(result, dict):
+        return None
+    if result.get("state") == "verifying":
+        # Preserve the legacy receipt result exactly.
+        return "verifying"
+    if (
+        set(result) != _MOBILITY_ENVELOPE_FIELDS
+        or result.get("protocol_version") != "mobility-v1"
+        or not isinstance(result.get("recipient_attestation"), dict)
+        or not isinstance(result.get("command_id"), str)
+        or not isinstance(result.get("spec"), dict)
+    ):
+        return None
+    receipt = result.get("receipt")
+    if not isinstance(receipt, dict) or set(receipt) not in {
+        _MOBILITY_RECEIPT_FIELDS,
+        _MOBILITY_SEALED_RECEIPT_FIELDS,
+    }:
+        return None
+    state = receipt["state"]
+    if not isinstance(state, str) or state not in _MOBILITY_RECEIPT_STATES:
+        return None
+    if state == "sealed" and not isinstance(receipt.get("artifact"), dict):
+        return None
+    if state != "sealed" and "artifact" in receipt:
+        return None
+    return state
 
 
 def dispatch_artifact_transfer(service, action, payload, context, *, body=b"", mobility=None):
@@ -82,9 +130,7 @@ def dispatch_artifact_transfer(service, action, payload, context, *, body=b"", m
         result = service.read_range(
             payload["artifact_id"], payload["offset"], payload["length"], context
         )
-    status = (
-        202 if isinstance(result, dict) and result.get("state") == "verifying" else 200
-    )
+    status = 202 if _response_state(result) == "verifying" else 200
     return ArtifactTransferHttpResult(status, result)
 
 

@@ -9,6 +9,9 @@ import pytest
 
 from sonder_runtime.application.artifacts.transfer import TransferError
 from sonder_runtime.bootstrap.artifact_transfer import ArtifactTransferBinding
+from sonder_runtime.interfaces.http.facades.artifact_transfer import (
+    dispatch_artifact_transfer,
+)
 from sonder_runtime.platform.artifact_transfer_config import ArtifactTransferConfig
 from sonder_runtime.platform.config import Secrets, SonderConfig, StateConfig
 
@@ -53,6 +56,76 @@ def _begin(binding, context, *, command="mobility-begin", capability="a" * 64):
     return binding.service().begin_mobility_upload(
         _spec(), command, binding.mobility_contract(context, capability), context
     )
+
+
+class _MobilitySealResult:
+    def __init__(self, result):
+        self.result = result
+
+    def seal_mobility_upload(self, *_args):
+        return self.result
+
+
+def _envelope(receipt):
+    return {
+        "protocol_version": "mobility-v1",
+        "recipient_attestation": {
+            "protocol_version": "mobility-v1",
+            "receiver_identity_id": "receiver-a",
+            "principal_id": "alice",
+            "project_id": "project-a",
+            "authorized_source_owner_id": "source-owner-a",
+            "grant_id": "grant-a",
+            "grant_revision": 1,
+            "can_write": True,
+            "max_object_bytes": 65536,
+            "sha256": "a" * 64,
+        },
+        "command_id": "mobility-seal",
+        "spec": {
+            "sha256": "b" * 64,
+            "size_bytes": 0,
+            "media_type": "application/octet-stream",
+        },
+        "receipt": receipt,
+    }
+
+
+def _receipt(state, **extra):
+    return {
+        "transfer_id": "a" * 32,
+        "state": state,
+        "offset": 0,
+        "chunk_bytes": 65536,
+        "expires_at": 1,
+        "revision": 1,
+        **extra,
+    }
+
+
+@pytest.mark.parametrize(
+    ("result", "expected_status"),
+    [
+        (_envelope(_receipt("verifying")), 202),
+        (_envelope(_receipt("sealed", artifact={})), 200),
+        (
+            _envelope({"state": "verifying"}),
+            200,
+        ),
+        (_envelope(_receipt(["verifying"])), 200),
+    ],
+)
+def test_mobility_envelope_status_uses_only_a_valid_nested_receipt(
+    result, expected_status
+):
+    response = dispatch_artifact_transfer(
+        _MobilitySealResult(result),
+        "seal",
+        {"transfer_id": "a" * 32, "command_id": "mobility-seal"},
+        object(),
+        mobility=object(),
+    )
+    assert response.status_code == expected_status
 
 
 def test_mobility_replay_keeps_the_original_verifier_and_receipt(tmp_path):
