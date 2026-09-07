@@ -300,15 +300,27 @@ def test_default_cancellation_wait_honours_positive_timeout(monkeypatch):
     assert sleeps == [0.5]
 
 
-def test_default_app_build_is_atomic(monkeypatch):
+def test_default_app_build_is_atomic(monkeypatch, tmp_path):
+    import socket
+    from sonder_runtime.platform.config import OllamaConfig, StateConfig
+
     bootstrap_app.reset_for_tests()
+    build_application = bootstrap_app.build_application
+    config = SonderConfig(state=StateConfig(home=str(tmp_path)),
+                          ollama=OllamaConfig(url="http://127.0.0.1:11434", workers=(), allow_remote=False))
+
+    def deny_network(*_args, **_kwargs):
+        pytest.fail("local application composition attempted network I/O")
+
+    monkeypatch.setattr(socket, "create_connection", deny_network)
+    monkeypatch.setattr(socket.socket, "connect", deny_network)
     first_started = threading.Event()
     release_first = threading.Event()
     second_built = threading.Event()
     calls = []
 
     def build():
-        instance = object()
+        instance = build_application(config=config)
         calls.append(instance)
         if len(calls) == 1:
             first_started.set()
@@ -331,5 +343,11 @@ def test_default_app_build_is_atomic(monkeypatch):
 
     assert not first.is_alive() and not second.is_alive()
     assert len(calls) == 1
+    assert len(results) == 2
     assert results[0] is results[1]
+    assert type(results[0]) is bootstrap_app.Application
+    assert results[0].inference_pool.configured_origins == ("http://127.0.0.1:11434",)
+    assert not results[0].inference_pool.has_configured_remote_workers
+    assert results[0].inference_membership._source._workers == ()
+    assert results[0].inference_membership._thread is None
     bootstrap_app.reset_for_tests()
