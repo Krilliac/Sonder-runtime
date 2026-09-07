@@ -67,6 +67,25 @@ def test_enabled_mobility_rejects_invalid_destination_origin_without_echo(tmp_pa
     assert rejected_origin not in str(raised.value)
 
 
+def test_enabled_mobility_bounds_an_oversized_decimal_port_without_echo(tmp_path, caplog):
+    rejected_origin = "https://node-b.example:" + "9" * 5_000
+    path = tmp_path / "sonder.toml"
+    path.write_text(_enabled_toml(tmp_path, rejected_origin), encoding="utf-8")
+
+    with pytest.raises(ConfigError) as raised:
+        load_config(
+            path,
+            env={"SONDER_ARTIFACT_MOBILITY_PEER_KEY": "mobility-" + "x" * 32},
+        )
+
+    rendered_error = json.dumps({"errors": raised.value.errors})
+    assert raised.value.errors == ("[artifact_mobility].destination_origin invalid",)
+    assert rejected_origin not in str(raised.value)
+    assert rejected_origin not in repr(raised.value)
+    assert rejected_origin not in caplog.text
+    assert rejected_origin not in rendered_error
+
+
 @pytest.mark.parametrize(
     "origin",
     (
@@ -284,6 +303,55 @@ def test_mobility_parser_redacts_controls_and_continuation_like_lines(tmp_path):
     assert raised.value.errors == ("[artifact_mobility].peer_key malformed secrets input",)
     assert rejected_fragment not in str(raised.value)
     assert rejected_fragment not in repr(raised.value)
+
+
+@pytest.mark.parametrize(
+    "interruption",
+    (
+        "\n\n",
+        "\n# harmless comment\n",
+        "\x1e\x1e",
+        "\x1e# harmless comment\x1e",
+    ),
+)
+def test_mobility_parser_keeps_split_continuations_field_only(tmp_path, interruption):
+    secrets = tmp_path / "secrets.env"
+    rejected_fragment = "https://leaked-mobility-credential/continuation"
+    secrets.write_text(
+        "SONDER_ARTIFACT_MOBILITY_PEER_KEY=mobility-"
+        + "x" * 32
+        + interruption
+        + rejected_fragment,
+        encoding="utf-8",
+    )
+
+    with pytest.raises(config_environment.EnvironmentFileError) as raised:
+        config_environment.parse_env_file(secrets)
+
+    assert str(raised.value) == "[artifact_mobility].peer_key malformed secrets input"
+    assert "https://leaked-mobility" not in repr(raised.value)
+
+
+def test_mobility_parser_failure_stays_out_of_errors_logs_and_serialization(tmp_path, caplog):
+    secrets = tmp_path / "secrets.env"
+    rejected_fragment = "https://leaked-mobility-credential/continuation"
+    secrets.write_text(
+        "SONDER_ARTIFACT_MOBILITY_PEER_KEY=mobility-"
+        + "x" * 32
+        + "\x1e# harmless comment\x1e"
+        + rejected_fragment,
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError) as raised:
+        load_config(secrets_path=secrets, env={})
+
+    rendered_error = json.dumps({"errors": raised.value.errors})
+    assert raised.value.errors == ("[artifact_mobility].peer_key malformed secrets input",)
+    assert rejected_fragment not in str(raised.value)
+    assert rejected_fragment not in repr(raised.value)
+    assert rejected_fragment not in caplog.text
+    assert rejected_fragment not in rendered_error
 
 
 def test_mobility_key_is_toml_forbidden_and_private_values_are_redacted(tmp_path):

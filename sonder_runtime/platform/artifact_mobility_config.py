@@ -5,6 +5,11 @@ import ipaddress
 import re
 
 
+_MAX_DESTINATION_ORIGIN_LENGTH = 512
+_MAX_DESTINATION_AUTHORITY_LENGTH = 512
+_MAX_PORT_TEXT_LENGTH = 5
+
+
 @dataclass(frozen=True)
 class ArtifactMobilityConfig:
     enabled: bool = False
@@ -48,6 +53,7 @@ def _origin_host(value: str) -> bool:
 def _strict_https_origin(value: object) -> bool:
     if (
         not isinstance(value, str)
+        or len(value) > _MAX_DESTINATION_ORIGIN_LENGTH
         or not value.startswith("https://")
         or any(ord(character) < 33 or ord(character) > 126 for character in value)
     ):
@@ -55,7 +61,11 @@ def _strict_https_origin(value: object) -> bool:
     authority = value[len("https://"):]
     if authority.endswith("/"):
         authority = authority[:-1]
-    if not authority or any(character in authority for character in "/?#@"):
+    if (
+        not authority
+        or len(authority) > _MAX_DESTINATION_AUTHORITY_LENGTH
+        or any(character in authority for character in "/?#@")
+    ):
         return False
     if authority.startswith("["):
         closing = authority.find("]")
@@ -72,9 +82,16 @@ def _strict_https_origin(value: object) -> bool:
         host, separator, port_text = authority.rpartition(":")
         if not separator or not host or ":" in host or not _origin_host(host):
             return False
-    if not port_text.isascii() or not port_text.isdecimal():
+    if (
+        not port_text.isascii()
+        or not port_text.isdecimal()
+        or len(port_text) > _MAX_PORT_TEXT_LENGTH
+    ):
         return False
-    port = int(port_text)
+    try:
+        port = int(port_text)
+    except (TypeError, ValueError, OverflowError):
+        return False
     return 1 <= port <= 65_535
 
 
