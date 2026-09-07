@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import math
 from typing import Protocol
 
-from ...domain.inference_membership import MAX_ADVERTISEMENTS, MAX_SNAPSHOT_BYTES, MembershipSnapshot
+from ...domain.inference_membership import MAX_ADVERTISEMENTS, MAX_SNAPSHOT_BYTES, MembershipHighWater, MembershipSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,4 +33,14 @@ class MembershipSource(Protocol):
         the timeout across its complete read. No partial/truncated snapshot may
         become authority. This port provides no discovery or background loop.
         """
+        ...
+
+
+class MembershipReplayStore(Protocol):
+    def read(self) -> MembershipHighWater | None:
+        """Read the exact durable authority, failing closed on corrupt state."""
+        ...
+
+    def compare_and_advance(self, snapshot: MembershipSnapshot) -> MembershipHighWater:
+        """Synchronize durable authority before publishing this snapshot."""
         ...

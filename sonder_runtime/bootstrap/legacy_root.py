@@ -13,7 +13,7 @@ def require_inference_application(application, *, expected_pool=None, allow_inac
     from ..adapters.inference.ollama_pool import OllamaWorkerPool
     from ..adapters.inference.static_membership import StaticMembershipSource, configured_worker_origins
     from ..application.inference_membership.controller import MembershipController
-    from ..platform.config import SonderConfig
+    from ..platform.config import SonderConfig, validate_membership_config
 
     if type(application) is not Application or type(application.config) is not SonderConfig:
         raise ValueError("invalid legacy membership binding: exact typed Application required")
@@ -23,25 +23,32 @@ def require_inference_application(application, *, expected_pool=None, allow_inac
             or controller._pool is not pool):
         raise ValueError("invalid legacy membership binding: exact pool/controller ownership required")
     configured = configured_worker_origins(application.config.ollama)
+    validate_membership_config(application.config.membership, application.config.secrets,
+                               allow_remote=application.config.ollama.allow_remote)
+    origins = pool.configured_origins
+    if (type(origins) is not tuple or any(type(origin) is not str for origin in origins)
+            or origins != configured):
+        raise ValueError("invalid legacy membership binding: configured origins differ")
     source = controller._source
-    if type(source) is not StaticMembershipSource:
-        raise ValueError("invalid legacy membership binding: exact static configuration source required")
-    for origins in (pool.configured_origins, source.configured_origins):
+    if application.config.membership.mode == "external":
+        _require_external_source(application, source, controller, pool)
+    else:
+        if type(source) is not StaticMembershipSource or pool._external_source is not None or controller._high_water_store is not None:
+            raise ValueError("invalid legacy membership binding: exact static configuration source required")
+        origins = source.configured_origins
         if (type(origins) is not tuple or any(type(origin) is not str for origin in origins)
                 or origins != configured):
             raise ValueError("invalid legacy membership binding: configured origins differ")
-    # The source is configuration-derived, with the same expiry/capacity policy
-    # and clock as its controller. No external source is admitted by Task 5.
-    source_origins = configured_worker_origins(source._configuration)
-    if (source_origins != configured or source._clock is not controller._clock
-            or source._configuration.worker_capability_ttl_seconds != application.config.ollama.worker_capability_ttl_seconds
-            or source._configuration.worker_max_inflight != application.config.ollama.worker_max_inflight
-            or any(type(value) is not str for value in (
-                source.cluster_id, source.issuer_id, controller._cluster, controller._issuer))
-            or source.cluster_id != StaticMembershipSource.cluster_id
-            or source.issuer_id != StaticMembershipSource.issuer_id
-            or source.cluster_id != controller._cluster or source.issuer_id != controller._issuer):
-        raise ValueError("invalid legacy membership binding: static source authority/configuration differs")
+        source_origins = configured_worker_origins(source._configuration)
+        if (source_origins != configured or source._clock is not controller._clock
+                or source._configuration.worker_capability_ttl_seconds != application.config.ollama.worker_capability_ttl_seconds
+                or source._configuration.worker_max_inflight != application.config.ollama.worker_max_inflight
+                or any(type(value) is not str for value in (
+                    source.cluster_id, source.issuer_id, controller._cluster, controller._issuer))
+                or source.cluster_id != StaticMembershipSource.cluster_id
+                or source.issuer_id != StaticMembershipSource.issuer_id
+                or source.cluster_id != controller._cluster or source.issuer_id != controller._issuer):
+            raise ValueError("invalid legacy membership binding: static source authority/configuration differs")
     authority = pool._membership_authority
     if ((allow_inactive is not True and (controller._closed is not False or pool._draining))
             or pool._membership_clock is None or pool._membership_clock is not controller._clock
@@ -50,6 +57,50 @@ def require_inference_application(application, *, expected_pool=None, allow_inac
             or authority[0] != controller._cluster or authority[1] != controller._issuer):
         raise ValueError("invalid legacy membership binding: configured membership must be active")
     return pool
+
+
+def _require_external_source(application, source, controller, pool):
+    from pathlib import Path
+    from types import MappingProxyType
+    from ..adapters.inference.external_membership import ExternalMembershipSource, _PinnedTransport
+    from ..adapters.inference.membership_high_water import MembershipHighWaterStore
+    from ..application.ports.inference_membership import MembershipSourceLimits
+    from ..platform import paths
+    from ..platform.config import MembershipEndpointPolicy
+    config, secrets = application.config.membership, application.config.secrets
+    water = controller._high_water_store
+    limits = controller._source_limits
+    if (type(source) is not ExternalMembershipSource or pool._external_source is not source
+            or source._config is not config or source._secrets is not secrets
+            or source._clock is not controller._clock or type(source._transport) is not _PinnedTransport
+            or source._transport._config is not config or source._transport._secrets is not secrets
+            or type(water) is not MembershipHighWaterStore or water._clock is not controller._clock
+            or type(limits) is not MembershipSourceLimits
+            or limits.max_advertisements != config.snapshot_max_advertisements
+            or limits.max_bytes != config.snapshot_max_bytes
+            or any(type(value) is not str for value in (
+                source.cluster_id, source.issuer_id, controller._cluster, controller._issuer, water._cluster, water._issuer))
+            or source.cluster_id != config.cluster_id or source.issuer_id != config.issuer_id
+            or controller._cluster != config.cluster_id or controller._issuer != config.issuer_id
+            or water._cluster != config.cluster_id or water._issuer != config.issuer_id
+            or type(water._path) is not type(Path())
+            or water._path != paths.default_home() / "inference-membership" / "high-water.json"):
+        raise ValueError("invalid legacy membership binding: exact external authority required")
+    policy = source._source_policy
+    if (type(policy) is not MembershipEndpointPolicy
+            or any(type(value) is not str for value in (policy.member_id, policy.origin, policy.tls_server_name))
+            or type(policy.allowed_cidrs) is not tuple or any(type(value) is not str for value in policy.allowed_cidrs)
+            or (policy.member_id, policy.origin, policy.tls_server_name, policy.allowed_cidrs) !=
+               ("source", config.source_origin, config.source_tls_server_name, config.source_allowed_cidrs)
+            or type(source._policies) is not MappingProxyType or type(source._origins) is not MappingProxyType
+            or len(source._policies) != len(config.member_policies) or len(source._origins) != len(config.member_policies)
+            or any(type(key) is not str for key in (*source._policies, *source._origins))
+            or any(source._policies.get(value.member_id) is not value or source._origins.get(value.origin) is not value
+                   for value in config.member_policies)
+            or type(pool._configured_remote_origins) is not frozenset
+            or any(type(value) is not str for value in pool._configured_remote_origins)
+            or pool._configured_remote_origins != frozenset(source._origins)):
+        raise ValueError("invalid legacy membership binding: external endpoint policy differs")
 
 
 def require_mcp_inference_binding(application, pool, *, primary_origin):

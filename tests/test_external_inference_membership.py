@@ -1,0 +1,619 @@
+"""Offline authority, pinned transport, and external membership boundaries."""
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+import base64
+import io
+import json
+import socket
+
+import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from sonder_runtime.adapters.inference.external_membership import ExternalMembershipSource, MembershipSourceError
+from sonder_runtime.adapters.model_transport import ModelCallError
+from sonder_runtime.application.ports.inference_membership import MembershipSourceLimits
+from sonder_runtime.platform.config import MembershipConfig, MembershipEndpointPolicy, Secrets
+
+NOW = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
+ORIGIN = "https://worker.example:11434"
+
+
+def configuration(tmp_path):
+    return MembershipConfig(mode="external", cluster_id="cluster", issuer_id="issuer", protocol_version=1,
+        source_origin="https://registry.example:443", source_tls_server_name="registry.example",
+        source_allowed_cidrs=("10.77.0.0/24",), trust_anchor_file=str(tmp_path / "ca.pem"),
+        signature_public_key_file=str(tmp_path / "signer.pem"), refresh_interval_seconds=30,
+        snapshot_max_advertisements=16, snapshot_max_bytes=1048576, local_fallback=False,
+        member_policies=(MembershipEndpointPolicy("worker", ORIGIN, "worker.example", ("10.77.0.0/24",)),))
+
+
+def envelope(key, **changes):
+    payload = dict(cluster_id="cluster", issuer_id="issuer", generation=1, protocol_version=1,
+        issued_at=NOW.isoformat(), expires_at=(NOW + timedelta(seconds=60)).isoformat(),
+        workers=[dict(worker_id="worker", origin=ORIGIN, member_generation=1,
+                      lifecycle_state="active", models=[], advertised_capacity=1)])
+    payload.update(changes)
+    canonical = lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+    signature = base64.b64encode(key.sign(canonical(payload))).decode("ascii")
+    return canonical(dict(payload=payload, signature=signature))
+
+
+@pytest.fixture
+def source(tmp_path, monkeypatch):
+    key = Ed25519PrivateKey.generate()
+    config = configuration(tmp_path)
+    (tmp_path / "signer.pem").write_bytes(key.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
+    secrets = Secrets(membership_client_cert_file="client.pem", membership_client_key_file="private.pem")
+    value = ExternalMembershipSource(config, secrets, clock=lambda: NOW)
+    calls = []
+    def retrieve(policy, **kwargs):
+        calls.append((policy, kwargs))
+        return envelope(key)
+    monkeypatch.setattr(value._transport, "retrieve", retrieve)
+    yield value, key, calls
+    assert value.close(timeout=2)
+
+
+def test_external_source_reads_only_configured_authority(source):
+    value, key, calls = source
+    snapshot = value.read_snapshot(limits=MembershipSourceLimits())
+    assert snapshot.cluster_id == "cluster" and snapshot.workers[0].origin == ORIGIN
+    assert calls[0][0].origin == "https://registry.example:443"
+    assert calls[0][1]["path"] == "/v1/membership"
+    with pytest.raises(TypeError):
+        value.read_snapshot(limits=MembershipSourceLimits(), origin=ORIGIN)
+
+
+@pytest.mark.parametrize("failure", ["signature", "cluster", "issuer", "protocol", "expired", "future",
+    "origin", "identity", "trust_root", "san_policy", "cidr_policy", "credentials", "oversized", "over_items", "noncanonical"])
+def test_external_authority_cannot_change_configured_trust(source, monkeypatch, failure):
+    value, key, calls = source
+    changes = {}
+    if failure in ("cluster", "issuer"):
+        changes[failure + "_id"] = "other-secret-identity"
+    elif failure == "protocol":
+        changes["protocol_version"] = 2
+    elif failure == "expired":
+        changes["expires_at"] = NOW.isoformat()
+    elif failure == "future":
+        changes["issued_at"] = (NOW + timedelta(seconds=1)).isoformat()
+    elif failure in ("origin", "identity", "trust_root", "san_policy", "cidr_policy", "credentials", "over_items"):
+        workers = json.loads(envelope(key))["payload"]["workers"]
+        if failure == "origin": workers[0]["origin"] = "https://other.example:11434"
+        elif failure == "identity": workers[0]["worker_id"] = "unknown"
+        elif failure == "over_items": workers *= 17
+        else: workers[0][failure] = "secret-override"
+        changes["workers"] = workers
+    raw = envelope(Ed25519PrivateKey.generate() if failure == "signature" else key, **changes)
+    if failure == "oversized": raw = b"x" * 1048577
+    if failure == "noncanonical": raw += b"\n"
+    monkeypatch.setattr(value._transport, "retrieve", lambda *_a, **_kw: raw)
+    with pytest.raises(MembershipSourceError) as caught:
+        value.read_snapshot(limits=MembershipSourceLimits())
+    assert str(caught.value) == "external membership unavailable"
+
+
+@pytest.mark.parametrize("failure", ["mixed_dns", "out_of_cidr", "empty_dns", "wrong_san", "wildcard_san", "redirect",
+                                      "client_cert", "server_cert", "oversized", "partial_status", "partial_body", "server_error"])
+def test_pinned_transport_rejects_boundary_failures(tmp_path, monkeypatch, failure):
+    from sonder_runtime.adapters.inference import external_membership as module
+    config = configuration(tmp_path)
+    source = ExternalMembershipSource(config, Secrets(membership_client_cert_file="client.pem",
+        membership_client_key_file="private.pem"), clock=lambda: NOW)
+    resolved, connected, identities = [], [], []
+    answers = ["10.77.0.2"]
+    if failure == "mixed_dns": answers += ["203.0.113.9"]
+    if failure == "out_of_cidr": answers = ["203.0.113.9"]
+    if failure == "empty_dns": answers = []
+    def resolve(host, port, **kwargs):
+        resolved.append((host, port))
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip, port)) for ip in answers]
+    class Channel:
+        def settimeout(self, value): pass
+        def connect(self, address): connected.append(address)
+        def sendall(self, data): pass
+        def close(self): pass
+        def getpeercert(self):
+            name = "other.example" if failure == "wrong_san" else "*.example" if failure == "wildcard_san" else "registry.example"
+            return {"subjectAltName": (("DNS", name),)}
+        def makefile(self, *_args, **_kwargs):
+            if failure == "partial_status": return io.BytesIO(b"HTTP/1")
+            if failure == "partial_body": return io.BytesIO(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n{}")
+            status = b"302 Found" if failure == "redirect" else b"503 Unavailable" if failure == "server_error" else b"200 OK"
+            body = b"x" * (1048577 if failure == "oversized" else 1)
+            return io.BytesIO(b"HTTP/1.1 " + status + b"\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+    class Context:
+        check_hostname = True
+        verify_mode = None
+        def load_verify_locations(self, **kwargs): pass
+        def load_cert_chain(self, **kwargs):
+            if failure == "client_cert": raise OSError("secret client certificate")
+        def wrap_socket(self, channel, *, server_hostname):
+            identities.append(server_hostname)
+            if failure == "server_cert": raise OSError("secret certificate chain")
+            return channel
+    monkeypatch.setattr(module.socket, "getaddrinfo", resolve)
+    monkeypatch.setattr(module.socket, "socket", lambda *_a, **_kw: Channel())
+    monkeypatch.setattr(module.ssl, "SSLContext", lambda *_a: Context())
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:8080")
+    try:
+        with pytest.raises((MembershipSourceError, ModelCallError)) as caught:
+            source._transport.retrieve(source._source_policy, path="/v1/membership", timeout=1, max_bytes=1048576)
+        for private in ("registry.example", "secret client certificate", "secret certificate chain", str(tmp_path), "private.pem"):
+            assert private not in str(caught.value) and private not in repr(caught.value)
+        if failure in ("redirect", "oversized", "partial_status", "partial_body", "server_error"):
+            from sonder_runtime.adapters.inference.ollama_pool import OllamaWorkerPool
+            assert type(caught.value) is ModelCallError
+            assert not OllamaWorkerPool._retryable(caught.value)
+        assert len(resolved) <= 1
+        assert all(address[0] == "10.77.0.2" for address in connected)
+        assert all(name == "registry.example" for name in identities)
+        if failure in ("mixed_dns", "out_of_cidr", "empty_dns"):
+            assert connected == []
+    finally:
+        assert source.close(timeout=2)
+
+
+@pytest.mark.parametrize("failure", ["commit", "contention", "replacement"])
+def test_external_composition_persists_before_apply_and_pins_worker_policy(tmp_path, monkeypatch, failure):
+    from sonder_runtime.bootstrap import app as bootstrap, legacy_root
+    from sonder_runtime.adapters.inference import ollama_pool
+    from sonder_runtime.platform.config import SonderConfig, OllamaConfig, StateConfig
+    key = Ed25519PrivateKey.generate()
+    membership = configuration(tmp_path)
+    (tmp_path / "signer.pem").write_bytes(key.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
+    config = SonderConfig(state=StateConfig(home=str(tmp_path)), membership=membership,
+        ollama=OllamaConfig(allow_remote=True),
+        secrets=Secrets(membership_client_cert_file="client.pem", membership_client_key_file="key.pem"))
+    application = bootstrap.build_application(config=config)
+    control, pool = application.inference_membership, application.inference_pool
+    assert type(control._source) is ExternalMembershipSource
+    assert control._thread is None
+    clock = lambda: NOW
+    control._clock = control._source._clock = control._high_water_store._clock = pool._membership_clock = clock
+    generation, calls = [1], []
+    def retrieve(policy, **kwargs):
+        assert not pool._condition._is_owned()
+        assert not control._condition._is_owned()
+        calls.append((policy, kwargs["path"]))
+        if kwargs["path"] == "/v1/membership":
+            return envelope(key, generation=generation[0])
+        assert policy is membership.member_policies[0]
+        return b'{"models":[{"name":"code"}],"version":"1","ok":true}'
+    monkeypatch.setattr(control._source._transport, "retrieve", retrieve)
+    original_apply = pool.apply_membership
+    def apply(result):
+        assert control._high_water_store.read() == result.high_water
+        original_apply(result)
+    monkeypatch.setattr(pool, "apply_membership", apply)
+    try:
+        assert legacy_root.require_inference_application(application) is pool
+        with pytest.raises(ollama_pool.WorkerPoolError):
+            pool.request(lambda _: pytest.fail("remote admitted without evidence"), model="code")
+        assert calls == []
+        control.refresh(timeout_seconds=2, probe=False)
+        with pytest.raises(ollama_pool.WorkerPoolError):
+            pool.request(lambda _: pytest.fail("probation admitted"), model="code")
+        control.refresh(timeout_seconds=2)
+        import urllib.request
+        def send(origin):
+            with pool.open_url(urllib.request.Request(origin + "/api/generate", data=b"{}"), timeout=1) as response:
+                return json.loads(response.read())
+        assert pool.request(send, model="code")["ok"] is True
+        assert calls[-1] == (membership.member_policies[0], "/api/generate")
+        import server
+        monkeypatch.setattr(server, "OLLAMA_POOL", pool)
+        before = len(calls)
+        public = json.dumps(pool.summary()) + server.status()
+        assert len(calls) == before
+        for private in ("worker.example", "registry.example", str(tmp_path), "client.pem", "key.pem"):
+            assert private not in public
+        old_result = control._result
+        generation[0] = 2
+        from contextlib import nullcontext
+        water_store = control._high_water_store
+        def fail(publish):
+            assert not pool._condition._is_owned()
+            assert not control._condition._is_owned()
+            if failure == "replacement":
+                water_store._path.write_bytes(b"partial private record")
+                publish()
+            raise OSError("private fsync failure")
+        if failure != "contention": monkeypatch.setattr(water_store, "_commit", fail)
+        with water_store._session() if failure == "contention" else nullcontext():
+            with pytest.raises(RuntimeError): control.refresh(timeout_seconds=2)
+        assert control._result is old_result
+        assert pool.request(send, model="code")["ok"] is True
+    finally:
+        application.close_providers(timeout=2)
+        ollama_pool.reset_typed_workers()
+
+
+@pytest.mark.parametrize("mode", ["dns", "ip", "wrong_dns_san", "wrong_ip_san", "foreign_client", "missing_client", "foreign_server"])
+def test_real_local_tls_requires_private_chain_client_certificate_and_exact_san(tmp_path, monkeypatch, mode):
+    import ipaddress
+    import ssl
+    import threading
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
+
+    now = datetime.now(timezone.utc)
+    ca_key = Ed25519PrivateKey.generate()
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "private-test-ca")])
+    def certificate(key, name, *, ca=False, signer=ca_key, issuer=ca_name, san=None, usage=None):
+        builder = (x509.CertificateBuilder().subject_name(name).issuer_name(issuer).public_key(key.public_key())
+                   .serial_number(x509.random_serial_number()).not_valid_before(now-timedelta(minutes=1))
+                   .not_valid_after(now+timedelta(hours=1)).add_extension(x509.BasicConstraints(ca=ca, path_length=None), True))
+        if san is not None: builder = builder.add_extension(x509.SubjectAlternativeName([san]), False)
+        if usage is not None: builder = builder.add_extension(x509.ExtendedKeyUsage([usage]), False)
+        return builder.sign(signer, algorithm=None)
+    ca = certificate(ca_key, ca_name, ca=True)
+    (tmp_path / "ca.pem").write_bytes(ca.public_bytes(serialization.Encoding.PEM))
+    foreign = Ed25519PrivateKey.generate()
+    for identity in ("server", "client"):
+        key = Ed25519PrivateKey.generate()
+        signer = foreign if mode == "foreign_" + identity else ca_key
+        san = (x509.IPAddress(ipaddress.ip_address("127.0.0.1")) if mode == "ip" else
+               x509.IPAddress(ipaddress.ip_address("127.0.0.2")) if mode == "wrong_ip_san" else
+               x509.DNSName("wrong.example" if mode == "wrong_dns_san" else "registry.example"))
+        cert = certificate(key, x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "registry.example")]),
+            signer=signer, san=san if identity == "server" else None,
+            usage=ExtendedKeyUsageOID.SERVER_AUTH if identity == "server" else ExtendedKeyUsageOID.CLIENT_AUTH)
+        (tmp_path / (identity + ".pem")).write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+        (tmp_path / (identity + ".key")).write_bytes(key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    signing = Ed25519PrivateKey.generate()
+    (tmp_path / "signer.pem").write_bytes(signing.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(str(tmp_path / "server.pem"), str(tmp_path / "server.key"))
+    context.load_verify_locations(cafile=str(tmp_path / "ca.pem"))
+    context.verify_mode = ssl.CERT_REQUIRED
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(1)
+    port = listener.getsockname()[1]
+    requests = []
+    def serve():
+        try:
+            raw, _ = listener.accept()
+            raw.settimeout(1)
+            with raw:
+                with context.wrap_socket(raw, server_side=True) as stream:
+                    requests.append(stream.recv(4096))
+                    body = envelope(signing)
+                    stream.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body)
+        except (ssl.SSLError, OSError):
+            pass  # expected rejected client/closed peer; assertions are below
+        finally:
+            listener.close()
+    thread = threading.Thread(target=serve)
+    thread.start()
+    name = "127.0.0.1" if mode in ("ip", "wrong_ip_san") else "registry.example"
+    config = replace(configuration(tmp_path), source_origin=f"https://{name}:{port}",
+                     source_tls_server_name=name, source_allowed_cidrs=("127.0.0.1/32",))
+    credentials = Secrets(membership_client_cert_file=str(tmp_path / ("missing.pem" if mode == "missing_client" else "client.pem")),
+                          membership_client_key_file=str(tmp_path / "client.key"))
+    source = ExternalMembershipSource(config, credentials, clock=lambda: NOW)
+    resolves = []
+    def resolve(host, resolved_port, **kwargs):
+        resolves.append((host, resolved_port))
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", resolved_port))]
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    monkeypatch.setenv("HTTPS_PROXY", "http://untrusted-proxy.invalid:443")
+    try:
+        if mode in ("dns", "ip"):
+            assert source.read_snapshot(limits=MembershipSourceLimits(timeout_seconds=1)).workers[0].origin == ORIGIN
+        else:
+            with pytest.raises(MembershipSourceError, match="^external membership unavailable$"):
+                source.read_snapshot(limits=MembershipSourceLimits(timeout_seconds=1))
+        assert resolves == [(name, port)]
+    finally:
+        assert source.close(timeout=2)
+        thread.join(2)
+    assert not thread.is_alive()
+    if mode in ("dns", "ip"):
+        assert len(requests) == 1 and b"GET /v1/membership HTTP/1.1" in requests[0]
+
+
+@pytest.mark.parametrize("kind", ["config", "policy", "origin", "cidr", "secrets", "tuple"])
+def test_external_configuration_rejects_hostile_subclasses_before_io(tmp_path, kind):
+    config = configuration(tmp_path)
+    secrets = Secrets(membership_client_cert_file="client.pem", membership_client_key_file="key.pem")
+    def hostile(value):
+        def equality(*_): pytest.fail("hostile equality called")
+        cls = type("Hostile", (type(value),), {"__eq__": equality, "__hash__": type(value).__hash__})
+        if isinstance(value, (str, tuple)): return cls(value)
+        copy = object.__new__(cls)
+        copy.__dict__.update(value.__dict__)
+        return copy
+    if kind == "config": config = hostile(config)
+    elif kind == "secrets": secrets = hostile(secrets)
+    elif kind == "tuple": config = replace(config, member_policies=hostile(config.member_policies))
+    else:
+        policy = config.member_policies[0]
+        policy = (hostile(policy) if kind == "policy" else replace(policy, origin=hostile(policy.origin))
+                  if kind == "origin" else replace(policy, allowed_cidrs=(hostile("10.77.0.0/24"),)))
+        config = replace(config, member_policies=(policy,))
+    with pytest.raises(ValueError): ExternalMembershipSource(config, secrets, clock=lambda: NOW)
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_external_local_fallback_cannot_authorize_a_remote_or_cross_lane_origin(tmp_path, monkeypatch, fallback):
+    import urllib.request
+    from sonder_runtime.bootstrap import app as bootstrap
+    from sonder_runtime.adapters.inference import ollama_pool, ollama_endpoint
+    from sonder_runtime.platform.config import SonderConfig, OllamaConfig, StateConfig
+    config = SonderConfig(state=StateConfig(home=str(tmp_path)), membership=replace(configuration(tmp_path), local_fallback=fallback),
+        ollama=OllamaConfig(allow_remote=True), secrets=Secrets(membership_client_cert_file="client.pem", membership_client_key_file="key.pem"))
+    application = bootstrap.build_application(config=config)
+    pool, control = application.inference_pool, application.inference_membership
+    calls = []
+    monkeypatch.setattr(ollama_endpoint, "open_url", lambda request, **_k: calls.append(request.full_url) or io.BytesIO(b"{}"))
+    try:
+        request = urllib.request.Request("http://127.0.0.1:11434/api/generate", data=b"{}")
+        if fallback:
+            with pool.open_url(request, timeout=1) as response: assert response.read() == b"{}"
+        else:
+            with pytest.raises(ollama_pool.WorkerPoolUnavailable): pool.open_url(request, timeout=1)
+        with pytest.raises(ollama_pool.WorkerPoolError):
+            pool.request(lambda _: pytest.fail("unadmitted remote dispatched"), model="remote-only")
+        with pytest.raises(ollama_pool.WorkerPoolUnavailable):
+            pool.open_url(urllib.request.Request("http://127.0.0.2:11434/api/generate"), timeout=1)
+        assert calls == ([request.full_url, "http://127.0.0.1:11434/api/version", "http://127.0.0.1:11434/api/tags"] if fallback else [])
+        assert control._thread is None
+    finally:
+        application.close_providers(timeout=2)
+        ollama_pool.reset_typed_workers()
+
+
+def test_resolver_timeout_retains_one_owned_task_without_backlog(tmp_path, monkeypatch):
+    import threading
+    from time import monotonic
+    from sonder_runtime.adapters.inference import external_membership as module
+    release, entered = threading.Event(), threading.Event()
+    calls = []
+    def blocked(*_a, **_kw):
+        calls.append(1)
+        entered.set()
+        release.wait(2)
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("10.77.0.2", 443))]
+    monkeypatch.setattr(module.socket, "getaddrinfo", blocked)
+    value = ExternalMembershipSource(configuration(tmp_path),
+        Secrets(membership_client_cert_file="client.pem", membership_client_key_file="key.pem"), clock=lambda: NOW)
+    try:
+        with pytest.raises(TimeoutError): value._transport._resolve("registry.example", 443, monotonic() + .02)
+        assert entered.is_set()
+        thread = value._transport._resolver_thread
+        for _ in range(4):
+            with pytest.raises(TimeoutError): value._transport._resolve("registry.example", 443, monotonic() + .02)
+            assert value._transport._resolver_thread is thread
+        assert calls == [1]
+        for invalid in (None, True, -1, float("nan"), float("inf"), 31):
+            with pytest.raises(ValueError): value.close(timeout=invalid)
+        assert value.close(timeout=0) is False
+    finally:
+        release.set()
+        assert value.close(timeout=2)
+
+
+def test_external_policy_ceiling_does_not_bypass_pool_admission_bound(tmp_path, monkeypatch):
+    from sonder_runtime.bootstrap import app as bootstrap, legacy_root
+    from sonder_runtime.adapters.inference import ollama_pool
+    from sonder_runtime.platform.config import SonderConfig, OllamaConfig, StateConfig, validate_membership_config
+    policies = tuple(MembershipEndpointPolicy(f"w{i:04}", f"https://w{i:04}.example:11434",
+        f"w{i:04}.example", ("10.77.0.0/24",)) for i in range(4096))
+    config = replace(configuration(tmp_path), snapshot_max_advertisements=4096, member_policies=policies)
+    secrets = Secrets(membership_client_cert_file="client.pem", membership_client_key_file="key.pem")
+    validate_membership_config(config, secrets)
+    with pytest.raises(ValueError): validate_membership_config(replace(config, member_policies=policies + policies[:1]), secrets)
+    key = Ed25519PrivateKey.generate()
+    (tmp_path / "signer.pem").write_bytes(key.public_key().public_bytes(serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo))
+    raw = envelope(key, workers=[dict(worker_id=p.member_id, origin=p.origin, member_generation=1,
+        lifecycle_state="active", models=[], advertised_capacity=1) for p in policies])
+    assert len(raw) <= 1048576
+    application = bootstrap.build_application(config=SonderConfig(membership=config, secrets=secrets,
+        state=StateConfig(home=str(tmp_path)), ollama=OllamaConfig(allow_remote=True, worker_pool_max_workers=4)))
+    control, pool = application.inference_membership, application.inference_pool
+    clock = lambda: NOW
+    control._clock = control._source._clock = control._high_water_store._clock = pool._membership_clock = clock
+    probed = []
+    def retrieve(policy, **kwargs):
+        assert not pool._condition._is_owned()
+        if kwargs["path"] == "/v1/membership": return raw
+        probed.append(policy.origin)
+        return b'{"version":"1","models":[{"name":"code"}]}'
+    monkeypatch.setattr(control._source._transport, "retrieve", retrieve)
+    try:
+        control._refresh_once(2, True)
+        assert pool.membership_limit == 3
+        assert len(control._result.roster.members) == 3
+        assert pool.summary()["membership_omitted_worker_count"] == 4093
+        assert len(pool._states) == 4  # reserved static loopback plus three remote
+        admitted = {p.origin for p in policies[:3]}
+        assert set(probed) == admitted and len(probed) == 6
+        dispatched = []
+        for _ in range(8): pool.request(lambda origin: dispatched.append(origin), model="code")
+        assert set(dispatched) <= admitted
+        assert legacy_root.require_inference_application(application) is pool
+    finally:
+        application.close_providers(timeout=2)
+        ollama_pool.reset_typed_workers()
+
+
+@pytest.mark.parametrize("mutation", ["source_policy", "policies", "origins", "source_subclass"])
+def test_external_binding_refuses_substituted_configured_authority(tmp_path, mutation):
+    from sonder_runtime.bootstrap import app as bootstrap, legacy_root
+    from sonder_runtime.adapters.inference import ollama_pool
+    from sonder_runtime.platform.config import SonderConfig, OllamaConfig, StateConfig
+    application = bootstrap.build_application(config=SonderConfig(membership=configuration(tmp_path),
+        secrets=Secrets(membership_client_cert_file="client.pem", membership_client_key_file="key.pem"),
+        state=StateConfig(home=str(tmp_path)), ollama=OllamaConfig(allow_remote=True)))
+    source = application.inference_membership._source
+    try:
+        assert legacy_root.require_inference_application(application) is application.inference_pool
+        if mutation == "source_policy": source._source_policy = replace(source._source_policy, origin="https://other.example:443")
+        elif mutation == "policies": source._policies = {}
+        elif mutation == "origins": source._origins = {}
+        else:
+            class Hostile(ExternalMembershipSource):
+                def __eq__(self, other): pytest.fail("hostile equality")
+            source.__class__ = Hostile
+        with pytest.raises(ValueError): legacy_root.require_inference_application(application)
+    finally:
+        application.close_providers(timeout=2)
+        ollama_pool.reset_typed_workers()
+
+
+@pytest.mark.parametrize("operation", ["read", "readline"])
+def test_trickled_headers_and_body_cannot_extend_the_total_deadline(monkeypatch, operation):
+    from sonder_runtime.adapters.inference import external_membership as module
+    clock, reads = [0.0], []
+    class Trickle:
+        def read(self, size): clock[0] += 5; return b"x" * size
+        def readline(self, size): clock[0] += 5; return b"private header\r\n"
+        def read1(self, size):
+            reads.append(size)
+            clock[0] += .4
+            return b"x"
+    class Channel:
+        def settimeout(self, timeout): assert 0 < timeout <= 1
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0])
+    reader = module._ResponseReader(Trickle(), Channel(), 1.0)
+    with pytest.raises(TimeoutError): getattr(reader, operation)(50)
+    assert len(reads) <= 3
+
+
+@pytest.mark.parametrize("command", ["serve", "mcp", "repl", "bound_direct"])
+@pytest.mark.parametrize("primary_remote", [False, True])
+@pytest.mark.parametrize("fallback", [False, True])
+def test_real_entrypoints_keep_external_admission_transport_and_local_choice(
+    tmp_path, monkeypatch, command, primary_remote, fallback,
+):
+    from types import SimpleNamespace
+    import urllib.request
+    import server
+    import sonder_runtime.__main__ as entrypoint
+    from sonder_runtime.adapters.application_lifecycle import ApplicationLifecycle
+    from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool
+    from sonder_runtime.adapters.persistence import migrations, operations_store
+    from sonder_runtime.adapters.persistence.sqlite import bridge_migration
+    from sonder_runtime.bootstrap import app as bootstrap, legacy_root
+    from sonder_runtime.interfaces.http import serve
+    from sonder_runtime.interfaces.repl import repl
+    from sonder_runtime.platform.config import SonderConfig, StateConfig, OllamaConfig
+    key = Ed25519PrivateKey.generate()
+    (tmp_path / "signer.pem").write_bytes(key.public_key().public_bytes(serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo))
+    local = "http://127.0.0.1:11434"
+    config = SonderConfig(state=StateConfig(home=str(tmp_path)), membership=replace(configuration(tmp_path), local_fallback=fallback),
+        secrets=Secrets(membership_client_cert_file="client.pem", membership_client_key_file="key.pem"),
+        ollama=OllamaConfig(url=ORIGIN if primary_remote else local, allow_remote=True))
+    monkeypatch.setattr(server, "OLLAMA_POOL", ollama_pool.OllamaWorkerPool(local))
+    monkeypatch.setattr(server, "BASE", local)
+    monkeypatch.setattr(server, "_APP_GRAPH", None)
+    monkeypatch.setattr(legacy_root, "_owned_application", None)
+    monkeypatch.setattr(bootstrap, "_application_lifecycle", ApplicationLifecycle(bootstrap._build_default_application))
+    for name in ("_default_config", "_default_compute_close", "_default_delegation_close", "_default_inference_close"):
+        monkeypatch.setattr(bootstrap, name, None)
+    monkeypatch.setattr(entrypoint, "_load_config", lambda _: config)
+    monkeypatch.setattr(entrypoint, "_export_runtime_environment", lambda *_a, **_kw: None)
+    monkeypatch.setattr(bridge_migration, "require_epoch_2", lambda _: None)
+    monkeypatch.setattr(migrations, "migrate_all", lambda **_: None)
+    monkeypatch.setattr(operations_store, "OperationsStore", lambda: SimpleNamespace(prune_events=lambda _: 0))
+    monkeypatch.setattr(server, "dispatch_provider", lambda _provider, _path, _payload, send: send())
+    local_calls, remote_calls, source_calls, checked = [], [], [], []
+    def local_transport(request, **kwargs):
+        assert fallback and not primary_remote
+        assert request.full_url.startswith(local + "/")
+        local_calls.append(request.full_url)
+        return io.BytesIO(b'{"version":"1","models":[{"name":"local-model"}],"ok":true}')
+    monkeypatch.setattr(ollama_endpoint._OPENER, "open", local_transport)
+    def run_interface(**_):
+        application = bootstrap.default_app()
+        pool, control = application.inference_pool, application.inference_membership
+        assert server.OLLAMA_POOL is pool and server._application() is application
+        assert control._thread is None and control._source._transport._resolver_thread is None
+        clock = [NOW]
+        aware = lambda: clock[0]
+        control._clock = control._source._clock = control._high_water_store._clock = pool._membership_clock = aware
+        def retrieve(policy, **kwargs):
+            assert not pool._condition._is_owned()
+            if kwargs["path"] == "/v1/membership":
+                source_calls.append(1)
+                return envelope(key)
+            assert policy is config.membership.member_policies[0]
+            remote_calls.append(kwargs["path"])
+            return b'{"version":"1","models":[{"name":"remote-model"}],"ok":true}'
+        monkeypatch.setattr(control._source._transport, "retrieve", retrieve)
+        with pytest.raises(ollama_pool.WorkerPoolError): server._post("/api/generate", {"model":"remote-model"})
+        assert remote_calls == [] and source_calls == []
+        if primary_remote or not fallback:
+            with pytest.raises(ollama_pool.WorkerPoolError): server._post("/api/generate", {}, local_only=True)
+            assert local_calls == []
+        else:
+            assert server._post("/api/generate", {}, local_only=True)["ok"]
+        control.refresh(timeout_seconds=2)
+        assert source_calls == [1]
+        assert server._post("/api/generate", {"model":"remote-model"})["ok"]
+        assert remote_calls.count("/api/generate") == 1
+        clock[0] += timedelta(seconds=61)
+        before = list(remote_calls)
+        with pytest.raises(ollama_pool.WorkerPoolError): server._post("/api/generate", {"model":"remote-model"})
+        if primary_remote:
+            with pytest.raises(ollama_pool.WorkerPoolError): server._get("/api/tags")
+        assert remote_calls == before and source_calls == [1]
+        assert legacy_root.require_inference_application(application) is pool
+        checked.append(True)
+    monkeypatch.setattr(serve, "main", run_interface)
+    monkeypatch.setattr(server.mcp, "run", run_interface)
+    monkeypatch.setattr(server, "require_mcp_startup_safety", lambda: None)
+    monkeypatch.setattr(repl, "main", run_interface)
+    try:
+        if command == "bound_direct":
+            legacy_root.configure_application(bootstrap.default_app(config=config))
+            server.run_mcp()
+        else:
+            assert getattr(entrypoint, "cmd_" + command)(SimpleNamespace(skip_preflight=True, native=False, json=False)) == 0
+        assert checked == [True]
+    finally:
+        bootstrap.close_default_runtime_resources(timeout=2)
+        ollama_pool.reset_typed_workers()
+
+
+@pytest.mark.parametrize("diagnostic", ["preflight_primary", "preflight_workers", "doctor_primary", "doctor_workers", "doctor_residency"])
+@pytest.mark.parametrize("primary_remote", [False, True])
+def test_external_standalone_diagnostics_defer_without_network_or_private_details(tmp_path, monkeypatch, diagnostic, primary_remote):
+    import urllib.request
+    import sonder_doctor
+    from sonder_runtime.adapters import preflight
+    from sonder_runtime.adapters.inference import ollama_endpoint
+    from sonder_runtime.platform.config import SonderConfig, OllamaConfig
+    config = SonderConfig(membership=configuration(tmp_path),
+        secrets=Secrets(membership_client_cert_file="private-client.pem", membership_client_key_file="private-key.pem"),
+        ollama=OllamaConfig(url=ORIGIN if primary_remote else "http://127.0.0.1:11434",
+                            workers=() if primary_remote else (ORIGIN,), allow_remote=True))
+    def forbidden(*_a, **_kw): pytest.fail("standalone external diagnostic attempted transport")
+    monkeypatch.setattr(socket, "getaddrinfo", forbidden)
+    monkeypatch.setattr(socket, "socket", forbidden)
+    monkeypatch.setattr(socket, "create_connection", forbidden)
+    monkeypatch.setattr(urllib.request, "urlopen", forbidden)
+    monkeypatch.setattr(ollama_endpoint, "open_url", forbidden)
+    monkeypatch.setattr(sonder_doctor, "_load_config_or_none", lambda: config)
+    if diagnostic.startswith("preflight"):
+        results = ([preflight._check_ollama(config)] if diagnostic == "preflight_primary" else preflight._check_ollama_workers(config))
+        assert results and all(not item.ok and not item.required for item in results)
+        rendered = json.dumps([item.as_dict() for item in results])
+    else:
+        result = {"doctor_primary":sonder_doctor._check_ollama, "doctor_workers":sonder_doctor._check_ollama_workers,
+                  "doctor_residency":sonder_doctor._check_ollama_residency}[diagnostic]()
+        assert result["status"] == sonder_doctor.STATUS_SKIPPED
+        rendered = json.dumps(result)
+    assert "deferred" in rendered
+    for private in ("worker.example", "registry.example", "private-client.pem", "private-key.pem", str(tmp_path)):
+        assert private not in rendered

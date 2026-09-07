@@ -4739,7 +4739,7 @@ def _post(
             headers={"Content-Type": "application/json"},
         )
         def transport():
-            with ollama_endpoint.open_url(req, timeout=remaining) as resp:
+            with OLLAMA_POOL.open_url(req, timeout=remaining) as resp:
                 raw = _read_ollama_response_bytes(resp)
                 return json.loads(raw.decode("utf-8"))
 
@@ -4822,7 +4822,7 @@ def _get(path: str) -> dict:
 
     def send(origin):
         req = urllib.request.Request(f"{origin}{path}")
-        with ollama_endpoint.open_url(req, timeout=15) as resp:
+        with OLLAMA_POOL.open_url(req, timeout=15) as resp:
             raw = _read_ollama_response_bytes(resp)
             return json.loads(raw.decode("utf-8"))
 

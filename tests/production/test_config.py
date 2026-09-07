@@ -13,6 +13,93 @@ pytestmark = pytest.mark.unit
 _CLEAN_ENV: dict[str, str] = {}
 
 
+def _membership_toml():
+    return '''[ollama]
+allow_remote = true
+[membership]
+mode = "external"
+cluster_id = "cluster"
+issuer_id = "issuer"
+protocol_version = 1
+source_origin = "https://registry.example:443"
+source_tls_server_name = "registry.example"
+source_allowed_cidrs = ["10.77.0.0/24"]
+trust_anchor_file = "private-ca.pem"
+signature_public_key_file = "membership-signer.pem"
+refresh_interval_seconds = 30
+snapshot_max_advertisements = 4096
+snapshot_max_bytes = 1048576
+local_fallback = false
+[[membership.member_policies]]
+member_id = "worker"
+origin = "https://worker.example:11434"
+tls_server_name = "worker.example"
+allowed_cidrs = ["10.77.0.0/24"]
+'''
+
+
+def test_external_membership_is_explicit_and_secrets_are_redacted(tmp_path):
+    assert load_config(env={}).membership.mode == "static"
+    path = tmp_path / "membership.toml"
+    path.write_text(_membership_toml(), encoding="utf-8")
+    with pytest.raises(ConfigError): load_config(path, env={})
+    config = load_config(path, env={"SONDER_MEMBERSHIP_CLIENT_CERT_FILE": "private-client.pem",
+                                  "SONDER_MEMBERSHIP_CLIENT_KEY_FILE": "private-key.pem"})
+    assert config.membership.member_policies[0].member_id == "worker"
+    rendered = str(config.as_redacted_dict())
+    assert "private-client.pem" not in rendered and "private-key.pem" not in rendered
+    assert "registry.example" not in rendered and "worker.example" not in rendered
+    for rendered in (repr(config.membership), repr(config.membership.member_policies[0]), repr(config)):
+        for private in ("registry.example", "worker.example", "private-ca.pem", "membership-signer.pem",
+                        "private-client.pem", "private-key.pem", "10.77.0.0/24"):
+            assert private not in rendered
+
+
+@pytest.mark.parametrize("old,new", [('mode = "external"', 'mode = "discovery"'),
+    ('tls_server_name = "worker.example"', 'tls_server_name = "*.example"'),
+    ('tls_server_name = "worker.example"', 'tls_server_name = ".example"'),
+    ('origin = "https://worker.example:11434"', 'origin = "http://worker.example:11434"'),
+    ('allowed_cidrs = ["10.77.0.0/24"]', 'allowed_cidrs = ["invalid"]'),
+    ('snapshot_max_advertisements = 4096', 'snapshot_max_advertisements = 4097'),
+    ('snapshot_max_bytes = 1048576', 'snapshot_max_bytes = 1048577'),
+    ('protocol_version = 1', 'protocol_version = 2'),
+    ('local_fallback = false', ''), ('trust_anchor_file = "private-ca.pem"', ''),
+    ('allow_remote = true', 'allow_remote = false')])
+def test_external_membership_rejects_unfixed_or_unbounded_policy(tmp_path, old, new):
+    path = tmp_path / "membership.toml"
+    path.write_text(_membership_toml().replace(old, new), encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_config(path, env={"SONDER_MEMBERSHIP_CLIENT_CERT_FILE": "client.pem",
+                               "SONDER_MEMBERSHIP_CLIENT_KEY_FILE": "key.pem"})
+
+
+def test_external_member_policy_parser_has_a_hard_4096_entry_limit(tmp_path):
+    path = tmp_path / "membership.toml"
+    header, table = _membership_toml().split("[[membership.member_policies]]", 1)
+    tables = ["[[membership.member_policies]]" + table.replace('"worker"', f'"worker{i}"').replace("worker.example", f"worker{i}.example")
+              for i in range(4096)]
+    env = {"SONDER_MEMBERSHIP_CLIENT_CERT_FILE":"client.pem", "SONDER_MEMBERSHIP_CLIENT_KEY_FILE":"key.pem"}
+    path.write_text(header + "".join(tables), encoding="utf-8")
+    assert len(load_config(path, env=env).membership.member_policies) == 4096
+    path.write_text(header + "".join(tables) + tables[0], encoding="utf-8")
+    with pytest.raises(ConfigError): load_config(path, env=env)
+
+
+@pytest.mark.parametrize("change", ["missing", "duplicate_id", "duplicate_origin", "credential"])
+def test_external_policy_and_credential_input_fails_privately(tmp_path, change):
+    header, table = _membership_toml().split("[[membership.member_policies]]", 1)
+    if change == "missing": text = header
+    elif change == "duplicate_id": text = _membership_toml() + "[[membership.member_policies]]" + table.replace("worker.example", "other.example")
+    elif change == "duplicate_origin": text = _membership_toml() + "[[membership.member_policies]]" + table.replace('"worker"', '"other"')
+    else: text = header + 'membership_client_key_file = "secret-inline-credential"\n[[membership.member_policies]]' + table
+    path = tmp_path / "membership.toml"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(ConfigError) as caught:
+        load_config(path, env={"SONDER_MEMBERSHIP_CLIENT_CERT_FILE":"client.pem", "SONDER_MEMBERSHIP_CLIENT_KEY_FILE":"key.pem"})
+    for private in ("worker.example", "other.example", "secret-inline-credential", "private-ca.pem"):
+        assert private not in str(caught.value)
+
+
 @pytest.mark.parametrize("remote_primary", [False, True])
 def test_trusted_cidr_does_not_allow_remote_http(tmp_path, remote_primary):
     toml = tmp_path / "sonder.toml"

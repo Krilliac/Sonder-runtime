@@ -330,6 +330,8 @@ def _check_ollama(*, timeout: float = 5.0) -> dict:
     config = _load_config_or_none()
     if config is None:
         return _skip("config unavailable for Ollama endpoint")
+    if getattr(getattr(config, "membership", None), "mode", "static") == "external":
+        return _skip("deferred: external membership requires explicit typed pool refresh")
     url = getattr(getattr(config, "ollama", None), "url", None)
     if not url:
         return _skip("no Ollama url configured")
@@ -389,6 +391,8 @@ def _check_ollama_workers(*, timeout: float = 5.0) -> dict:
     config = _load_config_or_none()
     if config is None:
         return _skip("config unavailable for Ollama worker endpoints")
+    if getattr(getattr(config, "membership", None), "mode", "static") == "external":
+        return _skip("deferred: external membership requires explicit typed pool refresh")
     workers = tuple(getattr(getattr(config, "ollama", None), "workers", ()) or ())
     if not workers:
         return _skip("no worker endpoints configured (single-endpoint deployment)")
@@ -437,6 +441,8 @@ def _check_ollama_residency(*, timeout: float = 5.0) -> dict:
     config = _load_config_or_none()
     if config is None:
         return _skip("config unavailable for Ollama residency check")
+    if getattr(getattr(config, "membership", None), "mode", "static") == "external":
+        return _skip("deferred: external membership requires explicit typed pool refresh")
     url = getattr(getattr(config, "ollama", None), "url", None)
     if not url:
         return _skip("no Ollama url configured")

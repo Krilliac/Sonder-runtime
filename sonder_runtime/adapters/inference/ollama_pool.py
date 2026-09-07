@@ -475,15 +475,16 @@ def _model_names(payload) -> tuple[str, ...]:
     return tuple(sorted(set(names)))
 
 
-def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0):
+def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open_url=None):
     """Build a bounded prober using the same no-proxy/no-redirect transport."""
     ollama_endpoint = importlib.import_module(
         "sonder_runtime.adapters.inference.ollama_endpoint"
     )
 
     def read(origin: str, path: str) -> dict:
+        transport = open_url or ollama_endpoint.open_url
         request = urllib.request.Request(origin + path, method="GET")
-        with ollama_endpoint.open_url(
+        with transport(
             request, timeout=timeout, allow_remote=allow_remote,
         ) as response:
             raw = response.read(_PROBE_RESPONSE_LIMIT + 1)
@@ -649,6 +650,7 @@ class OllamaWorkerPool:
             origin for origin in normalized_origins if not _is_loopback(origin))
         self._local_worker_count = len(states) - len(self._configured_remote_origins)
         self._membership_omitted = 0
+        self._external_source = None
 
     @property
     def membership_limit(self) -> int:
@@ -670,12 +672,37 @@ class OllamaWorkerPool:
                     state.capabilities = None
             self._roster_generation += 1
 
+    def configure_external_source(self, source, *, probe_timeout_seconds=2.0) -> None:
+        from .external_membership import ExternalMembershipSource
+        if type(source) is not ExternalMembershipSource or self._membership_clock is not None:
+            raise ValueError("exact external source required before membership composition")
+        allowed = frozenset(policy.origin for policy in source._config.member_policies)
+        if not self._configured_remote_origins <= allowed:
+            raise ValueError("configured remote worker lacks external endpoint policy")
+        self._external_source = source
+        self._configured_remote_origins = allowed
+        self._capability_prober = _default_capability_prober(
+            allow_remote=True, timeout=probe_timeout_seconds, open_url=self.open_url)
+
+    def open_url(self, request, *, timeout, allow_remote=None):
+        import sonder_runtime.adapters.inference.ollama_endpoint as ollama_endpoint
+        if self._external_source is not None:
+            if not _is_loopback(request.full_url):
+                return self._external_source.open_worker_url(request, timeout=timeout)
+            origin = ollama_policy.normalize(ollama_endpoint._origin_from_url(request.full_url))
+            if (not self._external_source._config.local_fallback
+                    or origin not in self.configured_origins):
+                raise WorkerPoolUnavailable("external membership does not authorize local fallback")
+        return ollama_endpoint.open_url(request, timeout=timeout, allow_remote=allow_remote)
+
     def validate_membership_snapshot(self, snapshot: MembershipSnapshot) -> None:
         if type(snapshot) is not MembershipSnapshot or self._membership_authority is None:
             raise ValueError("verified configured membership snapshot required")
         if (snapshot.cluster_id, snapshot.issuer_id) != self._membership_authority:
             raise ValueError("membership authority differs from static configuration")
-        if len(snapshot.workers) > self.membership_limit:
+        limit = (self._external_source._config.snapshot_max_advertisements
+                 if self._external_source is not None else self.membership_limit)
+        if len(snapshot.workers) > limit:
             raise ValueError("membership exceeds configured remote roster bound")
         if any(worker.origin not in self._configured_remote_origins for worker in snapshot.workers):
             raise ValueError("membership origin is not an exact configured remote origin")
@@ -763,7 +790,7 @@ class OllamaWorkerPool:
 
     def _membership_admissible(self, state: _WorkerState, now: float) -> bool:
         if state.membership_state is None:
-            return True
+            return self._external_source is None or self._external_source._config.local_fallback
         wall_now = self._membership_clock()
         return (state.membership_state == "active" and state.membership_expires_at is not None
                 and wall_now < state.membership_expires_at and state.membership_evidence is not None

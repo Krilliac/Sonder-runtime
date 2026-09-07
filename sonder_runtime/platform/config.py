@@ -58,6 +58,8 @@ _COMPUTE_CAPABILITIES = frozenset({
 # Keys that must only ever arrive through the secrets environment file or
 # process environment.  Their presence in TOML fails validation.
 SECRET_ENV_KEYS = (
+    "SONDER_MEMBERSHIP_CLIENT_CERT_FILE",
+    "SONDER_MEMBERSHIP_CLIENT_KEY_FILE",
     "SONDER_API_KEY",
     "SONDER_ARTIFACT_TRANSFER_KEY",
     "SONDER_AUTH_SECRET",
@@ -65,7 +67,8 @@ SECRET_ENV_KEYS = (
     "SONDER_LAUNCHER_HEALTH_TOKEN",
 )
 _SECRET_TOML_KEYS = frozenset(
-    {"api_key", "artifact_transfer_key", "auth_secret", "backup_key", "backup_key_file", "secret", "token"}
+    {"api_key", "artifact_transfer_key", "auth_secret", "backup_key", "backup_key_file", "secret", "token",
+     "membership_client_cert_file", "membership_client_key_file"}
 )
 
 MIN_API_KEY_LENGTH = 24
@@ -133,6 +136,111 @@ class OllamaConfig:
     worker_capability_probe_parallelism: int = 4
     worker_capability_probe_batch_size: int = 32
     worker_status_page_size: int = 32
+
+
+@dataclass(frozen=True)
+class MembershipEndpointPolicy:
+    member_id: str = ""
+    origin: str = ""
+    tls_server_name: str = ""
+    allowed_cidrs: tuple[str, ...] = ()
+
+    def __repr__(self):
+        return "MembershipEndpointPolicy(<private>)"
+
+
+@dataclass(frozen=True)
+class MembershipConfig:
+    mode: str = "static"
+    cluster_id: str = ""
+    issuer_id: str = ""
+    protocol_version: int = 0
+    source_origin: str = ""
+    source_tls_server_name: str = ""
+    source_allowed_cidrs: tuple[str, ...] = ()
+    trust_anchor_file: str = ""
+    signature_public_key_file: str = ""
+    refresh_interval_seconds: int = 0
+    snapshot_max_advertisements: int = 0
+    snapshot_max_bytes: int = 0
+    local_fallback: bool | None = None
+    member_policies: tuple[MembershipEndpointPolicy, ...] = ()
+
+    def __repr__(self):
+        return "MembershipConfig(<private>)"
+
+
+def validate_membership_endpoint(policy: MembershipEndpointPolicy, *, source=False) -> None:
+    if type(policy) is not MembershipEndpointPolicy:
+        raise ValueError("exact membership endpoint policy required")
+    _membership_identity(policy.member_id)
+    if (type(policy.origin) is not str or len(policy.origin) > 2048 or not re.fullmatch(
+            r"https://(?:\[[0-9a-f:.]+\]|[a-z0-9.-]+):[0-9]{1,5}", policy.origin)):
+        raise ValueError("membership endpoint must be an exact HTTPS origin")
+    origin = _canonical_ollama_origin(policy.origin)
+    if origin != policy.origin or not 1 <= urlsplit(origin).port <= 65535:
+        raise ValueError("membership endpoint origin must be canonical")
+    host = urlsplit(origin).hostname
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        labels = host.split(".")
+        if (len(host) > 253 or all(label.isdigit() for label in labels)
+                or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels)):
+            raise ValueError("membership endpoint hostname is invalid")
+    if type(policy.tls_server_name) is not str or policy.tls_server_name != host:
+        raise ValueError("membership TLS SAN must exactly match the configured host")
+    if not source and _is_loopback_host(host):
+        raise ValueError("loopback endpoints belong to the static-local lane")
+    if type(policy.allowed_cidrs) is not tuple or not 1 <= len(policy.allowed_cidrs) <= 32:
+        raise ValueError("membership connection CIDRs must be explicitly bounded")
+    for value in policy.allowed_cidrs:
+        if type(value) is not str or ipaddress.ip_network(value, strict=True).prefixlen == 0:
+            raise ValueError("invalid membership connection CIDR")
+
+
+def _membership_identity(value):
+    if type(value) is not str or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", value):
+        raise ValueError("membership identity must be an exact bounded ASCII identifier")
+
+
+def validate_membership_config(config, secrets, *, allow_remote=True) -> None:
+    """Pure external-policy validation; error text never contains private input."""
+    if type(config) is not MembershipConfig or type(secrets) is not Secrets or type(config.mode) is not str:
+        raise ValueError("exact membership configuration required")
+    if config.mode == "static":
+        return
+    try:
+        if config.mode != "external" or allow_remote is not True:
+            raise ValueError
+        _membership_identity(config.cluster_id)
+        _membership_identity(config.issuer_id)
+        if type(config.protocol_version) is not int or config.protocol_version != 1:
+            raise ValueError
+        for value, maximum in ((config.refresh_interval_seconds, 86400),
+                               (config.snapshot_max_advertisements, 4096),
+                               (config.snapshot_max_bytes, 1048576)):
+            if type(value) is not int or not 1 <= value <= maximum:
+                raise ValueError
+        if type(config.local_fallback) is not bool:
+            raise ValueError
+        for path in (config.trust_anchor_file, config.signature_public_key_file,
+                     secrets.membership_client_cert_file, secrets.membership_client_key_file):
+            if type(path) is not str or not path.strip() or len(path) > 4096 or "\x00" in path:
+                raise ValueError
+        validate_membership_endpoint(MembershipEndpointPolicy("source", config.source_origin,
+            config.source_tls_server_name, config.source_allowed_cidrs), source=True)
+        if type(config.member_policies) is not tuple or not 1 <= len(config.member_policies) <= config.snapshot_max_advertisements:
+            raise ValueError
+        identities, origins = set(), set()
+        for policy in config.member_policies:
+            validate_membership_endpoint(policy)
+            if policy.member_id in identities or policy.origin in origins:
+                raise ValueError
+            identities.add(policy.member_id)
+            origins.add(policy.origin)
+    except (ValueError, TypeError):
+        raise ValueError("external membership requires exact bounded identity, HTTPS, credential and endpoint policy") from None
 
 
 @dataclass(frozen=True)
@@ -234,9 +342,13 @@ class Secrets:
     auth_secret: str = ""
     backup_key_file: str = ""
     artifact_transfer_key: str = field(default="", repr=False)
+    membership_client_cert_file: str = field(default="", repr=False)
+    membership_client_key_file: str = field(default="", repr=False)
 
     def as_redacted_dict(self) -> dict:
         return {
+            "membership_client_cert_file": redact_presence(self.membership_client_cert_file),
+            "membership_client_key_file": redact_presence(self.membership_client_key_file),
             "api_key": redact_presence(self.api_key),
             "artifact_transfer_key": redact_presence(self.artifact_transfer_key),
             "auth_secret": redact_presence(self.auth_secret),
@@ -264,9 +376,12 @@ class SonderConfig:
     artifact_transfer: ArtifactTransferConfig = field(default_factory=ArtifactTransferConfig)
     child_storage: ChildStorageConfig = field(default_factory=ChildStorageConfig)
     app_control: AppControlConfig = field(default_factory=AppControlConfig)
+    membership: MembershipConfig = field(default_factory=MembershipConfig)
 
     def as_redacted_dict(self) -> dict:
         out: dict = {
+            "membership": {"mode": self.membership.mode,
+                           "configured_member_count": len(self.membership.member_policies)},
             "schema_version": self.schema_version,
             "profile": self.profile,
             "sources": list(self.sources),
@@ -418,6 +533,7 @@ def _walk_toml_for_secrets(data, path: str, errors: list[str]) -> None:
 
 
 _SECTION_TYPES = {
+    "membership": MembershipConfig,
     "server": ServerConfig,
     "deployment": DeploymentConfig,
     "artifact_transfer": ArtifactTransferConfig,
@@ -443,7 +559,26 @@ def _apply_section(current, section_name: str, raw: dict, errors: list[str]):
             errors.append(f"unknown key [{section_name}].{key}")
             continue
         expected = type(getattr(current, key))
-        if expected is tuple:
+        if section_name == "membership" and key == "member_policies":
+            try:
+                if type(value) is not list or len(value) > 4096:
+                    raise ValueError
+                policies = []
+                for row in value:
+                    if type(row) is not dict or set(row) != {"member_id", "origin", "tls_server_name", "allowed_cidrs"}:
+                        raise ValueError
+                    if type(row["allowed_cidrs"]) is not list or len(row["allowed_cidrs"]) > 32:
+                        raise ValueError
+                    policies.append(MembershipEndpointPolicy(**(row | {"allowed_cidrs": tuple(row["allowed_cidrs"])})))
+                updates[key] = tuple(policies)
+            except (ValueError, TypeError):
+                errors.append("[membership].member_policies must be bounded exact endpoint tables")
+        elif section_name == "membership" and key == "local_fallback":
+            if type(value) is not bool:
+                errors.append("[membership].local_fallback must be an explicit boolean")
+            else:
+                updates[key] = value
+        elif expected is tuple:
             if not isinstance(value, list) or not all(
                 isinstance(v, str) for v in value
             ):
@@ -838,6 +973,10 @@ def _apply_environment(
         )
     if env.get("SONDER_API_KEY", "").strip():
         secrets = replace(secrets, api_key=env["SONDER_API_KEY"].strip())
+    if "SONDER_MEMBERSHIP_CLIENT_CERT_FILE" in env:
+        secrets = replace(secrets, membership_client_cert_file=env["SONDER_MEMBERSHIP_CLIENT_CERT_FILE"].strip())
+    if "SONDER_MEMBERSHIP_CLIENT_KEY_FILE" in env:
+        secrets = replace(secrets, membership_client_key_file=env["SONDER_MEMBERSHIP_CLIENT_KEY_FILE"].strip())
     if env.get("SONDER_ARTIFACT_TRANSFER_KEY", "").strip():
         secrets = replace(secrets, artifact_transfer_key=env["SONDER_ARTIFACT_TRANSFER_KEY"].strip())
     if env.get("SONDER_AUTH_SECRET", "").strip():
@@ -895,6 +1034,10 @@ def validate_deployment(config: SonderConfig) -> None:
 
 
 def _validate(config: SonderConfig, errors: list[str]) -> None:
+    try:
+        validate_membership_config(config.membership, config.secrets, allow_remote=config.ollama.allow_remote)
+    except ValueError as error:
+        errors.append(str(error))
     errors.extend(child_storage_errors(config))
     errors.extend(app_control_errors(config))
     errors.extend(artifact_transfer_errors(config))

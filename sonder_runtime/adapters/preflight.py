@@ -135,6 +135,9 @@ def _check_ollama_origin(
 
 
 def _check_ollama(config: SonderConfig, *, timeout: float = 5.0) -> CheckResult:
+    if config.membership.mode == "external":
+        return CheckResult("ollama", False, False,
+            "deferred: external membership requires explicit typed pool refresh")
     return _check_ollama_origin(
         config.ollama.url,
         name="ollama",
@@ -148,6 +151,9 @@ def _check_ollama_workers(
     config: SonderConfig, *, timeout: float = 5.0,
 ) -> list[CheckResult]:
     """Probe optional workers independently so one outage stays degraded."""
+    if config.membership.mode == "external":
+        return [CheckResult("ollama_workers", False, False,
+            "deferred: external membership requires explicit typed pool refresh")]
     entries = list(enumerate(config.ollama.workers, start=1))
     if not entries:
         return []

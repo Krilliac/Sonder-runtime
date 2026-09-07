@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 282,
+      "file_count": 284,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -137,7 +137,9 @@
         "sonder_runtime/adapters/host_terminal_projection.py",
         "sonder_runtime/adapters/host_terminal_result.py",
         "sonder_runtime/adapters/inference/__init__.py",
+        "sonder_runtime/adapters/inference/external_membership.py",
         "sonder_runtime/adapters/inference/injected.py",
+        "sonder_runtime/adapters/inference/membership_high_water.py",
         "sonder_runtime/adapters/inference/model_gateway_factory.py",
         "sonder_runtime/adapters/inference/ollama.py",
         "sonder_runtime/adapters/inference/ollama_endpoint.py",

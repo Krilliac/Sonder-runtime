@@ -24,8 +24,9 @@ worker. Each endpoint must be unique after canonical normalization, so a
 repeated worker or an alias of the primary endpoint is rejected rather than
 silently removed. The bound keeps one coordinator's roster finite; it does
 not guarantee that a host can sustain that many workers or any particular
-throughput. The roster is static: Sonder only probes the origins an operator
-configured. It does not discover remote Ollama nodes, shard one model or
+throughput. Static configuration is the default. The optional authenticated
+membership mode below can admit only origins an operator already authorized.
+Sonder does not discover remote Ollama nodes, shard one model or
 request across nodes, or claim indefinite scaling.
 
 ## Prerequisites
@@ -142,6 +143,16 @@ SONDER_OLLAMA_WORKER_PROBE_BATCH_SIZE=32
 SONDER_OLLAMA_WORKER_STATUS_PAGE_SIZE=32
 ```
 
+Typed application construction leaves remote workers in probation and does
+not start membership I/O. An embedding owner explicitly calls
+`application.inference_membership.refresh(timeout_seconds=30)` to start the
+owned lifecycle and request its first refresh, or `start()` to opt into the
+periodic loop. Capability evidence is required before remote dispatch and
+expires independently of the snapshot. The owner must close the application
+providers on shutdown. The CLI, default status, app, and REPL do not start this
+lifecycle automatically; the worker-cache administration operation below does
+not retrieve or create membership. There is no membership-enrollment UI or CLI.
+
 ## 3. Tier routing with remote models
 
 Tier environment variables map quality tiers to specific models.  The
@@ -220,3 +231,120 @@ restrict the proxy listener to the intended coordinator. Do not disable
 certificate verification. The coordinator uses its existing no-proxy,
 no-redirect, bounded-response transport and does not replay response-bearing
 model requests.
+
+## Optional externally authenticated membership
+
+External mode requires a fixed registry serving `GET /v1/membership`, a private
+CA, a PEM Ed25519 public signing key, and client certificate/key files supplied
+through the secrets environment. The registry and every worker must require
+that client certificate. This is a configured membership authority, not node
+discovery, an ownership service, or automatic takeover.
+
+```toml
+[ollama]
+url = "http://127.0.0.1:11434"
+allow_remote = true
+worker_pool_max_workers = 16
+
+[membership]
+mode = "external"
+cluster_id = "private-inference"
+issuer_id = "configured-registry"
+protocol_version = 1
+source_origin = "https://registry.example:443"
+source_tls_server_name = "registry.example"
+source_allowed_cidrs = ["10.77.0.0/24"]
+trust_anchor_file = "/private/config/inference-ca.pem"
+signature_public_key_file = "/private/config/membership-signer.pem"
+refresh_interval_seconds = 30
+snapshot_max_advertisements = 4096
+snapshot_max_bytes = 1048576
+local_fallback = false
+
+[[membership.member_policies]]
+member_id = "node1"
+origin = "https://node1.example:11443"
+tls_server_name = "node1.example"
+allowed_cidrs = ["10.77.0.0/24"]
+```
+
+Use absolute file paths suitable for the coordinator OS. Set
+`SONDER_MEMBERSHIP_CLIENT_CERT_FILE` and `SONDER_MEMBERSHIP_CLIENT_KEY_FILE` in
+the protected secrets environment file or process environment; credential
+settings in TOML are rejected. Membership configuration and public status
+redact origins, certificate identities, CIDRs, trust paths, and credential
+paths. The exact typed application, pool, controller, configured policies,
+clock, source, and state store are checked at compatibility bindings. External
+mode must use that typed composition; a bare remote `python server.py` root
+fails closed without it.
+
+Standalone preflight and doctor Ollama checks are explicitly deferred in
+external mode. They perform no registry or worker I/O and expose no endpoint
+details; readiness requires the typed pool's explicit membership/capability
+refresh. Static-mode diagnostic behavior is unchanged.
+
+Each member ID has exactly one canonical HTTPS origin with an explicit port,
+exact hostname/IP SAN, and 1–32 explicit CIDRs. Wildcards, suffix matching,
+CN fallback, duplicate IDs/origins, remote HTTP, and `/0` CIDRs are rejected.
+The private CA replaces system trust for both registry retrieval and worker
+capability/inference requests. Each connection resolves once, checks every
+answer against its configured CIDRs, then connects to a validated numeric
+address with the configured SNI and exact SAN. Proxies and redirects are never
+used. A signed advertisement cannot change any transport or credential policy.
+
+The signed response is compact ASCII JSON with sorted keys and no whitespace
+or trailing newline: `{"payload":...,"signature":"..."}`. The payload has
+exactly `cluster_id`, `issuer_id`, `generation`, `protocol_version`, `issued_at`,
+`expires_at`, and `workers`. The signature is base64 Ed25519 over the same
+canonical encoding of the payload. Times are timezone-aware ISO 8601 strings.
+Each worker has exactly `worker_id`, `origin`, `member_generation`,
+`lifecycle_state`, `models`, and `advertised_capacity`; identities and origins
+must match local policy. Supported lifecycle states are `probation`, `active`,
+`draining`, `expired`, `unhealthy`, and `revoked`. An advertised active worker still needs
+fresh local capability evidence. The replay digest covers the entire verified
+canonical envelope, including its signature.
+
+Configuration and snapshots admit at most 4,096 policies/advertisements and a
+1 MiB response. The pool still holds at most `worker_pool_max_workers` total
+states (default 16, maximum 256), including reserved configured loopback and
+draining slots. Excess membership is omitted with bounded counts; omitted
+workers are not probed or sent inference. Normal probe batch/parallelism and
+status page limits still apply. Source refresh is 1–86,400 seconds; one source
+fetch is bounded by the controller's at-most-30-second deadline. A timed-out
+resolver retains its single owned task until it finishes, with no queued
+replacement. Worker requests and responses are each capped at 1 MiB, with a
+maximum 300-second transport deadline. These limits do not promise throughput.
+
+`local_fallback` is an explicit external-mode choice. `false` disables the
+separate configured loopback pool inference lane. `true` permits only the exact
+configured loopback primary/workers, including during source outage; it cannot
+authorize a remote worker. Loopback endpoints are never externally admitted.
+On registry failure, only the last accepted, unexpired remote roster with
+fresh capability evidence remains eligible. Expiry, revocation, or removal
+stops new remote admissions; existing in-flight requests retain their original
+endpoint while draining. No default status or inference request refreshes the
+external source.
+
+Before applying a newer roster, the controller persists exactly
+`{cluster, issuer, generation, digest}` as canonical JSON at
+`<runtime-state>/inference-membership/high-water.json`. The dedicated directory
+is created privately on first successful advancement. Reads and atomic
+replacement hold a nonblocking OS lock and validate the private directory/file
+identities, permissions, and absence of links. Staged files are fsynced; Windows
+publication uses write-through replacement, and POSIX publication fsyncs the
+directory. State/source I/O occurs outside the pool condition.
+
+Lower generations, equal-generation digest conflicts, expired envelopes,
+changed cluster/issuer, malformed/partial state, and an initialized directory
+missing its record fail closed. Persistence failure leaves the accepted live
+roster unchanged, still subject to expiry. Equal generation and digest are
+idempotent only before the signed expiry. There is no automatic state reset,
+deletion, rotation, or migration. Protect and back up the entire state directory;
+do not precreate its private child or restore an older copy to reset admission.
+A privileged owner rolling back or deleting the entire directory across a
+process restart cannot be detected without an independent monotonic anchor;
+this local adapter does not supply one. Filesystem durability also depends on
+the host filesystem and hardware honoring synchronization.
+
+Validation uses deterministic fixtures and synthetic loopback TLS servers.
+It does not establish live-cluster compatibility or deployed-node readiness.

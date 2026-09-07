@@ -199,6 +199,8 @@ def build_application(
             raise TypeError("config must be a SonderConfig when provided")
         from ..platform.config import validate_deployment
         validate_deployment(config)
+        from ..platform.config import validate_membership_config
+        validate_membership_config(config.membership, config.secrets, allow_remote=config.ollama.allow_remote)
         from ..platform.child_storage_config import child_storage_errors
         from ..platform.config import ConfigError
         child_errors = child_storage_errors(config)
@@ -238,12 +240,26 @@ def build_application(
         from ..adapters.inference.static_membership import StaticMembershipSource
         from ..application.inference_membership.controller import MembershipController
         membership_clock = lambda: datetime.now(timezone.utc)
-        static_source = StaticMembershipSource(config.ollama, clock=membership_clock)
         inference_pool = ollama_pool.from_environment(config.ollama.url)
+        source_limits = high_water_store = None
+        if config.membership.mode == "external":
+            from ..adapters.inference.external_membership import ExternalMembershipSource
+            from ..adapters.inference.membership_high_water import MembershipHighWaterStore
+            from ..application.ports.inference_membership import MembershipSourceLimits
+            source = ExternalMembershipSource(config.membership, config.secrets, clock=membership_clock)
+            high_water_store = MembershipHighWaterStore(runtime_paths.default_home() / "inference-membership" / "high-water.json",
+                cluster_id=config.membership.cluster_id, issuer_id=config.membership.issuer_id, clock=membership_clock)
+            source_limits = MembershipSourceLimits(max_advertisements=config.membership.snapshot_max_advertisements,
+                                                  max_bytes=config.membership.snapshot_max_bytes)
+            interval = config.membership.refresh_interval_seconds
+            inference_pool.configure_external_source(source, probe_timeout_seconds=config.ollama.worker_probe_timeout_ms / 1000)
+        else:
+            source = StaticMembershipSource(config.ollama, clock=membership_clock)
+            interval = max(1, min(30, config.ollama.worker_capability_ttl_seconds / 2))
         inference_membership = MembershipController(
-            static_source, inference_pool, clock=membership_clock,
-            cluster_id=static_source.cluster_id, issuer_id=static_source.issuer_id,
-            refresh_interval_seconds=max(1, min(30, config.ollama.worker_capability_ttl_seconds / 2)),
+            source, inference_pool, clock=membership_clock,
+            cluster_id=source.cluster_id, issuer_id=source.issuer_id,
+            refresh_interval_seconds=interval, high_water_store=high_water_store, source_limits=source_limits,
         )
     if profile not in PROFILES:
         raise ValueError(f"unknown profile {profile!r}; expected {PROFILES}")

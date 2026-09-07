@@ -18,7 +18,7 @@ def _timeout(value, ceiling):
 
 
 class MembershipController:
-    """Static authority only; the pool additionally enforces its configured origins.
+    """Configured authority; the pool additionally enforces its endpoint policy.
 
     Construction performs no source/probe I/O. start() opts into the periodic
     loop; refresh() explicitly starts that same thread if needed. At most one
@@ -27,7 +27,7 @@ class MembershipController:
     """
 
     def __init__(self, source, pool, *, clock, cluster_id, issuer_id,
-                 refresh_interval_seconds=30):
+                 refresh_interval_seconds=30, high_water_store=None, source_limits=None):
         self._interval = _timeout(refresh_interval_seconds, 86400)
         if self._interval < 1:
             raise ValueError("membership refresh interval must be at least one second")
@@ -35,6 +35,10 @@ class MembershipController:
         # pool's admission state changes. This pure check contacts no source.
         reconcile_membership(None, cluster_id=cluster_id, issuer_id=issuer_id, clock=clock)
         self._source, self._pool, self._clock = source, pool, clock
+        self._high_water_store = high_water_store
+        self._source_limits = source_limits or MembershipSourceLimits(max_advertisements=pool.membership_limit)
+        if type(self._source_limits) is not MembershipSourceLimits:
+            raise ValueError("exact bounded membership source limits required")
         self._cluster, self._issuer = cluster_id, issuer_id
         self._condition = Condition()
         self._thread = None
@@ -106,11 +110,17 @@ class MembershipController:
     def _refresh_once(self, timeout, probe):
         previous = self._result.roster if self._result is not None else None
         water = self._result.high_water if self._result is not None else None
+        if self._high_water_store is not None:
+            # State/source/probe I/O occurs outside both the pool condition and
+            # publication lock. A persistence failure never mutates the roster.
+            water = self._high_water_store.read()
         options = dict(cluster_id=self._cluster, issuer_id=self._issuer, clock=self._clock,
                        previous=previous, high_water=water, max_workers=self._pool.membership_limit)
         try:
             candidate = self._source.read_snapshot(limits=MembershipSourceLimits(
-                max_advertisements=self._pool.membership_limit, timeout_seconds=timeout))
+                max_advertisements=self._source_limits.max_advertisements,
+                max_bytes=self._source_limits.max_bytes,
+                timeout_seconds=min(timeout, self._source_limits.timeout_seconds)))
             if type(candidate) is not MembershipSnapshot:
                 raise ValueError("source returned an unverified snapshot")
             self._pool.validate_membership_snapshot(candidate)
@@ -118,6 +128,9 @@ class MembershipController:
         except Exception as error:
             logger.warning("membership source rejected: %s", type(error).__name__)
             result = reconcile_membership(None, **options)
+            candidate = None
+        if self._high_water_store is not None and candidate is not None:
+            self._high_water_store.compare_and_advance(candidate)
         with self._condition:
             if self._closed:
                 return
@@ -137,6 +150,7 @@ class MembershipController:
         timeout = 5 if timeout is None else timeout
         if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 <= timeout <= 30:
             raise ValueError("close timeout must be within 0..30 seconds")
+        deadline = monotonic() + timeout
         with self._condition:
             self._closed = True
             self._pending = None
@@ -144,5 +158,8 @@ class MembershipController:
             thread = self._thread
         self._pool.stop_membership()
         if thread is not None:
-            thread.join(timeout)
-        return thread is None or not thread.is_alive()
+            thread.join(max(0, deadline - monotonic()))
+        stopped = thread is None or not thread.is_alive()
+        if self._high_water_store is not None:
+            stopped = self._source.close(timeout=max(0, deadline - monotonic())) and stopped
+        return stopped

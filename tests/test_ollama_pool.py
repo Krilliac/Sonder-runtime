@@ -299,7 +299,7 @@ def test_server_posts_through_the_pool_selected_origin(monkeypatch):
         return Response()
 
     monkeypatch.setattr(server, "OLLAMA_POOL", FakePool())
-    monkeypatch.setattr(server.ollama_endpoint, "open_url", open_url)
+    monkeypatch.setattr(FakePool, "open_url", staticmethod(open_url), raising=False)
 
     assert server._post("/api/chat", {"model": "sonder:latest"}) == {"ok": True}
     assert seen[0][0] == "https://worker.example:11434/api/chat"
@@ -656,7 +656,7 @@ def test_local_only_never_reaches_the_pool_even_with_remote_workers(monkeypatch)
         return Response()
 
     monkeypatch.setattr(server, "OLLAMA_POOL", FakePool())
-    monkeypatch.setattr(server.ollama_endpoint, "open_url", open_url)
+    monkeypatch.setattr(FakePool, "open_url", staticmethod(open_url), raising=False)
 
     assert server._post("/api/chat", {}, local_only=True) == {"ok": True}
     assert seen == [server.BASE + "/api/chat"]
@@ -744,7 +744,7 @@ def test_server_pool_failover_uses_one_total_timeout_budget(monkeypatch):
 
     monkeypatch.setattr(server, "OLLAMA_POOL", FakePool())
     monkeypatch.setattr(server.time, "monotonic", Clock())
-    monkeypatch.setattr(server.ollama_endpoint, "open_url", open_url)
+    monkeypatch.setattr(FakePool, "open_url", staticmethod(open_url), raising=False)
 
     assert server._post("/api/chat", {}, timeout=5) == {"ok": True}
     assert timeouts == [5.0, 1.0]

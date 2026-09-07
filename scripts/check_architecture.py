@@ -807,6 +807,11 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
                 and top in {'psycopg', 'psycopg_pool'}
             ):
                 continue  # Optional PostgreSQL driver stays behind its adapter.
+            if (
+                rel.as_posix() == 'sonder_runtime/adapters/inference/external_membership.py'
+                and top == 'cryptography'
+            ):
+                continue  # Pinned Ed25519 verification stays behind this exact adapter.
             if top not in ALLOWED_ROOT_IMPORTS[layer]:
                 if (
                     rel.as_posix() == "sonder_runtime/adapters/learning_health.py"
