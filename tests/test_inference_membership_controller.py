@@ -5,6 +5,10 @@ import hashlib
 import hmac
 import importlib
 import json
+import os
+from pathlib import Path
+import subprocess
+import sys
 import threading
 from urllib.error import URLError
 from types import SimpleNamespace
@@ -525,7 +529,7 @@ def test_refresh_rejects_invalid_timeout_before_starting_a_thread(timeout):
 
 
 @pytest.mark.parametrize("primary_remote", [False, True])
-@pytest.mark.parametrize("command", ["serve", "mcp", "repl"])
+@pytest.mark.parametrize("command", ["serve", "mcp", "repl", "bound_direct"])
 def test_entrypoint_legacy_requests_share_typed_membership_admission(
     monkeypatch, tmp_path, primary_remote, command,
 ):
@@ -620,8 +624,82 @@ def test_entrypoint_legacy_requests_share_typed_membership_admission(
     monkeypatch.setattr(repl, "main", run_interface)
     try:
         args = SimpleNamespace(skip_preflight=True, native=False, json=False)
-        assert getattr(entrypoint, "cmd_" + command)(args) == 0
+        if command == "bound_direct":
+            application = bootstrap.default_app(config=config)
+            legacy_root.configure_application(application)
+            server.run_mcp()
+        else:
+            assert getattr(entrypoint, "cmd_" + command)(args) == 0
         assert checked == [True]
     finally:
         bootstrap.close_default_runtime_resources(timeout=2)
         ollama_pool.reset_typed_workers()
+
+
+@pytest.mark.parametrize("configuration", ["remote_primary", "remote_worker", "local", "local_lab", "invalid_lab"])
+def test_executable_root_refuses_unbound_remote_membership_in_isolated_process(tmp_path, configuration):
+    root = Path(__file__).resolve().parents[1]
+    environment = {name: value for name, value in os.environ.items()
+                   if not name.startswith(("SONDER_", "OLLAMA_"))}
+    environment.update(SONDER_HOME=str(tmp_path), SONDER_DB=str(tmp_path / "memory.db"),
+                       SONDER_FLEET_DB=str(tmp_path / "fleet.db"), SONDER_FLEET_HEARTBEAT="0",
+                       SONDER_ALLOW_CLOUD="0", SONDER_WEB_TOOLS="0", SONDER_LIVE_RELOAD="0",
+                       SONDER_EMBED_CACHE="0", SONDER_FALLBACK_LOCAL="0", SONDER_HOST="127.0.0.1",
+                       OLLAMA_HOST=REMOTE if configuration == "remote_primary" else LOCAL,
+                       SONDER_OLLAMA_WORKERS=REMOTE if configuration == "remote_worker" else "",
+                       SONDER_ALLOW_REMOTE_OLLAMA="1" if configuration.startswith("remote_") else "0")
+    # Run the executable branch in a fresh interpreter: no already-imported
+    # server module, typed pool cache, or lab acknowledgement can hide its path.
+    script = r'''
+import inspect, json, os, runpy, socket, sys
+import reloadable_mcp
+from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool
+from sonder_runtime.adapters.security import unsafe_lab
+
+def deny_network(*args, **kwargs):
+    raise AssertionError("unexpected real network")
+socket.create_connection = deny_network
+socket.socket.connect = deny_network
+mode = sys.argv[1]
+if mode in ("local_lab", "invalid_lab"):
+    os.environ[unsafe_lab.ACK_ENV] = unsafe_lab.ACKNOWLEDGEMENT if mode == "local_lab" else "true"
+    unsafe_lab.is_privileged = lambda: False
+assert (unsafe_lab.ACK_ENV in os.environ) == (mode in ("local_lab", "invalid_lab"))
+assert "server" not in sys.modules
+assert ollama_pool._configured_pool is None
+result = {"started": False, "calls": [], "error": None}
+class Response:
+    def __enter__(self): return self
+    def __exit__(self, *_): return False
+    def read(self, *_): return b'{"ok":true}'
+def send(request, **kwargs):
+    result["calls"].append(request.full_url)
+    return Response()
+ollama_endpoint.open_url = send
+ollama_pool._default_capability_prober = lambda **kwargs: lambda origin: {"models": ["code"]}
+def run(self):
+    result["started"] = True
+    namespace = inspect.currentframe().f_back.f_globals
+    assert namespace["__name__"] == "__main__"
+    assert namespace["_APP_GRAPH"] is None
+    namespace["dispatch_provider"] = lambda _provider, _path, _payload, transport: transport()
+    for _ in range(2):
+        namespace["_post"]("/api/generate", {"model": "code"})
+reloadable_mcp.ReloadableMCPServer.run = run
+try:
+    runpy.run_path("server.py", run_name="__main__")
+except (ollama_pool.WorkerPoolError, unsafe_lab.UnsafeLabError) as error:
+    result["error"] = type(error).__name__
+print("ROOT_RESULT=" + json.dumps(result, sort_keys=True))
+'''
+    completed = subprocess.run([sys.executable, "-c", script, configuration], cwd=root,
+                               env=environment, capture_output=True, text=True, timeout=30)
+    assert completed.returncode == 0, completed.stderr[-3000:]
+    result = json.loads(next(line.removeprefix("ROOT_RESULT=") for line in completed.stdout.splitlines()
+                             if line.startswith("ROOT_RESULT=")))
+    if configuration.startswith("remote_"):
+        assert result == {"started": False, "calls": [], "error": "WorkerPoolUnavailable"}
+    elif configuration == "invalid_lab":
+        assert result == {"started": False, "calls": [], "error": "UnsafeLabError"}
+    else:
+        assert result == {"started": True, "calls": [LOCAL + "/api/generate"] * 2, "error": None}
