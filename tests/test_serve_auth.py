@@ -1126,6 +1126,11 @@ def test_system_status_uses_projected_activity_and_shared_feed(
     assert payload["deployment"]["capabilities"]["automatic_takeover"][
         "available"
     ] is False
+    recovery_posture = payload["deployment"]["recovery_posture"]
+    assert recovery_posture["automatic_takeover_available"] is False
+    assert recovery_posture["automatic_failback_available"] is False
+    assert recovery_posture["independent_witness_required"] is True
+    assert "independent witness" in recovery_posture["reason"]
     capabilities = payload["operational_capabilities"]
     assert capabilities["schema_version"] == 1
     assert capabilities["inference"]["request_level_pooling"]["available"] is False

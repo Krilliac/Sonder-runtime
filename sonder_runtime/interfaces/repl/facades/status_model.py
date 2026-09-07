@@ -135,6 +135,66 @@ class ExecutionStatusFacade:
         return "[lanes %s | agents %s]" % (lanes, agents)
 
 
+class RecoveryPostureFacade:
+    """Render an injected deployment recovery projection without provider I/O."""
+
+    def __init__(self, snapshot_provider: Callable[[], Any] | None = None) -> None:
+        self._snapshot_provider = snapshot_provider
+
+    def snapshot(self, value: Any = None) -> Mapping[str, Any] | None:
+        if value is None and self._snapshot_provider is not None:
+            try:
+                value = self._snapshot_provider()
+            except Exception:
+                return None
+        if not isinstance(value, Mapping):
+            return None
+        posture = value.get("recovery_posture")
+        if not isinstance(posture, Mapping):
+            return None
+        fields = (
+            "automatic_takeover_available",
+            "automatic_failback_available",
+            "independent_witness_required",
+        )
+        if any(type(posture.get(field)) is not bool for field in fields):
+            return None
+        reason = posture.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            return None
+        profile = str(value.get("profile_id") or value.get("profile") or "unknown").strip()
+        if not profile:
+            profile = "unknown"
+        return {
+            "profile": profile,
+            "automatic_takeover_available": posture["automatic_takeover_available"],
+            "automatic_failback_available": posture["automatic_failback_available"],
+            "independent_witness_required": posture["independent_witness_required"],
+            "reason": reason.strip()[:500],
+        }
+
+    def format(self, value: Any = None) -> str:
+        posture = self.snapshot(value)
+        if posture is None:
+            return "Recovery posture unavailable."
+        return "\n".join((
+            "Recovery posture — read-only",
+            "Profile: %s" % posture["profile"],
+            "Automatic takeover: %s" % (
+                "available" if posture["automatic_takeover_available"] else "unavailable"
+            ),
+            "Automatic failback: %s" % (
+                "available" if posture["automatic_failback_available"] else "unavailable"
+            ),
+            "Independent witness: %s" % (
+                "required before automatic owner transition."
+                if posture["independent_witness_required"]
+                else "not required by the reported posture."
+            ),
+            posture["reason"],
+        ))
+
+
 class PermissionModeFacade:
     """Normalize permission mode/elevation for terminal presentation.
 
@@ -212,4 +272,5 @@ __all__ = [
     "InstalledModel",
     "ModelSelectionFacade",
     "PermissionModeFacade",
+    "RecoveryPostureFacade",
 ]

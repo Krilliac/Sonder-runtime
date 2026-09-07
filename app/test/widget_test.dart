@@ -18,7 +18,8 @@ import 'package:sonder_runtime/settings_screen.dart';
 import 'package:sonder_runtime/system_screen.dart';
 
 void main() {
-  testWidgets('desktop workspace navigation connects chat, agents and settings', (tester) async {
+  testWidgets('desktop workspace navigation connects chat, agents and settings',
+      (tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
     tester.view.physicalSize = const Size(1200, 850);
     tester.view.devicePixelRatio = 1;
@@ -43,7 +44,8 @@ void main() {
       expect(find.text('New chat'), findsWidgets);
       await tester.pumpWidget(const SizedBox());
     }, () => client);
-    tester.view.resetPhysicalSize(); tester.view.resetDevicePixelRatio();
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
   });
 
   testWidgets('App boots to the chat screen', (tester) async {
@@ -547,7 +549,8 @@ void main() {
         'preferred_primary': 'primary',
         'control_state_scope': 'local-instance',
         'preference_confers_authority': false,
-        'partition_policy': 'no_promotion_without_fencing_and_acknowledged_data',
+        'partition_policy':
+            'no_promotion_without_fencing_and_acknowledged_data',
         'capabilities': {
           'private_compute': {
             'available': true,
@@ -555,7 +558,13 @@ void main() {
           },
           'automatic_takeover': {
             'available': false,
-            'reason': 'Fencing and acknowledged replication are not integrated.',
+            'reason':
+                'Fencing and acknowledged replication are not integrated.',
+          },
+          'automatic_failback': {
+            'available': false,
+            'reason':
+                'Fencing and acknowledged replication are not integrated.',
           },
           'acknowledged_state_replication': {
             'available': false,
@@ -569,6 +578,14 @@ void main() {
             'available': false,
             'reason': 'No quorum provider is integrated.',
           },
+        },
+        'recovery_posture': {
+          'mode': 'external-authority-required',
+          'automatic_takeover_available': false,
+          'automatic_failback_available': false,
+          'independent_witness_required': true,
+          'reason':
+              'Automatic takeover and failback are unavailable without an independent witness.',
         },
       },
     });
@@ -596,6 +613,14 @@ void main() {
     expect(find.text('secondary, primary'), findsOneWidget);
     expect(
       find.textContaining('Unavailable — Fencing and acknowledged replication'),
+      findsNWidgets(2),
+    );
+    expect(find.text('Automatic failback'), findsOneWidget);
+    expect(find.text('Recovery posture'), findsOneWidget);
+    expect(
+      find.text(
+        'Automatic takeover and failback unavailable; independent witness required.',
+      ),
       findsOneWidget,
     );
     expect(
@@ -692,9 +717,15 @@ void main() {
       find.textContaining('Available — Owned dispatcher is installed.'),
       findsOneWidget,
     );
-    expect(find.text('1/2 healthy workers; Available — Requests may route to one worker.'), findsOneWidget);
-    expect(find.textContaining('Unavailable — Tensor sharding is not integrated.'), findsOneWidget);
-    expect(find.textContaining('Unavailable — External provider required.'), findsOneWidget);
+    expect(
+        find.text(
+            '1/2 healthy workers; Available — Requests may route to one worker.'),
+        findsOneWidget);
+    expect(
+        find.textContaining('Unavailable — Tensor sharding is not integrated.'),
+        findsOneWidget);
+    expect(find.textContaining('Unavailable — External provider required.'),
+        findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
