@@ -300,7 +300,9 @@ def test_mobility_parser_redacts_controls_and_continuation_like_lines(tmp_path):
     with pytest.raises(ConfigError) as raised:
         load_config(secrets_path=secrets, env={})
 
-    assert raised.value.errors == ("[artifact_mobility].peer_key malformed secrets input",)
+    assert len(raised.value.errors) == 1
+    assert raised.value.errors[0].startswith(f"{secrets}:")
+    assert raised.value.errors[0].endswith(": expected KEY=VALUE")
     assert rejected_fragment not in str(raised.value)
     assert rejected_fragment not in repr(raised.value)
 
@@ -314,7 +316,7 @@ def test_mobility_parser_redacts_controls_and_continuation_like_lines(tmp_path):
         "\x1e# harmless comment\x1e",
     ),
 )
-def test_mobility_parser_keeps_split_continuations_field_only(tmp_path, interruption):
+def test_mobility_parser_keeps_split_continuations_value_free(tmp_path, interruption):
     secrets = tmp_path / "secrets.env"
     rejected_fragment = "https://leaked-mobility-credential/continuation"
     secrets.write_text(
@@ -328,7 +330,9 @@ def test_mobility_parser_keeps_split_continuations_field_only(tmp_path, interrup
     with pytest.raises(config_environment.EnvironmentFileError) as raised:
         config_environment.parse_env_file(secrets)
 
-    assert str(raised.value) == "[artifact_mobility].peer_key malformed secrets input"
+    assert str(raised.value).startswith(f"{secrets}:")
+    assert str(raised.value).endswith(": expected KEY=VALUE")
+    assert rejected_fragment not in str(raised.value)
     assert "https://leaked-mobility" not in repr(raised.value)
 
 
@@ -347,11 +351,64 @@ def test_mobility_parser_failure_stays_out_of_errors_logs_and_serialization(tmp_
         load_config(secrets_path=secrets, env={})
 
     rendered_error = json.dumps({"errors": raised.value.errors})
-    assert raised.value.errors == ("[artifact_mobility].peer_key malformed secrets input",)
+    assert len(raised.value.errors) == 1
+    assert raised.value.errors[0].startswith(f"{secrets}:")
+    assert raised.value.errors[0].endswith(": expected KEY=VALUE")
     assert rejected_fragment not in str(raised.value)
     assert rejected_fragment not in repr(raised.value)
     assert rejected_fragment not in caplog.text
     assert rejected_fragment not in rendered_error
+
+
+@pytest.mark.parametrize(
+    "unrecognized_assignment",
+    (
+        "UNRECOGNIZED_RECORD=value",
+        'UNRECOGNIZED_RECORD = "value"',
+        "UNRECOGNIZED_RECORD=",
+        "UNRECOGNIZED_RECORD=1",
+        "UNRECOGNIZED_RECORD=quoted-value",
+        "UNRECOGNIZED_RECORD=another=value",
+    ),
+)
+def test_malformed_secrets_input_never_reflects_raw_content_after_unknown_assignment(
+    tmp_path,
+    caplog,
+    unrecognized_assignment,
+):
+    secrets = tmp_path / "secrets.env"
+    rejected_fragment = "https://leaked-mobility-credential/continuation"
+    secrets.write_text(
+        "SONDER_ARTIFACT_MOBILITY_PEER_KEY=mobility-"
+        + "x" * 32
+        + "\n"
+        + unrecognized_assignment
+        + "\n\n# harmless comment\n\x1e# control comment\x1e"
+        + rejected_fragment,
+        encoding="utf-8",
+    )
+
+    with pytest.raises(config_environment.EnvironmentFileError) as parser_error:
+        config_environment.parse_env_file(secrets)
+    with pytest.raises(ConfigError) as config_error:
+        load_config(secrets_path=secrets, env={})
+
+    parser_message = str(parser_error.value)
+    rendered_error = json.dumps({"errors": config_error.value.errors})
+    assert parser_message.startswith(f"{secrets}:")
+    assert parser_message.endswith(": expected KEY=VALUE")
+    assert config_error.value.errors == (parser_message,)
+    for raw_input in (
+        rejected_fragment,
+        "https://leaked-mobility",
+        unrecognized_assignment,
+    ):
+        assert raw_input not in parser_message
+        assert raw_input not in repr(parser_error.value)
+        assert raw_input not in str(config_error.value)
+        assert raw_input not in repr(config_error.value)
+        assert raw_input not in caplog.text
+        assert raw_input not in rendered_error
 
 
 def test_mobility_key_is_toml_forbidden_and_private_values_are_redacted(tmp_path):

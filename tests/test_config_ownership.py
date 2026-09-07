@@ -71,5 +71,5 @@ def test_environment_file_parser_preserves_root_config_error_contract(tmp_path):
         sonder_config.parse_env_file(path)
 
     assert excinfo.value.errors == (
-        f"{path}:1: expected KEY=VALUE, got 'not-an-assignment'",
+        f"{path}:1: expected KEY=VALUE",
     )
