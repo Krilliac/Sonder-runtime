@@ -10,29 +10,62 @@ import os
 from pathlib import Path
 
 
+_MOBILITY_PEER_KEY = "SONDER_ARTIFACT_MOBILITY_PEER_KEY"
+_MOBILITY_PEER_KEY_ERROR = "[artifact_mobility].peer_key malformed secrets input"
+
+
 class EnvironmentFileError(ValueError):
-    """Malformed compatibility environment-file input."""
+    """Malformed compatibility environment-file input.
+
+    ``field_code`` is deliberately metadata instead of a copy of the rejected
+    line.  The configuration boundary can preserve legacy diagnostics for
+    ordinary compatibility keys while keeping mobility credentials out of
+    exceptions, logs, and serialization.
+    """
+
+    def __init__(self, message: str, *, field_code: str = "") -> None:
+        super().__init__(message)
+        self.field_code = field_code
 
 
 def parse_env_file(path: Path) -> dict[str, str]:
     """Parse a ``KEY=VALUE`` environment file without owning config types."""
     values: dict[str, str] = {}
+    previous_line_was_mobility_peer_key = False
     for lineno, raw in enumerate(
         path.read_text(encoding="utf-8").splitlines(), start=1
     ):
         line = raw.strip()
         if not line or line.startswith("#"):
+            previous_line_was_mobility_peer_key = False
             continue
         if "=" not in line:
+            if (
+                _MOBILITY_PEER_KEY in line
+                or previous_line_was_mobility_peer_key
+            ):
+                raise EnvironmentFileError(
+                    _MOBILITY_PEER_KEY_ERROR,
+                    field_code="artifact_mobility_peer_key",
+                )
             raise EnvironmentFileError(
                 f"{path}:{lineno}: expected KEY=VALUE, got {line[:32]!r}"
             )
         key, _, value = line.partition("=")
         key = key.strip()
+        if key == _MOBILITY_PEER_KEY and any(
+            ord(character) < 32 or ord(character) == 127
+            for character in raw.partition("=")[2]
+        ):
+            raise EnvironmentFileError(
+                _MOBILITY_PEER_KEY_ERROR,
+                field_code="artifact_mobility_peer_key",
+            )
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
             value = value[1:-1]
         values[key] = value
+        previous_line_was_mobility_peer_key = key == _MOBILITY_PEER_KEY
     return values
 
 

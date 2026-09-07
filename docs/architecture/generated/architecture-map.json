@@ -937,11 +937,13 @@
       ]
     },
     {
-      "file_count": 37,
+      "file_count": 39,
       "name": "platform",
       "python_files": [
         "sonder_runtime/platform/__init__.py",
         "sonder_runtime/platform/app_control_config.py",
+        "sonder_runtime/platform/artifact_mobility_config.py",
+        "sonder_runtime/platform/artifact_mobility_source_config.py",
         "sonder_runtime/platform/artifact_transfer_config.py",
         "sonder_runtime/platform/child_environment_policy.py",
         "sonder_runtime/platform/child_storage_config.py",

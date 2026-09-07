@@ -9044,6 +9044,18 @@
     },
     {
       "default": null,
+      "field": "artifact_mobility_source",
+      "section": "root",
+      "type": "ArtifactMobilitySourceConfig"
+    },
+    {
+      "default": null,
+      "field": "artifact_mobility",
+      "section": "root",
+      "type": "ArtifactMobilityConfig"
+    },
+    {
+      "default": null,
       "field": "child_storage",
       "section": "root",
       "type": "ChildStorageConfig"
@@ -9075,6 +9087,12 @@
     {
       "default": "[redacted]",
       "field": "artifact_transfer_key",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "artifact_mobility_peer_key",
       "section": "secrets",
       "type": "str"
     },
@@ -9171,6 +9189,120 @@
     {
       "default": false,
       "field": "enabled",
+      "section": "artifact_mobility",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": "",
+      "field": "destination_label",
+      "section": "artifact_mobility",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "destination_origin",
+      "section": "artifact_mobility",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "destination_tls_certificate_sha256",
+      "section": "artifact_mobility",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "expected_recipient_attestation_sha256",
+      "section": "artifact_mobility",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "destination_credential_id",
+      "section": "artifact_mobility",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": 268435456,
+      "field": "max_object_bytes",
+      "section": "artifact_mobility",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 30,
+      "field": "attempt_timeout_seconds",
+      "section": "artifact_mobility",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 90,
+      "field": "attempt_lease_seconds",
+      "section": "artifact_mobility",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 604800,
+      "field": "receipt_ttl_seconds",
+      "section": "artifact_mobility",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 64,
+      "field": "max_live_operations",
+      "section": "artifact_mobility",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": false,
+      "field": "enabled",
+      "section": "artifact_mobility_source",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": "",
+      "field": "store_dir",
+      "section": "artifact_mobility_source",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "principal_id",
+      "section": "artifact_mobility_source",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "project_id",
+      "section": "artifact_mobility_source",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "source_owner_id",
+      "section": "artifact_mobility_source",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": 268435456,
+      "field": "max_object_bytes",
+      "section": "artifact_mobility_source",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 2147483648,
+      "field": "total_bytes",
+      "section": "artifact_mobility_source",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 86400,
+      "field": "ttl_seconds",
+      "section": "artifact_mobility_source",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": false,
+      "field": "enabled",
       "section": "artifact_transfer",
       "type": "<class 'bool'>"
     },
@@ -9195,6 +9327,12 @@
     {
       "default": "",
       "field": "peer_node_id",
+      "section": "artifact_transfer",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "receiver_identity_id",
       "section": "artifact_transfer",
       "type": "<class 'str'>"
     },
@@ -9697,11 +9835,11 @@
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES",
   "counts": {
     "commands": 316,
-    "configuration": 123,
+    "configuration": 146,
     "events": 43,
     "tools": 212
   },
-  "digest": "d42b127fd15b61be115f6f216960de6258b0c69e01191ac837cc94773155ec2c",
+  "digest": "24620b378a2527998d2a1295d94a1cdf781580234f811006c004b653d1f8b6cc",
   "events": [
     {
       "name": "session.started",
@@ -10175,7 +10313,7 @@
     "server.py": "9a4262ad4dd80fa47d5a1875a46e1e786d2ae5364cf9257140d5c5072456591c",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
-    "sonder_runtime/platform/config.py": "e274ff9e0668680d2be026da3283eb7870886b8ca2f46621533ee3a959a3714e"
+    "sonder_runtime/platform/config.py": "2b51b4d96d93dcc4d7338fbe1db52c7c5a3dde444035d72cb728318245b2912f"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
   "tools": [
