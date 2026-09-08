@@ -1,3 +1,5 @@
+import pytest
+
 from sonder_runtime.domain.operational_capabilities import (
     build_operational_capabilities,
 )
@@ -6,6 +8,24 @@ from sonder_runtime.platform.config import (
     ComputeNodeConfig,
     SonderConfig,
 )
+
+
+@pytest.mark.parametrize("count", [16, 64, 256])
+def test_bounded_worker_pool_is_available_only_when_accepting_eligible_work(count):
+    for admission, eligible, available in (("accepting", count, True), ("draining", count, False), ("accepting", 0, False)):
+        surface = build_operational_capabilities(config=None, inference_pool_status={
+            "schema_version": 2, "enabled": True, "worker_count": count,
+            "healthy_worker_count": count, "eligible_worker_count": eligible,
+            "admission": admission, "available_capacity": 128,
+            "queue": {"waiting": 3, "limit": 32}, "membership_state": "static",
+            "workers": [{"origin": "https://private.example:11434"}],
+        })
+        assert surface["inference"]["request_level_pooling"]["available"] is available
+        assert surface["inference"]["pool"]["eligible_worker_count"] == eligible
+        assert surface["inference"]["pool"]["queue"] == {"waiting": 3, "limit": 32, "scope": "global"}
+        assert surface["inference"]["model_sharding"]["available"] is False
+        assert surface["compute"]["indefinite_scale"]["available"] is False
+        assert "private.example" not in str(surface)
 
 
 def test_default_surface_is_explicitly_local_and_fail_closed():
@@ -37,6 +57,32 @@ def test_default_surface_is_explicitly_local_and_fail_closed():
     ]["reason"]
     assert surface["mobility"]["automatic_memory_migration"]["available"] is False
     assert surface["mobility"]["automatic_artifact_migration"]["available"] is False
+
+
+def test_surface_preserves_bounded_external_membership_status():
+    surface = build_operational_capabilities(
+        config=None,
+        inference_pool_status={
+            "schema_version": 2,
+            "enabled": True,
+            "worker_count": 2,
+            "healthy_worker_count": 1,
+            "eligible_worker_count": 1,
+            "available_capacity": 1,
+            "remote_worker_count": 1,
+            "admission": "accepting",
+            "membership_mode": "external",
+            "membership_state": "current",
+            "refresh_state": "current",
+            "queue": {"waiting": 0, "limit": 1},
+            "workers": [{"origin": "https://private-worker.example:11434"}],
+        },
+    )
+
+    pool = surface["inference"]["pool"]
+    assert pool["membership_mode"] == "external"
+    assert pool["membership_state"] == "current"
+    assert "private-worker" not in str(surface)
 
 
 def test_surface_distinguishes_pooled_requests_from_sharding_and_mobility():

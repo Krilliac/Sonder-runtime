@@ -18,6 +18,54 @@ import 'package:sonder_runtime/settings_screen.dart';
 import 'package:sonder_runtime/system_screen.dart';
 
 void main() {
+  testWidgets(
+      'worker detail stays idle until requested and clears after denial',
+      (tester) async {
+    var calls = 0;
+    final client = MockClient((request) async {
+      calls++;
+      if (calls == 2) return http.Response('{}', 403);
+      expect(jsonDecode(request.body)['refresh'], isFalse);
+      return http.Response(
+          jsonEncode({
+            'schema_version': 2,
+            'worker_count': 64,
+            'complete': false,
+            'next_cursor': 'opaque',
+            'omitted_worker_count': 63,
+            'workers': [
+              {
+                'origin': 'https://private-worker.test:11434',
+                'state': 'ready',
+                'model_count': 1,
+                'model_preview': ['safe'],
+                'error_category': 'none'
+              }
+            ]
+          }),
+          200);
+    });
+    await http.runWithClient(() async {
+      await tester.pumpWidget(MaterialApp(
+          home: Scaffold(
+              body: OllamaPoolDetails(
+        api: SonderApi(baseUrl: 'https://host.test', apiKey: 'key'),
+      ))));
+      await tester.pumpAndSettle();
+      expect(calls, 0);
+      expect(find.textContaining('https://private-worker'), findsNothing);
+      await tester.tap(find.text('Inspect worker page'));
+      await tester.pumpAndSettle();
+      expect(calls, 1);
+      expect(find.textContaining('https://private-worker'), findsOneWidget);
+      expect(find.text('Next worker page'), findsOneWidget);
+      await tester.tap(find.text('Next worker page'));
+      await tester.pumpAndSettle();
+      expect(calls, 2);
+      expect(find.textContaining('https://private-worker'), findsNothing);
+      expect(find.textContaining('Check administrator access'), findsOneWidget);
+    }, () => client);
+  });
   testWidgets('desktop workspace navigation connects chat, agents and settings',
       (tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
@@ -716,6 +764,9 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Distributed capability surface'), findsOneWidget);
+    expect(find.text('Inspect worker page'), findsOneWidget);
+    expect(find.text('Refresh worker cache'), findsOneWidget);
+    expect(find.textContaining('https://private-worker'), findsNothing);
     expect(
       find.textContaining('Available — Owned dispatcher is installed.'),
       findsOneWidget,

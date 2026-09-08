@@ -6,6 +6,7 @@ from pathlib import Path
 import secrets
 import sys
 from threading import Event
+from time import monotonic
 
 
 def _configure_legacy_http_boundary(application, config, *, serve):
@@ -77,6 +78,110 @@ def _install_owned_app_work_if_enabled(application, config, *, serve):
     return binding
 
 
+def _close_managed_provider_graph(application, *, timeout):
+    """Close graph-owned resources while child storage owns delegation.
+
+    The managed resource ledger closes durable child storage first, so calling
+    ``Application.close_providers`` here would repeat delegation shutdown.
+    Keep the remaining graph lifecycle in its authoritative order and attempt
+    every closer even when an earlier one fails.
+    """
+    started = monotonic()
+
+    def remaining():
+        return max(0, timeout - (monotonic() - started))
+
+    try:
+        artifact_close = getattr(application, "close_artifact_mobility", None)
+        if artifact_close is not None:
+            artifact_close()
+    finally:
+        try:
+            compute_close = getattr(application, "close_compute", None)
+            if compute_close is not None:
+                compute_close(timeout=remaining())
+        finally:
+            try:
+                replication = getattr(application, "memory_replication", None)
+                if replication is not None:
+                    replication.close()
+            finally:
+                try:
+                    # Membership shutdown stops refresh, not request admission.
+                    # Drain the exact graph pool first so a failing owned child
+                    # cannot retain a live inference authority during teardown.
+                    pool = getattr(application, "inference_pool", None)
+                    drain = getattr(pool, "drain", None)
+                    if callable(drain) and not drain(timeout_seconds=min(30, remaining())):
+                        raise TimeoutError("inference worker pool has not drained")
+                finally:
+                    try:
+                        controller = getattr(application, "inference_membership", None)
+                        if controller is not None and not controller.close(
+                            timeout=min(30, remaining())
+                        ):
+                            raise TimeoutError("inference membership refresh has not stopped")
+                    finally:
+                        application.specialized_providers.close(timeout=remaining())
+
+
+def _stop_configured_lifecycle_probe(lifecycle_module) -> bool:
+    """Stop the selected lifecycle probe and report whether it actually ended.
+
+    A managed owner writes a clean resource receipt only after every resource
+    it owns has stopped.  Older compatibility lifecycle doubles return
+    ``None`` from ``stop_probe``; retain that successful convention while a
+    modern explicit ``False`` remains an unclean, observable result.
+    """
+    instance = getattr(lifecycle_module, "_instance", None)
+    if instance is None:
+        return True
+    stop_probe = getattr(instance, "stop_probe", None)
+    if not callable(stop_probe):
+        return True
+    return stop_probe() is not False
+
+
+def _finish_managed_runtime(
+    *,
+    errors,
+    cleanup_errors,
+    receipt,
+    evidence,
+    primary_error,
+    primary_traceback,
+) -> int:
+    """Write a terminal receipt before preserving the primary startup error.
+
+    A managed child must leave durable evidence for both ordinary cleanup
+    failures and a startup/bind exception that triggered an otherwise clean
+    rollback.  Re-raising the original exception keeps the caller's causal
+    error and traceback authoritative; the receipt records the separate
+    runtime ownership outcome.
+    """
+    unclean = (
+        primary_error is not None
+        or bool(errors)
+        or bool(cleanup_errors)
+        or receipt is None
+        or not receipt.clean
+    )
+    if unclean:
+        try:
+            evidence("UNCLEAN", receipt)
+        except BaseException as error:
+            cleanup_errors.append("evidence-" + type(error).__name__)
+        if primary_error is not None:
+            if primary_traceback is not None:
+                raise primary_error.with_traceback(primary_traceback)
+            raise primary_error
+        from ..application.ports.runtime_owner import OwnerRefused
+
+        raise OwnerRefused("managed application cleanup is incomplete")
+    evidence("CLEAN", receipt)
+    return 0
+
+
 def run(root, namespace, job_id):
     from ..application.compute_fabric.artifact_spool import PrivateDirectoryAnchor
 
@@ -107,6 +212,7 @@ def _run(root, workspace, namespace, job_id, anchor):
     from ..adapters.persistence.runtime_owner import SQLiteManagedRuntimeOwnerJournal
     from ..adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
     from ..adapters.process_liveness import process_identity
+    from ..adapters.filesystem.atomic_json import write_json_atomic
     from ..application.ports.runtime_owner import OwnerRefused
     from .managed_configuration import (
         read_configuration,
@@ -210,135 +316,18 @@ def _run(root, workspace, namespace, job_id, anchor):
     )
 
     resources = ApplicationResourceOwners(COMPONENTS, close_order=CLOSE_ORDER)
-
-    def proof(name, closed, evidence):
-        return ComponentCloseProof(name, bool(closed), evidence)
-
-    def close_sqlite(resource, timeout):
-        resource.stop_admissions()
-        return proof(
-            "sqlite", cleanup() and resource.snapshot().clean, "exact-sqlite-handles"
-        )
-
-    resources.initialize("sqlite", lambda: sqlite, close_sqlite)
-    resources.initialize(
-        "workers",
-        lambda: workers,
-        lambda resource, timeout: proof(
-            "workers", resource.close(timeout=timeout).clean, "exact-worker-handles"
-        ),
-    )
-    from ..adapters.persistence import migrations
-
-    migrations.migrate_all(busy_timeout_ms=1000)
-    from .app import (
-        build_application,
-        install_owned_application,
-        stop_owned_application,
-    )
-    from .child_storage import HostChildRepositoryFactory
-    from ..adapters.persistence.durable_continuation import (
-        SQLiteDurableContinuationRepository,
-    )
-
-    def create_children():
-        if config.child_storage.backend == "sqlite":
-            return SQLiteDurableContinuationRepository(Path(descriptor["child_path"]))
-        from ..adapters.persistence.postgres_binding import PostgresPrivateBinding
-        from ..adapters.persistence.postgres_continuation import (
-            PostgreSQLDurableContinuationRepository,
-        )
-
-        def roots():
-            from ..adapters.filesystem.file_ops import allowed_roots
-
-            return tuple(allowed_roots()) + config.state.workspace_roots
-
-        binding = PostgresPrivateBinding(
-            config.child_storage.binding_file, writable_roots=roots
-        )
-        try:
-            return PostgreSQLDurableContinuationRepository(
-                config.child_storage,
-                binding,
-                expected_storage_identity=descriptor["child_identity"],
-            )
-        except BaseException:
-            binding.close()
-            raise
-
-    def construct():
-        application = build_application(
-            config=config,
-            child_repository_factory=HostChildRepositoryFactory(
-                config.child_storage.backend, create_children
-            ),
-        )
-        install_owned_application(application)
-        return application
-
-    def close_application(application, timeout):
-        return proof(
-            "application",
-            application.session_repository().close(timeout=timeout),
-            "session-connections-closed",
-        )
-
-    application = resources.initialize("application", construct, close_application)
-    from .managed_app_work import install_owned_app_work_slot, seal_owned_app_work
-
-    install_owned_app_work_slot(application, resources, workers)
-    application.session_repository()
-
-    def close_children(application, timeout):
-        application.close_delegation(timeout=timeout)
-        return proof("child-storage", True, "runner-repository-close-proof")
-
-    resources.initialize("child-storage", lambda: application, close_children)
-    application.delegation_service()
-
-    def close_providers(application, timeout):
-        from time import monotonic
-
-        deadline = monotonic() + timeout
-        application.close_compute(timeout=timeout)
-        # The concrete bundle unregisters each provider only after its typed
-        # CleanupResult proves quiescence and release, and raises on any failure.
-        application.specialized_providers.close(timeout=max(0, deadline - monotonic()))
-        return proof("providers", True, "typed-provider-unregister")
-
-    resources.initialize("providers", lambda: application, close_providers)
-    from ..interfaces.http import serve
-    from ..adapters.web import lifecycle
-    from .managed_http import ManagedHTTPServer
-    from ..adapters.filesystem.atomic_json import write_json_atomic
-
-    serve.configure_typed_config(config)
-    _configure_legacy_http_boundary(application, config, serve=serve)
-    _install_owned_app_work_if_enabled(application, config, serve=serve)
-    lifecycle.configure(config)
-    stopped = Event()
+    application = None
+    owned_application = False
+    stopped = None
+    watcher = None
+    watcher_started = False
+    lifecycle = None
+    lifecycle_configured = False
+    receipt = None
     errors = []
-    listener = []
-
-    def factory(address, handler):
-        seal_owned_app_work(application)
-        server = resources.initialize(
-            "http-sockets",
-            lambda: ManagedHTTPServer(
-                address,
-                handler,
-                workers=workers,
-                request_timeout_seconds=descriptor["request_timeout_seconds"],
-            ),
-            lambda resource, timeout: proof(
-                "http-sockets",
-                resource.sockets_closed,
-                "exact-listener-request-sockets",
-            ),
-        )
-        listener.append(server)
-        return server
+    cleanup_errors = []
+    primary_error = None
+    primary_traceback = None
 
     def evidence(phase, receipt=None):
         value = dict(
@@ -357,39 +346,205 @@ def _run(root, workspace, namespace, job_id, anchor):
             value["components"] = [asdict(item) for item in receipt.components]
         write_json_atomic(root / ("runtime-" + job_id + ".json"), value)
 
-    def control():
-        ready = False
-        try:
-            while not stopped.wait(0.1):
-                if not ready and listener and serve.BOUND_PORT == descriptor["port"]:
-                    evidence("READY")
-                    ready = True
-                command = journal.pending()
-                if command is not None and command.action == "stop":
-                    lifecycle.get().drain("owned runtime stop")
-                    return
-        except BaseException:
-            errors.append("control-failed")
-            lifecycle.get().drain("owned control unavailable")
-
-    watcher = workers.thread(
-        target=control, name="managed-runtime-control", daemon=True
-    )
-    watcher.start()
+    # The ledger exists before any resource can be admitted.  Keep one cleanup
+    # owner around every startup step, including migration and listener setup:
+    # a child that fails before serve.main must not strand a graph or SQLite
+    # handle merely because the normal serving finalizer was never entered.
     try:
-        serve.main(
-            config=config, _server_factory=factory, _close_default_resources=False
+        def proof(name, closed, evidence):
+            return ComponentCloseProof(name, bool(closed), evidence)
+
+        def close_sqlite(resource, timeout):
+            resource.stop_admissions()
+            return proof(
+                "sqlite", cleanup() and resource.snapshot().clean, "exact-sqlite-handles"
+            )
+
+        resources.initialize("sqlite", lambda: sqlite, close_sqlite)
+        resources.initialize(
+            "workers",
+            lambda: workers,
+            lambda resource, timeout: proof(
+                "workers", resource.close(timeout=timeout).clean, "exact-worker-handles"
+            ),
         )
+        from ..adapters.persistence import migrations
+
+        migrations.migrate_all(busy_timeout_ms=1000)
+        from .app import (
+            build_application,
+            install_owned_application,
+            stop_owned_application,
+        )
+        from .child_storage import HostChildRepositoryFactory
+        from ..adapters.persistence.durable_continuation import (
+            SQLiteDurableContinuationRepository,
+        )
+
+        def create_children():
+            if config.child_storage.backend == "sqlite":
+                return SQLiteDurableContinuationRepository(Path(descriptor["child_path"]))
+            from ..adapters.persistence.postgres_binding import PostgresPrivateBinding
+            from ..adapters.persistence.postgres_continuation import (
+                PostgreSQLDurableContinuationRepository,
+            )
+
+            def roots():
+                from ..adapters.filesystem.file_ops import allowed_roots
+
+                return tuple(allowed_roots()) + config.state.workspace_roots
+
+            binding = PostgresPrivateBinding(
+                config.child_storage.binding_file, writable_roots=roots
+            )
+            try:
+                return PostgreSQLDurableContinuationRepository(
+                    config.child_storage,
+                    binding,
+                    expected_storage_identity=descriptor["child_identity"],
+                )
+            except BaseException:
+                binding.close()
+                raise
+
+        def construct():
+            graph = build_application(
+                config=config,
+                child_repository_factory=HostChildRepositoryFactory(
+                    config.child_storage.backend, create_children
+                ),
+            )
+            try:
+                install_owned_application(graph)
+            except BaseException:
+                # initialize() records a failed factory as unresolved and
+                # cannot call its closer, so this fresh graph owns its own
+                # rollback until installation has been published.
+                graph.close_providers(timeout=5)
+                raise
+            return graph
+
+        def close_application(graph, timeout):
+            return proof(
+                "application",
+                graph.session_repository().close(timeout=timeout),
+                "session-connections-closed",
+            )
+
+        application = resources.initialize("application", construct, close_application)
+        owned_application = True
+        from .managed_app_work import install_owned_app_work_slot, seal_owned_app_work
+
+        def close_children(graph, timeout):
+            graph.close_delegation(timeout=timeout)
+            return proof("child-storage", True, "runner-repository-close-proof")
+
+        def close_providers(graph, timeout):
+            _close_managed_provider_graph(graph, timeout=timeout)
+            return proof("providers", True, "typed-provider-unregister")
+
+        # Register every graph closer before any late startup work can fail.
+        resources.initialize("child-storage", lambda: application, close_children)
+        resources.initialize("providers", lambda: application, close_providers)
+        install_owned_app_work_slot(application, resources, workers)
+        application.session_repository()
+        application.delegation_service()
+
+        from ..interfaces.http import serve
+        from ..adapters.web import lifecycle
+        from .managed_http import ManagedHTTPServer
+
+        _configure_legacy_http_boundary(application, config, serve=serve)
+        lifecycle.configure(config)
+        lifecycle_configured = True
+        stopped = Event()
+        listener = []
+
+        def finish_http_configuration(graph):
+            if graph is not application:
+                raise OwnerRefused("managed HTTP graph selection changed during startup")
+            _install_owned_app_work_if_enabled(application, config, serve=serve)
+
+        def factory(address, handler):
+            seal_owned_app_work(application)
+            server = resources.initialize(
+                "http-sockets",
+                lambda: ManagedHTTPServer(
+                    address,
+                    handler,
+                    workers=workers,
+                    request_timeout_seconds=descriptor["request_timeout_seconds"],
+                ),
+                lambda resource, timeout: proof(
+                    "http-sockets",
+                    resource.sockets_closed,
+                    "exact-listener-request-sockets",
+                ),
+            )
+            listener.append(server)
+            return server
+
+        def control():
+            ready = False
+            try:
+                while not stopped.wait(0.1):
+                    if not ready and listener and serve.BOUND_PORT == descriptor["port"]:
+                        evidence("READY")
+                        ready = True
+                    command = journal.pending()
+                    if command is not None and command.action == "stop":
+                        lifecycle.get().drain("owned runtime stop")
+                        return
+            except BaseException:
+                errors.append("control-failed")
+                lifecycle.get().drain("owned control unavailable")
+
+        watcher = workers.thread(
+            target=control, name="managed-runtime-control", daemon=True
+        )
+        watcher.start()
+        watcher_started = True
+        serve.main(
+            config=config,
+            _server_factory=factory,
+            _close_default_resources=False,
+            _after_configure=finish_http_configuration,
+        )
+    except BaseException as error:
+        primary_error = error
+        primary_traceback = error.__traceback__
     finally:
-        stopped.set()
-        lifecycle.get().stop_probe()
-        stop_owned_application(application)
-        receipt = resources.close(timeout=15)
-    if errors or not receipt.clean:
-        evidence("UNCLEAN", receipt)
-        raise OwnerRefused("managed application cleanup is incomplete")
-    evidence("CLEAN", receipt)
-    return 0
+        if stopped is not None:
+            stopped.set()
+        if watcher_started:
+            try:
+                watcher.join(2)
+            except BaseException as error:
+                cleanup_errors.append("watcher-" + type(error).__name__)
+        if lifecycle_configured:
+            try:
+                if not _stop_configured_lifecycle_probe(lifecycle):
+                    cleanup_errors.append("probe-incomplete")
+            except BaseException as error:
+                cleanup_errors.append("probe-" + type(error).__name__)
+        if owned_application:
+            try:
+                stop_owned_application(application)
+            except BaseException as error:
+                cleanup_errors.append("owned-" + type(error).__name__)
+        try:
+            receipt = resources.close(timeout=15)
+        except BaseException as error:
+            cleanup_errors.append("resources-" + type(error).__name__)
+
+    return _finish_managed_runtime(
+        errors=errors,
+        cleanup_errors=cleanup_errors,
+        receipt=receipt,
+        evidence=evidence,
+        primary_error=primary_error,
+        primary_traceback=primary_traceback,
+    )
 
 
 if __name__ == "__main__":

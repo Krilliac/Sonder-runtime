@@ -6,6 +6,7 @@ import pytest
 
 from sonder_runtime.adapters.inference.ollama_pool import (
     OllamaWorkerPool,
+    WorkerCapabilityUnavailable,
     _metric_label,
     _default_capability_prober,
     configure_typed_workers,
@@ -30,8 +31,8 @@ class _Metrics:
 
 
 def test_worker_origin_parser_accepts_comma_and_semicolon_lists():
-    assert parse_worker_origins("https://a:11434; https://b:11434, https://a:11434") == (
-        "https://a:11434", "https://b:11434", "https://a:11434",
+    assert parse_worker_origins("https://a:11434; https://b:11434, https://c:11434") == (
+        "https://a:11434", "https://b:11434", "https://c:11434",
     )
 
 
@@ -45,15 +46,12 @@ def test_remote_worker_requires_https_and_explicit_consent():
     ) == "https://192.168.1.20:11434"
 
 
-def test_trusted_origins_allows_http_remote_workers_through_pool_constructor():
-    pool = OllamaWorkerPool(
-        "http://127.0.0.1:11434",
-        ("http://192.168.1.20:11434",),
-        allow_remote=True,
-        trusted_origins=("192.168.1.0/24",),
-    )
-    assert len(pool.origins) == 2
-    assert pool.origins[1] == "http://192.168.1.20:11434"
+def test_trusted_origins_never_relaxes_https_requirement():
+    with pytest.raises(ValueError, match="must use https"):
+        OllamaWorkerPool(
+            "http://127.0.0.1:11434", ("http://192.168.1.20:11434",),
+            allow_remote=True, trusted_origins=("192.168.1.0/24",),
+        )
 
 
 def test_pool_constructor_rejects_http_remote_without_trusted_origins():
@@ -302,7 +300,7 @@ def test_server_posts_through_the_pool_selected_origin(monkeypatch):
         return Response()
 
     monkeypatch.setattr(server, "OLLAMA_POOL", FakePool())
-    monkeypatch.setattr(server.ollama_endpoint, "open_url", open_url)
+    monkeypatch.setattr(FakePool, "open_url", staticmethod(open_url), raising=False)
 
     assert server._post("/api/chat", {"model": "sonder:latest"}) == {"ok": True}
     assert seen[0][0] == "https://worker.example:11434/api/chat"
@@ -437,12 +435,18 @@ def test_half_open_worker_admits_one_trial_and_recovers_on_success():
     assert snap.probing is False
 
 
-def test_model_affinity_orders_workers_lacking_the_model_last():
+def test_model_affinity_requires_capability_evidence_and_never_uses_missing_model():
     clock = FakeClock()
     pool = OllamaWorkerPool(PRIMARY, (SECOND,), time_fn=clock)
     assert pool.note_models("127.0.0.1:11434", ["llama3:latest"]) is True
     assert pool.note_models(SECOND, ["qwen3-coder:30b"]) is True
     assert pool.note_models("nonexistent:1", ["x"]) is False
+    # Inventory hints alone are not verified capability evidence.
+    with pytest.raises(WorkerCapabilityUnavailable):
+        pool.request(lambda _: pytest.fail("unprobed worker dispatched"), model="llama3")
+    pool._capability_prober = lambda origin: {"models": [
+        "llama3:latest" if origin == PRIMARY else "qwen3-coder:30b"]}
+    pool.refresh_capabilities()
 
     chosen = []
 
@@ -457,7 +461,7 @@ def test_model_affinity_orders_workers_lacking_the_model_last():
     pool.request(send, model="LLAMA3:latest")
     assert chosen == [SECOND, PRIMARY, PRIMARY]
 
-    # A worker with recorded inventory is deprioritized but never excluded.
+    # A transport failure cannot authorize another worker missing the model.
     failed = []
 
     def send_failing_second(origin):
@@ -466,9 +470,8 @@ def test_model_affinity_orders_workers_lacking_the_model_last():
             raise URLError("second down")
         return origin
 
-    assert pool.request(
-        send_failing_second, model="qwen3-coder:30b", idempotent=True,
-    ) == PRIMARY
+    with pytest.raises(URLError, match="second down"):
+        pool.request(send_failing_second, model="qwen3-coder:30b", idempotent=True)
     assert failed == [SECOND]
 
 
@@ -503,7 +506,8 @@ def test_pool_never_replays_a_classified_post_response_failure():
 
 
 def test_refresh_inventory_records_models_and_keeps_stale_records_on_error():
-    pool = OllamaWorkerPool(PRIMARY, (SECOND,))
+    pool = OllamaWorkerPool(PRIMARY, (SECOND,), capability_prober=lambda origin: {
+        "models": ["llama3:latest" if origin == PRIMARY else "qwen3-coder:30b"]})
     payloads = {
         PRIMARY: {"models": [{"name": "llama3:latest"}, {"model": "sonder:latest"}, None, {}]},
         SECOND: {"models": [{"name": "qwen3-coder:30b"}]},
@@ -659,7 +663,7 @@ def test_local_only_never_reaches_the_pool_even_with_remote_workers(monkeypatch)
         return Response()
 
     monkeypatch.setattr(server, "OLLAMA_POOL", FakePool())
-    monkeypatch.setattr(server.ollama_endpoint, "open_url", open_url)
+    monkeypatch.setattr(FakePool, "open_url", staticmethod(open_url), raising=False)
 
     assert server._post("/api/chat", {}, local_only=True) == {"ok": True}
     assert seen == [server.BASE + "/api/chat"]
@@ -747,7 +751,7 @@ def test_server_pool_failover_uses_one_total_timeout_budget(monkeypatch):
 
     monkeypatch.setattr(server, "OLLAMA_POOL", FakePool())
     monkeypatch.setattr(server.time, "monotonic", Clock())
-    monkeypatch.setattr(server.ollama_endpoint, "open_url", open_url)
+    monkeypatch.setattr(FakePool, "open_url", staticmethod(open_url), raising=False)
 
     assert server._post("/api/chat", {}, timeout=5) == {"ok": True}
     assert timeouts == [5.0, 1.0]

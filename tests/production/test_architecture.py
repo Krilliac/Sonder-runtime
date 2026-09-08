@@ -26,6 +26,26 @@ def _architecture_module():
     return module
 
 
+def test_membership_crypto_allowance_is_exactly_one_adapter(tmp_path):
+    (tmp_path / "scripts").mkdir()
+    checker = tmp_path / "scripts" / "check_architecture.py"
+    shutil.copy2(_REPO_ROOT / "scripts" / "check_architecture.py", checker)
+    paths = ["sonder_runtime/adapters/inference/external_membership.py",
+             "sonder_runtime/adapters/inference/adjacent.py", "sonder_runtime/platform/adjacent.py"]
+    for name in paths:
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("from cryptography.hazmat.primitives import serialization\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "--", *paths], cwd=tmp_path, check=True)
+    result = subprocess.run([sys.executable, str(checker)], capture_output=True, text=True, timeout=30)
+    crypto_errors = [line.replace("\\", "/") for line in result.stdout.splitlines() if "cryptography" in line]
+    assert len(crypto_errors) == 2
+    assert all("external_membership.py" not in line for line in crypto_errors)
+    assert any("adapters/inference/adjacent.py" in line for line in crypto_errors)
+    assert any("platform/adjacent.py" in line for line in crypto_errors)
+
+
 def test_architecture_check_passes():
     result = subprocess.run(
         [

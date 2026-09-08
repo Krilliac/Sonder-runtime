@@ -162,7 +162,26 @@ def configure_memory_replication_receiver(receiver):
     return receiver
 
 
-def configure_memory_replication_service(service):
+_UNSET = object()
+
+
+def _detach_memory_replication_route(*, service=_UNSET, receiver=_UNSET):
+    """Remove an HTTP exposure without taking ownership of its graph service.
+
+    The service belongs to the composed Application.  Hosts use this helper on
+    startup rollback and shutdown so a route cannot outlive its graph, while a
+    caller with ``_close_default_resources=False`` remains the sole resource
+    owner.  Identity matching prevents an old host from clearing a newer
+    selection in a programmatic process.
+    """
+    global _MEMORY_REPLICATION_SERVICE, _MEMORY_REPLICATION_RECEIVER
+    if service is _UNSET or _MEMORY_REPLICATION_SERVICE is service:
+        _MEMORY_REPLICATION_SERVICE = None
+    if receiver is _UNSET or _MEMORY_REPLICATION_RECEIVER is receiver:
+        _MEMORY_REPLICATION_RECEIVER = None
+
+
+def configure_memory_replication_service(service, *, close_replaced=True):
     """Install one already-owned local replication service at HTTP startup.
 
     The HTTP adapter never creates a peer client or chooses a peer.  Starting
@@ -187,7 +206,7 @@ def configure_memory_replication_service(service):
     previous = _MEMORY_REPLICATION_SERVICE
     configure_memory_replication_receiver(receiver)
     _MEMORY_REPLICATION_SERVICE = service
-    if previous is not None and previous is not service:
+    if close_replaced and previous is not None and previous is not service:
         previous.close()
     return service
 
@@ -203,11 +222,19 @@ def configure_control_plane_service(service):
 _THIN_HANDLERS: dict = {}
 
 
-def configure_thin_handlers(handlers: dict) -> None:
+def configure_thin_handlers(handlers: dict) -> dict:
     """Register SPEC-5 thin HTTP handlers by path."""
     global _THIN_HANDLERS
     _THIN_HANDLERS = dict(handlers)
     _serve_logger.info(f"SPEC-5 thin handlers configured: {sorted(_THIN_HANDLERS)}")
+    return _THIN_HANDLERS
+
+
+def _detach_thin_handlers(*, handlers=_UNSET) -> None:
+    """Remove an exact HTTP handler mapping without clobbering a replacement."""
+    global _THIN_HANDLERS
+    if handlers is _UNSET or _THIN_HANDLERS is handlers:
+        _THIN_HANDLERS = {}
 
 
 def _legacy_runtime():
@@ -919,8 +946,9 @@ def configure_typed_config(config) -> None:
         for cidr in server_config.trusted_proxy_cidrs
     )
     # A typed config application is a new host selection.  No prior receiver
-    # may remain reachable while the normal application owner is rebuilt.
-    configure_memory_replication_service(None)
+    # may remain reachable while the normal application owner is rebuilt, but
+    # the HTTP boundary must not close a graph-owned replication service.
+    _detach_memory_replication_route()
 _HTTP_SESSION_STATES = OrderedDict()
 _HTTP_SESSION_STATES_LOCK = threading.RLock()
 
@@ -1598,6 +1626,7 @@ def _admin_authorized(context):
 # Keep this at the HTTP boundary: hiding a command in the app does not stop a
 # crafted request, and a prompt must never be the thing that confers a role.
 SYSTEM_OPERATION_ROLES = {
+    "inference_pool_administration": "admin",
     "permission_mode_change": "admin",
     "runtime_policy_change": "admin",
     "permission_rule_change": "admin",
@@ -1613,6 +1642,7 @@ SYSTEM_OPERATION_ROLES = {
 # Direct local MCP/console use remains a trusted operator surface; this map is
 # deliberately enforced only when an HTTP request supplies an auth context.
 SYSTEM_OPERATION_TOOLS = {
+    "ollama_pool_admin_status": "inference_pool_administration",
     "permission_mode": "permission_mode_change",
     "permission_rule_set": "permission_rule_change",
     "permission_approve": "permission_rule_change",
@@ -1665,6 +1695,16 @@ def _http_system_operation_for(tool):
         operator_tools=getattr(server, "_AGENT_SYSTEM_OPERATOR_TOOLS", ()),
         canonicalize=getattr(server, "_canonical_agent_tool_name", None),
     )
+
+
+def _ollama_pool_admin_page(context, params):
+    """Authorize before touching pool state, for both HTTP entry paths."""
+    if not _admin_authorized(context):
+        return {"error": "authorization"}, 403
+    if not isinstance(params, dict) or set(params) - {"refresh", "cursor", "page_size"}:
+        return {"error": "invalid_request"}, 400
+    result = server._ollama_pool_admin_status_data(principal=_state_principal(context), **params)
+    return result, 400 if "error" in result else 200
 
 
 def _system_operation_authority_error(operation, context):
@@ -2886,6 +2926,11 @@ def _run_catalogued_tool_gated(line, tool_name, kwargs, handler, *, state, conte
     )
     if refusal:
         return refusal
+    if tool_name == "ollama_pool_admin_status" and context is not None:
+        # A tool argument cannot replace the authenticated HTTP principal.
+        params = {key: value for key, value in kwargs.items() if key != "token"}
+        result, _status = _ollama_pool_admin_page(context, params)
+        return json.dumps(result)
     if tool_name == "loop":
         refusal = _loop_global_operation_refusal(kwargs.get("actions_json"), context)
         if refusal:
@@ -4326,6 +4371,28 @@ class Handler(BaseHTTPRequestHandler):
         if not handle_artifact_transfer(self, "PUT", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
             self._send_not_found()
 
+    def _handle_ollama_pool_admin(self, method):
+        context = self._request_auth_context()
+        if not _admin_authorized(context):
+            self._send_json_payload({"error": "authorization"}, status=403,
+                                    headers={"Cache-Control": "no-store"})
+            return
+        try:
+            if method == "GET":
+                values = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query,
+                                              keep_blank_values=True, max_num_fields=2)
+                if set(values) - {"cursor", "page_size"} or any(len(v) != 1 for v in values.values()):
+                    raise ValueError("invalid page query")
+                params = {key: value[0] for key, value in values.items()}
+                if "page_size" in params:
+                    params["page_size"] = int(params["page_size"])
+            else:
+                params = self._read_json()
+            result, status = _ollama_pool_admin_page(context, params)
+        except (ValueError, HTTPRequestError):
+            result, status = {"error": "invalid_request"}, 400
+        self._send_json_payload(result, status=status, headers={"Cache-Control": "no-store"})
+
     def do_GET(self):
         # Keep-alive reuses Handler instances; see do_OPTIONS for why this is
         # reset before every externally visible request.
@@ -4346,6 +4413,9 @@ class Handler(BaseHTTPRequestHandler):
         if self._reject_disallowed_origin():
             return
         path = _request_route(self.path)
+        if path == "/v1/sonder/ollama-pool":
+            self._handle_ollama_pool_admin("GET")
+            return
         _serve_logger.debug(f"do_GET: path={path!r}, peer={self._peer()!r}")
         if path == "/" and _local_log_dashboard_allowed(self._peer()):
             self._send_local_log_page()
@@ -4856,8 +4926,21 @@ class Handler(BaseHTTPRequestHandler):
                 if memory_replication_service is not None
                 else None
             )
+            fixed_peer_artifact_copy_configured = False
+            artifact_availability = getattr(
+                application, "_artifact_mobility_available", None,
+            )
+            if callable(artifact_availability):
+                try:
+                    fixed_peer_artifact_copy_configured = bool(
+                        artifact_availability()
+                    )
+                except Exception:
+                    # The public status surface must fail closed if an optional
+                    # local binding cannot prove its configured availability.
+                    fixed_peer_artifact_copy_configured = False
             try:
-                inference_pool_status = server.OLLAMA_POOL.status()
+                inference_pool_status = server.OLLAMA_POOL.summary()
             except Exception:
                 # Status must stay useful when the optional legacy pool is
                 # unavailable; the capability projection reports unknown
@@ -4893,6 +4976,9 @@ class Handler(BaseHTTPRequestHandler):
                         _APP_CONTROL_BINDING is not None
                         and getattr(_APP_CONTROL_BINDING, "_work_binding", None)
                         is not None
+                    ),
+                    fixed_peer_artifact_copy_configured=(
+                        fixed_peer_artifact_copy_configured
                     ),
                 ),
                 "activity": activity,
@@ -5381,6 +5467,9 @@ class Handler(BaseHTTPRequestHandler):
                 )
 
         if self._reject_disallowed_origin():
+            return
+        if _request_route(self.path) == "/v1/sonder/ollama-pool":
+            self._handle_ollama_pool_admin("POST")
             return
         _maybe_live_reload()
         path = _request_route(self.path)
@@ -6543,111 +6632,203 @@ class Handler(BaseHTTPRequestHandler):
             return False
 
 
-def main(config=None, *, _server_factory=None, _close_default_resources=True):
+def main(
+    config=None,
+    *,
+    _server_factory=None,
+    _close_default_resources=True,
+    _after_configure=None,
+):
     _serve_logger.info("HTTP server starting")
     _serve_logger.debug("main: starting HTTP server")
-    global CONFIGURED_PORT
-    if config is not None:
-        configure_typed_config(config)
+    global CONFIGURED_PORT, BOUND_PORT
+    global _ARTIFACT_TRANSFER_BINDING, _ARTIFACT_TRANSFER_CONFIG
+    global _APP_CONTROL_BINDING, _APP_CONTROL_CONFIG
+    global _MEMORY_REPLICATION_SERVICE, _MEMORY_REPLICATION_RECEIVER
+    global _SESSION_FACADE, _CONTROL_PLANE_SERVICE
+    if _after_configure is not None and not callable(_after_configure):
+        raise TypeError("HTTP post-configure hook must be callable or None")
     application = None
-    if _SESSION_FACADE is None:
-        from sonder_runtime.bootstrap.app import default_app
-        from sonder_runtime.application.session.http_facade import HttpSessionFacade
+    graph_memory = None
+    memory_service = None
+    memory_receiver = None
+    session_facade = None
+    control_plane_service = None
+    artifact_binding = None
+    app_control_binding = None
+    thin_handlers = _THIN_HANDLERS
+    lifecycle = None
+    httpd = None
+    port = None
+    startup_completed = False
+    cleanup_errors = []
 
-        application = default_app(config=config)
-        configure_session_facade(application.session_http_facade())
-    if _CONTROL_PLANE_SERVICE is None:
-        from sonder_runtime.bootstrap.app import default_app
+    def cleanup(name, callback):
+        try:
+            if callback() is False:
+                cleanup_errors.append(name)
+                _serve_logger.error("HTTP cleanup was incomplete: %s", name)
+        except BaseException:
+            cleanup_errors.append(name)
+            _serve_logger.error("HTTP cleanup failed: %s", name, exc_info=True)
 
-        if application is None:
+    # The HTTP adapter publishes several process-global route bindings.  Start
+    # one ownership guard before publishing any of them, not only after the
+    # listener enters serve_forever, so startup and bind errors cannot leave a
+    # live artifact/memory/control route behind.
+    try:
+        if config is not None:
+            previous_artifact = _ARTIFACT_TRANSFER_BINDING
+            previous_control = _APP_CONTROL_BINDING
+            try:
+                configure_typed_config(config)
+            finally:
+                # A late configure failure may have published a candidate.
+                # Capture only a newly selected binding; never take a prior
+                # host's resource merely because validation rejected ours.
+                if _ARTIFACT_TRANSFER_BINDING is not previous_artifact:
+                    artifact_binding = _ARTIFACT_TRANSFER_BINDING
+                if _APP_CONTROL_BINDING is not previous_control:
+                    app_control_binding = _APP_CONTROL_BINDING
+        else:
+            artifact_binding = _ARTIFACT_TRANSFER_BINDING
+            app_control_binding = _APP_CONTROL_BINDING
+
+        if _SESSION_FACADE is None:
+            from sonder_runtime.bootstrap.app import default_app
+            from sonder_runtime.application.session.http_facade import HttpSessionFacade
+
             application = default_app(config=config)
-        configure_control_plane_service(application.control_plane_snapshot_service)
-    if application is None and config is not None:
-        from sonder_runtime.bootstrap.app import default_app
+            configure_session_facade(application.session_http_facade())
+            session_facade = _SESSION_FACADE
+        if _CONTROL_PLANE_SERVICE is None:
+            from sonder_runtime.bootstrap.app import default_app
 
-        application = default_app(config=config)
-    if application is not None:
-        configure_memory_replication_service(
-            getattr(application, "memory_replication", None),
+            if application is None:
+                application = default_app(config=config)
+            configure_control_plane_service(application.control_plane_snapshot_service)
+            control_plane_service = _CONTROL_PLANE_SERVICE
+        if application is None and config is not None:
+            from sonder_runtime.bootstrap.app import default_app
+
+            application = default_app(config=config)
+        if application is not None:
+            graph_memory = getattr(application, "memory_replication", None)
+            # The route starts and exposes the graph service, but replacement
+            # must not close any graph that an outer host still owns.
+            configure_memory_replication_service(
+                graph_memory, close_replaced=False,
+            )
+            memory_service = graph_memory
+            memory_receiver = _MEMORY_REPLICATION_RECEIVER
+        else:
+            # A compatibility host with no owned Application has no authority
+            # to retain a receiver from a prior typed host selection.
+            _detach_memory_replication_route()
+        if _after_configure is not None:
+            # Managed hosts that need the typed app-control binding can finish
+            # their exact application handoff here.  This remains inside the
+            # same outer cleanup guard as typed HTTP publication and occurs
+            # before listener/security admission.
+            _after_configure(application)
+            thin_handlers = _THIN_HANDLERS
+        port = _selected_listener_port(config)
+        # Discovery reads the bound-listener value. Keep it synchronized when
+        # the direct compatibility entrypoint overrides typed config with a
+        # positional argument or SONDER_PORT.
+        CONFIGURED_PORT = port
+
+        _validate_bind_security(HOST)
+        lifecycle = sonder_lifecycle.get()
+        try:
+            # STARTING -> MIGRATING -> READY; no listener opens on failure.
+            # When config is provided the caller (cmd_serve) already ran
+            # migrate_all with the configured busy_timeout_ms — skip the
+            # lifecycle's unconfigured duplicate.
+            _serve_logger.info("Lifecycle startup initiated (STARTING -> MIGRATING -> READY)")
+            lifecycle.startup(run_migrations=config is None)
+            startup_completed = True
+            _serve_logger.info("Lifecycle startup completed")
+        except Exception as error:
+            _serve_logger.error("lifecycle startup failed before bind", exc_info=True)
+            _serve_logger.critical("lifecycle startup failed before bind, server cannot start", exc_info=True)
+            print("startup failed before bind: %s" % error, file=sys.stderr)
+            raise SystemExit(1)
+        lifecycle.begin_ollama_probe()
+        try:
+            factory = ThreadingHTTPServer if _server_factory is None else _server_factory
+            httpd = factory((HOST, port), Handler)
+        except OSError:
+            _serve_logger.critical(f"server cannot bind to {HOST}:{port}, port may already be in use", exc_info=True)
+            raise
+        # After a drain completes (signal or /v1/admin/drain), stop accepting.
+        lifecycle.coordinator.add_flush_hook(
+            lambda: owned_runtime_thread(
+                target=httpd.shutdown, daemon=True, name="sonder-httpd-shutdown"
+            ).start()
         )
-    else:
-        # A compatibility host with no owned Application has no authority to
-        # retain a receiver from a prior typed host selection.
-        configure_memory_replication_service(None)
-    port = _selected_listener_port(config)
-    # Discovery reads the bound-listener value. Keep it synchronized when the
-    # direct compatibility entrypoint overrides the typed configuration with a
-    # positional argument or SONDER_PORT.
-    CONFIGURED_PORT = port
-
-    _validate_bind_security(HOST)
-    lifecycle = sonder_lifecycle.get()
-    try:
-        # STARTING -> MIGRATING -> READY; no listener opens on failure.
-        # When config is provided the caller (cmd_serve) already ran
-        # migrate_all with the configured busy_timeout_ms — skip the
-        # lifecycle's unconfigured duplicate.
-        _serve_logger.info("Lifecycle startup initiated (STARTING -> MIGRATING -> READY)")
-        lifecycle.startup(run_migrations=config is None)
-        _serve_logger.info("Lifecycle startup completed")
-    except Exception as error:
-        _serve_logger.error("lifecycle startup failed before bind", exc_info=True)
-        _serve_logger.critical("lifecycle startup failed before bind, server cannot start", exc_info=True)
-        print("startup failed before bind: %s" % error, file=sys.stderr)
-        raise SystemExit(1)
-    lifecycle.begin_ollama_probe()
-    try:
-        factory = ThreadingHTTPServer if _server_factory is None else _server_factory
-        httpd = factory((HOST, port), Handler)
-    except OSError:
-        _serve_logger.critical(f"server cannot bind to {HOST}:{port}, port may already be in use", exc_info=True)
-        raise
-    # After a drain completes (signal or /v1/admin/drain), stop accepting.
-    lifecycle.coordinator.add_flush_hook(
-        lambda: owned_runtime_thread(
-            target=httpd.shutdown, daemon=True, name="sonder-httpd-shutdown"
-        ).start()
-    )
-    global BOUND_PORT
-    BOUND_PORT = port
-    url = "http://%s:%d" % (HOST, port)
-    _serve_logger.info(f"Server listening on {url}, auth_mode={_effective_auth_mode()!r}")
-    print("sonder_serve listening on %s" % url)
-    print("auth mode: %s" % _effective_auth_mode())
-    try:
-        # Do not let a Git network timeout delay the first request.  This
-        # reports cached origin/main state; `/updatecheck` is the explicit
-        # refresh operation.
-        print(server.runtime_source_update_status(refresh=False))
-    except Exception as exc:
-        print("runtime source update status unavailable: %s" % type(exc).__name__)
-    print("point your chat UI's OpenAI API base at %s/v1" % url)
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        pass
+        BOUND_PORT = port
+        url = "http://%s:%d" % (HOST, port)
+        _serve_logger.info(f"Server listening on {url}, auth_mode={_effective_auth_mode()!r}")
+        print("sonder_serve listening on %s" % url)
+        print("auth mode: %s" % _effective_auth_mode())
+        try:
+            # Do not let a Git network timeout delay the first request.  This
+            # reports cached origin/main state; `/updatecheck` is the explicit
+            # refresh operation.
+            print(server.runtime_source_update_status(refresh=False))
+        except Exception as exc:
+            print("runtime source update status unavailable: %s" % type(exc).__name__)
+        print("point your chat UI's OpenAI API base at %s/v1" % url)
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            pass
     finally:
         _serve_logger.info("HTTP server shutting down")
-        if not lifecycle.coordinator.draining:
-            lifecycle.drain("server stopping")
-        httpd.server_close()
-        from sonder_runtime.bootstrap.app import close_default_runtime_resources
-        try:
-            if _close_default_resources:
-                close_default_runtime_resources(timeout=5)
-        finally:
-            if _ARTIFACT_TRANSFER_BINDING is not None:
-                _ARTIFACT_TRANSFER_BINDING.close()
-            if _MEMORY_REPLICATION_SERVICE is not None:
-                configure_memory_replication_service(None)
-            else:
-                receiver = _MEMORY_REPLICATION_RECEIVER
-                if receiver is not None:
-                    close = getattr(receiver, "close", None)
-                    if callable(close):
-                        close()
-                configure_memory_replication_receiver(None)
+        if startup_completed and lifecycle is not None:
+            coordinator = getattr(lifecycle, "coordinator", None)
+            if not getattr(coordinator, "draining", False):
+                cleanup("lifecycle-drain", lambda: lifecycle.drain("server stopping"))
+        if lifecycle is not None:
+            stop_probe = getattr(lifecycle, "stop_probe", None)
+            if callable(stop_probe):
+                cleanup("ollama-probe", stop_probe)
+        if httpd is not None:
+            cleanup("listener", httpd.server_close)
+        if port is not None and BOUND_PORT == port:
+            BOUND_PORT = None
+        # Stop exposing every HTTP-owned route before its backing resource is
+        # closed.  Exact identity checks avoid clearing a different host that
+        # may have selected a replacement after this one was detached.
+        if _ARTIFACT_TRANSFER_BINDING is artifact_binding:
+            _ARTIFACT_TRANSFER_BINDING = None
+            _ARTIFACT_TRANSFER_CONFIG = None
+        if _APP_CONTROL_BINDING is app_control_binding:
+            _APP_CONTROL_BINDING = None
+            _APP_CONTROL_CONFIG = None
+        _detach_memory_replication_route(
+            service=memory_service, receiver=memory_receiver,
+        )
+        if _SESSION_FACADE is session_facade:
+            _SESSION_FACADE = None
+        if _CONTROL_PLANE_SERVICE is control_plane_service:
+            _CONTROL_PLANE_SERVICE = None
+        _detach_thin_handlers(handlers=thin_handlers)
+        if artifact_binding is not None:
+            cleanup("artifact-transfer", artifact_binding.close)
+        if _close_default_resources:
+            from sonder_runtime.bootstrap.app import close_default_runtime_resources
+
+            cleanup(
+                "default-application",
+                lambda: close_default_runtime_resources(timeout=5),
+            )
+        if memory_service is not None and memory_service is not graph_memory:
+            cleanup("memory-replication", memory_service.close)
         _serve_logger.info("HTTP server stopped")
+    if cleanup_errors:
+        raise RuntimeError("HTTP server cleanup is incomplete: " + ", ".join(cleanup_errors))
 
 
 if __name__ == "__main__":

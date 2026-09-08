@@ -9,7 +9,7 @@ a faked ``_load_config_or_none`` and every HTTP response is a stub.
 """
 import json
 import types
-import urllib.request
+from sonder_runtime.adapters.inference import ollama_endpoint
 
 import sonder_doctor
 
@@ -31,7 +31,7 @@ class _Response:
 
 def _config(workers):
     return types.SimpleNamespace(
-        ollama=types.SimpleNamespace(url="http://127.0.0.1:11434", workers=workers)
+        ollama=types.SimpleNamespace(url="http://127.0.0.1:11434", workers=workers, allow_remote=True)
     )
 
 
@@ -61,8 +61,8 @@ def test_all_workers_reachable_reports_ok(monkeypatch):
         lambda: _config(("https://pc2:443", "https://pc3:443")),
     )
     monkeypatch.setattr(
-        urllib.request,
-        "urlopen",
+        ollama_endpoint._OPENER,
+        "open",
         lambda *a, **k: _Response({"models": [{"name": "sonder:latest"}]}),
     )
 
@@ -86,7 +86,7 @@ def test_one_worker_down_warns_and_names_it(monkeypatch):
             raise OSError("connection refused")
         return _Response({"models": []})
 
-    monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
+    monkeypatch.setattr(ollama_endpoint._OPENER, "open", _urlopen)
 
     result = sonder_doctor._check_ollama_workers()
 
@@ -107,7 +107,7 @@ def test_every_worker_down_fails(monkeypatch):
     def _boom(*_a, **_k):
         raise OSError("timed out")
 
-    monkeypatch.setattr(urllib.request, "urlopen", _boom)
+    monkeypatch.setattr(ollama_endpoint._OPENER, "open", _boom)
 
     result = sonder_doctor._check_ollama_workers()
 
@@ -122,7 +122,7 @@ def test_non_200_worker_response_counts_as_unreachable(monkeypatch):
         lambda: _config(("https://pc2:443",)),
     )
     monkeypatch.setattr(
-        urllib.request, "urlopen", lambda *a, **k: _Response({}, status=503)
+        ollama_endpoint._OPENER, "open", lambda *a, **k: _Response({}, status=503)
     )
 
     result = sonder_doctor._check_ollama_workers()

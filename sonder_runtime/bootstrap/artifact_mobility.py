@@ -23,7 +23,9 @@ from ..application.artifacts.mobility import (
 from ..application.artifacts.mobility_source import MobilitySourceError
 from ..application.artifacts.transfer import TransferError
 from ..platform.artifact_mobility_config import artifact_mobility_errors
-from ..platform.artifact_mobility_source_config import source_scope_id
+from ..platform.artifact_mobility_source_config import (
+    artifact_mobility_source_errors, source_scope_id,
+)
 from ..platform.config import SonderConfig, validate_deployment
 
 
@@ -266,7 +268,14 @@ def compose_artifact_mobility(config_provider, *, source_binding: ArtifactMobili
             return False
         try:
             config = config_provider()
+            if type(config) is not SonderConfig:
+                return False
             validate_deployment(config)
+            if (
+                artifact_mobility_source_errors(config)
+                or artifact_mobility_errors(config)
+            ):
+                return False
             ArtifactMobilitySourceBinding._check_store_roots(config)
             if source_binding is None:
                 return bool(config.artifact_mobility_source.enabled and config.artifact_mobility.enabled)

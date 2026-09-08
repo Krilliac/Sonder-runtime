@@ -32,17 +32,49 @@ def _pool_summary(pool_status: object) -> tuple[dict[str, object], dict[str, obj
         worker_count = 0
     if type(healthy) is not int or healthy < 0:
         healthy = 0
-    enabled = pool_status.get("enabled") is True
+    def count(value, limit=1024):
+        return min(value, limit) if type(value) is int and value >= 0 else 0
+
+    eligible = count(pool_status.get("eligible_worker_count", healthy))
+    admission = pool_status.get("admission")
+    enabled = (pool_status.get("enabled") is True and worker_count > 1
+               and admission == "accepting" and eligible > 0)
+    queue = pool_status.get("queue")
+    queue = queue if isinstance(queue, dict) else {}
+
     remote = pool_status.get("remote_worker_count", 0)
     if type(remote) is not int or remote < 0:
         remote = 0
+    membership_mode = (
+        pool_status.get("membership_mode")
+        if pool_status.get("membership_mode") in {"static", "external"}
+        else "unknown"
+    )
+    raw_membership_state = pool_status.get("membership_state")
+    membership_state = (
+        "static"
+        if membership_mode == "static" and raw_membership_state == "static"
+        else raw_membership_state
+        if membership_mode == "external"
+        and raw_membership_state in {"unrefreshed", "current", "stale_or_partial"}
+        else "unknown"
+    )
     summary = {
         "configured": True,
+        "schema_version": 2 if pool_status.get("schema_version") == 2 else 1,
+        "eligible_worker_count": eligible,
+        "available_capacity": count(pool_status.get("available_capacity"), 16384),
+        "queue": {"waiting": count(queue.get("waiting"), 4096),
+                  "limit": count(queue.get("limit"), 4096), "scope": "global"},
+        "membership_mode": membership_mode,
+        "membership_state": membership_state,
+        "refresh_state": pool_status.get("refresh_state") if pool_status.get("refresh_state") in
+                         {"not_refreshed", "current", "stale_or_partial"} else "unknown",
         "worker_count": min(worker_count, 1024),
         "healthy_worker_count": min(healthy, 1024),
         "remote_worker_count": min(remote, 1024),
-        "routing": str(pool_status.get("routing", ""))[:128],
-        "admission": str(pool_status.get("admission", ""))[:32],
+        "routing": "latency-aware-least-inflight" if pool_status.get("routing") == "latency-aware-least-inflight" else "unknown",
+        "admission": admission if admission in {"accepting", "draining"} else "unknown",
     }
     if enabled:
         reason = (

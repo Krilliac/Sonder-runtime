@@ -20,6 +20,8 @@ adopts the production behavior on first use.
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 
 import os
@@ -444,6 +446,9 @@ class RuntimeLifecycle:
 
         self._probe_thread: threading.Thread | None = None
         self._probe_stop = threading.Event()
+        self._probe_lock = threading.Lock()
+        self._probe_state_changed = threading.Condition(self._probe_lock)
+        self._probe_starting = False
         self._startup_reconciler = startup_reconciler
         self._startup_reconciled = 0
         self._graceful_drain_coordinator = graceful_drain_coordinator
@@ -606,19 +611,46 @@ class RuntimeLifecycle:
             self.tracker.transition(ProcessState.READY, "legacy start adopted")
 
     def begin_ollama_probe(self, *, interval_seconds: float | None = None) -> None:
-        if self._probe_thread is not None:
-            return
-        interval = interval_seconds if interval_seconds is not None else self._ollama_probe_interval
+        with self._probe_state_changed:
+            if (
+                self._probe_stop.is_set()
+                or self._probe_thread is not None
+                or self._probe_starting
+            ):
+                return
+            self._probe_starting = True
+        interval = (
+            interval_seconds
+            if interval_seconds is not None
+            else self._ollama_probe_interval
+        )
 
         def probe_loop() -> None:
             while not self._probe_stop.wait(interval):
                 self.probe_ollama_once()
 
-        self.probe_ollama_once()
-        self._probe_thread = owned_runtime_thread(
-            target=probe_loop, daemon=True, name="sonder-ollama-probe"
-        )
-        self._probe_thread.start()
+        try:
+            self.probe_ollama_once()
+        except BaseException:
+            with self._probe_state_changed:
+                self._probe_starting = False
+                self._probe_state_changed.notify_all()
+            raise
+        with self._probe_state_changed:
+            try:
+                # A concurrent retirement may have signalled stop while the
+                # first health check was in flight.  Do not publish a stale
+                # background probe after that lifecycle has been replaced.
+                if self._probe_stop.is_set():
+                    return
+                thread = owned_runtime_thread(
+                    target=probe_loop, daemon=True, name="sonder-ollama-probe"
+                )
+                self._probe_thread = thread
+                thread.start()
+            finally:
+                self._probe_starting = False
+                self._probe_state_changed.notify_all()
 
     def probe_ollama_once(self, timeout: float | None = None) -> bool:
         timeout = timeout if timeout is not None else self._ollama_probe_timeout
@@ -637,8 +669,24 @@ class RuntimeLifecycle:
         )
         return healthy
 
-    def stop_probe(self) -> None:
+    def stop_probe(self) -> bool:
+        """Signal and bounded-join the probe before retiring this lifecycle."""
         self._probe_stop.set()
+        deadline = time.monotonic() + max(0.0, self._ollama_probe_timeout)
+        with self._probe_state_changed:
+            while self._probe_starting:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._probe_state_changed.wait(remaining)
+            thread = self._probe_thread
+        if thread is not None and thread is not threading.current_thread():
+            # The probe loop waits on the stop event, so this normally returns
+            # immediately.  Bound the rare in-flight HTTP probe by its own
+            # configured request deadline rather than leaking an old endpoint
+            # into a later typed configuration.
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        return thread is None or not thread.is_alive()
 
     def drain(self, reason: str = "drain requested") -> bool:
         if not self._drain_lock.acquire(blocking=False):
@@ -664,8 +712,11 @@ class RuntimeLifecycle:
                     pass
             return result.clean
         clean = self.coordinator.drain(reason=reason)
-        self.stop_probe()
-        return clean
+        try:
+            probe_stopped = self.stop_probe()
+        except Exception:
+            probe_stopped = False
+        return clean and probe_stopped
 
     def drain_gracefully(
         self,
@@ -685,7 +736,7 @@ class RuntimeLifecycle:
         plan = build_drain_plan(())
         coordinator = self._graceful_drain_coordinator
         if coordinator is None:
-            return GracefulDrainResult(
+            result = GracefulDrainResult(
                 request=request,
                 stage=DrainStage.INCOMPLETE,
                 admission_stopped=False,
@@ -701,33 +752,44 @@ class RuntimeLifecycle:
                     "legacy ShutdownCoordinator remains authoritative",
                 ),
             )
-
+        else:
+            try:
+                selected_observations = (
+                    tuple(self._graceful_drain_observations())
+                    if observations is None and self._graceful_drain_observations is not None
+                    else tuple(observations or ())
+                )
+                result = coordinator.drain(
+                    request,
+                    observations=selected_observations,
+                )
+            except Exception as exc:
+                result = GracefulDrainResult(
+                    request=request,
+                    stage=DrainStage.INCOMPLETE,
+                    admission_stopped=False,
+                    deadline_announced=False,
+                    descendants_cancelled=False,
+                    descendants_settled=False,
+                    flush_completed=False,
+                    cleanup_completed=False,
+                    process_tree=(),
+                    plan=plan,
+                    errors=(f"graceful drain bridge: {type(exc).__name__}",),
+                )
         try:
-            selected_observations = (
-                tuple(self._graceful_drain_observations())
-                if observations is None and self._graceful_drain_observations is not None
-                else tuple(observations or ())
-            )
-            result = coordinator.drain(
-                request,
-                observations=selected_observations,
-            )
+            probe_stopped = self.stop_probe()
         except Exception as exc:
-            return GracefulDrainResult(
-                request=request,
-                stage=DrainStage.INCOMPLETE,
-                admission_stopped=False,
-                deadline_announced=False,
-                descendants_cancelled=False,
-                descendants_settled=False,
-                flush_completed=False,
+            probe_stopped = False
+            probe_error = f"ollama probe stop: {type(exc).__name__}"
+        else:
+            probe_error = "ollama probe did not stop"
+        if not probe_stopped:
+            return replace(
+                result,
                 cleanup_completed=False,
-                process_tree=(),
-                plan=plan,
-                errors=(f"graceful drain bridge: {type(exc).__name__}",),
+                errors=result.errors + (probe_error,),
             )
-        finally:
-            self.stop_probe()
         return result
 
     # -- admission ---------------------------------------------------------
@@ -1155,14 +1217,21 @@ def configure(config: SonderConfig | None) -> None:
     with _instance_lock:
         if _configured_config is config:
             return
-        _configured_config = config
         if _instance is not None:
-            _reset_instance()
+            # Do not publish a replacement while an old endpoint probe still
+            # runs.  Dropping the singleton first loses the only lifecycle
+            # reference that can prove the old probe has stopped.
+            if not _instance.stop_probe():
+                raise RuntimeError("configured lifecycle probe did not stop before replacement")
+        _configured_config = config
+        _reset_instance()
 
 
-def _reset_instance() -> None:
+def _reset_instance() -> RuntimeLifecycle | None:
     global _instance
+    previous = _instance
     _instance = None
+    return previous
 
 
 def get() -> RuntimeLifecycle:
@@ -1198,5 +1267,7 @@ def get() -> RuntimeLifecycle:
 def reset_for_tests() -> None:
     global _configured_config
     with _instance_lock:
+        if _instance is not None and not _instance.stop_probe():
+            raise RuntimeError("configured lifecycle probe did not stop before reset")
         _configured_config = None
         _reset_instance()

@@ -13,6 +13,82 @@ import sonder_runtime.platform.config as runtime_config
 import sonder_health
 
 
+@pytest.mark.parametrize("mode,role,key,allowed", [
+    ("local-open", None, False, True), ("api-key", None, True, True),
+    ("account", "user", False, False), ("account", "developer", False, False),
+    ("account", "admin", False, True), ("both", "user", True, False),
+    ("both", "admin", True, True),
+])
+def test_pool_admin_http_detail_obeys_administrator_boundary(monkeypatch, mode, role, key, allowed):
+    from sonder_runtime.adapters.inference.ollama_pool import OllamaWorkerPool
+    probes = []
+    pool = OllamaWorkerPool("http://127.0.0.1:11434", capability_prober=lambda origin: probes.append(origin) or {"models": ()})
+    monkeypatch.setattr(ts.server, "OLLAMA_POOL", pool)
+    context = {"mode": mode, "authorized": True, "api_key": key,
+               "account": {"username": "caller", "role": role} if role else None}
+    monkeypatch.setattr(ts.Handler, "_request_auth_context", lambda self: context)
+    if not allowed:
+        monkeypatch.setattr(pool, "validate_status_request", lambda **k: pytest.fail("unauthorized pool call"))
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(port, "POST", "/v1/sonder/ollama-pool", body='{"refresh":true,"page_size":1}',
+                                   headers={"Content-Type": "application/json"})
+    assert status == (200 if allowed else 403), body
+    assert len(probes) == (1 if allowed else 0)
+    if allowed:
+        page = json.loads(body)
+        assert page["schema_version"] == 2
+        assert len(page["workers"]) == 1
+        assert page["serialized_bytes"] == len(json.dumps(page).encode("utf-8"))
+    else:
+        assert json.loads(body) == {"error": "authorization"}
+
+
+def test_pool_admin_generic_tool_cannot_bypass_role_gate():
+    context = {"mode": "account", "authorized": True, "api_key": False,
+               "account": {"username": "reader", "role": "user"}}
+    assert ts._http_tool_refusal(("ollama_pool_admin_status",), "/ollama_pool_admin_status", context)
+
+
+def test_pool_admin_http_rejects_probe_overrides_and_bad_cursors_without_io(monkeypatch):
+    from sonder_runtime.adapters.inference.ollama_pool import OllamaWorkerPool
+    pool = OllamaWorkerPool("http://127.0.0.1:11434", capability_prober=lambda _: pytest.fail("unexpected probe"))
+    monkeypatch.setattr(ts.server, "OLLAMA_POOL", pool)
+    context = {"mode": "account", "authorized": True, "api_key": False,
+               "account": {"username": "owner", "role": "admin"}}
+    monkeypatch.setattr(ts.Handler, "_request_auth_context", lambda self: context)
+    with _http_server(monkeypatch) as port:
+        for payload in ({"refresh": True, "probe_batch_size": 128}, {"refresh": True, "cursor": "invalid"}):
+            status, _, body = _request(port, "POST", "/v1/sonder/ollama-pool", body=json.dumps(payload),
+                                       headers={"Content-Type": "application/json"})
+            assert status == 400, body
+            assert json.loads(body) == {"error": "invalid_request"}
+
+
+def test_pool_http_cached_pages_bind_cursors_to_current_admin_before_refresh(monkeypatch):
+    from sonder_runtime.adapters.inference.ollama_pool import OllamaWorkerPool
+    pool = OllamaWorkerPool("http://127.0.0.1:11434", ("http://127.0.0.1:11435",),
+                           capability_prober=lambda _: pytest.fail("unexpected probe"))
+    monkeypatch.setattr(ts.server, "OLLAMA_POOL", pool)
+    context = {"mode": "account", "authorized": True, "api_key": False,
+               "account": {"username": "owner-a", "role": "admin"}}
+    monkeypatch.setattr(ts.Handler, "_request_auth_context", lambda self: context)
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(port, "GET", "/v1/sonder/ollama-pool?page_size=1")
+        assert status == 200
+        assert headers["Cache-Control"] == "no-store"
+        cursor = json.loads(body)["next_cursor"]
+        context["account"]["username"] = "owner-b"
+        status, _, body = _request(port, "POST", "/v1/sonder/ollama-pool",
+                                   body=json.dumps({"refresh": True, "cursor": cursor}),
+                                   headers={"Content-Type": "application/json"})
+        assert status == 400
+        assert json.loads(body) == {"error": "invalid_request"}
+        context["account"]["username"] = "owner-a"
+        status, _, body = _request(port, "GET", "/v1/sonder/ollama-pool?cursor=" + cursor)
+        assert status == 200
+        assert json.loads(body)["complete"] is True
+
+
 @pytest.mark.parametrize('mode', ['account', 'both', 'either', 'api-key', 'local-open'])
 def test_logout_revokes_only_explicit_session_with_safe_retry(monkeypatch, tmp_path, mode):
     import admin_auth
@@ -1039,6 +1115,14 @@ def test_served_runtime_stash_aliases_delegate_after_action_sensitive_gates(ever
 def test_system_status_uses_projected_activity_and_shared_feed(
     monkeypatch, tmp_path,
 ):
+    from dataclasses import replace
+    from sonder_runtime.bootstrap import app as bootstrap_app
+    from sonder_runtime.platform.artifact_mobility_config import ArtifactMobilityConfig
+    from sonder_runtime.platform.artifact_mobility_source_config import (
+        ArtifactMobilitySourceConfig,
+    )
+    from sonder_runtime.platform.config import SonderConfig
+
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
@@ -1083,6 +1167,24 @@ def test_system_status_uses_projected_activity_and_shared_feed(
     monkeypatch.setattr(ts.server, "learning_health_data", lambda: {})
     monkeypatch.setattr(ts.server.sonder_paths, "default_home", lambda: tmp_path)
     monkeypatch.setattr(ts.server, "available_tiers", lambda: {})
+
+    class ComposedApplication:
+        config = replace(
+            SonderConfig(),
+            artifact_mobility=ArtifactMobilityConfig(enabled=True),
+            artifact_mobility_source=ArtifactMobilitySourceConfig(enabled=True),
+        )
+        memory_replication = None
+
+        @staticmethod
+        def provider_health_data():
+            return ()
+
+        @staticmethod
+        def _artifact_mobility_available():
+            return True
+
+    monkeypatch.setattr(bootstrap_app, "default_app", lambda: ComposedApplication())
     monkeypatch.setattr(ts.server, "npu_fallback_status_data", lambda: {
         "schema_version": 1,
         "known": True,
@@ -1139,6 +1241,7 @@ def test_system_status_uses_projected_activity_and_shared_feed(
     assert capabilities["mobility"]["automatic_takeover_available"] is False
     assert capabilities["mobility"]["automatic_failback_available"] is False
     assert capabilities["mobility"]["automatic_artifact_migration"]["available"] is False
+    assert capabilities["mobility"]["fixed_peer_artifact_copy"]["available"] is True
     npu_event = next(
         row for row in payload["execution"]["feed"]["events"]
         if row["kind"] == "npu_fallback_handled"
@@ -1154,6 +1257,105 @@ def test_system_status_uses_projected_activity_and_shared_feed(
         "npu-secret", str(tmp_path / "private"),
     ):
         assert secret not in text
+
+
+def test_system_status_fails_closed_for_invalid_direct_artifact_mobility_config(
+    monkeypatch, tmp_path,
+):
+    """Status must not promise a peer copy which dispatch will reject."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from sonder_runtime.bootstrap import app as bootstrap_app
+    from sonder_runtime.bootstrap.artifact_mobility import compose_artifact_mobility
+    from sonder_runtime.platform.artifact_mobility_config import ArtifactMobilityConfig
+    from sonder_runtime.platform.artifact_mobility_source_config import (
+        ArtifactMobilitySourceConfig,
+    )
+    from sonder_runtime.platform.config import Secrets, SonderConfig, StateConfig
+
+    source_path = tmp_path / "private-source"
+    peer_origin = "https://private-peer.example:9443"
+    peer_key = "private-peer-key-" + "c" * 32
+    valid = SonderConfig(
+        state=StateConfig(home=str(tmp_path / "state")),
+        artifact_mobility_source=ArtifactMobilitySourceConfig(
+            enabled=True,
+            store_dir=str(source_path),
+            principal_id="principal-a",
+            project_id="project-a",
+            source_owner_id="owner-a",
+        ),
+        artifact_mobility=ArtifactMobilityConfig(
+            enabled=True,
+            destination_label="node-one",
+            destination_origin=peer_origin,
+            destination_tls_certificate_sha256="a" * 64,
+            expected_recipient_attestation_sha256="b" * 64,
+            destination_credential_id="private-generation",
+        ),
+        secrets=Secrets(artifact_mobility_peer_key=peer_key),
+    )
+    _, _, _, valid_available, valid_close = compose_artifact_mobility(lambda: valid)
+    try:
+        assert valid_available() is True
+    finally:
+        valid_close()
+
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "status", lambda: "ready")
+    monkeypatch.setattr(ts.server, "sonder_stats", lambda: {})
+    monkeypatch.setattr(ts.server, "learn_tiers", lambda: {})
+    monkeypatch.setattr(ts.server, "system_improvement_report", lambda: {})
+    monkeypatch.setattr(ts.server, "context_health_data", lambda: {})
+    monkeypatch.setattr(ts.server.context_policy, "policy", lambda *_: {})
+    monkeypatch.setattr(ts.server.master_orchestrator, "snapshot", lambda: {})
+    monkeypatch.setattr(ts.server.autopilot_controller, "snapshot", lambda: {})
+    monkeypatch.setattr(ts.server, "runtime_policy_data", lambda: {})
+    monkeypatch.setattr(ts.server.selfmod, "status_data", lambda: {})
+    monkeypatch.setattr(ts.server, "mcp_runtime_data", lambda: {})
+    monkeypatch.setattr(ts.server, "npu_fallback_status_data", lambda: {})
+    monkeypatch.setattr(ts.server, "learning_health_data", lambda: {})
+    monkeypatch.setattr(ts.server, "available_tiers", lambda: {})
+    monkeypatch.setattr(ts.server.activity_tracker, "snapshot", lambda: {})
+    monkeypatch.setattr(
+        ts.server.activity_tracker, "public_snapshot", lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(ts.server, "execution_status_data", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(ts.server.OLLAMA_POOL, "summary", lambda: None)
+
+    invalid_configs = (
+        replace(
+            valid,
+            artifact_mobility_source=replace(
+                valid.artifact_mobility_source, principal_id=""
+            ),
+        ),
+        replace(valid, secrets=replace(valid.secrets, artifact_mobility_peer_key="")),
+    )
+    for config in invalid_configs:
+        _, _, _, available, close = compose_artifact_mobility(lambda: config)
+        application = SimpleNamespace(
+            config=config,
+            memory_replication=None,
+            provider_health_data=lambda: (),
+            _artifact_mobility_available=available,
+        )
+        monkeypatch.setattr(bootstrap_app, "default_app", lambda: application)
+        try:
+            with _http_server(monkeypatch) as port:
+                status, _, body = _request(port, "GET", "/v1/sonder/status")
+        finally:
+            close()
+        text = body.decode("utf-8")
+        assert status == 200
+        payload = json.loads(text)
+        assert payload["operational_capabilities"]["mobility"][
+            "fixed_peer_artifact_copy"
+        ]["available"] is False
+        for private in (peer_origin, peer_key, str(source_path)):
+            assert private not in text
 
 
 def test_ordinary_hosted_account_cannot_read_global_operations_dashboard(monkeypatch):

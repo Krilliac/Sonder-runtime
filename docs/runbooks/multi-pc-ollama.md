@@ -27,17 +27,15 @@ cooldown doubles on each consecutive trip, up to eight times the base cooldown
 probe every 30 seconds while still recovering a rebooted one within a minute
 or two.
 
-The pool also carries an experimental model-affinity seam: when a worker's
-advertised model inventory has been recorded, requests naming a model that
-worker lacks are ordered toward workers that have it. Inventory only reorders
-scheduling — it never excludes a worker, because a recorded list may be stale
-and Ollama can pull a model on demand. Running the `status` tool refreshes
-each worker's inventory (best-effort, per-worker `/api/tags` probes) and a
- worker that cannot answer keeps its previous record. Idempotent control-plane
- reads may fail over; model POSTs never do. A transport timeout cannot prove
- that a remote worker did not receive a request body, so replaying that POST
- could duplicate inference. Sonder surfaces the ambiguous failure instead.
-Transport errors retained in status are reduced to their exception class.
+For model-specific routing the pool requires fresh positive capability evidence.
+If no fresh supporting worker exists, one request may probe one unknown or stale
+worker; it does not fan out across the roster. Model-less requests and default
+status start no such probe. `ollama_pool_admin_status(refresh=true)` is the
+explicit administrator operation for one configured bounded stale refresh.
+Idempotent control reads may fail over; model POSTs never do. A transport timeout
+cannot prove that a remote worker did not receive a request body, so Sonder
+surfaces ambiguous failures instead of replaying the POST. Administrative status
+reports only closed error categories, never free-form exception text.
 
 ## Prepare each worker PC
 
@@ -116,19 +114,20 @@ loopback, and the pool is never consulted for them even when it is enabled:
 
 Every other pool-eligible request (ordinary chat/generate tiers) is free to
 land on any configured worker, local or remote, per the least-inflight
-scheduler above. Locality displays (`status`, error messages, cache
+scheduler above. Locality decisions (error messages and cache
 eligibility) also treat any configured remote worker as non-local, not just a
 non-loopback primary — a loopback primary with a remote worker in
 `SONDER_OLLAMA_WORKERS` is reported and cached as remote.
 
 ## Verify
 
- Use the normal status surface. It reports the configured worker count, how
-many workers are remote, and per-worker health: in-flight requests, consecutive
-failures, circuit trips, whether the worker is in its half-open probing state,
-and the smoothed request latency in milliseconds. A worker that goes down is
-temporarily removed from selection and returns automatically through a
-successful half-open trial after its cooldown.
+The normal status surface is a cached summary: eligible/total workers, available
+capacity, global queue occupancy, static membership, and cache freshness. It
+never refreshes inventory or reveals worker origins. Use the explicit
+administrator-only `ollama_pool_admin_status` operation for a bounded cached
+page or one configured refresh batch. See the
+[multi-node status contract](multi-node-ollama.md#4-verify-the-pool) for the HTTP
+route, cursor behavior, and fixed page limits.
 
 Run `python -m sonder_runtime doctor` (or `sonder doctor`) to check worker
 health without sending inference traffic:
@@ -164,8 +163,7 @@ metrics endpoint:
 The `worker` label is a bounded ordinal ("w0", "w1", ...) assigned in
 configuration order, capped at 16 distinct slots with any remainder
 collapsed into `overflow` -- it never carries the worker's hostname, so a
-Prometheus scrape target never learns your worker topology. Use the status
-surface (not metrics) to map a slot back to an origin. Each failed attempt's
+Prometheus scrape target never learns your worker topology. Only administrator detail exposes configured origins. Each failed attempt's
 error text is redacted with the same secret-value and pattern filters as the
 structured JSON logs before it is retained for the status surface.
 
@@ -173,10 +171,9 @@ To pull the trace spans for one specific request or run, use the bounded
 local observability projection with a correlation filter, e.g.
 `GET /v1/observability/trace?correlation_id=<id>`; `category` and `severity`
  filters compose the same way.
- The status surface also reports the TLS verification mode and that
- non-idempotent failover is disabled. Error status retains only the exception
- class; free-form transport details are suppressed because they may contain
- internal topology or credential-shaped text.
+ Administrative detail also reports the TLS verification mode and disabled
+ non-idempotent failover. Error categories never contain exception text,
+ internal topology, or credential-shaped details.
 
 ## Internet access
 

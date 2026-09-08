@@ -330,6 +330,8 @@ def _check_ollama(*, timeout: float = 5.0) -> dict:
     config = _load_config_or_none()
     if config is None:
         return _skip("config unavailable for Ollama endpoint")
+    if getattr(getattr(config, "membership", None), "mode", "static") == "external":
+        return _skip("deferred: external membership requires explicit typed pool refresh")
     url = getattr(getattr(config, "ollama", None), "url", None)
     if not url:
         return _skip("no Ollama url configured")
@@ -338,13 +340,17 @@ def _check_ollama(*, timeout: float = 5.0) -> dict:
         import urllib.error
         import urllib.request
         from urllib.parse import urlsplit
-    except Exception as exc:  # pragma: no cover - stdlib import guard
-        return _skip("urllib unavailable (%s)" % exc)
+        from sonder_runtime.adapters.inference import ollama_endpoint
+    except Exception as exc:  # pragma: no cover - import guard
+        return _skip("Ollama transport unavailable (%s)" % exc)
     host = urlsplit(url).hostname or ""
     tags_url = url.rstrip("/") + "/api/tags"
     try:
         request = urllib.request.Request(tags_url, method="GET")
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with ollama_endpoint.open_url(
+            request, timeout=timeout,
+            allow_remote=getattr(config.ollama, "allow_remote", False) is True,
+        ) as response:
             if response.status != 200:
                 return {
                     "status": STATUS_FAIL,
@@ -385,6 +391,8 @@ def _check_ollama_workers(*, timeout: float = 5.0) -> dict:
     config = _load_config_or_none()
     if config is None:
         return _skip("config unavailable for Ollama worker endpoints")
+    if getattr(getattr(config, "membership", None), "mode", "static") == "external":
+        return _skip("deferred: external membership requires explicit typed pool refresh")
     workers = tuple(getattr(getattr(config, "ollama", None), "workers", ()) or ())
     if not workers:
         return _skip("no worker endpoints configured (single-endpoint deployment)")
@@ -393,8 +401,9 @@ def _check_ollama_workers(*, timeout: float = 5.0) -> dict:
         import urllib.error
         import urllib.request
         from urllib.parse import urlsplit
-    except Exception as exc:  # pragma: no cover - stdlib import guard
-        return _skip("urllib unavailable (%s)" % exc)
+        from sonder_runtime.adapters.inference import ollama_endpoint
+    except Exception as exc:  # pragma: no cover - import guard
+        return _skip("Ollama transport unavailable (%s)" % exc)
 
     up: list[str] = []
     down: list[str] = []
@@ -403,7 +412,10 @@ def _check_ollama_workers(*, timeout: float = 5.0) -> dict:
         tags_url = origin.rstrip("/") + "/api/tags"
         try:
             request = urllib.request.Request(tags_url, method="GET")
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with ollama_endpoint.open_url(
+                request, timeout=timeout,
+                allow_remote=getattr(config.ollama, "allow_remote", False) is True,
+            ) as response:
                 if response.status != 200:
                     down.append("%s (HTTP %s)" % (host, response.status))
                     continue
@@ -429,6 +441,8 @@ def _check_ollama_residency(*, timeout: float = 5.0) -> dict:
     config = _load_config_or_none()
     if config is None:
         return _skip("config unavailable for Ollama residency check")
+    if getattr(getattr(config, "membership", None), "mode", "static") == "external":
+        return _skip("deferred: external membership requires explicit typed pool refresh")
     url = getattr(getattr(config, "ollama", None), "url", None)
     if not url:
         return _skip("no Ollama url configured")
@@ -438,14 +452,18 @@ def _check_ollama_residency(*, timeout: float = 5.0) -> dict:
         import urllib.request
         from datetime import datetime, timezone
         from urllib.parse import urlsplit
-    except Exception as exc:  # pragma: no cover - stdlib import guard
-        return _skip("urllib unavailable (%s)" % exc)
+        from sonder_runtime.adapters.inference import ollama_endpoint
+    except Exception as exc:  # pragma: no cover - import guard
+        return _skip("Ollama transport unavailable (%s)" % exc)
 
     host = urlsplit(url).hostname or ""
     ps_url = url.rstrip("/") + "/api/ps"
     try:
         request = urllib.request.Request(ps_url, method="GET")
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with ollama_endpoint.open_url(
+            request, timeout=timeout,
+            allow_remote=getattr(config.ollama, "allow_remote", False) is True,
+        ) as response:
             if response.status != 200:
                 return _skip("%s: /api/ps returned HTTP %s" % (host, response.status))
             payload = json.loads(response.read(1_048_576).decode("utf-8"))

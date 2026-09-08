@@ -544,11 +544,23 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
     # endpoint directly.
     if include_typed_runtime:
         os.environ["OLLAMA_HOST"] = config.ollama.url
+        os.environ["SONDER_OLLAMA_POOL_MAX_WORKERS"] = str(
+            config.ollama.worker_pool_max_workers
+        )
         os.environ["SONDER_OLLAMA_WORKER_MAX_INFLIGHT"] = str(
             config.ollama.worker_max_inflight
         )
         os.environ["SONDER_OLLAMA_WORKER_QUEUE_DEPTH"] = str(
             config.ollama.worker_queue_depth
+        )
+        os.environ["SONDER_OLLAMA_WORKER_PROBE_PARALLELISM"] = str(
+            config.ollama.worker_capability_probe_parallelism
+        )
+        os.environ["SONDER_OLLAMA_WORKER_PROBE_BATCH_SIZE"] = str(
+            config.ollama.worker_capability_probe_batch_size
+        )
+        os.environ["SONDER_OLLAMA_WORKER_STATUS_PAGE_SIZE"] = str(
+            config.ollama.worker_status_page_size
         )
         os.environ["SONDER_OLLAMA_WORKER_ADMISSION_TIMEOUT_MS"] = str(
             config.ollama.worker_admission_timeout_ms
@@ -640,10 +652,10 @@ def cmd_serve(args) -> int:
                   "(use --skip-preflight only for recovery work)",
                   file=sys.stderr)
             return 1
-    # Bind typed state and HTTP settings before migration/binding. The
-    # compatibility export below is restricted to settings still consumed by
-    # legacy adapters; typed HTTP authority no longer depends on environment
-    # round-tripping.
+    # Bind non-HTTP typed state before migration/binding. The canonical HTTP
+    # adapter publishes its artifact/control bindings inside serve.main's
+    # ownership guard, after migrations have succeeded, so a refused migration
+    # cannot leave a live route behind.
     _configure_typed_home(config)
     from sonder_runtime.adapters.inference import ollama_endpoint
     ollama_endpoint.configure_typed_endpoint(config.ollama.url)
@@ -661,6 +673,12 @@ def cmd_serve(args) -> int:
         probe_timeout_ms=config.ollama.worker_probe_timeout_ms,
         max_inflight_per_worker=config.ollama.worker_max_inflight,
         queue_depth=config.ollama.worker_queue_depth,
+        max_workers=config.ollama.worker_pool_max_workers,
+        capability_probe_parallelism=(
+            config.ollama.worker_capability_probe_parallelism
+        ),
+        capability_probe_batch_size=config.ollama.worker_capability_probe_batch_size,
+        status_page_size=config.ollama.worker_status_page_size,
     )
     from sonder_runtime.adapters.inference import ollama_vision
     ollama_vision.configure_typed_request_timeout(
@@ -681,7 +699,6 @@ def cmd_serve(args) -> int:
         )
         return 1
     import sonder_runtime.interfaces.http.serve as sonder_serve
-    sonder_serve.configure_typed_config(config)
     _export_runtime_environment(config, include_typed_runtime=False)
 
     # MIGRATING phase: no listener opens until migrations complete.
@@ -707,27 +724,32 @@ def cmd_serve(args) -> int:
         pass
 
     from sonder_runtime.bootstrap.legacy_interfaces import (
+        configure_legacy_application,
         configure_legacy_interfaces,
         configure_legacy_capacity,
     )
-
-    configure_legacy_interfaces()
-    configure_legacy_capacity(
-        autopilot_runs=config.capacity.autopilot_runs,
-        fleet_workers=config.capacity.fleet_workers,
-        training_jobs=config.capacity.training_jobs,
+    from sonder_runtime.bootstrap.app import (
+        close_default_runtime_resources, default_app,
     )
-
-    from sonder_runtime.bootstrap.app import default_app
     from sonder_runtime.interfaces.http.handlers import RecallHandler, OutcomeHandler
-    app = default_app()
-    sonder_serve.configure_thin_handlers({
-        "/v1/recall": RecallHandler(app.memory),
-        "/v1/outcome": OutcomeHandler(app.memory),
-    })
-
-    sys.argv = ["python -m sonder_runtime serve", str(config.server.port)]
-    sonder_serve.main(config=config)
+    # Compose typed admission before any boundary resolves the legacy root.
+    app = default_app(config=config)
+    try:
+        configure_legacy_application(app)
+        configure_legacy_interfaces()
+        configure_legacy_capacity(
+            autopilot_runs=config.capacity.autopilot_runs,
+            fleet_workers=config.capacity.fleet_workers,
+            training_jobs=config.capacity.training_jobs,
+        )
+        sonder_serve.configure_thin_handlers({
+            "/v1/recall": RecallHandler(app.memory),
+            "/v1/outcome": OutcomeHandler(app.memory),
+        })
+        sys.argv = ["python -m sonder_runtime serve", str(config.server.port)]
+        sonder_serve.main(config=config, _close_default_resources=False)
+    finally:
+        close_default_runtime_resources(timeout=5)
     return 0
 
 
@@ -757,8 +779,11 @@ def cmd_repl(args) -> int:
     from sonder_runtime.bootstrap.legacy_interfaces import configure_legacy_interfaces
 
     configure_legacy_interfaces()
-    from sonder_runtime.bootstrap.app import default_app
+    from sonder_runtime.bootstrap.app import (
+        close_default_runtime_resources, default_app,
+    )
     from sonder_runtime.bootstrap.legacy_interfaces import configure_legacy_application
+
     owned_application = None
     try:
         owned_application = default_app(config=config)
@@ -769,7 +794,7 @@ def cmd_repl(args) -> int:
             sonder_repl.main()
     finally:
         if owned_application is not None:
-            owned_application.close_providers(timeout=5)
+            close_default_runtime_resources(timeout=5)
     return 0
 
 
@@ -806,7 +831,13 @@ def cmd_mcp(args) -> int:
         except sonder_migrations.MigrationError as exc:
             print(f"migration failed: {exc}", file=sys.stderr)
             return 1
-        return run_native_mcp(build_application(config=config), close_compute_on_exit=True)
+        application = build_application(config=config)
+        try:
+            return run_native_mcp(application, close_compute_on_exit=False)
+        finally:
+            application.close_providers(timeout=5)
+    from sonder_runtime.bootstrap.app import close_default_runtime_resources
+
     owned_application = None
     def _configure_mcp_legacy() -> None:
         nonlocal owned_application
@@ -821,8 +852,6 @@ def cmd_mcp(args) -> int:
         _export_runtime_environment(config)
         from sonder_runtime.bootstrap.app import default_app
         from sonder_runtime.bootstrap.legacy_mcp import configure_legacy_application
-        owned_application = default_app(config=config)
-        configure_legacy_application(owned_application)
         from sonder_runtime.adapters.inference import ollama_endpoint
         ollama_endpoint.configure_typed_endpoint(config.ollama.url)
         from sonder_runtime.adapters.inference import ollama_pool
@@ -837,7 +866,17 @@ def cmd_mcp(args) -> int:
             probe_timeout_ms=config.ollama.worker_probe_timeout_ms,
             max_inflight_per_worker=config.ollama.worker_max_inflight,
             queue_depth=config.ollama.worker_queue_depth,
+            max_workers=config.ollama.worker_pool_max_workers,
+            capability_probe_parallelism=(
+                config.ollama.worker_capability_probe_parallelism
+            ),
+            capability_probe_batch_size=config.ollama.worker_capability_probe_batch_size,
+            status_page_size=config.ollama.worker_status_page_size,
         )
+        # Do not reset typed worker configuration after the application binds
+        # its pool: that would erase the shared compatibility pool reference.
+        owned_application = default_app(config=config)
+        configure_legacy_application(owned_application)
 
     try:
         McpCommand(build_legacy_server_mcp_runtime()).execute(_configure_mcp_legacy)
@@ -846,7 +885,7 @@ def cmd_mcp(args) -> int:
         return 2
     finally:
         if owned_application is not None:
-            owned_application.close_providers(timeout=5)
+            close_default_runtime_resources(timeout=5)
     return 0
 
 

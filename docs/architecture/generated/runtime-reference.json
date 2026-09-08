@@ -5398,6 +5398,41 @@
     },
     {
       "aliases": [],
+      "category": "system",
+      "name": "/ollama_pool_admin_status",
+      "native": false,
+      "params": [
+        {
+          "default": "",
+          "name": "token",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": false,
+          "name": "refresh",
+          "required": false,
+          "type": "bool"
+        },
+        {
+          "default": "",
+          "name": "cursor",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": 32,
+          "name": "page_size",
+          "required": false,
+          "type": "int"
+        }
+      ],
+      "risk": "ask",
+      "summary": "Read an administrator-only cached worker page; optionally refresh one bounded stale batch.",
+      "tool": "ollama_pool_admin_status"
+    },
+    {
+      "aliases": [],
       "category": "execution",
       "name": "/parallel_generate_run",
       "native": false,
@@ -7433,7 +7468,7 @@
       "native": false,
       "params": [],
       "risk": "safe",
-      "summary": "Report Sonder Runtime's local-model state and current VRAM residency.",
+      "summary": "Report cached inference capacity without contacting Ollama workers.",
       "tool": "status"
     },
     {
@@ -9093,6 +9128,12 @@
       "type": "AppControlConfig"
     },
     {
+      "default": null,
+      "field": "membership",
+      "section": "root",
+      "type": "MembershipConfig"
+    },
+    {
       "default": "[redacted]",
       "field": "api_key",
       "section": "secrets",
@@ -9131,6 +9172,18 @@
     {
       "default": "[redacted]",
       "field": "artifact_mobility_peer_key",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "membership_client_cert_file",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "membership_client_key_file",
       "section": "secrets",
       "type": "str"
     },
@@ -9633,6 +9686,90 @@
       "type": "bool"
     },
     {
+      "default": "static",
+      "field": "mode",
+      "section": "membership",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "cluster_id",
+      "section": "membership",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "issuer_id",
+      "section": "membership",
+      "type": "str"
+    },
+    {
+      "default": 0,
+      "field": "protocol_version",
+      "section": "membership",
+      "type": "int"
+    },
+    {
+      "default": "",
+      "field": "source_origin",
+      "section": "membership",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "source_tls_server_name",
+      "section": "membership",
+      "type": "str"
+    },
+    {
+      "default": [],
+      "field": "source_allowed_cidrs",
+      "section": "membership",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": "",
+      "field": "trust_anchor_file",
+      "section": "membership",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "signature_public_key_file",
+      "section": "membership",
+      "type": "str"
+    },
+    {
+      "default": 0,
+      "field": "refresh_interval_seconds",
+      "section": "membership",
+      "type": "int"
+    },
+    {
+      "default": 0,
+      "field": "snapshot_max_advertisements",
+      "section": "membership",
+      "type": "int"
+    },
+    {
+      "default": 0,
+      "field": "snapshot_max_bytes",
+      "section": "membership",
+      "type": "int"
+    },
+    {
+      "default": null,
+      "field": "local_fallback",
+      "section": "membership",
+      "type": "bool | None"
+    },
+    {
+      "default": [],
+      "field": "member_policies",
+      "section": "membership",
+      "type": "tuple[MembershipEndpointPolicy, ...]"
+    },
+    {
       "default": false,
       "field": "enabled",
       "section": "memory_replication",
@@ -9819,6 +9956,30 @@
       "type": "int"
     },
     {
+      "default": 16,
+      "field": "worker_pool_max_workers",
+      "section": "ollama",
+      "type": "int"
+    },
+    {
+      "default": 4,
+      "field": "worker_capability_probe_parallelism",
+      "section": "ollama",
+      "type": "int"
+    },
+    {
+      "default": 32,
+      "field": "worker_capability_probe_batch_size",
+      "section": "ollama",
+      "type": "int"
+    },
+    {
+      "default": 32,
+      "field": "worker_status_page_size",
+      "section": "ollama",
+      "type": "int"
+    },
+    {
       "default": "127.0.0.1",
       "field": "host",
       "section": "server",
@@ -9950,12 +10111,12 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
-    "commands": 318,
-    "configuration": 162,
+    "commands": 319,
+    "configuration": 183,
     "events": 43,
-    "tools": 212
+    "tools": 213
   },
-  "digest": "6bf7d419bcc2bd1a0d39db75b1cb45c9057c8dffa2c769b664eb46b0d09d5255",
+  "digest": "878123420aa66f5b087d64ec4133f54978857993260a6873e6c10ea728b0447f",
   "events": [
     {
       "name": "session.started",
@@ -10426,10 +10587,10 @@
   "schema": "sonder-runtime-document-reference-v1",
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "9a4262ad4dd80fa47d5a1875a46e1e786d2ae5364cf9257140d5c5072456591c",
+    "server.py": "ca00f5015ad1ccc296af4be63a8bb99583c607014adeeab99edce8fba7b92366",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
-    "sonder_runtime/platform/config.py": "c180a464fb0465d86141e61f90af259eefca6f7a3d0d17ed75c585a542d0aa2c",
+    "sonder_runtime/platform/config.py": "9e26bb0179011ff174be113b92c4a40b28dd2bbf9a534f9ee885e40cc89dc190",
     "sonder_runtime/platform/memory_replication_config.py": "1981bbc57a4e6442fc1b770d9c37cc766c66334089697d762e9b9b7ed578d179"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
@@ -14644,6 +14805,36 @@
       }
     },
     {
+      "description": "Read an administrator-only cached worker page; optionally refresh one bounded stale batch.\n\n    Page size is 1..128 and the full JSON page is at most 65,536 UTF-8 bytes.\n    Remote probes retain configured consent and HTTPS policy. Callers cannot\n    change configured probe batch size or parallelism. Cursors belong to one\n    administrator and roster generation. Local-open direct use is permitted.\n    ",
+      "name": "ollama_pool_admin_status",
+      "parameters": {
+        "properties": {
+          "cursor": {
+            "default": "",
+            "title": "Cursor",
+            "type": "string"
+          },
+          "page_size": {
+            "default": 32,
+            "title": "Page Size",
+            "type": "integer"
+          },
+          "refresh": {
+            "default": false,
+            "title": "Refresh",
+            "type": "boolean"
+          },
+          "token": {
+            "default": "",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "title": "ollama_pool_admin_statusArguments",
+        "type": "object"
+      }
+    },
+    {
       "description": "Generate several Python code candidates in parallel, then compile/run each.\n\n    The prompt should describe the desired Python solution. `check` is appended to\n    each extracted code block, usually as assertions. This is meant for search:\n    generate multiple attempts, compile them, execute them, and keep the winners.\n    ",
       "name": "parallel_generate_run",
       "parameters": {
@@ -16110,7 +16301,7 @@
       }
     },
     {
-      "description": "Report Sonder Runtime's local-model state and current VRAM residency.\n\n    Use this to check whether the GPU is busy before offloading, or to confirm models pulled.\n    ",
+      "description": "Report cached inference capacity without contacting Ollama workers.\n\n    Inventory and residency remain unknown until explicitly inspected. Use\n    ollama_pool_admin_status for authorized cached detail or a bounded refresh.\n    ",
       "name": "status",
       "parameters": {
         "properties": {},

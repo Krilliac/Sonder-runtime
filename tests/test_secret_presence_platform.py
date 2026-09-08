@@ -23,6 +23,8 @@ def test_config_secret_redaction_uses_platform_policy():
         "memory_replication_key": "[unset]",
         "memory_replication_state_integrity_key": "[unset]",
         "artifact_mobility_peer_key": "[unset]",
+        "membership_client_cert_file": "[unset]",
+        "membership_client_key_file": "[unset]",
     }
 
 
@@ -34,6 +36,8 @@ def test_secrets_repr_omits_all_secret_values():
         memory_replication_key="private-memory-key",
         memory_replication_state_integrity_key="private-memory-state-key",
         artifact_mobility_peer_key="private-mobility-key",
+        membership_client_cert_file="C:/private/client.pem",
+        membership_client_key_file="C:/private/client.key",
         backup_key_file="C:/private/backup.key",
     )
 
@@ -47,6 +51,8 @@ def test_secrets_repr_omits_all_secret_values():
         "private-memory-key",
         "private-memory-state-key",
         "private-mobility-key",
+        "C:/private/client.pem",
+        "C:/private/client.key",
         "C:/private/backup.key",
     ):
         assert value not in rendered_secrets

@@ -378,7 +378,7 @@ def test_http_owner_composes_only_the_local_receiver_without_peer_send(tmp_path,
     assert service.status()["closed"] is True
 
 
-def test_disabled_typed_http_config_leaves_no_memory_receiver_route(monkeypatch):
+def test_disabled_typed_http_config_detaches_but_does_not_close_graph_memory(monkeypatch):
     from sonder_runtime.interfaces.http import serve
 
     closed = []
@@ -392,7 +392,9 @@ def test_disabled_typed_http_config_leaves_no_memory_receiver_route(monkeypatch)
 
     assert serve._MEMORY_REPLICATION_RECEIVER is None
     assert serve._MEMORY_REPLICATION_SERVICE is None
-    assert closed == [True]
+    # A typed HTTP selection may remove a stale route, but it must not take
+    # ownership of a service whose Application still owns durable cleanup.
+    assert closed == []
 
 
 def test_serve_main_uses_the_owned_service_before_listener_bind(tmp_path, monkeypatch):
@@ -441,6 +443,261 @@ def test_serve_main_uses_the_owned_service_before_listener_bind(tmp_path, monkey
         assert observed["service"].status()["started"] is True
         assert observed["receiver"] is not None
         assert observed["service"].status()["closed"] is True
+    finally:
+        bootstrap_app.reset_for_tests()
+
+
+@pytest.mark.parametrize("failure", ("startup", "handoff", "bind"))
+def test_serve_main_failure_detaches_routes_and_closes_the_default_graph(
+    tmp_path, monkeypatch, failure,
+):
+    """Startup and bind failures cannot strand HTTP-owned route resources."""
+    from types import SimpleNamespace
+
+    from sonder_runtime.bootstrap import app as bootstrap_app
+    from sonder_runtime.bootstrap.artifact_transfer import ArtifactTransferBinding
+    from sonder_runtime.interfaces.http import serve
+
+    bootstrap_app.reset_for_tests()
+    observed = {"artifacts": [], "graphs": [], "probes": 0, "drains": 0}
+    original_memory = serve.configure_memory_replication_service
+    original_artifact_close = ArtifactTransferBinding.close
+    original_graph_close = bootstrap_app.Application.close_providers
+
+    def capture_memory(service, **kwargs):
+        if service is not None:
+            observed["service"] = service
+        return original_memory(service, **kwargs)
+
+    def capture_artifact_close(binding):
+        observed["artifacts"].append(binding)
+        return original_artifact_close(binding)
+
+    def capture_graph_close(graph, timeout=None):
+        observed["graphs"].append(graph)
+        return original_graph_close(graph, timeout=timeout)
+
+    class Lifecycle:
+        coordinator = SimpleNamespace(add_flush_hook=lambda _hook: None, draining=False)
+
+        def startup(self, **_kwargs):
+            if failure == "startup":
+                raise RuntimeError("startup refused")
+
+        def begin_ollama_probe(self):
+            observed["probe-started"] = True
+
+        def stop_probe(self):
+            observed["probes"] += 1
+
+        def drain(self, _reason):
+            observed["drains"] += 1
+
+    def refused_factory(*_args, **_kwargs):
+        if failure == "bind":
+            raise OSError("listener refused")
+        pytest.fail("listener factory must not run before lifecycle startup")
+
+    for name in (
+        "_SESSION_FACADE", "_CONTROL_PLANE_SERVICE",
+        "_MEMORY_REPLICATION_RECEIVER", "_MEMORY_REPLICATION_SERVICE",
+        "_ARTIFACT_TRANSFER_BINDING", "_APP_CONTROL_BINDING",
+    ):
+        monkeypatch.setattr(serve, name, None)
+    monkeypatch.setattr(serve, "configure_memory_replication_service", capture_memory)
+    monkeypatch.setattr(ArtifactTransferBinding, "close", capture_artifact_close)
+    monkeypatch.setattr(bootstrap_app.Application, "close_providers", capture_graph_close)
+    monkeypatch.setattr(serve.sonder_lifecycle, "get", lambda: Lifecycle())
+    try:
+        error = {
+            "startup": SystemExit,
+            "handoff": RuntimeError,
+            "bind": OSError,
+        }[failure]
+        with pytest.raises(error):
+            serve.main(
+                _config(tmp_path),
+                _server_factory=refused_factory,
+                _after_configure=(
+                    (lambda _application: (_ for _ in ()).throw(RuntimeError("handoff refused")))
+                    if failure == "handoff" else None
+                ),
+            )
+        assert observed["service"].status()["closed"] is True
+        assert len(observed["graphs"]) == 1
+        assert len(observed["artifacts"]) == 1
+        # A lifecycle acquired before a failed startup is explicitly retired;
+        # the post-configure handoff fails before one is constructed.
+        assert observed["probes"] == (0 if failure == "handoff" else 1)
+        assert observed["drains"] == (1 if failure == "bind" else 0)
+        assert serve._MEMORY_REPLICATION_SERVICE is None
+        assert serve._MEMORY_REPLICATION_RECEIVER is None
+        assert serve._ARTIFACT_TRANSFER_BINDING is None
+        assert serve._APP_CONTROL_BINDING is None
+    finally:
+        bootstrap_app.reset_for_tests()
+
+
+def test_serve_main_external_graph_owner_only_detaches_memory_route(
+    tmp_path, monkeypatch,
+):
+    """Managed/owned hosts retain sole graph cleanup ownership on bind failure."""
+    from types import SimpleNamespace
+
+    from sonder_runtime.bootstrap import app as bootstrap_app
+    from sonder_runtime.interfaces.http import serve
+
+    bootstrap_app.reset_for_tests()
+    observed = {}
+    original_memory = serve.configure_memory_replication_service
+
+    def capture_memory(service, **kwargs):
+        if service is not None:
+            observed["service"] = service
+        return original_memory(service, **kwargs)
+
+    lifecycle = SimpleNamespace(
+        startup=lambda **_kwargs: None,
+        begin_ollama_probe=lambda: None,
+        stop_probe=lambda: None,
+        coordinator=SimpleNamespace(add_flush_hook=lambda _hook: None, draining=False),
+        drain=lambda _reason: None,
+    )
+    for name in (
+        "_SESSION_FACADE", "_CONTROL_PLANE_SERVICE",
+        "_MEMORY_REPLICATION_RECEIVER", "_MEMORY_REPLICATION_SERVICE",
+        "_ARTIFACT_TRANSFER_BINDING", "_APP_CONTROL_BINDING",
+    ):
+        monkeypatch.setattr(serve, name, None)
+    monkeypatch.setattr(serve, "configure_memory_replication_service", capture_memory)
+    monkeypatch.setattr(serve.sonder_lifecycle, "get", lambda: lifecycle)
+    try:
+        with pytest.raises(OSError, match="listener refused"):
+            serve.main(
+                _config(tmp_path),
+                _server_factory=lambda *_args: (_ for _ in ()).throw(OSError("listener refused")),
+                _close_default_resources=False,
+            )
+        assert observed["service"].status()["closed"] is False
+        assert serve._MEMORY_REPLICATION_SERVICE is None
+        assert serve._MEMORY_REPLICATION_RECEIVER is None
+        bootstrap_app.close_default_runtime_resources(timeout=5)
+        assert observed["service"].status()["closed"] is True
+    finally:
+        bootstrap_app.reset_for_tests()
+
+
+def test_serve_main_refuses_a_clean_shutdown_when_probe_remains(
+    tmp_path, monkeypatch,
+):
+    """A still-running probe is a shutdown failure, even after HTTP returns."""
+    from types import SimpleNamespace
+
+    from sonder_runtime.bootstrap import app as bootstrap_app
+    from sonder_runtime.interfaces.http import serve
+
+    bootstrap_app.reset_for_tests()
+
+    class FakeServer:
+        def __init__(self, _address, _handler):
+            return None
+
+        def serve_forever(self):
+            return None
+
+        def server_close(self):
+            return None
+
+        def shutdown(self):
+            return None
+
+    lifecycle = SimpleNamespace(
+        startup=lambda **_kwargs: None,
+        begin_ollama_probe=lambda: None,
+        stop_probe=lambda: False,
+        coordinator=SimpleNamespace(
+            add_flush_hook=lambda _hook: None,
+            draining=False,
+        ),
+        drain=lambda _reason: True,
+    )
+    for name in (
+        "_SESSION_FACADE", "_CONTROL_PLANE_SERVICE",
+        "_MEMORY_REPLICATION_RECEIVER", "_MEMORY_REPLICATION_SERVICE",
+        "_ARTIFACT_TRANSFER_BINDING", "_APP_CONTROL_BINDING",
+    ):
+        monkeypatch.setattr(serve, name, None)
+    monkeypatch.setattr(serve.sonder_lifecycle, "get", lambda: lifecycle)
+    monkeypatch.setattr(
+        serve.server, "runtime_source_update_status", lambda refresh=False: "ok",
+    )
+    try:
+        with pytest.raises(RuntimeError, match="ollama-probe"):
+            serve.main(_config(tmp_path), _server_factory=FakeServer)
+        assert serve._MEMORY_REPLICATION_SERVICE is None
+        assert serve._MEMORY_REPLICATION_RECEIVER is None
+        assert serve._ARTIFACT_TRANSFER_BINDING is None
+    finally:
+        bootstrap_app.reset_for_tests()
+
+
+def test_serve_main_removes_exact_thin_handlers_before_a_later_restart(
+    tmp_path, monkeypatch,
+):
+    """Thin handlers cannot retain a prior graph across HTTP host lifetimes."""
+    from types import SimpleNamespace
+
+    from sonder_runtime.bootstrap import app as bootstrap_app
+    from sonder_runtime.interfaces.http import serve
+
+    bootstrap_app.reset_for_tests()
+    observed = []
+
+    class FakeServer:
+        def __init__(self, _address, _handler):
+            observed.append(dict(serve._THIN_HANDLERS))
+
+        def serve_forever(self):
+            return None
+
+        def server_close(self):
+            return None
+
+        def shutdown(self):
+            return None
+
+    lifecycle = SimpleNamespace(
+        startup=lambda **_kwargs: None,
+        begin_ollama_probe=lambda: None,
+        stop_probe=lambda: None,
+        coordinator=SimpleNamespace(
+            add_flush_hook=lambda _hook: None,
+            draining=False,
+        ),
+        drain=lambda _reason: True,
+    )
+    for name in (
+        "_SESSION_FACADE", "_CONTROL_PLANE_SERVICE",
+        "_MEMORY_REPLICATION_RECEIVER", "_MEMORY_REPLICATION_SERVICE",
+        "_ARTIFACT_TRANSFER_BINDING", "_APP_CONTROL_BINDING",
+    ):
+        monkeypatch.setattr(serve, name, None)
+    monkeypatch.setattr(serve, "_THIN_HANDLERS", {})
+    monkeypatch.setattr(serve.sonder_lifecycle, "get", lambda: lifecycle)
+    monkeypatch.setattr(
+        serve.server, "runtime_source_update_status", lambda refresh=False: "ok",
+    )
+    marker = object()
+    first_mapping = serve.configure_thin_handlers({"/v1/recall": marker})
+    try:
+        serve.main(_config(tmp_path / "first"), _server_factory=FakeServer)
+        assert observed == [{"/v1/recall": marker}]
+        assert serve._THIN_HANDLERS == {}
+
+        serve.main(_config(tmp_path / "second"), _server_factory=FakeServer)
+        assert observed[-1] == {}
+        assert serve._THIN_HANDLERS == {}
+        assert first_mapping is not serve._THIN_HANDLERS
     finally:
         bootstrap_app.reset_for_tests()
 
