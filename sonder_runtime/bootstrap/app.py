@@ -211,7 +211,11 @@ def build_application(
             raise ConfigError(child_errors)
         profile = config.profile
         logger.info(f"config applied, effective profile={profile!r}")
-        logger.debug(f"config supplied, effective profile={profile!r}, home={config.state.home!r}")
+        logger.debug(
+            "config supplied, effective profile=%r, typed_home_configured=%s",
+            profile,
+            bool(config.state.home),
+        )
         if config.state.home:
             # Keep typed startup state process-local.  This must happen before
             # any lazy persistence factory can resolve a database path, and
@@ -1203,7 +1207,13 @@ def build_application(
     # permission decisions leave their content-free receipts on this same
     # sink, replacing the default the legacy module installs when it loads
     # before a graph exists.
-    events = LocalObservabilitySink(OperationsEventSink())
+    from ..platform.logging import redactor_for_config
+
+    runtime_redactor = redactor_for_config(config or SonderConfig())
+    events = LocalObservabilitySink(
+        OperationsEventSink(redactor=runtime_redactor),
+        redactor=runtime_redactor,
+    )
     permission_receipts.install(lambda: events)
 
     # The typed tool boundary for the workbench file families (the reads and
@@ -1212,12 +1222,11 @@ def build_application(
     # second gate on every typed call that was not already decided by the
     # surface forwarding it; every receipt is durable before it is visible.
     logger.debug("composing typed tool application facade")
-    from ..platform.logging import Redactor as _Redactor
-
     tool_audit = DurableToolAuditRepository(
         runtime_paths.state_path(
             os.path.join("audit", "tool-receipts.jsonl"), "SONDER_TOOL_AUDIT",
         ),
+        redactor=runtime_redactor,
         limits=ToolAuditLimits(),
     )
 
@@ -1225,7 +1234,7 @@ def build_application(
         typed_tool_registry(),
         PackagedToolExecutor(),
         policy=typed_tool_policy(),
-        redactor=PatternOutputRedactor(_Redactor().redact),
+        redactor=PatternOutputRedactor(runtime_redactor.redact),
         receipts=ReceiptStore(),
         audit=tool_audit,
         permissions=(PermissionModesEvaluator(policy_names=POLICY_NAMES),),

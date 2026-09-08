@@ -235,7 +235,7 @@ def test_secret_identifier_values_fall_back_before_retention():
 
 def test_bootstrap_wraps_authoritative_sink_without_rewriting(monkeypatch):
     delegate = _Delegate()
-    monkeypatch.setattr(bootstrap_app, "OperationsEventSink", lambda: delegate)
+    monkeypatch.setattr(bootstrap_app, "OperationsEventSink", lambda **_kwargs: delegate)
 
     application = bootstrap_app.build_application()
     application.events.emit(
@@ -256,6 +256,51 @@ def test_bootstrap_wraps_authoritative_sink_without_rewriting(monkeypatch):
             "operation_id": None,
         },
     )]
+
+
+def test_bootstrap_injects_config_redactor_into_durable_tool_and_event_sinks(
+    monkeypatch, tmp_path,
+):
+    import sonder_config
+
+    captured = {}
+
+    class _Operations:
+        def __init__(self, *, redactor=None):
+            captured["event"] = redactor
+
+        def emit(self, *_args, **_kwargs):
+            pass
+
+    class _Audit:
+        def __init__(self, _path, *, redactor=None, limits=None):
+            captured["audit"] = redactor
+            captured["limits"] = limits
+
+    class _OutputRedactor:
+        def __init__(self, redact):
+            captured["output"] = redact
+
+        def redact(self, _tool_name, output):
+            return output
+
+    monkeypatch.setattr(bootstrap_app, "OperationsEventSink", _Operations)
+    monkeypatch.setattr(bootstrap_app, "DurableToolAuditRepository", _Audit)
+    monkeypatch.setattr(bootstrap_app, "PatternOutputRedactor", _OutputRedactor)
+    secret = "config-only-durable-secret"
+    application = bootstrap_app.build_application(config=sonder_config.SonderConfig(
+        state=sonder_config.StateConfig(home=str(tmp_path / "home")),
+        secrets=sonder_config.Secrets(artifact_transfer_key=secret),
+        private_source_paths=(str(tmp_path / "private" / "sonder.env"),),
+    ))
+
+    try:
+        assert captured["event"].redact(secret) == "[REDACTED]"
+        assert captured["audit"].redact(secret) == "[REDACTED]"
+        assert captured["output"](secret) == "[REDACTED]"
+        assert application.events._redactor is captured["event"]
+    finally:
+        application.close_providers(timeout=0)
 
 
 def test_concurrent_emit_keeps_exact_counters_and_bounded_recent_events():

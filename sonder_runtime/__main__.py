@@ -75,6 +75,13 @@ def _configured_path(explicit, env_name: str, filename: str):
     return str(candidate) if candidate.is_file() else None
 
 
+def _redactor_for_config(config):
+    """Create the common redactor before compatibility env export occurs."""
+    from sonder_runtime.platform.logging import redactor_for_config
+
+    return redactor_for_config(config, env=os.environ)
+
+
 def _emit(payload: dict, *, as_json: bool) -> None:
     if as_json:
         print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
@@ -895,11 +902,11 @@ def cmd_serve(args) -> int:
         "1" if config.ollama.allow_remote else "0"
     )
     os.environ["SONDER_TRUSTED_ORIGINS"] = ",".join(config.ollama.trusted_origins)
-    from sonder_runtime.platform.logging import configure_logging, Redactor
+    from sonder_runtime.platform.logging import configure_logging
     configure_logging(
         level=config.observability.log_level,
         log_format=config.observability.log_format,
-        redactor=Redactor(env=os.environ),
+        redactor=_redactor_for_config(config),
     )
     if not args.skip_preflight:
         report = _run_preflight(
@@ -1022,11 +1029,11 @@ def cmd_repl(args) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     _configure_typed_home(config)
-    from sonder_runtime.platform.logging import configure_logging, Redactor
+    from sonder_runtime.platform.logging import configure_logging
     configure_logging(
         level=config.observability.log_level,
         log_format=config.observability.log_format,
-        redactor=Redactor(env=os.environ),
+        redactor=_redactor_for_config(config),
     )
     _export_runtime_environment(config)
     import sonder_runtime.adapters.persistence.migrations as sonder_migrations
@@ -1078,11 +1085,11 @@ def cmd_mcp(args) -> int:
         from sonder_runtime.bootstrap.native_mcp import run_native_mcp
 
         _configure_typed_home(config)
-        from sonder_runtime.platform.logging import configure_logging, Redactor
+        from sonder_runtime.platform.logging import configure_logging
         configure_logging(
             level=config.observability.log_level,
             log_format=config.observability.log_format,
-            redactor=Redactor(env=os.environ),
+            redactor=_redactor_for_config(config),
         )
         _export_runtime_environment(config, include_typed_runtime=False)
         import sonder_runtime.adapters.persistence.migrations as sonder_migrations
@@ -1105,11 +1112,11 @@ def cmd_mcp(args) -> int:
         nonlocal owned_application
         config = _load_config(args)
         _configure_typed_home(config)
-        from sonder_runtime.platform.logging import configure_logging, Redactor
+        from sonder_runtime.platform.logging import configure_logging
         configure_logging(
             level=config.observability.log_level,
             log_format=config.observability.log_format,
-            redactor=Redactor(env=os.environ),
+            redactor=_redactor_for_config(config),
         )
         _export_runtime_environment(config)
         from sonder_runtime.bootstrap.app import default_app

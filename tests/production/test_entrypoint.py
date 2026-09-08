@@ -171,6 +171,39 @@ def test_the_environment_snapshot_actually_restores_what_the_export_changed():
     assert os.environ["OLLAMA_HOST"] == sentinel
 
 
+def test_entrypoint_redactor_covers_config_file_secrets_before_export(tmp_path):
+    """Secrets loaded from a private env file must be redacted before export."""
+    import sonder_config
+    from sonder_runtime import __main__ as entrypoint
+
+    secrets = sonder_config.Secrets(
+        artifact_transfer_key="artifact-transfer-secret",
+        memory_replication_key="memory-replication-secret",
+        membership_client_key_file="membership-client-key-secret",
+        control_state_rehearsal_key="control-state-rehearsal-secret",
+    )
+    private_source = str(tmp_path / "private" / "sonder.env")
+    rendered = entrypoint._redactor_for_config(sonder_config.SonderConfig(
+        secrets=secrets,
+        private_source_paths=(private_source,),
+    )).redact(" ".join((
+        secrets.artifact_transfer_key,
+        secrets.memory_replication_key,
+        secrets.membership_client_key_file,
+        secrets.control_state_rehearsal_key,
+        private_source,
+    )))
+
+    for value in (
+        secrets.artifact_transfer_key,
+        secrets.memory_replication_key,
+        secrets.membership_client_key_file,
+        secrets.control_state_rehearsal_key,
+        private_source,
+    ):
+        assert value not in rendered
+
+
 def test_user_global_config_is_discovered_when_present(monkeypatch, tmp_path):
     from sonder_runtime.__main__ import _configured_path
 
