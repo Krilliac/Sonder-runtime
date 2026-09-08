@@ -45,6 +45,10 @@ from sonder_runtime.platform.artifact_mobility_source_config import (
     artifact_mobility_source_errors,
 )
 from sonder_runtime.platform.app_control_config import AppControlConfig, app_control_errors
+from sonder_runtime.platform.control_state_rehearsal_config import (
+    ControlStateRehearsalConfig,
+    control_state_rehearsal_errors,
+)
 from sonder_runtime.platform.child_storage_config import (
     ChildStorageConfig, child_storage_errors, apply_child_storage_environment,
 )
@@ -85,6 +89,7 @@ SECRET_ENV_KEYS = (
     "SONDER_AUTH_SECRET",
     "SONDER_BACKUP_KEY_FILE",
     "SONDER_LAUNCHER_HEALTH_TOKEN",
+    "SONDER_CONTROL_STATE_REHEARSAL_API_KEY",
 )
 _SECRET_TOML_KEYS = frozenset(
     {
@@ -95,6 +100,7 @@ _SECRET_TOML_KEYS = frozenset(
         "memory_replication_state_integrity_key",
         "membership_client_cert_file",
         "membership_client_key_file",
+        "control_state_rehearsal_key",
         "auth_secret",
         "backup_key",
         "backup_key_file",
@@ -382,6 +388,7 @@ class Secrets:
     artifact_mobility_peer_key: str = field(default="", repr=False)
     membership_client_cert_file: str = field(default="", repr=False)
     membership_client_key_file: str = field(default="", repr=False)
+    control_state_rehearsal_key: str = field(default="", repr=False)
 
     def as_redacted_dict(self) -> dict:
         return {
@@ -395,6 +402,9 @@ class Secrets:
             ),
             "artifact_mobility_peer_key": redact_presence(
                 self.artifact_mobility_peer_key
+            ),
+            "control_state_rehearsal_key": redact_presence(
+                self.control_state_rehearsal_key
             ),
             "auth_secret": redact_presence(self.auth_secret),
             "backup_key_file": redact_presence(self.backup_key_file),
@@ -431,6 +441,9 @@ class SonderConfig:
     child_storage: ChildStorageConfig = field(default_factory=ChildStorageConfig)
     app_control: AppControlConfig = field(default_factory=AppControlConfig)
     membership: MembershipConfig = field(default_factory=MembershipConfig)
+    control_state_rehearsal: ControlStateRehearsalConfig = field(
+        default_factory=ControlStateRehearsalConfig
+    )
 
     def as_redacted_dict(self) -> dict:
         out: dict = {
@@ -446,6 +459,7 @@ class SonderConfig:
             "artifact_transfer",
             "artifact_mobility_source",
             "artifact_mobility",
+            "control_state_rehearsal",
             "state",
             "ollama",
             "features",
@@ -475,6 +489,9 @@ class SonderConfig:
             out["artifact_mobility"][name] = redact_presence(
                 getattr(self.artifact_mobility, name)
             )
+        out["control_state_rehearsal"]["origin"] = redact_presence(
+            self.control_state_rehearsal.origin
+        )
         out["compute"] = {
             "worker_host_id": self.compute.worker_host_id,
             "worker_memory_budget_bytes": self.compute.worker_memory_budget_bytes,
@@ -693,6 +710,7 @@ _SECTION_TYPES = {
     "artifact_mobility": ArtifactMobilityConfig,
     "child_storage": ChildStorageConfig,
     "app_control": AppControlConfig,
+    "control_state_rehearsal": ControlStateRehearsalConfig,
     "state": StateConfig,
     "ollama": OllamaConfig,
     "features": FeaturesConfig,
@@ -1238,6 +1256,13 @@ def _apply_environment(
                 secrets,
                 artifact_mobility_peer_key=mobility_peer_key,
             )
+    if env.get("SONDER_CONTROL_STATE_REHEARSAL_API_KEY", "").strip():
+        secrets = replace(
+            secrets,
+            control_state_rehearsal_key=env[
+                "SONDER_CONTROL_STATE_REHEARSAL_API_KEY"
+            ].strip(),
+        )
     if env.get("SONDER_AUTH_SECRET", "").strip():
         secrets = replace(secrets, auth_secret=env["SONDER_AUTH_SECRET"].strip())
     if env.get("SONDER_BACKUP_KEY_FILE", "").strip():
@@ -1304,6 +1329,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     errors.extend(artifact_mobility_source_errors(config))
     errors.extend(artifact_mobility_errors(config))
     errors.extend(_artifact_mobility_storage_errors(config))
+    errors.extend(control_state_rehearsal_errors(config))
     errors.extend(deployment_errors(config))
     if config.schema_version != 1:
         errors.append(

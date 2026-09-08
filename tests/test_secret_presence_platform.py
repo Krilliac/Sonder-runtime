@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from sonder_runtime.platform.config import Secrets, SonderConfig
+from sonder_runtime.platform.control_state_rehearsal_config import (
+    ControlStateRehearsalConfig,
+)
 from sonder_runtime.platform.secret_presence import redact_presence
 
 
@@ -25,6 +28,7 @@ def test_config_secret_redaction_uses_platform_policy():
         "artifact_mobility_peer_key": "[unset]",
         "membership_client_cert_file": "[unset]",
         "membership_client_key_file": "[unset]",
+        "control_state_rehearsal_key": "[unset]",
     }
 
 
@@ -84,3 +88,13 @@ def test_artifact_mobility_secret_redacts_to_presence_only():
     ).as_redacted_dict()
     assert redacted["artifact_mobility_peer_key"] == "[set]"
     assert "private-mobility-test-key" not in str(redacted)
+
+
+def test_rehearsal_origin_redacts_to_presence_only():
+    origin = "https://private-control.example.test:9443"
+    redacted = SonderConfig(
+        control_state_rehearsal=ControlStateRehearsalConfig(origin=origin)
+    ).as_redacted_dict()
+
+    assert redacted["control_state_rehearsal"]["origin"] == "[set]"
+    assert origin not in str(redacted)

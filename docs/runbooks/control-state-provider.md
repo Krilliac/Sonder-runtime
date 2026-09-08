@@ -96,6 +96,51 @@ promotes an owner, retries an ambiguous write, or creates a provider from
 configuration; a separately owned durable authority must consume an allowed
 attempt before changing an epoch.
 
+## Explicit disposable rehearsal command
+
+The only runtime entry point that constructs this provider is the explicit,
+one-shot command:
+
+```text
+python -m sonder_runtime control-state-rehearsal \
+  --config <rehearsal.toml> [--secrets <rehearsal.env>] [--json] \
+  --event-id rehearsal-<event> --resource-kind job \
+  --resource-id rehearsal-<job> --owner-epoch <positive> \
+  --sequence <positive> --payload-digest <lowercase-sha256>
+```
+
+`--config` is required. The command has no `--set`, origin, API-key, cluster,
+witness, provider, or local-owner override. Its typed configuration must be an
+enabled pooled pair whose cluster, event ID, and resource ID all use the
+`rehearsal-` namespace. It accepts only `job` resources. Validation happens
+before the factory or provider can be constructed, so a live-looking scope or
+malformed request does not produce provider traffic.
+
+The command appends exactly one event, reads exactly one event after the prior
+sequence, and requires that page to equal the submitted event. It does not
+retry an append, read, or fence failure and never falls back to SQLite,
+deployment ownership, or a runtime owner. Without a confirmation it records
+collection evidence and stops. A fence request requires both
+`--confirm-fence external-fence` and `--new-owner-id` equal to the configured
+peer. The collected acknowledgement is supplied to the coordinator so fencing
+does not append the event a second time.
+
+Every report is redacted: it omits the origin, API key, configuration paths,
+payload digest and body, raw provider response, and exception text. It always
+states `promotion_attempted: false`,
+`automatic_takeover_available: false`, and
+`automatic_failback_available: false`. A positive fence decision is provider
+transport evidence only; it does not advance an epoch, promote a node, or
+prove automatic HA.
+
+Normal `serve`, MCP, and REPL startup never invoke this command or compose the
+provider. The loopback process test uses separate fresh child processes and a
+parent-owned test HTTP server. It proves only a process-boundary transport
+exercise with authenticated, exact receipts. It is not evidence of an
+independent witness, a live failure domain, automatic takeover/failback,
+authoritative artifact or memory mobility, model sharding, or indefinite
+cluster scaling.
+
 ## Verification
 
 The transport and DTO boundary are covered by
@@ -103,3 +148,10 @@ The transport and DTO boundary are covered by
 redirect and response bounds, exact event/receipt binding, ordered reads,
 non-durable acknowledgements, and denial handling. The tests use an injected
 opener and never contact a real node or modify installed state.
+
+`tests/test_control_state_rehearsal_command.py` adds the explicit parser and
+process-boundary exercise. It runs two sequential spawned children with
+separate homes, configs, secrets, PIDs, and result files; validates exact
+append/read bindings; proves unconfirmed collection sends no fence; proves a
+malformed append stops before read/fence; and proves the confirmed path sends
+one append, one read, and one fence without promotion.
