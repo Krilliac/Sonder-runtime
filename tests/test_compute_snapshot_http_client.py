@@ -97,6 +97,7 @@ def test_snapshot_client_reconstructs_configured_remote_authority() -> None:
     (
         (302, b"", "redirect"),
         (200, _wire("different"), "identity"),
+        (200, "not-bytes", "not bytes"),
         (200, b"{not-json", "JSON"),
         (200, b"x" * 4097, "size"),
     ),

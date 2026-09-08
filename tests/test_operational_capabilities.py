@@ -1,0 +1,170 @@
+import pytest
+
+from sonder_runtime.domain.operational_capabilities import (
+    build_operational_capabilities,
+)
+from sonder_runtime.platform.config import (
+    ComputeConfig,
+    ComputeNodeConfig,
+    SonderConfig,
+)
+
+
+@pytest.mark.parametrize("count", [16, 64, 256])
+def test_bounded_worker_pool_is_available_only_when_accepting_eligible_work(count):
+    for admission, eligible, available in (("accepting", count, True), ("draining", count, False), ("accepting", 0, False)):
+        surface = build_operational_capabilities(config=None, inference_pool_status={
+            "schema_version": 2, "enabled": True, "worker_count": count,
+            "healthy_worker_count": count, "eligible_worker_count": eligible,
+            "admission": admission, "available_capacity": 128,
+            "queue": {"waiting": 3, "limit": 32}, "membership_state": "static",
+            "workers": [{"origin": "https://private.example:11434"}],
+        })
+        assert surface["inference"]["request_level_pooling"]["available"] is available
+        assert surface["inference"]["pool"]["eligible_worker_count"] == eligible
+        assert surface["inference"]["pool"]["queue"] == {"waiting": 3, "limit": 32, "scope": "global"}
+        assert surface["inference"]["model_sharding"]["available"] is False
+        assert surface["compute"]["indefinite_scale"]["available"] is False
+        assert "private.example" not in str(surface)
+
+
+def test_default_surface_is_explicitly_local_and_fail_closed():
+    surface = build_operational_capabilities(
+        config=SonderConfig(),
+        inference_pool_status={
+            "enabled": False,
+            "worker_count": 1,
+            "healthy_worker_count": 1,
+            "remote_worker_count": 0,
+        },
+    )
+
+    assert surface["schema_version"] == 1
+    assert surface["compute"]["configured_peer_count"] == 0
+    assert surface["compute"]["remote_enabled"] is False
+    assert surface["control"]["managed_app_work"]["available"] is False
+    assert surface["control"]["managed_app_work"]["reason"] == (
+        "Managed app work is disabled by configuration."
+    )
+    assert surface["inference"]["request_level_pooling"]["available"] is False
+    assert surface["inference"]["model_sharding"]["available"] is False
+    assert surface["mobility"]["memory_replication_transport"]["available"] is False
+    assert surface["mobility"]["automatic_takeover_available"] is False
+    assert surface["mobility"]["automatic_failback_available"] is False
+    assert surface["mobility"]["artifact_transfer_transport"]["available"] is False
+    assert "source-only spool exposes no receiver" in surface["mobility"][
+        "artifact_transfer_transport"
+    ]["reason"]
+    assert surface["mobility"]["automatic_memory_migration"]["available"] is False
+    assert surface["mobility"]["automatic_artifact_migration"]["available"] is False
+
+
+def test_surface_preserves_bounded_external_membership_status():
+    surface = build_operational_capabilities(
+        config=None,
+        inference_pool_status={
+            "schema_version": 2,
+            "enabled": True,
+            "worker_count": 2,
+            "healthy_worker_count": 1,
+            "eligible_worker_count": 1,
+            "available_capacity": 1,
+            "remote_worker_count": 1,
+            "admission": "accepting",
+            "membership_mode": "external",
+            "membership_state": "current",
+            "refresh_state": "current",
+            "queue": {"waiting": 0, "limit": 1},
+            "workers": [{"origin": "https://private-worker.example:11434"}],
+        },
+    )
+
+    pool = surface["inference"]["pool"]
+    assert pool["membership_mode"] == "external"
+    assert pool["membership_state"] == "current"
+    assert "private-worker" not in str(surface)
+
+
+def test_surface_distinguishes_pooled_requests_from_sharding_and_mobility():
+    config = SonderConfig(
+        compute=ComputeConfig(
+            node_id="node-a",
+            allow_remote=True,
+            nodes=(ComputeNodeConfig(node_id="node-b"),),
+        )
+    )
+    surface = build_operational_capabilities(
+        config=config,
+        inference_pool_status={
+            "enabled": True,
+            "worker_count": 2,
+            "healthy_worker_count": 1,
+            "remote_worker_count": 1,
+            "routing": "latency-aware-least-inflight",
+            "admission": "accepting",
+        },
+        memory_receiver_configured=True,
+    )
+
+    assert surface["compute"]["configured_peer_count"] == 1
+    assert surface["compute"]["remote_enabled"] is True
+    assert surface["inference"]["request_level_pooling"]["available"] is True
+    assert surface["inference"]["pool"]["remote_worker_count"] == 1
+    assert surface["inference"]["model_sharding"]["available"] is False
+    assert surface["mobility"]["memory_replication_transport"]["available"] is True
+    reason = surface["mobility"]["memory_replication_transport"]["reason"]
+    assert "fixed" in reason.lower()
+    assert "quorum" in reason.lower()
+    assert "high availability" in reason.lower()
+    assert surface["mobility"]["automatic_takeover_available"] is False
+    assert surface["mobility"]["automatic_failback_available"] is False
+    assert surface["mobility"]["automatic_memory_migration"]["available"] is False
+
+
+def test_surface_never_probes_or_uses_unbounded_pool_fields():
+    surface = build_operational_capabilities(
+        config=None,
+        inference_pool_status={
+            "enabled": True,
+            "worker_count": 10**9,
+            "healthy_worker_count": 10**9,
+            "remote_worker_count": 10**9,
+        },
+    )
+    assert surface["inference"]["pool"]["worker_count"] == 1024
+    assert surface["inference"]["pool"]["healthy_worker_count"] == 1024
+    assert surface["inference"]["pool"]["remote_worker_count"] == 1024
+
+
+def test_surface_reports_owned_work_only_when_enabled_and_composed():
+    from dataclasses import replace
+    from sonder_runtime.platform.app_control_config import AppControlConfig
+
+    config = replace(SonderConfig(), app_control=AppControlConfig(enabled=True))
+    unavailable = build_operational_capabilities(
+        config=config,
+        managed_work_configured=False,
+    )
+    assert unavailable["control"]["managed_app_work"]["available"] is False
+    assert "dispatcher is not composed" in unavailable["control"]["managed_app_work"]["reason"]
+
+    available = build_operational_capabilities(
+        config=config,
+        managed_work_configured=True,
+    )
+    assert available["control"]["managed_app_work"]["available"] is True
+
+
+def test_fixed_copy_requires_explicit_composition_and_enabled_source_outbound():
+    from dataclasses import replace
+    from sonder_runtime.platform.artifact_mobility_config import ArtifactMobilityConfig
+    from sonder_runtime.platform.artifact_mobility_source_config import ArtifactMobilitySourceConfig
+    config = replace(SonderConfig(),
+        artifact_mobility=ArtifactMobilityConfig(enabled=True),
+        artifact_mobility_source=ArtifactMobilitySourceConfig(enabled=True))
+    assert not build_operational_capabilities(config=config)['mobility']['fixed_peer_artifact_copy']['available']
+    surface = build_operational_capabilities(config=config, fixed_peer_artifact_copy_configured=True)
+    assert surface['mobility']['fixed_peer_artifact_copy']['available']
+    assert not surface['mobility']['automatic_artifact_migration']['available']
+    assert not build_operational_capabilities(config=SonderConfig(),
+        fixed_peer_artifact_copy_configured=True)['mobility']['fixed_peer_artifact_copy']['available']

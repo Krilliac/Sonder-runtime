@@ -36,11 +36,11 @@ STDLIB = set(sys.stdlib_module_names)
 
 # Root modules each layer may reach while the strangler migration runs.
 ROOT_PLATFORM_MODULES = set()
-# These platform-owned modules contain the unavoidable standard-library
-# edges for parsing configured Ollama URLs and reading the local build stamp.
-# They are not root-module compatibility allowances.
-PLATFORM_NETWORK_MODULES = frozenset({
-    "sonder_runtime/platform/config.py",
+# These two platform-owned config parsers may use urllib.parse only. They never
+# initiate transport and are not root-module compatibility allowances.
+PLATFORM_PURE_URL_IMPORTS = frozenset({
+    ("sonder_runtime/platform/config.py", "urllib.parse"),
+    ("sonder_runtime/platform/control_state_rehearsal_config.py", "urllib.parse"),
 })
 PLATFORM_SUBPROCESS_MODULES = frozenset({
     "sonder_runtime/platform/system_profile.py",
@@ -49,6 +49,8 @@ PLATFORM_SUBPROCESS_MODULES = frozenset({
 NPU_ACCELERATOR_EXTERNALS = frozenset({"numpy", "onnxruntime", "tokenizers"})
 FILESYSTEM_OPTIONAL_EXTERNALS = frozenset({"yaml"})
 PLATFORM_OPTIONAL_EXTERNALS = frozenset({"prometheus_client", "psutil"})
+PERSISTENCE_CRYPTO_PATH = "sonder_runtime/adapters/persistence/artifact_mobility.py"
+PERSISTENCE_CRYPTO_EXTERNALS = frozenset({"cryptography"})
 DOMAIN_PURE_URL_MODULES = frozenset({
     "sonder_runtime/domain/ollama_policy.py",
 })
@@ -748,6 +750,12 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
             ):
                 continue
             if (
+                layer == "adapters"
+                and rel.as_posix() == PERSISTENCE_CRYPTO_PATH
+                and top in PERSISTENCE_CRYPTO_EXTERNALS
+            ):
+                continue
+            if (
                 layer == "platform"
                 and rel.as_posix() == "sonder_runtime/platform/metrics.py"
                 and top in PLATFORM_OPTIONAL_EXTERNALS
@@ -766,6 +774,14 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
                 if (
                     rel.as_posix() == UPDATE_ENGINE_PATH
                     and name == "sonder_runtime.bootstrap.app"
+                ):
+                    continue
+                # One pure public-label grammar must govern configuration and
+                # retained receipts. Keep this exception exact in both ends;
+                # platform still cannot import other domain/runtime policy.
+                if (
+                    rel.as_posix() == "sonder_runtime/platform/artifact_mobility_config.py"
+                    and name == "sonder_runtime.domain.artifact_mobility_label"
                 ):
                     continue
                 if target_layer not in ALLOWED_PACKAGE_EDGES[layer]:
@@ -791,7 +807,7 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
                 if (
                     top in IO_MODULES
                     and layer not in ("adapters", "entry")
-                    and rel.as_posix() not in PLATFORM_NETWORK_MODULES
+                    and (rel.as_posix(), name) not in PLATFORM_PURE_URL_IMPORTS
                     and rel.as_posix() not in DOMAIN_PURE_URL_MODULES
                 ):
                     violations.append(
@@ -802,6 +818,16 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
                 continue
             if rel.as_posix() == REPL_PATH and top in REPL_ROOT_MODULES:
                 continue
+            if (
+                rel.as_posix() == 'sonder_runtime/adapters/persistence/postgres_continuation_transport.py'
+                and top in {'psycopg', 'psycopg_pool'}
+            ):
+                continue  # Optional PostgreSQL driver stays behind its adapter.
+            if (
+                rel.as_posix() == 'sonder_runtime/adapters/inference/external_membership.py'
+                and top == 'cryptography'
+            ):
+                continue  # Pinned Ed25519 verification stays behind this exact adapter.
             if top not in ALLOWED_ROOT_IMPORTS[layer]:
                 if (
                     rel.as_posix() == "sonder_runtime/adapters/learning_health.py"

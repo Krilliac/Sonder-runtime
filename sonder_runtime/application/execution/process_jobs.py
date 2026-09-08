@@ -22,8 +22,15 @@ class ProcessJobRequest:
     memory_limit_bytes: int | None = None
     metadata: tuple[tuple[str, str], ...] = ()
     require_job_scope: bool = False
+    capacity_token: str | None = None
+    inherit_environment: bool = True
 
     def __post_init__(self) -> None:
+        if self.capacity_token is not None and (
+            not isinstance(self.capacity_token, str) or len(self.capacity_token) != 64
+            or any(c not in "0123456789abcdef" for c in self.capacity_token)
+        ):
+            raise ValueError("capacity_token must be a 256-bit hex token")
         if not isinstance(self.identity, JobIdentity):
             raise TypeError("identity must be a JobIdentity")
         if not self.argv or any(not isinstance(item, str) or not item for item in self.argv):
@@ -44,6 +51,8 @@ class ProcessJobRequest:
             raise ValueError("memory_limit_bytes must be within 1..2^50")
         if not isinstance(self.require_job_scope, bool):
             raise TypeError("require_job_scope must be a boolean")
+        if not isinstance(self.inherit_environment, bool):
+            raise TypeError("inherit_environment must be a boolean")
         if any(not isinstance(key, str) or not key for key, _ in self.environment):
             raise ValueError("environment keys must be non-empty strings")
         seen: set[str] = set()

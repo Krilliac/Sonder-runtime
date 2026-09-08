@@ -12,6 +12,8 @@ proxy for remote access) unless it says otherwise.
 - [start-stop-drain.md](start-stop-drain.md)
 - [rotate-credentials.md](rotate-credentials.md)
 - [backup-restore.md](backup-restore.md)
+- [memory-replication.md](memory-replication.md) — explicit fixed-peer, fact-only copies
+- [control-state-provider.md](control-state-provider.md) — authenticated replication, quorum, and fencing transport
 - [upgrade-rollback.md](upgrade-rollback.md)
 - [publish-release.md](publish-release.md) — TUF signing ceremony
 - [release-version-policy.md](release-version-policy.md) — version/tag compatibility gate

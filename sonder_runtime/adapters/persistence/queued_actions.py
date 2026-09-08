@@ -7,6 +7,8 @@ can approve them and only ``Actor.HOST`` can record execution outcomes.
 """
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 import hashlib
 import json
 import math
@@ -219,7 +221,7 @@ def connect(path=None):
     """Open a migrated local queue database (direct schema only for :memory:)."""
     path = database_path() if path is None else path
     if str(path) == ":memory:":
-        conn = sqlite3.connect(path, timeout=5.0)
+        conn = owned_sqlite_connect(path, timeout=5.0)
         conn.execute("PRAGMA foreign_keys=ON")
         conn.executescript(_SCHEMA)
     else:

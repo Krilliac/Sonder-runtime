@@ -10,6 +10,9 @@ passes record the narrow runtime hardening and adversarial coverage they added.
 - **[DEFENSIVE-BOUNDARIES-2026-08-22.md](./DEFENSIVE-BOUNDARIES-2026-08-22.md)**
   — implemented tool-policy, remote-worker, identity, provenance, archive, and
   redaction hardening with adversarial coverage and residual risks.
+- **[history-privacy-debt.md](./history-privacy-debt.md)** — exact revision,
+  result, release-gate, and bounded-inspection evidence for the seven historical
+  private-object pairs.
 
 See also **[ISOLATED_EXECUTION.md](./ISOLATED_EXECUTION.md)** for the optional
 Docker/Podman-backed `isolated_run` contract, fixed controls, availability, and

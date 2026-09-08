@@ -117,3 +117,60 @@ def test_json_formatter_emits_structured_redacted_line():
     assert line["correlation_id"] == "req_test"
     assert line["timestamp"].endswith("Z")
     assert "secret-value-9876" not in stream.getvalue()
+
+
+@pytest.mark.parametrize("log_format", ("json", "text"))
+def test_configured_logging_redacts_runtime_secret_values(log_format):
+    secret_environment = {
+        "SONDER_ARTIFACT_MOBILITY_PEER_KEY": "artifact-mobility-secret",
+        "SONDER_MEMORY_REPLICATION_KEY": "memory-replication-secret",
+        "SONDER_MEMBERSHIP_CLIENT_KEY_FILE": "membership-client-key-secret",
+        "SONDER_CONTROL_STATE_REHEARSAL_API_KEY": "control-state-rehearsal-secret",
+    }
+    secrets = tuple(secret_environment.values())
+    stream = io.StringIO()
+    root = logging.getLogger()
+    original_handlers = root.handlers[:]
+    original_level = root.level
+    try:
+        logger = sonder_logging.configure_logging(
+            level="INFO",
+            log_format=log_format,
+            stream=stream,
+            redactor=Redactor(env=secret_environment),
+        )
+        try:
+            raise RuntimeError("runtime credentials: %s" % ", ".join(secrets))
+        except RuntimeError:
+            logger.exception(
+                "runtime credentials: %s",
+                ", ".join(secrets),
+                extra={
+                    "principal_id": secrets[0],
+                    "result": {secrets[1]: secrets[2]},
+                },
+            )
+        logger.handlers[-1].flush()
+        rendered = stream.getvalue()
+    finally:
+        root.handlers[:] = original_handlers
+        root.setLevel(original_level)
+
+    assert all(secret not in rendered for secret in secrets)
+    assert REDACTED in rendered
+
+
+def test_configured_handler_drops_logs_after_stream_shutdown(capsys):
+    stream = io.StringIO()
+    root = logging.getLogger()
+    original_handlers = root.handlers[:]
+    original_level = root.level
+    try:
+        logger = sonder_logging.configure_logging(stream=stream)
+        stream.close()
+        logger.info("runtime is shutting down")
+    finally:
+        root.handlers[:] = original_handlers
+        root.setLevel(original_level)
+
+    assert "--- Logging error ---" not in capsys.readouterr().err

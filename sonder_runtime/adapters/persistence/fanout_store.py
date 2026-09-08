@@ -7,6 +7,8 @@ recoverable without replaying an unknown cloud request.
 """
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 import contextlib
 import os
 import re
@@ -157,7 +159,7 @@ def _ensure_schema(path: str) -> None:
         deadline = time.monotonic() + 5.0
         while True:
             retry = False
-            conn = sqlite3.connect(resolved, timeout=5)
+            conn = owned_sqlite_connect(resolved, timeout=5)
             try:
                 conn.execute("PRAGMA busy_timeout=5000")
                 conn.execute("PRAGMA journal_mode=WAL")
@@ -255,7 +257,7 @@ def _ensure_schema(path: str) -> None:
 
 def _connect() -> sqlite3.Connection:
     path = database_path(); _ensure_schema(path)
-    conn = sqlite3.connect(path, timeout=5, check_same_thread=False)
+    conn = owned_sqlite_connect(path, timeout=5, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=5000"); conn.execute("PRAGMA foreign_keys=ON")
     return conn

@@ -84,6 +84,14 @@ last code block, guarded), `/train [N]` (grounded practice),
 triggers many of these. Dangerous commands over HTTP require
 developer/admin authorization.
 
+The REPL has no memory-replication send, retry, promotion, takeover, or
+failback command. `/runtime status` is read-only and does not contact a
+replication peer. The bounded fact-only service's `replicate_once()` method is
+an application-owned operator seam with no public CLI, MCP, REPL, or HTTP
+mutation surface. Use the authenticated status/API and System screen only to
+inspect its truthful capability posture; see
+[Bounded, explicit fact replication](../runbooks/memory-replication.md).
+
 ## Scripted REPL output
 
 Piped REPL use (`sonder < script.txt`, `echo /stats | sonder`) prints plain

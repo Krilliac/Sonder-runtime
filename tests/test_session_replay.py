@@ -68,3 +68,20 @@ def test_missing_model_snapshot_does_not_infer_request_from_transcript():
     assert reconstruct_model_request([
         event(1, "user.message", {"content": "not a request"}),
     ]) is None
+
+
+@pytest.mark.parametrize("error_code", ["CANCELLED", "DEADLINE_EXCEEDED", "INTERNAL_FAILURE"])
+def test_model_failure_counts_as_error_without_assistant_message_or_session_cancellation(error_code):
+    events = [
+        event(1, "session.started"),
+        event(2, "user.message", {"request_id": "r1", "turn_id": "t1", "content": "hello"}),
+        event(3, "model.requested", {"request_id": "r1", "turn_id": "t1", "prompt": "hello"}),
+        event(4, "model.failed", {"request_id": "r1", "turn_id": "t1", "error_code": error_code}),
+        event(5, "error", {"code": "OTHER_ERROR"}),
+    ]
+    replay = replay_session(events)
+    assert replay.projection.error_count == 2
+    assert replay.projection.event_count == 5
+    assert replay.projection.assistant_message_count == 0
+    assert replay.projection.status == "active"
+    assert [(message.role, message.content) for message in replay.transcript] == [("user", "hello")]

@@ -90,12 +90,18 @@ class TestCachedConnection(unittest.TestCase):
 
     def test_different_path_reconnects(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db1 = Path(tmp) / "a.db"
-            db2 = Path(tmp) / "b.db"
-            conn1 = cached_connection("test_cache", db1)
-            conn1.execute("CREATE TABLE t (v TEXT)")
-            conn2 = cached_connection("test_cache", db2)
-            self.assertIsNot(conn1, conn2)
+            try:
+                db1 = Path(tmp) / "a.db"
+                db2 = Path(tmp) / "b.db"
+                conn1 = cached_connection("test_cache", db1)
+                conn1.execute("CREATE TABLE t (v TEXT)")
+                conn2 = cached_connection("test_cache", db2)
+                self.assertIsNot(conn1, conn2)
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    conn1.execute("SELECT 1")
+            finally:
+                # tearDown runs after the temporary directory exits.
+                close_cached("test_cache")
 
     def test_close_cached(self):
         cached_connection("test_cache", ":memory:")

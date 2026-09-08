@@ -8,17 +8,20 @@ import 'local_manager.dart';
 import 'models.dart';
 import 'settings.dart';
 import 'theme.dart';
+import 'workspace_ui.dart';
 
 class SystemScreen extends StatefulWidget {
   final Settings settings;
   final SystemInfo? initialInfo;
   final bool liveUpdates;
+  final ValueChanged<WorkspaceDestination>? onNavigate;
 
   const SystemScreen({
     super.key,
     required this.settings,
     this.initialInfo,
     this.liveUpdates = true,
+    this.onNavigate,
   });
 
   @override
@@ -69,6 +72,7 @@ class _SystemScreenState extends State<SystemScreen>
   SonderApi get _api => SonderApi(
         baseUrl: widget.settings.serverUrl,
         apiKey: widget.settings.apiKey,
+        accountSession: widget.settings.accountSession,
       );
 
   SonderLauncherApi get _launcherApi => SonderLauncherApi(
@@ -666,6 +670,10 @@ class _SystemScreenState extends State<SystemScreen>
         ),
         title: const Text('System'),
         actions: [
+          if (widget.onNavigate != null)
+            WorkspaceMenu(
+                current: WorkspaceDestination.runtime,
+                onSelected: widget.onNavigate!),
           // No Tooltip wrapper here. The button already carries a visible
           // "Chat" label, so a hover tooltip only added a floating box in the
           // top-right corner, where it collided with the window's own Close
@@ -689,705 +697,750 @@ class _SystemScreenState extends State<SystemScreen>
           final content = ListView(
             padding: const EdgeInsets.all(16),
             children: [
-          if (!wide)
-            _SystemCompactNav(
-              onSelect: _scrollToSection,
-              runtimeKey: _systemRuntimeKey,
-              autopilotKey: _systemAutopilotKey,
-              activityKey: _systemActivityKey,
-              learningKey: _systemLearningKey,
-              policyKey: _systemPolicyKey,
-              extensionsKey: _systemExtensionsKey,
-            ),
-          if (!wide) const SizedBox(height: 12),
-          _Section(
-            key: _systemRuntimeKey,
-            title: 'Runtime architecture',
-            child: Text(
-              'Sonder Runtime is the orchestration layer, not a standalone '
-              'foundation model. Ollama loads and serves selected local '
-              'base-model weights for inference. Sonder Runtime supplies '
-              'routing, prompts, memory, tools, and policy. QLoRA/LoRA adapter '
-              'training runs through PEFT/Hugging Face; only validated '
-              'adapters or merged models are deployed to Ollama.',
-              style: Theme.of(context).textTheme.bodyMedium,
-            ),
-          ),
-          const SizedBox(height: 12),
-          if (_updateStatus != null) ...[
-            _UpdateSection(status: _updateStatus!),
-            const SizedBox(height: 12),
-          ],
-          if (_extensionRegistry != null) ...[
-            _ExtensionRegistrySection(key: _systemExtensionsKey, status: _extensionRegistry!),
-            const SizedBox(height: 12),
-          ],
-          if (localInfo != null) ...[
-            _Section(
-              title: 'Install',
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _StatusRow(
-                    label: 'Platform',
-                    value: localInfo.platform,
-                    ok: true,
-                  ),
-                  _StatusRow(
-                    label: 'Local system',
-                    value: localInfo.systemExists
-                        ? localInfo.systemDir
-                        : 'Not bundled',
-                    ok: localInfo.systemExists,
-                  ),
-                  _StatusRow(
-                    label: 'Shared memory',
-                    value: localInfo.sharedHome,
-                    ok: true,
-                    onCopy: () => _copy(localInfo.sharedHome),
-                  ),
-                  _StatusRow(
-                    label: 'Local server',
-                    value: LocalManager.canRunLocalTools
-                        ? (localInfo.defaultServerReachable
-                            ? 'Reachable on 127.0.0.1:11435'
-                            : 'Not detected on 127.0.0.1:11435')
-                        : widget.settings.serverUrl,
-                    ok: LocalManager.canRunLocalTools
-                        ? localInfo.defaultServerReachable
-                        : _info != null,
-                  ),
-                  _StatusRow(
-                    label: 'Updater',
-                    value: localInfo.gitCheckout
-                        ? 'Git pull enabled'
-                        : 'First update will replace bundled folder from Git',
-                    ok: true,
-                  ),
-                  _StatusRow(
-                    label: 'Host runtime setup',
-                    value: localInfo.bootstrapScript
-                        ? 'One-click setup available'
-                        : 'Bootstrap script not bundled',
-                    ok: localInfo.bootstrapScript || !localInfo.canLaunch,
-                  ),
-                  _StatusRow(
-                    label: 'Runtime payload',
-                    value: localInfo.engineBundle
-                        ? 'Sealed offline engine included'
-                        : 'Host runtimes; downloads may be needed',
-                    ok: localInfo.engineBundle,
-                  ),
-                ],
+              if (!wide)
+                _SystemCompactNav(
+                  onSelect: _scrollToSection,
+                  runtimeKey: _systemRuntimeKey,
+                  autopilotKey: _systemAutopilotKey,
+                  activityKey: _systemActivityKey,
+                  learningKey: _systemLearningKey,
+                  policyKey: _systemPolicyKey,
+                  extensionsKey: _systemExtensionsKey,
+                ),
+              if (!wide) const SizedBox(height: 12),
+              _Section(
+                key: _systemRuntimeKey,
+                title: 'Runtime architecture',
+                child: Text(
+                  'Sonder Runtime is the orchestration layer, not a standalone '
+                  'foundation model. Ollama loads and serves selected local '
+                  'base-model weights for inference. Sonder Runtime supplies '
+                  'routing, prompts, memory, tools, and policy. QLoRA/LoRA adapter '
+                  'training runs through PEFT/Hugging Face; only validated '
+                  'adapters or merged models are deployed to Ollama.',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
               ),
-            ),
-            const SizedBox(height: 12),
-          ],
-          _Section(
-            title: 'Host Launcher',
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _StatusRow(
-                  label: 'Control endpoint',
-                  value: widget.settings.effectiveLauncherUrl.isEmpty
-                      ? 'Not configured'
-                      : widget.settings.effectiveLauncherUrl,
-                  ok: widget.settings.usesHostLauncher && _launcherInfo != null,
-                ),
-                _StatusRow(
-                  label: 'Launcher',
-                  value: _launcherInfo?.launcher ?? 'Not reachable',
-                  ok: _launcherInfo?.ok ?? false,
-                ),
-                _StatusRow(
-                  label: 'Main server',
-                  value: launcherServerText,
-                  ok: _launcherInfo?.serverState == 'healthy',
-                ),
-                if (_launcherOperation != null)
-                  _StatusRow(
-                    label: hostOperationActive
-                        ? 'Active operation'
-                        : 'Last operation',
-                    value: _launcherOperation!.action.isEmpty
-                        ? _launcherOperation!.phase
-                        : '${_launcherOperation!.action}: '
-                            '${_launcherOperation!.phase}',
-                    ok: _launcherOperation!.succeeded || hostOperationActive,
-                  ),
-                if (_launcherError.isNotEmpty) ...[
-                  const SizedBox(height: 8),
-                  Text(
-                    _launcherError,
-                    style:
-                        TextStyle(color: Theme.of(context).colorScheme.error),
-                  ),
-                ],
-                if (widget.settings.launcherConfigurationError != null) ...[
-                  const SizedBox(height: 8),
-                  Text(
-                    widget.settings.launcherConfigurationError!,
-                    style:
-                        TextStyle(color: Theme.of(context).colorScheme.error),
-                  ),
-                ],
+              const SizedBox(height: 12),
+              if (_updateStatus != null) ...[
+                _UpdateSection(status: _updateStatus!),
+                const SizedBox(height: 12),
               ],
-            ),
-          ),
-          const SizedBox(height: 12),
-          _Section(
-            title: 'Runtime Control',
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    FilledButton.icon(
-                      onPressed: _working || !localRuntimeControls
-                          ? null
-                          : () => _run(
-                                () => LocalManager.setupEngine(
-                                  allowHosted: widget.settings.allowHosted,
-                                  contextSize: widget.settings.contextSize,
-                                ),
-                                label: 'Setup host runtime',
-                              ),
-                      icon: const Icon(Icons.auto_fix_high_outlined),
-                      label: const Text('Setup host runtime'),
-                    ),
-                    FilledButton.icon(
-                      key: const Key('start-server'),
-                      onPressed:
-                          _working || hostOperationActive || !canControlServer
-                              ? null
-                              : () => _run(_startServer, label: 'Start server'),
-                      icon: _busyIcon(
-                        'Start server',
-                        const Icon(Icons.play_arrow_outlined),
-                      ),
-                      label: Text(
-                        _busyAction == 'Start server'
-                            ? 'Starting server...'
-                            : 'Start server',
-                      ),
-                    ),
-                    FilledButton.tonalIcon(
-                      onPressed:
-                          _working || hostOperationActive || !canControlServer
-                              ? null
-                              : () => _run(_stopServer, label: 'Stop server'),
-                      icon: _busyIcon(
-                        'Stop server',
-                        const Icon(Icons.stop_circle_outlined),
-                      ),
-                      label: const Text('Stop server'),
-                    ),
-                    FilledButton.tonalIcon(
-                      onPressed: _working ||
-                              hostOperationActive ||
-                              !widget.settings.usesHostLauncher
-                          ? null
-                          : () => _run(
-                                _restartServer,
-                                label: 'Restart server',
-                              ),
-                      icon: _busyIcon(
-                        'Restart server',
-                        const Icon(Icons.restart_alt),
-                      ),
-                      label: const Text('Restart server'),
-                    ),
-                    if (_waitingForLauncherOperation)
-                      OutlinedButton.icon(
-                        key: const Key('launcher-stop-waiting'),
-                        onPressed: _stopWaitingForLauncherAction,
-                        icon: const Icon(Icons.close),
-                        label: const Text('Stop waiting'),
-                      ),
-                    FilledButton.tonalIcon(
-                      onPressed: _working || !localRuntimeControls
-                          ? null
-                          : () => _run(
-                                LocalManager.startEndlessTraining,
-                                label: 'Grounded practice',
-                              ),
-                      icon: const Icon(Icons.all_inclusive),
-                      label: const Text('Grounded practice'),
-                    ),
-                    OutlinedButton.icon(
-                      onPressed: _working || !localRuntimeControls
-                          ? null
-                          : () => _run(
-                                LocalManager.updateFromGit,
-                                label: 'Update from Git',
-                              ),
-                      icon: const Icon(Icons.system_update_alt),
-                      label: const Text('Update from Git'),
-                    ),
-                  ],
+              if (_extensionRegistry != null) ...[
+                _ExtensionRegistrySection(
+                    key: _systemExtensionsKey, status: _extensionRegistry!),
+                const SizedBox(height: 12),
+              ],
+              if (!LocalManager.canRunLocalTools) ...[
+                const WorkspaceNotice(
+                  message:
+                      'This client cannot inspect local files or launch local processes. '
+                      'Use the desktop app for local setup. Authenticated host-launcher controls remain available when configured in Settings.',
                 ),
-                if (_busyAction.isNotEmpty) ...[
-                  const SizedBox(height: 12),
-                  Row(
-                    key: const Key('runtime-busy'),
+                const SizedBox(height: 12),
+              ],
+              if (localInfo != null && LocalManager.canRunLocalTools) ...[
+                _Section(
+                  title: 'Install',
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
+                      _StatusRow(
+                        label: 'Platform',
+                        value: localInfo.platform,
+                        ok: true,
                       ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text('$_busyAction in progress...'),
+                      _StatusRow(
+                        label: 'Local system',
+                        value: localInfo.systemExists
+                            ? localInfo.systemDir
+                            : 'Not bundled',
+                        ok: localInfo.systemExists,
+                      ),
+                      _StatusRow(
+                        label: 'Shared memory',
+                        value: localInfo.sharedHome,
+                        ok: true,
+                        onCopy: () => _copy(localInfo.sharedHome),
+                      ),
+                      _StatusRow(
+                        label: 'Local server',
+                        value: LocalManager.canRunLocalTools
+                            ? (localInfo.defaultServerReachable
+                                ? 'Reachable on 127.0.0.1:11435'
+                                : 'Not detected on 127.0.0.1:11435')
+                            : widget.settings.serverUrl,
+                        ok: LocalManager.canRunLocalTools
+                            ? localInfo.defaultServerReachable
+                            : _info != null,
+                      ),
+                      _StatusRow(
+                        label: 'Updater',
+                        value: localInfo.gitCheckout
+                            ? 'Git pull enabled'
+                            : 'First update will replace bundled folder from Git',
+                        ok: true,
+                      ),
+                      _StatusRow(
+                        label: 'Host runtime setup',
+                        value: localInfo.bootstrapScript
+                            ? 'One-click setup available'
+                            : 'Bootstrap script not bundled',
+                        ok: localInfo.bootstrapScript || !localInfo.canLaunch,
+                      ),
+                      _StatusRow(
+                        label: 'Runtime payload',
+                        value: localInfo.engineBundle
+                            ? 'Sealed offline engine included'
+                            : 'Host runtimes; downloads may be needed',
+                        ok: localInfo.engineBundle,
                       ),
                     ],
                   ),
-                ],
-                if (_runtimeFailure != null) ...[
-                  const SizedBox(height: 12),
-                  _RuntimeFailureCard(
-                    label: _runtimeFailureLabel,
-                    result: _runtimeFailure!,
-                    onShowLog: () => unawaited(
-                      _showActionFailure(
-                        _runtimeFailureLabel,
-                        _runtimeFailure!,
-                      ),
-                    ),
-                  ),
-                ],
-                if (!localRuntimeControls) ...[
-                  const SizedBox(height: 10),
-                  Text(
-                    widget.settings.usesHostLauncher
-                        ? 'Start, Stop, and Restart control the configured host. '
-                            'Runtime setup, Git updates, grounded practice, and '
-                            'PEFT adapter training remain on that host.'
-                        : 'Configure an explicit host launcher URL to control a server from this client-only device.',
-                  ),
-                ],
-              ],
-            ),
-          ),
-          const SizedBox(height: 12),
-          _Section(
-            key: _systemAutopilotKey,
-            title: 'Autopilot',
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Give Sonder Runtime an outcome, then let its local planner build '
-                  'a persistent checklist, execute one guarded task at a time, '
-                  'validate the result, and pause safely when a budget or '
-                  'decision boundary is reached.',
-                  style: Theme.of(context).textTheme.bodyMedium,
                 ),
                 const SizedBox(height: 12),
-                TextField(
-                  key: const Key('autopilot-goal'),
-                  controller: _autopilotGoal,
-                  enabled: !_working,
-                  minLines: 2,
-                  maxLines: 4,
-                  decoration: const InputDecoration(
-                    labelText: 'Autonomous goal',
-                    hintText:
-                        'Inspect this project, implement the missing feature, and run its tests',
-                    alignLabelWithHint: true,
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  crossAxisAlignment: WrapCrossAlignment.center,
+              ],
+              _Section(
+                title: 'Host Launcher',
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    ChoiceChip(
-                      label: const Text('Workspace'),
-                      avatar: const Icon(Icons.edit_note_outlined, size: 18),
-                      selected: !_autopilotObserve,
-                      onSelected: _working
-                          ? null
-                          : (_) => setState(() => _autopilotObserve = false),
+                    _StatusRow(
+                      label: 'Control endpoint',
+                      value: widget.settings.effectiveLauncherUrl.isEmpty
+                          ? 'Not configured'
+                          : widget.settings.effectiveLauncherUrl,
+                      ok: widget.settings.usesHostLauncher &&
+                          _launcherInfo != null,
                     ),
-                    ChoiceChip(
-                      label: const Text('Observe only'),
-                      avatar: const Icon(Icons.visibility_outlined, size: 18),
-                      selected: _autopilotObserve,
-                      onSelected: _working
-                          ? null
-                          : (_) => setState(() => _autopilotObserve = true),
+                    _StatusRow(
+                      label: 'Launcher',
+                      value: _launcherInfo?.launcher ?? 'Not reachable',
+                      ok: _launcherInfo?.ok ?? false,
                     ),
-                    FilterChip(
-                      label: const Text('Public web'),
-                      avatar: const Icon(Icons.public_outlined, size: 18),
-                      selected: _autopilotWeb,
-                      onSelected: _working
-                          ? null
-                          : (value) => setState(() => _autopilotWeb = value),
+                    _StatusRow(
+                      label: 'Main server',
+                      value: launcherServerText,
+                      ok: _launcherInfo?.serverState == 'healthy',
                     ),
-                    FilterChip(
-                      label: const Text('Adaptive review'),
-                      avatar: const Icon(Icons.route_outlined, size: 18),
-                      selected: _autopilotAdaptive,
-                      onSelected: _working
-                          ? null
-                          : (value) =>
-                              setState(() => _autopilotAdaptive = value),
+                    if (_launcherOperation != null)
+                      _StatusRow(
+                        label: hostOperationActive
+                            ? 'Active operation'
+                            : 'Last operation',
+                        value: _launcherOperation!.action.isEmpty
+                            ? _launcherOperation!.phase
+                            : '${_launcherOperation!.action}: '
+                                '${_launcherOperation!.phase}',
+                        ok: _launcherOperation!.succeeded ||
+                            hostOperationActive,
+                      ),
+                    if (_launcherError.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        _launcherError,
+                        style: TextStyle(
+                            color: Theme.of(context).colorScheme.error),
+                      ),
+                    ],
+                    if (widget.settings.launcherConfigurationError != null) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        widget.settings.launcherConfigurationError!,
+                        style: TextStyle(
+                            color: Theme.of(context).colorScheme.error),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              _Section(
+                title: 'Runtime Control',
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        FilledButton.icon(
+                          onPressed: _working || !localRuntimeControls
+                              ? null
+                              : () => _run(
+                                    () => LocalManager.setupEngine(
+                                      allowHosted: widget.settings.allowHosted,
+                                      contextSize: widget.settings.contextSize,
+                                    ),
+                                    label: 'Setup host runtime',
+                                  ),
+                          icon: const Icon(Icons.auto_fix_high_outlined),
+                          label: const Text('Setup host runtime'),
+                        ),
+                        FilledButton.icon(
+                          key: const Key('start-server'),
+                          onPressed: _working ||
+                                  hostOperationActive ||
+                                  !canControlServer
+                              ? null
+                              : () => _run(_startServer, label: 'Start server'),
+                          icon: _busyIcon(
+                            'Start server',
+                            const Icon(Icons.play_arrow_outlined),
+                          ),
+                          label: Text(
+                            _busyAction == 'Start server'
+                                ? 'Starting server...'
+                                : 'Start server',
+                          ),
+                        ),
+                        FilledButton.tonalIcon(
+                          onPressed: _working ||
+                                  hostOperationActive ||
+                                  !canControlServer
+                              ? null
+                              : () => _run(_stopServer, label: 'Stop server'),
+                          icon: _busyIcon(
+                            'Stop server',
+                            const Icon(Icons.stop_circle_outlined),
+                          ),
+                          label: const Text('Stop server'),
+                        ),
+                        FilledButton.tonalIcon(
+                          onPressed: _working ||
+                                  hostOperationActive ||
+                                  !widget.settings.usesHostLauncher
+                              ? null
+                              : () => _run(
+                                    _restartServer,
+                                    label: 'Restart server',
+                                  ),
+                          icon: _busyIcon(
+                            'Restart server',
+                            const Icon(Icons.restart_alt),
+                          ),
+                          label: const Text('Restart server'),
+                        ),
+                        if (_waitingForLauncherOperation)
+                          OutlinedButton.icon(
+                            key: const Key('launcher-stop-waiting'),
+                            onPressed: _stopWaitingForLauncherAction,
+                            icon: const Icon(Icons.close),
+                            label: const Text('Stop waiting'),
+                          ),
+                        FilledButton.tonalIcon(
+                          onPressed: _working || !localRuntimeControls
+                              ? null
+                              : () => _run(
+                                    LocalManager.startEndlessTraining,
+                                    label: 'Grounded practice',
+                                  ),
+                          icon: const Icon(Icons.all_inclusive),
+                          label: const Text('Grounded practice'),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: _working || !localRuntimeControls
+                              ? null
+                              : () => _run(
+                                    LocalManager.updateFromGit,
+                                    label: 'Update from Git',
+                                  ),
+                          icon: const Icon(Icons.system_update_alt),
+                          label: const Text('Update from Git'),
+                        ),
+                      ],
                     ),
-                    Tooltip(
-                      message:
-                          'Autopilot never receives location consent, cloud tiers, delete, account, permission, or fleet controls.',
-                      child: Icon(
-                        Icons.shield_outlined,
-                        size: 20,
-                        color: Theme.of(context).colorScheme.primary,
+                    if (_busyAction.isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      Row(
+                        key: const Key('runtime-busy'),
+                        children: [
+                          const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text('$_busyAction in progress...'),
+                          ),
+                        ],
+                      ),
+                    ],
+                    if (_runtimeFailure != null) ...[
+                      const SizedBox(height: 12),
+                      _RuntimeFailureCard(
+                        label: _runtimeFailureLabel,
+                        result: _runtimeFailure!,
+                        onShowLog: () => unawaited(
+                          _showActionFailure(
+                            _runtimeFailureLabel,
+                            _runtimeFailure!,
+                          ),
+                        ),
+                      ),
+                    ],
+                    if (!localRuntimeControls) ...[
+                      const SizedBox(height: 10),
+                      Text(
+                        widget.settings.usesHostLauncher
+                            ? 'Start, Stop, and Restart control the configured host. '
+                                'Runtime setup, Git updates, grounded practice, and '
+                                'PEFT adapter training remain on that host.'
+                            : 'Configure an explicit host launcher URL to control a server from this client-only device.',
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              _Section(
+                key: _systemAutopilotKey,
+                title: 'Autopilot',
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Give Sonder Runtime an outcome, then let its local planner build '
+                      'a persistent checklist, execute one guarded task at a time, '
+                      'validate the result, and pause safely when a budget or '
+                      'decision boundary is reached.',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      key: const Key('autopilot-goal'),
+                      controller: _autopilotGoal,
+                      enabled: !_working,
+                      minLines: 2,
+                      maxLines: 4,
+                      decoration: const InputDecoration(
+                        labelText: 'Autonomous goal',
+                        hintText:
+                            'Inspect this project, implement the missing feature, and run its tests',
+                        alignLabelWithHint: true,
+                        border: OutlineInputBorder(),
                       ),
                     ),
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        ChoiceChip(
+                          label: const Text('Workspace'),
+                          avatar:
+                              const Icon(Icons.edit_note_outlined, size: 18),
+                          selected: !_autopilotObserve,
+                          onSelected: _working
+                              ? null
+                              : (_) =>
+                                  setState(() => _autopilotObserve = false),
+                        ),
+                        ChoiceChip(
+                          label: const Text('Observe only'),
+                          avatar:
+                              const Icon(Icons.visibility_outlined, size: 18),
+                          selected: _autopilotObserve,
+                          onSelected: _working
+                              ? null
+                              : (_) => setState(() => _autopilotObserve = true),
+                        ),
+                        FilterChip(
+                          label: const Text('Public web'),
+                          avatar: const Icon(Icons.public_outlined, size: 18),
+                          selected: _autopilotWeb,
+                          onSelected: _working
+                              ? null
+                              : (value) =>
+                                  setState(() => _autopilotWeb = value),
+                        ),
+                        FilterChip(
+                          label: const Text('Adaptive review'),
+                          avatar: const Icon(Icons.route_outlined, size: 18),
+                          selected: _autopilotAdaptive,
+                          onSelected: _working
+                              ? null
+                              : (value) =>
+                                  setState(() => _autopilotAdaptive = value),
+                        ),
+                        Tooltip(
+                          message:
+                              'Autopilot never receives location consent, cloud tiers, delete, account, permission, or fleet controls.',
+                          child: Icon(
+                            Icons.shield_outlined,
+                            size: 20,
+                            color: Theme.of(context).colorScheme.primary,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        FilledButton.tonalIcon(
+                          key: const Key('autopilot-plan'),
+                          onPressed: _working
+                              ? null
+                              : () => _startAutopilot(planOnly: true),
+                          icon: const Icon(Icons.account_tree_outlined),
+                          label: const Text('Plan only'),
+                        ),
+                        FilledButton.icon(
+                          key: const Key('autopilot-run'),
+                          onPressed: _working
+                              ? null
+                              : () => _startAutopilot(planOnly: false),
+                          icon: const Icon(Icons.rocket_launch_outlined),
+                          label: const Text('Run goal'),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: _working
+                              ? null
+                              : () => _sendCommand('/autopilot status'),
+                          icon: const Icon(Icons.manage_search_outlined),
+                          label: const Text('Status'),
+                        ),
+                      ],
+                    ),
+                    if (info?.autopilot != null) ...[
+                      const SizedBox(height: 14),
+                      const Divider(),
+                      const SizedBox(height: 8),
+                      _AutopilotPanel(
+                        status: info!.autopilot!,
+                        onResume: (run) => _controlAutopilot('resume', run),
+                        onPause: (run) => _controlAutopilot('pause', run),
+                        onCancel: (run) => _controlAutopilot('cancel', run),
+                      ),
+                    ],
                   ],
                 ),
-                const SizedBox(height: 10),
-                Wrap(
+              ),
+              const SizedBox(height: 12),
+              _Section(
+                key: _systemActivityKey,
+                title: 'Server Actions',
+                child: Wrap(
                   spacing: 8,
                   runSpacing: 8,
                   children: [
-                    FilledButton.tonalIcon(
-                      key: const Key('autopilot-plan'),
-                      onPressed: _working
-                          ? null
-                          : () => _startAutopilot(planOnly: true),
-                      icon: const Icon(Icons.account_tree_outlined),
-                      label: const Text('Plan only'),
-                    ),
-                    FilledButton.icon(
-                      key: const Key('autopilot-run'),
-                      onPressed: _working
-                          ? null
-                          : () => _startAutopilot(planOnly: false),
-                      icon: const Icon(Icons.rocket_launch_outlined),
-                      label: const Text('Run goal'),
+                    OutlinedButton.icon(
+                      onPressed: _working ? null : () => _sendCommand('/stats'),
+                      icon: const Icon(Icons.query_stats),
+                      label: const Text('Stats'),
                     ),
                     OutlinedButton.icon(
-                      onPressed: _working
-                          ? null
-                          : () => _sendCommand('/autopilot status'),
-                      icon: const Icon(Icons.manage_search_outlined),
-                      label: const Text('Status'),
+                      onPressed:
+                          _working ? null : () => _sendCommand('/context'),
+                      icon: const Icon(Icons.monitor_heart_outlined),
+                      label: const Text('Context'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed:
+                          _working ? null : () => _sendCommand('/compact'),
+                      icon: const Icon(Icons.compress_outlined),
+                      label: const Text('Compact'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: _working ? null : () => _sendCommand('/todo'),
+                      icon: const Icon(Icons.task_alt_outlined),
+                      label: const Text('Tasks'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed:
+                          _working ? null : () => _sendCommand('/quality'),
+                      icon: const Icon(Icons.fact_check_outlined),
+                      label: const Text('Quality'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed:
+                          _working ? null : () => _sendCommand('/improve'),
+                      icon: const Icon(Icons.tips_and_updates_outlined),
+                      label: const Text('Improve'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed:
+                          _working ? null : () => _sendCommand('/agents'),
+                      icon: const Icon(Icons.hub_outlined),
+                      label: const Text('Agents'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed:
+                          _working ? null : () => _sendCommand('/capacity'),
+                      icon: const Icon(Icons.memory_outlined),
+                      label: const Text('Capacity'),
+                    ),
+                    if ((info?.agents?.activeAgents ?? 0) > 0)
+                      OutlinedButton.icon(
+                        onPressed: _working ? null : _cancelActiveAgents,
+                        icon: const Icon(Icons.cancel_schedule_send_outlined),
+                        label: const Text('Cancel active'),
+                      ),
+                    OutlinedButton.icon(
+                      onPressed:
+                          _working ? null : () => _sendCommand('/commands'),
+                      icon: const Icon(Icons.terminal_outlined),
+                      label: const Text('Commands'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed:
+                          _working ? null : () => _sendCommand('/dump app'),
+                      icon: const Icon(Icons.description_outlined),
+                      label: const Text('Dump'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed:
+                          _working ? null : () => _sendCommand('/permissions'),
+                      icon: const Icon(Icons.security_outlined),
+                      label: const Text('Permissions'),
+                    ),
+                    SizedBox(
+                      width: 120,
+                      child: TextField(
+                        controller: _trainCount,
+                        enabled: !_working,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          isDense: true,
+                          labelText: 'Practice cases',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed:
+                          _working ? null : () => _sendCommand(_trainCommand()),
+                      icon: const Icon(Icons.school_outlined),
+                      label: const Text('Run practice'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: _working ? null : () => _sendCommand('/help'),
+                      icon: const Icon(Icons.help_outline),
+                      label: const Text('Help'),
                     ),
                   ],
                 ),
-                if (info?.autopilot != null) ...[
-                  const SizedBox(height: 14),
-                  const Divider(),
-                  const SizedBox(height: 8),
-                  _AutopilotPanel(
-                    status: info!.autopilot!,
-                    onResume: (run) => _controlAutopilot('resume', run),
-                    onPause: (run) => _controlAutopilot('pause', run),
-                    onCancel: (run) => _controlAutopilot('cancel', run),
-                  ),
-                ],
+              ),
+              const SizedBox(height: 12),
+              _Section(
+                title: 'Command',
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _customCommand,
+                        enabled: !_working,
+                        autocorrect: false,
+                        decoration: const InputDecoration(
+                          isDense: true,
+                          hintText: '/diagnostics',
+                          border: OutlineInputBorder(),
+                        ),
+                        onSubmitted: (_) {
+                          if (!_working) _sendCommand(_customCommand.text);
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    FilledButton.icon(
+                      onPressed: _working
+                          ? null
+                          : () => _sendCommand(_customCommand.text.trim()),
+                      icon: const Icon(Icons.terminal),
+                      label: const Text('Send'),
+                    ),
+                  ],
+                ),
+              ),
+              if (_loading || _working) ...[
+                const SizedBox(height: 16),
+                const LinearProgressIndicator(),
               ],
-            ),
-          ),
-          const SizedBox(height: 12),
-          _Section(
-            key: _systemActivityKey,
-            title: 'Server Actions',
-            child: Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                OutlinedButton.icon(
-                  onPressed: _working ? null : () => _sendCommand('/stats'),
-                  icon: const Icon(Icons.query_stats),
-                  label: const Text('Stats'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: _working ? null : () => _sendCommand('/context'),
-                  icon: const Icon(Icons.monitor_heart_outlined),
-                  label: const Text('Context'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: _working ? null : () => _sendCommand('/compact'),
-                  icon: const Icon(Icons.compress_outlined),
-                  label: const Text('Compact'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: _working ? null : () => _sendCommand('/todo'),
-                  icon: const Icon(Icons.task_alt_outlined),
-                  label: const Text('Tasks'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: _working ? null : () => _sendCommand('/quality'),
-                  icon: const Icon(Icons.fact_check_outlined),
-                  label: const Text('Quality'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: _working ? null : () => _sendCommand('/improve'),
-                  icon: const Icon(Icons.tips_and_updates_outlined),
-                  label: const Text('Improve'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: _working ? null : () => _sendCommand('/agents'),
-                  icon: const Icon(Icons.hub_outlined),
-                  label: const Text('Agents'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: _working ? null : () => _sendCommand('/capacity'),
-                  icon: const Icon(Icons.memory_outlined),
-                  label: const Text('Capacity'),
-                ),
-                if ((info?.agents?.activeAgents ?? 0) > 0)
-                  OutlinedButton.icon(
-                    onPressed: _working ? null : _cancelActiveAgents,
-                    icon: const Icon(Icons.cancel_schedule_send_outlined),
-                    label: const Text('Cancel active'),
+              if (_message != null) ...[
+                const SizedBox(height: 16),
+                _OutputCard(text: _message!),
+              ],
+              const SizedBox(height: 12),
+              if (info == null) ...[
+                _Section(
+                  title: 'Live Execution',
+                  child: LiveExecutionFeed(
+                    feed: null,
+                    offline: _message != null,
                   ),
-                OutlinedButton.icon(
-                  onPressed: _working ? null : () => _sendCommand('/commands'),
-                  icon: const Icon(Icons.terminal_outlined),
-                  label: const Text('Commands'),
                 ),
-                OutlinedButton.icon(
-                  onPressed: _working ? null : () => _sendCommand('/dump app'),
-                  icon: const Icon(Icons.description_outlined),
-                  label: const Text('Dump'),
-                ),
-                OutlinedButton.icon(
-                  onPressed:
-                      _working ? null : () => _sendCommand('/permissions'),
-                  icon: const Icon(Icons.security_outlined),
-                  label: const Text('Permissions'),
-                ),
-                SizedBox(
-                  width: 120,
-                  child: TextField(
-                    controller: _trainCount,
-                    enabled: !_working,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      isDense: true,
-                      labelText: 'Practice cases',
-                      border: OutlineInputBorder(),
+                const SizedBox(height: 12),
+              ],
+              if (info != null) ...[
+                _Section(title: 'Status', child: _OutputText(info.status)),
+                const SizedBox(height: 12),
+                if (info.deployment != null) ...[
+                  _Section(
+                    title: 'Deployment profile',
+                    child: _DeploymentPanel(
+                      key: const Key('deployment-panel'),
+                      info: info.deployment!,
                     ),
                   ),
+                  const SizedBox(height: 12),
+                ],
+                if (info.operationalCapabilities != null) ...[
+                  _Section(
+                    title: 'Distributed capability surface',
+                    child: _OperationalCapabilitiesPanel(
+                      key: const Key('operational-capabilities-panel'),
+                      info: info.operationalCapabilities!,
+                      api: _api,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                if (info.runtimePolicy != null) ...[
+                  _Section(
+                    key: _systemPolicyKey,
+                    title: 'Local Runtime Policy',
+                    child: _RuntimePolicyPanel(policy: info.runtimePolicy!),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                if (info.selfmod != null) ...[
+                  _Section(
+                    title: 'Safe Self-Improvement',
+                    child: _SelfmodPanel(info: info.selfmod!),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                if (info.mcpRuntime != null) ...[
+                  _Section(
+                    title: 'Runtime Convergence',
+                    child: _McpRuntimePanel(runtime: info.mcpRuntime!),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                if (info.learningHealth != null) ...[
+                  _Section(
+                    key: _systemLearningKey,
+                    title: 'Learning Quality',
+                    child: _LearningHealthPanel(health: info.learningHealth!),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                if (info.context != null) ...[
+                  _Section(
+                    title: 'Context Health',
+                    child: _ContextHealthPanel(health: info.context!),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                _Section(
+                  title: 'Live Execution',
+                  child: LiveExecutionFeed(feed: info.executionFeed),
                 ),
-                OutlinedButton.icon(
-                  onPressed:
-                      _working ? null : () => _sendCommand(_trainCommand()),
-                  icon: const Icon(Icons.school_outlined),
-                  label: const Text('Run practice'),
+                const SizedBox(height: 12),
+                if (info.activity?.displayResponse != null) ...[
+                  _Section(
+                    title: 'Workbench Activity',
+                    child: WorkbenchActivityPanel(
+                      response: info.activity!.displayResponse!,
+                      totalToolCalls: info.activity!.totalToolCalls,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                _Section(
+                  title: 'Server State',
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (info.dbPath.isNotEmpty)
+                        _StatusRow(
+                          label: 'Database',
+                          value: info.dbPath,
+                          ok: true,
+                          onCopy: () => _copy(info.dbPath),
+                        ),
+                      if (info.stateHome.isNotEmpty)
+                        _StatusRow(
+                          label: 'Home',
+                          value: info.stateHome,
+                          ok: true,
+                          onCopy: () => _copy(info.stateHome),
+                        ),
+                      if (info.dbPath.isEmpty && info.stateHome.isEmpty)
+                        const _OutputText('Server did not report state paths.'),
+                    ],
+                  ),
                 ),
-                OutlinedButton.icon(
-                  onPressed: _working ? null : () => _sendCommand('/help'),
-                  icon: const Icon(Icons.help_outline),
-                  label: const Text('Help'),
+                const SizedBox(height: 12),
+                _Section(
+                  title: 'Memory & grounded learning',
+                  child: _OutputText(info.learnTiers),
+                ),
+                const SizedBox(height: 12),
+                if (info.agents != null) ...[
+                  _Section(
+                    title: 'Agents',
+                    child: _AgentStatusPanel(
+                      status: info.agents!,
+                      onRetry: _retryPersistedAgent,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                if (info.improvements.isNotEmpty) ...[
+                  _Section(
+                    title: 'Improvements',
+                    child: _OutputText(info.improvements),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                _Section(title: 'Stats', child: _OutputText(info.stats)),
+                const SizedBox(height: 12),
+                _Section(
+                  title: 'Inference models',
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Sonder Runtime routes requests to these providers. '
+                        'Ollama hosts and runs the local model weights.',
+                      ),
+                      const SizedBox(height: 10),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: info.models
+                            .map((m) => Chip(
+                                  label: Text('${m.id} - ${m.ownedBy}'),
+                                  avatar: Icon(
+                                    m.ownedBy == 'cloud'
+                                        ? Icons.cloud_outlined
+                                        : Icons.memory_outlined,
+                                    size: 18,
+                                  ),
+                                ))
+                            .toList(),
+                      ),
+                    ],
+                  ),
                 ),
               ],
-            ),
-          ),
-          const SizedBox(height: 12),
-          _Section(
-            title: 'Command',
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _customCommand,
-                    enabled: !_working,
-                    autocorrect: false,
-                    decoration: const InputDecoration(
-                      isDense: true,
-                      hintText: '/diagnostics',
-                      border: OutlineInputBorder(),
-                    ),
-                    onSubmitted: (_) {
-                      if (!_working) _sendCommand(_customCommand.text);
-                    },
-                  ),
-                ),
-                const SizedBox(width: 8),
-                FilledButton.icon(
-                  onPressed: _working
-                      ? null
-                      : () => _sendCommand(_customCommand.text.trim()),
-                  icon: const Icon(Icons.terminal),
-                  label: const Text('Send'),
-                ),
-              ],
-            ),
-          ),
-          if (_loading || _working) ...[
-            const SizedBox(height: 16),
-            const LinearProgressIndicator(),
-          ],
-          if (_message != null) ...[
-            const SizedBox(height: 16),
-            _OutputCard(text: _message!),
-          ],
-          const SizedBox(height: 12),
-          if (info == null) ...[
-            _Section(
-              title: 'Live Execution',
-              child: LiveExecutionFeed(
-                feed: null,
-                offline: _message != null,
+              const SizedBox(height: 24),
+              Text(
+                'Sonder Runtime orchestrates inference; it is not the model itself. '
+                'Desktop builds look for a bundled local-system folder next to the app. '
+                'A sealed engine payload can include Python, Ollama, and models for offline setup; '
+                'otherwise setup uses installed runtimes and may download missing components. '
+                '${LocalManager.canRunLocalTools ? 'Runtime memory is shared through ${localInfo?.sharedHome ?? LocalManager.sharedHomePath()}. ' : 'This client cannot inspect the host memory directory. '}'
+                'Android, iOS, and other client-only builds use the authenticated '
+                'host launcher to start or stop the configured computer without '
+                'exposing a remote shell.',
+                style: Theme.of(context).textTheme.bodySmall,
               ),
-            ),
-            const SizedBox(height: 12),
-          ],
-          if (info != null) ...[
-            _Section(title: 'Status', child: _OutputText(info.status)),
-            const SizedBox(height: 12),
-            if (info.runtimePolicy != null) ...[
-              _Section(
-                key: _systemPolicyKey,
-                title: 'Local Runtime Policy',
-                child: _RuntimePolicyPanel(policy: info.runtimePolicy!),
-              ),
-              const SizedBox(height: 12),
-            ],
-            if (info.selfmod != null) ...[
-              _Section(
-                title: 'Safe Self-Improvement',
-                child: _SelfmodPanel(info: info.selfmod!),
-              ),
-              const SizedBox(height: 12),
-            ],
-            if (info.mcpRuntime != null) ...[
-              _Section(
-                title: 'Runtime Convergence',
-                child: _McpRuntimePanel(runtime: info.mcpRuntime!),
-              ),
-              const SizedBox(height: 12),
-            ],
-            if (info.learningHealth != null) ...[
-              _Section(
-                key: _systemLearningKey,
-                title: 'Learning Quality',
-                child: _LearningHealthPanel(health: info.learningHealth!),
-              ),
-              const SizedBox(height: 12),
-            ],
-            if (info.context != null) ...[
-              _Section(
-                title: 'Context Health',
-                child: _ContextHealthPanel(health: info.context!),
-              ),
-              const SizedBox(height: 12),
-            ],
-            _Section(
-              title: 'Live Execution',
-              child: LiveExecutionFeed(feed: info.executionFeed),
-            ),
-            const SizedBox(height: 12),
-            if (info.activity?.displayResponse != null) ...[
-              _Section(
-                title: 'Workbench Activity',
-                child: WorkbenchActivityPanel(
-                  response: info.activity!.displayResponse!,
-                  totalToolCalls: info.activity!.totalToolCalls,
-                ),
-              ),
-              const SizedBox(height: 12),
-            ],
-            _Section(
-              title: 'Server State',
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (info.dbPath.isNotEmpty)
-                    _StatusRow(
-                      label: 'Database',
-                      value: info.dbPath,
-                      ok: true,
-                      onCopy: () => _copy(info.dbPath),
-                    ),
-                  if (info.stateHome.isNotEmpty)
-                    _StatusRow(
-                      label: 'Home',
-                      value: info.stateHome,
-                      ok: true,
-                      onCopy: () => _copy(info.stateHome),
-                    ),
-                  if (info.dbPath.isEmpty && info.stateHome.isEmpty)
-                    const _OutputText('Server did not report state paths.'),
-                ],
-              ),
-            ),
-            const SizedBox(height: 12),
-            _Section(
-              title: 'Memory & grounded learning',
-              child: _OutputText(info.learnTiers),
-            ),
-            const SizedBox(height: 12),
-            if (info.agents != null) ...[
-              _Section(
-                title: 'Agents',
-                child: _AgentStatusPanel(
-                  status: info.agents!,
-                  onRetry: _retryPersistedAgent,
-                ),
-              ),
-              const SizedBox(height: 12),
-            ],
-            if (info.improvements.isNotEmpty) ...[
-              _Section(
-                title: 'Improvements',
-                child: _OutputText(info.improvements),
-              ),
-              const SizedBox(height: 12),
-            ],
-            _Section(title: 'Stats', child: _OutputText(info.stats)),
-            const SizedBox(height: 12),
-            _Section(
-              title: 'Inference models',
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Sonder Runtime routes requests to these providers. '
-                    'Ollama hosts and runs the local model weights.',
-                  ),
-                  const SizedBox(height: 10),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: info.models
-                        .map((m) => Chip(
-                              label: Text('${m.id} - ${m.ownedBy}'),
-                              avatar: Icon(
-                                m.ownedBy == 'cloud'
-                                    ? Icons.cloud_outlined
-                                    : Icons.memory_outlined,
-                                size: 18,
-                              ),
-                            ))
-                        .toList(),
-                  ),
-                ],
-              ),
-            ),
-          ],
-          const SizedBox(height: 24),
-          Text(
-            'Sonder Runtime orchestrates inference; it is not the model itself. '
-            'Desktop builds look for a bundled local-system folder next to the app. '
-            'A sealed engine payload can include Python, Ollama, and models for offline setup; '
-            'otherwise setup uses installed runtimes and may download missing components. '
-            'Runtime memory is shared through '
-            '${localInfo?.sharedHome ?? LocalManager.sharedHomePath()}. '
-            'Android, iOS, and other client-only builds use the authenticated '
-            'host launcher to start or stop the configured computer without '
-            'exposing a remote shell.',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
             ],
           );
           if (!wide) return content;
@@ -2363,6 +2416,311 @@ class _AgentStatusPanel extends StatelessWidget {
   }
 }
 
+class _DeploymentPanel extends StatelessWidget {
+  final DeploymentInfo info;
+
+  const _DeploymentPanel({super.key, required this.info});
+
+  String _capabilityValue(DeploymentCapabilityInfo capability) {
+    if (capability.available) {
+      return capability.reason.isEmpty
+          ? 'Available'
+          : 'Available — ${capability.reason}';
+    }
+    return capability.reason.isEmpty
+        ? 'Unavailable'
+        : 'Unavailable — ${capability.reason}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final privateCompute = info.capability('private_compute');
+    final takeover = info.capability('automatic_takeover');
+    final failback = info.capability('automatic_failback');
+    final replication = info.capability('acknowledged_state_replication');
+    final fencing = info.capability('worker_epoch_fencing');
+    final quorum = info.capability('quorum');
+    final policy = info.partitionPolicy.replaceAll('_', ' ');
+    return Column(
+      key: const Key('deployment-panel-content'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _StatusRow(
+          label: 'Profile',
+          value: info.profile.isEmpty
+              ? info.displayProfile
+              : '${info.displayProfile} (${info.profile})',
+          ok: info.profile.isNotEmpty || info.profileId.isNotEmpty,
+        ),
+        _StatusRow(
+          label: 'Members',
+          value: info.membersLabel,
+          ok: info.configuredMembers.isNotEmpty,
+        ),
+        if (info.localNode.isNotEmpty)
+          _StatusRow(label: 'Local node', value: info.localNode, ok: true),
+        if (info.preferredPrimary.isNotEmpty)
+          _StatusRow(
+            label: 'Preferred primary',
+            value: info.preferredPrimary,
+            ok: true,
+          ),
+        _StatusRow(
+          label: 'Private compute',
+          value: _capabilityValue(privateCompute),
+          ok: privateCompute.available,
+        ),
+        _StatusRow(
+          label: 'Automatic takeover',
+          value: _capabilityValue(takeover),
+          ok: takeover.available,
+        ),
+        _StatusRow(
+          label: 'Automatic failback',
+          value: _capabilityValue(failback),
+          ok: failback.available,
+        ),
+        if (info.recoveryPosture != null)
+          _StatusRow(
+            label: 'Recovery posture',
+            value: info.recoveryPosture!.summary,
+            ok: info.recoveryPosture!.automaticTakeoverAvailable &&
+                info.recoveryPosture!.automaticFailbackAvailable,
+          ),
+        _StatusRow(
+          label: 'State replication',
+          value: _capabilityValue(replication),
+          ok: replication.available,
+        ),
+        _StatusRow(
+          label: 'Worker fencing',
+          value: _capabilityValue(fencing),
+          ok: fencing.available,
+        ),
+        _StatusRow(
+          label: 'Quorum',
+          value: _capabilityValue(quorum),
+          ok: quorum.available,
+        ),
+        if (info.controlStateScope.isNotEmpty)
+          _StatusRow(
+            label: 'State scope',
+            value: info.controlStateScope,
+            ok: true,
+          ),
+        if (policy.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          Text(
+            'Partition policy: $policy.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
+        if (!info.preferenceConfersAuthority) ...[
+          const SizedBox(height: 4),
+          Text(
+            'Primary preference is advisory; it never grants promotion authority.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _OperationalCapabilitiesPanel extends StatelessWidget {
+  final OperationalCapabilitiesInfo info;
+  final SonderApi api;
+
+  const _OperationalCapabilitiesPanel(
+      {super.key, required this.info, required this.api});
+
+  String _capabilityValue(OperationalCapabilityInfo capability) {
+    if (capability.available) {
+      return capability.reason.isEmpty
+          ? 'Available'
+          : 'Available — ${capability.reason}';
+    }
+    return capability.reason.isEmpty
+        ? 'Unavailable'
+        : 'Unavailable — ${capability.reason}';
+  }
+
+  String _automaticAvailabilityValue(bool available, String action) {
+    return available
+        ? 'Available'
+        : 'Unavailable — automatic $action is not available.';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      key: const Key('operational-capabilities-panel-content'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (info.localNode.isNotEmpty)
+          _StatusRow(label: 'Compute node', value: info.localNode, ok: true),
+        _StatusRow(
+          label: 'Compute peers',
+          value: '${info.configuredPeerCount}',
+          ok: true,
+        ),
+        _StatusRow(
+          label: 'Managed app work',
+          value: _capabilityValue(info.managedAppWork),
+          ok: info.managedAppWork.available,
+        ),
+        _StatusRow(
+          label: 'Inference pool',
+          value:
+              '${info.workerSummary}; ${_capabilityValue(info.requestLevelPooling)}',
+          ok: info.requestLevelPooling.available,
+        ),
+        if (info.poolSchemaVersion == 2)
+          _StatusRow(
+              label: 'Cached capacity',
+              value: info.poolCapacitySummary,
+              ok: true),
+        OllamaPoolDetails(api: api),
+        _StatusRow(
+          label: 'Whole-job placement',
+          value: _capabilityValue(info.wholeJobPlacement),
+          ok: info.wholeJobPlacement.available,
+        ),
+        _StatusRow(
+          label: 'Model sharding',
+          value: _capabilityValue(info.modelSharding),
+          ok: info.modelSharding.available,
+        ),
+        _StatusRow(
+          label: 'Memory replication',
+          value: _capabilityValue(info.memoryReplicationTransport),
+          ok: info.memoryReplicationTransport.available,
+        ),
+        _StatusRow(
+          label: 'Automatic takeover',
+          value: _automaticAvailabilityValue(
+            info.automaticTakeoverAvailable,
+            'takeover',
+          ),
+          ok: info.automaticTakeoverAvailable,
+        ),
+        _StatusRow(
+          label: 'Automatic failback',
+          value: _automaticAvailabilityValue(
+            info.automaticFailbackAvailable,
+            'failback',
+          ),
+          ok: info.automaticFailbackAvailable,
+        ),
+        _StatusRow(
+          label: 'Artifact transfer',
+          value: _capabilityValue(info.artifactTransferTransport),
+          ok: info.artifactTransferTransport.available,
+        ),
+        _StatusRow(
+          label: 'Automatic memory migration',
+          value: _capabilityValue(info.automaticMemoryMigration),
+          ok: info.automaticMemoryMigration.available,
+        ),
+        _StatusRow(
+          label: 'Automatic artifact migration',
+          value: _capabilityValue(info.automaticArtifactMigration),
+          ok: info.automaticArtifactMigration.available,
+        ),
+        _StatusRow(
+          label: 'Indefinite scale',
+          value: _capabilityValue(info.indefiniteScale),
+          ok: info.indefiniteScale.available,
+        ),
+      ],
+    );
+  }
+}
+
+/// Administrative details are fetched only by an explicit operator action.
+class OllamaPoolDetails extends StatefulWidget {
+  final SonderApi api;
+  const OllamaPoolDetails({super.key, required this.api});
+
+  @override
+  State<OllamaPoolDetails> createState() => _OllamaPoolDetailsState();
+}
+
+class _OllamaPoolDetailsState extends State<OllamaPoolDetails> {
+  OllamaPoolPage? _page;
+  bool _busy = false;
+  String? _error;
+  int _generation = 0;
+
+  @override
+  void didUpdateWidget(covariant OllamaPoolDetails oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.api.baseUrl != widget.api.baseUrl ||
+        oldWidget.api.apiKey != widget.api.apiKey ||
+        oldWidget.api.accountSession != widget.api.accountSession) {
+      _generation++;
+      _page = null;
+      _error = null;
+      _busy = false;
+    }
+  }
+
+  Future<void> _load({bool refresh = false, String cursor = ''}) async {
+    if (_busy) return;
+    final generation = ++_generation;
+    setState(() {
+      _busy = true;
+      _error = null;
+      _page = null;
+    });
+    try {
+      final page = await widget.api
+          .ollamaPoolAdminStatus(refresh: refresh, cursor: cursor);
+      if (!mounted || generation != _generation) return;
+      setState(() {
+        _page = page;
+        _busy = false;
+      });
+    } catch (_) {
+      if (!mounted || generation != _generation) return;
+      setState(() {
+        _busy = false;
+        _error =
+            'Worker details unavailable. Check administrator access, then inspect again.';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final page = _page;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Wrap(spacing: 8, children: [
+        OutlinedButton(
+            onPressed: _busy ? null : () => _load(),
+            child: const Text('Inspect worker page')),
+        OutlinedButton(
+            onPressed: _busy ? null : () => _load(refresh: true),
+            child: const Text('Refresh worker cache')),
+        if (page != null && !page.complete && page.nextCursor.isNotEmpty)
+          OutlinedButton(
+              onPressed: _busy ? null : () => _load(cursor: page.nextCursor),
+              child: const Text('Next worker page')),
+      ]),
+      if (_busy)
+        const LinearProgressIndicator(semanticsLabel: 'Loading worker page'),
+      if (_error != null) Text(_error!, semanticsLabel: _error),
+      if (page != null) ...[
+        Text(
+            '${page.workers.length} of ${page.workerCount} workers on this page; ${page.omittedWorkerCount} remaining'),
+        for (final worker in page.workers)
+          SelectableText(
+              '${worker.origin}: ${worker.state}; ${worker.modelCount} models; ${worker.errorCategory}\n${worker.modelPreview.join(', ')}'),
+      ],
+    ]);
+  }
+}
+
 class WorkbenchActivityPanel extends StatelessWidget {
   final ActivityResponse response;
   final int totalToolCalls;
@@ -2567,9 +2925,8 @@ class LiveExecutionFeed extends StatelessWidget {
     final cs = Theme.of(context).colorScheme;
     final limit = maxVisible.clamp(1, 20).toInt();
     final events = feed?.events ?? const <ExecutionFeedEvent>[];
-    final visible = events.length <= limit
-        ? events
-        : events.sublist(events.length - limit);
+    final visible =
+        events.length <= limit ? events : events.sublist(events.length - limit);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -2589,7 +2946,8 @@ class LiveExecutionFeed extends StatelessWidget {
           const _ExecutionFeedPlaceholder(
             icon: Icons.cloud_off_outlined,
             title: 'Offline',
-            message: 'Live execution events are unavailable while disconnected.',
+            message:
+                'Live execution events are unavailable while disconnected.',
           )
         else if (feed == null || !feed!.known)
           const _ExecutionFeedPlaceholder(
@@ -2622,17 +2980,14 @@ class LiveExecutionFeed extends StatelessWidget {
               ),
               if (feed!.oldestSeq != null && feed!.nextSeq != null)
                 Chip(
-                  label: Text(
-                      'window ${feed!.oldestSeq} → ${feed!.nextSeq}'),
+                  label: Text('window ${feed!.oldestSeq} → ${feed!.nextSeq}'),
                 ),
               if ((feed!.droppedEvents ?? 0) > 0)
                 Chip(label: Text('${feed!.droppedEvents} dropped')),
               if (feed!.detailsDisabled)
                 const Chip(label: Text('Details disabled')),
-              if (feed!.hasGap)
-                const Chip(label: Text('Sequence gap')),
-              if (feed!.truncated)
-                const Chip(label: Text('History truncated')),
+              if (feed!.hasGap) const Chip(label: Text('Sequence gap')),
+              if (feed!.truncated) const Chip(label: Text('History truncated')),
               if (feed!.redactionApplied)
                 const Chip(label: Text('Redaction applied')),
             ],
@@ -2760,8 +3115,8 @@ class _ExecutionEventCard extends StatelessWidget {
           if (event.deltaLabel.isNotEmpty) ...[
             const SizedBox(height: 3),
             Text(event.deltaLabel,
-                style: tokens.mono(11, color: tokens.accent,
-                    weight: FontWeight.w500)),
+                style: tokens.mono(11,
+                    color: tokens.accent, weight: FontWeight.w500)),
           ],
           if (event.preview.isNotEmpty) ...[
             const SizedBox(height: 7),
@@ -2945,7 +3300,11 @@ class _SystemRail extends StatelessWidget {
   Widget build(BuildContext context) {
     final destinations = [
       (label: 'Runtime', icon: Icons.tune_outlined, key: runtimeKey),
-      (label: 'Autopilot', icon: Icons.rocket_launch_outlined, key: autopilotKey),
+      (
+        label: 'Autopilot',
+        icon: Icons.rocket_launch_outlined,
+        key: autopilotKey
+      ),
       (label: 'Activity', icon: Icons.timeline_outlined, key: activityKey),
       (label: 'Learning', icon: Icons.school_outlined, key: learningKey),
       (label: 'Policy', icon: Icons.security_outlined, key: policyKey),
@@ -2957,7 +3316,9 @@ class _SystemRail extends StatelessWidget {
       minExtendedWidth: 220,
       selectedIndex: null,
       onDestinationSelected: (index) => onSelect(destinations[index].key),
-      labelType: NavigationRailLabelType.all,
+      labelType: MediaQuery.sizeOf(context).width >= 1200
+          ? NavigationRailLabelType.none
+          : NavigationRailLabelType.all,
       destinations: [
         for (final destination in destinations)
           NavigationRailDestination(
@@ -2992,7 +3353,11 @@ class _SystemCompactNav extends StatelessWidget {
   Widget build(BuildContext context) {
     final destinations = [
       (label: 'Runtime', icon: Icons.tune_outlined, key: runtimeKey),
-      (label: 'Autopilot', icon: Icons.rocket_launch_outlined, key: autopilotKey),
+      (
+        label: 'Autopilot',
+        icon: Icons.rocket_launch_outlined,
+        key: autopilotKey
+      ),
       (label: 'Activity', icon: Icons.timeline_outlined, key: activityKey),
       (label: 'Learning', icon: Icons.school_outlined, key: learningKey),
       (label: 'Policy', icon: Icons.security_outlined, key: policyKey),

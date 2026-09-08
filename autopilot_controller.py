@@ -47,15 +47,31 @@ class HostTaskResult:
     # Canonical host-selected filesystem root used by guarded dispatch.  This
     # is deliberately typed host state, not a marker parsed from model text.
     project_scope: str = ""
+    # Optional host-owned audit identity. This describes point-in-time workspace
+    # evidence, not task success or authority for a later effect. Consumers that
+    # act on the workspace later must revalidate through the verifier service.
+    verification_certificate_id: str = ""
+    verification_generation: int = 0
+    verification_code: str = ""
 
     def receipt(self) -> dict:
-        return {
+        receipt = {
             "schema": 1,
             "tools": list(self.tools),
             "mutation_observed": self.mutation_observed,
             "validation_attempted": self.validation_attempted,
             "validation_passed": self.validation_passed,
         }
+        # Additive schema-1 metadata; old, nondelegated receipts retain their
+        # exact shape. Never derive these fields from model-controlled output.
+        if self.verification_code:
+            receipt["delegated_verification"] = {
+                "certificate_id": self.verification_certificate_id,
+                "generation": self.verification_generation,
+                "code": self.verification_code,
+                "scope": "point_in_time_workspace_evidence",
+            }
+        return receipt
 
 
 def normalize_policy(value: str) -> str:

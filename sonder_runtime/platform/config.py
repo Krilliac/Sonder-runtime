@@ -31,6 +31,32 @@ from urllib.parse import urlsplit
 
 from sonder_runtime.platform import paths as sonder_paths
 from sonder_runtime.platform.secret_presence import redact_presence
+from sonder_runtime.platform.artifact_transfer_config import (
+    ArtifactTransferConfig,
+    artifact_transfer_errors,
+    private_store_path,
+)
+from sonder_runtime.platform.artifact_mobility_config import (
+    ArtifactMobilityConfig,
+    artifact_mobility_errors,
+)
+from sonder_runtime.platform.artifact_mobility_source_config import ArtifactMobilitySourceConfig
+from sonder_runtime.platform.artifact_mobility_source_config import (
+    artifact_mobility_source_errors,
+)
+from sonder_runtime.platform.app_control_config import AppControlConfig, app_control_errors
+from sonder_runtime.platform.control_state_rehearsal_config import (
+    ControlStateRehearsalConfig,
+    control_state_rehearsal_errors,
+)
+from sonder_runtime.platform.child_storage_config import (
+    ChildStorageConfig, child_storage_errors, apply_child_storage_environment,
+)
+from sonder_runtime.platform.memory_replication_config import (
+    MemoryReplicationConfig,
+    MemoryReplicationPeerConfig,
+    memory_replication_errors,
+)
 from sonder_runtime.platform import unsafe_lab_policy
 from sonder_runtime.platform.config_environment import (
     EnvironmentFileError,
@@ -53,13 +79,34 @@ _COMPUTE_CAPABILITIES = frozenset({
 # Keys that must only ever arrive through the secrets environment file or
 # process environment.  Their presence in TOML fails validation.
 SECRET_ENV_KEYS = (
+    "SONDER_MEMBERSHIP_CLIENT_CERT_FILE",
+    "SONDER_MEMBERSHIP_CLIENT_KEY_FILE",
     "SONDER_API_KEY",
+    "SONDER_ARTIFACT_TRANSFER_KEY",
+    "SONDER_MEMORY_REPLICATION_KEY",
+    "SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY",
+    "SONDER_ARTIFACT_MOBILITY_PEER_KEY",
     "SONDER_AUTH_SECRET",
     "SONDER_BACKUP_KEY_FILE",
     "SONDER_LAUNCHER_HEALTH_TOKEN",
+    "SONDER_CONTROL_STATE_REHEARSAL_API_KEY",
 )
 _SECRET_TOML_KEYS = frozenset(
-    {"api_key", "auth_secret", "backup_key", "backup_key_file", "secret", "token"}
+    {
+        "api_key",
+        "artifact_transfer_key",
+        "artifact_mobility_peer_key",
+        "memory_replication_key",
+        "memory_replication_state_integrity_key",
+        "membership_client_cert_file",
+        "membership_client_key_file",
+        "control_state_rehearsal_key",
+        "auth_secret",
+        "backup_key",
+        "backup_key_file",
+        "secret",
+        "token",
+    }
 )
 
 MIN_API_KEY_LENGTH = 24
@@ -122,6 +169,119 @@ class OllamaConfig:
     worker_probe_timeout_ms: int = 2_000
     startup_timeout_seconds: int = 60
     request_timeout_seconds: int = 300
+    # Keep new static-pool settings after the legacy positional contract.
+    worker_pool_max_workers: int = 16
+    worker_capability_probe_parallelism: int = 4
+    worker_capability_probe_batch_size: int = 32
+    worker_status_page_size: int = 32
+
+
+@dataclass(frozen=True)
+class MembershipEndpointPolicy:
+    member_id: str = ""
+    origin: str = ""
+    tls_server_name: str = ""
+    allowed_cidrs: tuple[str, ...] = ()
+
+    def __repr__(self):
+        return "MembershipEndpointPolicy(<private>)"
+
+
+@dataclass(frozen=True)
+class MembershipConfig:
+    mode: str = "static"
+    cluster_id: str = ""
+    issuer_id: str = ""
+    protocol_version: int = 0
+    source_origin: str = ""
+    source_tls_server_name: str = ""
+    source_allowed_cidrs: tuple[str, ...] = ()
+    trust_anchor_file: str = ""
+    signature_public_key_file: str = ""
+    refresh_interval_seconds: int = 0
+    snapshot_max_advertisements: int = 0
+    snapshot_max_bytes: int = 0
+    local_fallback: bool | None = None
+    member_policies: tuple[MembershipEndpointPolicy, ...] = ()
+
+    def __repr__(self):
+        return "MembershipConfig(<private>)"
+
+
+def validate_membership_endpoint(policy: MembershipEndpointPolicy, *, source=False) -> None:
+    if type(policy) is not MembershipEndpointPolicy:
+        raise ValueError("exact membership endpoint policy required")
+    _membership_identity(policy.member_id)
+    if (type(policy.origin) is not str or len(policy.origin) > 2048 or not re.fullmatch(
+            r"https://(?:\[[0-9a-f:.]+\]|[a-z0-9.-]+):[0-9]{1,5}", policy.origin)):
+        raise ValueError("membership endpoint must be an exact HTTPS origin")
+    origin = _canonical_ollama_origin(policy.origin)
+    if origin != policy.origin or not 1 <= urlsplit(origin).port <= 65535:
+        raise ValueError("membership endpoint origin must be canonical")
+    host = urlsplit(origin).hostname
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        labels = host.split(".")
+        if (len(host) > 253 or all(label.isdigit() for label in labels)
+                or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels)):
+            raise ValueError("membership endpoint hostname is invalid")
+    if type(policy.tls_server_name) is not str or policy.tls_server_name != host:
+        raise ValueError("membership TLS SAN must exactly match the configured host")
+    if not source and _is_loopback_host(host):
+        raise ValueError("loopback endpoints belong to the static-local lane")
+    if type(policy.allowed_cidrs) is not tuple or not 1 <= len(policy.allowed_cidrs) <= 32:
+        raise ValueError("membership connection CIDRs must be explicitly bounded")
+    for value in policy.allowed_cidrs:
+        if type(value) is not str or ipaddress.ip_network(value, strict=True).prefixlen == 0:
+            raise ValueError("invalid membership connection CIDR")
+
+
+def _membership_identity(value):
+    if type(value) is not str or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", value):
+        raise ValueError("membership identity must be an exact bounded ASCII identifier")
+
+
+def validate_membership_config(config, secrets, *, allow_remote=True) -> None:
+    """Pure external-policy validation; error text never contains private input."""
+    if type(config) is not MembershipConfig or type(secrets) is not Secrets or type(config.mode) is not str:
+        raise ValueError("exact membership configuration required")
+    if config.mode == "static":
+        return
+    try:
+        if config.mode != "external" or allow_remote is not True:
+            raise ValueError
+        _membership_identity(config.cluster_id)
+        _membership_identity(config.issuer_id)
+        if type(config.protocol_version) is not int or config.protocol_version != 1:
+            raise ValueError
+        for value, maximum in ((config.refresh_interval_seconds, 86400),
+                               (config.snapshot_max_advertisements, 4096),
+                               (config.snapshot_max_bytes, 1048576)):
+            if type(value) is not int or not 1 <= value <= maximum:
+                raise ValueError
+        if type(config.local_fallback) is not bool:
+            raise ValueError
+        for path in (config.trust_anchor_file, config.signature_public_key_file,
+                     secrets.membership_client_cert_file, secrets.membership_client_key_file):
+            if (type(path) is not str or not path.strip() or len(path) > 4096 or "\x00" in path
+                    or not Path(path).is_absolute() or path.startswith(("\\\\", "//"))
+                    or ".." in Path(path).parts
+                    or (os.name == "nt" and ":" in str(Path(path).relative_to(Path(path).anchor)))):
+                raise ValueError
+        validate_membership_endpoint(MembershipEndpointPolicy("source", config.source_origin,
+            config.source_tls_server_name, config.source_allowed_cidrs), source=True)
+        if type(config.member_policies) is not tuple or not 1 <= len(config.member_policies) <= config.snapshot_max_advertisements:
+            raise ValueError
+        identities, origins = set(), set()
+        for policy in config.member_policies:
+            validate_membership_endpoint(policy)
+            if policy.member_id in identities or policy.origin in origins:
+                raise ValueError
+            identities.add(policy.member_id)
+            origins.add(policy.origin)
+    except (ValueError, TypeError):
+        raise ValueError("external membership requires exact bounded identity, HTTPS, credential and endpoint policy") from None
 
 
 @dataclass(frozen=True)
@@ -147,16 +307,29 @@ class ComputeJobConfig:
     allowed_relative_path_options: tuple[str, ...] = ()
     memory_limit_bytes: int | None = None
     artifact_paths: tuple[str, ...] = ()
+    memory_reservation_bytes: int | None = None
 
 
 @dataclass(frozen=True)
 class ComputeConfig:
+    worker_host_id: str = "local"
+    worker_memory_budget_bytes: int | None = None
+    worker_max_jobs: int = 1
+    worker_reservation_seconds: int = 30
     allow_remote: bool = False
     node_id: str = "local"
     snapshot_ttl_seconds: int = 30
     probe_timeout_ms: int = 2_000
     nodes: tuple[ComputeNodeConfig, ...] = ()
     jobs: tuple[ComputeJobConfig, ...] = ()
+
+
+@dataclass(frozen=True)
+class DeploymentConfig:
+    profile: str = "single-host"
+    preferred_primary: str = ""
+    automatic_takeover: bool = False
+    automatic_failback: bool = False
 
 
 @dataclass(frozen=True)
@@ -206,15 +379,35 @@ class BackupConfig:
 class Secrets:
     """Secret material, loaded separately so it can never be dumped."""
 
-    api_key: str = ""
-    auth_secret: str = ""
-    backup_key_file: str = ""
+    api_key: str = field(default="", repr=False)
+    auth_secret: str = field(default="", repr=False)
+    backup_key_file: str = field(default="", repr=False)
+    artifact_transfer_key: str = field(default="", repr=False)
+    memory_replication_key: str = field(default="", repr=False)
+    memory_replication_state_integrity_key: str = field(default="", repr=False)
+    artifact_mobility_peer_key: str = field(default="", repr=False)
+    membership_client_cert_file: str = field(default="", repr=False)
+    membership_client_key_file: str = field(default="", repr=False)
+    control_state_rehearsal_key: str = field(default="", repr=False)
 
     def as_redacted_dict(self) -> dict:
         return {
+            "membership_client_cert_file": redact_presence(self.membership_client_cert_file),
+            "membership_client_key_file": redact_presence(self.membership_client_key_file),
             "api_key": redact_presence(self.api_key),
+            "artifact_transfer_key": redact_presence(self.artifact_transfer_key),
+            "memory_replication_key": redact_presence(self.memory_replication_key),
+            "memory_replication_state_integrity_key": redact_presence(
+                self.memory_replication_state_integrity_key
+            ),
+            "artifact_mobility_peer_key": redact_presence(
+                self.artifact_mobility_peer_key
+            ),
+            "control_state_rehearsal_key": redact_presence(
+                self.control_state_rehearsal_key
+            ),
             "auth_secret": redact_presence(self.auth_secret),
-            "backup_key_file": self.backup_key_file or "[unset]",
+            "backup_key_file": redact_presence(self.backup_key_file),
         }
 
 
@@ -226,6 +419,7 @@ class SonderConfig:
     state: StateConfig = field(default_factory=StateConfig)
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
     compute: ComputeConfig = field(default_factory=ComputeConfig)
+    deployment: DeploymentConfig = field(default_factory=DeploymentConfig)
     features: FeaturesConfig = field(default_factory=FeaturesConfig)
     capacity: CapacityConfig = field(default_factory=CapacityConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
@@ -233,15 +427,39 @@ class SonderConfig:
     secrets: Secrets = field(default_factory=Secrets)
     # Provenance for diagnostics: which layers actually contributed.
     sources: tuple[str, ...] = ()
+    private_source_paths: tuple[str, ...] = field(default=(), repr=False)
+    artifact_transfer: ArtifactTransferConfig = field(default_factory=ArtifactTransferConfig)
+    memory_replication: MemoryReplicationConfig = field(
+        default_factory=MemoryReplicationConfig
+    )
+    artifact_mobility_source: ArtifactMobilitySourceConfig = field(
+        default_factory=ArtifactMobilitySourceConfig
+    )
+    artifact_mobility: ArtifactMobilityConfig = field(
+        default_factory=ArtifactMobilityConfig
+    )
+    child_storage: ChildStorageConfig = field(default_factory=ChildStorageConfig)
+    app_control: AppControlConfig = field(default_factory=AppControlConfig)
+    membership: MembershipConfig = field(default_factory=MembershipConfig)
+    control_state_rehearsal: ControlStateRehearsalConfig = field(
+        default_factory=ControlStateRehearsalConfig
+    )
 
     def as_redacted_dict(self) -> dict:
         out: dict = {
+            "membership": {"mode": self.membership.mode,
+                           "configured_member_count": len(self.membership.member_policies)},
             "schema_version": self.schema_version,
             "profile": self.profile,
             "sources": list(self.sources),
         }
         for section in (
             "server",
+            "deployment",
+            "artifact_transfer",
+            "artifact_mobility_source",
+            "artifact_mobility",
+            "control_state_rehearsal",
             "state",
             "ollama",
             "features",
@@ -256,7 +474,29 @@ class SonderConfig:
                 )
                 for f in fields(value)
             }
+        # These values identify private disk boundaries and a fixed remote peer.
+        # Public diagnostics need only show whether an operator configured them;
+        # retaining their text would disclose local layout or peer information.
+        out["artifact_mobility_source"]["store_dir"] = redact_presence(
+            self.artifact_mobility_source.store_dir
+        )
+        for name in (
+            "destination_origin",
+            "destination_tls_certificate_sha256",
+            "expected_recipient_attestation_sha256",
+            "destination_credential_id",
+        ):
+            out["artifact_mobility"][name] = redact_presence(
+                getattr(self.artifact_mobility, name)
+            )
+        out["control_state_rehearsal"]["origin"] = redact_presence(
+            self.control_state_rehearsal.origin
+        )
         out["compute"] = {
+            "worker_host_id": self.compute.worker_host_id,
+            "worker_memory_budget_bytes": self.compute.worker_memory_budget_bytes,
+            "worker_max_jobs": self.compute.worker_max_jobs,
+            "worker_reservation_seconds": self.compute.worker_reservation_seconds,
             "allow_remote": self.compute.allow_remote,
             "node_id": self.compute.node_id,
             "snapshot_ttl_seconds": self.compute.snapshot_ttl_seconds,
@@ -287,12 +527,42 @@ class SonderConfig:
                         job.allowed_relative_path_options
                     ),
                     "memory_limit_bytes": job.memory_limit_bytes,
+                    "memory_reservation_bytes": job.memory_reservation_bytes,
                     "artifact_paths": list(job.artifact_paths),
                 }
                 for job in self.compute.jobs
             ],
         }
+        out['app_control'] = {
+            item.name: ('<configured>' if self.app_control.catalog_file else '<unset>')
+            if item.name == 'catalog_file' else getattr(self.app_control, item.name)
+            for item in fields(self.app_control)
+        }
         out["secrets"] = self.secrets.as_redacted_dict()
+        out["memory_replication"] = {
+            "enabled": self.memory_replication.enabled,
+            "local_node_id": self.memory_replication.local_node_id,
+            "project_scope": self.memory_replication.project_scope,
+            "receiver_enabled": self.memory_replication.receiver_enabled,
+            "accepted_source_ids": list(self.memory_replication.accepted_source_ids),
+            "peers": [
+                {
+                    "node_id": peer.node_id,
+                    "project_scope": peer.project_scope,
+                    "origin": "[configured]" if peer.origin else "[unset]",
+                }
+                for peer in self.memory_replication.peers
+            ],
+            "request_timeout_seconds": self.memory_replication.request_timeout_seconds,
+            "max_request_bytes": self.memory_replication.max_request_bytes,
+            "max_response_bytes": self.memory_replication.max_response_bytes,
+            "max_batch_records": self.memory_replication.max_batch_records,
+        }
+        out['child_storage'] = {
+            item.name: ('<configured>' if self.child_storage.binding_file else '<unset>')
+            if item.name == 'binding_file' else getattr(self.child_storage, item.name)
+            for item in fields(self.child_storage)
+        }
         return out
 
 
@@ -306,7 +576,17 @@ class ConfigError(ValueError):
         self.errors = tuple(errors)
 
 
-def _is_loopback_host(host: str) -> bool:
+def _is_exact_string(value: object) -> bool:
+    return type(value) is str
+
+
+def _has_minimum_api_key(value: object) -> bool:
+    return _is_exact_string(value) and len(value) >= MIN_API_KEY_LENGTH
+
+
+def _is_loopback_host(host: object) -> bool:
+    if not _is_exact_string(host):
+        return False
     if host in ("localhost",):
         return True
     try:
@@ -315,23 +595,38 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
-def _host_in_trusted_origins(
-    host: str, trusted_origins: tuple[str, ...],
-) -> bool:
-    """Return whether *host* falls within any configured trusted CIDR."""
-    if not trusted_origins:
-        return False
+def _canonical_ollama_origin(value: object) -> str | None:
+    """Return a comparison identity for one syntactically valid Ollama origin."""
+    if not isinstance(value, str):
+        return None
     try:
-        addr = ipaddress.ip_address(host)
+        parts = urlsplit(value)
+        port = parts.port
     except ValueError:
-        return False
-    for cidr in trusted_origins:
-        try:
-            if addr in ipaddress.ip_network(cidr, strict=False):
-                return True
-        except ValueError:
-            continue
-    return False
+        return None
+    scheme = parts.scheme.casefold()
+    host = (parts.hostname or "").casefold().rstrip(".")
+    if (
+        scheme not in ("http", "https")
+        or not host
+        or port is None
+        or parts.username is not None
+        or parts.password is not None
+        or parts.path not in ("", "/")
+        or parts.query
+        or parts.fragment
+    ):
+        return None
+    if host in ("localhost", "0.0.0.0"):
+        host = "127.0.0.1"
+    elif host == "::":
+        host = "::1"
+    try:
+        host = ipaddress.ip_address(host).compressed
+    except ValueError:
+        pass
+    rendered_host = f"[{host}]" if ":" in host else host
+    return f"{scheme}://{rendered_host}:{port}"
 
 
 def parse_env_file(path: Path) -> dict[str, str]:
@@ -339,7 +634,59 @@ def parse_env_file(path: Path) -> dict[str, str]:
     try:
         return _parse_env_file(path)
     except EnvironmentFileError as exc:
+        if exc.field_code == "artifact_mobility_peer_key":
+            raise ConfigError(
+                ["[artifact_mobility].peer_key malformed secrets input"]
+            ) from None
         raise ConfigError([str(exc)]) from None
+
+
+def _canonical_private_path(value: str) -> Path | None:
+    """Resolve an already validated private path without surfacing its text."""
+    try:
+        return Path(value).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _paths_overlap(first: Path, second: Path) -> bool:
+    """Return whether two canonical paths are equal or ancestor/descendant."""
+    first_text = os.path.normcase(str(first))
+    second_text = os.path.normcase(str(second))
+    try:
+        common = os.path.commonpath((first_text, second_text))
+    except ValueError:
+        return False
+    return common == first_text or common == second_text
+
+
+def _artifact_mobility_storage_errors(config: SonderConfig) -> list[str]:
+    """Keep the source-only spool outside every configured writable boundary."""
+    source = config.artifact_mobility_source
+    if not source.enabled or not isinstance(source.store_dir, str):
+        return []
+    source_path = _canonical_private_path(source.store_dir)
+    if source_path is None:
+        return ["[artifact_mobility_source].store_dir invalid"]
+
+    errors: list[str] = []
+    writable_roots = (config.state.home, *config.state.workspace_roots)
+    for root in writable_roots:
+        if not isinstance(root, str):
+            continue
+        root_path = _canonical_private_path(root)
+        if root_path is not None and _paths_overlap(source_path, root_path):
+            errors.append(
+                "[artifact_mobility_source].store_dir overlaps configured writable root"
+            )
+            break
+
+    receiver_path = _canonical_private_path(str(private_store_path(config)))
+    if receiver_path is not None and _paths_overlap(source_path, receiver_path):
+        errors.append(
+            "[artifact_mobility_source].store_dir overlaps artifact transfer store"
+        )
+    return errors
 
 
 def _walk_toml_for_secrets(data, path: str, errors: list[str]) -> None:
@@ -355,7 +702,15 @@ def _walk_toml_for_secrets(data, path: str, errors: list[str]) -> None:
 
 
 _SECTION_TYPES = {
+    "membership": MembershipConfig,
     "server": ServerConfig,
+    "deployment": DeploymentConfig,
+    "artifact_transfer": ArtifactTransferConfig,
+    "artifact_mobility_source": ArtifactMobilitySourceConfig,
+    "artifact_mobility": ArtifactMobilityConfig,
+    "child_storage": ChildStorageConfig,
+    "app_control": AppControlConfig,
+    "control_state_rehearsal": ControlStateRehearsalConfig,
     "state": StateConfig,
     "ollama": OllamaConfig,
     "features": FeaturesConfig,
@@ -376,7 +731,26 @@ def _apply_section(current, section_name: str, raw: dict, errors: list[str]):
             errors.append(f"unknown key [{section_name}].{key}")
             continue
         expected = type(getattr(current, key))
-        if expected is tuple:
+        if section_name == "membership" and key == "member_policies":
+            try:
+                if type(value) is not list or len(value) > 4096:
+                    raise ValueError
+                policies = []
+                for row in value:
+                    if type(row) is not dict or set(row) != {"member_id", "origin", "tls_server_name", "allowed_cidrs"}:
+                        raise ValueError
+                    if type(row["allowed_cidrs"]) is not list or len(row["allowed_cidrs"]) > 32:
+                        raise ValueError
+                    policies.append(MembershipEndpointPolicy(**(row | {"allowed_cidrs": tuple(row["allowed_cidrs"])})))
+                updates[key] = tuple(policies)
+            except (ValueError, TypeError):
+                errors.append("[membership].member_policies must be bounded exact endpoint tables")
+        elif section_name == "membership" and key == "local_fallback":
+            if type(value) is not bool:
+                errors.append("[membership].local_fallback must be an explicit boolean")
+            else:
+                updates[key] = value
+        elif expected is tuple:
             if not isinstance(value, list) or not all(
                 isinstance(v, str) for v in value
             ):
@@ -401,6 +775,82 @@ def _apply_section(current, section_name: str, raw: dict, errors: list[str]):
     return replace(current, **updates) if updates else current
 
 
+def _apply_memory_replication_section(
+    current: MemoryReplicationConfig,
+    raw: dict,
+    errors: list[str],
+) -> MemoryReplicationConfig:
+    """Parse the static trusted-peer section; never import topology from env."""
+    known = {
+        "enabled", "local_node_id", "project_scope", "receiver_enabled",
+        "accepted_source_ids", "peers", "request_timeout_seconds",
+        "max_request_bytes", "max_response_bytes", "max_batch_records",
+    }
+    for key in raw:
+        if key in _SECRET_TOML_KEYS:
+            continue  # The recursive secret walk already recorded the refusal.
+        if key not in known:
+            errors.append(f"unknown key [memory_replication].{key}")
+
+    updates: dict[str, object] = {}
+    for key in ("enabled", "receiver_enabled"):
+        if key not in raw:
+            continue
+        if type(raw[key]) is not bool:
+            errors.append(f"[memory_replication].{key} must be a boolean")
+            continue
+        updates[key] = raw[key]
+    for key in ("local_node_id", "project_scope"):
+        if key not in raw:
+            continue
+        if not isinstance(raw[key], str):
+            errors.append(f"[memory_replication].{key} must be a string")
+            continue
+        updates[key] = raw[key]
+    for key in (
+        "request_timeout_seconds", "max_request_bytes", "max_response_bytes",
+        "max_batch_records",
+    ):
+        if key not in raw:
+            continue
+        if type(raw[key]) is not int:
+            errors.append(f"[memory_replication].{key} must be an integer")
+            continue
+        updates[key] = raw[key]
+
+    if "accepted_source_ids" in raw:
+        value = raw["accepted_source_ids"]
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            errors.append(
+                "[memory_replication].accepted_source_ids must be a list of strings"
+            )
+        else:
+            updates["accepted_source_ids"] = tuple(value)
+
+    if "peers" in raw:
+        value = raw["peers"]
+        peers: list[MemoryReplicationPeerConfig] = []
+        if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+            errors.append("[memory_replication].peers must be an array of tables")
+        else:
+            peer_keys = ("node_id", "project_scope", "origin")
+            for index, item in enumerate(value):
+                where = f"[memory_replication].peers[{index}]"
+                for key in item:
+                    if key not in peer_keys:
+                        errors.append(f"unknown key {where}.{key}")
+                fields: dict[str, str] = {}
+                for key in peer_keys:
+                    field_value = item.get(key, "")
+                    if not isinstance(field_value, str):
+                        errors.append(f"{where}.{key} must be a string")
+                        field_value = ""
+                    fields[key] = field_value
+                peers.append(MemoryReplicationPeerConfig(**fields))
+            updates["peers"] = tuple(peers)
+    return replace(current, **updates) if updates else current
+
+
 def _string_list(
     raw: dict,
     key: str,
@@ -421,12 +871,24 @@ def _apply_compute_section(
 ) -> ComputeConfig:
     known = {
         "allow_remote", "node_id", "snapshot_ttl_seconds", "probe_timeout_ms",
-        "nodes", "jobs",
+        "nodes", "jobs", "worker_host_id", "worker_memory_budget_bytes",
+        "worker_max_jobs", "worker_reservation_seconds",
     }
     for key in raw:
         if key not in known:
             errors.append(f"unknown key [compute].{key}")
 
+    capacity_values = {}
+    for key in ("worker_host_id", "worker_memory_budget_bytes", "worker_max_jobs", "worker_reservation_seconds"):
+        value = raw.get(key, getattr(current, key))
+        expected = str if key == "worker_host_id" else int
+        if key == "worker_memory_budget_bytes" and value is None and key not in raw:
+            capacity_values[key] = None
+            continue
+        if not isinstance(value, expected) or isinstance(value, bool):
+            errors.append(f"[compute].{key} has an invalid type")
+            value = getattr(current, key)
+        capacity_values[key] = value
     allow_remote = raw.get("allow_remote", current.allow_remote)
     if not isinstance(allow_remote, bool):
         errors.append("[compute].allow_remote must be a boolean")
@@ -489,7 +951,7 @@ def _apply_compute_section(
             "environment_allowlist", "workspace_mappings",
             "allowed_flags", "allowed_bounded_options",
             "allowed_relative_path_options",
-            "memory_limit_bytes",
+            "memory_limit_bytes", "memory_reservation_bytes",
             "artifact_paths",
         }
         for index, item in enumerate(jobs_raw):
@@ -534,6 +996,7 @@ def _apply_compute_section(
                     and not isinstance(item.get("memory_limit_bytes"), bool)
                     else None
                 ),
+                memory_reservation_bytes=item.get("memory_reservation_bytes"),
                 artifact_paths=_string_list(item, "artifact_paths", where, errors),
             ))
             if (
@@ -545,6 +1008,7 @@ def _apply_compute_section(
             ):
                 errors.append(f"{where}.memory_limit_bytes must be an integer")
     return ComputeConfig(
+        **capacity_values,
         allow_remote=allow_remote,
         node_id=local_node_id,
         snapshot_ttl_seconds=snapshot_ttl,
@@ -674,6 +1138,10 @@ def _apply_environment(
         )
     ollama = replace(
         ollama,
+        worker_pool_max_workers=_env_int(
+            "SONDER_OLLAMA_POOL_MAX_WORKERS", env,
+            ollama.worker_pool_max_workers, errors,
+        ),
         worker_max_inflight=_env_int(
             "SONDER_OLLAMA_WORKER_MAX_INFLIGHT", env,
             ollama.worker_max_inflight, errors,
@@ -681,6 +1149,18 @@ def _apply_environment(
         worker_queue_depth=_env_int(
             "SONDER_OLLAMA_WORKER_QUEUE_DEPTH", env,
             ollama.worker_queue_depth, errors,
+        ),
+        worker_capability_probe_parallelism=_env_int(
+            "SONDER_OLLAMA_WORKER_PROBE_PARALLELISM", env,
+            ollama.worker_capability_probe_parallelism, errors,
+        ),
+        worker_capability_probe_batch_size=_env_int(
+            "SONDER_OLLAMA_WORKER_PROBE_BATCH_SIZE", env,
+            ollama.worker_capability_probe_batch_size, errors,
+        ),
+        worker_status_page_size=_env_int(
+            "SONDER_OLLAMA_WORKER_STATUS_PAGE_SIZE", env,
+            ollama.worker_status_page_size, errors,
         ),
         worker_admission_timeout_ms=_env_int(
             "SONDER_OLLAMA_WORKER_ADMISSION_TIMEOUT_MS", env,
@@ -741,6 +1221,48 @@ def _apply_environment(
         )
     if env.get("SONDER_API_KEY", "").strip():
         secrets = replace(secrets, api_key=env["SONDER_API_KEY"].strip())
+    if "SONDER_MEMBERSHIP_CLIENT_CERT_FILE" in env:
+        secrets = replace(secrets, membership_client_cert_file=env["SONDER_MEMBERSHIP_CLIENT_CERT_FILE"].strip())
+    if "SONDER_MEMBERSHIP_CLIENT_KEY_FILE" in env:
+        secrets = replace(secrets, membership_client_key_file=env["SONDER_MEMBERSHIP_CLIENT_KEY_FILE"].strip())
+    if env.get("SONDER_ARTIFACT_TRANSFER_KEY", "").strip():
+        secrets = replace(secrets, artifact_transfer_key=env["SONDER_ARTIFACT_TRANSFER_KEY"].strip())
+    if "SONDER_MEMORY_REPLICATION_KEY" in env:
+        replication_key = env["SONDER_MEMORY_REPLICATION_KEY"]
+        if type(replication_key) is not str:
+            errors.append("SONDER_MEMORY_REPLICATION_KEY must be a string")
+        elif replication_key.strip():
+            secrets = replace(
+                secrets,
+                memory_replication_key=replication_key.strip(),
+            )
+    if "SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY" in env:
+        state_integrity_key = env["SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY"]
+        if type(state_integrity_key) is not str:
+            errors.append(
+                "SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY must be a string"
+            )
+        elif state_integrity_key.strip():
+            secrets = replace(
+                secrets,
+                memory_replication_state_integrity_key=state_integrity_key.strip(),
+            )
+    if "SONDER_ARTIFACT_MOBILITY_PEER_KEY" in env:
+        mobility_peer_key = env["SONDER_ARTIFACT_MOBILITY_PEER_KEY"]
+        if type(mobility_peer_key) is not str:
+            errors.append("SONDER_ARTIFACT_MOBILITY_PEER_KEY must be a string")
+        elif mobility_peer_key != "":
+            secrets = replace(
+                secrets,
+                artifact_mobility_peer_key=mobility_peer_key,
+            )
+    if env.get("SONDER_CONTROL_STATE_REHEARSAL_API_KEY", "").strip():
+        secrets = replace(
+            secrets,
+            control_state_rehearsal_key=env[
+                "SONDER_CONTROL_STATE_REHEARSAL_API_KEY"
+            ].strip(),
+        )
     if env.get("SONDER_AUTH_SECRET", "").strip():
         secrets = replace(secrets, auth_secret=env["SONDER_AUTH_SECRET"].strip())
     if env.get("SONDER_BACKUP_KEY_FILE", "").strip():
@@ -756,24 +1278,91 @@ def _apply_environment(
         compute=compute,
         features=features,
         secrets=secrets,
+        child_storage=apply_child_storage_environment(config.child_storage, env, errors),
     )
 
 
+def deployment_errors(config: SonderConfig) -> list[str]:
+    """Validate only implemented topology promises, including typed startup."""
+    deployment = config.deployment
+    errors: list[str] = []
+    if deployment.profile not in ("single-host", "pooled-pair"):
+        errors.append(
+            "[deployment].profile must be single-host or pooled-pair; "
+            "HA/quorum provider integration is not available"
+        )
+    members = (config.compute.node_id, *(node.node_id for node in config.compute.nodes))
+    if deployment.profile == "pooled-pair" and (len(members) != 2 or len(set(members)) != 2):
+        errors.append("[deployment].pooled-pair requires one local node and exactly one distinct configured compute peer")
+    if not isinstance(deployment.preferred_primary, str) or (
+        deployment.preferred_primary and deployment.preferred_primary not in members
+    ):
+        errors.append("[deployment].preferred_primary must name a configured member")
+    for setting in ("automatic_takeover", "automatic_failback"):
+        value = getattr(deployment, setting)
+        if not isinstance(value, bool):
+            errors.append(f"[deployment].{setting} must be a boolean")
+        elif value:
+            errors.append(
+                f"[deployment].{setting} is unavailable: independent old-owner fencing, "
+                "acknowledged durable-state replication, and worker ownership-epoch enforcement "
+                "are not integrated"
+            )
+    return errors
+
+
+def validate_deployment(config: SonderConfig) -> None:
+    errors = deployment_errors(config)
+    if errors:
+        raise ConfigError(errors)
+
+
 def _validate(config: SonderConfig, errors: list[str]) -> None:
+    try:
+        validate_membership_config(config.membership, config.secrets, allow_remote=config.ollama.allow_remote)
+    except ValueError as error:
+        errors.append(str(error))
+    errors.extend(child_storage_errors(config))
+    errors.extend(app_control_errors(config))
+    errors.extend(artifact_transfer_errors(config))
+    errors.extend(memory_replication_errors(config))
+    errors.extend(artifact_mobility_source_errors(config))
+    errors.extend(artifact_mobility_errors(config))
+    errors.extend(_artifact_mobility_storage_errors(config))
+    errors.extend(control_state_rehearsal_errors(config))
+    errors.extend(deployment_errors(config))
     if config.schema_version != 1:
         errors.append(
             f"unsupported configuration schema_version {config.schema_version}"
         )
-    if config.profile not in PROFILES:
+    profile = config.profile
+    profile_is_exact_string = _is_exact_string(profile)
+    if not profile_is_exact_string:
+        errors.append("profile must be an exact builtin string")
+    elif profile not in PROFILES:
         errors.append(
-            f"unknown profile {config.profile!r}; expected one of {PROFILES}"
+            f"unknown profile {profile!r}; expected one of {PROFILES}"
         )
 
     server = config.server
+    server_host = server.host
+    host_is_exact_string = _is_exact_string(server_host)
+    auth_mode = server.auth_mode
+    auth_mode_is_exact_string = _is_exact_string(auth_mode)
+    require_account = server.require_account
+    tls_terminated_by_proxy = server.tls_terminated_by_proxy
     if not 1 <= server.port <= 65_535:
         errors.append(f"[server].port out of range: {server.port}")
-    if server.auth_mode not in ("api-key", "account", "both", "either"):
-        errors.append(f"[server].auth_mode invalid: {server.auth_mode!r}")
+    if not auth_mode_is_exact_string:
+        errors.append("[server].auth_mode must be an exact builtin string")
+    elif auth_mode not in ("api-key", "account", "both", "either"):
+        errors.append(f"[server].auth_mode invalid: {auth_mode!r}")
+    if not host_is_exact_string:
+        errors.append("[server].host must be an exact builtin string")
+    if type(require_account) is not bool:
+        errors.append("[server].require_account must be a boolean")
+    if type(tls_terminated_by_proxy) is not bool:
+        errors.append("[server].tls_terminated_by_proxy must be a boolean")
     if server.max_request_bytes <= 0 or server.max_request_bytes > 16 * 1024 * 1024:
         errors.append("[server].max_request_bytes must be within 1..16MiB")
     if server.max_concurrent_requests < 1:
@@ -799,23 +1388,24 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         except ValueError:
             errors.append(f"[server].trusted_proxy_cidrs entry invalid: {cidr!r}")
 
-    loopback = _is_loopback_host(server.host)
-    if not loopback:
+    api_key = getattr(config.secrets, "api_key", None)
+    loopback = _is_loopback_host(server_host) if host_is_exact_string else False
+    if host_is_exact_string and not loopback:
         # SPEC-2 remote exposure rules: non-loopback binding requires an
         # explicit TLS-proxy declaration AND strong authentication.  There
         # is no override; the reference topology keeps Sonder on loopback.
-        if not server.tls_terminated_by_proxy:
+        if tls_terminated_by_proxy is not True:
             errors.append(
-                f"[server].host {server.host!r} is not loopback: non-loopback "
+                f"[server].host {server_host!r} is not loopback: non-loopback "
                 "binding without tls_terminated_by_proxy=true is prohibited"
             )
-        if len(config.secrets.api_key) < MIN_API_KEY_LENGTH:
+        if not _has_minimum_api_key(api_key):
             errors.append(
                 "non-loopback binding requires SONDER_API_KEY of at least "
                 f"{MIN_API_KEY_LENGTH} characters in the secrets file"
             )
-    if config.profile == "server-private":
-        if len(config.secrets.api_key) < MIN_API_KEY_LENGTH:
+    if profile_is_exact_string and profile == "server-private":
+        if not _has_minimum_api_key(api_key):
             errors.append(
                 "profile server-private requires SONDER_API_KEY of at least "
                 f"{MIN_API_KEY_LENGTH} characters"
@@ -823,17 +1413,21 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
 
     effective_auth_mode = (
         "account"
-        if server.require_account and server.auth_mode == "api-key"
-        else server.auth_mode
+        if require_account is True and auth_mode_is_exact_string and auth_mode == "api-key"
+        else auth_mode if auth_mode_is_exact_string else ""
     )
-    if (
-        effective_auth_mode in ACCOUNT_BEARING_AUTH_MODES
-        and config.secrets.auth_secret == BUILTIN_DEV_AUTH_SECRET
-    ):
-        errors.append(
-            f"[server].auth_mode {server.auth_mode!r} may not use the built-in "
-            "development auth secret; set SONDER_AUTH_SECRET to a private value"
-        )
+    if effective_auth_mode in ACCOUNT_BEARING_AUTH_MODES:
+        auth_secret = getattr(config.secrets, "auth_secret", None)
+        if not _is_exact_string(auth_secret):
+            errors.append(
+                "[server].auth_secret must be an exact builtin string for "
+                "account-bearing authentication"
+            )
+        elif auth_secret == BUILTIN_DEV_AUTH_SECRET:
+            errors.append(
+                f"[server].auth_mode {auth_mode!r} may not use the built-in "
+                "development auth secret; set SONDER_AUTH_SECRET to a private value"
+            )
 
     if config.state.minimum_free_disk_bytes < 0:
         errors.append("[state].minimum_free_disk_bytes must be >= 0")
@@ -873,15 +1467,14 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     elif (
         not _is_loopback_host(parts.hostname)
         and parts.scheme != "https"
-        and not _host_in_trusted_origins(
-            parts.hostname, config.ollama.trusted_origins,
-        )
     ):
         errors.append(
             "[ollama].url remote Ollama must use https so prompts and "
             "embeddings are protected in transit"
         )
 
+    canonical_primary = _canonical_ollama_origin(config.ollama.url)
+    canonical_workers: list[str] = []
     for worker in config.ollama.workers:
         try:
             worker_parts = urlsplit(worker)
@@ -913,19 +1506,43 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
                 errors.append(
                     "[ollama].workers remote entries require the remote-Ollama consent gate"
                 )
-            elif (
-                worker_parts.scheme != "https"
-                and not _host_in_trusted_origins(
-                    worker_parts.hostname, config.ollama.trusted_origins,
-                )
-            ):
+            elif worker_parts.scheme != "https":
                 errors.append("[ollama].workers remote entries must use https")
+        canonical_worker = _canonical_ollama_origin(worker)
+        if canonical_worker is not None:
+            canonical_workers.append(canonical_worker)
 
-    if len(config.ollama.workers) > 15:
-        errors.append("[ollama].workers supports at most 15 additional workers")
+    canonical_origins = (
+        {canonical_primary} if canonical_primary is not None else set()
+    )
+    for canonical_worker in canonical_workers:
+        if canonical_worker == canonical_primary:
+            errors.append(
+                "[ollama].workers contains a worker that duplicates primary "
+                "after canonical normalization"
+            )
+        elif canonical_worker in canonical_origins:
+            errors.append(
+                "[ollama].workers contains a duplicate canonical worker origin"
+            )
+        else:
+            canonical_origins.add(canonical_worker)
+    if (
+        config.ollama.worker_pool_max_workers >= 1
+        and len(canonical_origins) > config.ollama.worker_pool_max_workers
+    ):
+        errors.append(
+            "[ollama].worker_pool_max_workers limits the primary-plus-worker "
+            "roster to %d unique origins"
+            % config.ollama.worker_pool_max_workers
+        )
     for name in (
+        "worker_pool_max_workers",
         "worker_max_inflight",
         "worker_queue_depth",
+        "worker_capability_probe_parallelism",
+        "worker_capability_probe_batch_size",
+        "worker_status_page_size",
         "worker_admission_timeout_ms",
         "worker_failure_threshold",
         "worker_cooldown_seconds",
@@ -935,8 +1552,12 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         if getattr(config.ollama, name) < 1:
             errors.append(f"[ollama].{name} must be >= 1")
     worker_upper_bounds = {
+        "worker_pool_max_workers": 256,
         "worker_max_inflight": 64,
         "worker_queue_depth": 4096,
+        "worker_capability_probe_parallelism": 8,
+        "worker_capability_probe_batch_size": 128,
+        "worker_status_page_size": 128,
         "worker_admission_timeout_ms": 60_000,
         "worker_failure_threshold": 100,
         "worker_cooldown_seconds": 3600,
@@ -959,7 +1580,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         errors.append("[compute].node_id must differ from remote node identities")
     if len(node_ids) != len(set(node_ids)):
         errors.append("[compute].nodes contains duplicate node identities")
-    if compute.nodes and len(config.secrets.api_key) < MIN_API_KEY_LENGTH:
+    if compute.nodes and not _has_minimum_api_key(api_key):
         errors.append(
             "[compute].nodes requires SONDER_API_KEY of at least "
             f"{MIN_API_KEY_LENGTH} characters for authenticated remote compute"
@@ -1011,11 +1632,31 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             for item in node.workspace_mappings
         ):
             errors.append(f"{where}.workspace_mappings contains an invalid identity")
+    if not isinstance(compute.worker_host_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", compute.worker_host_id
+    ):
+        errors.append("[compute].worker_host_id must be a bounded stable identity")
+    for key, minimum, maximum in (
+        ("worker_memory_budget_bytes", 0, 1 << 50),
+        ("worker_max_jobs", 1, 1024),
+        ("worker_reservation_seconds", 1, 300),
+    ):
+        value = getattr(compute, key)
+        if key == "worker_memory_budget_bytes" and value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+            errors.append(f"[compute].{key} must be within {minimum}..{maximum}")
     job_ids = [job.job_id for job in compute.jobs]
     if len(job_ids) != len(set(job_ids)):
         errors.append("[compute].jobs contains duplicate job identities")
     for index, job in enumerate(compute.jobs):
         where = f"[compute].jobs[{index}]"
+        if job.memory_reservation_bytes is not None and (
+            isinstance(job.memory_reservation_bytes, bool)
+            or not isinstance(job.memory_reservation_bytes, int)
+            or not 1 <= job.memory_reservation_bytes <= 1 << 50
+        ):
+            errors.append(f"{where}.memory_reservation_bytes must be within 1..2^50")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", job.job_id):
             errors.append(f"{where}.id must be a bounded stable identity")
         try:
@@ -1133,10 +1774,12 @@ def load_config(
     """
     errors: list[str] = []
     sources: list[str] = ["defaults"]
+    private_source_paths: list[str] = []
     config = SonderConfig()
 
     if toml_path is not None:
         path = Path(toml_path)
+        private_source_paths.append(str(path.resolve()))
         try:
             with path.open("rb") as fh:
                 raw = tomllib.load(fh)
@@ -1157,6 +1800,16 @@ def load_config(
                     config = replace(config, profile=value)
                 else:
                     errors.append("profile must be a string")
+            elif key == "memory_replication":
+                if isinstance(value, dict):
+                    config = replace(
+                        config,
+                        memory_replication=_apply_memory_replication_section(
+                            config.memory_replication, value, errors,
+                        ),
+                    )
+                else:
+                    errors.append("[memory_replication] must be a table")
             elif key in _SECTION_TYPES:
                 if isinstance(value, dict):
                     config = replace(
@@ -1183,6 +1836,7 @@ def load_config(
     merged_env: dict[str, str] = {}
     if secrets_path is not None:
         spath = Path(secrets_path)
+        private_source_paths.append(str(spath.resolve()))
         if not spath.exists():
             errors.append(f"secrets file not found: {spath}")
         else:
@@ -1224,7 +1878,11 @@ def load_config(
     _validate(config, errors)
     if errors:
         raise ConfigError(errors)
-    return replace(config, sources=tuple(sources))
+    if config.app_control.catalog_file:
+        private_source_paths.append(str(Path(config.app_control.catalog_file).resolve()))
+    if config.child_storage.binding_file:
+        private_source_paths.append(str(Path(config.child_storage.binding_file).resolve()))
+    return replace(config, sources=tuple(sources), private_source_paths=tuple(dict.fromkeys(private_source_paths)))
 
 
 _OVERRIDE_PATTERN = re.compile(r"^[a-z_]+\.[a-z_]+$")

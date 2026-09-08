@@ -13,6 +13,183 @@ import sonder_runtime.platform.config as runtime_config
 import sonder_health
 
 
+@pytest.mark.parametrize("mode,role,key,allowed", [
+    ("local-open", None, False, True), ("api-key", None, True, True),
+    ("account", "user", False, False), ("account", "developer", False, False),
+    ("account", "admin", False, True), ("both", "user", True, False),
+    ("both", "admin", True, True),
+])
+def test_pool_admin_http_detail_obeys_administrator_boundary(monkeypatch, mode, role, key, allowed):
+    from sonder_runtime.adapters.inference.ollama_pool import OllamaWorkerPool
+    probes = []
+    pool = OllamaWorkerPool("http://127.0.0.1:11434", capability_prober=lambda origin: probes.append(origin) or {"models": ()})
+    monkeypatch.setattr(ts.server, "OLLAMA_POOL", pool)
+    context = {"mode": mode, "authorized": True, "api_key": key,
+               "account": {"username": "caller", "role": role} if role else None}
+    monkeypatch.setattr(ts.Handler, "_request_auth_context", lambda self: context)
+    if not allowed:
+        monkeypatch.setattr(pool, "validate_status_request", lambda **k: pytest.fail("unauthorized pool call"))
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(port, "POST", "/v1/sonder/ollama-pool", body='{"refresh":true,"page_size":1}',
+                                   headers={"Content-Type": "application/json"})
+    assert status == (200 if allowed else 403), body
+    assert len(probes) == (1 if allowed else 0)
+    if allowed:
+        page = json.loads(body)
+        assert page["schema_version"] == 2
+        assert len(page["workers"]) == 1
+        assert page["serialized_bytes"] == len(json.dumps(page).encode("utf-8"))
+    else:
+        assert json.loads(body) == {"error": "authorization"}
+
+
+def test_pool_admin_generic_tool_cannot_bypass_role_gate():
+    context = {"mode": "account", "authorized": True, "api_key": False,
+               "account": {"username": "reader", "role": "user"}}
+    assert ts._http_tool_refusal(("ollama_pool_admin_status",), "/ollama_pool_admin_status", context)
+
+
+def test_pool_admin_http_rejects_probe_overrides_and_bad_cursors_without_io(monkeypatch):
+    from sonder_runtime.adapters.inference.ollama_pool import OllamaWorkerPool
+    pool = OllamaWorkerPool("http://127.0.0.1:11434", capability_prober=lambda _: pytest.fail("unexpected probe"))
+    monkeypatch.setattr(ts.server, "OLLAMA_POOL", pool)
+    context = {"mode": "account", "authorized": True, "api_key": False,
+               "account": {"username": "owner", "role": "admin"}}
+    monkeypatch.setattr(ts.Handler, "_request_auth_context", lambda self: context)
+    with _http_server(monkeypatch) as port:
+        for payload in ({"refresh": True, "probe_batch_size": 128}, {"refresh": True, "cursor": "invalid"}):
+            status, _, body = _request(port, "POST", "/v1/sonder/ollama-pool", body=json.dumps(payload),
+                                       headers={"Content-Type": "application/json"})
+            assert status == 400, body
+            assert json.loads(body) == {"error": "invalid_request"}
+
+
+def test_pool_http_cached_pages_bind_cursors_to_current_admin_before_refresh(monkeypatch):
+    from sonder_runtime.adapters.inference.ollama_pool import OllamaWorkerPool
+    pool = OllamaWorkerPool("http://127.0.0.1:11434", ("http://127.0.0.1:11435",),
+                           capability_prober=lambda _: pytest.fail("unexpected probe"))
+    monkeypatch.setattr(ts.server, "OLLAMA_POOL", pool)
+    context = {"mode": "account", "authorized": True, "api_key": False,
+               "account": {"username": "owner-a", "role": "admin"}}
+    monkeypatch.setattr(ts.Handler, "_request_auth_context", lambda self: context)
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(port, "GET", "/v1/sonder/ollama-pool?page_size=1")
+        assert status == 200
+        assert headers["Cache-Control"] == "no-store"
+        cursor = json.loads(body)["next_cursor"]
+        context["account"]["username"] = "owner-b"
+        status, _, body = _request(port, "POST", "/v1/sonder/ollama-pool",
+                                   body=json.dumps({"refresh": True, "cursor": cursor}),
+                                   headers={"Content-Type": "application/json"})
+        assert status == 400
+        assert json.loads(body) == {"error": "invalid_request"}
+        context["account"]["username"] = "owner-a"
+        status, _, body = _request(port, "GET", "/v1/sonder/ollama-pool?cursor=" + cursor)
+        assert status == 200
+        assert json.loads(body)["complete"] is True
+
+
+@pytest.mark.parametrize('mode', ['account', 'both', 'either', 'api-key', 'local-open'])
+def test_logout_revokes_only_explicit_session_with_safe_retry(monkeypatch, tmp_path, mode):
+    import admin_auth
+    import memory_store
+    path = str(tmp_path / 'logout.sqlite')
+    conn = memory_store.connect(path)
+    admin_auth.register(conn, 'owner', 'password123')
+    first, _ = admin_auth.login(conn, 'owner', 'password123')
+    second, _ = admin_auth.login(conn, 'owner', 'password123')
+    conn.close()
+    monkeypatch.setattr(ts.server, '_open_db', lambda: memory_store.connect(path))
+    monkeypatch.setattr(ts, 'AUTH_MODE', mode)
+    monkeypatch.setattr(ts, 'API_KEY', '' if mode == 'local-open' else 'deployment-key')
+    monkeypatch.setattr(ts, 'REQUIRE_ACCOUNT', False)
+    monkeypatch.setattr(ts.Handler, '_auth_rate_limited', lambda self: False)
+    headers = {'Content-Type': 'application/json',
+               'Authorization': 'Bearer deployment-key',
+               'X-Sonder-Account-Token': first}
+    with _http_server(monkeypatch) as port:
+        for _ in range(2):
+            status, response_headers, body = _request(
+                port, 'POST', '/v1/sonder/logout', body='{}', headers=headers)
+            assert status == 200, body
+            assert json.loads(body) == {'ok': True}
+            assert response_headers['Cache-Control'] == 'no-store'
+        status, _, _ = _request(port, 'POST', '/v1/sonder/logout', body='{}',
+                                headers={'Authorization': 'Bearer ' + second})
+        assert status == 401  # No fallback from deployment bearer to session.
+    conn = memory_store.connect(path)
+    try:
+        assert admin_auth.authenticate(conn, first) is None
+        assert admin_auth.authenticate(conn, second) is not None
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize('body,headers,expected', [
+    ('{}', {'X-Sonder-Account-Token': 'session'}, 401),
+    ('{"token":"another-session"}', {'X-Sonder-Account-Token': 'session',
+                                    'Authorization': 'Bearer deployment-key'}, 400),
+    (' ' * 1025, {'X-Sonder-Account-Token': 'session',
+                 'Authorization': 'Bearer deployment-key'}, 413),
+])
+def test_logout_refuses_missing_deployment_key_or_body_target(monkeypatch, body, headers, expected):
+    monkeypatch.setattr(ts, 'AUTH_MODE', 'both')
+    monkeypatch.setattr(ts, 'API_KEY', 'deployment-key')
+    monkeypatch.setattr(ts, 'REQUIRE_ACCOUNT', False)
+    monkeypatch.setattr(ts, '_auth_account', lambda header: None)
+    monkeypatch.setattr(ts.Handler, '_auth_rate_limited', lambda self: False)
+    monkeypatch.setattr(ts.server, '_open_db', lambda: pytest.fail('must not open revocation store'))
+    with _http_server(monkeypatch) as port:
+        status, response_headers, _ = _request(port, 'POST', '/v1/sonder/logout',
+                                              body=body, headers={
+                                                  'Content-Type': 'application/json', **headers})
+        assert status == expected
+        assert response_headers['Cache-Control'] == 'no-store'
+
+
+def test_logout_store_unavailable_is_controlled_and_does_not_authenticate_target(monkeypatch):
+    monkeypatch.setattr(ts, 'AUTH_MODE', 'account')
+    monkeypatch.setattr(ts, 'REQUIRE_ACCOUNT', False)
+    monkeypatch.setattr(ts, '_auth_account', lambda header: pytest.fail('no target lookup'))
+    monkeypatch.setattr(ts.Handler, '_auth_rate_limited', lambda self: pytest.fail('no failed-auth bucket'))
+    def unavailable():
+        raise OSError('private database failure details')
+    monkeypatch.setattr(ts.server, '_open_db', unavailable)
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(port, 'POST', '/v1/sonder/logout', body='{}',
+                                        headers={'Content-Type': 'application/json',
+                                                 'X-Sonder-Account-Token': 'private-session'})
+        assert status == 503
+        assert headers['Cache-Control'] == 'no-store'
+        assert json.loads(body) == {'ok': False, 'message': 'session revocation unavailable'}
+
+
+def test_logout_admission_is_bounded_and_released_after_failure(monkeypatch):
+    gate = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(ts, '_ACCOUNT_LOGOUT_ADMISSION', gate)
+    monkeypatch.setattr(ts, 'AUTH_MODE', 'local-open')
+    monkeypatch.setattr(ts, 'API_KEY', '')
+    monkeypatch.setattr(ts, 'REQUIRE_ACCOUNT', False)
+    def unavailable():
+        raise OSError('unavailable')
+    monkeypatch.setattr(ts.server, '_open_db', unavailable)
+    headers = {'Content-Type': 'application/json', 'X-Sonder-Account-Token': 'session'}
+    with _http_server(monkeypatch) as port:
+        assert gate.acquire(blocking=False)
+        try:
+            status, response_headers, _ = _request(
+                port, 'POST', '/v1/sonder/logout', body='{}', headers=headers)
+            assert status == 429
+            assert response_headers['Cache-Control'] == 'no-store'
+        finally:
+            gate.release()
+        for _ in range(2):
+            status, _, _ = _request(port, 'POST', '/v1/sonder/logout', body='{}', headers=headers)
+            assert status == 503
+            assert gate.acquire(timeout=5)
+            gate.release()
+
+
 def test_local_log_dashboard_requires_direct_loopback_and_no_tls_proxy(monkeypatch):
     monkeypatch.setattr(ts, "TLS_TERMINATED_BY_PROXY", False)
     assert ts._local_log_dashboard_allowed("127.0.0.1") is True
@@ -938,6 +1115,14 @@ def test_served_runtime_stash_aliases_delegate_after_action_sensitive_gates(ever
 def test_system_status_uses_projected_activity_and_shared_feed(
     monkeypatch, tmp_path,
 ):
+    from dataclasses import replace
+    from sonder_runtime.bootstrap import app as bootstrap_app
+    from sonder_runtime.platform.artifact_mobility_config import ArtifactMobilityConfig
+    from sonder_runtime.platform.artifact_mobility_source_config import (
+        ArtifactMobilitySourceConfig,
+    )
+    from sonder_runtime.platform.config import SonderConfig
+
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
@@ -982,6 +1167,24 @@ def test_system_status_uses_projected_activity_and_shared_feed(
     monkeypatch.setattr(ts.server, "learning_health_data", lambda: {})
     monkeypatch.setattr(ts.server.sonder_paths, "default_home", lambda: tmp_path)
     monkeypatch.setattr(ts.server, "available_tiers", lambda: {})
+
+    class ComposedApplication:
+        config = replace(
+            SonderConfig(),
+            artifact_mobility=ArtifactMobilityConfig(enabled=True),
+            artifact_mobility_source=ArtifactMobilitySourceConfig(enabled=True),
+        )
+        memory_replication = None
+
+        @staticmethod
+        def provider_health_data():
+            return ()
+
+        @staticmethod
+        def _artifact_mobility_available():
+            return True
+
+    monkeypatch.setattr(bootstrap_app, "default_app", lambda: ComposedApplication())
     monkeypatch.setattr(ts.server, "npu_fallback_status_data", lambda: {
         "schema_version": 1,
         "known": True,
@@ -1019,6 +1222,26 @@ def test_system_status_uses_projected_activity_and_shared_feed(
         "operation_mode": "execution", "fallback_handler": "ollama",
         "handler_state": "handled", "count": 1,
     }
+    assert payload["deployment"]["profile"] == "single-host"
+    assert payload["deployment"]["profile_id"] == "single-pc"
+    assert payload["deployment"]["configured_members"] == ["local"]
+    assert payload["deployment"]["capabilities"]["automatic_takeover"][
+        "available"
+    ] is False
+    recovery_posture = payload["deployment"]["recovery_posture"]
+    assert recovery_posture["automatic_takeover_available"] is False
+    assert recovery_posture["automatic_failback_available"] is False
+    assert recovery_posture["independent_witness_required"] is True
+    assert "independent witness" in recovery_posture["reason"]
+    capabilities = payload["operational_capabilities"]
+    assert capabilities["schema_version"] == 1
+    assert capabilities["inference"]["request_level_pooling"]["available"] is False
+    assert capabilities["inference"]["model_sharding"]["available"] is False
+    assert capabilities["mobility"]["memory_replication_transport"]["available"] is False
+    assert capabilities["mobility"]["automatic_takeover_available"] is False
+    assert capabilities["mobility"]["automatic_failback_available"] is False
+    assert capabilities["mobility"]["automatic_artifact_migration"]["available"] is False
+    assert capabilities["mobility"]["fixed_peer_artifact_copy"]["available"] is True
     npu_event = next(
         row for row in payload["execution"]["feed"]["events"]
         if row["kind"] == "npu_fallback_handled"
@@ -1034,6 +1257,105 @@ def test_system_status_uses_projected_activity_and_shared_feed(
         "npu-secret", str(tmp_path / "private"),
     ):
         assert secret not in text
+
+
+def test_system_status_fails_closed_for_invalid_direct_artifact_mobility_config(
+    monkeypatch, tmp_path,
+):
+    """Status must not promise a peer copy which dispatch will reject."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from sonder_runtime.bootstrap import app as bootstrap_app
+    from sonder_runtime.bootstrap.artifact_mobility import compose_artifact_mobility
+    from sonder_runtime.platform.artifact_mobility_config import ArtifactMobilityConfig
+    from sonder_runtime.platform.artifact_mobility_source_config import (
+        ArtifactMobilitySourceConfig,
+    )
+    from sonder_runtime.platform.config import Secrets, SonderConfig, StateConfig
+
+    source_path = tmp_path / "private-source"
+    peer_origin = "https://private-peer.example:9443"
+    peer_key = "private-peer-key-" + "c" * 32
+    valid = SonderConfig(
+        state=StateConfig(home=str(tmp_path / "state")),
+        artifact_mobility_source=ArtifactMobilitySourceConfig(
+            enabled=True,
+            store_dir=str(source_path),
+            principal_id="principal-a",
+            project_id="project-a",
+            source_owner_id="owner-a",
+        ),
+        artifact_mobility=ArtifactMobilityConfig(
+            enabled=True,
+            destination_label="node-one",
+            destination_origin=peer_origin,
+            destination_tls_certificate_sha256="a" * 64,
+            expected_recipient_attestation_sha256="b" * 64,
+            destination_credential_id="private-generation",
+        ),
+        secrets=Secrets(artifact_mobility_peer_key=peer_key),
+    )
+    _, _, _, valid_available, valid_close = compose_artifact_mobility(lambda: valid)
+    try:
+        assert valid_available() is True
+    finally:
+        valid_close()
+
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "status", lambda: "ready")
+    monkeypatch.setattr(ts.server, "sonder_stats", lambda: {})
+    monkeypatch.setattr(ts.server, "learn_tiers", lambda: {})
+    monkeypatch.setattr(ts.server, "system_improvement_report", lambda: {})
+    monkeypatch.setattr(ts.server, "context_health_data", lambda: {})
+    monkeypatch.setattr(ts.server.context_policy, "policy", lambda *_: {})
+    monkeypatch.setattr(ts.server.master_orchestrator, "snapshot", lambda: {})
+    monkeypatch.setattr(ts.server.autopilot_controller, "snapshot", lambda: {})
+    monkeypatch.setattr(ts.server, "runtime_policy_data", lambda: {})
+    monkeypatch.setattr(ts.server.selfmod, "status_data", lambda: {})
+    monkeypatch.setattr(ts.server, "mcp_runtime_data", lambda: {})
+    monkeypatch.setattr(ts.server, "npu_fallback_status_data", lambda: {})
+    monkeypatch.setattr(ts.server, "learning_health_data", lambda: {})
+    monkeypatch.setattr(ts.server, "available_tiers", lambda: {})
+    monkeypatch.setattr(ts.server.activity_tracker, "snapshot", lambda: {})
+    monkeypatch.setattr(
+        ts.server.activity_tracker, "public_snapshot", lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(ts.server, "execution_status_data", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(ts.server.OLLAMA_POOL, "summary", lambda: None)
+
+    invalid_configs = (
+        replace(
+            valid,
+            artifact_mobility_source=replace(
+                valid.artifact_mobility_source, principal_id=""
+            ),
+        ),
+        replace(valid, secrets=replace(valid.secrets, artifact_mobility_peer_key="")),
+    )
+    for config in invalid_configs:
+        _, _, _, available, close = compose_artifact_mobility(lambda: config)
+        application = SimpleNamespace(
+            config=config,
+            memory_replication=None,
+            provider_health_data=lambda: (),
+            _artifact_mobility_available=available,
+        )
+        monkeypatch.setattr(bootstrap_app, "default_app", lambda: application)
+        try:
+            with _http_server(monkeypatch) as port:
+                status, _, body = _request(port, "GET", "/v1/sonder/status")
+        finally:
+            close()
+        text = body.decode("utf-8")
+        assert status == 200
+        payload = json.loads(text)
+        assert payload["operational_capabilities"]["mobility"][
+            "fixed_peer_artifact_copy"
+        ]["available"] is False
+        for private in (peer_origin, peer_key, str(source_path)):
+            assert private not in text
 
 
 def test_ordinary_hosted_account_cannot_read_global_operations_dashboard(monkeypatch):
@@ -2327,6 +2649,101 @@ def test_non_loopback_bind_fails_without_strong_auth():
     ts._validate_bind_security(
         "127.0.0.1", api_key="", auth_mode="local-open", auth_secret=""
     )
+
+
+def test_bind_gate_rejects_host_subclass_before_unsafe_or_loopback_checks(monkeypatch):
+    class PretendLoopback(str):
+        def strip(self, chars=None):
+            return "127.0.0.1"
+
+    calls = []
+    monkeypatch.setattr(
+        ts.unsafe_lab,
+        "require_startup",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    with pytest.raises(RuntimeError, match="exact builtin string"):
+        ts._validate_bind_security(
+            PretendLoopback("0.0.0.0"),
+            api_key="k" * 32,
+            auth_mode="api-key",
+            auth_secret="",
+            tls_terminated_by_proxy=True,
+        )
+
+    assert calls == []
+
+
+def test_bind_gate_rejects_subclassed_api_key_before_length_check():
+    class LongKey(str):
+        def __len__(self):
+            return runtime_config.MIN_API_KEY_LENGTH
+
+    with pytest.raises(RuntimeError, match="API key must be an exact builtin string"):
+        ts._validate_bind_security(
+            "0.0.0.0",
+            api_key=LongKey("short"),
+            auth_mode="api-key",
+            auth_secret="",
+            tls_terminated_by_proxy=True,
+        )
+
+
+def test_bind_gate_rejects_subclassed_account_secret_before_length_check():
+    class LongSecret(str):
+        def __len__(self):
+            return ts.MIN_ACCOUNT_SECRET_LENGTH
+
+    with pytest.raises(RuntimeError, match="auth secret must be an exact builtin string"):
+        ts._validate_bind_security(
+            "0.0.0.0",
+            api_key="",
+            auth_mode="account",
+            auth_secret=LongSecret("short"),
+            tls_terminated_by_proxy=True,
+        )
+
+
+def test_bind_gate_rejects_nonboolean_tls_proxy_declaration():
+    with pytest.raises(RuntimeError, match="TLS proxy declaration must be a boolean"):
+        ts._validate_bind_security(
+            "0.0.0.0",
+            api_key="k" * runtime_config.MIN_API_KEY_LENGTH,
+            auth_mode="api-key",
+            auth_secret="",
+            tls_terminated_by_proxy=1,
+        )
+
+
+def test_bind_gate_rejects_subclassed_global_mode_before_effective_mode(monkeypatch):
+    class ExplodingMode(str):
+        def __eq__(self, other):
+            raise AssertionError("the final bind gate must not compare a subclassed mode")
+
+    monkeypatch.setattr(ts, "AUTH_MODE", ExplodingMode("api-key"))
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_SECRET", "")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+
+    with pytest.raises(RuntimeError, match="bind auth mode must be an exact builtin string"):
+        ts._validate_bind_security("127.0.0.1")
+
+
+def test_typed_config_rejects_subclassed_mode_before_loopback_downgrade():
+    from sonder_runtime.platform.config import Secrets, ServerConfig, SonderConfig
+
+    class PretendApiKey(str):
+        def __eq__(self, other):
+            return other == "api-key"
+
+    config = SonderConfig(
+        server=ServerConfig(host="127.0.0.1", auth_mode=PretendApiKey("account")),
+        secrets=Secrets(api_key=""),
+    )
+
+    with pytest.raises(RuntimeError, match="bind auth mode must be an exact builtin string"):
+        ts.configure_typed_config(config)
 
 
 def test_sonder_health_requires_exact_private_loopback_challenge(monkeypatch):

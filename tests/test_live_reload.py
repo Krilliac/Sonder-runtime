@@ -209,7 +209,9 @@ def test_workflow_live_reload_stays_behind_package_adapter(monkeypatch, tmp_path
     import server
     from sonder_runtime.adapters.filesystem import workflow_store as packaged
 
-    monkeypatch.setattr(packaged, "workspace_root", lambda: str(tmp_path))
+    from sonder_runtime.platform import paths as runtime_paths
+
+    runtime_paths.configure_home(tmp_path)
     monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)
     monkeypatch.setattr(
         server.live_reload,

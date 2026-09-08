@@ -18,7 +18,11 @@ Tiers (escalation ladder, cheapest first):
     cloud-code/cloud-general -> configured hosted defaults (no local memory cost)
 """
 
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+from sonder_runtime.platform.runtime_threads import ThreadPoolExecutor as owned_runtime_pool
+
 import collections
+import atexit
 import base64
 import contextlib
 import logging
@@ -161,6 +165,12 @@ import autopilot_controller
 from sonder_runtime.adapters.persistence import fanout_store
 import fanout_prompt_vault
 from sonder_runtime.adapters.model_transport import ModelCallError
+from sonder_runtime.application.session.provider_attempts import (
+    complete_scoped_provider_request, deferred_provider_request_scope, dispatch_provider,
+)
+from sonder_runtime.application.session.model_steps import (
+    run_model_step, wrap_model_generator,
+)
 from sonder_runtime.adapters.model_inventory import inventory_rows as _inventory_rows_policy
 from sonder_runtime.domain.context import compaction as context_compaction
 from sonder_runtime.domain.context import overflow as context_overflow
@@ -1744,11 +1754,12 @@ def _generate_text(prompt, tier="fast", system="", temperature=0.2,
 
 _APP_GRAPH = None
 _APP_GRAPH_LOCK = threading.Lock()
+_APP_GRAPH_OWNED_BY_SERVER = False
 
 
 def _application():
     """Lazily build the SPEC-3 composition-root graph (no import-time cost)."""
-    global _APP_GRAPH
+    global _APP_GRAPH, _APP_GRAPH_OWNED_BY_SERVER
     with _APP_GRAPH_LOCK:
         if _APP_GRAPH is None:
             from sonder_runtime.bootstrap import app as _bootstrap_app
@@ -1756,7 +1767,35 @@ def _application():
                 preference_connection_factory=lambda: _open_db(),
                 preference_module_provider=lambda: preference_learning,
             )
+            _APP_GRAPH_OWNED_BY_SERVER = True
         return _APP_GRAPH
+
+
+def _close_server_owned_application(*, timeout=5) -> None:
+    """Retire only a graph that this legacy module constructed itself."""
+    global _APP_GRAPH, _APP_GRAPH_OWNED_BY_SERVER
+    with _APP_GRAPH_LOCK:
+        if not _APP_GRAPH_OWNED_BY_SERVER or _APP_GRAPH is None:
+            return
+        application = _APP_GRAPH
+        _APP_GRAPH = None
+        _APP_GRAPH_OWNED_BY_SERVER = False
+    # Never hold the legacy graph lock while a provider close can block or
+    # invoke a compatibility hook.  Externally configured graphs are left to
+    # their actual owner.
+    application.close_providers(timeout=timeout)
+
+
+def _close_server_owned_application_at_exit() -> None:
+    try:
+        _close_server_owned_application(timeout=5)
+    except Exception:
+        logging.getLogger("sonder.server").error(
+            "legacy owned application cleanup incomplete", exc_info=True,
+        )
+
+
+atexit.register(_close_server_owned_application_at_exit)
 
 
 class _TypedToolError(RuntimeError):
@@ -1872,6 +1911,44 @@ def _typed_tool(tool_name, arguments, *, token="", approval="", extra_roots=""):
     return json.loads(receipt.output)
 
 
+def _capture_named_provider_request(function):
+    """Bind only this owning caller's named session; preserve explicit opt-outs.
+
+    Admission is deferred until provider dispatch, so control/cache-only paths
+    retain their prior capture behavior. The initial command stays distinct
+    from the final augmented payload recorded by the transport boundary.
+    """
+    signature = inspect.signature(function)
+
+    @functools.wraps(function)
+    def wrapped(*args, **kwargs):
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        values = bound.arguments
+        session = values.get("session", "")
+        named = bool(str(session or "").strip()) or function.__name__ == "_sonder_impl_serialized"
+        session_id = _resolve_session(session) if named and values.get("capture_session", True) else None
+
+        def admit():
+            from sonder_runtime.application.ports.model_gateway import ModelRequest
+            from sonder_runtime.domain.common.ids import new_id
+
+            capture = _application().session_capture_service()
+            pending = capture.begin_request(
+                str(session_id), new_id("turn"),
+                ModelRequest(prompt=values["prompt"], tier=values.get("tier") or "sonder",
+                             system=values.get("system", ""), history=tuple(values.get("history") or ()),
+                             options={key: values[key] for key in ("temperature", "num_predict", "num_ctx") if key in values}),
+                request_id=new_id("request"), user_message=values["prompt"],
+            )
+            return capture, pending
+
+        with deferred_provider_request_scope(admit if session_id is not None else None):
+            return function(*args, **kwargs)
+
+    return wrapped
+
+
 def _capture_durable_session_turn(
     session_id, prompt, history, model, system, tier, response, request_id=None,
 ):
@@ -1886,6 +1963,9 @@ def _capture_durable_session_turn(
     """
     if session_id is None:
         return None
+    captured = complete_scoped_provider_request(session_id, response)
+    if captured is not None:
+        return captured
     from sonder_runtime.application.ports.model_gateway import ModelRequest
     from sonder_runtime.domain.common.ids import new_id
 
@@ -1903,6 +1983,40 @@ def _capture_durable_session_turn(
         user_message=prompt,
         model_response=response,
     )
+
+
+def _legacy_model_failure_code(error):
+    """Map legacy transport kinds to the stable session failure taxonomy."""
+    from sonder_runtime.domain.common.errors import (
+        Cancelled, DeadlineExceeded, DependencyUnavailable, InvalidInput,
+        InternalFailure,
+    )
+
+    if isinstance(error, ModelCallError):
+        return {
+            "cancelled": Cancelled.code,
+            "timeout": DeadlineExceeded.code,
+            "configuration": InvalidInput.code,
+            "empty_response": DependencyUnavailable.code,
+            "http": DependencyUnavailable.code,
+            "protocol": DependencyUnavailable.code,
+            "request": DependencyUnavailable.code,
+            "transport": DependencyUnavailable.code,
+        }.get(error.kind, DependencyUnavailable.code)
+    return getattr(error, "code", InternalFailure.code)
+
+
+def _legacy_model_step_options(generator, *, temperature, num_predict, num_ctx):
+    """Snapshot the requested options, including an active output budget cap."""
+    prediction = num_predict
+    override = getattr(generator, "num_predict_override", None)
+    if isinstance(override, int) and not isinstance(override, bool):
+        prediction = max(1, min(int(num_predict), override))
+    return {
+        "temperature": temperature,
+        "num_predict": prediction,
+        "num_ctx": num_ctx,
+    }
 
 
 def _gateway_generate_text(prompt, tier="fast", system="", temperature=0.2,
@@ -2592,7 +2706,7 @@ def _execute_selfmod_run(run_id, explicit_tests=None):
         while not heartbeat_stop.wait(30):
             if not selfmod.heartbeat(run_id, owner):
                 return
-    heartbeat_thread = threading.Thread(
+    heartbeat_thread = owned_runtime_thread(
         target=heartbeat_worker, name="sonder-selfmod-heartbeat", daemon=True,
     )
     heartbeat_thread.start()
@@ -4220,6 +4334,19 @@ def _require_ollama_endpoint(*, cloud: bool = False) -> None:
         )
 
 
+def _read_ollama_response_bytes(resp) -> bytes:
+    """Read one bounded Ollama response while enforcing the opener contract."""
+    raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
+    if not isinstance(raw, bytes):
+        raise ModelCallError("protocol", "Ollama response body is not bytes")
+    if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
+        raise ModelCallError(
+            "protocol",
+            "Ollama response exceeded the 16 MiB safety limit",
+        )
+    return raw
+
+
 def _post_model(
     path: str,
     payload: dict,
@@ -4641,15 +4768,19 @@ def _post(
             f"{origin}{path}", data=data,
             headers={"Content-Type": "application/json"},
         )
-        with ollama_endpoint.open_url(req, timeout=remaining) as resp:
-            raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
-            if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
-                raise ModelCallError(
-                    "protocol",
-                    "Ollama response exceeded the 16 MiB safety limit",
-                )
-            return json.loads(raw.decode("utf-8"))
+        def transport():
+            with OLLAMA_POOL.open_url(req, timeout=remaining) as resp:
+                raw = _read_ollama_response_bytes(resp)
+                return json.loads(raw.decode("utf-8"))
 
+        # This callback runs once per selected pool worker, inside all payload
+        # transformations and local retries. Metadata probes are not inference.
+        if path in {"/api/chat", "/api/generate"}:
+            return dispatch_provider("ollama", path, json.loads(data), transport)
+        return transport()
+
+    if local_only and not ollama_endpoint.is_loopback(BASE):
+        raise ollama_pool.WorkerPoolUnavailable("local-only inference requires a loopback primary")
     if local_only or not OLLAMA_POOL.enabled:
         return send(BASE)
     model_hint = payload.get("model") if isinstance(payload, dict) else None
@@ -4702,7 +4833,7 @@ def prewarm_model(tier: str = "") -> bool:
             with _PREWARM_LOCK:
                 _PREWARM_INFLIGHT.discard(model)
 
-    threading.Thread(
+    owned_runtime_thread(
         target=_load, daemon=True, name="sonder-prewarm"
     ).start()
     return True
@@ -4721,13 +4852,8 @@ def _get(path: str) -> dict:
 
     def send(origin):
         req = urllib.request.Request(f"{origin}{path}")
-        with ollama_endpoint.open_url(req, timeout=15) as resp:
-            raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
-            if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
-                raise ModelCallError(
-                    "protocol",
-                    "Ollama response exceeded the 16 MiB safety limit",
-                )
+        with OLLAMA_POOL.open_url(req, timeout=15) as resp:
+            raw = _read_ollama_response_bytes(resp)
             return json.loads(raw.decode("utf-8"))
 
     return (
@@ -4907,9 +5033,11 @@ def _offload_impl(
     timeout: int = TIMEOUT,
     cancel_check=None,
     schema=None,
+    session: str | None = None,
 ) -> str:
     """Internal offload path; model failures stay typed for orchestrators."""
     schema = _parse_schema_arg(schema)
+    capture_session = _resolve_session(session) if session is not None else None
     # 0 means model-aware automatic sizing. The resolved model is not known
     # until after live tier refresh, so defer selection to the generation
     # boundary where Ollama metadata can be consulted.
@@ -4963,7 +5091,18 @@ def _offload_impl(
         usage = {}
         used_model = model
         msg = ""
-        try:
+
+        from sonder_runtime.application.ports.model_gateway import ModelRequest
+
+        request = ModelRequest(
+            prompt=prompt,
+            tier=tier,
+            system=system,
+            options=dict(options),
+        )
+
+        def invoke_nonlearning():
+            nonlocal msg, used_model, usage
             if cloud:
                 out, msg, used_model = _chat_request_with_cloud_fallback(
                     payload,
@@ -4995,6 +5134,20 @@ def _offload_impl(
                 "tokens_out": int(tokens_out or 0),
                 "token_source": source,
             }
+            return msg
+
+        try:
+            msg = run_model_step(
+                invoke_nonlearning,
+                capture_factory=(
+                    lambda: _application().session_capture_service()
+                    if capture_session is not None else None
+                ),
+                session_id=capture_session,
+                request=request,
+                user_message=prompt,
+                failure_code=_legacy_model_failure_code,
+            )
             # `ok` describes the model call, which succeeded: the request was
             # answered and tokens came back. A schema violation is a verdict on
             # the content, and it is carried by the `rejected` outcome rather
@@ -5056,6 +5209,27 @@ def _offload_impl(
             cancel_check=cancel_check,
             schema=schema,
         )
+    if capture_session is not None:
+        gen = wrap_model_generator(
+            gen,
+            capture_factory=lambda: _application().session_capture_service(),
+            session_id=capture_session,
+            tier=tier,
+            system=system,
+            options={
+                "temperature": temperature,
+                "num_predict": num_predict,
+                "num_ctx": num_ctx,
+            },
+            options_factory=lambda _prompt, _history, raw: _legacy_model_step_options(
+                raw,
+                temperature=temperature,
+                num_predict=num_predict,
+                num_ctx=num_ctx,
+            ),
+            first_user_message=prompt,
+            failure_code=_legacy_model_failure_code,
+        )
     conn = _open_db()
     try:
         response, iid = orchestrator.run_with_learning(
@@ -5075,6 +5249,223 @@ def _offload_impl(
             raise
         response = _with_schema_coverage(response, gaps)
     return with_footer(response, iid)
+
+
+from sonder_runtime.interfaces import standalone_agent_lanes as _standalone_lanes
+
+_MANAGED_AGENT_ADMISSION = contextvars.ContextVar('managed_agent_admission', default=None)
+
+
+def _managed_agent_controller():
+    controller = _standalone_lanes.current()
+    if controller is not None and (
+        getattr(controller, '_managed_factory', None) is not None
+        or getattr(controller, '_managed_session', None) is not None
+        or getattr(controller, '_managed_nested_forbidden', False)
+    ):
+        return controller
+    return _MANAGED_AGENT_ADMISSION.get()
+
+
+@contextlib.contextmanager
+def _managed_agent_admission_scope():
+    # Nested loops lose the lane-controller capability, but must retain the
+    # originating host's revocation checks for model and ordinary tool work.
+    token = _MANAGED_AGENT_ADMISSION.set(_managed_agent_controller())
+    try:
+        yield
+    finally:
+        _MANAGED_AGENT_ADMISSION.reset(token)
+
+
+def _require_managed_agent_admission():
+    from sonder_runtime.bootstrap.prepared_workbench import current_permit
+    permit = current_permit()
+    if permit is not None:
+        permit.require_current()
+    controller = _managed_agent_controller()
+    if controller is not None:
+        controller.require_current()
+
+
+def _guard_managed_agent_call(callback, *, inherit_context=False):
+    from sonder_runtime.bootstrap.prepared_workbench import current_permit
+    prepared_permit = current_permit()
+    controller = _managed_agent_controller()
+    if controller is None and prepared_permit is None:
+        return callback
+    captured = contextvars.copy_context() if inherit_context else None
+
+    def admitted(*args, **kwargs):
+        if prepared_permit is not None:
+            prepared_permit.require_current()
+            if controller is None:
+                raise PermissionError("prepared work requires its managed controller")
+        controller.require_current()
+        result = callback(*args, **kwargs)
+        controller.require_current()
+        if prepared_permit is not None:
+            prepared_permit.require_current()
+        return result
+
+    def invoke(*args, **kwargs):
+        # Each worker gets a separate Context object while retaining the same
+        # live cancellation/selection identities and authority checks.
+        if captured is not None:
+            return captured.copy().run(admitted, *args, **kwargs)
+        return admitted(*args, **kwargs)
+    class GuardedCall:
+        @property
+        def num_predict_override(self):
+            return callback.num_predict_override
+
+        @num_predict_override.setter
+        def num_predict_override(self, value):
+            # The budget adapter writes and resets the provider ceiling on the
+            # callable it receives. Keep both writes on the actual generator.
+            callback.num_predict_override = value
+
+        def __call__(self, *args, **kwargs):
+            return invoke(*args, **kwargs)
+
+        def __getattr__(self, name):
+            # Generation updates metadata on the underlying callable. Preserve
+            # that live view rather than copying a stale attributes snapshot.
+            return getattr(callback, name)
+
+    return GuardedCall()
+
+
+def _standalone_verifier_factory(application, service):
+    from sonder_runtime.bootstrap.delegated_verification import compose_delegated_verification
+    catalog = os.environ.get("SONDER_LANE_TEST_TARGETS_FILE", "").strip()
+    if not catalog:
+        raise PermissionError("independent verification catalog is not configured")
+    return compose_delegated_verification(service, application.process_job_provider(), catalog)
+
+
+_REPL_CONVERSATION_SLOT = contextvars.ContextVar('private_repl_conversation_slot', default=None)
+
+
+@contextlib.contextmanager
+def _managed_repl_conversation_scope():
+    from sonder_runtime.bootstrap.managed_conversation import ReplConversationSlot
+    slot = ReplConversationSlot()
+    token = _REPL_CONVERSATION_SLOT.set(slot)
+    try:
+        yield
+    finally:
+        try:
+            slot.clear()
+        finally:
+            _REPL_CONVERSATION_SLOT.reset(token)
+
+
+def _clear_managed_repl_conversation():
+    slot = _REPL_CONVERSATION_SLOT.get()
+    if slot is not None:
+        slot.clear()
+
+
+def _run_managed_repl_work(session_id, *, memory_database, _recovery_cursor=None,
+                           _recovery_request=None, **arguments):
+    """Private REPL entry: persisted history alone never authorizes a host."""
+    from sonder_runtime.bootstrap.repl_managed import run_managed_repl_work, ReplRecoveryRequest
+    from sonder_runtime.adapters.security.control_plane_paths import ControlPlanePaths
+    application = _application()
+    request = None
+    if _recovery_request is not None:
+        if not isinstance(_recovery_request, tuple) or len(_recovery_request) != 2:
+            raise ValueError('exact REPL recovery identities required')
+        request = ReplRecoveryRequest(*_recovery_request)
+    sources = getattr(application, 'private_source_paths', None)
+    if not isinstance(sources, tuple):
+        raise PermissionError('managed REPL requires configured private source provenance')
+    ledger = permission_modes.approval_ledger().pinned()
+
+    def selected_row(exact_id):
+        connection = _open_db()
+        try:
+            return memory_store.get_session(connection, exact_id)
+        finally:
+            connection.close()
+
+    def supplemental_paths():
+        current = application.private_source_paths
+        if not isinstance(current, tuple):
+            raise PermissionError('private source provenance unavailable')
+        return ControlPlanePaths(
+            databases=(Path(memory_database).resolve(), Path(ledger.path).resolve()),
+            files=tuple(Path(value).resolve() for value in current),
+        )
+
+    return run_managed_repl_work(
+        application=application, session_id=session_id, project=arguments.get('project', ''),
+        get_session=selected_row, run=lambda: workbench_agent(**arguments),
+        permission_engine=permission_modes, additional_paths=supplemental_paths, ledger=ledger,
+        recovery_cursor=_recovery_cursor,
+        recovery_request=request, verifier_factory=_standalone_verifier_factory,
+        conversation_slot=_REPL_CONVERSATION_SLOT.get(),
+        conversation_source=str(Path(memory_database).resolve()),
+    )
+
+
+def _approve_standalone_verification(prepared, context):
+    # Independent host check: never reuse the child lane's approval.
+    refusal = _agent_permission_gate_error("workspace_run", prepared.approval_payload())
+    if refusal:
+        raise PermissionError(refusal)
+    return "standalone-verification-" + uuid.uuid4().hex
+
+
+def _agent_lane_context():
+    from sonder_runtime.application.context import local_owner_context
+    application = _application()
+    context = local_owner_context(
+        correlation_id="lane-" + os.urandom(16).hex(), source="mcp",
+        workspace_roots=tuple(Path(root) for root in application.config.state.workspace_roots),
+        timeout_seconds=60.0,
+    )
+    return application, context
+
+
+def _agent_lane_gate_arguments(arguments):
+    """Shared outer/inner MCP gate identity; never persist bearer proof."""
+    from sonder_runtime.interfaces.agent_lane_entrypoint import lane_approval_arguments
+    application, context = _agent_lane_context()
+    return lane_approval_arguments(application, context, arguments)
+
+
+@mcp.tool()
+def agent_lane(action: str, payload: dict, parent_session_id: str = "",
+               parent_token: str = "") -> str:
+    """Control independent agent conversations with scoped parent authority.
+
+    Call open_parent with an empty payload first; retain its parent_session_id
+    and parent_token for subsequent commands. Never place the token in tasks,
+    messages or files. Actions also include rotate_parent and revoke_parent.
+    Other actions: spawn, list, inspect, send_message, wait, interrupt, resume,
+    cancel, reports and ack. Existing sessions cannot be claimed by name.
+    """
+    from sonder_runtime.interfaces.agent_lane_entrypoint import (
+        lane_approval_arguments, execute_lane_command,
+    )
+    from sonder_runtime.domain.common.errors import Forbidden
+    from sonder_runtime.adapters.security.permission_policy import permission_policy as lane_policy
+    application, context = _agent_lane_context()
+    arguments = {"action": action, "payload": payload,
+                 "parent_session_id": parent_session_id, "parent_token": parent_token}
+    safe = lane_approval_arguments(application, context, arguments)
+    decision = None if lane_policy.approval_spent_for("agent_lane", safe) else lane_policy.decide_for_caller(
+        "agent_lane", interactive=False, gate_control_exempt=False, surface="mcp",
+        arguments=safe,
+    )
+    if decision is not None and decision.action != lane_policy.allow_action():
+        raise Forbidden(decision.reason)
+    try:
+        return json.dumps(execute_lane_command(application, context, arguments), ensure_ascii=False)
+    finally:
+        lane_policy.forget_spent_approval()
 
 
 @mcp.tool()
@@ -5099,6 +5490,7 @@ def offload(
     learn: bool = True,
     timeout: int = TIMEOUT,
     schema: str = "",
+    session: str | None = None,
 ) -> str:
     """Offload a self-contained subtask to a local or Ollama-cloud model.
 
@@ -5144,6 +5536,11 @@ def offload(
     Omit schema (the default) and this call behaves exactly as it always has:
     no format constraint, no checking, raw text back.
     Small object shapes work far better than deep ones on a 3B/7B local tier.
+
+    session: optional durable session identity. When supplied, the exact
+    model-visible request, effective provider attempts, and accepted response
+    are appended to that session; omitted calls retain the historical one-shot
+    persistence policy. Use ``session="none"`` to explicitly opt out.
     """
     _maybe_live_reload()
     try:
@@ -5157,6 +5554,7 @@ def offload(
             learn=learn,
             timeout=timeout,
             schema=schema,
+            session=session,
         )
     except ModelCallError as error:
         return _format_runtime_model_call_error_policy(
@@ -5400,6 +5798,7 @@ def _route_chat_web(prompt, session, project, location_consent):
     return reply
 
 
+@_capture_named_provider_request
 def _sonder_impl_serialized(
     prompt: str,
     system: str = "",
@@ -5827,6 +6226,7 @@ def sonder(
     return _append_activity(result, response=response, replace=True)
 
 
+@_capture_named_provider_request
 def _answer_with_history_impl(
     prompt,
     history,
@@ -6449,7 +6849,7 @@ def parallel_generate_run(
                 "seconds": 0,
             }
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+    with owned_runtime_pool(max_workers=max_workers) as pool:
         futures = {pool.submit(one, i): i for i in range(variants)}
         for future in as_completed(futures):
             result = future.result()
@@ -6570,7 +6970,7 @@ def parallel_generate_run_languages(
                 "seconds": 0,
             }
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+    with owned_runtime_pool(max_workers=max_workers) as pool:
         futures = [
             pool.submit(one, index, lang, variant)
             for index, (lang, variant) in enumerate(jobs)
@@ -6770,7 +7170,7 @@ def campaign_generate_compile_execute_record(
 
     started = time.time()
     results = [None] * len(jobs)
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+    with owned_runtime_pool(max_workers=max_workers) as pool:
         futures = [pool.submit(run_one, *job) for job in jobs]
         for future in as_completed(futures):
             result = future.result()
@@ -7085,7 +7485,7 @@ def campaign_repo_repair(
 
     started = time.time()
     results = [None] * len(jobs)
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+    with owned_runtime_pool(max_workers=max_workers) as pool:
         futures = [pool.submit(run_one, *job) for job in jobs]
         for future in as_completed(futures):
             outcome = future.result()
@@ -13750,7 +14150,7 @@ def game_generation_campaign(
                 }
 
     started = time.time()
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    with owned_runtime_pool(max_workers=workers) as pool:
         futures = {pool.submit(one, index): index for index in range(total)}
         for future in as_completed(futures):
             results[futures[future]] = future.result()
@@ -15768,6 +16168,7 @@ def access_request_preview(path: str, mode: str = "read") -> str:
 
 
 AGENT_TOOL_HELP = """Available tools:
+- agent_lane: {"action": "spawn|list|inspect|send_message|wait|interrupt|resume|cancel|reports|ack", "payload": {}} -- parent authority is inherited from this run. Spawn payload: command_id, task, workspace_root (within the configured project grant), optional title/tier/max_steps/max_output_tokens/max_wall_seconds. Other actions use lane_id; send_message uses command_id/content; controls use command_id; ack uses report_id/command_id. Never supply parent identity or tokens.
 - run_code: {"code": "...", "language": "python|js|powershell|cpp|csharp", "stdin": "", "timeout": 10} -- source snippet only; never pass a shell command such as `cargo --version`
 - run_project: {"files_json": {"files": {"src/main.cpp": "..."}}, "commands_json": [{"cmd": ["g++", "src/main.cpp", "-o", "app"]}], "stdin": "", "timeout": 60}
 - artifact_generate: {"name": "brand-kit", "brief": "fiery logo, DOCX report, AVI video, MIDI score, captions, textured humanoid 3D mascot with full morph frames and sequenced Idle Walk Run clips", "kinds": "auto|all|icon,vector,diagram,document,docx,data,spreadsheet,presentation,animation,video,music,midi,captions,timeline,web,model,rigged_model", "dimension": "auto|2d|2.5d|3d", "theme": "auto|ember|verdant|arcane|frost"}
@@ -16640,6 +17041,7 @@ def _agent_negative_claim_review(
     cloud: bool = False,
     cancel_check=None,
     cloud_budget_state=None,
+    session_id: str | None = None,
 ) -> dict:
     """Audit negative existence claims without letting the reviewer invent facts."""
     if not _AGENT_NEGATIVE_CLAIM_RE.search(str(final or "")):
@@ -16688,6 +17090,20 @@ def _agent_negative_claim_review(
         model, system, 0.0, 260, 4096, cloud=cloud,
         cancel_check=cancel_check, compact_cloud_reasoning=True,
     )
+    if session_id is not None:
+        gen = wrap_model_generator(
+            gen,
+            capture_factory=lambda: _application().session_capture_service(),
+            session_id=session_id,
+            tier="agent-review",
+            system=system,
+            options={"temperature": 0.0, "num_predict": 260, "num_ctx": 4096},
+            options_factory=lambda _prompt, _history, raw: _legacy_model_step_options(
+                raw, temperature=0.0, num_predict=260, num_ctx=4096,
+            ),
+            failure_code=_legacy_model_failure_code,
+        )
+    gen = _guard_managed_agent_call(gen)
     if cloud and cloud_budget_state is not None:
         gen = _bounded_cloud_agent_generate(
             gen,
@@ -16913,6 +17329,8 @@ def _agent_dispatch(
     tool_name, args, allow_web=True, read_only=False, allow_location=False,
     repository_extra_roots="",
 ):
+    _require_managed_agent_admission()
+    lane_read_only = read_only
     unsafe = unsafe_lab.active()
     if unsafe:
         # The acknowledgement is specifically permission to remove model-loop
@@ -16922,6 +17340,8 @@ def _agent_dispatch(
         allow_location = True
         repository_extra_roots = ""
     tool_name = _canonical_agent_tool_name((tool_name or "").strip())
+    from sonder_runtime.bootstrap.prepared_workbench import require_prepared_tool
+    require_prepared_tool(tool_name)
     args = args or {}
     if not isinstance(args, dict):
         return "ERROR: tool args must be a JSON object"
@@ -16955,7 +17375,19 @@ def _agent_dispatch(
             "host-selected project root."
         )
         return refusal
-    gate_error = _agent_permission_gate_error(tool_name, args)
+    gate_arguments = args
+    if tool_name == "agent_lane":
+        refusal = _agent_run_tool_refusal(tool_name, read_only=lane_read_only)
+        if refusal:
+            lane_refusal = "ERROR: HOST POLICY: agent_lane requires " + refusal
+            return lane_refusal
+        try:
+            prepared_lane_command = _standalone_lanes.current().prepare_command(args)
+            gate_arguments = prepared_lane_command.approval_arguments()
+        except (ValueError, TypeError, PermissionError) as exc:
+            lane_refusal = "ERROR: HOST POLICY: " + str(exc)
+            return lane_refusal
+    gate_error = _agent_permission_gate_error(tool_name, gate_arguments)
     if gate_error:
         return gate_error
     root_refusal = _agent_project_root_refusal(
@@ -17013,6 +17445,15 @@ def _agent_dispatch(
             stdin=args.get("stdin", ""),
             timeout=args.get("timeout", 10),
         )
+    if tool_name == "agent_lane":
+        try:
+            return json.dumps(
+                _standalone_lanes.current().execute_prepared(prepared_lane_command),
+                ensure_ascii=False,
+            )
+        except Exception as exc:
+            lane_failure = "ERROR: agent_lane " + type(exc).__name__ + ": " + str(exc)
+            return lane_failure
     if tool_name == "toolchain_status":
         return toolchain_status(
             name=args.get("name", ""),
@@ -18086,7 +18527,7 @@ _PROJECT_BOUND_AGENT_TOOLS = (
     _PROJECT_SCOPED_PATH_TOOLS
     | _PROJECT_SCOPED_EXECUTION_TOOLS
     | frozenset({
-        "ground_artifact", "program_search",
+        "agent_lane", "ground_artifact", "program_search",
         "web_search", "web_fetch",
         "weather_lookup", "approximate_location_lookup", "memory_search",
         "file_policy", "task_create", "task_list", "task_update", "task_show",
@@ -18109,6 +18550,7 @@ _CLOUD_AGENT_NESTED_MODEL_TOOLS = frozenset({
     "ensemble_codegen_build_loop",
 })
 _CLOUD_AGENT_LOCAL_ONLY_TOOLS = frozenset({
+    "agent_lane",
     "environment_status", "toolchain_status", "hardware_profile", "file_policy",
     "workspace_inventory", "directory_tree", "file_find", "file_read",
     "file_read_range", "file_digest", "text_search", "repo_status",
@@ -18156,6 +18598,10 @@ def _agent_run_tool_refusal(
     exact defect shape this function exists to prevent.  No caller reads the
     text: both use it as a predicate.
     """
+    if _canonical_agent_tool_name(tool_name) == "agent_lane":
+        controller = _standalone_lanes.current()
+        if read_only or cloud or controller is None or not controller.available:
+            return "an active local write-enabled standalone controller"
     if _canonical_agent_tool_name(tool_name) in _AGENT_SYSTEM_OPERATOR_TOOLS:
         return "system operation"
     if unsafe:
@@ -18859,8 +19305,24 @@ def _agent_impl(*args, **kwargs) -> str:
     instructions. See _stable_system_context; a nested call under an already
     pinned turn reuses the outer reading.
     """
-    with _stable_system_context():
-        return _agent_turn(*args, **kwargs)
+    with _managed_agent_admission_scope(), _stable_system_context(), _standalone_lanes.model_loop_scope():
+        controller = _standalone_lanes.current()
+        if controller is not None:
+            controller.terminal_projected = False
+        result = _agent_turn(*args, **kwargs)
+        controller = _standalone_lanes.current()
+        if controller is None or not controller.delegated_work or controller.terminal_projected:
+            return result
+        summary = "delegated work requires independent verification"
+        activity_tracker.set_response_status("unverified", summary)
+        activity_tracker.set_result_summary(summary)
+        if isinstance(result, autopilot_controller.HostTaskResult):
+            from dataclasses import replace
+            return replace(
+                result, output=controller.report_outcome(result.output),
+                validation_passed=False,
+            )
+        return controller.report_outcome(result)
 
 
 def _agent_turn(
@@ -18881,6 +19343,7 @@ def _agent_turn(
     return_host_receipt: bool = False,
     system: str | None = None,
     cancel_check=None,
+    session: str | None = None,
 ) -> str:
     """Run a Claude-like local agent loop that can call tools.
 
@@ -18897,11 +19360,13 @@ def _agent_turn(
         )
 
     _maybe_live_reload()
+    capture_session = _resolve_session(session) if session is not None else None
     # A model failure that ends this run is noted for the escalating
     # workbench runner under this run's own identity, so a nested agent's
     # failure can never be mistaken for it.
     escalation_key = _agent_escalation_key(tier, prompt)
     _take_agent_model_failure()
+    lane_read_only = read_only
     unsafe = unsafe_lab.active()
     if unsafe:
         # Unsafe lab mode is for a disposable host where the model is the
@@ -18918,13 +19383,21 @@ def _agent_turn(
         tool_policy = None
         auto_checklist = False
     max_steps = _safe_limit_policy(max_steps, 6, 20)
-    model, cloud, augment, tier_label = _serve_target(tier, None)
+    from sonder_runtime.bootstrap.prepared_workbench import prepared_target
+    pinned_target = prepared_target(prompt, tier, max_steps, allow_web, project, allow_location)
+    if pinned_target is not None:
+        from sonder_runtime.bootstrap.prepared_workbench import prepared_tool_allowlist
+        tool_allowlist = prepared_tool_allowlist(tool_allowlist)
+    model, cloud, augment, tier_label = pinned_target if pinned_target is not None else _serve_target(tier, None)
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
     if tier_label is None:
         return "unknown tier '%s'. Valid: sonder, %s." % (tier, _valid_tier_names())
     if model is None:
         return "`sonder:latest` Ollama alias not found."
+    controller = _standalone_lanes.current()
+    if controller is not None:
+        controller.restrict(read_only=lane_read_only, cloud=cloud)
     project_scope, project_error = _agent_project_scope(project)
     if project_error:
         if return_host_receipt:
@@ -18998,6 +19471,25 @@ def _agent_turn(
         accept_native_tool_calls=True,
         compact_cloud_reasoning=True,
     )
+    if capture_session is not None:
+        gen = wrap_model_generator(
+            gen,
+            capture_factory=lambda: _application().session_capture_service(),
+            session_id=capture_session,
+            tier=tier_label or tier,
+            system=system,
+            options={
+                "temperature": 0.1,
+                "num_predict": agent_num_predict,
+                "num_ctx": 0,
+            },
+            options_factory=lambda _prompt, _history, raw: _legacy_model_step_options(
+                raw, temperature=0.1, num_predict=agent_num_predict, num_ctx=0,
+            ),
+            first_user_message=prompt,
+            failure_code=_legacy_model_failure_code,
+        )
+    gen = _guard_managed_agent_call(gen)
     if cloud:
         gen = _bounded_cloud_agent_generate(
             gen,
@@ -19010,6 +19502,12 @@ def _agent_turn(
     used_tool = False
     inspected = False
     mutated = False
+    parent_effect_dirty = False
+    host_controller = _standalone_lanes.current()
+    if host_controller is not None:
+        from sonder_runtime.adapters.agent_terminal_evidence import HostObservationLedger
+
+        host_controller.begin_host_turn(HostObservationLedger(project_scope=project_scope))
     validation_attempted = False
     validation_ok = False
     # A currently-valid citation for the completion claim. Same discipline as
@@ -19070,6 +19568,7 @@ def _agent_turn(
         )
         return observation, _agent_tool_observation_ok(tool_name, observation)
 
+    _spec_dispatch = _guard_managed_agent_call(_spec_dispatch, inherit_context=True)
     _spec_engine = sonder_speculation.SpeculationEngine(
         _predictor, _spec_dispatch, enabled=_spec_enabled,
     )
@@ -19118,6 +19617,8 @@ def _agent_turn(
 
     def ensure_not_cancelled():
         if cancel_check is not None and _cancel_requested(cancel_check):
+            if _standalone_lanes.current() is not None:
+                _standalone_lanes.current().request_cancel()
             raise ModelCallError(
                 "cancelled",
                 "agent call cancelled before another model/tool action",
@@ -19149,6 +19650,8 @@ def _agent_turn(
             text += "\n\n%s\n%s" % (marker, "\n\n".join(observations))
         return text
 
+    delegated_verdict = None
+
     def _work_validated():
         """Was the change actually checked, by either grounded route?
 
@@ -19165,11 +19668,44 @@ def _agent_turn(
         Not a relaxation: the added satisfying condition is a host-observed
         passing verifier whose root covers every mutated path.
         """
+        nonlocal delegated_verdict
+        controller = _standalone_lanes.current()
+        if controller is not None and controller.delegated_work:
+            delegated_verdict = controller.verify_delegated(
+                _approve_standalone_verification,
+                verifier_factory=_standalone_verifier_factory,
+            )
+            return (delegated_verdict.valid is True
+                    and (not parent_effect_dirty or validation_ok or verification_ok))
         return validation_ok or verification_ok
 
-    def finish_final(final):
+    def finish_final(final, *, failed=False):
+        nonlocal validation_attempted, mutated, parent_effect_dirty, validation_ok, verification_ok
         _teardown_speculation()
         final = str(final or "")
+        controller = _standalone_lanes.current()
+        managed_plan = getattr(controller, '_escalation', None)
+        if managed_plan is not None:
+            if not managed_plan.finalizing:
+                saved_final, saved_failed = final, failed
+                managed_plan.capture(lambda: finish_final(saved_final, failed=saved_failed))
+                controller.observe_host_tool(
+                    tool='host_rung', arguments={'tier': tier}, observation=final,
+                    dispatched=False,
+                    success=not failed and not final.lstrip().startswith(autopilot_controller.FAILURE_PREFIXES),
+                )
+            evidence = controller.parent_effect_evidence()
+            parent_effect_dirty = evidence.dirty
+            mutated = mutated or evidence.dirty
+            validation_attempted = evidence.validation_attempted
+            validation_ok, verification_ok = evidence.validation_ok, evidence.verification_ok
+            if managed_plan.finalizing and managed_plan.blockers:
+                failed = True
+                final = 'EVIDENCE_REQUIRED: earlier rung host evidence remains unresolved.\n\n' + final
+        delegated = controller is not None and controller.delegated_work
+        if final.lstrip().startswith(autopilot_controller.FAILURE_PREFIXES):
+            final = final.lstrip()
+            failed = True
         if completion_blocking_failures:
             failures = "; ".join(
                 "%s: %s" % (name, detail[:240])
@@ -19182,19 +19718,37 @@ def _agent_turn(
                 for name, _detail in completion_blocking_failures.values()
             )
             prefix = "EVIDENCE_REQUIRED" if evidence_failure else "ERROR"
-            return "%s: required host evidence did not recover (%s)." % (
+            final = "%s: required host evidence did not recover (%s)." % (
                 prefix, failures,
             )
-        validated = _work_validated()
+            failed = True
+        final = _attach_tool_evidence(final)
+        if controller is not None:
+            terminal_class = "ERROR" if failed else "NORMAL"
+            for marker in autopilot_controller.FAILURE_PREFIXES:
+                if final.lstrip().startswith(marker):
+                    terminal_class = marker.rstrip(":")
+                    break
+            captured = controller.freeze_host_terminal(
+                final, terminal_class=terminal_class,
+                blockers=tuple(sorted(set(completion_blocking_failures) |
+                    (managed_plan.blockers if managed_plan is not None else set()))),
+            )
+            if delegated and not captured:
+                final = "EVIDENCE_REQUIRED: original host observations could not be preserved.\n\n" + final
+                failed = True
+        validated = False if failed else _work_validated()
+        if delegated and delegated_verdict is not None:
+            validation_attempted = True
         if auto_checklist:
             _agent_checklist_mark(
                 checklist_id, checklist_states, 1, "done", "workspace evidence inspected",
             )
             _agent_checklist_mark(
-                checklist_id, checklist_states, 2, "done",
+                checklist_id, checklist_states, 2, "blocked" if failed else "done",
                 "requested work completed" if mutated else "analysis completed without file mutation",
             )
-            validation_status = "done" if (validated or not mutated) else "blocked"
+            validation_status = "done" if (not failed and (validated or not (mutated or delegated))) else "blocked"
             _agent_checklist_mark(
                 checklist_id, checklist_states, 3, validation_status,
                 "grounded validation passed" if validated else (
@@ -19204,17 +19758,16 @@ def _agent_turn(
             _agent_checklist_mark(
                 checklist_id, checklist_states, 4, "done", "end report prepared",
             )
-        final = _attach_tool_evidence(final)
         # The model's own first line, captured before anything leads the report,
         # so the activity feed keeps naming the work rather than the standing.
         model_summary = final.splitlines()[0] if final else "agent completed"
 
-        validation_failed = bool(auto_checklist and mutated and not validated)
+        validation_failed = bool(auto_checklist and (mutated or delegated) and not validated)
         standing = ""
         # Only where a verifier was actually callable. Elsewhere the sentence
         # names tools the lane is forbidden from using and has no OFF state --
         # see _agent_verifier_reachable.
-        if not verification_ok and _agent_verifier_reachable(
+        if not validated and not verification_ok and _agent_verifier_reachable(
             read_only, allowed_tools,
         ):
             demanded, reason = _agent_verification_standing()
@@ -19223,7 +19776,7 @@ def _agent_turn(
                 # should_verify's own projection of the counts. Nothing is
                 # generated by the model or about how it feels.
                 standing = reason
-        if validation_failed:
+        if validation_failed and not failed:
             # Compose, never stack. Prefixing the standing in front of
             # VALIDATION_FAILED would push that marker off position 0, and
             # _task_passed / _agent_observation_ok would stop seeing a failed
@@ -19236,7 +19789,7 @@ def _agent_turn(
                     _AGENT_VERIFIERS_PHRASE, standing,
                 )
             final = block + "\n\n" + final
-        elif standing:
+        elif standing and not failed:
             final = "%s this run claimed completion without %s - %s\n\n%s" % (
                 _AGENT_UNVERIFIED_PREFIX, _AGENT_VERIFIERS_PHRASE, standing, final,
             )
@@ -19258,6 +19811,41 @@ def _agent_turn(
         activity_tracker.set_result_summary(
             _AGENT_VALIDATION_FAILED_LINE if validation_failed else model_summary
         )
+        certificate_fields = {}
+        if delegated:
+            if delegated_verdict is not None:
+                certificate_fields = {
+                    "verification_certificate_id": delegated_verdict.certificate_id,
+                    "verification_generation": delegated_verdict.generation,
+                    "verification_code": delegated_verdict.code,
+                }
+            if validated:
+                final = ("Delegated workspace certificate valid for generation %s.\n\n"
+                         "Model outcome:\n%s" % (delegated_verdict.generation, final))
+            else:
+                final = controller.report_outcome(final)
+                activity_tracker.set_response_status("unverified", "delegated work or parent effects lack current validation")
+                activity_tracker.set_result_summary("delegated work or parent effects lack current validation")
+            controller.terminal_projected = True
+        if controller is not None:
+            from sonder_runtime.application.ports.host_final import HostFinalFacts
+            final_class = 'ERROR' if failed else 'NORMAL'
+            for marker in (*autopilot_controller.FAILURE_PREFIXES, _AGENT_UNVERIFIED_PREFIX):
+                if final.lstrip().startswith(marker):
+                    final_class = marker.rstrip(':')
+                    break
+            final_sink = controller.capture_host_final if return_host_receipt else controller.stage_host_final
+            final_sink(final, HostFinalFacts(
+                tools=tuple(sorted(used_tool_names)), project_scope=project_scope,
+                mutation_observed=bool(mutated), validation_attempted=bool(validation_attempted),
+                validation_passed=bool(validated), terminal_class=final_class,
+                blockers=tuple(sorted(set(completion_blocking_failures) |
+                    (managed_plan.blockers if managed_plan is not None else set()))),
+                certificate_id=certificate_fields.get('verification_certificate_id', ''),
+                certificate_generation=certificate_fields.get('verification_generation', 0),
+                certificate_code=certificate_fields.get('verification_code', ''),
+                delegated_work=bool(delegated),
+            ))
         if return_host_receipt:
             return autopilot_controller.HostTaskResult(
                 output=final,
@@ -19266,6 +19854,7 @@ def _agent_turn(
                 validation_attempted=validation_attempted,
                 validation_passed=validated,
                 project_scope=project_scope,
+                **certificate_fields,
             )
         return final
 
@@ -19277,6 +19866,10 @@ def _agent_turn(
         check, misreporting a normal evidence/parse failure as a scope
         mismatch.
         """
+        controller = _standalone_lanes.current()
+        if controller is not None and (controller._managed_factory is not None
+                or controller.delegated_work or controller._escalation is not None):
+            return finish_final(text, failed=True)
         _teardown_speculation()
         text = str(text or "")
         # Early exits are still auditable outcomes.  A worker may have already
@@ -19426,6 +20019,7 @@ def _agent_turn(
             _predicted_args = _project_scope_args(
                 _predicted_tool, {}, project_scope,
             )
+            _require_managed_agent_admission()
             _spec_issued = _spec_engine.begin(
                 _predicted_tool,
                 _agent_call_signature(_predicted_tool, _predicted_args),
@@ -19440,6 +20034,7 @@ def _agent_turn(
                 _prefetch_scoped = _project_scope_args(
                     "file_read", _prefetch_args, project_scope,
                 )
+                _require_managed_agent_admission()
                 _spec_engine.begin(
                     "file_read",
                     _agent_call_signature("file_read", _prefetch_scoped),
@@ -19522,6 +20117,7 @@ def _agent_turn(
                     prompt, final, observations, model, cloud=cloud,
                     cancel_check=cancel_check,
                     cloud_budget_state=cloud_budget_state,
+                    session_id=capture_session,
                 )
                 if claim_review["decision"] == "error":
                     if auto_checklist:
@@ -19795,6 +20391,7 @@ def _agent_turn(
                 )
         observation_text = str(observation)
         tool_ok = _agent_tool_observation_ok(tool_name, observation)
+        abort_observation = None
         if tool_ok:
             failed_call_counts.pop(call_signature, None)
             completion_blocking_failures.pop(call_signature, None)
@@ -19831,10 +20428,9 @@ def _agent_turn(
                         checklist_id, checklist_states,
                         "%s failed: %s" % (tool_name, observation_text[:240]),
                     )
-                return _early_exit(
-                    "ERROR: required %s failed; no answer was produced from "
-                    "unverified sources (%s)." % (tool_name, observation_text[:600])
-                )
+                # Preserve the original failure detail, but finish host effect
+                # accounting and observation before freezing the early result.
+                abort_observation = observation_text[:600]
             # Multiple required tools are intentionally alternatives.  A
             # singleton is a hard caller contract; evidence-required review
             # likewise needs a successful evidence tool of the failed kind.
@@ -19906,10 +20502,11 @@ def _agent_turn(
             )
         mutation_happened = _agent_tool_mutates(
             tool_name, policy_tool_args,
-        ) and tool_ok
+        ) and tool_ok and tool_name != "agent_lane"
         mutation_attempt_may_have_changed = (
             tool_dispatched
             and _agent_tool_mutates(tool_name, policy_tool_args)
+            and tool_name != "agent_lane"
         )
         if mutation_attempt_may_have_changed:
             # A failed mutator can still leave directories or partial output.
@@ -19921,6 +20518,7 @@ def _agent_turn(
             and tool_name in _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS
         )
         if mutation_attempt_may_have_changed or execution_may_have_changed:
+            parent_effect_dirty = True
             # A real mutation or an execution-capable tool can make prior
             # inspection results stale even when the command exits nonzero.
             # Dry-run mutation tools do not reach here.
@@ -19990,6 +20588,19 @@ def _agent_turn(
                         if validation_covered else "did not validate changed paths",
                     ),
                 )
+        if host_controller is not None:
+            host_controller.observe_host_tool(
+                tool=tool_name, arguments=policy_tool_args,
+                observation=observation_text, dispatched=bool(tool_dispatched),
+                success=bool(tool_ok),
+                dirty=bool(mutation_attempt_may_have_changed or execution_may_have_changed),
+                mutation_records=(
+                    _agent_mutation_records(tool_name, policy_tool_args)
+                    if mutation_attempt_may_have_changed else ()
+                ),
+                verifier=tool_name in _AGENT_VERIFICATION_TOOLS,
+                validator=tool_name in _WORK_VALIDATION_TOOLS,
+            )
         observations.append(
             "step %d tool=%s reason=%s\n%s" % (
                 step,
@@ -19998,6 +20609,11 @@ def _agent_turn(
                 observation_text[:6000],
             )
         )
+        if abort_observation is not None:
+            return _early_exit(
+                "ERROR: required %s failed; no answer was produced from "
+                "unverified sources (%s)." % (tool_name, abort_observation)
+            )
     final = ""
     while True:
         final_prompt = transcript
@@ -20041,6 +20657,7 @@ def _agent_turn(
             prompt, final, observations, model, cloud=cloud,
             cancel_check=cancel_check,
             cloud_budget_state=cloud_budget_state,
+            session_id=capture_session,
         )
         if claim_review["decision"] == "error":
             if auto_checklist:
@@ -20110,8 +20727,14 @@ def agent(
     project: str = "",
     checklist: bool = True,
     allow_location: bool = False,
+    session: str | None = None,
 ) -> str:
-    """Run a visible local tool-using agent loop with checklist/reporting."""
+    """Run a visible local tool-using agent loop with checklist/reporting.
+
+    ``session`` optionally binds every model decision and format-repair call to
+    one durable session; omitted calls preserve the existing transient agent
+    behavior. ``session="none"`` explicitly disables capture.
+    """
     refusal = intents.containment_egress_refusal(prompt)
     if refusal:
         return refusal
@@ -20123,15 +20746,18 @@ def agent(
         model=tier,
         project=project,
     ) as response:
-        result = _agent_impl(
-            prompt,
-            tier=tier,
-            max_steps=max_steps,
-            allow_web=allow_web,
-            auto_checklist=bool(checklist),
-            project=project,
-            allow_location=bool(allow_location),
-        )
+        project_scope, _project_error = _agent_project_scope(project)
+        with _standalone_lanes.controller_scope(_application, project=project_scope):
+            result = _agent_impl(
+                prompt,
+                tier=tier,
+                max_steps=max_steps,
+                allow_web=allow_web,
+                auto_checklist=bool(checklist),
+                project=project,
+                allow_location=bool(allow_location),
+                session=session,
+            )
     # Keep the report bound to this invocation's span.  Once an outer span
     # closes, ``latest()`` is a process-global last-completed value; another
     # MCP/HTTP request can complete in the small gap before this formatting
@@ -20171,6 +20797,36 @@ def _work_expects_effects(prompt):
 
 def _workbench_agent_escalating(
     prompt, tier, *, max_steps, allow_web, project, allow_location,
+    prepared_plan=None, session=None,
+):
+    project_scope, _error = _agent_project_scope(project)
+    with _standalone_lanes.managed_escalation_scope(
+        _application, project=project_scope, max_rungs=tier_escalation.MAX_ESCALATIONS + 1,
+    ) as managed_plan:
+        if managed_plan is None:
+            return _workbench_agent_escalating_owned(
+                prompt, tier, max_steps=max_steps, allow_web=allow_web,
+                project=project, allow_location=allow_location, managed_plan=None,
+                prepared_plan=prepared_plan, session=session,
+            )
+        with activity_tracker.response_span(
+            'managed-workbench', prompt, surface='agent', model=tier, project=project,
+        ) as response:
+            output, answered = _workbench_agent_escalating_owned(
+                prompt, tier, max_steps=max_steps, allow_web=allow_web,
+                project=project, allow_location=allow_location, managed_plan=managed_plan,
+                prepared_plan=prepared_plan, session=session,
+            )
+        return '%s\n\n%s\n\n%s' % (
+            output.rstrip(),
+            activity_tracker.format_end_report(response, calibration_line=_agent_end_report_standing_line()),
+            activity_tracker.format_response(response),
+        ), answered
+
+
+def _workbench_agent_escalating_owned(
+    prompt, tier, *, max_steps, allow_web, project, allow_location, managed_plan,
+    prepared_plan=None, session=None,
 ):
     """Run the workbench agent on ``tier``, stepping up when the model fails.
 
@@ -20185,13 +20841,23 @@ def _workbench_agent_escalating(
     every attempt.  Returns ``(output, tier)`` for the attempt that stood; an
     escalated output carries the escalation line.
     """
-    start = _local_tier_rung(tier)
-    escalation_plan = _default_route_plan(prompt, start) if start is not None else None
+    if prepared_plan is not None:
+        from sonder_runtime.bootstrap.prepared_workbench import current_permit
+        permit = current_permit()
+        if permit is None or permit.require_current()[2] is not prepared_plan:
+            raise PermissionError("private prepared workbench plan required")
+        escalation_plan = prepared_plan
+    else:
+        start = _local_tier_rung(tier)
+        escalation_plan = _default_route_plan(prompt, start) if start is not None else None
     if escalation_plan is None or escalation_plan.escalations == 0:
-        return workbench_agent(
-            prompt=prompt, tier=tier, max_steps=max_steps, allow_web=allow_web,
-            project=project, allow_location=allow_location,
-        ), tier
+        with managed_plan.rung() if managed_plan is not None else contextlib.nullcontext():
+            output = workbench_agent(
+                prompt=prompt, tier=tier, max_steps=max_steps, allow_web=allow_web,
+                project=project, allow_location=allow_location, session=session,
+            )
+        finalized = managed_plan.finish() if managed_plan is not None else None
+        return finalized if finalized is not None else output, tier
     steps = []
     answered = escalation_plan.start
     output = ""
@@ -20200,10 +20866,11 @@ def _workbench_agent_escalating(
     for index, rung in enumerate(escalation_plan.rungs):
         answered = rung
         _take_agent_model_failure()
-        output = workbench_agent(
-            prompt=prompt, tier=rung.tier, max_steps=max_steps, allow_web=allow_web,
-            project=project, allow_location=allow_location,
-        )
+        with managed_plan.rung() if managed_plan is not None else contextlib.nullcontext():
+            output = workbench_agent(
+                prompt=prompt, tier=rung.tier, max_steps=max_steps, allow_web=allow_web,
+                project=project, allow_location=allow_location, session=session,
+            )
         failure = _take_agent_model_failure()
         owned = bool(failure) and failure.get("key") == _agent_escalation_key(rung.tier, prompt)
         if owned and failure.get("vacuous") and not expects_effects:
@@ -20220,6 +20887,10 @@ def _workbench_agent_escalating(
         )
         steps.append(step)
         _note_escalation(step, "agent")
+    if managed_plan is not None:
+        finalized = managed_plan.finish()
+        if finalized is not None:
+            output = finalized
     if steps:
         line = tier_escalation.describe(steps)
         output = (
@@ -20237,15 +20908,20 @@ def workbench_agent(
     allow_web: bool = True,
     project: str = "",
     allow_location: bool = False,
+    session: str | None = None,
 ) -> str:
-    """Execute local work with guarded tools, checklist, validation, and report."""
+    """Execute local work with guarded tools, checklist, validation, and report.
+
+    An optional ``session`` carries each model step across retries and tier
+    escalation in one durable transcript.
+    """
     _maybe_live_reload()
     requested = str(tier or "").strip().lower()
     lane_tier = _runtime_lane_tier("workbench", tier)
     if requested in ("", "auto", "default", "policy"):
         output, _answered_tier = _workbench_agent_escalating(
             prompt, lane_tier, max_steps=max_steps, allow_web=allow_web,
-            project=project, allow_location=allow_location,
+            project=project, allow_location=allow_location, session=session,
         )
         return output
     return agent(
@@ -20256,6 +20932,7 @@ def workbench_agent(
         project=project,
         checklist=True,
         allow_location=allow_location,
+        session=session,
     )
 
 
@@ -20707,7 +21384,7 @@ def _autopilot_heartbeat(run_id: str, owner_id: str, stop: threading.Event) -> N
 def _execute_autopilot(run_id: str, *, max_cycles=12, plan_only=False, request_owner: str | None = None) -> dict:
     owner_id = "auto-%s-%s" % (os.getpid(), time.time_ns())
     stop = threading.Event()
-    heartbeat = threading.Thread(
+    heartbeat = owned_runtime_thread(
         target=_autopilot_heartbeat,
         args=(run_id, owner_id, stop),
         name="sonder-autopilot-heartbeat",
@@ -20771,7 +21448,7 @@ def _launch_autopilot(run_id: str, max_cycles=12, plan_only=False, request_owner
             alive = sum(1 for t in _AUTOPILOT_THREADS.values() if t.is_alive())
             if alive >= _MAX_AUTOPILOT_RUNS:
                 return False
-        thread = threading.Thread(
+        thread = owned_runtime_thread(
             target=_autopilot_thread_main,
             args=(run_id, int(max_cycles), bool(plan_only), request_owner),
             name="sonder-autopilot-%s" % run_id,
@@ -21793,183 +22470,62 @@ def diagnostics() -> str:
 
 @mcp.tool()
 def status() -> str:
-    """Report Sonder Runtime's local-model state and current VRAM residency.
+    """Report cached inference capacity without contacting Ollama workers.
 
-    Use this to check whether the GPU is busy before offloading, or to confirm models pulled.
+    Inventory and residency remain unknown until explicitly inspected. Use
+    ollama_pool_admin_status for authorized cached detail or a bounded refresh.
     """
-    _maybe_live_reload()
-    if OLLAMA_POOL.enabled:
-        OLLAMA_POOL.refresh_capabilities()
-    try:
-        tags = _inventory_rows_policy(_get("/api/tags"), "/api/tags")
-        ps = _inventory_rows_policy(_get("/api/ps"), "/api/ps")
-    except ModelCallError as error:
-        message = _format_runtime_model_call_error_policy(
-            error,
-            endpoint_loopback=_ollama_endpoint_is_local(),
-            display=_ollama_display(),
-        )
-        return "\n".join((message, *OLLAMA_POOL.operator_status_lines()))
-    except urllib.error.URLError as e:
-        return "\n".join((
-            f"ERROR contacting Ollama at {_ollama_display()}: {e}",
-            *OLLAMA_POOL.operator_status_lines(),
-        ))
+    summary = OLLAMA_POOL.summary()
+    queue = summary["queue"]
+    return "\n".join((
+        "Ollama pool: %s; %d/%d eligible; capacity=%d; queue=%d/%d; %s" % (
+            summary["admission"], summary["eligible_worker_count"], summary["worker_count"],
+            summary["available_capacity"], queue["waiting"], queue["limit"], summary["membership_state"],
+        ),
+        "Capability cache: %s; age=%s" % (
+            summary["refresh_state"], "unknown" if summary["refresh_age_seconds"] is None
+            else "%ss" % summary["refresh_age_seconds"],
+        ),
+        "Request placement: whole-worker; model sharding unavailable; indefinite scale unavailable.",
+        "Installed inventory and live residency: unknown (cached status does not probe).",
+    ))
 
-    installed = _inventory_model_names(tags)
-    loaded = [line for line in map(_residency_display, ps) if line]
-    tier_lines = [
-        f"  {k}={v}" + ("  [CLOUD - leaves machine]" if _is_cloud_tier(k, v) else "  [local Ollama]")
-        for k, v in available_tiers(
-            include_disabled=_cloud_allowed_policy(os.environ)
-        ).items()
-    ]
-    if not _ollama_endpoint_is_local():
-        tier_lines = [
-            line.replace("  [local Ollama]", "  [REMOTE OLLAMA - leaves machine]")
-            for line in tier_lines
-        ]
-    worker_lines = []
-    if OLLAMA_POOL.enabled:
-        def _fetch_worker_tags(origin):
-            req = urllib.request.Request(f"{origin}/api/tags")
-            with ollama_endpoint.open_url(req, timeout=5) as resp:
-                raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
-                if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
-                    raise ModelCallError(
-                        "protocol",
-                        "Ollama response exceeded the 16 MiB safety limit",
-                    )
-                return json.loads(raw.decode("utf-8"))
 
-        # Best-effort per-worker inventory refresh: it feeds the pool's
-        # model-affinity ordering and the operator's health readout, and a
-        # worker that cannot answer keeps its previous inventory record.
-        inventory = OLLAMA_POOL.refresh_inventory(_fetch_worker_tags)
-        for snapshot in OLLAMA_POOL.snapshots():
-            health = (
-                "probing" if snapshot.probing
-                else "ok" if snapshot.healthy
-                else "cooling down"
-            )
-            worker_lines.append(
-                "  worker %s: %s, inflight=%d, failures=%d, trips=%d, "
-                "latency=%.0fms, models=%s" % (
-                    snapshot.worker_id, health, snapshot.inflight,
-                    snapshot.consecutive_failures, snapshot.trips,
-                    snapshot.ewma_latency_ms,
-                    inventory.get(snapshot.worker_id, "?"),
-                )
-            )
-    lines = [
-        "Unsafe lab mode: %s" % unsafe_lab.status_line(),
-        f"Ollama @ {_ollama_display()} ({ollama_endpoint.locality(BASE)})",
-        "Ollama workers: %d configured (%d remote; least-inflight, model POSTs never fail over)" % (
-            len(OLLAMA_POOL.origins),
-            sum(1 for origin in OLLAMA_POOL.origins if not ollama_endpoint.is_loopback(origin)),
-        ),
-        *worker_lines,
-        "Ollama worker TLS: %s; idempotent control reads may fail over" % (
-            OLLAMA_POOL.status()["tls_verification"],
-        ),
-        "Tiers:",
-        *tier_lines,
-        f"Learning tiers: {', '.join(sorted(LEARN_TIERS)) if LEARN_TIERS else '(none)'}",
-        f"Installed/registered models: {', '.join(installed) if installed else '(none)'}",
-        f"Resident in Ollama now: {', '.join(loaded) if loaded else '(none loaded)'}",
-        f"local keep_alive: {KEEP_ALIVE}",
-        "loopback retry: %d transient retry(s), %dms base delay; remote/cloud retries off" % (
-            _local_model_retries_policy(), int(_local_retry_delay_policy(1) * 1000),
-        ),
-        "local runtime: threads={num_thread}, gpu_layers={num_gpu}, batch={num_batch}".format(
-            **_platform_local_runtime_summary(
-                _platform_local_model_options(
-                    0.2,
-                    1,
-                    SESSION_NUM_CTX,
-                    native_context=context_policy.native,
-                    environ=os.environ,
-                ),
-                _platform_requested_context(
-                    SESSION_NUM_CTX,
-                    default_value=SESSION_NUM_CTX,
-                ),
-            )
-        ),
-    ]
+def _ollama_pool_admin_status_data(*, principal: str, refresh=False, cursor="", page_size=32):
+    """Internal page operation; the calling surface must authorize first."""
+    if type(refresh) is not bool:
+        return {"error": "invalid_request"}
     try:
-        hardware_report = sonder_hardware.get_profile(workload="general")
-        hardware = hardware_report.get("hardware") or {}
-        capabilities = (hardware_report.get("recommendation") or {}).get("capabilities") or {}
-        execution = (hardware_report.get("recommendation") or {}).get("model_execution") or {}
-        backend_names = ",".join(capabilities.get("backend_candidates") or ("cpu",))
-        free_vram = capabilities.get("vram_free_gb")
-        vram_text = "%s GB free VRAM" % free_vram if free_vram is not None else "VRAM unknown"
-        lines.append(
-            "hardware: %s %s; %s; backends=%s; 30B=%s"
-            % (
-                capabilities.get("gpu_vendor", hardware.get("gpu_vendor", "unknown")),
-                capabilities.get("gpu_name", hardware.get("gpu_name", "")) or "GPU unknown",
-                vram_text, backend_names, execution.get("mode", "unknown"),
-            )
-        )
+        OLLAMA_POOL.validate_status_request(cursor=cursor, page_size=page_size, principal=principal)
+        if refresh:
+            OLLAMA_POOL.refresh_capabilities()
+        return OLLAMA_POOL.status(cursor=cursor, page_size=page_size, principal=principal)
+    except ValueError:
+        return {"error": "invalid_request"}
     except Exception:
-        lines.append("hardware: unknown (capability report unavailable)")
-    mcp_state = mcp_runtime_data()
-    provenance = mcp_state.get("provenance") or {}
-    if provenance.get("issue"):
-        lines.append(
-            "mcp runtime: ERROR %s (source root: %s)"
-            % (
-                provenance["issue"],
-                "present" if provenance.get("source_root_exists") else "missing",
-            )
-        )
-        action = _safe_mcp_recovery_action(provenance)
-        if action:
-            lines.append("mcp ACTION: %s" % action)
-    try:
-        auto = _application().automation.snapshot(include_finished=False, limit=20)
-        lines.append(
-            "autopilot: %s active, %s resumable"
-            % (auto.get("active_runs", 0), auto.get("resumable_runs", 0))
-        )
-    except Exception as exc:
-        lines.append("autopilot: ERROR %s" % exc)
-    try:
-        lines.append("npu accelerator: %s" % npu_service.diagnostics_line())
-    except Exception:
-        lines.append("npu accelerator: unknown (status unavailable)")
-    try:
-        spec = sonder_speculation.default_predictor().stats()
-        lines.append(
-            "branch predictor: %d predictions, %.0f%% accurate; "
-            "speculation %d issued, %.0f%% retired (%d states); "
-            "cost model decision~%.2fs tool~%.2fs, %.1fs hidden"
-            % (
-                spec["predictions"], spec["accuracy"] * 100,
-                spec["speculations"], spec["speculation_hit_rate"] * 100,
-                spec["transition_states"],
-                spec["ewma_decision_s"], spec["ewma_tool_s"], spec["saved_s"],
-            )
-        )
-    except Exception as exc:
-        lines.append("branch predictor: ERROR %s" % exc)
-    try:
-        source = runtime_source_update_status_data(refresh=False)
-        lines.append(
-            "source update: %s @ %s; newest %s @ %s; %s (behind %s)"
-            % (
-                str(source.get("installed_commit") or "unknown")[:12],
-                source.get("installed_commit_time") or "unknown time",
-                str(source.get("newest_commit") or "unknown")[:12],
-                source.get("newest_commit_time") or "unknown time",
-                source.get("state") or "unknown", source.get("behind", "?"),
-            )
-        )
-    except Exception as exc:
-        lines.append("source update: unavailable (%s)" % type(exc).__name__)
-    return "\n".join(lines)
+        logging.getLogger("sonder.server").warning("Ollama administrative status unavailable")
+        return {"error": "unknown"}
+
+
+@mcp.tool()
+def ollama_pool_admin_status(token: str = "", refresh: bool = False, cursor: str = "", page_size: int = 32) -> str:
+    """Read an administrator-only cached worker page; optionally refresh one bounded stale batch.
+
+    Page size is 1..128 and the full JSON page is at most 65,536 UTF-8 bytes.
+    Remote probes retain configured consent and HTTPS policy. Callers cannot
+    change configured probe batch size or parallelism. Cursors belong to one
+    administrator and roster generation. Local-open direct use is permitted.
+    """
+    principal = "local-open"
+    if token or _deployment_authenticates_callers():
+        ok, _message, account = _admin_require(token, "admin")
+        identity = str((account or {}).get("username") or (account or {}).get("id") or "").strip()
+        if not ok or not identity:
+            return json.dumps({"error": "authorization"})
+        principal = "account:" + identity
+    return json.dumps(_ollama_pool_admin_status_data(
+        principal=principal, refresh=refresh, cursor=cursor, page_size=page_size,
+    ))
 
 
 def _runtime_source_root():
@@ -22691,7 +23247,7 @@ def _execute_fanout_run(run_id):
     pending_cloud = []
     if row is not None:
         pending_cloud.append(row)
-    with ThreadPoolExecutor(max_workers=limits["cloud_workers"]) as pool:
+    with owned_runtime_pool(max_workers=limits["cloud_workers"]) as pool:
         inflight = {}
         while True:
             while pending_cloud and len(inflight) < limits["cloud_workers"]:
@@ -24052,13 +24608,46 @@ def require_mcp_startup_safety() -> None:
 def run_mcp(*, safety_checked: bool = False) -> None:
     """Run the MCP adapter only after the process-level lab gate succeeds."""
     if not safety_checked:
-        require_mcp_startup_safety()
+        try:
+            require_mcp_startup_safety()
+        except BaseException:
+            # A direct compatibility caller may have forced lazy graph
+            # composition before it reaches the process-wide safety gate.
+            # Retire only that locally constructed graph while preserving the
+            # gate's original refusal for the caller.
+            try:
+                _close_server_owned_application(timeout=5)
+            except Exception:
+                logging.getLogger("sonder.server").error(
+                    "legacy owned application cleanup incomplete after MCP safety refusal",
+                    exc_info=True,
+                )
+            raise
+    from sonder_runtime.bootstrap.legacy_root import require_mcp_inference_binding
+
+    binding_verified = False
     try:
+        try:
+            require_mcp_inference_binding(
+                _APP_GRAPH, OLLAMA_POOL, primary_origin=BASE,
+            )
+        except ValueError:
+            raise ollama_pool.WorkerPoolUnavailable(
+                "MCP requires a trusted application membership binding for configured workers; "
+                "start with python -m sonder_runtime mcp"
+            ) from None
+        binding_verified = True
         mcp.run()
     finally:
         # Stop distributed admission before the adapter exits and give active
-        # transports a bounded chance to release their worker slots.
-        OLLAMA_POOL.drain(timeout_seconds=5.0)
+        # transports a bounded chance to release their worker slots.  A
+        # rejected membership might be an impostor object, so it must never
+        # receive even a cleanup method call.
+        try:
+            if binding_verified:
+                OLLAMA_POOL.drain(timeout_seconds=5.0)
+        finally:
+            _close_server_owned_application(timeout=5)
 
 
 if __name__ == "__main__" and not globals().get("_MCP_HOT_RELOAD_EXEC"):

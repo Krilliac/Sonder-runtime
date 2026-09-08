@@ -1,6 +1,10 @@
 """SQLite adapter for durable loop idempotency and retry evidence."""
 from __future__ import annotations
 
+from contextlib import contextmanager
+
+from sonder_runtime.adapters.persistence.owned_sqlite import transaction as owned_sqlite_transaction
+
 from collections.abc import Mapping
 import hashlib
 import json
@@ -76,10 +80,11 @@ class SQLiteLoopStateRepository(OutboxCASRepository):
         with self._connect() as connection:
             connection.executescript(_DDL)
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(str(self._path), timeout=5.0)
-        connection.execute("PRAGMA busy_timeout=5000")
-        return connection
+    @contextmanager
+    def _connect(self):
+        with owned_sqlite_transaction(str(self._path), timeout=5.0) as connection:
+            connection.execute("PRAGMA busy_timeout=5000")
+            yield connection
 
     @staticmethod
     def _record(row: tuple[Any, ...] | None) -> TransactionNeutralRecord | None:
@@ -167,7 +172,7 @@ class SQLiteRetryEvidenceLedger:
         self._max_records = max_records
         self._clock = clock
         self._lock = Lock()
-        with sqlite3.connect(str(self._path)) as connection:
+        with owned_sqlite_transaction(str(self._path)) as connection:
             connection.executescript(_DDL)
 
     def record(
@@ -189,7 +194,7 @@ class SQLiteRetryEvidenceLedger:
             decision.classification.value, decision.backoff.cap_for_attempt(1),
             decision.side_effect.effect, digest, recorded_at,
         )
-        with self._lock, sqlite3.connect(str(self._path)) as connection:
+        with self._lock, owned_sqlite_transaction(str(self._path)) as connection:
             connection.execute(
                 "INSERT INTO loop_retry_evidence "
                 "(operation_id,attempt,failure_code,action,classification,delay_cap_seconds,"
@@ -206,7 +211,7 @@ class SQLiteRetryEvidenceLedger:
         return evidence
 
     def snapshot(self) -> tuple[RetryEvidence, ...]:
-        with sqlite3.connect(str(self._path)) as connection:
+        with owned_sqlite_transaction(str(self._path)) as connection:
             rows = connection.execute(
                 "SELECT operation_id,attempt,failure_code,action,classification,delay_cap_seconds,"
                 "side_effect,evidence_digest,recorded_at FROM loop_retry_evidence ORDER BY evidence_id"

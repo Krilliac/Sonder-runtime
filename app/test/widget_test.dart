@@ -18,6 +18,84 @@ import 'package:sonder_runtime/settings_screen.dart';
 import 'package:sonder_runtime/system_screen.dart';
 
 void main() {
+  testWidgets(
+      'worker detail stays idle until requested and clears after denial',
+      (tester) async {
+    var calls = 0;
+    final client = MockClient((request) async {
+      calls++;
+      if (calls == 2) return http.Response('{}', 403);
+      expect(jsonDecode(request.body)['refresh'], isFalse);
+      return http.Response(
+          jsonEncode({
+            'schema_version': 2,
+            'worker_count': 64,
+            'complete': false,
+            'next_cursor': 'opaque',
+            'omitted_worker_count': 63,
+            'workers': [
+              {
+                'origin': 'https://private-worker.test:11434',
+                'state': 'ready',
+                'model_count': 1,
+                'model_preview': ['safe'],
+                'error_category': 'none'
+              }
+            ]
+          }),
+          200);
+    });
+    await http.runWithClient(() async {
+      await tester.pumpWidget(MaterialApp(
+          home: Scaffold(
+              body: OllamaPoolDetails(
+        api: SonderApi(baseUrl: 'https://host.test', apiKey: 'key'),
+      ))));
+      await tester.pumpAndSettle();
+      expect(calls, 0);
+      expect(find.textContaining('https://private-worker'), findsNothing);
+      await tester.tap(find.text('Inspect worker page'));
+      await tester.pumpAndSettle();
+      expect(calls, 1);
+      expect(find.textContaining('https://private-worker'), findsOneWidget);
+      expect(find.text('Next worker page'), findsOneWidget);
+      await tester.tap(find.text('Next worker page'));
+      await tester.pumpAndSettle();
+      expect(calls, 2);
+      expect(find.textContaining('https://private-worker'), findsNothing);
+      expect(find.textContaining('Check administrator access'), findsOneWidget);
+    }, () => client);
+  });
+  testWidgets('desktop workspace navigation connects chat, agents and settings',
+      (tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    tester.view.physicalSize = const Size(1200, 850);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    final client = MockClient((request) async => http.Response('{}', 200));
+    await http.runWithClient(() async {
+      await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Agents'));
+      await tester.pumpAndSettle();
+      expect(find.text('Conversations'), findsOneWidget);
+      await tester.tap(find.byTooltip('Workspace navigation'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Settings'));
+      await tester.pumpAndSettle();
+      expect(find.byType(SettingsScreen), findsOneWidget);
+      await tester.tap(find.text('Chat'));
+      await tester.pumpAndSettle();
+      expect(find.text('New chat'), findsWidgets);
+      await tester.pumpWidget(const SizedBox());
+    }, () => client);
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+
   testWidgets('App boots to the chat screen', (tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
 
@@ -504,6 +582,221 @@ void main() {
     }
   });
 
+  testWidgets('System shows deployment profile and honest takeover limits', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(900, 1000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final info = SystemInfo.fromJson({
+      'status': 'ready',
+      'deployment': {
+        'profile': 'pooled-pair',
+        'profile_id': 'two-pc',
+        'local_node': 'secondary',
+        'configured_members': ['secondary', 'primary'],
+        'preferred_primary': 'primary',
+        'control_state_scope': 'local-instance',
+        'preference_confers_authority': false,
+        'partition_policy':
+            'no_promotion_without_fencing_and_acknowledged_data',
+        'capabilities': {
+          'private_compute': {
+            'available': true,
+            'reason': 'Configured private-node compute is enabled.',
+          },
+          'automatic_takeover': {
+            'available': false,
+            'reason':
+                'Fencing and acknowledged replication are not integrated.',
+          },
+          'automatic_failback': {
+            'available': false,
+            'reason':
+                'Fencing and acknowledged replication are not integrated.',
+          },
+          'acknowledged_state_replication': {
+            'available': false,
+            'reason': 'No replication backend is integrated.',
+          },
+          'worker_epoch_fencing': {
+            'available': false,
+            'reason': 'Ownership epochs are not integrated.',
+          },
+          'quorum': {
+            'available': false,
+            'reason': 'No quorum provider is integrated.',
+          },
+        },
+        'recovery_posture': {
+          'mode': 'external-authority-required',
+          'automatic_takeover_available': false,
+          'automatic_failback_available': false,
+          'independent_witness_required': true,
+          'reason':
+              'Automatic takeover and failback are unavailable without an independent witness.',
+        },
+      },
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: SystemScreen(
+          settings: Settings(),
+          initialInfo: info,
+          liveUpdates: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('deployment-panel')),
+      240,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Deployment profile'), findsOneWidget);
+    expect(find.text('Two PC (pooled-pair)'), findsOneWidget);
+    expect(find.text('secondary, primary'), findsOneWidget);
+    expect(
+      find.textContaining('Unavailable — Fencing and acknowledged replication'),
+      findsNWidgets(2),
+    );
+    expect(find.text('Automatic failback'), findsOneWidget);
+    expect(find.text('Recovery posture'), findsOneWidget);
+    expect(
+      find.text(
+        'Automatic takeover and failback unavailable; independent witness required.',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.text(
+        'Primary preference is advisory; it never grants promotion authority.',
+      ),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('System shows distributed capability boundaries', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(900, 1200));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final info = SystemInfo.fromJson({
+      'status': 'ready',
+      'operational_capabilities': {
+        'schema_version': 1,
+        'control': {
+          'managed_app_work': {
+            'available': true,
+            'reason': 'Owned dispatcher is installed.',
+          },
+        },
+        'inference': {
+          'request_level_pooling': {
+            'available': true,
+            'reason': 'Requests may route to one worker.',
+          },
+          'model_sharding': {
+            'available': false,
+            'reason': 'Tensor sharding is not integrated.',
+          },
+          'pool': {
+            'worker_count': 2,
+            'healthy_worker_count': 1,
+            'remote_worker_count': 1,
+          },
+        },
+        'compute': {
+          'local_node': 'node-a',
+          'configured_peer_count': 1,
+          'remote_enabled': true,
+          'whole_job_placement': {
+            'available': true,
+            'reason': 'Complete jobs are placed on one node.',
+          },
+          'indefinite_scale': {
+            'available': false,
+            'reason': 'External provider required.',
+          },
+        },
+        'mobility': {
+          'automatic_takeover_available': false,
+          'automatic_failback_available': false,
+          'memory_replication_transport': {
+            'available': true,
+            'reason':
+                'Configured fixed-peer memory replication is an explicit bounded authenticated fact-only batch transport; an operator must invoke replicate_once. Every configured peer must return a durable receipt before the cursor advances; this is not quorum or high availability.',
+          },
+          'artifact_transfer_transport': {
+            'available': false,
+            'reason': 'Explicit grant is disabled.',
+          },
+          'automatic_memory_migration': {
+            'available': false,
+            'reason': 'Ownership is not integrated.',
+          },
+          'automatic_artifact_migration': {
+            'available': false,
+            'reason': 'Explicit transfer only.',
+          },
+        },
+      },
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: SystemScreen(
+          settings: Settings(),
+          initialInfo: info,
+          liveUpdates: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('operational-capabilities-panel')),
+      240,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Distributed capability surface'), findsOneWidget);
+    expect(find.text('Inspect worker page'), findsOneWidget);
+    expect(find.text('Refresh worker cache'), findsOneWidget);
+    expect(find.textContaining('https://private-worker'), findsNothing);
+    expect(
+      find.textContaining('Available — Owned dispatcher is installed.'),
+      findsOneWidget,
+    );
+    expect(
+        find.text(
+            '1/2 healthy workers; Available — Requests may route to one worker.'),
+        findsOneWidget);
+    expect(
+        find.textContaining('Unavailable — Tensor sharding is not integrated.'),
+        findsOneWidget);
+    expect(find.textContaining('Unavailable — External provider required.'),
+        findsOneWidget);
+    expect(
+      find.textContaining(
+        'Configured fixed-peer memory replication is an explicit bounded authenticated fact-only batch transport;',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.text('Unavailable — automatic takeover is not available.'),
+      findsOneWidget,
+    );
+    expect(
+      find.text('Unavailable — automatic failback is not available.'),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('System shows caller-judged work, never the blended rate alone', (
     tester,
   ) async {
@@ -809,14 +1102,14 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Runtime architecture'), findsOneWidget);
+    expect(find.text('Runtime architecture'), findsNothing);
     expect(
       find.textContaining('not a standalone foundation model'),
-      findsOneWidget,
+      findsNothing,
     );
     expect(
       find.textContaining('training uses PEFT/Hugging Face'),
-      findsOneWidget,
+      findsNothing,
     );
 
     await tester.enterText(find.byType(TextField).first, 'http://127.0.0.1:1');

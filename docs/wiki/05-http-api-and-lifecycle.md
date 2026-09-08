@@ -16,7 +16,8 @@ production lifecycle and admission layer (`sonder_lifecycle.py`).
 | `GET /v1/models` | key | Route IDs plus exact chat-capable catalog models. |
 | `POST /v1/admin/drain` | admin | Begin graceful drain (idempotent). |
 | `GET /v1/admin/updates/status` | admin | Durable update state (System page). |
-| `GET /v1/sonder/status` | admin/owner | Rich host-wide runtime/stats snapshot. Ordinary hosted accounts receive only their account and the model catalog. |
+| `POST /v1/memory/replication/batches` | fixed configured peer only | Disabled unless the typed fact-only receiver is enabled; accepts one bounded authenticated replication batch and returns its durable receipt. It is not an operator send, takeover, or failback endpoint. |
+| `GET /v1/sonder/status` | admin/owner | Rich host-wide runtime/stats snapshot, including the configured deployment profile and honest capability availability. Ordinary hosted accounts receive only their account and the model catalog. |
 | `GET /v1/sonder/feed` | any authorized caller | Owner-scoped live execution feed: the caller's own active and recently completed responses (category/name, state, elapsed, redacted summary, current operation). Never exposes prompts, tool arguments, paths, outputs, reasoning, or another principal's work. |
 
 `/live` may be unauthenticated so an external check never needs the key;
@@ -28,6 +29,20 @@ tier IDs. It also includes exact installed/discovered models that declare a
 chat capability; embedding- or vision-only entries are omitted. Cloud models
 appear only after the operator enables cloud use, so clients must treat the
 response as the live allowlist rather than a static catalog.
+
+The administrator `/v1/sonder/status` projection includes `deployment` with
+the configured members, canonical `profile_id` (`single-pc` or `two-pc`), local
+control-state scope, and per-capability `available`/`reason` values. A preferred
+primary is advisory. In the currently supported profiles, automatic takeover,
+failback, explicit promotion, acknowledged state replication, worker-epoch
+fencing, and quorum remain explicitly unavailable until their external
+authority prerequisites are integrated.
+
+`deployment.recovery_posture` is a read-only summary shared by the API, app,
+and REPL. It reports automatic takeover and failback as unavailable and names
+the independent-witness, fencing, replication, and ownership-epoch evidence
+required before an automatic owner transition can be considered. It neither
+contacts a peer nor changes ownership or fence state.
 
 ## Chat request
 
@@ -44,6 +59,31 @@ client that names a `session` but sends only the current message gets
 server-side history rebuilt from the stored session — so both contracts
 work. `choices[0].message.content` contains only the answer; bounded
 observable execution metadata is returned separately as `sonder_activity`.
+
+The administrator-only `/v1/sonder/status` snapshot also contains
+`operational_capabilities` (schema version 1). It is a read-only projection of
+already-applied configuration and injected transports: request-level Ollama
+pooling, complete-job compute placement, authenticated memory-batch and
+content-addressed artifact transfer, plus their bounded limits. When the
+memory transport is available, its reason identifies it as fixed-peer,
+operator-invoked, project-scoped fact replication: every configured peer must
+return a durable receipt before the source cursor advances. That is
+all-fixed-peer receipt evidence, not quorum or high availability.
+
+The mobility projection always reports
+`automatic_takeover_available: false` and
+`automatic_failback_available: false`. It also reports model sharding,
+automatic memory/artifact migration, and indefinite-scale providers as
+unavailable until those separate ownership and provider systems exist. Reading
+the projection never probes a peer, loads a model, enrolls a receiver, changes
+runtime state, or invokes `replicate_once()`.
+
+The status snapshot may include a local `memory_replication` service state when
+the typed feature is enabled. It contains only the configured peer identities,
+bounded cursor, receipt identities/cursors, and stable pending/failure reasons;
+it never contains a fact payload, peer origin, checkpoint path, or secret.
+There is no public HTTP endpoint that invokes `replicate_once()`. The batch
+route above is only the inbound fixed-peer receiver.
 
 The supported chat subset currently includes `model`, `messages`, `stream`,
 `session`, `project`, `context_size`, and the consented location fields.

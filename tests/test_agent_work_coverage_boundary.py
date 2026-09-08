@@ -1,5 +1,6 @@
 """Agent work coverage lives in the adapters layer; root names are aliases."""
 import server
+import os
 from sonder_runtime.adapters import agent_work_coverage as coverage
 
 
@@ -19,13 +20,13 @@ def test_root_names_are_identity_preserving_aliases():
 def test_paths_normalize_and_contain(tmp_path):
     project = (tmp_path / "proj").resolve()
     (project / "src").mkdir(parents=True)
-    assert coverage.normalized_path(str(project / "src" / "..")) == str(project)
+    assert coverage.normalized_path(str(project / "src" / "..")) == os.path.normcase(str(project))
     assert coverage.normalized_path("") == ""
     assert coverage.path_within(str(project / "src" / "a.py"), str(project))
     assert not coverage.path_within(str(tmp_path / "other.py"), str(project))
     assert not coverage.path_within("", str(project))
     targets = coverage.explicit_command_paths(["-x", "src/app.py", "README.md", "word"], str(project))
-    assert targets == [str(project / "src" / "app.py"), str(project / "README.md")]
+    assert targets == [os.path.normcase(str(project / "src" / "app.py")), os.path.normcase(str(project / "README.md"))]
     assert coverage.paths_covered_by_targets([str(project / "src" / "app.py")], [str(project / "src")])
     assert not coverage.paths_covered_by_targets([], [str(project)])
 
@@ -64,13 +65,13 @@ def test_mutation_records_name_the_paths_a_tool_changes(tmp_path):
     project = (tmp_path / "proj").resolve()
     records = coverage.mutation_records
     assert records("file_write", {"path": str(project / "a.txt")}) == [
-        {"tool": "file_write", "path": str(project / "a.txt")},
+        {"tool": "file_write", "path": os.path.normcase(str(project / "a.txt"))},
     ]
     moved = records("file_move", {"source": str(project / "a"), "destination": str(project / "b")})
-    assert moved == [{"tool": "file_move", "path": str(project / "b"), "source": str(project / "a")}]
+    assert moved == [{"tool": "file_move", "path": os.path.normcase(str(project / "b")), "source": os.path.normcase(str(project / "a"))}]
     assert records("data_convert", {"output_path": str(project / "o.json")}) == []
     assert records("archive_create", {"root": str(project), "destination": "out.zip"}) == [
-        {"tool": "archive_create", "path": str(project / "out.zip")},
+        {"tool": "archive_create", "path": os.path.normcase(str(project / "out.zip"))},
     ]
 
 
@@ -78,7 +79,8 @@ def test_validators_must_touch_the_changed_disk_state(tmp_path):
     project = (tmp_path / "proj").resolve()
     project.mkdir()
     note = str(project / "notes.md")
-    mutations = [{"tool": "file_write", "path": note}]
+    # Validators consume persisted canonical mutation records, as the real loop does.
+    mutations = coverage.mutation_records("file_write", {"path": note})
     covers = coverage.validation_covers
     assert covers("file_read", {"path": note}, mutations)
     assert not covers("file_read", {"path": str(project / "app.py")}, [{"tool": "file_write", "path": str(project / "app.py")}])

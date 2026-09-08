@@ -69,6 +69,12 @@ class NodeHealth(StrEnum):
     UNHEALTHY = "unhealthy"
 
 
+class PlacementPolicy(StrEnum):
+    LOCAL_ONLY = "local-only"
+    PREFER_REMOTE = "prefer-remote"
+    RANK_ALL = "rank-all"
+
+
 def _require_identity(value: str, label: str) -> str:
     if not isinstance(value, str) or not _IDENTITY.fullmatch(value):
         raise ValueError(f"{label} must be a bounded stable identity")
@@ -321,9 +327,14 @@ class WorkloadRequest:
     required_model: str | None = None
     idempotent: bool = False
     background_preferred: bool = False
+    placement_policy: PlacementPolicy | None = None
+    priority: int = 0
+    max_queue_depth: int | None = None
 
     def __post_init__(self) -> None:
         _require_identity(self.request_id, "request_id")
+        if self.placement_policy is not None and not isinstance(self.placement_policy, PlacementPolicy):
+            raise ValueError("placement_policy must be a PlacementPolicy or None")
         if not isinstance(self.kind, WorkloadKind):
             raise ValueError("kind must be a WorkloadKind")
         for values, label in (
@@ -354,6 +365,15 @@ class WorkloadRequest:
         ):
             _optional_nonnegative_int(getattr(self, name), name)
         _optional_fraction(self.max_load_fraction, "max_load_fraction")
+        if (
+            isinstance(self.priority, bool)
+            or not isinstance(self.priority, int)
+            or not -100 <= self.priority <= 100
+        ):
+            raise ValueError("priority must be within -100 and 100")
+        _optional_nonnegative_int(self.max_queue_depth, "max_queue_depth")
+        if self.max_queue_depth is not None and self.max_queue_depth > 4096:
+            raise ValueError("max_queue_depth must be at most 4096")
         for values, label in (
             (self.preferred_node_ids, "preferred_node_ids"),
             (self.avoided_node_ids, "avoided_node_ids"),
@@ -384,6 +404,8 @@ class WorkloadRequest:
     def as_dict(self) -> dict[str, Any]:
         return {
             "request_id": self.request_id,
+            # Preserve historical request digests when no new policy is supplied.
+            **({"placement_policy": self.placement_policy.value} if self.placement_policy is not None else {}),
             "kind": self.kind.value,
             "required_capabilities": sorted(item.value for item in self.required_capabilities),
             "any_capabilities": sorted(item.value for item in self.any_capabilities),
@@ -404,6 +426,8 @@ class WorkloadRequest:
             "required_model": self.required_model,
             "idempotent": self.idempotent,
             "background_preferred": self.background_preferred,
+            **({"priority": self.priority} if self.priority else {}),
+            **({"max_queue_depth": self.max_queue_depth} if self.max_queue_depth is not None else {}),
         }
 
     def digest(self) -> str:
@@ -418,6 +442,66 @@ class CandidateDecision:
     score: float | None = None
 
 
+_PLACEMENT_REASON_MESSAGES = {
+    "node_avoided": "candidate was explicitly avoided",
+    "unhealthy": "candidate health evidence is not healthy",
+    "future_observation": "candidate evidence is from the future",
+    "stale": "candidate evidence is older than the placement window",
+    "workload_not_allowed": "candidate does not advertise this workload",
+    "local_only": "request policy requires local execution",
+    "remote_not_allowed": "remote execution consent is absent",
+    "missing_capability": "candidate is missing a required capability",
+    "missing_any_capability": "candidate matches none of the capability alternatives",
+    "workspace_unavailable": "candidate does not expose the requested workspace",
+    "model_unavailable": "candidate does not advertise the requested model",
+    "ram_unknown": "candidate has no usable RAM measurement",
+    "insufficient_ram": "candidate does not meet the RAM floor",
+    "disk_unknown": "candidate has no usable disk measurement",
+    "insufficient_disk": "candidate does not meet the disk floor",
+    "vram_unknown": "candidate has no usable VRAM measurement",
+    "insufficient_vram": "candidate does not meet the VRAM floor",
+    "load_unknown": "candidate has no usable load measurement",
+    "load_too_high": "candidate exceeds the requested load ceiling",
+    "queue_full": "candidate queue is at the request's bounded depth",
+    "eligible": "candidate satisfies the requested placement policy",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class PlacementExplanation:
+    """Bounded, redacted reason for one placement candidate."""
+
+    node_id: str
+    eligible: bool
+    selected: bool
+    reason_code: str
+    message: str
+    score: float | None = None
+    rank: int | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "node_id": self.node_id,
+            "eligible": self.eligible,
+            "selected": self.selected,
+            "reason_code": self.reason_code,
+            "message": self.message,
+            "score": self.score,
+            "rank": self.rank,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PlacementInventoryScope:
+    candidate_scope: str
+    registry_generation: str
+    observation_revision: int
+    configured_count: int
+    observed_count: int
+    considered_count: int
+    structurally_excluded_count: int
+
+
 @dataclass(frozen=True, slots=True)
 class PlacementDecision:
     request_digest: str
@@ -425,6 +509,30 @@ class PlacementDecision:
     candidates: tuple[CandidateDecision, ...]
     ranked_node_ids: tuple[str, ...]
     snapshot_digests: tuple[tuple[str, str], ...]
+    inventory_scope: PlacementInventoryScope | None = None
+
+    def explain(self) -> tuple[PlacementExplanation, ...]:
+        """Return stable, bounded explanations without re-running placement."""
+        ranks = {node_id: index + 1 for index, node_id in enumerate(self.ranked_node_ids)}
+        return tuple(
+            PlacementExplanation(
+                node_id=candidate.node_id,
+                eligible=candidate.eligible,
+                selected=candidate.node_id == self.selected_node_id,
+                reason_code=candidate.reason_code,
+                message=_PLACEMENT_REASON_MESSAGES.get(
+                    candidate.reason_code,
+                    "candidate was rejected by a placement constraint",
+                ),
+                score=candidate.score,
+                rank=ranks.get(candidate.node_id),
+            )
+            for candidate in self.candidates
+        )
+
+    @property
+    def explanations(self) -> tuple[PlacementExplanation, ...]:
+        return self.explain()
 
 
 class ComputePlacementScheduler:
@@ -443,6 +551,7 @@ class ComputePlacementScheduler:
         snapshots: Iterable[NodeSnapshot],
         *,
         now: datetime,
+        snapshot_digest=None,
     ) -> PlacementDecision:
         if not isinstance(request, WorkloadRequest):
             raise TypeError("request must be a WorkloadRequest")
@@ -458,7 +567,7 @@ class ComputePlacementScheduler:
         eligible: list[CandidateDecision] = []
         digests: list[tuple[str, str]] = []
         for snapshot in ordered:
-            digests.append((snapshot.node.node_id, snapshot.digest()))
+            digests.append((snapshot.node.node_id, snapshot.digest() if snapshot_digest is None else snapshot_digest(snapshot)))
             decision = self._assess(request, snapshot, current)
             decisions.append(decision)
             if decision.eligible:
@@ -500,7 +609,7 @@ class ComputePlacementScheduler:
             return reject("stale")
         if request.kind not in snapshot.effective_workloads:
             return reject("workload_not_allowed")
-        if request.local_only and not node.local:
+        if (request.local_only or request.placement_policy is PlacementPolicy.LOCAL_ONLY) and not node.local:
             return reject("local_only")
         if not node.local and not request.allow_remote:
             return reject("remote_not_allowed")
@@ -519,6 +628,8 @@ class ComputePlacementScheduler:
             return reject("workspace_unavailable")
         if request.required_model and request.required_model not in snapshot.models:
             return reject("model_unavailable")
+        if request.max_queue_depth is not None and snapshot.active_jobs >= request.max_queue_depth:
+            return reject("queue_full")
 
         resource_reason = self._resource_rejection(request, snapshot.resources)
         if resource_reason:
@@ -588,7 +699,9 @@ __all__ = [
     "NodeHealth",
     "NodeResources",
     "NodeSnapshot",
+    "PlacementExplanation",
     "PlacementDecision",
+    "PlacementPolicy",
     "WorkloadKind",
     "WorkloadRequest",
 ]

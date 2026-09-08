@@ -12,14 +12,21 @@ that policy.
 """
 from __future__ import annotations
 
+from sonder_runtime.platform.runtime_threads import ThreadPoolExecutor as owned_runtime_pool
+
+import base64
+import hashlib
+import hmac
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 import http.client
 import importlib
 import ipaddress
 import json
 import math
 import os
+import re
 import threading
 import time
 from typing import Callable, Mapping
@@ -31,6 +38,10 @@ import logging
 
 import sonder_runtime.adapters.model_inventory as model_inventory
 from sonder_runtime.domain import ollama_policy
+from sonder_runtime.domain.inference_membership import (
+    CapabilityEvidence, MembershipHighWater, MembershipReconciliation,
+    MembershipRoster, MembershipSnapshot, WorkerAdvertisement,
+)
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.platform.logging import Redactor
 from sonder_runtime.platform.metrics import MetricsRegistry, default_registry
@@ -45,7 +56,18 @@ _DEFAULT_MAX_INFLIGHT = 1
 _DEFAULT_QUEUE_DEPTH = 32
 _DEFAULT_ADMISSION_TIMEOUT_SECONDS = 1.0
 _DEFAULT_CAPABILITY_TTL_SECONDS = 300.0
-_MAX_WORKERS = 16
+_DEFAULT_MAX_WORKERS = 16
+_MAX_POOL_WORKERS = 256
+_DEFAULT_CAPABILITY_PROBE_PARALLELISM = 4
+_MAX_CAPABILITY_PROBE_PARALLELISM = 8
+_DEFAULT_CAPABILITY_PROBE_BATCH_SIZE = 32
+_MAX_CAPABILITY_PROBE_BATCH_SIZE = 128
+_DEFAULT_STATUS_PAGE_SIZE = 32
+_MAX_STATUS_PAGE_SIZE = 128
+_MAX_STATUS_SERIALIZED_BYTES = 65_536
+_STATUS_MODEL_PREVIEW_COUNT = 8
+_STATUS_MODEL_PREVIEW_LENGTH = 128
+_STATUS_SCHEMA_VERSION = 2
 _MAX_MODELS_PER_WORKER = 2048
 _MAX_INFLIGHT_PER_WORKER = 64
 _MAX_QUEUE_DEPTH = 4096
@@ -65,7 +87,14 @@ _configured_cooldown_seconds: float | None = None
 _configured_admission_timeout_ms: int | None = None
 _configured_capability_ttl_seconds: int | None = None
 _configured_probe_timeout_ms: int | None = None
+_configured_max_inflight: int | None = None
+_configured_queue_depth: int | None = None
+_configured_max_workers: int | None = None
+_configured_probe_parallelism: int | None = None
+_configured_probe_batch_size: int | None = None
+_configured_status_page_size: int | None = None
 _configuration_lock = threading.RLock()
+_configured_pool = None
 
 
 class WorkerPoolError(urllib.error.URLError):
@@ -139,18 +168,25 @@ def _positive_int(
     return value
 
 
-def parse_worker_origins(raw: str | None) -> tuple[str, ...]:
+def parse_worker_origins(
+    raw: str | None, *, max_workers: int = _DEFAULT_MAX_WORKERS,
+) -> tuple[str, ...]:
     """Parse a comma/semicolon-separated worker origin list."""
+    if not 1 <= max_workers <= _MAX_POOL_WORKERS:
+        raise ValueError("max workers must be within 1..256")
     values = []
     for item in str(raw or "").replace(";", ",").split(","):
         value = item.strip()
         if value:
             values.append(value)
-    if len(values) > _MAX_WORKERS - 1:
+    if len(values) > max_workers - 1:
         raise ValueError(
-            "at most %d additional Ollama workers are supported" % (_MAX_WORKERS - 1)
+            "at most %d additional Ollama workers are supported" % (max_workers - 1)
         )
-    return tuple(values)
+    normalized = tuple(ollama_policy.normalize(value) for value in values)
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("worker origins contain a duplicate canonical origin")
+    return normalized
 
 
 def _model_key(name) -> str:
@@ -160,24 +196,6 @@ def _model_key(name) -> str:
 
 def _metric_label(index: int) -> str:
     return "w%d" % index if index < _MAX_METRIC_WORKERS else _METRIC_OVERFLOW_LABEL
-
-
-def _host_in_trusted_origins(
-    host: str, trusted_origins: tuple[str, ...],
-) -> bool:
-    if not trusted_origins:
-        return False
-    try:
-        addr = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    for cidr in trusted_origins:
-        try:
-            if addr in ipaddress.ip_network(cidr, strict=False):
-                return True
-        except ValueError:
-            continue
-    return False
 
 
 def validate_worker_origin(
@@ -210,10 +228,7 @@ def validate_worker_origin(
             raise ValueError(
                 "remote worker endpoints require SONDER_ALLOW_REMOTE_OLLAMA=1"
             )
-        if (
-            parsed.scheme.casefold() != "https"
-            and not _host_in_trusted_origins(parsed.hostname or "", trusted_origins)
-        ):
+        if parsed.scheme.casefold() != "https":
             raise ValueError("remote worker endpoints must use https")
     result = normalized.rstrip("/")
     logger.debug(f"validated worker origin -> {result!r}")
@@ -230,6 +245,12 @@ def configure_typed_workers(
     admission_timeout_ms: int | None = None,
     capability_ttl_seconds: int | None = None,
     probe_timeout_ms: int | None = None,
+    max_inflight_per_worker: int | None = None,
+    queue_depth: int | None = None,
+    max_workers: int | None = None,
+    capability_probe_parallelism: int | None = None,
+    capability_probe_batch_size: int | None = None,
+    status_page_size: int | None = None,
 ) -> None:
     logger.debug(f"configuring typed workers: count={len(worker_origins)}, allow_remote={allow_remote}, trusted_origins={trusted_origins!r}")
     logger.info(f"configuring {len(worker_origins)} typed Ollama worker(s), allow_remote={allow_remote}")
@@ -241,11 +262,48 @@ def configure_typed_workers(
         )
         for origin in tuple(worker_origins)
     )
+    configured_max_workers = (
+        _DEFAULT_MAX_WORKERS if max_workers is None else int(max_workers)
+    )
+    configured_probe_parallelism = (
+        _DEFAULT_CAPABILITY_PROBE_PARALLELISM
+        if capability_probe_parallelism is None
+        else int(capability_probe_parallelism)
+    )
+    configured_probe_batch_size = (
+        _DEFAULT_CAPABILITY_PROBE_BATCH_SIZE
+        if capability_probe_batch_size is None
+        else int(capability_probe_batch_size)
+    )
+    configured_status_page_size = (
+        _DEFAULT_STATUS_PAGE_SIZE
+        if status_page_size is None
+        else int(status_page_size)
+    )
+    if not 1 <= configured_max_workers <= _MAX_POOL_WORKERS:
+        raise ValueError("max workers must be within 1..256")
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("worker origins contain a duplicate canonical origin")
+    if len(normalized) > configured_max_workers - 1:
+        raise ValueError(
+            "at most %d additional Ollama workers are supported"
+            % (configured_max_workers - 1)
+        )
+    if not 1 <= configured_probe_parallelism <= _MAX_CAPABILITY_PROBE_PARALLELISM:
+        raise ValueError("capability probe parallelism must be within 1..8")
+    if not 1 <= configured_probe_batch_size <= _MAX_CAPABILITY_PROBE_BATCH_SIZE:
+        raise ValueError("capability probe batch size must be within 1..128")
+    if not 1 <= configured_status_page_size <= _MAX_STATUS_PAGE_SIZE:
+        raise ValueError("status page size must be within 1..128")
     global _configured_workers, _configured_allow_remote, _configured_trusted_origins
     global _configured_failure_threshold, _configured_cooldown_seconds
     global _configured_admission_timeout_ms, _configured_capability_ttl_seconds
-    global _configured_probe_timeout_ms
+    global _configured_probe_timeout_ms, _configured_max_inflight
+    global _configured_queue_depth, _configured_max_workers
+    global _configured_probe_parallelism, _configured_probe_batch_size
+    global _configured_status_page_size, _configured_pool
     with _configuration_lock:
+        _configured_pool = None
         _configured_workers = normalized
         _configured_allow_remote = allow_remote
         _configured_trusted_origins = trusted_origins
@@ -254,6 +312,12 @@ def configure_typed_workers(
         _configured_admission_timeout_ms = admission_timeout_ms
         _configured_capability_ttl_seconds = capability_ttl_seconds
         _configured_probe_timeout_ms = probe_timeout_ms
+        _configured_max_inflight = max_inflight_per_worker
+        _configured_queue_depth = queue_depth
+        _configured_max_workers = configured_max_workers
+        _configured_probe_parallelism = configured_probe_parallelism
+        _configured_probe_batch_size = configured_probe_batch_size
+        _configured_status_page_size = configured_status_page_size
 
 
 def reset_typed_workers() -> None:
@@ -261,8 +325,12 @@ def reset_typed_workers() -> None:
     global _configured_workers, _configured_allow_remote, _configured_trusted_origins
     global _configured_failure_threshold, _configured_cooldown_seconds
     global _configured_admission_timeout_ms, _configured_capability_ttl_seconds
-    global _configured_probe_timeout_ms
+    global _configured_probe_timeout_ms, _configured_max_inflight
+    global _configured_queue_depth, _configured_max_workers
+    global _configured_probe_parallelism, _configured_probe_batch_size
+    global _configured_status_page_size, _configured_pool
     with _configuration_lock:
+        _configured_pool = None
         _configured_workers = None
         _configured_allow_remote = None
         _configured_trusted_origins = None
@@ -271,6 +339,12 @@ def reset_typed_workers() -> None:
         _configured_admission_timeout_ms = None
         _configured_capability_ttl_seconds = None
         _configured_probe_timeout_ms = None
+        _configured_max_inflight = None
+        _configured_queue_depth = None
+        _configured_max_workers = None
+        _configured_probe_parallelism = None
+        _configured_probe_batch_size = None
+        _configured_status_page_size = None
 
 
 def has_configured_remote_workers(environment=None) -> bool:
@@ -282,7 +356,15 @@ def has_configured_remote_workers(environment=None) -> bool:
         origins = typed_workers
     else:
         env = os.environ if environment is None else environment
-        origins = parse_worker_origins(env.get("SONDER_OLLAMA_WORKERS"))
+        origins = parse_worker_origins(
+            env.get("SONDER_OLLAMA_WORKERS"),
+            max_workers=_positive_int(
+                env,
+                "SONDER_OLLAMA_POOL_MAX_WORKERS",
+                _DEFAULT_MAX_WORKERS,
+                maximum=_MAX_POOL_WORKERS,
+            ),
+        )
     return any(not _is_loopback(origin) for origin in origins)
 
 
@@ -290,6 +372,8 @@ def has_configured_remote_workers(environment=None) -> bool:
 class WorkerEndpoint:
     origin: str
     worker_id: str
+    # Retained for endpoint constructor compatibility; emitted metric labels
+    # come from the process registry's immutable identity reservations.
     metric_label: str = "w0"
 
 
@@ -352,6 +436,7 @@ class WorkerSnapshot:
 @dataclass
 class _WorkerState:
     endpoint: WorkerEndpoint
+    metric_label: str | None = None
     inflight: int = 0
     consecutive_failures: int = 0
     last_error: str = ""
@@ -361,8 +446,14 @@ class _WorkerState:
     capabilities: WorkerCapabilities | None = None
     compatibility_error: str = ""
     capability_probe_failed: bool = False
+    capability_probe_generation: int = 0
     trips: int = 0
     known_models: frozenset[str] | None = None
+    advertisement: WorkerAdvertisement | None = None
+    membership_state: str | None = None
+    membership_expires_at: datetime | None = None
+    membership_evidence: CapabilityEvidence | None = None
+    capability_checked_at: datetime | None = None
 
 
 def _worker_id(origin: str) -> str:
@@ -385,18 +476,21 @@ def _model_names(payload) -> tuple[str, ...]:
     return tuple(sorted(set(names)))
 
 
-def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0):
+def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open_url=None):
     """Build a bounded prober using the same no-proxy/no-redirect transport."""
     ollama_endpoint = importlib.import_module(
         "sonder_runtime.adapters.inference.ollama_endpoint"
     )
 
     def read(origin: str, path: str) -> dict:
+        transport = open_url or ollama_endpoint.open_url
         request = urllib.request.Request(origin + path, method="GET")
-        with ollama_endpoint.open_url(
+        with transport(
             request, timeout=timeout, allow_remote=allow_remote,
         ) as response:
             raw = response.read(_PROBE_RESPONSE_LIMIT + 1)
+        if not isinstance(raw, bytes):
+            raise ValueError("capability response is not bytes")
         if len(raw) > _PROBE_RESPONSE_LIMIT:
             raise ValueError("capability response exceeded 1 MiB")
         payload = json.loads(raw.decode("utf-8"))
@@ -439,6 +533,10 @@ class OllamaWorkerPool:
         queue_depth: int = _DEFAULT_QUEUE_DEPTH,
         admission_timeout_seconds: float = _DEFAULT_ADMISSION_TIMEOUT_SECONDS,
         capability_ttl_seconds: float = _DEFAULT_CAPABILITY_TTL_SECONDS,
+        max_workers: int = _DEFAULT_MAX_WORKERS,
+        capability_probe_parallelism: int = _DEFAULT_CAPABILITY_PROBE_PARALLELISM,
+        capability_probe_batch_size: int = _DEFAULT_CAPABILITY_PROBE_BATCH_SIZE,
+        status_page_size: int = _DEFAULT_STATUS_PAGE_SIZE,
         capability_prober: Callable[[str], object] | None = None,
         clock: Callable[[], float] = time.monotonic,
         time_fn: Callable[[], float] | None = None,
@@ -457,19 +555,38 @@ class OllamaWorkerPool:
             raise ValueError("admission timeout must be within 0..60 seconds")
         if not 1 <= capability_ttl_seconds <= _MAX_CAPABILITY_TTL_SECONDS:
             raise ValueError("capability TTL must be within 1..86400 seconds")
+        if not 1 <= max_workers <= _MAX_POOL_WORKERS:
+            raise ValueError("max workers must be within 1..256")
+        if not 1 <= capability_probe_parallelism <= _MAX_CAPABILITY_PROBE_PARALLELISM:
+            raise ValueError("capability probe parallelism must be within 1..8")
+        if not 1 <= capability_probe_batch_size <= _MAX_CAPABILITY_PROBE_BATCH_SIZE:
+            raise ValueError("capability probe batch size must be within 1..128")
+        if not 1 <= status_page_size <= _MAX_STATUS_PAGE_SIZE:
+            raise ValueError("status page size must be within 1..128")
         all_origins = (primary_origin, *worker_origins)
-        if len(all_origins) > _MAX_WORKERS:
-            raise ValueError("at most %d Ollama workers are supported" % _MAX_WORKERS)
-        states = []
+        normalized_origins = []
         seen = set()
-        for raw in all_origins:
+        primary_normalized = ""
+        for index, raw in enumerate(all_origins):
             origin = validate_worker_origin(raw, allow_remote=allow_remote, trusted_origins=trusted_origins)
             if origin in seen:
-                continue
+                if index and origin == primary_normalized:
+                    raise ValueError(
+                        "worker origin duplicates primary after canonical normalization"
+                    )
+                raise ValueError("worker origins contain a duplicate canonical origin")
             seen.add(origin)
-            states.append(_WorkerState(
-                WorkerEndpoint(origin, _worker_id(origin), _metric_label(len(states)))
-            ))
+            normalized_origins.append(origin)
+            if index == 0:
+                primary_normalized = origin
+        if len(normalized_origins) > max_workers:
+            raise ValueError("at most %d Ollama workers are supported" % max_workers)
+        states = [
+            _WorkerState(
+                WorkerEndpoint(origin, _worker_id(origin), _metric_label(index))
+            )
+            for index, origin in enumerate(normalized_origins)
+        ]
         if not states:
             raise ValueError("at least one Ollama worker is required")
         logger.debug(
@@ -477,12 +594,16 @@ class OllamaWorkerPool:
             f"origins={[s.endpoint.origin for s in states]}, "
             f"failure_threshold={failure_threshold}, cooldown={cooldown_seconds}s, "
             f"max_inflight={max_inflight_per_worker}, queue_depth={queue_depth}, "
-            f"admission_timeout={admission_timeout_seconds}s, capability_ttl={capability_ttl_seconds}s"
+            f"admission_timeout={admission_timeout_seconds}s, capability_ttl={capability_ttl_seconds}s, "
+            f"max_workers={max_workers}, probe_parallelism={capability_probe_parallelism}, "
+            f"probe_batch_size={capability_probe_batch_size}, status_page_size={status_page_size}"
         )
         logger.info(
             f"Ollama worker pool initialized with {len(states)} worker(s), "
             f"max_inflight={max_inflight_per_worker}, queue_depth={queue_depth}"
         )
+        # Startup authority is independent of the live, drainable roster.
+        self._configured_origins = tuple(normalized_origins)
         self._states = states
         self._failure_threshold = int(failure_threshold)
         self._cooldown_seconds = float(cooldown_seconds)
@@ -490,9 +611,16 @@ class OllamaWorkerPool:
         self._queue_depth = int(queue_depth)
         self._admission_timeout = float(admission_timeout_seconds)
         self._capability_ttl = float(capability_ttl_seconds)
+        self._max_workers = int(max_workers)
+        self._probe_parallelism = int(capability_probe_parallelism)
+        self._probe_batch_size = int(capability_probe_batch_size)
+        self._status_page_size = int(status_page_size)
         self._capability_prober = capability_prober
         self._clock = time_fn or clock
         self._cursor = 0
+        self._probe_cursor = 0
+        self._roster_generation = 1
+        self._status_cursor_key = os.urandom(32)
         self._waiters = 0
         self._draining = False
         self._condition = threading.Condition(threading.RLock())
@@ -509,15 +637,212 @@ class OllamaWorkerPool:
             "reconnects": 0,
         }
         self._metrics_observer = metrics
+        # Production pools share their process registry. Lightweight injected
+        # observers still get a bounded allocator for the lifetime of this pool.
+        self._metric_label_registry = (
+            metrics if callable(getattr(metrics, "reserve_ollama_worker_label", None))
+            else MetricsRegistry(enabled=False)
+        )
         self._redactor = redactor or Redactor()
+        self._membership_clock = None
+        self._membership_authority = None
+        self._membership_high_water = None
+        self._membership_roster_applied = False
+        self._configured_remote_origins = frozenset(
+            origin for origin in normalized_origins if not _is_loopback(origin))
+        self._local_worker_count = len(states) - len(self._configured_remote_origins)
+        self._membership_omitted = 0
+        self._external_source = None
+        self._active_probe_states = ()
+
+    @property
+    def membership_limit(self) -> int:
+        return max(1, self._max_workers - self._local_worker_count)
+
+    def configure_membership(self, *, cluster_id, issuer_id, clock) -> None:
+        # Validate primitive authority fields before changing admission state.
+        MembershipHighWater(cluster_id, issuer_id, 1, "0" * 64)
+        with self._condition:
+            if self._membership_clock is not None:
+                raise ValueError("membership controller is already configured")
+            if any(state.inflight and not _is_loopback(state.endpoint.origin) for state in self._states):
+                raise ValueError("cannot attach membership while remote work is in flight")
+            self._membership_clock = clock
+            self._membership_authority = (cluster_id, issuer_id)
+            for state in self._states:
+                if not _is_loopback(state.endpoint.origin):
+                    state.membership_state = "probation"
+                    state.capabilities = None
+            self._roster_generation += 1
+
+    def configure_external_source(self, source, *, probe_timeout_seconds=2.0) -> None:
+        from .external_membership import ExternalMembershipSource
+        if type(source) is not ExternalMembershipSource or self._membership_clock is not None:
+            raise ValueError("exact external source required before membership composition")
+        allowed = frozenset(policy.origin for policy in source._config.member_policies)
+        if not self._configured_remote_origins <= allowed:
+            raise ValueError("configured remote worker lacks external endpoint policy")
+        self._external_source = source
+        self._configured_remote_origins = allowed
+        self._capability_prober = _default_capability_prober(
+            allow_remote=True, timeout=probe_timeout_seconds, open_url=self.open_url)
+
+    def open_url(self, request, *, timeout, allow_remote=None):
+        import sonder_runtime.adapters.inference.ollama_endpoint as ollama_endpoint
+        if self._external_source is not None:
+            if not _is_loopback(request.full_url):
+                return self._external_source.open_worker_url(request, timeout=timeout)
+            origin = ollama_policy.normalize(ollama_endpoint._origin_from_url(request.full_url))
+            if (not self._external_source._config.local_fallback
+                    or origin not in self.configured_origins):
+                raise WorkerPoolUnavailable("external membership does not authorize local fallback")
+        return ollama_endpoint.open_url(request, timeout=timeout, allow_remote=allow_remote)
+
+    def validate_membership_snapshot(self, snapshot: MembershipSnapshot) -> None:
+        if type(snapshot) is not MembershipSnapshot or self._membership_authority is None:
+            raise ValueError("verified configured membership snapshot required")
+        if (snapshot.cluster_id, snapshot.issuer_id) != self._membership_authority:
+            raise ValueError("membership authority differs from static configuration")
+        limit = (self._external_source._config.snapshot_max_advertisements
+                 if self._external_source is not None else self.membership_limit)
+        if len(snapshot.workers) > limit:
+            raise ValueError("membership exceeds configured remote roster bound")
+        if any(worker.origin not in self._configured_remote_origins for worker in snapshot.workers):
+            raise ValueError("membership origin is not an exact configured remote origin")
+
+    def apply_membership(self, result: MembershipReconciliation) -> None:
+        """Atomically publish a validated roster; retain original draining states.
+
+        Live and draining states together never exceed the configured limit.
+        When drains occupy all slots, new members wait for a later refresh.
+        Endpoint objects attached to in-flight work are never rewritten.
+        """
+        if type(result) is not MembershipReconciliation or self._membership_authority is None:
+            raise ValueError("exact configured membership reconciliation required")
+        if result.roster is not None:
+            self.validate_membership_snapshot(result.roster.snapshot)
+        water = result.high_water
+        if water is not None and (water.cluster_id, water.issuer_id) != self._membership_authority:
+            raise ValueError("membership high-water authority mismatch")
+        with self._condition:
+            old_water = self._membership_high_water
+            if old_water is not None and (water is None or water.generation < old_water.generation
+                    or (water.generation == old_water.generation and water.digest != old_water.digest)):
+                raise ValueError("membership high-water cannot roll back or conflict")
+            self._membership_high_water = water
+            members = result.roster.members if result.roster is not None else ()
+            desired = {(member.advertisement.worker_id, member.advertisement.origin,
+                        member.advertisement.member_generation): member for member in members}
+            new_admissions = {(worker.worker_id, worker.origin, worker.member_generation)
+                              for worker in result.additions}
+            retained = []
+            existing = {}
+            for state in self._states:
+                if state.membership_state is None:
+                    retained.append(state)
+                    continue
+                advertisement = state.advertisement
+                key = ((advertisement.worker_id, advertisement.origin, advertisement.member_generation)
+                       if advertisement is not None else None)
+                if key in desired and state.membership_state != "draining":
+                    existing[key] = state
+                else:
+                    state.membership_state = "draining"
+                    if state.inflight:
+                        retained.append(state)
+            omitted = result.omitted_worker_count
+            for key, member in desired.items():
+                state = existing.get(key)
+                if state is None:
+                    if len(retained) + len(existing) >= self._max_workers:
+                        omitted += 1
+                        continue
+                    worker = member.advertisement
+                    state = _WorkerState(WorkerEndpoint(worker.origin, worker.worker_id),
+                                         advertisement=worker)
+                else:
+                    existing.pop(key)
+                    if key in new_admissions:
+                        # A lease renewed after expiry must obtain new evidence;
+                        # a still-fresh capability cache predates this admission.
+                        state.capabilities = None
+                        state.known_models = None
+                state.membership_state = member.lifecycle_state
+                state.membership_expires_at = result.roster.snapshot.expires_at
+                state.membership_evidence = member.evidence
+                retained.append(state)
+            self._membership_roster_applied = result.roster is not None
+            self._states = retained
+            self._membership_omitted = omitted
+            self._roster_generation += 1
+            self._condition.notify_all()
+
+    def stop_membership(self) -> None:
+        with self._condition:
+            for state in self._states:
+                if state.membership_state is not None:
+                    state.membership_state = "draining"
+            self._prune_drained()
+            self._condition.notify_all()
+
+    def _prune_drained(self) -> None:
+        remaining = [state for state in self._states
+                     if state.membership_state != "draining" or state.inflight]
+        if len(remaining) != len(self._states):
+            self._states = remaining
+            self._roster_generation += 1
+
+    def _membership_admissible(self, state: _WorkerState, now: float) -> bool:
+        if state.membership_state is None:
+            return self._external_source is None or self._external_source._config.local_fallback
+        wall_now = self._membership_clock()
+        return (state.membership_state == "active" and state.membership_expires_at is not None
+                and wall_now < state.membership_expires_at and state.membership_evidence is not None
+                and state.membership_evidence.checked_at <= wall_now < state.membership_evidence.expires_at
+                and not self._capabilities_stale(state, now) and not state.capability_probe_failed)
+
+    def refresh_membership_capabilities(self) -> None:
+        self.refresh_capabilities(_membership=True)
+
+    def membership_evidence(self, roster: MembershipRoster) -> tuple[CapabilityEvidence, ...]:
+        if type(roster) is not MembershipRoster:
+            raise ValueError("exact membership roster required")
+        now = self._clock()
+        wall_now = self._membership_clock()
+        with self._condition:
+            evidence = []
+            for state in self._states:
+                if (state.advertisement is None or state.membership_state in ("draining", "expired")
+                        or self._capabilities_stale(state, now) or state.capability_probe_failed
+                        or state.compatibility_error or state.cooldown_until > now):
+                    continue
+                worker = state.advertisement
+                checked = state.capability_checked_at
+                if checked is None:
+                    continue
+                expires = min(checked + timedelta(seconds=self._capability_ttl), roster.snapshot.expires_at)
+                if checked <= wall_now < expires:
+                    evidence.append(CapabilityEvidence(worker.worker_id, worker.origin,
+                                                       worker.member_generation, checked, expires))
+            return tuple(evidence)
 
     @property
     def enabled(self) -> bool:
-        return len(self._states) > 1
+        return len(self._states) > 1 or (
+            self._membership_clock is not None and bool(self._configured_remote_origins))
 
     @property
     def has_remote_workers(self) -> bool:
         return any(not _is_loopback(state.endpoint.origin) for state in self._states)
+
+    @property
+    def has_configured_remote_workers(self) -> bool:
+        return bool(self._configured_remote_origins)
+
+    @property
+    def configured_origins(self) -> tuple[str, ...]:
+        """Immutable normalized primary and workers supplied at construction."""
+        return self._configured_origins
 
     @property
     def origins(self) -> tuple[str, ...]:
@@ -597,6 +922,20 @@ class OllamaWorkerPool:
             effective_max_inflight=min(self._max_inflight, advertised),
         ), round(measured_ms, 3)
 
+    def _worker_metric_label(self, state: _WorkerState) -> str:
+        # Reserve only when observed: provisional configured endpoints must
+        # not consume slots before receiving an admitted member identity.
+        if state.metric_label is None:
+            if state.advertisement is not None:
+                identity = ("member", *self._membership_authority,
+                            state.advertisement.worker_id)
+            else:
+                identity = ("configured-origin", state.endpoint.origin)
+            digest = hashlib.sha256(json.dumps(identity, separators=(",", ":"),
+                                                ensure_ascii=True).encode("ascii")).hexdigest()
+            state.metric_label = self._metric_label_registry.reserve_ollama_worker_label(digest)
+        return state.metric_label
+
     def _record_transport_failure(
         self, state: _WorkerState, error: BaseException,
     ) -> None:
@@ -650,7 +989,7 @@ class OllamaWorkerPool:
                 )
             if not was_open and self._metrics_observer is not None:
                 self._metrics_observer.observe_ollama_worker_circuit(
-                    worker=state.endpoint.metric_label, state="open"
+                    worker=self._worker_metric_label(state), state="open"
                 )
 
     def _record_success(self, state: _WorkerState, latency_ms: float) -> None:
@@ -675,36 +1014,68 @@ class OllamaWorkerPool:
             self._metrics["reconnects"] += 1
             if self._metrics_observer is not None:
                 self._metrics_observer.observe_ollama_worker_circuit(
-                    worker=state.endpoint.metric_label, state="closed"
+                    worker=self._worker_metric_label(state), state="closed"
                 )
 
     def refresh_capabilities(
-        self, *, force: bool = False,
-    ) -> tuple[WorkerSnapshot, ...]:
-        """Probe stale workers concurrently and retain deterministic state order.
+        self, *, force: bool = False, _membership: bool = False,
+    ) -> None:
+        self._refresh_capabilities(force=force, _membership=_membership)
+
+    def _refresh_capabilities(
+        self, *, force: bool = False, _membership: bool = False,
+        _target: _WorkerState | None = None, _lock_owned: bool = False,
+    ) -> None:
+        """Update cached capabilities using the configured bounded probe batch.
 
         Circuit-open workers are not probed before their retry deadline unless
         ``force`` is explicitly requested by an operator-facing caller.
+        Presentation is separate: callers may request a cached status page
+        after refresh without constructing whole-roster snapshots here.
         """
         logger.debug(f"refresh_capabilities called, force={force}")
         if self._capability_prober is None:
             logger.debug("no capability prober configured, skipping refresh")
-            return self.snapshots()
-        if not self._probe_lock.acquire(blocking=False):
+            return
+        if not _lock_owned and not self._probe_lock.acquire(blocking=False):
             logger.debug("probe lock contended, skipping refresh")
-            return self.snapshots()
+            return
         try:
             now = self._clock()
             with self._condition:
-                candidates = [
-                    state for state in self._states
-                    if (force or self._capabilities_stale(state, now))
-                    and (force or state.cooldown_until <= now)
-                    and not state.half_open_inflight
-                ]
+                candidates = []
+                last_selected_index = None
+                state_count = len(self._states)
+                start = self._probe_cursor % state_count if state_count else 0
+                for offset in range(state_count):
+                    index = (start + offset) % state_count
+                    state = self._states[index]
+                    if _target is not None and state is not _target:
+                        continue
+                    if state.membership_state is not None and (
+                        state.membership_state in ("draining", "expired")
+                        or state.membership_expires_at is None
+                        or self._membership_clock() >= state.membership_expires_at
+                    ):
+                        continue
+                    if _membership and state.membership_state is None:
+                        continue
+                    if not (
+                        (force or self._capabilities_stale(state, now))
+                        and (force or state.cooldown_until <= now)
+                        and not state.half_open_inflight
+                    ):
+                        continue
+                    candidates.append(state)
+                    last_selected_index = index
+                    if len(candidates) >= self._probe_batch_size:
+                        break
+                if last_selected_index is not None and state_count:
+                    self._probe_cursor = (last_selected_index + 1) % state_count
+                self._active_probe_states = tuple(candidates)
             if not candidates:
                 logger.debug("no stale/eligible workers to probe")
-                return self.snapshots()
+                return
 
             def run(state: _WorkerState):
                 started = self._clock()
@@ -715,15 +1086,21 @@ class OllamaWorkerPool:
                 except Exception as error:
                     return None, 0.0, error
 
-            logger.debug(f"probing {len(candidates)} candidate workers: {[s.endpoint.worker_id for s in candidates]}")
+            logger.debug(
+                f"probing {len(candidates)} candidate workers: "
+                f"{[s.endpoint.worker_id for s in candidates]}"
+            )
             logger.info(f"probing capabilities on {len(candidates)} worker(s)")
-            workers = min(4, len(candidates))
-            with ThreadPoolExecutor(max_workers=workers) as executor:
+            workers = min(self._probe_parallelism, len(candidates))
+            with owned_runtime_pool(max_workers=workers) as executor:
                 futures = [executor.submit(run, state) for state in candidates]
                 outcomes = [future.result() for future in futures]
 
             with self._condition:
                 for state, (payload, measured_ms, error) in zip(candidates, outcomes):
+                    state.capability_probe_generation += 1
+                    if state.membership_state == "draining" or not any(current is state for current in self._states):
+                        continue
                     self._metrics["capability_probes"] += 1
                     if error is not None:
                         logger.debug(f"capability probe failed for {state.endpoint.worker_id}: {_safe_error(error)}")
@@ -767,11 +1144,76 @@ class OllamaWorkerPool:
                         f"effective_max_inflight={capabilities.effective_max_inflight}, latency={latency_ms:.1f}ms"
                     )
                     state.capabilities = capabilities
+                    if state.membership_state is not None:
+                        state.capability_checked_at = self._membership_clock()
                     state.compatibility_error = ""
                     state.capability_probe_failed = False
                     self._record_success(state, latency_ms)
                 self._condition.notify_all()
-            return self.snapshots()
+        finally:
+            with self._condition:
+                self._active_probe_states = ()
+                self._condition.notify_all()
+            if not _lock_owned:
+                self._probe_lock.release()
+
+    def _refresh_for_model(self, model: str, *, admission_timeout: float) -> None:
+        """Probe one fair static unknown/stale worker, joining existing work.
+
+        The same probe lock serializes this with administrative batches, so
+        their configured parallelism ceiling remains global to this pool.
+        Waiters consume the existing global admission queue. Membership lease
+        activation/renewal remains exclusively owned by the controller.
+        """
+        with self._condition:
+            now = self._clock()
+            if self._draining or self._capability_prober is None:
+                return
+            if any(self._membership_admissible(state, now)
+                   and not state.compatibility_error and state.cooldown_until <= now
+                   and self._supports_model(state, model) for state in self._states):
+                return
+            candidates = [state for state in self._states
+                          if state.membership_state is None
+                          and self._membership_admissible(state, now)
+                          and self._capabilities_stale(state, now)
+                          and state.cooldown_until <= now and not state.half_open_inflight]
+            if not candidates:
+                return
+            candidate_ids = {id(state) for state in candidates}
+            # A caller arriving during a probe joins it even if the fair cursor
+            # already advanced. Identity and completion generation prevent a
+            # duplicate probe after either a successful or failed result.
+            target = next((state for state in self._active_probe_states
+                           if id(state) in candidate_ids), None)
+            if target is None:
+                start = self._probe_cursor % len(self._states)
+                target = next(state for state in self._states[start:] + self._states[:start]
+                              if id(state) in candidate_ids)
+            generation = target.capability_probe_generation
+            acquired = self._probe_lock.acquire(blocking=False)
+            if not acquired:
+                if self._waiters >= self._queue_depth:
+                    self._metrics["backpressure_rejections"] += 1
+                    raise WorkerPoolBackpressure("Ollama worker queue is full")
+                self._waiters += 1
+        if not acquired:
+            try:
+                acquired = self._probe_lock.acquire(timeout=max(0.0, admission_timeout))
+            finally:
+                with self._condition:
+                    self._waiters -= 1
+                    self._condition.notify_all()
+            if not acquired:
+                with self._condition:
+                    self._metrics["backpressure_rejections"] += 1
+                raise WorkerPoolBackpressure("timed out waiting for Ollama worker capability")
+        try:
+            with self._condition:
+                if (self._draining or target.capability_probe_generation != generation
+                        or not any(state is target for state in self._states)):
+                    return
+            self._refresh_capabilities(_target=target, _lock_owned=True)
         finally:
             self._probe_lock.release()
 
@@ -779,7 +1221,9 @@ class OllamaWorkerPool:
         if not model:
             return True
         if state.capabilities is None:
-            return not state.capability_probe_failed
+            return False
+        if self._capabilities_stale(state, self._clock()):
+            return False
         wanted = _model_key(model)
         return any(_model_key(name) == wanted for name in state.capabilities.models)
 
@@ -828,6 +1272,7 @@ class OllamaWorkerPool:
         candidates = [
             state for state in self._states
             if state.endpoint.worker_id not in excluded
+            and self._membership_admissible(state, now)
             and not state.compatibility_error
             and self._supports_model(state, model)
             and state.cooldown_until <= now
@@ -885,6 +1330,8 @@ class OllamaWorkerPool:
                 now = self._clock()
                 state = self._choose(model=model, excluded=excluded, now=now)
                 if state is not None:
+                    if self._metrics_observer is not None:
+                        self._worker_metric_label(state)
                     state.inflight += 1
                     if state.consecutive_failures >= self._failure_threshold:
                         state.half_open_inflight = True
@@ -895,14 +1342,15 @@ class OllamaWorkerPool:
                 remaining_states = [
                     state for state in self._states
                     if state.endpoint.worker_id not in excluded
+                    and self._membership_admissible(state, now)
                     and not state.compatibility_error
                     and self._supports_model(state, model)
                 ]
                 if not remaining_states:
                     if queued:
                         self._waiters -= 1
-                    known = all(state.capabilities is not None for state in self._states)
-                    if model and known:
+                    available = [state for state in self._states if self._membership_admissible(state, now)]
+                    if model and available:
                         raise WorkerCapabilityUnavailable(
                             "no Ollama worker advertises model %r" % model
                         )
@@ -980,10 +1428,11 @@ class OllamaWorkerPool:
                 result = "error"
             if self._metrics_observer is not None:
                 self._metrics_observer.observe_ollama_worker_request(
-                    worker=state.endpoint.metric_label,
+                    worker=self._worker_metric_label(state),
                     result=result,
                     elapsed_seconds=max(0.0, latency_ms / 1000.0),
                 )
+            self._prune_drained()
             self._condition.notify_all()
 
     def request(
@@ -999,17 +1448,20 @@ class OllamaWorkerPool:
         logger.debug(f"pool.request: model={model!r}, idempotent={idempotent}")
         with self._condition:
             self._metrics["logical_requests"] += 1
-        if model:
-            self.refresh_capabilities()
         admission_timeout = (
             self._admission_timeout
             if admission_timeout_seconds is None
             else max(0.0, float(admission_timeout_seconds))
         )
         admission_deadline = time.monotonic() + admission_timeout
+        if model:
+            self._refresh_for_model(model, admission_timeout=admission_timeout)
         attempted: set[str] = set()
         last_error = None
         while True:
+            if len(attempted) >= self._max_workers:
+                # Reconciliation cannot grow one logical request's retry set.
+                raise last_error or WorkerPoolUnavailable("Ollama worker attempt limit reached")
             try:
                 state = self._acquire(
                     model=model,
@@ -1018,7 +1470,7 @@ class OllamaWorkerPool:
                         0.0, admission_deadline - time.monotonic(),
                     ),
                 )
-            except WorkerPoolUnavailable:
+            except (WorkerPoolUnavailable, WorkerCapabilityUnavailable):
                 if last_error is not None:
                     logger.error(
                         f"all attempted workers failed for model={model!r}, "
@@ -1090,102 +1542,300 @@ class OllamaWorkerPool:
     def snapshots(self) -> tuple[WorkerSnapshot, ...]:
         now = self._clock()
         with self._condition:
-            snapshots = []
-            for state in self._states:
-                stale = self._capabilities_stale(state, now)
-                healthy = (
-                    not state.compatibility_error
-                    and not (
-                        state.capabilities is None
-                        and state.capability_probe_failed
-                    )
-                    and state.cooldown_until <= now
-                )
-                capacity = self._capacity(state)
-                if self._draining:
-                    label = "draining" if state.inflight else "drained"
-                elif state.compatibility_error:
-                    label = "incompatible"
-                elif state.cooldown_until > now:
-                    label = "circuit_open"
-                elif state.capabilities is None and state.capability_probe_failed:
-                    label = "unreachable"
-                elif state.half_open_inflight:
-                    label = "reconnecting"
-                elif state.inflight >= capacity:
-                    label = "saturated"
-                elif state.capabilities is None:
-                    label = "unknown"
-                elif stale:
-                    label = "stale"
-                else:
-                    label = "ready"
-                capabilities = state.capabilities
-                snapshots.append(WorkerSnapshot(
-                    worker_id=state.endpoint.worker_id,
-                    origin=state.endpoint.origin,
-                    state=label,
-                    healthy=healthy,
-                    inflight=state.inflight,
-                    capacity=capacity,
-                    consecutive_failures=state.consecutive_failures,
-                    last_error=state.last_error,
-                    cooldown_remaining_seconds=round(
-                        max(0.0, state.cooldown_until - now), 3,
-                    ),
-                    latency_ewma_ms=(
-                        None if state.latency_ewma_ms is None
-                        else round(state.latency_ewma_ms, 3)
-                    ),
-                    protocol=capabilities.protocol if capabilities else "unknown",
-                    version=capabilities.version if capabilities else "unknown",
-                    models=capabilities.models if capabilities else (),
-                    capabilities_stale=stale,
-                    cooldown_until=state.cooldown_until,
-                    trips=state.trips,
-                    probing=state.half_open_inflight,
-                ))
-            return tuple(snapshots)
+            return tuple(self._snapshot(state, now) for state in self._states)
 
-    def status(self) -> dict:
-        workers = self.snapshots()
-        with self._condition:
-            metrics = dict(self._metrics)
-            waiters = self._waiters
-            draining = self._draining
-        healthy_count = sum(1 for w in workers if w.healthy)
-        total_count = len(workers)
-        if healthy_count < total_count and not draining:
-            logger.warning(
-                f"pool running with {healthy_count}/{total_count} healthy "
-                f"workers; unhealthy: {[w.worker_id for w in workers if not w.healthy]}"
+    def _snapshot(self, state: _WorkerState, now: float) -> WorkerSnapshot:
+        """Copy one selected worker while the pool condition is held."""
+        stale = self._capabilities_stale(state, now)
+        healthy = (
+            self._membership_admissible(state, now)
+            and not state.compatibility_error
+            and not (
+                state.capabilities is None
+                and state.capability_probe_failed
             )
+            and state.cooldown_until <= now
+        )
+        capacity = self._capacity(state)
+        if self._draining:
+            label = "draining" if state.inflight else "drained"
+        elif state.membership_state == "draining":
+            label = "draining"
+        elif state.membership_state is not None and state.membership_expires_at is not None and (
+            self._membership_clock() >= state.membership_expires_at
+        ):
+            label = "expired"
+        elif state.membership_state is not None and not self._membership_admissible(state, now):
+            label = state.membership_state if state.membership_state != "active" else "probation"
+        elif state.compatibility_error:
+            label = "incompatible"
+        elif state.cooldown_until > now:
+            label = "circuit_open"
+        elif state.capabilities is None and state.capability_probe_failed:
+            label = "unreachable"
+        elif state.half_open_inflight:
+            label = "reconnecting"
+        elif state.inflight >= capacity:
+            label = "saturated"
+        elif state.capabilities is None:
+            label = "unknown"
+        elif stale:
+            label = "stale"
+        else:
+            label = "ready"
+        capabilities = state.capabilities
+        return WorkerSnapshot(
+            worker_id=state.endpoint.worker_id,
+            origin=state.endpoint.origin,
+            state=label,
+            healthy=healthy,
+            inflight=state.inflight,
+            capacity=capacity,
+            consecutive_failures=state.consecutive_failures,
+            last_error=state.last_error,
+            cooldown_remaining_seconds=round(
+                max(0.0, state.cooldown_until - now), 3,
+            ),
+            latency_ewma_ms=(
+                None if state.latency_ewma_ms is None
+                else round(state.latency_ewma_ms, 3)
+            ),
+            protocol=capabilities.protocol if capabilities else "unknown",
+            version=capabilities.version if capabilities else "unknown",
+            models=capabilities.models if capabilities else (),
+            capabilities_stale=stale,
+            cooldown_until=state.cooldown_until,
+            trips=state.trips,
+            probing=state.half_open_inflight,
+        )
+
+    def _encode_status_cursor(self, offset: int, principal: str) -> str:
+        # A keyed opaque handle: no identity, offset, or topology is encoded
+        # in the returned token, and no unbounded cursor registry is retained.
+        material = f"{self._roster_generation}:{offset}:{principal}".encode("utf-8")
+        digest = hmac.new(self._status_cursor_key, material, hashlib.sha256).digest()
+        return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+    def _decode_status_cursor(self, cursor: str | None, total: int, principal: str) -> int:
+        if cursor in (None, ""):
+            return 0
+        if isinstance(cursor, str) and len(cursor) == 43 and cursor.isascii():
+            # At most 256 candidate offsets, independent of model inventory.
+            for offset in range(1, total + 1):
+                if hmac.compare_digest(cursor, self._encode_status_cursor(offset, principal)):
+                    return offset
+        raise ValueError("invalid or stale Ollama worker status cursor")
+
+    def validate_status_request(self, *, cursor=None, page_size=None, principal="local-open") -> tuple[int, int]:
+        """Validate a cached detail request before any explicit refresh."""
+        size = self._status_page_size if page_size is None else page_size
+        if type(size) is not int or not 1 <= size <= _MAX_STATUS_PAGE_SIZE:
+            raise ValueError("status page size must be within 1..128")
+        with self._condition:
+            return self._decode_status_cursor(cursor, len(self._states), principal), size
+
+    @staticmethod
+    def _status_error_category(snapshot: WorkerSnapshot) -> str:
+        if not snapshot.last_error:
+            return "none"
+        error = snapshot.last_error.casefold()
+        if "timeout" in error:
+            return "timeout"
+        if snapshot.state == "incompatible" or "capability" in error:
+            return "capability"
+        if "http" in error or "protocol" in error:
+            return "protocol"
+        if "authoriz" in error or "forbidden" in error or "unauthorized" in error:
+            return "authorization"
+        if "urlerror" in error or "connection" in error or "transport" in error:
+            return "transport"
+        return "unknown"
+
+    def _status_worker_record(self, snapshot: WorkerSnapshot) -> dict:
+        previews = tuple(sorted({
+            model[:_STATUS_MODEL_PREVIEW_LENGTH]
+            for model in snapshot.models
+            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9._-]+)?", model)
+            and self._redactor.redact(model) == model
+        }))[:_STATUS_MODEL_PREVIEW_COUNT]
         return {
-            "enabled": self.enabled,
-            "admission": "draining" if draining else "accepting",
-            "worker_count": len(workers),
-            "remote_worker_count": sum(
-                1 for state in self._states
-                if not _is_loopback(state.endpoint.origin)
-            ),
-            "healthy_worker_count": sum(1 for worker in workers if worker.healthy),
-            "available_capacity": sum(
-                max(0, worker.capacity - worker.inflight)
-                for worker in workers
-                if not draining
-                and worker.healthy
-                and worker.state not in {"incompatible", "circuit_open"}
-            ),
-            "remote_tls_required": self.has_remote_workers,
-            "tls_verification": (
-                "system-trust-store" if self.has_remote_workers else "not-applicable"
-            ),
-            "non_idempotent_failover": False,
-            "queue": {"waiting": waiters, "limit": self._queue_depth},
-            "routing": "latency-aware-least-inflight",
-            "metrics": metrics,
-            "workers": [snapshot.to_dict() for snapshot in workers],
+            "worker_id": _safe_scalar(snapshot.worker_id, limit=256),
+            "origin": _safe_scalar(snapshot.origin, limit=256),
+            "state": snapshot.state,
+            "healthy": snapshot.healthy,
+            "inflight": snapshot.inflight,
+            "capacity": snapshot.capacity,
+            "consecutive_failures": snapshot.consecutive_failures,
+            "cooldown_remaining_seconds": snapshot.cooldown_remaining_seconds,
+            "latency_ewma_ms": snapshot.latency_ewma_ms,
+            "protocol": _safe_scalar(snapshot.protocol, limit=80),
+            "version": snapshot.version if re.fullmatch(r"v?\d+(?:\.\d+){1,3}(?:[-+][A-Za-z0-9.-]+)?", snapshot.version)
+            and self._redactor.redact(snapshot.version) == snapshot.version else "unknown",
+            "capabilities_stale": snapshot.capabilities_stale,
+            "trips": snapshot.trips,
+            "probing": snapshot.probing,
+            "ewma_latency_ms": snapshot.ewma_latency_ms or 0.0,
+            "error_category": OllamaWorkerPool._status_error_category(snapshot),
+            "model_count": len(snapshot.models),
+            "model_preview": list(previews),
         }
+
+    @staticmethod
+    def _serialized_status_bytes(payload: dict) -> int:
+        return len(json.dumps(payload).encode("utf-8"))
+
+    def _membership_status_locked(self, now: float) -> tuple[str, str]:
+        """Return an authority-safe admission projection without roster details."""
+        if self._external_source is None:
+            return "static", "static"
+        if not self._membership_roster_applied:
+            return "external", "unrefreshed"
+        admitted = tuple(
+            state for state in self._states
+            if state.membership_state not in (None, "draining")
+        )
+        if not admitted:
+            # An authenticated empty roster is current, but it admits no remote
+            # worker.  Capacity remains independently fail-closed at zero.
+            return "external", "current"
+        for state in admitted:
+            if not (
+                self._membership_admissible(state, now)
+                and not state.compatibility_error
+                and not (state.capabilities is None and state.capability_probe_failed)
+                and state.cooldown_until <= now
+                and not self._capabilities_stale(state, now)
+            ):
+                return "external", "stale_or_partial"
+        return "external", "current"
+
+    def _summary_locked(self, now: float) -> dict:
+        """Compute bounded scalar aggregates without copying model inventories."""
+        healthy = eligible = capacity = inflight = remote = refreshed = 0
+        newest = None
+        for state in self._states:
+            remote += not _is_loopback(state.endpoint.origin)
+            inflight += state.inflight
+            healthy_now = (self._membership_admissible(state, now) and not state.compatibility_error
+                           and not (state.capabilities is None and state.capability_probe_failed)
+                           and state.cooldown_until <= now)
+            healthy += healthy_now
+            fresh = not self._capabilities_stale(state, now)
+            eligible_now = healthy_now and fresh and not self._draining
+            eligible += eligible_now
+            if eligible_now:
+                capacity += max(0, self._capacity(state) - state.inflight)
+            if state.capabilities is not None:
+                refreshed += 1
+                observed = state.capabilities.observed_at
+                newest = observed if newest is None else max(newest, observed)
+        total = len(self._states)
+        membership_mode, membership_state = self._membership_status_locked(now)
+        refresh_state = (
+            "not_refreshed" if membership_state == "unrefreshed" else membership_state
+        ) if membership_mode == "external" else (
+            "not_refreshed" if not refreshed else
+            "current" if eligible == total else "stale_or_partial"
+        )
+        return {
+            "schema_version": _STATUS_SCHEMA_VERSION,
+            "roster_generation": self._roster_generation,
+            "membership_mode": membership_mode,
+            "membership_state": membership_state,
+            "enabled": self.enabled,
+            "admission": "draining" if self._draining else "accepting",
+            "worker_count": total,
+            "configured_worker_limit": self._max_workers,
+            "worker_pool_max_workers": self._max_workers,
+            "remote_worker_count": remote,
+            "healthy_worker_count": healthy,
+            "eligible_worker_count": eligible,
+            "unhealthy_worker_count": total - healthy,
+            "draining_worker_count": total if self._draining else sum(
+                state.membership_state == "draining" for state in self._states),
+            "membership_omitted_worker_count": self._membership_omitted,
+            "available_capacity": capacity,
+            "inflight": inflight,
+            "refresh_state": refresh_state,
+            "refresh_age_seconds": None if newest is None else round(max(0, now - newest), 3),
+            "queue": {"waiting": self._waiters, "limit": self._queue_depth, "scope": "global"},
+            "routing": "latency-aware-least-inflight",
+            "request_placement": "whole-worker; no model sharding",
+            "model_sharding": False,
+            "indefinite_scale": False,
+        }
+
+    def summary(self) -> dict:
+        """Return cached aggregate state only; never probe or construct detail."""
+        with self._condition:
+            return self._summary_locked(self._clock())
+
+    def status(
+        self, *, cursor: str | None = None, page_size: int | None = None,
+        principal: str = "local-open",
+    ) -> dict:
+        """Return a cached administrative page without starting a probe."""
+        with self._condition:
+            start, selected_page_size = self.validate_status_request(
+                cursor=cursor, page_size=page_size, principal=principal,
+            )
+            now = self._clock()
+            common = self._summary_locked(now)
+            total_count = len(self._states)
+            # Snapshot only this requested page. Models are immutable tuples;
+            # records outside this slice are neither copied nor sanitized.
+            workers = tuple(self._snapshot(state, now) for state in
+                            self._states[start:start + selected_page_size])
+            common.update({
+                "remote_tls_required": bool(common["remote_worker_count"]) or common["membership_mode"] == "external",
+                "tls_verification": (
+                    "pinned-ca-exact-san"
+                    if common["membership_mode"] == "external"
+                    else "system-trust-store"
+                    if common["remote_worker_count"] else "not-applicable"
+                ),
+                "non_idempotent_failover": False,
+                "metrics": dict(self._metrics),
+                "probe_parallelism": self._probe_parallelism,
+                "probe_batch_size": self._probe_batch_size,
+                "status_page_size": self._status_page_size,
+                "worker_capability_probe_parallelism": self._probe_parallelism,
+                "worker_capability_probe_batch_size": self._probe_batch_size,
+                "worker_status_page_size": self._status_page_size,
+            })
+            cursors = {end: self._encode_status_cursor(end, principal)
+                       for end in range(start, min(total_count, start + selected_page_size) + 1)}
+
+        def page_payload(records: list[dict], end: int) -> dict:
+            payload = dict(common)
+            payload.update({
+                "page_size": selected_page_size,
+                "next_cursor": (
+                    cursors[end] if end < total_count else None
+                ),
+                "complete": end >= total_count,
+                "omitted_worker_count": total_count - end,
+                "workers": records,
+                # Reserve the widest possible encoded value while choosing records.
+                "serialized_bytes": _MAX_STATUS_SERIALIZED_BYTES,
+            })
+            return payload
+
+        records: list[dict] = []
+        end = start
+        while end < total_count and len(records) < selected_page_size:
+            candidate = records + [self._status_worker_record(workers[end - start])]
+            payload = page_payload(candidate, end + 1)
+            if self._serialized_status_bytes(payload) > _MAX_STATUS_SERIALIZED_BYTES:
+                break
+            records = candidate
+            end += 1
+        result = page_payload(records, end)
+        for _ in range(3):
+            result["serialized_bytes"] = self._serialized_status_bytes(result)
+        if result["serialized_bytes"] > _MAX_STATUS_SERIALIZED_BYTES:
+            raise RuntimeError("bounded Ollama worker status exceeded its byte limit")
+        return result
 
     def operator_status_lines(self) -> tuple[str, ...]:
         """Render compact, bounded status without response bodies or prompts."""
@@ -1216,7 +1866,7 @@ class OllamaWorkerPool:
                     worker["inflight"],
                     worker["capacity"],
                     latency,
-                    len(worker["models"]),
+                    worker["model_count"],
                     worker["version"],
                     (
                         " retry=%.1fs" % worker["cooldown_remaining_seconds"]
@@ -1224,7 +1874,31 @@ class OllamaWorkerPool:
                     ),
                 )
             )
+        if status["omitted_worker_count"]:
+            lines.append(
+                "  + %d worker(s) omitted by the configured status page limit"
+                % status["omitted_worker_count"]
+            )
         return tuple(lines)
+
+
+def configure_typed_pool(pool: OllamaWorkerPool) -> None:
+    """Bind compatibility lookup to the pool owned by the typed application."""
+    import sonder_runtime.adapters.inference.ollama_endpoint as ollama_endpoint
+
+    global _configured_pool
+    if type(pool) is not OllamaWorkerPool:
+        raise ValueError("exact typed application pool required")
+    with ollama_endpoint._configuration_lock:
+        primary = ollama_endpoint._configured_endpoint
+    with _configuration_lock:
+        origins = pool.configured_origins
+        if (type(primary) is not str or type(_configured_workers) is not tuple
+                or type(origins) is not tuple or not origins
+                or any(type(origin) is not str for origin in (*origins, *_configured_workers))
+                or origins != (ollama_policy.normalize(primary).rstrip("/"), *_configured_workers)):
+            raise ValueError("application pool does not match typed configured origins")
+        _configured_pool = (origins[0], pool)
 
 
 def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
@@ -1233,6 +1907,10 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
     logger.info(f"building Ollama worker pool from environment, primary_origin={primary_origin!r}")
     env = os.environ if environment is None else environment
     with _configuration_lock:
+        if environment is None and _configured_pool is not None:
+            if ollama_policy.normalize(primary_origin).rstrip("/") != _configured_pool[0]:
+                raise ValueError("primary differs from the composed typed pool")
+            return _configured_pool[1]
         typed_workers = _configured_workers
         typed_allow_remote = _configured_allow_remote
         typed_trusted_origins = _configured_trusted_origins
@@ -1241,14 +1919,61 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
         typed_admission = _configured_admission_timeout_ms
         typed_ttl = _configured_capability_ttl_seconds
         typed_probe = _configured_probe_timeout_ms
+        typed_max_inflight = _configured_max_inflight
+        typed_queue_depth = _configured_queue_depth
+        typed_max_workers = _configured_max_workers
+        typed_probe_parallelism = _configured_probe_parallelism
+        typed_probe_batch_size = _configured_probe_batch_size
+        typed_status_page_size = _configured_status_page_size
     use_typed = environment is None and typed_workers is not None and typed_allow_remote is not None
+    max_workers = (
+        typed_max_workers if use_typed and typed_max_workers is not None
+        else _positive_int(
+            env,
+            "SONDER_OLLAMA_POOL_MAX_WORKERS",
+            _DEFAULT_MAX_WORKERS,
+            maximum=_MAX_POOL_WORKERS,
+        )
+    )
+    probe_parallelism = (
+        typed_probe_parallelism
+        if use_typed and typed_probe_parallelism is not None
+        else _positive_int(
+            env,
+            "SONDER_OLLAMA_WORKER_PROBE_PARALLELISM",
+            _DEFAULT_CAPABILITY_PROBE_PARALLELISM,
+            maximum=_MAX_CAPABILITY_PROBE_PARALLELISM,
+        )
+    )
+    probe_batch_size = (
+        typed_probe_batch_size
+        if use_typed and typed_probe_batch_size is not None
+        else _positive_int(
+            env,
+            "SONDER_OLLAMA_WORKER_PROBE_BATCH_SIZE",
+            _DEFAULT_CAPABILITY_PROBE_BATCH_SIZE,
+            maximum=_MAX_CAPABILITY_PROBE_BATCH_SIZE,
+        )
+    )
+    status_page_size = (
+        typed_status_page_size
+        if use_typed and typed_status_page_size is not None
+        else _positive_int(
+            env,
+            "SONDER_OLLAMA_WORKER_STATUS_PAGE_SIZE",
+            _DEFAULT_STATUS_PAGE_SIZE,
+            maximum=_MAX_STATUS_PAGE_SIZE,
+        )
+    )
     if use_typed:
         worker_origins = typed_workers
         allow_remote = typed_allow_remote
         trusted_origins = typed_trusted_origins or ()
         logger.debug(f"from_environment: using typed config, workers={len(worker_origins)}, allow_remote={allow_remote}")
     else:
-        worker_origins = parse_worker_origins(env.get("SONDER_OLLAMA_WORKERS"))
+        worker_origins = parse_worker_origins(
+            env.get("SONDER_OLLAMA_WORKERS"), max_workers=max_workers,
+        )
         allow_remote = str(env.get("SONDER_ALLOW_REMOTE_OLLAMA", "")).strip().lower() in {
             "1", "true", "yes", "on",
         }
@@ -1293,13 +2018,23 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
         trusted_origins=trusted_origins,
         failure_threshold=failure_threshold,
         cooldown_seconds=cooldown,
-        max_inflight_per_worker=_positive_int(
-            env, "SONDER_OLLAMA_WORKER_MAX_INFLIGHT", _DEFAULT_MAX_INFLIGHT,
-            maximum=_MAX_INFLIGHT_PER_WORKER,
+        max_workers=max_workers,
+        capability_probe_parallelism=probe_parallelism,
+        capability_probe_batch_size=probe_batch_size,
+        status_page_size=status_page_size,
+        max_inflight_per_worker=(
+            typed_max_inflight if use_typed and typed_max_inflight is not None
+            else _positive_int(
+                env, "SONDER_OLLAMA_WORKER_MAX_INFLIGHT", _DEFAULT_MAX_INFLIGHT,
+                maximum=_MAX_INFLIGHT_PER_WORKER,
+            )
         ),
-        queue_depth=_positive_int(
-            env, "SONDER_OLLAMA_WORKER_QUEUE_DEPTH", _DEFAULT_QUEUE_DEPTH,
-            maximum=_MAX_QUEUE_DEPTH,
+        queue_depth=(
+            typed_queue_depth if use_typed and typed_queue_depth is not None
+            else _positive_int(
+                env, "SONDER_OLLAMA_WORKER_QUEUE_DEPTH", _DEFAULT_QUEUE_DEPTH,
+                maximum=_MAX_QUEUE_DEPTH,
+            )
         ),
         admission_timeout_seconds=admission_ms / 1000.0,
         capability_ttl_seconds=(
@@ -1328,6 +2063,7 @@ __all__ = [
     "WorkerPoolUnavailable",
     "WorkerSnapshot",
     "configure_typed_workers",
+    "configure_typed_pool",
     "from_environment",
     "has_configured_remote_workers",
     "parse_worker_origins",

@@ -1,3 +1,4 @@
+import 'account_session.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
@@ -5,6 +6,7 @@ import 'dart:math';
 import 'package:http/http.dart' as http;
 
 import 'models.dart';
+import 'agent_lanes.dart';
 
 /// Return the catalog spelling of a saved model selector when it still exists.
 ///
@@ -758,7 +760,105 @@ class PermissionMode {
 /// with an optional `Authorization: Bearer <key>` header when the host
 /// enabled auth. This mirrors sonder_client.py, but for a GUI.
 class SonderApi {
+  Future<Map<String, dynamic>> _agentRequest(
+    String path, {
+    Map<String, String>? query,
+    Map<String, dynamic>? body,
+  }) async {
+    final uri = _uri('/v1/agent-lanes$path').replace(queryParameters: query);
+    final response = await (body == null
+            ? _requestGet(uri, headers: _headers())
+            : _requestPost(uri, headers: _headers(), body: jsonEncode(body)))
+        .timeout(const Duration(seconds: 35));
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw _responseException(
+        response,
+        'Could not load agent conversations (HTTP ${response.statusCode}).',
+      );
+    }
+    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    if (decoded is! Map<String, dynamic>) {
+      throw SonderException('Invalid agent conversation response.');
+    }
+    return decoded;
+  }
+
+  Future<AgentLanePage> agentLanes({
+    int cursor = 0,
+    String? parentSessionId,
+  }) async =>
+      AgentLanePage.fromJson(
+        await _agentRequest(
+          '',
+          query: {
+            'cursor': '$cursor',
+            'limit': '50',
+            if (parentSessionId != null) 'parent_session_id': parentSessionId,
+          },
+        ),
+      );
+  Future<AgentSnapshot> agentInspect(
+    String id, {
+    int cursor = 0,
+    bool wait = false,
+  }) async =>
+      AgentSnapshot.fromJson(
+        await _agentRequest(
+          '/${Uri.encodeComponent(id)}${wait ? '/wait' : ''}',
+          query: {
+            'cursor': '$cursor',
+            'limit': '100',
+            if (wait) 'timeout_seconds': '25',
+          },
+        ),
+      );
+  Future<AgentReceipt> agentCommand(
+    String id,
+    String action, {
+    required String commandId,
+    String? content,
+  }) async {
+    if (!const {'messages', 'interrupt', 'resume', 'cancel'}.contains(action)) {
+      throw ArgumentError.value(action);
+    }
+    return AgentReceipt.fromJson(
+      await _agentRequest(
+        '/${Uri.encodeComponent(id)}/$action',
+        body: {
+          'command_id': commandId,
+          if (content != null) 'content': content,
+        },
+      ),
+    );
+  }
+
+  Future<AgentReportPage> agentReports(
+    String parentSessionId, {
+    int cursor = 0,
+  }) async =>
+      AgentReportPage.fromJson(
+        await _agentRequest(
+          '/reports',
+          query: {
+            'parent_session_id': parentSessionId,
+            'cursor': '$cursor',
+            'limit': '50',
+          },
+        ),
+      );
+  Future<AgentReceipt> agentAcknowledge(
+    String id, {
+    required String commandId,
+  }) async =>
+      AgentReceipt.fromJson(
+        await _agentRequest(
+          '/reports/${Uri.encodeComponent(id)}/ack',
+          body: {'command_id': commandId},
+        ),
+      );
+
   final String baseUrl; // e.g. https://sonder.example.com
+  final AccountSession? accountSession;
   final String apiKey; // empty when the server has auth disabled
   final String localFallbackUrl;
 
@@ -767,6 +867,7 @@ class SonderApi {
   SonderApi({
     required this.baseUrl,
     this.apiKey = '',
+    this.accountSession,
     this.localFallbackUrl = 'http://127.0.0.1:11435',
   });
 
@@ -852,9 +953,9 @@ class SonderApi {
         'success,message,country,country_code,region,region_code,city,'
         'timezone';
     try {
-      final response = await http
-          .get(Uri.parse('https://ipwho.is/?fields=$fields'))
-          .timeout(const Duration(seconds: 10));
+      final response =
+          await _requestGet(Uri.parse('https://ipwho.is/?fields=$fields'))
+              .timeout(const Duration(seconds: 10));
       if (response.statusCode != 200) return null;
       final decoded = jsonDecode(utf8.decode(response.bodyBytes));
       if (decoded is! Map<String, dynamic> || decoded['success'] == false) {
@@ -897,6 +998,9 @@ class SonderApi {
     if (key.trim().isNotEmpty) {
       h['Authorization'] = 'Bearer ${key.trim()}';
     }
+    if (keyOverride == null && accountSession?.matches(baseUrl) == true) {
+      h['X-Sonder-Account-Token'] = accountSession!.token;
+    }
     return h;
   }
 
@@ -917,8 +1021,7 @@ class SonderApi {
   Future<List<String>> listModels() async {
     late http.Response resp;
     try {
-      resp = await http
-          .get(_uri('/v1/models'), headers: _headers())
+      resp = await _requestGet(_uri('/v1/models'), headers: _headers())
           .timeout(const Duration(seconds: 15));
     } catch (e) {
       // A silent local retry made connection tests authenticate a different
@@ -949,8 +1052,7 @@ class SonderApi {
   Future<SystemInfo> systemInfo() async {
     late http.Response resp;
     try {
-      resp = await http
-          .get(_uri('/v1/sonder/status'), headers: _headers())
+      resp = await _requestGet(_uri('/v1/sonder/status'), headers: _headers())
           .timeout(const Duration(seconds: 20));
     } catch (e) {
       // Status must stay bound to the configured host; otherwise polling can
@@ -972,6 +1074,31 @@ class SonderApi {
     }
   }
 
+  Future<OllamaPoolPage> ollamaPoolAdminStatus({
+    bool refresh = false,
+    String cursor = '',
+    int pageSize = 32,
+  }) async {
+    final response = await _requestPost(
+      _uri('/v1/sonder/ollama-pool'),
+      headers: _headers(),
+      body: jsonEncode(
+          {'refresh': refresh, 'cursor': cursor, 'page_size': pageSize}),
+    ).timeout(const Duration(seconds: 60));
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      throw SonderException('Administrator authorization is required.');
+    }
+    if (response.statusCode != 200) {
+      throw SonderException(
+          'Worker page unavailable. Inspect the first page again.');
+    }
+    if (response.bodyBytes.length > 65536) {
+      throw SonderException('Worker page exceeds the response limit.');
+    }
+    return OllamaPoolPage.fromJson(
+        jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>);
+  }
+
   /// Durable update state for the System page (SPEC-4 section 14).
   ///
   /// Admin-only on the server; a non-admin key gets 403 and the UI simply
@@ -979,8 +1106,8 @@ class SonderApi {
   Future<UpdateStatus?> fetchUpdateStatus() async {
     late http.Response resp;
     try {
-      resp = await http
-          .get(_uri('/v1/admin/updates/status'), headers: _headers())
+      resp = await _requestGet(_uri('/v1/admin/updates/status'),
+              headers: _headers())
           .timeout(const Duration(seconds: 15));
     } catch (e) {
       throw SonderException('Cannot reach server: $e');
@@ -1010,8 +1137,7 @@ class SonderApi {
   Future<ExtensionRegistryStatus?> fetchExtensionRegistry() async {
     late http.Response resp;
     try {
-      resp = await http
-          .get(_uri('/v1/extensions'), headers: _headers())
+      resp = await _requestGet(_uri('/v1/extensions'), headers: _headers())
           .timeout(const Duration(seconds: 15));
     } catch (e) {
       throw SonderException('Cannot reach server: $e');
@@ -1040,8 +1166,7 @@ class SonderApi {
   Future<CommandCatalog> fetchCommands() async {
     late http.Response resp;
     try {
-      resp = await http
-          .get(_uri('/v1/commands'), headers: _headers())
+      resp = await _requestGet(_uri('/v1/commands'), headers: _headers())
           .timeout(const Duration(seconds: 15));
     } catch (e) {
       throw SonderException('Cannot reach server: $e');
@@ -1075,8 +1200,7 @@ class SonderApi {
         .replace(queryParameters: {'q': q, 'limit': '$limit'});
     late http.Response resp;
     try {
-      resp = await http
-          .get(uri, headers: _headers())
+      resp = await _requestGet(uri, headers: _headers())
           .timeout(const Duration(seconds: 10));
     } catch (e) {
       throw SonderException('Cannot reach server: $e');
@@ -1108,8 +1232,7 @@ class SonderApi {
         _uri('/v1/commands/help').replace(queryParameters: {'topic': topic});
     late http.Response resp;
     try {
-      resp = await http
-          .get(uri, headers: _headers())
+      resp = await _requestGet(uri, headers: _headers())
           .timeout(const Duration(seconds: 15));
     } catch (e) {
       throw SonderException('Cannot reach server: $e');
@@ -1139,8 +1262,7 @@ class SonderApi {
   Future<PermissionMode?> fetchPermissionMode() async {
     late http.Response resp;
     try {
-      resp = await http
-          .get(_uri('/v1/permission-mode'), headers: _headers())
+      resp = await _requestGet(_uri('/v1/permission-mode'), headers: _headers())
           .timeout(const Duration(seconds: 10));
     } catch (e) {
       throw SonderException('Cannot reach server: $e');
@@ -1171,13 +1293,11 @@ class SonderApi {
     }
     late http.Response resp;
     try {
-      resp = await http
-          .post(
-            _uri('/v1/permission-mode'),
-            headers: _headers(),
-            body: jsonEncode({'mode': wanted}),
-          )
-          .timeout(const Duration(seconds: 10));
+      resp = await _requestPost(
+        _uri('/v1/permission-mode'),
+        headers: _headers(),
+        body: jsonEncode({'mode': wanted}),
+      ).timeout(const Duration(seconds: 10));
     } catch (e) {
       throw SonderException('Cannot reach server: $e');
     }
@@ -1278,7 +1398,7 @@ class SonderApi {
 
     late http.Response resp;
     String warning = '';
-    final client = http.Client();
+    final client = _NoRedirectClient(http.Client());
     _chatClient = client;
     try {
       resp = await client
@@ -1374,26 +1494,44 @@ class SonderApi {
     }
   }
 
+  Future<void> logout() async {
+    if (accountSession?.matches(baseUrl) != true) {
+      throw SonderException('No account session for this server.');
+    }
+    try {
+      final response = await _requestPost(_uri('/v1/sonder/logout'),
+              headers: _headers(), body: '{}')
+          .timeout(const Duration(seconds: 20));
+      if (response.statusCode != 200 ||
+          jsonDecode(response.body)['ok'] != true) {
+        throw SonderException(
+            'Account revocation was not confirmed. Retry sign out.');
+      }
+    } catch (_) {
+      throw SonderException(
+          'Account revocation was not confirmed. Retry sign out.');
+    }
+  }
+
   Future<String> register(String username, String password) async {
     return _accountAction('/v1/sonder/register', username, password);
   }
 
   Future<String> login(String username, String password) async {
+    serverOrigin(baseUrl);
     late http.Response resp;
     try {
-      resp = await http
-          .post(
-            _uri('/v1/sonder/login'),
-            headers: _headers(),
-            body: jsonEncode({'username': username, 'password': password}),
-          )
-          .timeout(const Duration(seconds: 20));
+      resp = await _requestPost(
+        _uri('/v1/sonder/login'),
+        headers: _headers(),
+        body: jsonEncode({'username': username, 'password': password}),
+      ).timeout(const Duration(seconds: 20));
     } catch (e) {
-      throw SonderException('Login failed: $e');
+      throw SonderException('Login could not be completed.');
     }
     final obj = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
     if (resp.statusCode != 200 || obj['ok'] != true) {
-      throw SonderException(obj['message']?.toString() ?? 'Login failed.');
+      throw SonderException('Login was not accepted.');
     }
     return obj['token']?.toString() ?? '';
   }
@@ -1403,17 +1541,16 @@ class SonderApi {
     String username,
     String password,
   ) async {
+    serverOrigin(baseUrl);
     late http.Response resp;
     try {
-      resp = await http
-          .post(
-            _uri(path),
-            headers: _headers(),
-            body: jsonEncode({'username': username, 'password': password}),
-          )
-          .timeout(const Duration(seconds: 20));
+      resp = await _requestPost(
+        _uri(path),
+        headers: _headers(),
+        body: jsonEncode({'username': username, 'password': password}),
+      ).timeout(const Duration(seconds: 20));
     } catch (e) {
-      throw SonderException('Account request failed: $e');
+      throw SonderException('Account request could not be completed.');
     }
     final obj = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
     if (resp.statusCode != 200 || obj['ok'] != true) {
@@ -1513,6 +1650,8 @@ class SystemInfo {
   final String improvements;
   final String dbPath;
   final String stateHome;
+  final DeploymentInfo? deployment;
+  final OperationalCapabilitiesInfo? operationalCapabilities;
   final ContextHealth? context;
   final AgentStatus? agents;
   final AutopilotStatus? autopilot;
@@ -1532,6 +1671,8 @@ class SystemInfo {
     required this.improvements,
     required this.dbPath,
     required this.stateHome,
+    this.deployment,
+    this.operationalCapabilities,
     required this.context,
     required this.agents,
     required this.autopilot,
@@ -1557,6 +1698,17 @@ class SystemInfo {
       improvements: json['improvements']?.toString() ?? '',
       dbPath: json['db_path']?.toString() ?? '',
       stateHome: json['state_home']?.toString() ?? '',
+      deployment: json['deployment'] is Map<String, dynamic>
+          ? DeploymentInfo.fromJson(
+              json['deployment'] as Map<String, dynamic>,
+            )
+          : null,
+      operationalCapabilities:
+          json['operational_capabilities'] is Map<String, dynamic>
+              ? OperationalCapabilitiesInfo.fromJson(
+                  json['operational_capabilities'] as Map<String, dynamic>,
+                )
+              : null,
       context: json['context'] is Map<String, dynamic>
           ? ContextHealth.fromJson(json['context'] as Map<String, dynamic>)
           : null,
@@ -1602,6 +1754,377 @@ class SystemInfo {
 
   String get executionSummary =>
       execution?.summary ?? 'lanes unknown | agents unknown';
+}
+
+/// A single deployment capability as reported by the runtime.
+///
+/// Availability is deliberately kept separate from the explanation. A
+/// configured peer or preferred primary is not evidence that promotion,
+/// fencing, or replication is actually available.
+class DeploymentCapabilityInfo {
+  final bool available;
+  final String reason;
+
+  const DeploymentCapabilityInfo({
+    required this.available,
+    required this.reason,
+  });
+
+  factory DeploymentCapabilityInfo.fromJson(Map<String, dynamic> json) {
+    return DeploymentCapabilityInfo(
+      available: _asBool(json['available']),
+      reason: json['reason']?.toString() ?? '',
+    );
+  }
+}
+
+class RecoveryPostureInfo {
+  final bool automaticTakeoverAvailable;
+  final bool automaticFailbackAvailable;
+  final bool independentWitnessRequired;
+  final String reason;
+
+  const RecoveryPostureInfo({
+    required this.automaticTakeoverAvailable,
+    required this.automaticFailbackAvailable,
+    required this.independentWitnessRequired,
+    required this.reason,
+  });
+
+  factory RecoveryPostureInfo.fromJson(Map<String, dynamic> json) {
+    return RecoveryPostureInfo(
+      automaticTakeoverAvailable: _asBool(
+        json['automatic_takeover_available'],
+      ),
+      automaticFailbackAvailable: _asBool(
+        json['automatic_failback_available'],
+      ),
+      independentWitnessRequired: _asBool(
+        json['independent_witness_required'],
+      ),
+      reason: json['reason']?.toString() ?? '',
+    );
+  }
+
+  String get summary {
+    if (automaticTakeoverAvailable || automaticFailbackAvailable) {
+      return 'Automatic recovery availability is reported above.';
+    }
+    return independentWitnessRequired
+        ? 'Automatic takeover and failback unavailable; independent witness required.'
+        : 'Automatic takeover and failback unavailable.';
+  }
+}
+
+class DeploymentInfo {
+  final String profile;
+  final String profileId;
+  final String localNode;
+  final List<String> configuredMembers;
+  final String preferredPrimary;
+  final String controlStateScope;
+  final bool preferenceConfersAuthority;
+  final String partitionPolicy;
+  final Map<String, DeploymentCapabilityInfo> capabilities;
+  final RecoveryPostureInfo? recoveryPosture;
+
+  const DeploymentInfo({
+    required this.profile,
+    required this.profileId,
+    required this.localNode,
+    required this.configuredMembers,
+    required this.preferredPrimary,
+    required this.controlStateScope,
+    required this.preferenceConfersAuthority,
+    required this.partitionPolicy,
+    required this.capabilities,
+    this.recoveryPosture,
+  });
+
+  factory DeploymentInfo.fromJson(Map<String, dynamic> json) {
+    final rawCapabilities = json['capabilities'];
+    final capabilities = <String, DeploymentCapabilityInfo>{};
+    if (rawCapabilities is Map) {
+      for (final entry in rawCapabilities.entries) {
+        if (entry.value is Map) {
+          capabilities[entry.key.toString()] =
+              DeploymentCapabilityInfo.fromJson(
+            Map<String, dynamic>.from(entry.value as Map),
+          );
+        }
+      }
+    }
+    final members = (json['configured_members'] as List? ?? const [])
+        .map((value) => value.toString())
+        .where((value) => value.isNotEmpty)
+        .toList(growable: false);
+    return DeploymentInfo(
+      profile: json['profile']?.toString() ?? '',
+      profileId: json['profile_id']?.toString() ?? '',
+      localNode: json['local_node']?.toString() ?? '',
+      configuredMembers: members,
+      preferredPrimary: json['preferred_primary']?.toString() ?? '',
+      controlStateScope: json['control_state_scope']?.toString() ?? '',
+      preferenceConfersAuthority: _asBool(
+        json['preference_confers_authority'],
+      ),
+      partitionPolicy: json['partition_policy']?.toString() ?? '',
+      capabilities: Map.unmodifiable(capabilities),
+      recoveryPosture: json['recovery_posture'] is Map
+          ? RecoveryPostureInfo.fromJson(
+              Map<String, dynamic>.from(json['recovery_posture'] as Map),
+            )
+          : null,
+    );
+  }
+
+  DeploymentCapabilityInfo capability(String name) =>
+      capabilities[name] ??
+      const DeploymentCapabilityInfo(
+        available: false,
+        reason: 'The runtime did not report this capability.',
+      );
+
+  String get displayProfile {
+    final normalized = profileId.trim().toLowerCase();
+    if (normalized == 'single-pc') return 'Single PC';
+    if (normalized == 'two-pc') return 'Two PC';
+    if (profile.trim().isNotEmpty) return profile;
+    return 'Unknown';
+  }
+
+  String get membersLabel => configuredMembers.isEmpty
+      ? 'None reported'
+      : configuredMembers.join(', ');
+}
+
+/// Read-only distributed capability projection from the runtime status API.
+///
+/// Each capability carries its own availability and reason. A pool can route
+/// requests while model sharding and automatic migration remain unavailable.
+class OperationalCapabilityInfo {
+  final bool available;
+  final String reason;
+
+  const OperationalCapabilityInfo({
+    required this.available,
+    required this.reason,
+  });
+
+  factory OperationalCapabilityInfo.fromJson(Map<String, dynamic> json) {
+    return OperationalCapabilityInfo(
+      available: _asBool(json['available']),
+      reason: json['reason']?.toString() ?? '',
+    );
+  }
+}
+
+class OperationalCapabilitiesInfo {
+  final int schemaVersion;
+  final String localNode;
+  final int configuredPeerCount;
+  final bool remoteConfigured;
+  final OperationalCapabilityInfo managedAppWork;
+  final int workerCount;
+  final int healthyWorkerCount;
+  final int remoteWorkerCount;
+  final int poolSchemaVersion;
+  final int eligibleWorkerCount;
+  final int availableCapacity;
+  final int queueWaiting;
+  final int queueLimit;
+  final String membershipMode;
+  final String membershipState;
+  final OperationalCapabilityInfo requestLevelPooling;
+  final OperationalCapabilityInfo modelSharding;
+  final OperationalCapabilityInfo wholeJobPlacement;
+  final OperationalCapabilityInfo indefiniteScale;
+  final OperationalCapabilityInfo memoryReplicationTransport;
+  final OperationalCapabilityInfo artifactTransferTransport;
+  final OperationalCapabilityInfo automaticMemoryMigration;
+  final OperationalCapabilityInfo automaticArtifactMigration;
+  final bool automaticTakeoverAvailable;
+  final bool automaticFailbackAvailable;
+
+  const OperationalCapabilitiesInfo({
+    required this.schemaVersion,
+    required this.localNode,
+    required this.configuredPeerCount,
+    required this.remoteConfigured,
+    required this.managedAppWork,
+    required this.workerCount,
+    required this.healthyWorkerCount,
+    required this.remoteWorkerCount,
+    this.poolSchemaVersion = 1,
+    this.eligibleWorkerCount = 0,
+    this.availableCapacity = 0,
+    this.queueWaiting = 0,
+    this.queueLimit = 0,
+    this.membershipMode = 'unknown',
+    this.membershipState = 'unknown',
+    required this.requestLevelPooling,
+    required this.modelSharding,
+    required this.wholeJobPlacement,
+    required this.indefiniteScale,
+    required this.memoryReplicationTransport,
+    required this.artifactTransferTransport,
+    required this.automaticMemoryMigration,
+    required this.automaticArtifactMigration,
+    required this.automaticTakeoverAvailable,
+    required this.automaticFailbackAvailable,
+  });
+
+  factory OperationalCapabilitiesInfo.fromJson(Map<String, dynamic> json) {
+    Map<String, dynamic> section(String key) {
+      final value = json[key];
+      return value is Map<String, dynamic> ? value : const <String, dynamic>{};
+    }
+
+    OperationalCapabilityInfo capability(
+      Map<String, dynamic> owner,
+      String key,
+    ) {
+      final value = owner[key];
+      return value is Map<String, dynamic>
+          ? OperationalCapabilityInfo.fromJson(value)
+          : const OperationalCapabilityInfo(
+              available: false,
+              reason: 'The runtime did not report this capability.',
+            );
+    }
+
+    final inference = section('inference');
+    final compute = section('compute');
+    final mobility = section('mobility');
+    final control = section('control');
+    // The pool is nested under inference; keep malformed responses bounded.
+    final rawPool = inference['pool'];
+    final poolMap = rawPool is Map
+        ? Map<String, dynamic>.from(rawPool)
+        : const <String, dynamic>{};
+    final rawMembershipState = poolMap['membership_state'];
+    final membershipMode = poolMap['membership_mode'] == 'static' ||
+            poolMap['membership_mode'] == 'external'
+        ? poolMap['membership_mode'] as String
+        // Older status payloads had only the static marker. Preserve that
+        // compatible, bounded interpretation without accepting arbitrary text.
+        : rawMembershipState == 'static'
+            ? 'static'
+            : 'unknown';
+    final membershipState =
+        membershipMode == 'static' && rawMembershipState == 'static'
+            ? 'static'
+            : membershipMode == 'external' &&
+                    (rawMembershipState == 'unrefreshed' ||
+                        rawMembershipState == 'current' ||
+                        rawMembershipState == 'stale_or_partial')
+                ? rawMembershipState as String
+                : 'unknown';
+    return OperationalCapabilitiesInfo(
+      schemaVersion: _asInt(json['schema_version']),
+      localNode: compute['local_node']?.toString() ?? '',
+      configuredPeerCount: _asInt(compute['configured_peer_count']),
+      remoteConfigured: _asBool(compute['remote_enabled']),
+      managedAppWork: capability(control, 'managed_app_work'),
+      workerCount: _asInt(poolMap['worker_count']),
+      healthyWorkerCount: _asInt(poolMap['healthy_worker_count']),
+      remoteWorkerCount: _asInt(poolMap['remote_worker_count']),
+      poolSchemaVersion: poolMap['schema_version'] == 2 ? 2 : 1,
+      eligibleWorkerCount: _asInt(poolMap['eligible_worker_count']),
+      availableCapacity: _asInt(poolMap['available_capacity']),
+      queueWaiting: _asInt(
+          (poolMap['queue'] is Map ? poolMap['queue'] : const {})['waiting']),
+      queueLimit: _asInt(
+          (poolMap['queue'] is Map ? poolMap['queue'] : const {})['limit']),
+      membershipMode: membershipMode,
+      membershipState: membershipState,
+      requestLevelPooling: capability(inference, 'request_level_pooling'),
+      modelSharding: capability(inference, 'model_sharding'),
+      wholeJobPlacement: capability(compute, 'whole_job_placement'),
+      indefiniteScale: capability(compute, 'indefinite_scale'),
+      memoryReplicationTransport:
+          capability(mobility, 'memory_replication_transport'),
+      artifactTransferTransport:
+          capability(mobility, 'artifact_transfer_transport'),
+      automaticMemoryMigration:
+          capability(mobility, 'automatic_memory_migration'),
+      automaticArtifactMigration:
+          capability(mobility, 'automatic_artifact_migration'),
+      automaticTakeoverAvailable:
+          _asBool(mobility['automatic_takeover_available']),
+      automaticFailbackAvailable:
+          _asBool(mobility['automatic_failback_available']),
+    );
+  }
+
+  String get workerSummary {
+    if (workerCount <= 0) return 'No inference workers reported';
+    if (poolSchemaVersion == 2)
+      return '$eligibleWorkerCount/$workerCount eligible workers';
+    return '$healthyWorkerCount/$workerCount healthy workers';
+  }
+
+  String get poolCapacitySummary =>
+      '$availableCapacity available slots; queue $queueWaiting/$queueLimit; ${membershipMode == 'external' ? '$membershipMode/$membershipState' : membershipState}';
+}
+
+class OllamaPoolWorker {
+  final String origin;
+  final String state;
+  final int modelCount;
+  final List<String> modelPreview;
+  final String errorCategory;
+
+  OllamaPoolWorker.fromJson(Map<String, dynamic> json)
+      : origin = _poolText(json['origin'], 256),
+        state = _poolText(json['state'], 32),
+        modelCount = _asInt(json['model_count']).clamp(0, 2048),
+        modelPreview = (json['model_preview'] is List
+                ? json['model_preview'] as List
+                : const [])
+            .take(8)
+            .whereType<String>()
+            .map((value) => _poolText(value, 128))
+            .toList(growable: false),
+        errorCategory = const {
+          'none',
+          'transport',
+          'timeout',
+          'protocol',
+          'capability',
+          'authorization',
+          'unknown'
+        }.contains(json['error_category'])
+            ? json['error_category'] as String
+            : 'unknown';
+}
+
+String _poolText(Object? value, int limit) {
+  if (value is! String) return '';
+  return value.length <= limit ? value : value.substring(0, limit);
+}
+
+class OllamaPoolPage {
+  final int schemaVersion;
+  final int workerCount;
+  final int omittedWorkerCount;
+  final bool complete;
+  final String nextCursor;
+  final List<OllamaPoolWorker> workers;
+
+  OllamaPoolPage.fromJson(Map<String, dynamic> json)
+      : schemaVersion = json['schema_version'] == 2 ? 2 : 1,
+        workerCount = _asInt(json['worker_count']).clamp(0, 256),
+        omittedWorkerCount = _asInt(json['omitted_worker_count']).clamp(0, 256),
+        complete = json['complete'] == true,
+        nextCursor = _poolText(json['next_cursor'], 128),
+        workers = (json['schema_version'] == 2 && json['workers'] is List
+                ? json['workers'] as List
+                : const [])
+            .take(128)
+            .whereType<Map<String, dynamic>>()
+            .map(OllamaPoolWorker.fromJson)
+            .toList(growable: false);
 }
 
 class ExecutionStatus {
@@ -3015,5 +3538,38 @@ class SystemModel {
       id: json['id']?.toString() ?? '',
       ownedBy: json['owned_by']?.toString() ?? '',
     );
+  }
+}
+
+class _NoRedirectClient extends http.BaseClient {
+  final http.Client inner;
+  _NoRedirectClient(this.inner);
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) {
+    request.followRedirects = false;
+    return inner.send(request);
+  }
+
+  @override
+  void close() => inner.close();
+}
+
+Future<http.Response> _requestGet(Uri uri,
+    {Map<String, String>? headers}) async {
+  final client = _NoRedirectClient(http.Client());
+  try {
+    return await client.get(uri, headers: headers);
+  } finally {
+    client.close();
+  }
+}
+
+Future<http.Response> _requestPost(Uri uri,
+    {Map<String, String>? headers, Object? body}) async {
+  final client = _NoRedirectClient(http.Client());
+  try {
+    return await client.post(uri, headers: headers, body: body);
+  } finally {
+    client.close();
   }
 }

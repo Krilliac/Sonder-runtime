@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from ...domain.common.events import DomainEvent
 
@@ -48,10 +48,12 @@ class SessionRepairPlan:
 
 
 _IN_FLIGHT = {
+    "provider.requested": "provider response or failure",
     "model.requested": "model completion or failure",
     "model.started": "model completion or failure",
     "tool.requested": "tool completion or failure",
     "tool.started": "tool completion or failure",
+    "tool.call": "tool completion or failure",
     "approval.requested": "approval grant or denial",
     "compaction.started": "compaction completion",
     "retrieval.requested": "retrieval completion",
@@ -59,6 +61,7 @@ _IN_FLIGHT = {
     "subagent.started": "subagent completion or failure",
 }
 _TERMINALS = {
+    "provider.responded", "provider.failed",
     "model.completed", "model.failed", "tool.completed", "tool.failed",
     "approval.granted", "approval.denied", "compaction.completed",
     "retrieval.completed", "subagent.completed", "subagent.failed",
@@ -67,15 +70,22 @@ _TERMINALS = {
 }
 
 
-def _operation_key(event: DomainEvent) -> tuple[str, str]:
-    payload = event.payload if isinstance(event.payload, dict) else {}
+def _payload_text(event: DomainEvent, field: str) -> str | None:
+    payload = event.payload if isinstance(event.payload, Mapping) else {}
+    value = payload.get(field)
+    return value if isinstance(value, str) else None
+
+
+def _operation_key(event: DomainEvent) -> tuple[str, str | None, str | None]:
+    """Keep explicit operation identities separate from legacy event identities."""
+    family = event.event_type.split(".", 1)[0]
     field = {
-        "model": "request_id", "tool": "call_id", "approval": "approval_id",
+        "provider": "attempt_id", "model": "request_id", "tool": "call_id", "approval": "approval_id",
         "compaction": "compaction_id", "retrieval": "retrieval_id",
         "subagent": "subagent_id",
-    }.get(event.event_type.split(".", 1)[0], "")
-    value = payload.get(field) if field else None
-    return event.event_type.split(".", 1)[0], value if isinstance(value, str) else event.id
+    }.get(family, "")
+    value = _payload_text(event, field) if field else None
+    return family, value, event.id if value is None else None
 
 
 def _ordered_prefix(events: tuple[object, ...]) -> tuple[str, tuple[DomainEvent, ...], list[RepairIssue]]:
@@ -109,19 +119,32 @@ def diagnose_session_tail(events: Iterable[DomainEvent]) -> SessionTailDiagnosis
     raw = tuple(events)
     session_id, accepted, issues = _ordered_prefix(raw)
     boundary = len(accepted)
-    pending: dict[tuple[str, str], int] = {}
+    pending: dict[tuple[str, str | None, str | None], int] = {}
     for index, event in enumerate(accepted):
+        if event.event_type in {"provider.requested", "provider.responded", "provider.failed"} and not _payload_text(event, "attempt_id"):
+            issues.append(RepairIssue(event.sequence, "invalid_attempt_identity", "provider evidence requires an attempt identity"))
+            continue
         if event.event_type in _IN_FLIGHT:
             pending.setdefault(_operation_key(event), index)
         elif event.event_type in _TERMINALS:
             key = _operation_key(event)
-            if key in pending:
-                pending.pop(key)
-            else:
-                family = key[0]
-                fallback = next((candidate for candidate in pending if candidate[0] == family), None)
-                if fallback is not None:
-                    pending.pop(fallback)
+            if key[1] is not None:
+                if key in pending:
+                    pending.pop(key)
+                else:
+                    issues.append(RepairIssue(event.sequence, "unmatched_terminal", "terminal identity has no pending operation"))
+                continue
+
+            turn_id = _payload_text(event, "turn_id")
+            candidates = [
+                candidate for candidate, pending_index in pending.items()
+                if candidate[0] == key[0]
+                and (turn_id is None or _payload_text(accepted[pending_index], "turn_id") == turn_id)
+            ]
+            if len(candidates) == 1:
+                pending.pop(candidates[0])
+            elif len(candidates) > 1:
+                issues.append(RepairIssue(event.sequence, "ambiguous_terminal", "terminal identity is ambiguous"))
     if not issues and pending:
         first = min(pending.values())
         boundary = first

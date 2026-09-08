@@ -132,7 +132,28 @@ class DurableJobRegistry:
         self._outputs: dict[str, BoundedOutputBuffer] = {}
         self._processes: dict[str, tuple[int, int | None]] = {}
         self._metadata: dict[str, dict[str, Any]] = {}
+        self._cleanup_evidence = {}
         self._lock = RLock()
+
+    def _record_process_cleanup(self, job_id, proof):
+        """Provider-internal evidence sink; never exposed as a job mutation tool."""
+        import json
+
+        with self._lock:
+            record = self.poll(job_id)
+            _validate_cleanup_evidence(record, proof)
+            encoded = json.dumps(proof, sort_keys=True, separators=(",", ":"))
+            previous = self._cleanup_evidence.get(job_id)
+            if previous is not None and previous != encoded:
+                raise ValueError("immutable process cleanup evidence conflict")
+            self._cleanup_evidence[job_id] = encoded
+
+    def process_cleanup_proof(self, job_id):
+        import json
+
+        with self._lock:
+            value = self._cleanup_evidence.get(job_id)
+            return None if value is None else json.loads(value)
 
     def start(
         self,
@@ -467,3 +488,20 @@ __all__ = [
     "DurableJobRegistry", "DurableJobView", "JobRecoveryReport", "ProcessTreeCleanupContract",
     "ProcessTreeCleanupReceipt", "ProcessTreeCleanupRequest",
 ]
+
+
+def _validate_cleanup_evidence(record, proof):
+    if (
+        not record.is_terminal
+        or proof.get("job_id") != record.identity.job_id
+        or proof.get("job_revision") != record.revision
+        or proof.get("parent_session_id") != record.identity.parent_session_id
+        or proof.get("status") != record.status.value
+        or not all(
+            proof.get(k) is True
+            for k in ("process_exited", "containment_empty", "resources_released")
+        )
+    ):
+        raise ValueError(
+            "process cleanup evidence does not match terminal job identity"
+        )

@@ -23,6 +23,10 @@ class CapturingGateway:
         self.calls.append((connection, task, options))
         return ["task -> exact result"]
 
+    def recall_page(self, connection, task, **options):
+        self.calls.append((connection, task, options))
+        return "explained page"
+
 
 def test_service_forwards_the_complete_typed_contract_without_reformatting():
     gateway = CapturingGateway()
@@ -43,6 +47,19 @@ def test_service_forwards_the_complete_typed_contract_without_reformatting():
         "exclude_session": "session", "project": "project",
         "include_all_projects": True, "embedding_model": "embed-v2",
         "embedding_revision": "revision",
+    })]
+
+
+def test_service_exposes_explained_recall_as_an_additive_contract():
+    gateway = CapturingGateway()
+    service = RecallService(gateway)
+
+    assert service.retrieve_page("connection", "task", k=1) == "explained page"
+    assert gateway.calls == [("connection", "task", {
+        "k": 1, "embed_fn": None, "min_sim": None, "qv": None,
+        "exclude_session": None, "project": None,
+        "include_all_projects": False, "embedding_model": None,
+        "embedding_revision": None, "candidate_cursor": None,
     })]
 
 
@@ -122,6 +139,20 @@ def test_legacy_gateway_resolves_live_adapter_module(monkeypatch):
 
     assert LegacyRecallGateway().recall("connection", "task", k=4) == ["live result"]
     assert calls == [("connection", "task", {"k": 4})]
+
+
+def test_legacy_gateway_forwards_explained_recall_without_changing_list_path(monkeypatch):
+    calls = []
+    replacement = SimpleNamespace(
+        recall=lambda *_args, **_kwargs: ["legacy"],
+        recall_page=lambda connection, task, **options: calls.append(
+            (connection, task, options)
+        ) or "explained",
+    )
+    monkeypatch.setitem(sys.modules, "sonder_runtime.adapters.recall", replacement)
+
+    assert LegacyRecallGateway().recall_page("connection", "task", k=2) == "explained"
+    assert calls == [("connection", "task", {"k": 2})]
 
 
 def test_server_live_reload_updates_adapter(monkeypatch):

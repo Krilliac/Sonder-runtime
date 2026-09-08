@@ -169,3 +169,76 @@ def test_memory_limit_requires_positive_integer():
         ExtensionHostLimits(memory_limit_bytes=0)
     with pytest.raises(ValueError, match="memory_limit_bytes"):
         ExtensionHostLimits(memory_limit_bytes=True)
+
+
+def test_windows_token_requires_observed_empty_job_before_close(monkeypatch):
+    from sonder_runtime.adapters.extensions.memory_limits import _WindowsJobToken
+
+    calls = []
+    observations = iter([(2, (258,)), (0, (0,))])
+    token = _WindowsJobToken(
+        123,
+        lambda handle: calls.append("close") or True,
+        terminate=lambda handle: calls.append("terminate") or True,
+    )
+    monkeypatch.setattr(token, "_observe", lambda: next(observations))
+    proof = token.quiesce(force=True)
+    assert proof.complete and proof.forced
+    assert calls == ["terminate"]
+    token.close()
+    assert calls == ["terminate", "close"]
+
+
+def test_windows_token_query_failure_does_not_claim_empty_or_drop_handle(monkeypatch):
+    from sonder_runtime.adapters.extensions.memory_limits import _WindowsJobToken
+
+    def failed_query():
+        raise ExtensionMemoryLimitError("query failure")
+
+    token = _WindowsJobToken(
+        123,
+        lambda handle: True,
+        terminate=lambda handle: True,
+    )
+    monkeypatch.setattr(token, "_observe", failed_query)
+    assert not token.quiesce(force=True).complete
+    with pytest.raises(Exception, match="quiescent"):
+        token.close()
+    assert token._handle == 123
+
+
+@pytest.mark.parametrize("user_scope", [True, False])
+def test_isolated_scope_bus_context_is_wrapper_only(user_scope):
+    limiter = NativeExtensionMemoryLimiter(
+        os_module=SimpleNamespace(name="posix", environ={"DBUS_SESSION_BUS_ADDRESS": "malicious", "SECRET": "private"}, geteuid=lambda: 1000),
+        platform_name="posix", which=lambda name: f"/usr/bin/{name}", systemd_user=user_scope)
+    argv = ("/usr/bin/python3", "-c", "pass")
+    prepared = limiter.prepare_process_job("isolated", argv, 1024 * 1024, 3)
+    environment = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+    result = limiter.isolated_process_environment(prepared, argv, environment)
+    assert result.token is prepared.token
+    if not user_scope:
+        assert result.argv[-7:] == ("/usr/bin/env", "-u", "INVOCATION_ID", "--", *argv)
+        assert result.launch_options["env"] == environment
+        return
+    assert result.argv[-9:] == ("/usr/bin/env", "-u", "DBUS_SESSION_BUS_ADDRESS", "-u", "INVOCATION_ID", "--", *argv)
+    wrapper = result.launch_options["env"]
+    assert "SECRET" not in wrapper
+    assert "malicious" not in result.argv
+    assert environment == {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+    if user_scope:
+        assert wrapper["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/run/user/1000/bus"
+    else:
+        assert wrapper == environment
+
+
+@pytest.mark.parametrize("key", ["LD_PRELOAD", "LD_LIBRARY_PATH", "GLIBC_TUNABLES", "SECRET_TOKEN", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "SYSTEMD_UNIT_PATH"])
+def test_isolated_scope_rejects_unsupported_environment_without_values_in_argv(key):
+    limiter = NativeExtensionMemoryLimiter(
+        os_module=SimpleNamespace(name="posix", environ={}, geteuid=lambda: 1000),
+        platform_name="posix", which=lambda name: f"/usr/bin/{name}")
+    argv = ("/usr/bin/python3", "-c", "pass")
+    prepared = limiter.prepare_process_job("unsupported-env", argv, 1024 * 1024, 3)
+    with pytest.raises(ExtensionMemoryLimitUnsupported, match="unsupported keys"):
+        limiter.isolated_process_environment(prepared, argv, {key: "secret-must-never-enter-argv"})
+    assert "secret-must-never-enter-argv" not in " ".join(prepared.argv)

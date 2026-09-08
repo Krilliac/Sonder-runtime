@@ -1567,6 +1567,6 @@
   "schema": "sonder-requirement-status-v1",
   "source": {
     "ledger_sha256": "b2bef7e4ecb2e0574d28a0f30c7392774c18a5b2639e97dbdc5ba0ee9ed0aa6e",
-    "spec_sha256": "7bf3ddbb6698370481dac9658f7e20c4f56587a794afe04e5c636973ef991a6d"
+    "spec_sha256": "6c15145add472ed9944b5777e7b46fe8c76d7b80d487ac1d2536f5165d3ce790"
   }
 }

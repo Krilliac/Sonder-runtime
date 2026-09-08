@@ -14,6 +14,8 @@ MigrationRequired.
 """
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 import hashlib
 import json
 import shutil
@@ -54,7 +56,7 @@ def check_epoch(db_path: Path) -> int | None:
     """Return the current epoch, or None if no epoch table exists."""
     if not db_path.exists():
         return None
-    conn = sqlite3.connect(str(db_path))
+    conn = owned_sqlite_connect(str(db_path))
     try:
         tables = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
@@ -265,7 +267,7 @@ def run_bridge_migration(
     tasks_migrated = 0
     memory_db_path = sonder_home / "memory.db"
     if memory_db_path.exists():
-        memory_conn = sqlite3.connect(str(memory_db_path))
+        memory_conn = owned_sqlite_connect(str(memory_db_path))
         active_connections.append(memory_conn)
         tasks_migrated = _migrate_tasks(memory_conn, automation_conn)
         # Add outbox to memory.db
@@ -282,7 +284,7 @@ def run_bridge_migration(
         # Fresh installs still participate in the epoch contract.  There is
         # no legacy data to copy, but the final runtime requires every domain
         # database in the adopted set to carry an explicit epoch marker.
-        memory_conn = sqlite3.connect(str(memory_db_path))
+        memory_conn = owned_sqlite_connect(str(memory_db_path))
         active_connections.append(memory_conn)
         memory_epoch(memory_conn)
         _stamp_epoch(memory_conn, version)
@@ -292,7 +294,7 @@ def run_bridge_migration(
     # Add outbox to updates.db if it exists
     updates_db_path = sonder_home / "updates.db"
     if updates_db_path.exists():
-        updates_conn = sqlite3.connect(str(updates_db_path))
+        updates_conn = owned_sqlite_connect(str(updates_db_path))
         active_connections.append(updates_conn)
         add_outbox_to_updates_db(updates_conn)
         updates_epoch(updates_conn)

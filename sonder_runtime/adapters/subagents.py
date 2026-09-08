@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import replace
+import uuid
 
 from ..application.context import OperationContext
 from ..application.ports.subagents import (
@@ -52,15 +54,19 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
     def __init__(
         self,
         service: DurableContinuationService,
-        runner: Runner,
+        runner: Runner | None = None,
         *,
+        runner_factory: Callable[[SubagentRequest, OperationContext], Runner] | None = None,
         provider: str = "local",
     ) -> None:
         if provider != "local":
             raise UnsupportedSubagentProvider(
                 f"unsupported subagent provider: {provider!r}"
             )
+        if runner is None and runner_factory is None:
+            raise InvalidSubagentRequest("local provider requires a concrete runner")
         super().__init__(service, runner)
+        self._runner_factory = runner_factory
         self._local_service = service
 
     def register_root(self, root_id: str, budget: SubagentBudget) -> None:
@@ -69,7 +75,10 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
     def spawn(self, request: SubagentRequest, context: OperationContext) -> SubagentHandle:
         """Apply request ceilings around the concrete local runner."""
         self._local_service.require_parent(request.parent_id)
+        if request.child_id is None:
+            request = replace(request, child_id="child-" + uuid.uuid4().hex)
         budget = request.budget
+        runner = self._runner_factory(request, context) if self._runner_factory else self._runner
 
         def bounded_runner(state, save, control):
             steps = 0
@@ -81,7 +90,7 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
                     raise TimeoutError("subagent step budget exhausted")
                 return save(next_state, cursor)
 
-            output = self._runner(state, bounded_save, control)
+            output = runner(state, bounded_save, control)
             if not isinstance(output, str):
                 raise InvalidSubagentRequest("local runner output must be text")
             # Four UTF-8 characters is a conservative local token estimate;

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from sonder_runtime.platform.config import Secrets
+from sonder_runtime.platform.config import Secrets, SonderConfig
+from sonder_runtime.platform.control_state_rehearsal_config import (
+    ControlStateRehearsalConfig,
+)
 from sonder_runtime.platform.secret_presence import redact_presence
 
 
@@ -19,4 +22,79 @@ def test_config_secret_redaction_uses_platform_policy():
         "api_key": "[set]",
         "auth_secret": "[set]",
         "backup_key_file": "[unset]",
+        "artifact_transfer_key": "[unset]",
+        "memory_replication_key": "[unset]",
+        "memory_replication_state_integrity_key": "[unset]",
+        "artifact_mobility_peer_key": "[unset]",
+        "membership_client_cert_file": "[unset]",
+        "membership_client_key_file": "[unset]",
+        "control_state_rehearsal_key": "[unset]",
     }
+
+
+def test_secrets_repr_omits_all_secret_values():
+    secrets = Secrets(
+        api_key="private-api-key",
+        auth_secret="private-auth-secret",
+        artifact_transfer_key="private-artifact-key",
+        memory_replication_key="private-memory-key",
+        memory_replication_state_integrity_key="private-memory-state-key",
+        artifact_mobility_peer_key="private-mobility-key",
+        membership_client_cert_file="C:/private/client.pem",
+        membership_client_key_file="C:/private/client.key",
+        backup_key_file="C:/private/backup.key",
+    )
+
+    rendered_secrets = repr(secrets)
+    rendered_config = repr(SonderConfig(secrets=secrets))
+
+    for value in (
+        "private-api-key",
+        "private-auth-secret",
+        "private-artifact-key",
+        "private-memory-key",
+        "private-memory-state-key",
+        "private-mobility-key",
+        "C:/private/client.pem",
+        "C:/private/client.key",
+        "C:/private/backup.key",
+    ):
+        assert value not in rendered_secrets
+        assert value not in rendered_config
+
+
+def test_backup_key_file_redacts_to_presence_in_direct_and_config_projection():
+    backup_key_file = "C:/private/backup.key"
+    secrets = Secrets(backup_key_file=backup_key_file)
+
+    direct = secrets.as_redacted_dict()
+    nested = SonderConfig(secrets=secrets).as_redacted_dict()["secrets"]
+
+    assert direct["backup_key_file"] == "[set]"
+    assert nested["backup_key_file"] == "[set]"
+    assert backup_key_file not in repr(direct)
+    assert backup_key_file not in repr(nested)
+
+
+def test_artifact_transfer_secret_redacts_to_presence_only():
+    redacted = Secrets(artifact_transfer_key="private-artifact-test-key").as_redacted_dict()
+    assert redacted["artifact_transfer_key"] == "[set]"
+    assert "private-artifact-test-key" not in str(redacted)
+
+
+def test_artifact_mobility_secret_redacts_to_presence_only():
+    redacted = Secrets(
+        artifact_mobility_peer_key="private-mobility-test-key"
+    ).as_redacted_dict()
+    assert redacted["artifact_mobility_peer_key"] == "[set]"
+    assert "private-mobility-test-key" not in str(redacted)
+
+
+def test_rehearsal_origin_redacts_to_presence_only():
+    origin = "https://private-control.example.test:9443"
+    redacted = SonderConfig(
+        control_state_rehearsal=ControlStateRehearsalConfig(origin=origin)
+    ).as_redacted_dict()
+
+    assert redacted["control_state_rehearsal"]["origin"] == "[set]"
+    assert origin not in str(redacted)

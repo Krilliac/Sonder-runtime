@@ -255,6 +255,41 @@
       "tool": "admin_whoami"
     },
     {
+      "aliases": [],
+      "category": "system",
+      "name": "/agent_lane",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "action",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": null,
+          "name": "payload",
+          "required": true,
+          "type": "obj"
+        },
+        {
+          "default": "",
+          "name": "parent_session_id",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "parent_token",
+          "required": false,
+          "type": "str"
+        }
+      ],
+      "risk": "execution",
+      "summary": "Control independent agent conversations with scoped parent authority.",
+      "tool": "agent_lane"
+    },
+    {
       "aliases": [
         "/cancelagents"
       ],
@@ -647,6 +682,16 @@
       "risk": "safe",
       "summary": "Prevalidate and list a bounded ZIP/TAR without extracting it.",
       "tool": "archive_list"
+    },
+    {
+      "aliases": [],
+      "category": "system",
+      "name": "/artifact-mobility",
+      "native": true,
+      "params": [],
+      "risk": "safe",
+      "summary": "",
+      "tool": ""
     },
     {
       "aliases": [],
@@ -4273,6 +4318,18 @@
       "tool": "json_patch"
     },
     {
+      "aliases": [
+        "/recover"
+      ],
+      "category": "system",
+      "name": "/lanes",
+      "native": true,
+      "params": [],
+      "risk": "execution",
+      "summary": "inspect and control durable agent conversations",
+      "tool": ""
+    },
+    {
       "aliases": [],
       "category": "memory",
       "name": "/learn_from_example",
@@ -5327,11 +5384,52 @@
           "name": "schema",
           "required": false,
           "type": "str"
+        },
+        {
+          "default": null,
+          "name": "session",
+          "required": false,
+          "type": "str"
         }
       ],
       "risk": "ask",
       "summary": "Offload a self-contained subtask to a local or Ollama-cloud model.",
       "tool": "offload"
+    },
+    {
+      "aliases": [],
+      "category": "system",
+      "name": "/ollama_pool_admin_status",
+      "native": false,
+      "params": [
+        {
+          "default": "",
+          "name": "token",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": false,
+          "name": "refresh",
+          "required": false,
+          "type": "bool"
+        },
+        {
+          "default": "",
+          "name": "cursor",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": 32,
+          "name": "page_size",
+          "required": false,
+          "type": "int"
+        }
+      ],
+      "risk": "ask",
+      "summary": "Read an administrator-only cached worker page; optionally refresh one bounded stale batch.",
+      "tool": "ollama_pool_admin_status"
     },
     {
       "aliases": [],
@@ -5983,6 +6081,16 @@
       "risk": "ask",
       "summary": "Feed a real-world outcome back into sonder's learning loop.",
       "tool": "record_outcome"
+    },
+    {
+      "aliases": [],
+      "category": "system",
+      "name": "/recovery",
+      "native": true,
+      "params": [],
+      "risk": "safe",
+      "summary": "show the configured control-state recovery posture (read-only)",
+      "tool": ""
     },
     {
       "aliases": [],
@@ -7360,7 +7468,7 @@
       "native": false,
       "params": [],
       "risk": "safe",
-      "summary": "Report Sonder Runtime's local-model state and current VRAM residency.",
+      "summary": "Report cached inference capacity without contacting Ollama workers.",
       "tool": "status"
     },
     {
@@ -8504,6 +8612,12 @@
           "name": "allow_location",
           "required": false,
           "type": "bool"
+        },
+        {
+          "default": null,
+          "name": "session",
+          "required": false,
+          "type": "str"
         }
       ],
       "risk": "ask",
@@ -8551,6 +8665,12 @@
           "name": "allow_location",
           "required": false,
           "type": "bool"
+        },
+        {
+          "default": null,
+          "name": "session",
+          "required": false,
+          "type": "str"
         }
       ],
       "risk": "ask",
@@ -8925,6 +9045,12 @@
     },
     {
       "default": null,
+      "field": "deployment",
+      "section": "root",
+      "type": "DeploymentConfig"
+    },
+    {
+      "default": null,
       "field": "features",
       "section": "root",
       "type": "FeaturesConfig"
@@ -8960,6 +9086,60 @@
       "type": "tuple[str, ...]"
     },
     {
+      "default": [],
+      "field": "private_source_paths",
+      "section": "root",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": null,
+      "field": "artifact_transfer",
+      "section": "root",
+      "type": "ArtifactTransferConfig"
+    },
+    {
+      "default": null,
+      "field": "memory_replication",
+      "section": "root",
+      "type": "MemoryReplicationConfig"
+    },
+    {
+      "default": null,
+      "field": "artifact_mobility_source",
+      "section": "root",
+      "type": "ArtifactMobilitySourceConfig"
+    },
+    {
+      "default": null,
+      "field": "artifact_mobility",
+      "section": "root",
+      "type": "ArtifactMobilityConfig"
+    },
+    {
+      "default": null,
+      "field": "child_storage",
+      "section": "root",
+      "type": "ChildStorageConfig"
+    },
+    {
+      "default": null,
+      "field": "app_control",
+      "section": "root",
+      "type": "AppControlConfig"
+    },
+    {
+      "default": null,
+      "field": "membership",
+      "section": "root",
+      "type": "MembershipConfig"
+    },
+    {
+      "default": null,
+      "field": "control_state_rehearsal",
+      "section": "root",
+      "type": "ControlStateRehearsalConfig"
+    },
+    {
       "default": "[redacted]",
       "field": "api_key",
       "section": "secrets",
@@ -8976,6 +9156,342 @@
       "field": "backup_key_file",
       "section": "secrets",
       "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "artifact_transfer_key",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "memory_replication_key",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "memory_replication_state_integrity_key",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "artifact_mobility_peer_key",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "membership_client_cert_file",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "membership_client_key_file",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "control_state_rehearsal_key",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": false,
+      "field": "enabled",
+      "section": "app_control",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": "",
+      "field": "runtime_id",
+      "section": "app_control",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "catalog_file",
+      "section": "app_control",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": false,
+      "field": "allow_numeric_loopback_native",
+      "section": "app_control",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": [],
+      "field": "app_origins",
+      "section": "app_control",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": [],
+      "field": "proxy_cidrs",
+      "section": "app_control",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": false,
+      "field": "proxy_only_backend",
+      "section": "app_control",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": 900,
+      "field": "session_ttl_seconds",
+      "section": "app_control",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 3600,
+      "field": "binding_ttl_seconds",
+      "section": "app_control",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 4,
+      "field": "account_session_cap",
+      "section": "app_control",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 64,
+      "field": "global_session_cap",
+      "section": "app_control",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 16,
+      "field": "account_binding_cap",
+      "section": "app_control",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 256,
+      "field": "global_binding_cap",
+      "section": "app_control",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 4096,
+      "field": "command_cap",
+      "section": "app_control",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 100,
+      "field": "page_cap",
+      "section": "app_control",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": false,
+      "field": "enabled",
+      "section": "artifact_mobility",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": "",
+      "field": "destination_label",
+      "section": "artifact_mobility",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "destination_origin",
+      "section": "artifact_mobility",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "destination_tls_certificate_sha256",
+      "section": "artifact_mobility",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "expected_recipient_attestation_sha256",
+      "section": "artifact_mobility",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "destination_credential_id",
+      "section": "artifact_mobility",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": 268435456,
+      "field": "max_object_bytes",
+      "section": "artifact_mobility",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 30,
+      "field": "attempt_timeout_seconds",
+      "section": "artifact_mobility",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 90,
+      "field": "attempt_lease_seconds",
+      "section": "artifact_mobility",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 604800,
+      "field": "receipt_ttl_seconds",
+      "section": "artifact_mobility",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 64,
+      "field": "max_live_operations",
+      "section": "artifact_mobility",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": false,
+      "field": "enabled",
+      "section": "artifact_mobility_source",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": "",
+      "field": "store_dir",
+      "section": "artifact_mobility_source",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "principal_id",
+      "section": "artifact_mobility_source",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "project_id",
+      "section": "artifact_mobility_source",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "source_owner_id",
+      "section": "artifact_mobility_source",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": 268435456,
+      "field": "max_object_bytes",
+      "section": "artifact_mobility_source",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 2147483648,
+      "field": "total_bytes",
+      "section": "artifact_mobility_source",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 86400,
+      "field": "ttl_seconds",
+      "section": "artifact_mobility_source",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": false,
+      "field": "enabled",
+      "section": "artifact_transfer",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": "",
+      "field": "store_dir",
+      "section": "artifact_transfer",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "principal_id",
+      "section": "artifact_transfer",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "project_id",
+      "section": "artifact_transfer",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "peer_node_id",
+      "section": "artifact_transfer",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "receiver_identity_id",
+      "section": "artifact_transfer",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "grant_id",
+      "section": "artifact_transfer",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": 1,
+      "field": "grant_revision",
+      "section": "artifact_transfer",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 0,
+      "field": "expires_at",
+      "section": "artifact_transfer",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": false,
+      "field": "can_read",
+      "section": "artifact_transfer",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": false,
+      "field": "can_write",
+      "section": "artifact_transfer",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": 268435456,
+      "field": "max_object_bytes",
+      "section": "artifact_transfer",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 1073741824,
+      "field": "quota_bytes",
+      "section": "artifact_transfer",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 2147483648,
+      "field": "total_bytes",
+      "section": "artifact_transfer",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 3600,
+      "field": "ttl_seconds",
+      "section": "artifact_transfer",
+      "type": "<class 'int'>"
     },
     {
       "default": true,
@@ -9050,6 +9566,126 @@
       "type": "int"
     },
     {
+      "default": "sqlite",
+      "field": "backend",
+      "section": "child_storage",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "binding_file",
+      "section": "child_storage",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "owner_id",
+      "section": "child_storage",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "primary",
+      "field": "durability",
+      "section": "child_storage",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "required_standby",
+      "section": "child_storage",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": 2,
+      "field": "pool_size",
+      "section": "child_storage",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 5,
+      "field": "operation_timeout_seconds",
+      "section": "child_storage",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 1,
+      "field": "cancel_timeout_seconds",
+      "section": "child_storage",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": false,
+      "field": "enabled",
+      "section": "control_state_rehearsal",
+      "type": "bool"
+    },
+    {
+      "default": "",
+      "field": "cluster_id",
+      "section": "control_state_rehearsal",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "node_id",
+      "section": "control_state_rehearsal",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "witness_id",
+      "section": "control_state_rehearsal",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "provider_id",
+      "section": "control_state_rehearsal",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "origin",
+      "section": "control_state_rehearsal",
+      "type": "str"
+    },
+    {
+      "default": 5,
+      "field": "timeout_seconds",
+      "section": "control_state_rehearsal",
+      "type": "int"
+    },
+    {
+      "default": false,
+      "field": "allow_insecure_loopback",
+      "section": "control_state_rehearsal",
+      "type": "bool"
+    },
+    {
+      "default": "single-host",
+      "field": "profile",
+      "section": "deployment",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "preferred_primary",
+      "section": "deployment",
+      "type": "str"
+    },
+    {
+      "default": false,
+      "field": "automatic_takeover",
+      "section": "deployment",
+      "type": "bool"
+    },
+    {
+      "default": false,
+      "field": "automatic_failback",
+      "section": "deployment",
+      "type": "bool"
+    },
+    {
       "default": false,
       "field": "cloud",
       "section": "features",
@@ -9108,6 +9744,168 @@
       "field": "location_consent",
       "section": "features",
       "type": "bool"
+    },
+    {
+      "default": "static",
+      "field": "mode",
+      "section": "membership",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "cluster_id",
+      "section": "membership",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "issuer_id",
+      "section": "membership",
+      "type": "str"
+    },
+    {
+      "default": 0,
+      "field": "protocol_version",
+      "section": "membership",
+      "type": "int"
+    },
+    {
+      "default": "",
+      "field": "source_origin",
+      "section": "membership",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "source_tls_server_name",
+      "section": "membership",
+      "type": "str"
+    },
+    {
+      "default": [],
+      "field": "source_allowed_cidrs",
+      "section": "membership",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": "",
+      "field": "trust_anchor_file",
+      "section": "membership",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "signature_public_key_file",
+      "section": "membership",
+      "type": "str"
+    },
+    {
+      "default": 0,
+      "field": "refresh_interval_seconds",
+      "section": "membership",
+      "type": "int"
+    },
+    {
+      "default": 0,
+      "field": "snapshot_max_advertisements",
+      "section": "membership",
+      "type": "int"
+    },
+    {
+      "default": 0,
+      "field": "snapshot_max_bytes",
+      "section": "membership",
+      "type": "int"
+    },
+    {
+      "default": null,
+      "field": "local_fallback",
+      "section": "membership",
+      "type": "bool | None"
+    },
+    {
+      "default": [],
+      "field": "member_policies",
+      "section": "membership",
+      "type": "tuple[MembershipEndpointPolicy, ...]"
+    },
+    {
+      "default": false,
+      "field": "enabled",
+      "section": "memory_replication",
+      "type": "bool"
+    },
+    {
+      "default": "",
+      "field": "local_node_id",
+      "section": "memory_replication",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "project_scope",
+      "section": "memory_replication",
+      "type": "str"
+    },
+    {
+      "default": false,
+      "field": "receiver_enabled",
+      "section": "memory_replication",
+      "type": "bool"
+    },
+    {
+      "default": [],
+      "field": "accepted_source_ids",
+      "section": "memory_replication",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": [],
+      "field": "peers",
+      "section": "memory_replication",
+      "type": "tuple[MemoryReplicationPeerConfig, ...]"
+    },
+    {
+      "default": 5,
+      "field": "request_timeout_seconds",
+      "section": "memory_replication",
+      "type": "int"
+    },
+    {
+      "default": 8388608,
+      "field": "max_request_bytes",
+      "section": "memory_replication",
+      "type": "int"
+    },
+    {
+      "default": 65536,
+      "field": "max_response_bytes",
+      "section": "memory_replication",
+      "type": "int"
+    },
+    {
+      "default": 256,
+      "field": "max_batch_records",
+      "section": "memory_replication",
+      "type": "int"
+    },
+    {
+      "default": "",
+      "field": "node_id",
+      "section": "memory_replication.peers[]",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "project_scope",
+      "section": "memory_replication.peers[]",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "origin",
+      "section": "memory_replication.peers[]",
+      "type": "str"
     },
     {
       "default": "json",
@@ -9214,6 +10012,30 @@
     {
       "default": 300,
       "field": "request_timeout_seconds",
+      "section": "ollama",
+      "type": "int"
+    },
+    {
+      "default": 16,
+      "field": "worker_pool_max_workers",
+      "section": "ollama",
+      "type": "int"
+    },
+    {
+      "default": 4,
+      "field": "worker_capability_probe_parallelism",
+      "section": "ollama",
+      "type": "int"
+    },
+    {
+      "default": 32,
+      "field": "worker_capability_probe_batch_size",
+      "section": "ollama",
+      "type": "int"
+    },
+    {
+      "default": 32,
+      "field": "worker_status_page_size",
       "section": "ollama",
       "type": "int"
     },
@@ -9347,14 +10169,14 @@
       "type": "int"
     }
   ],
-  "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES",
+  "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
-    "commands": 314,
-    "configuration": 76,
+    "commands": 319,
+    "configuration": 193,
     "events": 43,
-    "tools": 211
+    "tools": 213
   },
-  "digest": "fbf5ece369d8efdfceb74ed5cacdf6841a8a8d30ce94b891f5230fdbc004d685",
+  "digest": "1ae0be88fc00d01bf4ffbfa49900d366c9ecfe8139d15784f2e8da1174adcb77",
   "events": [
     {
       "name": "session.started",
@@ -9825,10 +10647,11 @@
   "schema": "sonder-runtime-document-reference-v1",
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "04be65a053012ceb53a80d7528f0b1c44fd8e3c84f5c4749296e6baf92ae8c3f",
+    "server.py": "1e63754f4d47dcb52ac7e9b3741f00445f6ad9341626f7f449e7716e43f911e1",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
-    "sonder_runtime/platform/config.py": "66eab0b6a4ccb7981242d73ed7eba2198f5cb4f8fbd0d621935e6a73c678ef50"
+    "sonder_runtime/platform/config.py": "1d811a362d2a912a726c98e6bfe2689b1c220c900bd19f82cbbb69f8fe88c055",
+    "sonder_runtime/platform/memory_replication_config.py": "1981bbc57a4e6442fc1b770d9c37cc766c66334089697d762e9b9b7ed578d179"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
   "tools": [
@@ -10021,7 +10844,7 @@
       }
     },
     {
-      "description": "Run a visible local tool-using agent loop with checklist/reporting.",
+      "description": "Run a visible local tool-using agent loop with checklist/reporting.\n\n    ``session`` optionally binds every model decision and format-repair call to\n    one durable session; omitted calls preserve the existing transient agent\n    behavior. ``session=\"none\"`` explicitly disables capture.\n    ",
       "name": "agent",
       "parameters": {
         "properties": {
@@ -10054,6 +10877,18 @@
             "title": "Prompt",
             "type": "string"
           },
+          "session": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session"
+          },
           "tier": {
             "default": "code",
             "title": "Tier",
@@ -10064,6 +10899,39 @@
           "prompt"
         ],
         "title": "agentArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Control independent agent conversations with scoped parent authority.\n\n    Call open_parent with an empty payload first; retain its parent_session_id\n    and parent_token for subsequent commands. Never place the token in tasks,\n    messages or files. Actions also include rotate_parent and revoke_parent.\n    Other actions: spawn, list, inspect, send_message, wait, interrupt, resume,\n    cancel, reports and ack. Existing sessions cannot be claimed by name.\n    ",
+      "name": "agent_lane",
+      "parameters": {
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "parent_session_id": {
+            "default": "",
+            "title": "Parent Session Id",
+            "type": "string"
+          },
+          "parent_token": {
+            "default": "",
+            "title": "Parent Token",
+            "type": "string"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "title": "Payload",
+            "type": "object"
+          }
+        },
+        "required": [
+          "action",
+          "payload"
+        ],
+        "title": "agent_laneArguments",
         "type": "object"
       }
     },
@@ -13928,7 +14796,7 @@
       }
     },
     {
-      "description": "Offload a self-contained subtask to a local or Ollama-cloud model.\n\n    Local aliases (fast/code/general, plus reasoning/vision when the operator\n    binds them) run privately through loopback Ollama by default on CPU or any\n    accelerator Ollama supports; an explicitly opted-in remote OLLAMA_HOST\n    leaves this machine. The learning tiers\n    (SONDER_LEARN_TIERS, default: every configured local tier) participate in the\n    lesson loop: with learn=True (default) the call is captured and the response ends\n    with a '[interaction_id: <id>]' footer you can pass to record_outcome once you know\n    whether it compiled / passed tests, so a good outcome distills a lesson. The local\n    'code' tier is also memory-augmented; cloud tiers answer without augmentation\n    but are still captured \u2014 so a paid frontier model's grounded wins become lessons and\n    fine-tuning data for the local model. 'fast'/'general' (mechanical work) and\n    learn=False run the plain path: no capture, no footer, just text.\n\n    Tiers: fast=3B (default), code=7B coder, general=7B instruct,\n    cloud-code / cloud-general (METERED, prompt leaves this machine).\n    Give a FULLY self-contained prompt (the model can't see this chat or your files).\n\n    schema: optional JSON Schema *as JSON text*, e.g.\n    '{\"type\": \"object\", \"required\": [\"name\"], \"properties\": {\"name\": {\"type\": \"string\"}}}'.\n    Full JSON Schema is accepted and is applied in full by the model's decoder.\n\n    It is then re-checked here, but only PARTIALLY: the in-process check covers\n    \"type\", \"required\", \"properties\" and \"items\". Everything else -- \"enum\",\n    \"minimum\", \"additionalProperties\", \"$ref\", \"oneOf\", and so on -- is\n    constrained during decoding and NOT re-checked. So is any node without an\n    explicit \"type\" (every \"$ref\" node, and \"properties\" written without\n    \"type\": \"object\"), which the check accepts unconditionally.\n\n    What that means for you:\n      - A response failing the re-checked part is REJECTED, with the failing\n        path named. It is never repaired into a passing one and never silently\n        retried.\n      - A response that passes gets back exactly the JSON text, and nothing\n        else, ONLY when the whole schema was re-checkable. Otherwise a\n        '[schema_unverified: <path> (<what went unchecked>)]' line follows the\n        JSON, so partial verification is never handed to you as complete.\n      - Stick to type/required/properties/items if you want the strongest\n        guarantee and clean parseable output.\n\n    Omit schema (the default) and this call behaves exactly as it always has:\n    no format constraint, no checking, raw text back.\n    Small object shapes work far better than deep ones on a 3B/7B local tier.\n    ",
+      "description": "Offload a self-contained subtask to a local or Ollama-cloud model.\n\n    Local aliases (fast/code/general, plus reasoning/vision when the operator\n    binds them) run privately through loopback Ollama by default on CPU or any\n    accelerator Ollama supports; an explicitly opted-in remote OLLAMA_HOST\n    leaves this machine. The learning tiers\n    (SONDER_LEARN_TIERS, default: every configured local tier) participate in the\n    lesson loop: with learn=True (default) the call is captured and the response ends\n    with a '[interaction_id: <id>]' footer you can pass to record_outcome once you know\n    whether it compiled / passed tests, so a good outcome distills a lesson. The local\n    'code' tier is also memory-augmented; cloud tiers answer without augmentation\n    but are still captured \u2014 so a paid frontier model's grounded wins become lessons and\n    fine-tuning data for the local model. 'fast'/'general' (mechanical work) and\n    learn=False run the plain path: no capture, no footer, just text.\n\n    Tiers: fast=3B (default), code=7B coder, general=7B instruct,\n    cloud-code / cloud-general (METERED, prompt leaves this machine).\n    Give a FULLY self-contained prompt (the model can't see this chat or your files).\n\n    schema: optional JSON Schema *as JSON text*, e.g.\n    '{\"type\": \"object\", \"required\": [\"name\"], \"properties\": {\"name\": {\"type\": \"string\"}}}'.\n    Full JSON Schema is accepted and is applied in full by the model's decoder.\n\n    It is then re-checked here, but only PARTIALLY: the in-process check covers\n    \"type\", \"required\", \"properties\" and \"items\". Everything else -- \"enum\",\n    \"minimum\", \"additionalProperties\", \"$ref\", \"oneOf\", and so on -- is\n    constrained during decoding and NOT re-checked. So is any node without an\n    explicit \"type\" (every \"$ref\" node, and \"properties\" written without\n    \"type\": \"object\"), which the check accepts unconditionally.\n\n    What that means for you:\n      - A response failing the re-checked part is REJECTED, with the failing\n        path named. It is never repaired into a passing one and never silently\n        retried.\n      - A response that passes gets back exactly the JSON text, and nothing\n        else, ONLY when the whole schema was re-checkable. Otherwise a\n        '[schema_unverified: <path> (<what went unchecked>)]' line follows the\n        JSON, so partial verification is never handed to you as complete.\n      - Stick to type/required/properties/items if you want the strongest\n        guarantee and clean parseable output.\n\n    Omit schema (the default) and this call behaves exactly as it always has:\n    no format constraint, no checking, raw text back.\n    Small object shapes work far better than deep ones on a 3B/7B local tier.\n\n    session: optional durable session identity. When supplied, the exact\n    model-visible request, effective provider attempts, and accepted response\n    are appended to that session; omitted calls retain the historical one-shot\n    persistence policy. Use ``session=\"none\"`` to explicitly opt out.\n    ",
       "name": "offload",
       "parameters": {
         "properties": {
@@ -13956,6 +14824,18 @@
             "title": "Schema",
             "type": "string"
           },
+          "session": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session"
+          },
           "system": {
             "default": "",
             "title": "System",
@@ -13981,6 +14861,36 @@
           "prompt"
         ],
         "title": "offloadArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Read an administrator-only cached worker page; optionally refresh one bounded stale batch.\n\n    Page size is 1..128 and the full JSON page is at most 65,536 UTF-8 bytes.\n    Remote probes retain configured consent and HTTPS policy. Callers cannot\n    change configured probe batch size or parallelism. Cursors belong to one\n    administrator and roster generation. Local-open direct use is permitted.\n    ",
+      "name": "ollama_pool_admin_status",
+      "parameters": {
+        "properties": {
+          "cursor": {
+            "default": "",
+            "title": "Cursor",
+            "type": "string"
+          },
+          "page_size": {
+            "default": 32,
+            "title": "Page Size",
+            "type": "integer"
+          },
+          "refresh": {
+            "default": false,
+            "title": "Refresh",
+            "type": "boolean"
+          },
+          "token": {
+            "default": "",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "title": "ollama_pool_admin_statusArguments",
         "type": "object"
       }
     },
@@ -15451,7 +16361,7 @@
       }
     },
     {
-      "description": "Report Sonder Runtime's local-model state and current VRAM residency.\n\n    Use this to check whether the GPU is busy before offloading, or to confirm models pulled.\n    ",
+      "description": "Report cached inference capacity without contacting Ollama workers.\n\n    Inventory and residency remain unknown until explicitly inspected. Use\n    ollama_pool_admin_status for authorized cached detail or a bounded refresh.\n    ",
       "name": "status",
       "parameters": {
         "properties": {},
@@ -16303,7 +17213,7 @@
       }
     },
     {
-      "description": "Execute local work with guarded tools, checklist, validation, and report.",
+      "description": "Execute local work with guarded tools, checklist, validation, and report.\n\n    An optional ``session`` carries each model step across retries and tier\n    escalation in one durable transcript.\n    ",
       "name": "workbench_agent",
       "parameters": {
         "properties": {
@@ -16330,6 +17240,18 @@
           "prompt": {
             "title": "Prompt",
             "type": "string"
+          },
+          "session": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session"
           },
           "tier": {
             "default": "auto",

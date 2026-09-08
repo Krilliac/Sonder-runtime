@@ -453,6 +453,15 @@ _READ_ONLY = frozenset({
 # for. The literal is asserted by a test, because it is the only thing that
 # makes ``safe`` true.
 _UNREGISTERED_BRANCH_WORK = {
+    # The scoped console facade gates the immutable prepared command itself.
+    # Declare its work here even though static discovery cannot follow it.
+    "/lanes": "agent_lane",
+    "/recover": "workspace_run",
+    # This command formats an injected deployment-status projection only.  It
+    # does not acquire ownership, contact a peer, or start a model turn, but it
+    # must remain visible to the permission map rather than resolving as an
+    # empty tool set.
+    "/recovery": "recovery",
     "/selfmod": "selfmod",
     "/selfmodify": "selfmod",
     "/mcp": "mcp",

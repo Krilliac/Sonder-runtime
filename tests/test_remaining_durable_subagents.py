@@ -1,8 +1,14 @@
-from threading import Event
+from contextlib import contextmanager
+from threading import Event, Thread
 
 import pytest
 
 from sonder_runtime.application.context import local_owner_context
+from sonder_runtime.application.ports.continuation_mutations import (
+    ContinuationCommitAmbiguous,
+    ContinuationMutationOutcome,
+    prepare_call,
+)
 from sonder_runtime.application.ports.subagents import SubagentBudget, SubagentRequest, SubagentStatus
 from sonder_runtime.application.subagents.continuable import ContinuableCheckpoint
 from sonder_runtime.application.subagents.durable_continuation import (
@@ -94,17 +100,106 @@ def test_durable_cancellation_survives_service_boundary_and_first_reason_wins(tm
     service.close(1)
 
 
-def test_restart_recovery_marks_orphaned_running_child_retryable(tmp_path):
+def test_public_cancellation_settles_a_prior_worker_receipt_before_retry(tmp_path):
+    repository = SQLiteDurableContinuationRepository(tmp_path / "cancel-retry.sqlite")
+    pending = prepare_call(
+        "update",
+        "child-pending",
+        status=SubagentStatus.RUNNING,
+        expected_revision=0,
+    )
+    attempts = []
+
+    def mutate(prepared):
+        attempts.append(prepared)
+        if len(attempts) == 1:
+            raise ContinuationCommitAmbiguous(pending)
+        return ContinuationMutationOutcome("no_change", b"false", None)
+
+    repository.mutate = mutate
+    repository.reconcile = lambda _prepared: None
+
+    assert repository.request_cancel("child-pending", reason="operator stop") is False
+    assert len(attempts) == 2
+    assert attempts[0] == attempts[1]
+
+
+def test_cancellation_waits_for_external_intent_receipt(tmp_path):
+    """A healthy writer may be between intent retention and its receipt."""
+    path = tmp_path / "cancel-race.sqlite"
+    repository = SQLiteDurableContinuationRepository(path)
+    service = DurableContinuationService(repository)
+    started = Event()
+    cancel_seen = Event()
+    allow_finish = Event()
+
+    def wait_for_cancel(_state, _checkpoint, cancel):
+        started.set()
+        while not cancel.cancelled:
+            cancel.wait(.01)
+        cancel_seen.set()
+        assert allow_finish.wait(3)
+        return "must not publish"
+
+    class PausedRepository(SQLiteDurableContinuationRepository):
+        def __init__(self, db_path):
+            self.ready = Event()
+            self.release = Event()
+            self.enabled = False
+            self.calls = 0
+            super().__init__(db_path)
+
+        @contextmanager
+        def _connect(self):
+            with super()._connect() as connection:
+                yield connection
+            if self.enabled:
+                self.calls += 1
+                if self.calls == 1:
+                    self.ready.set()
+                    assert self.release.wait(3)
+
+    handle = service.spawn(
+        _request("child-cancel-race"), _context("cancel-race"), wait_for_cancel
+    )
+    assert started.wait(1)
+    assert service.cancel("child-cancel-race", reason="operator stop")
+    external = PausedRepository(path)
+    external.enabled = True
+    external_done = Event()
+
+    def external_cancel():
+        assert not external.request_cancel("child-cancel-race", reason="later stop")
+        external_done.set()
+
+    writer = Thread(target=external_cancel)
+    writer.start()
+    assert external.ready.wait(1)
+    assert cancel_seen.wait(1)
+    allow_finish.set()
+    external.release.set()
+    assert external_done.wait(3)
+    assert handle.result(3).status is SubagentStatus.CANCELLED
+    assert SQLiteDurableContinuationRepository(path).get(
+        "child-cancel-race"
+    ).cancellation_reason == "operator stop"
+    writer.join(1)
+    assert not writer.is_alive()
+    service.close(1)
+
+
+def test_restart_recovery_requires_cleanup_and_storage_reconciliation(tmp_path):
     repository = SQLiteDurableContinuationRepository(tmp_path / "orphan.sqlite")
     repository.create(DurableChildSession(_request("child-orphan"), ChildSessionLineage("session-parent")))
     running = repository.update("child-orphan", status=SubagentStatus.RUNNING)
     assert running is not None
     service = DurableContinuationService(SQLiteDurableContinuationRepository(tmp_path / "orphan.sqlite"))
-    assert service.recover_after_restart() == ("child-orphan",)
+    from sonder_runtime.application.ports.continuation_mutations import ContinuationCleanupRequired
+    with pytest.raises(ContinuationCleanupRequired):
+        service.recover_after_restart()
     recovered = repository.get("child-orphan")
-    assert recovered and recovered.status is SubagentStatus.FAILED
-    assert recovered.recovery_required
-    assert recovered.result and recovered.result.error and recovered.result.error.code == "interrupted"
+    assert recovered and recovered.status is SubagentStatus.RUNNING
+    assert not recovered.recovery_required and recovered.result is None
 
 
 def test_lineage_rejects_cycles():

@@ -48,6 +48,7 @@ def project_session(events: Iterable[DomainEvent]) -> SessionProjection:
         "tool.call": 0,
         "tool.result": 0,
         "error": 0,
+        "model.failed": 0,
     }
     for event in ordered:
         if event.aggregate_id != session_id:
@@ -73,7 +74,7 @@ def project_session(events: Iterable[DomainEvent]) -> SessionProjection:
         assistant_message_count=counts["model.response"],
         tool_call_count=counts["tool.call"],
         tool_result_count=counts["tool.result"],
-        error_count=counts["error"],
+        error_count=counts["error"] + counts["model.failed"],
         event_count=len(ordered),
         last_sequence=ordered[-1].sequence,
     )

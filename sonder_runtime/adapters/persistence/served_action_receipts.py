@@ -25,6 +25,8 @@ this store from growing without bound:
 """
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 import contextlib
 import os
 import sqlite3
@@ -87,7 +89,7 @@ def _connect() -> sqlite3.Connection:
     with _LOCK:
         if path not in _INITIALIZED:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(path, timeout=5)
+            conn = owned_sqlite_connect(path, timeout=5)
             try:
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.executescript(_SCHEMA)
@@ -108,7 +110,7 @@ def _connect() -> sqlite3.Connection:
                 with contextlib.suppress(OSError):
                     os.chmod(path, 0o600)
             _INITIALIZED.add(path)
-    conn = sqlite3.connect(path, timeout=5)
+    conn = owned_sqlite_connect(path, timeout=5)
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
 

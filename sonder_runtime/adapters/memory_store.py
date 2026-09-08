@@ -1,4 +1,6 @@
 """SQLite-backed memory adapter for the Sonder learning loop. Stdlib only."""
+
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
 import array
 import base64
 from dataclasses import dataclass
@@ -14,6 +16,9 @@ import time
 import sonder_runtime.adapters.process_liveness as process_liveness
 from sonder_runtime.domain.memory import rules as memory_rules
 from sonder_runtime.adapters.persistence.sqlite.outbox import OUTBOX_DDL
+from sonder_runtime.adapters.persistence.sqlite.memory_replication import (
+    MEMORY_REPLICATION_DDL,
+)
 
 
 _ABANDONED_SESSION_CLAIMS_LOCK = globals().get(
@@ -253,9 +258,23 @@ BEFORE DELETE ON refinement_history BEGIN
 END;
 """
 
+# The journal tables live in the same ``memory.db`` as the first supported
+# source mutation set.  That placement is intentional: an authoritative fact
+# state row and the journal evidence must share a single SQLite commit.
+_SCHEMA += MEMORY_REPLICATION_DDL + """
+CREATE TABLE IF NOT EXISTS memory_authoritative_fact_state (
+    project TEXT NOT NULL,
+    fact_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK(version >= 1),
+    tombstoned INTEGER NOT NULL CHECK(tombstoned IN (0, 1)),
+    PRIMARY KEY(project, fact_id)
+);
+"""
+
 
 def connect(path=":memory:", check_same_thread=True):
-    conn = sqlite3.connect(path, check_same_thread=check_same_thread)
+    conn = owned_sqlite_connect(path, check_same_thread=check_same_thread)
     conn.row_factory = sqlite3.Row
     # busy_timeout must be the FIRST statement executed. Setting journal_mode
     # takes a brief exclusive lock, and init_db opens with BEGIN IMMEDIATE --
@@ -3086,7 +3105,8 @@ def _recall_row_bytes(row):
     total = 0
     for key in (
         "id", "task", "response", "session_id", "task_embedding_model",
-        "task_embedding_revision", "project",
+        "task_embedding_revision", "project", "ts", "tier",
+        "outcome_signal", "outcome_source",
     ):
         value = row[key]
         if isinstance(value, str):
@@ -3103,7 +3123,8 @@ def _decode_recall_candidate(row):
     decoded = dict(row)
     for key in (
         "id", "task", "response", "session_id", "task_embedding_model",
-        "task_embedding_revision", "project",
+        "task_embedding_revision", "project", "ts", "tier",
+        "outcome_signal", "outcome_source",
     ):
         value = decoded.get(key)
         if value is None:
@@ -3200,6 +3221,8 @@ def good_interaction_candidate_page(
         "SELECT CAST(i.ts AS BLOB) AS candidate_ts, "
         "CAST(i.id AS BLOB) AS candidate_cursor_id, "
         "CAST(i.id AS BLOB) AS id, "
+        "CAST(i.ts AS BLOB) AS ts, "
+        "CAST(i.tier AS BLOB) AS tier, "
         "CAST(i.task AS BLOB) AS task, "
         "CASE WHEN i.response IS NULL THEN NULL "
         "ELSE CAST(substr(i.response,1,?) AS BLOB) END AS response, "
@@ -3207,7 +3230,16 @@ def good_interaction_candidate_page(
         "CAST(i.task_embedding_model AS BLOB) AS task_embedding_model, "
         "CAST(i.task_embedding_revision AS BLOB) AS task_embedding_revision, "
         "i.task_embedding_dim, CASE WHEN NULLIF(i.project,'') IS NULL "
-        "THEN NULL ELSE CAST(i.project AS BLOB) END AS project "
+        "THEN NULL ELSE CAST(i.project AS BLOB) END AS project, "
+        "(SELECT CAST(good.signal AS BLOB) FROM outcomes good "
+        "WHERE good.interaction_id=i.id ORDER BY good.rowid ASC LIMIT 1) "
+        "AS outcome_signal, "
+        "(SELECT CAST(good.source AS BLOB) FROM outcomes good "
+        "WHERE good.interaction_id=i.id ORDER BY good.rowid ASC LIMIT 1) "
+        "AS outcome_source, "
+        "(SELECT good.reward FROM outcomes good "
+        "WHERE good.interaction_id=i.id ORDER BY good.rowid ASC LIMIT 1) "
+        "AS outcome_reward "
         "FROM interactions i WHERE i.task_embedding IS NOT NULL "
         "AND typeof(i.id)='text' AND length(i.id) BETWEEN 1 AND 256 "
         "AND typeof(i.ts)='text' AND length(i.ts) BETWEEN 1 AND 64 "

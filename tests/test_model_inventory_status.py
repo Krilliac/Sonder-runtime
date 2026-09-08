@@ -1,9 +1,7 @@
-"""Regression tests for the operator model inventory in server.status().
+"""Inventory parsing and residency formatting for explicit operator diagnostics.
 
-The status tool is the surface an operator reaches for when the local model
-stack is misbehaving, so it must tolerate a degraded Ollama-compatible
-endpoint instead of crashing, must not report a broken catalog as an empty
-one, and must actually show the VRAM residency its contract promises.
+Default status is cached and no longer requests or renders live inventory.
+The shared parsing/formatting owners still tolerate malformed provider rows.
 """
 import pytest
 
@@ -22,7 +20,7 @@ def _fake_get(tags=None, ps=None):
     return fake
 
 
-def test_status_tolerates_malformed_rows_and_model_key(monkeypatch):
+def test_inventory_tolerates_malformed_rows_and_model_key(monkeypatch):
     """Junk rows are skipped, valid ones survive, `model` key is honoured."""
     monkeypatch.setattr(
         server,
@@ -42,7 +40,10 @@ def test_status_tolerates_malformed_rows_and_model_key(monkeypatch):
         ),
     )
 
-    result = server.status()
+    tags = server._inventory_rows_policy(server._get("/api/tags"), "/api/tags")
+    ps = server._inventory_rows_policy(server._get("/api/ps"), "/api/ps")
+    result = "\n".join(("Installed/registered models: " + ", ".join(server._inventory_model_names(tags)),
+                        "Resident in Ollama now: " + ", ".join(filter(None, map(server._residency_display, ps)))))
 
     assert "alpha:latest" in result
     assert "beta:latest" in result
@@ -59,30 +60,26 @@ def test_status_tolerates_malformed_rows_and_model_key(monkeypatch):
         {"models": None},
     ],
 )
-def test_status_reports_invalid_catalog_as_error_not_empty(monkeypatch, tags):
+def test_inventory_reports_invalid_catalog_as_error_not_empty(monkeypatch, tags):
     """A wrong-shape payload is an explicit error, never '(none)' installed."""
     monkeypatch.setattr(server, "_get", _fake_get(tags=tags))
 
-    result = server.status()
-
-    assert "ERROR" in result
-    assert "(none)" not in result
+    with pytest.raises(server.ModelCallError):
+        server._inventory_rows_policy(server._get("/api/tags"), "/api/tags")
 
 
-def test_status_reports_invalid_residency_as_error_not_empty(monkeypatch):
+def test_inventory_reports_invalid_residency_as_error_not_empty(monkeypatch):
     monkeypatch.setattr(
         server,
         "_get",
         _fake_get(tags={"models": []}, ps={"models": "garbage"}),
     )
 
-    result = server.status()
-
-    assert "ERROR" in result
-    assert "(none loaded)" not in result
+    with pytest.raises(server.ModelCallError):
+        server._inventory_rows_policy(server._get("/api/ps"), "/api/ps")
 
 
-def test_status_shows_vram_residency_indicators(monkeypatch):
+def test_inventory_shows_vram_residency_indicators(monkeypatch):
     """Resident models expose bounded, content-free VRAM indicators."""
     gib = 2**30
     monkeypatch.setattr(
@@ -101,7 +98,10 @@ def test_status_shows_vram_residency_indicators(monkeypatch):
         ),
     )
 
-    result = server.status()
+    tags = server._inventory_rows_policy(server._get("/api/tags"), "/api/tags")
+    ps = server._inventory_rows_policy(server._get("/api/ps"), "/api/ps")
+    result = "\n".join(("Installed/registered models: " + ", ".join(server._inventory_model_names(tags)),
+                        "Resident in Ollama now: " + ", ".join(filter(None, map(server._residency_display, ps)))))
 
     assert "full:latest (5.0 GiB, 100% GPU)" in result
     assert "spill:latest (4.0 GiB, 50% GPU)" in result
@@ -111,7 +111,7 @@ def test_status_shows_vram_residency_indicators(monkeypatch):
     assert "opaque:latest" in result
 
 
-def test_status_vram_indicator_ignores_malformed_sizes(monkeypatch):
+def test_inventory_vram_indicator_ignores_malformed_sizes(monkeypatch):
     monkeypatch.setattr(
         server,
         "_get",
@@ -132,7 +132,10 @@ def test_status_vram_indicator_ignores_malformed_sizes(monkeypatch):
         ),
     )
 
-    result = server.status()
+    tags = server._inventory_rows_policy(server._get("/api/tags"), "/api/tags")
+    ps = server._inventory_rows_policy(server._get("/api/ps"), "/api/ps")
+    result = "\n".join(("Installed/registered models: " + ", ".join(server._inventory_model_names(tags)),
+                        "Resident in Ollama now: " + ", ".join(filter(None, map(server._residency_display, ps)))))
 
     assert "bool:latest (" not in result
     assert "neg:latest (" not in result
@@ -142,7 +145,7 @@ def test_status_vram_indicator_ignores_malformed_sizes(monkeypatch):
     assert "over:latest (1.0 GiB, 100% GPU)" in result
 
 
-def test_status_deduplicates_installed_names_casefolded(monkeypatch):
+def test_inventory_deduplicates_installed_names_casefolded(monkeypatch):
     monkeypatch.setattr(
         server,
         "_get",
@@ -156,7 +159,10 @@ def test_status_deduplicates_installed_names_casefolded(monkeypatch):
         ),
     )
 
-    result = server.status()
+    tags = server._inventory_rows_policy(server._get("/api/tags"), "/api/tags")
+    ps = server._inventory_rows_policy(server._get("/api/ps"), "/api/ps")
+    result = "\n".join(("Installed/registered models: " + ", ".join(server._inventory_model_names(tags)),
+                        "Resident in Ollama now: " + ", ".join(filter(None, map(server._residency_display, ps)))))
 
     installed_line = next(
         line for line in result.splitlines()

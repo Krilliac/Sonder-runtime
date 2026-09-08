@@ -312,7 +312,9 @@ class ToolGateway:
                     raise Forbidden("tool approval is required")
             self._check_control(request)
             result = self._invoker.invoke(request)
-            self._check_control(request)
+            # The executor returned the terminal outcome of an already admitted
+            # effect. Preserve that truth even if cancellation/deadline arrived
+            # in flight; the next invocation still fails its admission checks.
         except (Cancelled, DeadlineExceeded, Forbidden) as exc:
             # The early exits are outcomes too: publish the receipt that names
             # how the call ended, then let the surface answer its caller.
@@ -354,7 +356,9 @@ class ToolGateway:
             resource=self._resource(request),
             effects=tuple(sorted(request.permission.effects)),
             model=NOT_A_MODEL_CALL,
-            terminal=COMPLETED if result.success else FAILED,
+            terminal=(COMPLETED if result.success else CANCELLED
+                      if result.error_code in {"TEST_CANCELLED", "CANCELLED", "Cancelled"}
+                      else FAILED),
             evidence=safe_evidence if isinstance(safe_evidence, Mapping) else {},
         )
         self._publish(request, receipt)

@@ -1,6 +1,14 @@
 """Compute-fabric application services."""
 
 from .registry import ComputeNodeRegistry
+from .placement_queue import PlacementQueue
+from .deployment_admission import (
+    DeploymentAdmissionReceipt,
+    DeploymentAdmissionService,
+    DeploymentReconciliation,
+    DeploymentReservation,
+    DeploymentResourceRequest,
+)
 from .jobs import (
     ArgumentPolicy,
     ComputeJobWorker,
@@ -18,4 +26,10 @@ __all__ = [
     "RemoteArtifactReceipt",
     "RemoteJobEnvelope",
     "RemoteJobReceipt",
+    "PlacementQueue",
+    "DeploymentAdmissionReceipt",
+    "DeploymentAdmissionService",
+    "DeploymentReconciliation",
+    "DeploymentReservation",
+    "DeploymentResourceRequest",
 ]

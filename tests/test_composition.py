@@ -35,6 +35,16 @@ class _TempPaths:
 
     def __exit__(self, *exc):
         sonder_paths.state_path = self._orig
+        # SQLite transaction context managers do not close cached connections.
+        # Release the test-owned handle before Windows removes its directory.
+        from sonder_runtime.adapters.persistence import composition_store
+        connection = getattr(composition_store._LOCAL, "comp_conn", None)
+        if connection is not None:
+            connection.close()
+            composition_store._LOCAL.comp_conn = None
+            composition_store._LOCAL.comp_path = None
+        import goal_store
+        goal_store.reset_for_tests()
         self._tmpdir.cleanup()
 
 

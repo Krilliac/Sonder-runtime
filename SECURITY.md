@@ -104,6 +104,11 @@ Mitigations that are already in place and worth knowing about:
   paths, emails, credentials, private keys, and tokens are not distilled into
   memory.
 
+The repository also carries a documented historical Git-history privacy gate;
+see [the debt evidence record](docs/security/history-privacy-debt.md). Normal
+CI rejects new flagged history while tagged publishing fails closed until the
+known historical pairs are unreachable.
+
 ## Deployment guidance
 
 ### Unsafe lab mode (disposable isolated hosts only)

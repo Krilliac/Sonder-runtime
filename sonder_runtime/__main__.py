@@ -15,16 +15,21 @@ Commands:
     restore       verify / apply a backup into an empty directory
     drain         request graceful drain of a running server
     smoke         minimal end-to-end check without a real model
+    control-state-rehearsal  collect disposable provider evidence without promotion
     eval-history  inspect or explicitly record precomputed evaluation evidence
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
+import re
 import sys
 
 from sonder_runtime.adapters.persistence.migrations import STORE_NAMES
+from sonder_runtime.domain.artifact_mobility_label import is_public_mobility_label
 from sonder_runtime.platform import config as sonder_config
 from sonder_runtime.platform import paths as runtime_paths
 from sonder_runtime.platform import version as sonder_version
@@ -70,6 +75,13 @@ def _configured_path(explicit, env_name: str, filename: str):
     return str(candidate) if candidate.is_file() else None
 
 
+def _redactor_for_config(config):
+    """Create the common redactor before compatibility env export occurs."""
+    from sonder_runtime.platform.logging import redactor_for_config
+
+    return redactor_for_config(config, env=os.environ)
+
+
 def _emit(payload: dict, *, as_json: bool) -> None:
     if as_json:
         print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
@@ -91,6 +103,264 @@ def _emit(payload: dict, *, as_json: bool) -> None:
                 else:
                     print(f"{pad}- {item}")
     walk(payload)
+
+
+_REHEARSAL_PREFIX = "rehearsal-"
+_REHEARSAL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+_REHEARSAL_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+_MAX_REHEARSAL_SEQUENCE = (1 << 63) - 1
+
+
+def _contains_rehearsal_literal(argv: list[str]) -> bool:
+    """Identify raw invocations that could expose rehearsal-only input."""
+    return any(value == "control-state-rehearsal" for value in argv)
+
+
+def _rehearsal_report(status: str, *, reason: str | None = None) -> dict[str, object]:
+    """Return the stable, content-free report shared by every outcome.
+
+    The explicit command can collect provider transport evidence, but it never
+    owns a runtime transition.  Keep these properties present for success and
+    every refusal so callers cannot mistake a capability declaration or fence
+    receipt for automatic availability.
+    """
+    report: dict[str, object] = {
+        "schema": "sonder.control-state-rehearsal.v1",
+        "status": status,
+        "evidence_scope": "process-boundary-transport-rehearsal",
+        "promotion_attempted": False,
+        "automatic_takeover_available": False,
+        "automatic_failback_available": False,
+    }
+    if reason is not None:
+        report["reason"] = reason
+    return report
+
+
+def _emit_rehearsal_report(args, report: dict[str, object]) -> None:
+    """Emit a report without config paths, transport bodies, or exceptions."""
+    _emit(report, as_json=bool(getattr(args, "json", False)))
+
+
+def _rehearsal_identity(value: object) -> bool:
+    return isinstance(value, str) and _REHEARSAL_ID.fullmatch(value) is not None
+
+
+def _rehearsal_request_error(args) -> str | None:
+    """Reject all caller-controlled scope before config/factory/provider work."""
+    config_path = getattr(args, "config", None)
+    if not isinstance(config_path, str) or not config_path.strip():
+        return "configuration_invalid"
+    secrets_path = getattr(args, "secrets", None)
+    if secrets_path is not None and (
+        not isinstance(secrets_path, str) or not secrets_path.strip()
+    ):
+        return "configuration_invalid"
+
+    confirmation = getattr(args, "confirm_fence", None)
+    new_owner_id = getattr(args, "new_owner_id", None)
+    if confirmation is not None and confirmation != "external-fence":
+        return "invalid_confirmation"
+    if confirmation == "external-fence" and not new_owner_id:
+        return "new_owner_required"
+    if confirmation is None and new_owner_id is not None:
+        return "new_owner_without_confirmation"
+
+    event_id = getattr(args, "event_id", None)
+    if (
+        not _rehearsal_identity(event_id)
+        or not event_id.startswith(_REHEARSAL_PREFIX)
+        or len(event_id) == len(_REHEARSAL_PREFIX)
+    ):
+        return "rehearsal_event_required"
+    resource_id = getattr(args, "resource_id", None)
+    if (
+        not _rehearsal_identity(resource_id)
+        or not resource_id.startswith(_REHEARSAL_PREFIX)
+        or len(resource_id) == len(_REHEARSAL_PREFIX)
+    ):
+        return "rehearsal_resource_required"
+    if getattr(args, "resource_kind", None) != "job":
+        return "rehearsal_job_required"
+    if not _rehearsal_identity(new_owner_id) and new_owner_id is not None:
+        return "new_owner_invalid"
+    for field, reason in (("owner_epoch", "owner_epoch_invalid"), ("sequence", "sequence_invalid")):
+        value = getattr(args, field, None)
+        if type(value) is not int or not 1 <= value <= _MAX_REHEARSAL_SEQUENCE:
+            return reason
+    if not isinstance(getattr(args, "payload_digest", None), str) or (
+        _REHEARSAL_DIGEST.fullmatch(args.payload_digest) is None
+    ):
+        return "payload_digest_invalid"
+    return None
+
+
+def _rehearsal_config_boundary(config) -> tuple[str, str, str] | None:
+    """Return configured rehearsal identities without constructing a provider.
+
+    The factory remains the canonical topology validator.  This narrow preflight
+    only prevents a command-line request from reaching it with a non-disposable
+    cluster or an uninspectable peer identity.
+    """
+    section = getattr(config, "control_state_rehearsal", None)
+    cluster_id = getattr(section, "cluster_id", None)
+    local_id = getattr(section, "node_id", None)
+    compute = getattr(config, "compute", None)
+    nodes = getattr(compute, "nodes", None)
+    if (
+        not _rehearsal_identity(cluster_id)
+        or not cluster_id.startswith(_REHEARSAL_PREFIX)
+        or len(cluster_id) == len(_REHEARSAL_PREFIX)
+        or not _rehearsal_identity(local_id)
+        or type(nodes) is not tuple
+        or len(nodes) != 1
+    ):
+        return None
+    peer_id = getattr(nodes[0], "node_id", None)
+    if not _rehearsal_identity(peer_id) or peer_id == local_id:
+        return None
+    return cluster_id, local_id, peer_id
+
+
+def _rehearsal_event_report(event, acknowledgement) -> dict[str, object]:
+    """Select only bounded, non-payload evidence from exact receipts."""
+    return {
+        "cluster_id": event.cluster_id,
+        "event": {
+            "event_id": event.event_id,
+            "resource_kind": event.resource_kind,
+            "resource_id": event.resource_id,
+            "owner_id": event.owner_id,
+            "owner_epoch": event.owner_epoch,
+            "sequence": event.sequence,
+        },
+        "acknowledgement": {
+            "provider_id": acknowledgement.provider_id,
+            "durable": acknowledgement.durable,
+            "data_replica_ids": list(acknowledgement.data_replica_ids),
+            "witness_ids": list(acknowledgement.witness_ids),
+            "data_replica_count": acknowledgement.data_replica_count,
+        },
+    }
+
+
+def cmd_control_state_rehearsal(args) -> int:
+    """Collect one disposable provider evidence page; never promote an owner."""
+    request_error = _rehearsal_request_error(args)
+    if request_error is not None:
+        _emit_rehearsal_report(args, _rehearsal_report("rejected", reason=request_error))
+        return 2
+
+    try:
+        config = _load_config(args)
+    except (OSError, UnicodeError, sonder_config.ConfigError):
+        _emit_rehearsal_report(
+            args, _rehearsal_report("rejected", reason="configuration_invalid")
+        )
+        return 2
+
+    boundary = _rehearsal_config_boundary(config)
+    if boundary is None:
+        _emit_rehearsal_report(
+            args, _rehearsal_report("rejected", reason="rehearsal_cluster_required")
+        )
+        return 2
+    cluster_id, local_id, peer_id = boundary
+    if args.confirm_fence == "external-fence" and args.new_owner_id != peer_id:
+        _emit_rehearsal_report(
+            args,
+            _rehearsal_report("rejected", reason="new_owner_not_configured_peer"),
+        )
+        return 2
+
+    # These imports are intentionally local.  Ordinary serve, MCP, and REPL
+    # command composition must not obtain a rehearsal provider by importing the
+    # production entrypoint.
+    from .bootstrap.control_state_rehearsal import build_control_state_rehearsal
+    from .domain.cluster_availability import ControlStateEvent
+    from .domain.common.errors import DependencyUnavailable
+
+    try:
+        coordinator = build_control_state_rehearsal(config)
+    except (TypeError, ValueError):
+        _emit_rehearsal_report(
+            args, _rehearsal_report("rejected", reason="configuration_invalid")
+        )
+        return 2
+
+    try:
+        event = ControlStateEvent(
+            event_id=args.event_id,
+            cluster_id=cluster_id,
+            resource_kind=args.resource_kind,
+            resource_id=args.resource_id,
+            owner_id=local_id,
+            owner_epoch=args.owner_epoch,
+            sequence=args.sequence,
+            payload_digest=args.payload_digest,
+        )
+    except (TypeError, ValueError):
+        _emit_rehearsal_report(
+            args, _rehearsal_report("rejected", reason="invalid_request")
+        )
+        return 2
+
+    try:
+        acknowledgement = coordinator.append(event)
+        page = coordinator.read(
+            event.cluster_id,
+            after_sequence=event.sequence - 1,
+            limit=1,
+        )
+        if page != (event,):
+            raise DependencyUnavailable("control-state rehearsal event page mismatch")
+        payload = _rehearsal_report("collected")
+        payload.update(_rehearsal_event_report(event, acknowledgement))
+        if args.confirm_fence != "external-fence":
+            _emit_rehearsal_report(args, payload)
+            return 0
+
+        attempt = coordinator.prepare_takeover(
+            event.scope,
+            event,
+            new_owner_id=peer_id,
+            acknowledgement=acknowledgement,
+        )
+    except DependencyUnavailable:
+        _emit_rehearsal_report(
+            args, _rehearsal_report("blocked", reason="dependency_unavailable")
+        )
+        return 1
+    except Exception:
+        _emit_rehearsal_report(
+            args, _rehearsal_report("blocked", reason="internal_error")
+        )
+        return 1
+
+    receipt = attempt.fence_receipt
+    payload["fence"] = {
+        "requested": True,
+        "new_owner_id": peer_id,
+        "receipt_id": receipt.receipt_id,
+        "accepted": receipt.accepted,
+        "external": receipt.external,
+        "partition_state": receipt.partition_state.value,
+        "decision": {
+            "allowed": attempt.decision.allowed,
+            "reason": attempt.decision.reason,
+            "next_epoch": attempt.decision.next_epoch,
+            "data_replica_count": attempt.decision.data_replica_count,
+        },
+    }
+    if attempt.decision.allowed is not True:
+        payload["status"] = "blocked"
+        payload["reason"] = "takeover_evidence_denied"
+        _emit_rehearsal_report(args, payload)
+        return 1
+
+    payload["status"] = "fence_evidence_collected"
+    _emit_rehearsal_report(args, payload)
+    return 0
 
 
 def _run_preflight(config, *, check_ollama=True, ollama_timeout=5.0):
@@ -543,11 +813,23 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
     # endpoint directly.
     if include_typed_runtime:
         os.environ["OLLAMA_HOST"] = config.ollama.url
+        os.environ["SONDER_OLLAMA_POOL_MAX_WORKERS"] = str(
+            config.ollama.worker_pool_max_workers
+        )
         os.environ["SONDER_OLLAMA_WORKER_MAX_INFLIGHT"] = str(
             config.ollama.worker_max_inflight
         )
         os.environ["SONDER_OLLAMA_WORKER_QUEUE_DEPTH"] = str(
             config.ollama.worker_queue_depth
+        )
+        os.environ["SONDER_OLLAMA_WORKER_PROBE_PARALLELISM"] = str(
+            config.ollama.worker_capability_probe_parallelism
+        )
+        os.environ["SONDER_OLLAMA_WORKER_PROBE_BATCH_SIZE"] = str(
+            config.ollama.worker_capability_probe_batch_size
+        )
+        os.environ["SONDER_OLLAMA_WORKER_STATUS_PAGE_SIZE"] = str(
+            config.ollama.worker_status_page_size
         )
         os.environ["SONDER_OLLAMA_WORKER_ADMISSION_TIMEOUT_MS"] = str(
             config.ollama.worker_admission_timeout_ms
@@ -620,11 +902,11 @@ def cmd_serve(args) -> int:
         "1" if config.ollama.allow_remote else "0"
     )
     os.environ["SONDER_TRUSTED_ORIGINS"] = ",".join(config.ollama.trusted_origins)
-    from sonder_runtime.platform.logging import configure_logging, Redactor
+    from sonder_runtime.platform.logging import configure_logging
     configure_logging(
         level=config.observability.log_level,
         log_format=config.observability.log_format,
-        redactor=Redactor(env=os.environ),
+        redactor=_redactor_for_config(config),
     )
     if not args.skip_preflight:
         report = _run_preflight(
@@ -639,10 +921,10 @@ def cmd_serve(args) -> int:
                   "(use --skip-preflight only for recovery work)",
                   file=sys.stderr)
             return 1
-    # Bind typed state and HTTP settings before migration/binding. The
-    # compatibility export below is restricted to settings still consumed by
-    # legacy adapters; typed HTTP authority no longer depends on environment
-    # round-tripping.
+    # Bind non-HTTP typed state before migration/binding. The canonical HTTP
+    # adapter publishes its artifact/control bindings inside serve.main's
+    # ownership guard, after migrations have succeeded, so a refused migration
+    # cannot leave a live route behind.
     _configure_typed_home(config)
     from sonder_runtime.adapters.inference import ollama_endpoint
     ollama_endpoint.configure_typed_endpoint(config.ollama.url)
@@ -658,6 +940,14 @@ def cmd_serve(args) -> int:
         admission_timeout_ms=config.ollama.worker_admission_timeout_ms,
         capability_ttl_seconds=config.ollama.worker_capability_ttl_seconds,
         probe_timeout_ms=config.ollama.worker_probe_timeout_ms,
+        max_inflight_per_worker=config.ollama.worker_max_inflight,
+        queue_depth=config.ollama.worker_queue_depth,
+        max_workers=config.ollama.worker_pool_max_workers,
+        capability_probe_parallelism=(
+            config.ollama.worker_capability_probe_parallelism
+        ),
+        capability_probe_batch_size=config.ollama.worker_capability_probe_batch_size,
+        status_page_size=config.ollama.worker_status_page_size,
     )
     from sonder_runtime.adapters.inference import ollama_vision
     ollama_vision.configure_typed_request_timeout(
@@ -678,7 +968,6 @@ def cmd_serve(args) -> int:
         )
         return 1
     import sonder_runtime.interfaces.http.serve as sonder_serve
-    sonder_serve.configure_typed_config(config)
     _export_runtime_environment(config, include_typed_runtime=False)
 
     # MIGRATING phase: no listener opens until migrations complete.
@@ -704,27 +993,32 @@ def cmd_serve(args) -> int:
         pass
 
     from sonder_runtime.bootstrap.legacy_interfaces import (
+        configure_legacy_application,
         configure_legacy_interfaces,
         configure_legacy_capacity,
     )
-
-    configure_legacy_interfaces()
-    configure_legacy_capacity(
-        autopilot_runs=config.capacity.autopilot_runs,
-        fleet_workers=config.capacity.fleet_workers,
-        training_jobs=config.capacity.training_jobs,
+    from sonder_runtime.bootstrap.app import (
+        close_default_runtime_resources, default_app,
     )
-
-    from sonder_runtime.bootstrap.app import default_app
     from sonder_runtime.interfaces.http.handlers import RecallHandler, OutcomeHandler
-    app = default_app()
-    sonder_serve.configure_thin_handlers({
-        "/v1/recall": RecallHandler(app.memory),
-        "/v1/outcome": OutcomeHandler(app.memory),
-    })
-
-    sys.argv = ["python -m sonder_runtime serve", str(config.server.port)]
-    sonder_serve.main(config=config)
+    # Compose typed admission before any boundary resolves the legacy root.
+    app = default_app(config=config)
+    try:
+        configure_legacy_application(app)
+        configure_legacy_interfaces()
+        configure_legacy_capacity(
+            autopilot_runs=config.capacity.autopilot_runs,
+            fleet_workers=config.capacity.fleet_workers,
+            training_jobs=config.capacity.training_jobs,
+        )
+        sonder_serve.configure_thin_handlers({
+            "/v1/recall": RecallHandler(app.memory),
+            "/v1/outcome": OutcomeHandler(app.memory),
+        })
+        sys.argv = ["python -m sonder_runtime serve", str(config.server.port)]
+        sonder_serve.main(config=config, _close_default_resources=False)
+    finally:
+        close_default_runtime_resources(timeout=5)
     return 0
 
 
@@ -735,11 +1029,11 @@ def cmd_repl(args) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     _configure_typed_home(config)
-    from sonder_runtime.platform.logging import configure_logging, Redactor
+    from sonder_runtime.platform.logging import configure_logging
     configure_logging(
         level=config.observability.log_level,
         log_format=config.observability.log_format,
-        redactor=Redactor(env=os.environ),
+        redactor=_redactor_for_config(config),
     )
     _export_runtime_environment(config)
     import sonder_runtime.adapters.persistence.migrations as sonder_migrations
@@ -754,10 +1048,22 @@ def cmd_repl(args) -> int:
     from sonder_runtime.bootstrap.legacy_interfaces import configure_legacy_interfaces
 
     configure_legacy_interfaces()
-    if args.json:
-        sonder_repl.run_jsonl()
-    else:
-        sonder_repl.main()
+    from sonder_runtime.bootstrap.app import (
+        close_default_runtime_resources, default_app,
+    )
+    from sonder_runtime.bootstrap.legacy_interfaces import configure_legacy_application
+
+    owned_application = None
+    try:
+        owned_application = default_app(config=config)
+        configure_legacy_application(owned_application)
+        if args.json:
+            sonder_repl.run_jsonl()
+        else:
+            sonder_repl.main()
+    finally:
+        if owned_application is not None:
+            close_default_runtime_resources(timeout=5)
     return 0
 
 
@@ -779,11 +1085,11 @@ def cmd_mcp(args) -> int:
         from sonder_runtime.bootstrap.native_mcp import run_native_mcp
 
         _configure_typed_home(config)
-        from sonder_runtime.platform.logging import configure_logging, Redactor
+        from sonder_runtime.platform.logging import configure_logging
         configure_logging(
             level=config.observability.log_level,
             log_format=config.observability.log_format,
-            redactor=Redactor(env=os.environ),
+            redactor=_redactor_for_config(config),
         )
         _export_runtime_environment(config, include_typed_runtime=False)
         import sonder_runtime.adapters.persistence.migrations as sonder_migrations
@@ -794,17 +1100,27 @@ def cmd_mcp(args) -> int:
         except sonder_migrations.MigrationError as exc:
             print(f"migration failed: {exc}", file=sys.stderr)
             return 1
-        return run_native_mcp(build_application(config=config))
+        application = build_application(config=config)
+        try:
+            return run_native_mcp(application, close_compute_on_exit=False)
+        finally:
+            application.close_providers(timeout=5)
+    from sonder_runtime.bootstrap.app import close_default_runtime_resources
+
+    owned_application = None
     def _configure_mcp_legacy() -> None:
+        nonlocal owned_application
         config = _load_config(args)
         _configure_typed_home(config)
-        from sonder_runtime.platform.logging import configure_logging, Redactor
+        from sonder_runtime.platform.logging import configure_logging
         configure_logging(
             level=config.observability.log_level,
             log_format=config.observability.log_format,
-            redactor=Redactor(env=os.environ),
+            redactor=_redactor_for_config(config),
         )
         _export_runtime_environment(config)
+        from sonder_runtime.bootstrap.app import default_app
+        from sonder_runtime.bootstrap.legacy_mcp import configure_legacy_application
         from sonder_runtime.adapters.inference import ollama_endpoint
         ollama_endpoint.configure_typed_endpoint(config.ollama.url)
         from sonder_runtime.adapters.inference import ollama_pool
@@ -817,13 +1133,28 @@ def cmd_mcp(args) -> int:
             admission_timeout_ms=config.ollama.worker_admission_timeout_ms,
             capability_ttl_seconds=config.ollama.worker_capability_ttl_seconds,
             probe_timeout_ms=config.ollama.worker_probe_timeout_ms,
+            max_inflight_per_worker=config.ollama.worker_max_inflight,
+            queue_depth=config.ollama.worker_queue_depth,
+            max_workers=config.ollama.worker_pool_max_workers,
+            capability_probe_parallelism=(
+                config.ollama.worker_capability_probe_parallelism
+            ),
+            capability_probe_batch_size=config.ollama.worker_capability_probe_batch_size,
+            status_page_size=config.ollama.worker_status_page_size,
         )
+        # Do not reset typed worker configuration after the application binds
+        # its pool: that would erase the shared compatibility pool reference.
+        owned_application = default_app(config=config)
+        configure_legacy_application(owned_application)
 
     try:
         McpCommand(build_legacy_server_mcp_runtime()).execute(_configure_mcp_legacy)
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    finally:
+        if owned_application is not None:
+            close_default_runtime_resources(timeout=5)
     return 0
 
 
@@ -984,8 +1315,106 @@ def cmd_eval_history(args) -> int:
     return 0
 
 
+def cmd_artifact_mobility(args) -> int:
+    """Local operator-only adapter; never registered as a model-facing tool."""
+    from sonder_runtime.bootstrap.app import _artifact_mobility_operator_application
+    from sonder_runtime.bootstrap.artifact_mobility import mobility_error_projection
+    try:
+        application = _artifact_mobility_operator_application()
+        if args.mobility_command == "status":
+            payload = application.artifact_mobility_status(args.operation_id)
+        elif args.mobility_command == "list":
+            payload = application.artifact_mobility_list()
+        elif args.mobility_command == "send":
+            payload = application._artifact_mobility_binding().send(
+                args.source_artifact, confirm_destination=args.confirm_destination)
+        elif args.mobility_command == "resume":
+            payload = application._artifact_mobility_binding().resume(args.operation_id)
+        else:
+            payload = {"outcome_code": "INVALID_REQUEST"}
+        _emit(payload, as_json=args.json)
+        return 2 if set(payload) == {"outcome_code"} else 0
+    except Exception as error:
+        _emit(mobility_error_projection(error), as_json=args.json)
+        return 2
+
+
+class _MobilityArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        # argparse's normal error echoes rejected arguments, including URLs.
+        self.exit(2, "artifact-mobility: INVALID_REQUEST\n")
+
+
+def _check_mobility_arguments(values, parser):
+    """Admit the complete local grammar before help or host composition."""
+    action_options = {
+        "send": {"--source-artifact", "--confirm-destination"},
+        "resume": {"--operation-id"},
+        "status": {"--operation-id"},
+        "list": set(),
+    }
+    action = None
+    index = 0
+    while index < len(values):
+        token = values[index]
+        index += 1
+        if token in ("--help", "-h"):
+            continue
+        if action is None and token in action_options:
+            action = token
+            continue
+        if action is not None and token == "--json":
+            continue
+        option, separator, value = token.partition("=")
+        if action is None or option not in action_options[action]:
+            parser.error(None)
+        if not separator:
+            if index == len(values) or values[index].startswith("-"):
+                parser.error(None)
+            value = values[index]
+            index += 1
+        if option in ("--source-artifact", "--operation-id"):
+            # IDs have exactly the store's bounded ASCII opaque-ID grammar.
+            # Check length first; never normalize or echo a rejected value.
+            if len(value) != 32 or any(char not in "0123456789abcdef" for char in value):
+                parser.error(None)
+        elif option == "--confirm-destination" and not is_public_mobility_label(value):
+            parser.error(None)
+
+
+class _ProductionArgumentParser(argparse.ArgumentParser):
+    def parse_args(self, args=None, namespace=None):
+        values = list(sys.argv[1:] if args is None else args)
+        if any(value.casefold() == "artifact-mobility" for value in values):
+            # Detect case variants before ordinary parsing can echo an earlier
+            # misplaced value. Only exact lowercase syntax is admitted below.
+            parser = _MobilityArgumentParser(prog="artifact-mobility", allow_abbrev=False)
+            if not values or values[0] != "artifact-mobility":
+                parser.error(None)
+            _check_mobility_arguments(values[1:], parser)
+            _add_mobility_arguments(parser)
+            result = parser.parse_args(values[1:], namespace)
+            result.command = "artifact-mobility"
+            return result
+        return super().parse_args(values, namespace)
+
+
+def _add_mobility_arguments(parser):
+    mobility_sub = parser.add_subparsers(dest="mobility_command", required=True,
+        parser_class=_MobilityArgumentParser)
+    for action in ("send", "resume", "status", "list"):
+        mp = mobility_sub.add_parser(action, allow_abbrev=False)
+        mp.add_argument("--json", action="store_true")
+        if action == "send":
+            mp.add_argument("--source-artifact", required=True)
+            mp.add_argument("--confirm-destination", required=True)
+        elif action in ("resume", "status"):
+            mp.add_argument("--operation-id", required=True)
+        mp.set_defaults(func=cmd_artifact_mobility)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _ProductionArgumentParser(
         prog="python -m sonder_runtime",
         description="Sonder runtime production entry point",
     )
@@ -1080,6 +1509,26 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("smoke", help="minimal end-to-end check")
     common(p, ollama_flag=True)
     p.set_defaults(func=cmd_smoke)
+
+    p = sub.add_parser(
+        "control-state-rehearsal",
+        help="collect disposable external control-state evidence without promotion",
+    )
+    p.add_argument("--config", required=True, help="path to rehearsal-only sonder.toml")
+    p.add_argument("--secrets", help="path to the rehearsal secrets env file")
+    p.add_argument("--json", action="store_true", help="emit a redacted JSON report")
+    p.add_argument("--event-id", required=True)
+    p.add_argument("--resource-kind", required=True, choices=("job",))
+    p.add_argument("--resource-id", required=True)
+    p.add_argument("--owner-epoch", required=True, type=int)
+    p.add_argument("--sequence", required=True, type=int)
+    p.add_argument("--payload-digest", required=True)
+    p.add_argument(
+        "--confirm-fence",
+        help="pass exactly external-fence before requesting one external receipt",
+    )
+    p.add_argument("--new-owner-id", help="must be the configured rehearsal peer")
+    p.set_defaults(func=cmd_control_state_rehearsal)
 
     p = sub.add_parser("serve", help="run the HTTP adapter")
     common(p, ollama_flag=True)
@@ -1184,11 +1633,36 @@ def build_parser() -> argparse.ArgumentParser:
     hp.add_argument("--json", action="store_true")
     hp.set_defaults(func=cmd_eval_history)
 
+    p = sub.add_parser("artifact-mobility", help="explicit local fixed-peer artifact copy")
+    p.error = lambda message: parser.exit(2, "artifact-mobility: INVALID_REQUEST\n")
+    _add_mobility_arguments(p)
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if _contains_rehearsal_literal(raw_argv):
+        # argparse includes caller-provided values in its errors.  This one
+        # command admits provider credentials and an explicitly bounded
+        # disposable scope, so keep any parse failure containing its literal
+        # content-free. A malformed leading option cannot safely distinguish
+        # its value from a command token. Normal argv without this literal
+        # retains ordinary argparse behavior. Nonzero parser exits are handled;
+        # --help and --version retain their normal successful SystemExit behavior.
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                args = build_parser().parse_args(raw_argv)
+            except SystemExit as exc:
+                if exc.code == 2:
+                    _emit(
+                        _rehearsal_report("rejected", reason="invalid_arguments"),
+                        as_json="--json" in raw_argv,
+                    )
+                    return 2
+                raise
+    else:
+        args = build_parser().parse_args(raw_argv)
     try:
         return args.func(args)
     except sonder_config.ConfigError as exc:

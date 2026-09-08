@@ -1,0 +1,13 @@
+{
+  "profile": "product-admin",
+  "sourceRoots": ["lib"],
+  "locale": "en",
+  "canonicalMap": "UX-CONTRACT.md",
+  "requiredCapabilities": ["Form", "Scrollbar", "Toast", "CRUD"],
+  "requiredCommands": ["unit", "analyze"],
+  "commands": {"unit": "flutter test", "analyze": "flutter analyze --no-pub"},
+  "evidence": {
+    "crudFullFlow": "test/app_control_screen_test.dart",
+    "failurePaths": "test/app_control_test.dart"
+  }
+}

@@ -37,7 +37,27 @@ import pytest  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def _isolate_fleet_ledger():
+def _isolate_runtime_home():
+    """Restore process-local path configuration after entrypoint tests.
+
+    Typed startup deliberately overrides per-store environment paths. Leaving
+    that override behind makes later tests write into an earlier test's home
+    even when they set their own database environment variables.
+    """
+    from sonder_runtime.platform import paths
+
+    previous = paths._configured_home()
+    try:
+        yield
+    finally:
+        if previous is None:
+            paths.reset_home()
+        else:
+            paths.configure_home(previous)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_fleet_ledger(_isolate_runtime_home):
     """Clear the shared fleet ledger before each test.
 
     fleet_store is a process-shared sqlite ledger, and a test that leaves
@@ -55,7 +75,7 @@ def _isolate_fleet_ledger():
 
 
 @pytest.fixture(autouse=True)
-def _isolate_typed_ollama_endpoint():
+def _isolate_typed_ollama_endpoint(monkeypatch):
     """Restore the process-global typed Ollama endpoint around each test.
 
     ``bootstrap.app`` pins the typed endpoint (``configure_typed_endpoint``)
@@ -69,6 +89,11 @@ def _isolate_typed_ollama_endpoint():
     the endpoint still sees its own value while it runs.
     """
     from sonder_runtime.adapters.inference import ollama_endpoint
+    import weakref
+
+    # Each test owns its composed sources. Keep unrelated external-source
+    # cycles from another test from restricting this test's static adapter.
+    monkeypatch.setattr(ollama_endpoint, "_external_membership_owners", weakref.WeakSet())
 
     with ollama_endpoint._configuration_lock:
         before = ollama_endpoint._configured_endpoint
