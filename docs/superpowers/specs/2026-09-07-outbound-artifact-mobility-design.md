@@ -1,8 +1,10 @@
 # Fixed-peer outbound artifact mobility
 
 **Date:** 2026-09-07
-**Status:** Task 1 is accepted; Task 2's local-only source slice is implemented
-and awaiting re-review; Tasks 3–8 remain proposed.
+**Status:** Tasks 1–7 accepted through `548636e7854dc8f929017207ad95c55acdb9ba13`.
+Task 8 adds process-boundary evidence and operations documentation; independent
+review, full-suite pre-merge verification, and deployed two-host TLS acceptance
+remain separate gates.
 **Base inspected:** origin/main at 7226959a275021c9d8bb4e792c780fbc2ebd7c8b
 
 ## Purpose
@@ -60,6 +62,19 @@ The local operator front door is:
 Send creates the canonical operation ID itself and returns it. The caller
 cannot select an operation ID, remote command, destination URL, credential,
 source path, source scope, or recipient grant.
+
+Source and operation IDs are exactly 32 lowercase hexadecimal characters.
+The shared public-label grammar is `[A-Za-z0-9][A-Za-z0-9_-]{0,127}`. It is
+enforced in configuration, pre-parser confirmation, and retained/reloaded
+operation construction. URLs, paths, dots, colons, controls, whitespace, and
+Unicode labels cannot reach public receipt projection. Confirmation remains an
+exact post-host comparison; this display label is never destination identity.
+
+The local CLI takes no configuration/secrets/endpoint override. It obtains the
+already-owned Application or uses the private canonical OS-account host
+provisioning path, without ambient environment selectors. No caller-supplied
+publisher factory is exposed. See [operations](../../operations/artifact-mobility.md)
+and [configuration](../../operations/configuration.md).
 
 ### Options considered
 
@@ -563,3 +578,28 @@ The implementation must prove:
     downgrade a mobility row; and
 11. a process-boundary loopback rehearsal is labeled as such, while a real
     independent-host pinned TLS test remains a deployment gate.
+
+## Task 8 evidence boundary
+
+`tests/test_artifact_mobility_composed.py` uses two spawned receiver processes,
+the production HTTP Handler and receiver binding/store, a genuinely admitted
+binary source larger than two chunks, and the real source/journal/dispatch
+components. Its explicitly injected numeric-loopback factory provides a
+synthetic leaf certificate to the normal peer adapter. It is plain loopback
+HTTP under the test adapter, not a TLS handshake or independent-host test.
+
+The rehearsal interrupts after durable append but before a local checkpoint,
+closes and reopens the source/journal, proves that a live lease blocks resume,
+recovers an expired lease locally without peer traffic, and explicitly resumes.
+Canonical begin replay deduplicates to one receiver record, and ordered append
+offsets plus exact sealed size/digest prove that accepted bytes are not resent.
+A second receiver with the same display label/key but different identity is
+rejected before begin/append. These checks do not add production injection
+surfaces, background retries, receiver enablement, or ownership transitions.
+
+The separate [deployed two-host acceptance plan](../../operations/artifact-mobility-two-host-acceptance.md)
+requires real HTTPS, leaf/attestation pins, source-owner and rotation fences,
+quota/no-byte checks, and attended resume. Its evidence records contain exact
+revisions and opaque host configuration fingerprints, never endpoint or secret
+values. It remains unexecuted by this local implementation work. The full
+repository test command is still required before merge.
