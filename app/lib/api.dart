@@ -2059,8 +2059,9 @@ class OperationalCapabilitiesInfo {
 
   String get workerSummary {
     if (workerCount <= 0) return 'No inference workers reported';
-    if (poolSchemaVersion == 2)
+    if (poolSchemaVersion == 2) {
       return '$eligibleWorkerCount/$workerCount eligible workers';
+    }
     return '$healthyWorkerCount/$workerCount healthy workers';
   }
 
