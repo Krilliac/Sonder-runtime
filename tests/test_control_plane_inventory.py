@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import sqlite3
 import pytest
 from sonder_runtime.platform import paths
 from sonder_runtime.adapters.filesystem import file_ops
@@ -19,6 +20,172 @@ def test_supported_surrogate_names_keep_private_classification(tmp_path):
     assert inventory.protects(private)
     assert inventory.protects(owned / private.name)
     assert not inventory.protects(tmp_path / ("ordinary-" + chr(0xDCFF)))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows extended paths only")
+def test_inventory_covers_extended_wal_sidecar_after_it_appears(tmp_path, monkeypatch):
+    """A live SQLite sidecar keeps the same private identity after resolution."""
+    from sonder_runtime.adapters.security.control_plane_paths import (
+        ControlPlanePaths,
+        live_control_plane_inventory,
+    )
+
+    monkeypatch.setenv("SONDER_STATE_HOME", str(tmp_path / "state"))
+    database = tmp_path / "private" / "fleet.db"
+    database.parent.mkdir()
+    sidecar = Path(str(database) + "-wal")
+    assert not sidecar.exists()
+    inventory = live_control_plane_inventory(
+        additional=lambda: ControlPlanePaths(databases=(database,))
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("CREATE TABLE records(value INTEGER)")
+        connection.execute("INSERT INTO records VALUES(1)")
+        connection.commit()
+        assert sidecar.exists()
+        extended_database = Path("\\\\?\\" + str(database))
+        assert inventory.covers(ControlPlanePaths(databases=(database,)))
+        assert inventory.covers(ControlPlanePaths(databases=(extended_database,)))
+        assert inventory.protects(sidecar)
+        assert inventory.protects(Path("\\\\?\\" + str(sidecar)))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows reparse-path behavior only")
+def test_inventory_protects_resolved_wal_sidecar_under_directory_symlink(
+    tmp_path, monkeypatch
+):
+    from sonder_runtime.adapters.security.control_plane_paths import (
+        ControlPlanePaths,
+        live_control_plane_inventory,
+    )
+
+    monkeypatch.setenv("SONDER_STATE_HOME", str(tmp_path / "state"))
+    target = tmp_path / "private-target"
+    target.mkdir()
+    link = tmp_path / "private-link"
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable to this Windows test user")
+    database = link / "fleet.db"
+    inventory = live_control_plane_inventory(
+        additional=lambda: ControlPlanePaths(databases=(database,))
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("CREATE TABLE records(value INTEGER)")
+        connection.execute("INSERT INTO records VALUES(1)")
+        connection.commit()
+        resolved_database = database.resolve()
+        resolved_sidecar = Path(str(resolved_database) + "-wal")
+        assert resolved_sidecar.exists()
+        assert inventory.covers(ControlPlanePaths(databases=(resolved_database,)))
+        assert inventory.protects(resolved_sidecar)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows extended paths only")
+def test_windows_extended_final_path_normalization_is_allowlisted(tmp_path):
+    from sonder_runtime.adapters.security.control_plane_paths import (
+        _normalize_windows_extended_final_path,
+    )
+
+    normal = tmp_path / "private" / "state.db"
+    assert _normalize_windows_extended_final_path(
+        Path("\\\\?\\" + str(normal))
+    ) == normal
+    assert _normalize_windows_extended_final_path(
+        Path("\\\\?\\UNC\\server\\share\\folder\\state.db")
+    ) == Path("\\\\server\\share\\folder\\state.db")
+    for value in (
+        "\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1",
+        "\\\\?\\Volume{abc}\\state.db",
+        "\\\\?\\C:relative",
+        "\\\\?\\Ä:\\private\\state.db",
+        "\\\\?\\C:\\private\\name.",
+        "\\\\?\\C:\\private\\name ",
+        "\\\\?\\C:\\private\\name:stream",
+        "\\\\?\\C:\\private\\CON.txt",
+        "\\\\?\\C:\\private\\COM¹.txt",
+        "\\\\?\\C:\\private\\COM0.txt",
+        "\\\\?\\C:\\private\\LPT².txt",
+        "\\\\?\\C:\\private\\LPT³.txt",
+        "\\\\?\\C:\\private\\CONIN$.txt",
+        "\\\\?\\C:\\private\\CONOUT$",
+        "\\\\?\\C:\\private\\CONOUT$.txt",
+        "\\\\.\\PhysicalDrive0",
+        "\\\\?\\UNC\\server",
+        "\\\\?\\UNC\\\\share",
+        "\\\\?\\UNC\\server.\\share\\state.db",
+        "\\\\?\\UNC\\server\\share.\\state.db",
+        "\\\\?\\UNC\\server\\share\\name.",
+        "\\\\?\\UNC\\server\\share\\name ",
+        "\\\\?\\UNC\\server\\share\\name:stream",
+        "\\\\?\\UNC\\server\\share\\NUL.txt",
+    ):
+        with pytest.raises(ValueError, match="unsupported Windows private path namespace"):
+            _normalize_windows_extended_final_path(Path(value))
+
+
+def test_normal_windows_components_reject_extended_only_aliases():
+    from sonder_runtime.adapters.security.control_plane_paths import (
+        _normal_windows_components,
+    )
+
+    for value in (
+        "private\\.\\state.db",
+        "private\\..\\state.db",
+        "private\\name/file",
+        "server\\\\share",
+        "server\\share\\\\state.db",
+        "server\\share\\name/file",
+        "server \\share",
+        "server\\share ",
+        "server\\share\\.\\state.db",
+        "server\\share\\..\\state.db",
+    ):
+        with pytest.raises(ValueError, match="unsupported Windows private path namespace"):
+            _normal_windows_components(value)
+
+
+def test_windows_extended_final_path_normalization_leaves_other_platforms_unchanged(
+    tmp_path, monkeypatch
+):
+    from sonder_runtime.adapters.security import control_plane_paths
+
+    resolved = tmp_path / "private" / "state.db"
+    monkeypatch.setattr(control_plane_paths.os, "name", "posix")
+    assert (
+        control_plane_paths._normalize_windows_extended_final_path(resolved)
+        is resolved
+    )
+
+
+def test_control_inventory_keeps_different_database_owned_and_lock_paths_out(tmp_path):
+    from sonder_runtime.adapters.security.control_plane_paths import (
+        ControlPlanePaths,
+        live_control_plane_inventory,
+    )
+
+    database = tmp_path / "private" / "fleet.db"
+    owned = tmp_path / "private" / "output"
+    locks = tmp_path / "private" / "locks"
+    inventory = live_control_plane_inventory(
+        additional=lambda: ControlPlanePaths(
+            databases=(database,),
+            owned_directories=(owned,),
+            owner_lock_directories=(locks,),
+        )
+    )
+    assert not inventory.covers(
+        ControlPlanePaths(databases=(tmp_path / "other" / "fleet.db",))
+    )
+    assert not inventory.covers(
+        ControlPlanePaths(owned_directories=(tmp_path / "other" / "output",))
+    )
+    assert not inventory.covers(
+        ControlPlanePaths(owner_lock_directories=(tmp_path / "other" / "locks",))
+    )
 
 
 def test_inventory_path_bounds_use_filesystem_bytes_and_encoding_refuses(tmp_path, monkeypatch):

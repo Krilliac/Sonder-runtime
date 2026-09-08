@@ -82,8 +82,15 @@ class AppProjectGrantCatalog:
     """
 
     def __init__(
-        self, *, config_provider, workspace_roots, private_inventory, clock=time.time
+        self,
+        *,
+        config_provider,
+        workspace_roots,
+        private_inventory,
+        clock=time.time,
     ):
+        if not callable(private_inventory):
+            raise TypeError("private inventory provider must be callable")
         self._config = config_provider
         self._roots = workspace_roots
         self._inventory = private_inventory
@@ -118,7 +125,8 @@ class AppProjectGrantCatalog:
                 for root in canonical
             ):
                 raise PermissionError("private source overlaps model workspace")
-        self._inventory().require_disjoint(canonical)
+        inventory = self._inventory()
+        inventory.require_disjoint(canonical)
         return canonical
 
     def snapshot(self):
@@ -169,9 +177,7 @@ class AppProjectGrantCatalog:
                         {g.project for g in grants}
                     ) != len(grants):
                         raise ValueError("duplicate grant identity or project")
-                    if config != self._config() or roots != self._boundary(
-                        config, path
-                    ):
+                    if config != self._config() or roots != self._boundary(config, path):
                         raise ValueError("live app policy changed")
                     if any(g.expires_at <= self._clock() for g in grants):
                         raise ValueError("app policy expired")
