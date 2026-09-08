@@ -59,6 +59,32 @@ def test_absolute_import_index_preserves_compatibility_rule_semantics():
     })
 
 
+def test_mobility_label_exception_is_confined_to_exact_config_import(tmp_path, monkeypatch):
+    module = _architecture_module()
+    package = tmp_path / 'sonder_runtime'
+    platform = package / 'platform'
+    platform.mkdir(parents=True)
+    config = platform / 'artifact_mobility_config.py'
+    config.write_text(
+        'from sonder_runtime.domain.artifact_mobility_label import is_public_mobility_label\n'
+        'from sonder_runtime.domain.other_policy import rule\n', encoding='utf-8')
+    other = platform / 'other_config.py'
+    other.write_text(
+        'from sonder_runtime.domain.artifact_mobility_label import is_public_mobility_label\n',
+        encoding='utf-8')
+    monkeypatch.setattr(module, 'REPO_ROOT', tmp_path)
+    monkeypatch.setattr(module, 'PACKAGE_ROOT', package)
+    monkeypatch.setattr(module, 'tracked_production_python_files', lambda: [config, other])
+    compatibility_check = module.compatibility_import_offenders
+    monkeypatch.setattr(module, 'compatibility_import_offenders',
+        lambda *args, **kwargs: compatibility_check(*args, repo_root=tmp_path, **kwargs))
+    violations = module.check()
+    assert module.ALLOWED_PACKAGE_EDGES['platform'] == {'platform'}
+    assert not any('artifact_mobility_config.py: platform may not import sonder_runtime.domain.artifact_mobility_label' in row for row in violations)
+    assert any('artifact_mobility_config.py: platform may not import sonder_runtime.domain.other_policy' in row for row in violations)
+    assert any('other_config.py: platform may not import sonder_runtime.domain.artifact_mobility_label' in row for row in violations)
+
+
 def test_legacy_root_allowlist_has_a_shrink_only_ratchet():
     import importlib.util
 

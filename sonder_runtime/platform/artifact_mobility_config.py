@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 import ipaddress
 import re
 
+from sonder_runtime.domain.artifact_mobility_label import is_public_mobility_label
+
 
 _MAX_DESTINATION_ORIGIN_LENGTH = 512
 _MAX_DESTINATION_AUTHORITY_LENGTH = 512
@@ -111,10 +113,13 @@ def artifact_mobility_errors(config) -> list[str]:
     errors: list[str] = []
     if type(section.enabled) is not bool:
         errors.append("[artifact_mobility].enabled invalid")
-    for name in ("destination_label", "destination_credential_id"):
+    for name, valid in (
+        ("destination_label", is_public_mobility_label),
+        ("destination_credential_id", _identifier),
+    ):
         value = getattr(section, name)
-        if (section.enabled and not _identifier(value)) or (
-            value and not _identifier(value)
+        if (section.enabled and not valid(value)) or (
+            value and not valid(value)
         ):
             errors.append(f"[artifact_mobility].{name} invalid")
     if (section.enabled and not _strict_https_origin(section.destination_origin)) or (

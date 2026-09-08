@@ -25,6 +25,7 @@ import os
 import sys
 
 from sonder_runtime.adapters.persistence.migrations import STORE_NAMES
+from sonder_runtime.domain.artifact_mobility_label import is_public_mobility_label
 from sonder_runtime.platform import config as sonder_config
 from sonder_runtime.platform import paths as runtime_paths
 from sonder_runtime.platform import version as sonder_version
@@ -1069,6 +1070,8 @@ def _check_mobility_arguments(values, parser):
             # Check length first; never normalize or echo a rejected value.
             if len(value) != 32 or any(char not in "0123456789abcdef" for char in value):
                 parser.error(None)
+        elif option == "--confirm-destination" and not is_public_mobility_label(value):
+            parser.error(None)
 
 
 class _ProductionArgumentParser(argparse.ArgumentParser):

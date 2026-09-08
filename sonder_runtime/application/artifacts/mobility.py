@@ -24,6 +24,8 @@ import time
 from types import MappingProxyType
 from typing import Mapping, Protocol
 
+from sonder_runtime.domain.artifact_mobility_label import is_public_mobility_label
+
 from .mobility_source import MobilitySourceError, SourceArtifactRange
 from .transfer import (
     MOBILITY_V1_VERSION,
@@ -128,6 +130,12 @@ def _operation_id(value: object, *, code: str = "INVALID_REQUEST") -> str:
     return value
 
 
+def _destination_label(value: object, *, code: str = "INVALID_REQUEST") -> str:
+    if not is_public_mobility_label(value):
+        _fail(code)
+    return value
+
+
 def _digest(value: object, *, code: str = "INVALID_REQUEST") -> str:
     if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
         _fail(code)
@@ -208,7 +216,7 @@ class MobilityDispatchContext:
         object.__setattr__(self, "source_owner_id", _identifier(self.source_owner_id))
         object.__setattr__(self, "source_scope_id", _digest(self.source_scope_id))
         object.__setattr__(
-            self, "destination_label", _identifier(self.destination_label)
+            self, "destination_label", _destination_label(self.destination_label)
         )
         object.__setattr__(
             self, "destination_scope_id", _digest(self.destination_scope_id)
@@ -276,7 +284,7 @@ class MobilityOperationRequest:
         )
         object.__setattr__(self, "immutable_spec", _immutable_spec(self.immutable_spec))
         object.__setattr__(
-            self, "destination_label", _identifier(self.destination_label)
+            self, "destination_label", _destination_label(self.destination_label)
         )
         object.__setattr__(
             self, "destination_scope_id", _digest(self.destination_scope_id)
@@ -472,7 +480,7 @@ class MobilityOperation:
         object.__setattr__(
             self,
             "destination_label",
-            _identifier(self.destination_label, code="INTEGRITY"),
+            _destination_label(self.destination_label, code="INTEGRITY"),
         )
         object.__setattr__(
             self,

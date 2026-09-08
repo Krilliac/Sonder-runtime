@@ -776,6 +776,14 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
                     and name == "sonder_runtime.bootstrap.app"
                 ):
                     continue
+                # One pure public-label grammar must govern configuration and
+                # retained receipts. Keep this exception exact in both ends;
+                # platform still cannot import other domain/runtime policy.
+                if (
+                    rel.as_posix() == "sonder_runtime/platform/artifact_mobility_config.py"
+                    and name == "sonder_runtime.domain.artifact_mobility_label"
+                ):
+                    continue
                 if target_layer not in ALLOWED_PACKAGE_EDGES[layer]:
                     violations.append(
                         f"{rel}: {layer} may not import {name} "
