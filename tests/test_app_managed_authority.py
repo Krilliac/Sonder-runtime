@@ -106,6 +106,30 @@ def test_private_selection_is_exact_and_cannot_be_replaced(managed):
             pass
 
 
+def test_admission_never_carries_a_mutable_private_inventory(managed):
+    """The admission retains only a binding-issued opaque continuation lease."""
+    authority, selection, lanes, *_ = managed
+    with authority.admit(selection, selection.context) as admission:
+        assert not hasattr(admission, "private_inventory")
+        lease = admission.private_inventory_lease
+        assert repr(lease) == "<private inventory admission lease>"
+        with lanes.store.transaction() as tx:
+            assert authority.authorize_host(
+                admission,
+                selection.context,
+                selection.host_conversation_id,
+                connection=tx.conn,
+            )
+            admission.private_inventory_lease = object()
+            with pytest.raises(PermissionError, match="private admission"):
+                authority.authorize_host(
+                    admission,
+                    selection.context,
+                    selection.host_conversation_id,
+                    connection=tx.conn,
+                )
+
+
 def test_managed_host_registration_uses_private_selection_and_closes_registry(managed):
     authority, selection, lanes, model, context, *_ = managed
     host = authority.continuation_service(selection)
@@ -158,7 +182,7 @@ def test_each_bound_authorization_reuses_one_fresh_private_inventory(
         bound.close()
 
 
-def test_bound_authorization_reuses_only_active_private_inventory_scope(
+def test_bound_authorization_reuses_only_active_issuer_private_inventory_scope(
     managed, monkeypatch
 ):
     authority, selection, _, _, _, binding, *_ = managed
@@ -171,7 +195,6 @@ def test_bound_authorization_reuses_only_active_private_inventory_scope(
         context=selection.context,
         command_id="scoped-inventory-bound",
     )
-    snapshot = binding._inventory()
     original = binding._inventory
     calls = []
 
@@ -181,12 +204,12 @@ def test_bound_authorization_reuses_only_active_private_inventory_scope(
 
     monkeypatch.setattr(binding, "_inventory", inventory)
     try:
-        with binding.private_inventory_scope(snapshot):
+        with binding._private_inventory_scope():
             bound.require_current()
             bound.require_current()
-            assert calls == []
+            assert calls == [True]
         bound.require_current()
-        assert calls == [True]
+        assert calls == [True, True]
     finally:
         bound.close()
 

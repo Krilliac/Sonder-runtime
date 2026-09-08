@@ -87,20 +87,16 @@ class AppProjectGrantCatalog:
         config_provider,
         workspace_roots,
         private_inventory,
-        private_inventory_snapshot=None,
         clock=time.time,
     ):
-        if private_inventory_snapshot is not None and not callable(
-            private_inventory_snapshot
-        ):
-            raise TypeError("private inventory snapshot validator must be callable")
+        if not callable(private_inventory):
+            raise TypeError("private inventory provider must be callable")
         self._config = config_provider
         self._roots = workspace_roots
         self._inventory = private_inventory
-        self._inventory_snapshot = private_inventory_snapshot
         self._clock = clock
 
-    def _boundary(self, config, path, *, inventory=None):
+    def _boundary(self, config, path):
         roots = tuple(islice(self._roots(), 257))
         if not roots or len(roots) > 256:
             raise PermissionError("app policy unavailable")
@@ -129,22 +125,17 @@ class AppProjectGrantCatalog:
                 for root in canonical
             ):
                 raise PermissionError("private source overlaps model workspace")
-        if inventory is None:
-            inventory = self._inventory()
-        elif self._inventory_snapshot is None:
-            raise PermissionError("private inventory snapshot unavailable")
-        else:
-            inventory = self._inventory_snapshot(inventory)
+        inventory = self._inventory()
         inventory.require_disjoint(canonical)
         return canonical
 
-    def snapshot(self, *, inventory=None):
+    def snapshot(self):
         config = self._config()
         if not config.app_control.enabled or app_control_errors(config):
             raise PermissionError("app policy unavailable")
         path = canonical_catalog_path(config.app_control.catalog_file)
         try:
-            roots = self._boundary(config, path, inventory=inventory)
+            roots = self._boundary(config, path)
             with PrivateDirectoryAnchor(path.parent) as anchor:
                 with anchor.open_read(path.name) as stream:
                     before = os.fstat(stream.fileno())
@@ -186,9 +177,7 @@ class AppProjectGrantCatalog:
                         {g.project for g in grants}
                     ) != len(grants):
                         raise ValueError("duplicate grant identity or project")
-                    if config != self._config() or roots != self._boundary(
-                        config, path, inventory=inventory
-                    ):
+                    if config != self._config() or roots != self._boundary(config, path):
                         raise ValueError("live app policy changed")
                     if any(g.expires_at <= self._clock() for g in grants):
                         raise ValueError("app policy expired")
@@ -289,17 +278,17 @@ class AppProjectGrantCatalog:
             config.app_control.runtime_id,
         )
 
-    def resolve(self, project, normalized_account, role, *, inventory=None):
+    def resolve(self, project, normalized_account, role):
         """Inputs come only from root's live authenticated account adapter."""
         if role != "admin":
             raise PermissionError("app policy unavailable")
-        for grant in self.snapshot(inventory=inventory).grants:
+        for grant in self.snapshot().grants:
             if grant.project == project and normalized_account in grant.accounts:
                 return grant
         raise PermissionError("app policy unavailable")
 
-    def require_current(self, grant, *, inventory=None):
+    def require_current(self, grant):
         if type(grant) is not ProjectGrant:
             raise PermissionError("app policy unavailable")
-        if grant not in self.snapshot(inventory=inventory).grants:
+        if grant not in self.snapshot().grants:
             raise PermissionError("app policy changed")

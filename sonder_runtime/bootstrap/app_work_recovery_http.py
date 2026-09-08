@@ -92,8 +92,11 @@ class AppWorkRecoveryHttpBinding:
     @contextmanager
     def _recovery_scope(self, selection):
         """Start each explicit callback with one fresh, bounded inventory."""
-        inventory = self.require_current()
-        with self.control.private_inventory_scope(inventory):
+        with self.control._private_inventory_scope(
+            context_roots=selection.original_context.workspace_roots,
+            requirements=self.work.private_paths(),
+        ):
+            self.require_current()
             yield
 
     def _attempt(self, selection):

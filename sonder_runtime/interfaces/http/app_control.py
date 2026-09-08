@@ -166,9 +166,7 @@ def handle_app_control(
         with _admit(peer), ExitStack() as scopes:
             if binding is None or binding.store is None:
                 raise ControlError(503, "APP_CONTROL_UNAVAILABLE")
-            scopes.enter_context(
-                binding.private_inventory_scope(binding._private())
-            )
+            scopes.enter_context(binding._private_inventory_scope())
             config = binding._config()
             origin = _header(handler, "Origin")
             authorization = _header(handler, "Authorization")

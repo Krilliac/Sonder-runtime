@@ -46,7 +46,7 @@ class AppAdmission:
     active: bool = True
     connection: object = None
     key_digest: str = ""
-    private_inventory: object = field(default=None, repr=False)
+    private_inventory_lease: object = field(default=None, repr=False)
     private_inventory_identity: tuple = field(default=(), repr=False)
 
     def __reduce__(self):
@@ -342,14 +342,13 @@ class AppManagedAuthority:
                 )
             return result
 
-    def _selection(self, selection, *, inventory=None):
+    def _selection(self, selection):
         self._outside_work_callback()
         with self._lock:
             self._issued_locked(selection)
         _context_within(selection.context, selection.original_context)
         self.binding._private(
-            context_roots=selection.original_context.workspace_roots,
-            inventory=inventory,
+            context_roots=selection.original_context.workspace_roots
         )
         return selection
 
@@ -362,7 +361,8 @@ class AppManagedAuthority:
                 or scope is None
                 or scope["token"] is not admission
                 or scope["thread"] != threading.get_ident()
-                or scope["private_inventory"] is not admission.private_inventory
+                or scope["private_inventory_lease"]
+                is not admission.private_inventory_lease
                 or scope["private_inventory_identity"]
                 != admission.private_inventory_identity
                 or admission.private_inventory_identity
@@ -371,9 +371,11 @@ class AppManagedAuthority:
                 )
             ):
                 raise PermissionError("exact private admission required for model roots")
-        return self.binding._config(
-            inventory=admission.private_inventory
-        ).state.workspace_roots
+        self.binding._require_private_admission_lease(
+            admission.private_inventory_lease,
+            context_roots=admission.context.workspace_roots,
+        )
+        return self.binding._config().state.workspace_roots
 
     @contextmanager
     def admit(self, subject, context):
@@ -420,91 +422,102 @@ class AppManagedAuthority:
             with self._lock:
                 selection = self._issued_locked(registration.selection)
         binding = self.binding
-        inventory = binding._private(
+        # This scope is the owner of the capability for the full admission.
+        # It retains the snapshot privately and revokes it before the admission
+        # returns, including copied async contexts that outlive this block.
+        with binding._private_inventory_scope(
             context_roots=selection.original_context.workspace_roots
-        )
-        selection = self._selection(selection, inventory=inventory)
-        if context.source == "worker":
-            with self._lock:
-                proof = self._workers.get(id(context))
-            if (
-                proof is None
-                or proof[0] is not context
-                or registration is None
-                or proof[1] != registration.generation
-            ):
-                raise PermissionError("service-issued worker context required")
-            if context.expired:
-                raise PermissionError("worker grant expired")
-        else:
-            _context_within(context, selection.context)
-        binding._config(inventory=inventory)
-        binding._private(context_roots=context.workspace_roots, inventory=inventory)
-        conn = binding._open()
-        admission = None
-        try:
-            with account_admission(conn):
-                binding._source(conn)
-                key_digest = hashlib.sha256(account_auth._secret().encode()).hexdigest()
-                account = account_auth.read_session_reference(
-                    conn, selection.account.reference
-                )
-                if (
-                    key_digest
-                    != hashlib.sha256(account_auth._secret().encode()).hexdigest()
-                ):
-                    raise PermissionError(
-                        "account signing key changed during reference read"
-                    )
-                if (
-                    account != selection.account
-                    or account is None
-                    or account.role != "admin"
-                ):
-                    raise PermissionError("exact app account session is no longer live")
-                binding._config(inventory=inventory)
-                grant = binding._grant(
-                    account, selection.control.grant.project_handle, inventory=inventory
-                )
-                if grant_snapshot(grant) != selection.control.grant:
-                    raise PermissionError("original app grant changed")
-                admission = AppAdmission(
-                    selection,
-                    context,
-                    account,
-                    self._issuer,
-                    threading.get_ident(),
-                    registration,
-                    private_inventory=inventory,
-                    private_inventory_identity=_private_inventory_identity(
-                        selection, context, key_digest
-                    ),
-                )
-                admission.key_digest = key_digest
+        ):
+            capability = binding._private_capability(
+                context_roots=selection.original_context.workspace_roots
+            )
+            lease = binding._private_admission_lease(capability)
+            selection = self._selection(selection)
+            if context.source == "worker":
                 with self._lock:
-                    if len(self._admissions) >= 128:
+                    proof = self._workers.get(id(context))
+                if (
+                    proof is None
+                    or proof[0] is not context
+                    or registration is None
+                    or proof[1] != registration.generation
+                ):
+                    raise PermissionError("service-issued worker context required")
+                if context.expired:
+                    raise PermissionError("worker grant expired")
+            else:
+                _context_within(context, selection.context)
+            binding._config()
+            binding._private(context_roots=context.workspace_roots)
+            conn = binding._open()
+            admission = None
+            try:
+                with account_admission(conn):
+                    binding._source(conn)
+                    key_digest = hashlib.sha256(account_auth._secret().encode()).hexdigest()
+                    account = account_auth.read_session_reference(
+                        conn, selection.account.reference
+                    )
+                    if (
+                        key_digest
+                        != hashlib.sha256(account_auth._secret().encode()).hexdigest()
+                    ):
                         raise PermissionError(
-                            "active app admission capacity unavailable"
+                            "account signing key changed during reference read"
                         )
-                    self._admissions[id(admission)] = dict(
-                        token=admission,
-                        thread=admission.thread,
-                        context=context,
-                        selection=selection,
-                        account=account,
-                        key_digest=admission.key_digest,
-                        private_inventory=admission.private_inventory,
-                        private_inventory_identity=admission.private_inventory_identity,
-                        connection=None,
+                    if (
+                        account != selection.account
+                        or account is None
+                        or account.role != "admin"
+                    ):
+                        raise PermissionError("exact app account session is no longer live")
+                    binding._config()
+                    grant = binding._grant(
+                        account, selection.control.grant.project_handle
                     )
-                yield admission
-        finally:
-            if admission is not None:
-                with self._lock:
-                    self._admissions.pop(id(admission), None)
-                admission.active = False
-                admission.connection = None
-            conn.close()
+                    if grant_snapshot(grant) != selection.control.grant:
+                        raise PermissionError("original app grant changed")
+                    admission = AppAdmission(
+                        selection,
+                        context,
+                        account,
+                        self._issuer,
+                        threading.get_ident(),
+                        registration,
+                        private_inventory_lease=lease,
+                        private_inventory_identity=_private_inventory_identity(
+                            selection, context, key_digest
+                        ),
+                    )
+                    admission.key_digest = key_digest
+                    with self._lock:
+                        if len(self._admissions) >= 128:
+                            raise PermissionError(
+                                "active app admission capacity unavailable"
+                            )
+                        self._admissions[id(admission)] = dict(
+                            token=admission,
+                            thread=admission.thread,
+                            context=context,
+                            selection=selection,
+                            account=account,
+                            key_digest=admission.key_digest,
+                            private_inventory_lease=(
+                                admission.private_inventory_lease
+                            ),
+                            private_inventory_identity=(
+                                admission.private_inventory_identity
+                            ),
+                            connection=None,
+                        )
+                    yield admission
+            finally:
+                if admission is not None:
+                    with self._lock:
+                        self._admissions.pop(id(admission), None)
+                    admission.active = False
+                    admission.connection = None
+                conn.close()
 
     def _check(self, admission, context, connection):
         self._outside_work_callback()
@@ -518,7 +531,8 @@ class AppManagedAuthority:
                 or scope["selection"] is not admission.selection
                 or scope["account"] != admission.account
                 or scope["key_digest"] != admission.key_digest
-                or scope["private_inventory"] is not admission.private_inventory
+                or scope["private_inventory_lease"]
+                is not admission.private_inventory_lease
                 or scope["private_inventory_identity"]
                 != admission.private_inventory_identity
                 or scope["connection"] is not None
@@ -541,7 +555,11 @@ class AppManagedAuthority:
             and admission.connection is not connection
         ):
             raise PermissionError("exact live app transaction admission required")
-        self.binding._config(inventory=admission.private_inventory)
+        self.binding._require_private_admission_lease(
+            admission.private_inventory_lease,
+            context_roots=context.workspace_roots,
+        )
+        self.binding._config()
         if (
             admission.account.expires_at <= time.time()
             or admission.key_digest
@@ -549,9 +567,7 @@ class AppManagedAuthority:
         ):
             raise PermissionError("account admission expired or signing key changed")
         admission.connection = connection
-        selection = self._selection(
-            admission.selection, inventory=admission.private_inventory
-        )
+        selection = self._selection(admission.selection)
         try:
             session, binding, slot = self.binding.store.atomic(
                 lambda tx: tx.require_selection(
@@ -572,11 +588,7 @@ class AppManagedAuthority:
             or slot != selection.slot
         ):
             raise PermissionError("sealed app selection changed")
-        current = self.binding._grant(
-            admission.account,
-            session.grant.project_handle,
-            inventory=admission.private_inventory,
-        )
+        current = self.binding._grant(admission.account, session.grant.project_handle)
         if grant_snapshot(current) != session.grant:
             raise PermissionError("app catalog changed")
         if not set(selection.allowed_tools).issubset(self.lanes.allowed_tools):
