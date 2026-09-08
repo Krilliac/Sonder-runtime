@@ -204,4 +204,3 @@ class ChildMigrationActivation:
             self._cutover_manifest = self._cutover_bundle = None
             self._cutover_stores = ()
             return {"phase": "COMPLETE", "migration_id": manifest["migration_id"]}
-

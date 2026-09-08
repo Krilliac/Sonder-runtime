@@ -371,4 +371,3 @@ def test_standalone_learning_owner_preserves_explicit_session_optout(tmp_path, m
     events = repository.read_range("named")
     assert [e.event_type for e in events] == (
         ["model.requested", "user.message", "provider.requested", "provider.responded", "model.response"] if session == "named" else [])
-
