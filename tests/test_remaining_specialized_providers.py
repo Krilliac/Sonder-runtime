@@ -87,6 +87,22 @@ def test_wiring_publishes_all_specialized_capabilities_and_normalizes_identity()
     assert registry.providers() == ()
 
 
+def test_specialized_bundle_close_is_idempotent():
+    """A graph can be handed back after its direct owner already closed it."""
+    registry = ScopedProviderRegistry()
+    bundle = wire_specialized_providers(
+        registry,
+        embedding=EmbeddingLifecycleAdapter(
+            lambda request, ctx: ([1.0],), provider_id="embedding"
+        ),
+    )
+
+    bundle.close(timeout=0)
+    bundle.close(timeout=0)
+
+    assert registry.providers() == ()
+
+
 def test_public_composition_boundary_is_fail_closed_for_absent_provider():
     assert PublicEmbeddingLifecycleAdapter is EmbeddingLifecycleAdapter
     assert PublicTrainingLifecycleAdapter is TrainingLifecycleAdapter
