@@ -9054,6 +9054,12 @@
     },
     {
       "default": null,
+      "field": "memory_replication",
+      "section": "root",
+      "type": "MemoryReplicationConfig"
+    },
+    {
+      "default": null,
       "field": "child_storage",
       "section": "root",
       "type": "ChildStorageConfig"
@@ -9085,6 +9091,18 @@
     {
       "default": "[redacted]",
       "field": "artifact_transfer_key",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "memory_replication_key",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "memory_replication_state_integrity_key",
       "section": "secrets",
       "type": "str"
     },
@@ -9467,6 +9485,84 @@
       "type": "bool"
     },
     {
+      "default": false,
+      "field": "enabled",
+      "section": "memory_replication",
+      "type": "bool"
+    },
+    {
+      "default": "",
+      "field": "local_node_id",
+      "section": "memory_replication",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "project_scope",
+      "section": "memory_replication",
+      "type": "str"
+    },
+    {
+      "default": false,
+      "field": "receiver_enabled",
+      "section": "memory_replication",
+      "type": "bool"
+    },
+    {
+      "default": [],
+      "field": "accepted_source_ids",
+      "section": "memory_replication",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": [],
+      "field": "peers",
+      "section": "memory_replication",
+      "type": "tuple[MemoryReplicationPeerConfig, ...]"
+    },
+    {
+      "default": 5,
+      "field": "request_timeout_seconds",
+      "section": "memory_replication",
+      "type": "int"
+    },
+    {
+      "default": 8388608,
+      "field": "max_request_bytes",
+      "section": "memory_replication",
+      "type": "int"
+    },
+    {
+      "default": 65536,
+      "field": "max_response_bytes",
+      "section": "memory_replication",
+      "type": "int"
+    },
+    {
+      "default": 256,
+      "field": "max_batch_records",
+      "section": "memory_replication",
+      "type": "int"
+    },
+    {
+      "default": "",
+      "field": "node_id",
+      "section": "memory_replication.peers[]",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "project_scope",
+      "section": "memory_replication.peers[]",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "origin",
+      "section": "memory_replication.peers[]",
+      "type": "str"
+    },
+    {
       "default": "json",
       "field": "log_format",
       "section": "observability",
@@ -9704,14 +9800,14 @@
       "type": "int"
     }
   ],
-  "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES",
+  "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
     "commands": 317,
-    "configuration": 123,
+    "configuration": 139,
     "events": 43,
     "tools": 212
   },
-  "digest": "6ff3ceadbc5c8d95db0e65660292e8c7a3b68299caf93755c8df69bb151bd5c3",
+  "digest": "e4dd513a58ebd7cf99310efd03b0431a7a344a23ed3c3b23f01a6140d0851bf3",
   "events": [
     {
       "name": "session.started",
@@ -10185,7 +10281,8 @@
     "server.py": "9a4262ad4dd80fa47d5a1875a46e1e786d2ae5364cf9257140d5c5072456591c",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
-    "sonder_runtime/platform/config.py": "e274ff9e0668680d2be026da3283eb7870886b8ca2f46621533ee3a959a3714e"
+    "sonder_runtime/platform/config.py": "20eb6d3e8d3ffec7649b3f686c80d3afda45d68b4799dee00372c98cdf5a907c",
+    "sonder_runtime/platform/memory_replication_config.py": "900adcdc781592461167f407490835ce6390b4fe0327e403163427c8ad7f5de7"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
   "tools": [

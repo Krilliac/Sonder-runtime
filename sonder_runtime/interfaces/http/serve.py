@@ -47,6 +47,7 @@ from sonder_runtime.interfaces.http.app_control import handle_app_control, is_ap
 _ARTIFACT_TRANSFER_BINDING = None
 _ARTIFACT_TRANSFER_CONFIG = None
 _MEMORY_REPLICATION_RECEIVER = None
+_MEMORY_REPLICATION_SERVICE = None
 _ACCOUNT_LOGOUT_ADMISSION = threading.BoundedSemaphore(2)
 
 import logging as _logging_module
@@ -159,6 +160,36 @@ def configure_memory_replication_receiver(receiver):
         receiver is not None,
     )
     return receiver
+
+
+def configure_memory_replication_service(service):
+    """Install one already-owned local replication service at HTTP startup.
+
+    The HTTP adapter never creates a peer client or chooses a peer.  Starting
+    the service is a local lifecycle transition only; the service exposes an
+    incoming receiver when its fixed typed policy opted into one.  Outbound
+    batches still require a separate explicit ``replicate_once`` call.
+    """
+    if service is not None:
+        for name in ("start", "receiver", "close", "status"):
+            if not callable(getattr(service, name, None)):
+                raise TypeError("memory replication service has an invalid lifecycle")
+        # Complete the candidate before changing the published route.  A
+        # malformed receiver cannot replace a known-good active service.
+        service.start()
+        receiver = service.receiver()
+        if receiver is not None and not callable(getattr(receiver, "receive_bytes", None)):
+            raise TypeError("memory replication service receiver is invalid")
+    else:
+        receiver = None
+
+    global _MEMORY_REPLICATION_SERVICE
+    previous = _MEMORY_REPLICATION_SERVICE
+    configure_memory_replication_receiver(receiver)
+    _MEMORY_REPLICATION_SERVICE = service
+    if previous is not None and previous is not service:
+        previous.close()
+    return service
 
 
 def configure_control_plane_service(service):
@@ -808,6 +839,16 @@ HTTP_SESSION_STATE_OWNER_LIMIT = max(1, min(
 
 def configure_typed_config(config) -> None:
     """Bind validated ``SonderConfig`` values at the HTTP boundary."""
+    server_config = config.server
+    _require_exact_bind_values(
+        server_config.host,
+        config.secrets.api_key,
+        server_config.auth_mode,
+        config.secrets.auth_secret,
+        require_account=server_config.require_account,
+    )
+    if type(server_config.tls_terminated_by_proxy) is not bool:
+        raise RuntimeError("bind TLS proxy declaration must be a boolean")
     _serve_logger.debug("configure_typed_config: binding server config to HTTP boundary")
     _serve_logger.info(f"Applying typed server configuration, host={config.server.host!r}, port={config.server.port}, auth_mode={config.server.auth_mode!r}")
     global CONFIGURED_PORT, API_KEY, AUTH_SECRET, HOST, REQUIRE_ACCOUNT, AUTH_MODE, CORS_ORIGINS
@@ -846,7 +887,6 @@ def configure_typed_config(config) -> None:
     _APP_CONTROL_CONFIG = config
     candidate_control._config_provider = lambda: _APP_CONTROL_CONFIG
     _APP_CONTROL_BINDING = candidate_control
-    server_config = config.server
     from sonder_runtime.adapters.web import listener_probe
     listener_probe.configure_typed_config(config)
     CONFIGURED_PORT = server_config.port
@@ -878,6 +918,9 @@ def configure_typed_config(config) -> None:
         ipaddress.ip_network(cidr, strict=False)
         for cidr in server_config.trusted_proxy_cidrs
     )
+    # A typed config application is a new host selection.  No prior receiver
+    # may remain reachable while the normal application owner is rebuilt.
+    configure_memory_replication_service(None)
 _HTTP_SESSION_STATES = OrderedDict()
 _HTTP_SESSION_STATES_LOCK = threading.RLock()
 
@@ -1635,13 +1678,36 @@ def _system_operation_authority_error(operation, context):
 
 
 def _is_loopback_host(host):
-    value = (host or "").strip().strip("[]").lower()
+    if type(host) is not str:
+        return False
+    value = host.strip().strip("[]").lower()
     if value == "localhost":
         return True
     try:
         return ipaddress.ip_address(value).is_loopback
     except ValueError:
         return False
+
+
+def _require_exact_bind_values(
+    host,
+    api_key,
+    auth_mode,
+    auth_secret,
+    *,
+    require_account=None,
+):
+    """Reject direct typed values before a bind-time security comparison."""
+    if type(host) is not str:
+        raise RuntimeError("bind host must be an exact builtin string")
+    if type(api_key) is not str:
+        raise RuntimeError("bind API key must be an exact builtin string")
+    if type(auth_mode) is not str:
+        raise RuntimeError("bind auth mode must be an exact builtin string")
+    if type(auth_secret) is not str:
+        raise RuntimeError("bind auth secret must be an exact builtin string")
+    if require_account is not None and type(require_account) is not bool:
+        raise RuntimeError("bind account requirement must be a boolean")
 
 
 def _a2a_discovery_base_url():
@@ -1690,14 +1756,31 @@ def _validate_bind_security(
     auth_secret=None,
     tls_terminated_by_proxy=None,
 ):
-    _serve_logger.debug(f"_validate_bind_security: host={host!r}, auth_mode={auth_mode!r}, tls_proxy={tls_terminated_by_proxy}")
+    api_key = API_KEY if api_key is None else api_key
+    auth_secret = AUTH_SECRET if auth_secret is None else auth_secret
+    raw_mode = AUTH_MODE if auth_mode is None else auth_mode
+    _require_exact_bind_values(
+        host,
+        api_key,
+        raw_mode,
+        auth_secret,
+        require_account=REQUIRE_ACCOUNT if auth_mode is None else None,
+    )
+    mode = _effective_auth_mode() if auth_mode is None else raw_mode
+    if mode not in ("api-key", "account", "both", "either", "local-open"):
+        raise RuntimeError("invalid bind auth mode")
+    if tls_terminated_by_proxy is None:
+        tls_terminated_by_proxy = _env_flag("SONDER_TLS_TERMINATED_BY_PROXY")
+    elif type(tls_terminated_by_proxy) is not bool:
+        raise RuntimeError("bind TLS proxy declaration must be a boolean")
+    _serve_logger.debug(
+        f"_validate_bind_security: host={host!r}, auth_mode={mode!r}, "
+        f"tls_proxy={tls_terminated_by_proxy}"
+    )
     _serve_logger.info(f"Validating bind security, host={host!r}")
     # Unsafe lab acknowledgement tightens exposure: unlike normal served mode,
     # there is deliberately no authenticated non-loopback topology available.
     unsafe_lab.require_startup(host=host)
-    api_key = API_KEY if api_key is None else api_key
-    mode = _effective_auth_mode() if auth_mode is None else auth_mode
-    auth_secret = AUTH_SECRET if auth_secret is None else auth_secret
     if mode == "api-key" and not api_key:
         _serve_logger.critical(f"bind security validation failed: api-key auth mode requires SONDER_API_KEY, host={host!r}")
         raise RuntimeError("api-key auth mode requires SONDER_API_KEY")
@@ -1714,9 +1797,7 @@ def _validate_bind_security(
     # the last responsible moment, immediately before ``serve_forever`` can
     # bind.  An operator who uses the direct entrypoint must make the same
     # explicit reverse-proxy assertion as a configured deployment.
-    if tls_terminated_by_proxy is None:
-        tls_terminated_by_proxy = _env_flag("SONDER_TLS_TERMINATED_BY_PROXY")
-    if not tls_terminated_by_proxy:
+    if tls_terminated_by_proxy is not True:
         _serve_logger.critical(f"bind security violation: non-loopback host={host!r} without TLS proxy declaration, refusing to start")
         raise RuntimeError(
             "non-loopback bind requires SONDER_TLS_TERMINATED_BY_PROXY=1 "
@@ -4767,6 +4848,14 @@ class Handler(BaseHTTPRequestHandler):
             )
             from sonder_runtime.bootstrap.app import default_app
             application = default_app()
+            memory_replication_service = getattr(
+                application, "memory_replication", None,
+            )
+            memory_replication_status = (
+                memory_replication_service.status()
+                if memory_replication_service is not None
+                else None
+            )
             try:
                 inference_pool_status = server.OLLAMA_POOL.status()
             except Exception:
@@ -4792,12 +4881,14 @@ class Handler(BaseHTTPRequestHandler):
                 "mcp_runtime": server.mcp_runtime_data(),
                 "npu_fallback": server.npu_fallback_status_data(),
                 "learning_health": server.learning_health_data(),
+                "memory_replication": memory_replication_status,
                 "operational_capabilities": build_operational_capabilities(
                     config=getattr(application, "config", None),
                     inference_pool_status=inference_pool_status,
                     memory_receiver_configured=(
                         _MEMORY_REPLICATION_RECEIVER is not None
                     ),
+                    memory_replication_status=memory_replication_status,
                     managed_work_configured=(
                         _APP_CONTROL_BINDING is not None
                         and getattr(_APP_CONTROL_BINDING, "_work_binding", None)
@@ -6471,6 +6562,18 @@ def main(config=None, *, _server_factory=None, _close_default_resources=True):
         if application is None:
             application = default_app(config=config)
         configure_control_plane_service(application.control_plane_snapshot_service)
+    if application is None and config is not None:
+        from sonder_runtime.bootstrap.app import default_app
+
+        application = default_app(config=config)
+    if application is not None:
+        configure_memory_replication_service(
+            getattr(application, "memory_replication", None),
+        )
+    else:
+        # A compatibility host with no owned Application has no authority to
+        # retain a receiver from a prior typed host selection.
+        configure_memory_replication_service(None)
     port = _selected_listener_port(config)
     # Discovery reads the bound-listener value. Keep it synchronized when the
     # direct compatibility entrypoint overrides the typed configuration with a
@@ -6535,11 +6638,15 @@ def main(config=None, *, _server_factory=None, _close_default_resources=True):
         finally:
             if _ARTIFACT_TRANSFER_BINDING is not None:
                 _ARTIFACT_TRANSFER_BINDING.close()
-            receiver = _MEMORY_REPLICATION_RECEIVER
-            if receiver is not None:
-                close = getattr(receiver, "close", None)
-                if callable(close):
-                    close()
+            if _MEMORY_REPLICATION_SERVICE is not None:
+                configure_memory_replication_service(None)
+            else:
+                receiver = _MEMORY_REPLICATION_RECEIVER
+                if receiver is not None:
+                    close = getattr(receiver, "close", None)
+                    if callable(close):
+                        close()
+                configure_memory_replication_receiver(None)
         _serve_logger.info("HTTP server stopped")
 
 

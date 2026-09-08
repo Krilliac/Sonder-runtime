@@ -188,6 +188,9 @@ class Application:
     session_http_facade: Callable[[], HttpSessionFacade]
     job_registry: Callable[[], JobRegistry]
     job_service: Callable[[], JobRegistryService]
+    # The fact-only trusted-peer service is absent unless a complete typed
+    # configuration explicitly enables it.  It owns no background work.
+    memory_replication: Any | None = None
     process_job_provider: Callable[[], ProcessJobProvider] | None = None
     job_recovery: Callable[..., JobRecoveryReport] | None = None
     config: SonderConfig | None = None
@@ -317,8 +320,12 @@ class Application:
                     remaining = None if timeout is None else max(0, timeout - (monotonic() - started))
                     self.close_compute(timeout=remaining)
         finally:
-            remaining = None if timeout is None else max(0, timeout - (monotonic() - started))
-            self.specialized_providers.close(timeout=remaining)
+            try:
+                if self.memory_replication is not None:
+                    self.memory_replication.close()
+            finally:
+                remaining = None if timeout is None else max(0, timeout - (monotonic() - started))
+                self.specialized_providers.close(timeout=remaining)
 
 
 # Compatibility name for callers that used the bootstrap-private selector.
@@ -392,6 +399,13 @@ def build_application(
     logger.debug("configuring runtime lifecycle")
     from ..adapters.web import lifecycle as runtime_lifecycle
     runtime_lifecycle.configure(config)
+    memory_replication_service = None
+    if config is not None:
+        # This constructs only a local policy owner.  It opens no database or
+        # peer connection until its explicit receiver or replicate_once call.
+        from .memory_replication import compose_memory_replication_service
+
+        memory_replication_service = compose_memory_replication_service(config)
     # Keep the transitional provider behind lazy closures: composing the
     # application must not import the historical root module.
     logger.debug("resolving legacy model provider factories")
@@ -1394,6 +1408,7 @@ def build_application(
         compaction_service=get_compaction_service,
         job_registry=get_job_registry,
         job_service=get_job_service,
+        memory_replication=memory_replication_service,
         process_job_provider=get_process_job_provider,
         job_recovery=recover_jobs,
         workflow_engine=get_workflow_engine,
@@ -1437,6 +1452,7 @@ def build_application(
 _default_config: SonderConfig | None = None
 _default_compute_close = None
 _default_delegation_close = None
+_default_memory_replication_close = None
 _owned_default_application = None
 
 
@@ -1450,8 +1466,12 @@ def close_default_runtime_resources(timeout=5):
     timeout = 5 if timeout is None else max(0, timeout)
     started = monotonic()
     try:
-        if _default_delegation_close is not None:
-            _default_delegation_close(timeout=timeout)
+        try:
+            if _default_delegation_close is not None:
+                _default_delegation_close(timeout=timeout)
+        finally:
+            if _default_memory_replication_close is not None:
+                _default_memory_replication_close()
     finally:
         close_default_compute(timeout=max(0, timeout - (monotonic() - started)))
 
@@ -1478,7 +1498,8 @@ _application_lifecycle = ApplicationLifecycle(_build_default_application)
 
 def install_owned_application(application: Application) -> None:
     """Private required-new child composition; never an external factory seam."""
-    global _owned_default_application, _default_config, _default_compute_close, _default_delegation_close
+    global _owned_default_application, _default_config, _default_compute_close
+    global _default_delegation_close, _default_memory_replication_close
     if type(application) is not Application or not isinstance(application.config, SonderConfig):
         raise TypeError("exact configured Application required")
     _application_lifecycle.install_owned(application)
@@ -1486,21 +1507,25 @@ def install_owned_application(application: Application) -> None:
     _default_config = application.config
     _default_compute_close = application.close_compute
     _default_delegation_close = application.close_delegation
+    _default_memory_replication_close = getattr(
+        application.memory_replication, "close", None,
+    )
 
 
 def stop_owned_application(application: Application) -> None:
     """Freeze compatibility lookup; the live host still owns actual cleanup."""
-    global _default_compute_close, _default_delegation_close
+    global _default_compute_close, _default_delegation_close, _default_memory_replication_close
     if application is not _owned_default_application:
         raise RuntimeError("exact owned Application required")
     _application_lifecycle.stop_owned(application)
-    _default_compute_close = _default_delegation_close = None
+    _default_compute_close = _default_delegation_close = _default_memory_replication_close = None
 
 
 def default_app(*, config: SonderConfig | None = None) -> Application:
     """Process-wide default graph for compatibility shims."""
     logger.debug(f"default_app called, config_provided={config is not None}")
     global _default_config, _default_compute_close, _default_delegation_close
+    global _default_memory_replication_close
     if _owned_default_application is not None:
         if config is not None and config is not _owned_default_application.config:
             raise RuntimeError("owned application config selection is immutable")
@@ -1518,6 +1543,9 @@ def default_app(*, config: SonderConfig | None = None) -> Application:
     application = _application_lifecycle.get()
     _default_compute_close = getattr(application, "close_compute", None)
     _default_delegation_close = getattr(application, "close_delegation", None)
+    _default_memory_replication_close = getattr(
+        getattr(application, "memory_replication", None), "close", None,
+    )
     if config is not None and application.config is not config:
         logger.critical("default application was already built with a different config object -- process-wide state is inconsistent and cannot be recovered")
         raise RuntimeError("default application was already built without this config")
@@ -1526,11 +1554,13 @@ def default_app(*, config: SonderConfig | None = None) -> Application:
 
 def reset_for_tests() -> None:
     global _default_config, _default_compute_close, _default_delegation_close
+    global _default_memory_replication_close
     if _owned_default_application is not None:
         raise RuntimeError("owned application cannot be reset")
     close_default_runtime_resources()
     _default_compute_close = None
     _default_delegation_close = None
+    _default_memory_replication_close = None
     _default_config = None
     _application_lifecycle.reset()
     runtime_paths.reset_home()

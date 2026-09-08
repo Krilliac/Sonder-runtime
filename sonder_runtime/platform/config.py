@@ -36,6 +36,11 @@ from sonder_runtime.platform.app_control_config import AppControlConfig, app_con
 from sonder_runtime.platform.child_storage_config import (
     ChildStorageConfig, child_storage_errors, apply_child_storage_environment,
 )
+from sonder_runtime.platform.memory_replication_config import (
+    MemoryReplicationConfig,
+    MemoryReplicationPeerConfig,
+    memory_replication_errors,
+)
 from sonder_runtime.platform import unsafe_lab_policy
 from sonder_runtime.platform.config_environment import (
     EnvironmentFileError,
@@ -60,12 +65,18 @@ _COMPUTE_CAPABILITIES = frozenset({
 SECRET_ENV_KEYS = (
     "SONDER_API_KEY",
     "SONDER_ARTIFACT_TRANSFER_KEY",
+    "SONDER_MEMORY_REPLICATION_KEY",
+    "SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY",
     "SONDER_AUTH_SECRET",
     "SONDER_BACKUP_KEY_FILE",
     "SONDER_LAUNCHER_HEALTH_TOKEN",
 )
 _SECRET_TOML_KEYS = frozenset(
-    {"api_key", "artifact_transfer_key", "auth_secret", "backup_key", "backup_key_file", "secret", "token"}
+    {
+        "api_key", "artifact_transfer_key", "memory_replication_key",
+        "memory_replication_state_integrity_key",
+        "auth_secret", "backup_key", "backup_key_file", "secret", "token",
+    }
 )
 
 MIN_API_KEY_LENGTH = 24
@@ -225,17 +236,23 @@ class BackupConfig:
 class Secrets:
     """Secret material, loaded separately so it can never be dumped."""
 
-    api_key: str = ""
-    auth_secret: str = ""
-    backup_key_file: str = ""
+    api_key: str = field(default="", repr=False)
+    auth_secret: str = field(default="", repr=False)
+    backup_key_file: str = field(default="", repr=False)
     artifact_transfer_key: str = field(default="", repr=False)
+    memory_replication_key: str = field(default="", repr=False)
+    memory_replication_state_integrity_key: str = field(default="", repr=False)
 
     def as_redacted_dict(self) -> dict:
         return {
             "api_key": redact_presence(self.api_key),
             "artifact_transfer_key": redact_presence(self.artifact_transfer_key),
+            "memory_replication_key": redact_presence(self.memory_replication_key),
+            "memory_replication_state_integrity_key": redact_presence(
+                self.memory_replication_state_integrity_key
+            ),
             "auth_secret": redact_presence(self.auth_secret),
-            "backup_key_file": self.backup_key_file or "[unset]",
+            "backup_key_file": redact_presence(self.backup_key_file),
         }
 
 
@@ -257,6 +274,9 @@ class SonderConfig:
     sources: tuple[str, ...] = ()
     private_source_paths: tuple[str, ...] = field(default=(), repr=False)
     artifact_transfer: ArtifactTransferConfig = field(default_factory=ArtifactTransferConfig)
+    memory_replication: MemoryReplicationConfig = field(
+        default_factory=MemoryReplicationConfig
+    )
     child_storage: ChildStorageConfig = field(default_factory=ChildStorageConfig)
     app_control: AppControlConfig = field(default_factory=AppControlConfig)
 
@@ -331,6 +351,25 @@ class SonderConfig:
             for item in fields(self.app_control)
         }
         out["secrets"] = self.secrets.as_redacted_dict()
+        out["memory_replication"] = {
+            "enabled": self.memory_replication.enabled,
+            "local_node_id": self.memory_replication.local_node_id,
+            "project_scope": self.memory_replication.project_scope,
+            "receiver_enabled": self.memory_replication.receiver_enabled,
+            "accepted_source_ids": list(self.memory_replication.accepted_source_ids),
+            "peers": [
+                {
+                    "node_id": peer.node_id,
+                    "project_scope": peer.project_scope,
+                    "origin": "[configured]" if peer.origin else "[unset]",
+                }
+                for peer in self.memory_replication.peers
+            ],
+            "request_timeout_seconds": self.memory_replication.request_timeout_seconds,
+            "max_request_bytes": self.memory_replication.max_request_bytes,
+            "max_response_bytes": self.memory_replication.max_response_bytes,
+            "max_batch_records": self.memory_replication.max_batch_records,
+        }
         out['child_storage'] = {
             item.name: ('<configured>' if self.child_storage.binding_file else '<unset>')
             if item.name == 'binding_file' else getattr(self.child_storage, item.name)
@@ -349,7 +388,17 @@ class ConfigError(ValueError):
         self.errors = tuple(errors)
 
 
-def _is_loopback_host(host: str) -> bool:
+def _is_exact_string(value: object) -> bool:
+    return type(value) is str
+
+
+def _has_minimum_api_key(value: object) -> bool:
+    return _is_exact_string(value) and len(value) >= MIN_API_KEY_LENGTH
+
+
+def _is_loopback_host(host: object) -> bool:
+    if not _is_exact_string(host):
+        return False
     if host in ("localhost",):
         return True
     try:
@@ -445,6 +494,82 @@ def _apply_section(current, section_name: str, raw: dict, errors: list[str]):
                 errors.append(f"[{section_name}].{key} must be a string")
                 continue
             updates[key] = value
+    return replace(current, **updates) if updates else current
+
+
+def _apply_memory_replication_section(
+    current: MemoryReplicationConfig,
+    raw: dict,
+    errors: list[str],
+) -> MemoryReplicationConfig:
+    """Parse the static trusted-peer section; never import topology from env."""
+    known = {
+        "enabled", "local_node_id", "project_scope", "receiver_enabled",
+        "accepted_source_ids", "peers", "request_timeout_seconds",
+        "max_request_bytes", "max_response_bytes", "max_batch_records",
+    }
+    for key in raw:
+        if key in _SECRET_TOML_KEYS:
+            continue  # The recursive secret walk already recorded the refusal.
+        if key not in known:
+            errors.append(f"unknown key [memory_replication].{key}")
+
+    updates: dict[str, object] = {}
+    for key in ("enabled", "receiver_enabled"):
+        if key not in raw:
+            continue
+        if type(raw[key]) is not bool:
+            errors.append(f"[memory_replication].{key} must be a boolean")
+            continue
+        updates[key] = raw[key]
+    for key in ("local_node_id", "project_scope"):
+        if key not in raw:
+            continue
+        if not isinstance(raw[key], str):
+            errors.append(f"[memory_replication].{key} must be a string")
+            continue
+        updates[key] = raw[key]
+    for key in (
+        "request_timeout_seconds", "max_request_bytes", "max_response_bytes",
+        "max_batch_records",
+    ):
+        if key not in raw:
+            continue
+        if type(raw[key]) is not int:
+            errors.append(f"[memory_replication].{key} must be an integer")
+            continue
+        updates[key] = raw[key]
+
+    if "accepted_source_ids" in raw:
+        value = raw["accepted_source_ids"]
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            errors.append(
+                "[memory_replication].accepted_source_ids must be a list of strings"
+            )
+        else:
+            updates["accepted_source_ids"] = tuple(value)
+
+    if "peers" in raw:
+        value = raw["peers"]
+        peers: list[MemoryReplicationPeerConfig] = []
+        if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+            errors.append("[memory_replication].peers must be an array of tables")
+        else:
+            peer_keys = ("node_id", "project_scope", "origin")
+            for index, item in enumerate(value):
+                where = f"[memory_replication].peers[{index}]"
+                for key in item:
+                    if key not in peer_keys:
+                        errors.append(f"unknown key {where}.{key}")
+                fields: dict[str, str] = {}
+                for key in peer_keys:
+                    field_value = item.get(key, "")
+                    if not isinstance(field_value, str):
+                        errors.append(f"{where}.{key} must be a string")
+                        field_value = ""
+                    fields[key] = field_value
+                peers.append(MemoryReplicationPeerConfig(**fields))
+            updates["peers"] = tuple(peers)
     return replace(current, **updates) if updates else current
 
 
@@ -804,6 +929,26 @@ def _apply_environment(
         secrets = replace(secrets, api_key=env["SONDER_API_KEY"].strip())
     if env.get("SONDER_ARTIFACT_TRANSFER_KEY", "").strip():
         secrets = replace(secrets, artifact_transfer_key=env["SONDER_ARTIFACT_TRANSFER_KEY"].strip())
+    if "SONDER_MEMORY_REPLICATION_KEY" in env:
+        replication_key = env["SONDER_MEMORY_REPLICATION_KEY"]
+        if type(replication_key) is not str:
+            errors.append("SONDER_MEMORY_REPLICATION_KEY must be a string")
+        elif replication_key.strip():
+            secrets = replace(
+                secrets,
+                memory_replication_key=replication_key.strip(),
+            )
+    if "SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY" in env:
+        state_integrity_key = env["SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY"]
+        if type(state_integrity_key) is not str:
+            errors.append(
+                "SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY must be a string"
+            )
+        elif state_integrity_key.strip():
+            secrets = replace(
+                secrets,
+                memory_replication_state_integrity_key=state_integrity_key.strip(),
+            )
     if env.get("SONDER_AUTH_SECRET", "").strip():
         secrets = replace(secrets, auth_secret=env["SONDER_AUTH_SECRET"].strip())
     if env.get("SONDER_BACKUP_KEY_FILE", "").strip():
@@ -862,21 +1007,40 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     errors.extend(child_storage_errors(config))
     errors.extend(app_control_errors(config))
     errors.extend(artifact_transfer_errors(config))
+    errors.extend(memory_replication_errors(config))
     errors.extend(deployment_errors(config))
     if config.schema_version != 1:
         errors.append(
             f"unsupported configuration schema_version {config.schema_version}"
         )
-    if config.profile not in PROFILES:
+    profile = config.profile
+    profile_is_exact_string = _is_exact_string(profile)
+    if not profile_is_exact_string:
+        errors.append("profile must be an exact builtin string")
+    elif profile not in PROFILES:
         errors.append(
-            f"unknown profile {config.profile!r}; expected one of {PROFILES}"
+            f"unknown profile {profile!r}; expected one of {PROFILES}"
         )
 
     server = config.server
+    server_host = server.host
+    host_is_exact_string = _is_exact_string(server_host)
+    auth_mode = server.auth_mode
+    auth_mode_is_exact_string = _is_exact_string(auth_mode)
+    require_account = server.require_account
+    tls_terminated_by_proxy = server.tls_terminated_by_proxy
     if not 1 <= server.port <= 65_535:
         errors.append(f"[server].port out of range: {server.port}")
-    if server.auth_mode not in ("api-key", "account", "both", "either"):
-        errors.append(f"[server].auth_mode invalid: {server.auth_mode!r}")
+    if not auth_mode_is_exact_string:
+        errors.append("[server].auth_mode must be an exact builtin string")
+    elif auth_mode not in ("api-key", "account", "both", "either"):
+        errors.append(f"[server].auth_mode invalid: {auth_mode!r}")
+    if not host_is_exact_string:
+        errors.append("[server].host must be an exact builtin string")
+    if type(require_account) is not bool:
+        errors.append("[server].require_account must be a boolean")
+    if type(tls_terminated_by_proxy) is not bool:
+        errors.append("[server].tls_terminated_by_proxy must be a boolean")
     if server.max_request_bytes <= 0 or server.max_request_bytes > 16 * 1024 * 1024:
         errors.append("[server].max_request_bytes must be within 1..16MiB")
     if server.max_concurrent_requests < 1:
@@ -902,23 +1066,24 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         except ValueError:
             errors.append(f"[server].trusted_proxy_cidrs entry invalid: {cidr!r}")
 
-    loopback = _is_loopback_host(server.host)
-    if not loopback:
+    api_key = getattr(config.secrets, "api_key", None)
+    loopback = _is_loopback_host(server_host) if host_is_exact_string else False
+    if host_is_exact_string and not loopback:
         # SPEC-2 remote exposure rules: non-loopback binding requires an
         # explicit TLS-proxy declaration AND strong authentication.  There
         # is no override; the reference topology keeps Sonder on loopback.
-        if not server.tls_terminated_by_proxy:
+        if tls_terminated_by_proxy is not True:
             errors.append(
-                f"[server].host {server.host!r} is not loopback: non-loopback "
+                f"[server].host {server_host!r} is not loopback: non-loopback "
                 "binding without tls_terminated_by_proxy=true is prohibited"
             )
-        if len(config.secrets.api_key) < MIN_API_KEY_LENGTH:
+        if not _has_minimum_api_key(api_key):
             errors.append(
                 "non-loopback binding requires SONDER_API_KEY of at least "
                 f"{MIN_API_KEY_LENGTH} characters in the secrets file"
             )
-    if config.profile == "server-private":
-        if len(config.secrets.api_key) < MIN_API_KEY_LENGTH:
+    if profile_is_exact_string and profile == "server-private":
+        if not _has_minimum_api_key(api_key):
             errors.append(
                 "profile server-private requires SONDER_API_KEY of at least "
                 f"{MIN_API_KEY_LENGTH} characters"
@@ -926,17 +1091,21 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
 
     effective_auth_mode = (
         "account"
-        if server.require_account and server.auth_mode == "api-key"
-        else server.auth_mode
+        if require_account is True and auth_mode_is_exact_string and auth_mode == "api-key"
+        else auth_mode if auth_mode_is_exact_string else ""
     )
-    if (
-        effective_auth_mode in ACCOUNT_BEARING_AUTH_MODES
-        and config.secrets.auth_secret == BUILTIN_DEV_AUTH_SECRET
-    ):
-        errors.append(
-            f"[server].auth_mode {server.auth_mode!r} may not use the built-in "
-            "development auth secret; set SONDER_AUTH_SECRET to a private value"
-        )
+    if effective_auth_mode in ACCOUNT_BEARING_AUTH_MODES:
+        auth_secret = getattr(config.secrets, "auth_secret", None)
+        if not _is_exact_string(auth_secret):
+            errors.append(
+                "[server].auth_secret must be an exact builtin string for "
+                "account-bearing authentication"
+            )
+        elif auth_secret == BUILTIN_DEV_AUTH_SECRET:
+            errors.append(
+                f"[server].auth_mode {auth_mode!r} may not use the built-in "
+                "development auth secret; set SONDER_AUTH_SECRET to a private value"
+            )
 
     if config.state.minimum_free_disk_bytes < 0:
         errors.append("[state].minimum_free_disk_bytes must be >= 0")
@@ -1062,7 +1231,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         errors.append("[compute].node_id must differ from remote node identities")
     if len(node_ids) != len(set(node_ids)):
         errors.append("[compute].nodes contains duplicate node identities")
-    if compute.nodes and len(config.secrets.api_key) < MIN_API_KEY_LENGTH:
+    if compute.nodes and not _has_minimum_api_key(api_key):
         errors.append(
             "[compute].nodes requires SONDER_API_KEY of at least "
             f"{MIN_API_KEY_LENGTH} characters for authenticated remote compute"
@@ -1282,6 +1451,16 @@ def load_config(
                     config = replace(config, profile=value)
                 else:
                     errors.append("profile must be a string")
+            elif key == "memory_replication":
+                if isinstance(value, dict):
+                    config = replace(
+                        config,
+                        memory_replication=_apply_memory_replication_section(
+                            config.memory_replication, value, errors,
+                        ),
+                    )
+                else:
+                    errors.append("[memory_replication] must be a table")
             elif key in _SECTION_TYPES:
                 if isinstance(value, dict):
                     config = replace(

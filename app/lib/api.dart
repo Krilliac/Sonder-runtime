@@ -1911,6 +1911,8 @@ class OperationalCapabilitiesInfo {
   final OperationalCapabilityInfo artifactTransferTransport;
   final OperationalCapabilityInfo automaticMemoryMigration;
   final OperationalCapabilityInfo automaticArtifactMigration;
+  final bool automaticTakeoverAvailable;
+  final bool automaticFailbackAvailable;
 
   const OperationalCapabilitiesInfo({
     required this.schemaVersion,
@@ -1929,6 +1931,8 @@ class OperationalCapabilitiesInfo {
     required this.artifactTransferTransport,
     required this.automaticMemoryMigration,
     required this.automaticArtifactMigration,
+    required this.automaticTakeoverAvailable,
+    required this.automaticFailbackAvailable,
   });
 
   factory OperationalCapabilitiesInfo.fromJson(Map<String, dynamic> json) {
@@ -1980,6 +1984,10 @@ class OperationalCapabilitiesInfo {
           capability(mobility, 'automatic_memory_migration'),
       automaticArtifactMigration:
           capability(mobility, 'automatic_artifact_migration'),
+      automaticTakeoverAvailable:
+          _asBool(mobility['automatic_takeover_available']),
+      automaticFailbackAvailable:
+          _asBool(mobility['automatic_failback_available']),
     );
   }
 

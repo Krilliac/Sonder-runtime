@@ -29,6 +29,8 @@ def test_default_surface_is_explicitly_local_and_fail_closed():
     assert surface["inference"]["request_level_pooling"]["available"] is False
     assert surface["inference"]["model_sharding"]["available"] is False
     assert surface["mobility"]["memory_replication_transport"]["available"] is False
+    assert surface["mobility"]["automatic_takeover_available"] is False
+    assert surface["mobility"]["automatic_failback_available"] is False
     assert surface["mobility"]["artifact_transfer_transport"]["available"] is False
     assert surface["mobility"]["automatic_memory_migration"]["available"] is False
     assert surface["mobility"]["automatic_artifact_migration"]["available"] is False
@@ -61,6 +63,12 @@ def test_surface_distinguishes_pooled_requests_from_sharding_and_mobility():
     assert surface["inference"]["pool"]["remote_worker_count"] == 1
     assert surface["inference"]["model_sharding"]["available"] is False
     assert surface["mobility"]["memory_replication_transport"]["available"] is True
+    reason = surface["mobility"]["memory_replication_transport"]["reason"]
+    assert "fixed" in reason.lower()
+    assert "quorum" in reason.lower()
+    assert "high availability" in reason.lower()
+    assert surface["mobility"]["automatic_takeover_available"] is False
+    assert surface["mobility"]["automatic_failback_available"] is False
     assert surface["mobility"]["automatic_memory_migration"]["available"] is False
 
 

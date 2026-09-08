@@ -967,9 +967,12 @@ void main() {
           },
         },
         'mobility': {
+          'automatic_takeover_available': false,
+          'automatic_failback_available': false,
           'memory_replication_transport': {
             'available': true,
-            'reason': 'Receiver injected.',
+            'reason':
+                'Configured fixed-peer memory replication is an explicit bounded authenticated fact-only batch transport; an operator must invoke replicate_once. Every configured peer must return a durable receipt before the cursor advances; this is not quorum or high availability.',
           },
           'artifact_transfer_transport': {
             'available': false,
@@ -997,7 +1000,22 @@ void main() {
     expect(capabilities.requestLevelPooling.available, isTrue);
     expect(capabilities.modelSharding.available, isFalse);
     expect(capabilities.memoryReplicationTransport.available, isTrue);
+    expect(
+      capabilities.memoryReplicationTransport.reason,
+      contains('fixed-peer memory replication'),
+    );
+    expect(capabilities.automaticTakeoverAvailable, isFalse);
+    expect(capabilities.automaticFailbackAvailable, isFalse);
     expect(capabilities.automaticArtifactMigration.available, isFalse);
+  });
+
+  test('operational capability defaults automatic recovery flags to unavailable', () {
+    final capabilities = OperationalCapabilitiesInfo.fromJson({
+      'mobility': const <String, dynamic>{},
+    });
+
+    expect(capabilities.automaticTakeoverAvailable, isFalse);
+    expect(capabilities.automaticFailbackAvailable, isFalse);
   });
 
   test('system info parses shared live execution counts', () {

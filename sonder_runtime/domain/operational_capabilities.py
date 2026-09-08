@@ -61,6 +61,7 @@ def build_operational_capabilities(
     config: object | None,
     inference_pool_status: object = None,
     memory_receiver_configured: bool = False,
+    memory_replication_status: object = None,
     managed_work_configured: bool = False,
 ) -> dict[str, object]:
     """Build an admin-safe, non-probing capability snapshot.
@@ -92,15 +93,60 @@ def build_operational_capabilities(
             else "Artifact transfer is disabled until an explicit receiver grant is applied."
         ),
     )
+    # The service status is explicitly local and non-probing.  Treat anything
+    # else as absent rather than accepting an arbitrary object as evidence of
+    # live replication.  Keep ``memory_receiver_configured`` for the older
+    # injected-receiver seam while exposing the richer owned-service posture.
+    replication_status = (
+        memory_replication_status
+        if isinstance(memory_replication_status, dict)
+        else None
+    )
+    service_enabled = bool(
+        replication_status is not None
+        and replication_status.get("enabled") is True
+        and replication_status.get("fact_only") is True
+    )
+    receiver_configured = bool(
+        memory_receiver_configured
+        or (
+            replication_status is not None
+            and replication_status.get("receiver_configured") is True
+        )
+    )
+    configured_peers = ()
+    if replication_status is not None:
+        candidates = replication_status.get("configured_peer_ids")
+        if type(candidates) is tuple:
+            configured_peers = tuple(
+                identity for identity in candidates[:64]
+                if type(identity) is str and identity
+            )
+    memory_available = service_enabled or receiver_configured
     memory_capability = _capability(
-        bool(memory_receiver_configured),
+        memory_available,
         (
-            "An authenticated memory replication receiver is explicitly injected; "
-            "replication remains a bounded batch transport."
-            if memory_receiver_configured
-            else "Memory replication is disabled until an authenticated receiver is injected."
+            "Configured fixed-peer memory replication is an explicit bounded "
+            "authenticated fact-only batch transport; an operator must invoke "
+            "replicate_once. Every configured peer must return a durable receipt "
+            "before the cursor advances; this is not quorum or high availability."
+            if service_enabled
+            else (
+                "An authenticated fixed-peer memory replication receiver is "
+                "explicitly injected; it accepts bounded fact batches only and does "
+                "not provide quorum or high availability."
+                if receiver_configured
+                else "Memory fact replication is disabled until an authenticated receiver is injected."
+            )
         ),
     )
+    memory_capability.update({
+        "fact_only": service_enabled,
+        "configured_peer_count": len(configured_peers),
+        "receiver_configured": receiver_configured,
+        "automatic_takeover_available": False,
+        "automatic_failback_available": False,
+    })
     app_control = getattr(config, "app_control", None)
     app_control_enabled = bool(getattr(app_control, "enabled", False))
     managed_work = _capability(
@@ -146,6 +192,8 @@ def build_operational_capabilities(
         },
         "mobility": {
             "memory_replication_transport": memory_capability,
+            "automatic_takeover_available": False,
+            "automatic_failback_available": False,
             "artifact_transfer_transport": artifact_capability,
             "automatic_memory_migration": _capability(
                 False,
