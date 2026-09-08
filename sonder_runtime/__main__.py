@@ -25,6 +25,7 @@ import os
 import sys
 
 from sonder_runtime.adapters.persistence.migrations import STORE_NAMES
+from sonder_runtime.domain.artifact_mobility_label import is_public_mobility_label
 from sonder_runtime.platform import config as sonder_config
 from sonder_runtime.platform import paths as runtime_paths
 from sonder_runtime.platform import version as sonder_version
@@ -1006,8 +1007,106 @@ def cmd_eval_history(args) -> int:
     return 0
 
 
+def cmd_artifact_mobility(args) -> int:
+    """Local operator-only adapter; never registered as a model-facing tool."""
+    from sonder_runtime.bootstrap.app import _artifact_mobility_operator_application
+    from sonder_runtime.bootstrap.artifact_mobility import mobility_error_projection
+    try:
+        application = _artifact_mobility_operator_application()
+        if args.mobility_command == "status":
+            payload = application.artifact_mobility_status(args.operation_id)
+        elif args.mobility_command == "list":
+            payload = application.artifact_mobility_list()
+        elif args.mobility_command == "send":
+            payload = application._artifact_mobility_binding().send(
+                args.source_artifact, confirm_destination=args.confirm_destination)
+        elif args.mobility_command == "resume":
+            payload = application._artifact_mobility_binding().resume(args.operation_id)
+        else:
+            payload = {"outcome_code": "INVALID_REQUEST"}
+        _emit(payload, as_json=args.json)
+        return 2 if set(payload) == {"outcome_code"} else 0
+    except Exception as error:
+        _emit(mobility_error_projection(error), as_json=args.json)
+        return 2
+
+
+class _MobilityArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        # argparse's normal error echoes rejected arguments, including URLs.
+        self.exit(2, "artifact-mobility: INVALID_REQUEST\n")
+
+
+def _check_mobility_arguments(values, parser):
+    """Admit the complete local grammar before help or host composition."""
+    action_options = {
+        "send": {"--source-artifact", "--confirm-destination"},
+        "resume": {"--operation-id"},
+        "status": {"--operation-id"},
+        "list": set(),
+    }
+    action = None
+    index = 0
+    while index < len(values):
+        token = values[index]
+        index += 1
+        if token in ("--help", "-h"):
+            continue
+        if action is None and token in action_options:
+            action = token
+            continue
+        if action is not None and token == "--json":
+            continue
+        option, separator, value = token.partition("=")
+        if action is None or option not in action_options[action]:
+            parser.error(None)
+        if not separator:
+            if index == len(values) or values[index].startswith("-"):
+                parser.error(None)
+            value = values[index]
+            index += 1
+        if option in ("--source-artifact", "--operation-id"):
+            # IDs have exactly the store's bounded ASCII opaque-ID grammar.
+            # Check length first; never normalize or echo a rejected value.
+            if len(value) != 32 or any(char not in "0123456789abcdef" for char in value):
+                parser.error(None)
+        elif option == "--confirm-destination" and not is_public_mobility_label(value):
+            parser.error(None)
+
+
+class _ProductionArgumentParser(argparse.ArgumentParser):
+    def parse_args(self, args=None, namespace=None):
+        values = list(sys.argv[1:] if args is None else args)
+        if any(value.casefold() == "artifact-mobility" for value in values):
+            # Detect case variants before ordinary parsing can echo an earlier
+            # misplaced value. Only exact lowercase syntax is admitted below.
+            parser = _MobilityArgumentParser(prog="artifact-mobility", allow_abbrev=False)
+            if not values or values[0] != "artifact-mobility":
+                parser.error(None)
+            _check_mobility_arguments(values[1:], parser)
+            _add_mobility_arguments(parser)
+            result = parser.parse_args(values[1:], namespace)
+            result.command = "artifact-mobility"
+            return result
+        return super().parse_args(values, namespace)
+
+
+def _add_mobility_arguments(parser):
+    mobility_sub = parser.add_subparsers(dest="mobility_command", required=True,
+        parser_class=_MobilityArgumentParser)
+    for action in ("send", "resume", "status", "list"):
+        mp = mobility_sub.add_parser(action, allow_abbrev=False)
+        mp.add_argument("--json", action="store_true")
+        if action == "send":
+            mp.add_argument("--source-artifact", required=True)
+            mp.add_argument("--confirm-destination", required=True)
+        elif action in ("resume", "status"):
+            mp.add_argument("--operation-id", required=True)
+        mp.set_defaults(func=cmd_artifact_mobility)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _ProductionArgumentParser(
         prog="python -m sonder_runtime",
         description="Sonder runtime production entry point",
     )
@@ -1205,6 +1304,10 @@ def build_parser() -> argparse.ArgumentParser:
     hp.add_argument("--source", default="manual")
     hp.add_argument("--json", action="store_true")
     hp.set_defaults(func=cmd_eval_history)
+
+    p = sub.add_parser("artifact-mobility", help="explicit local fixed-peer artifact copy")
+    p.error = lambda message: parser.exit(2, "artifact-mobility: INVALID_REQUEST\n")
+    _add_mobility_arguments(p)
 
     return parser
 

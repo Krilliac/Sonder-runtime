@@ -2,8 +2,15 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
+import hashlib
+import hmac
+import http.client
+import ipaddress
 import json
+import re
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -34,6 +41,241 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def _default_opener(request: urllib.request.Request, *, timeout: float):
     return urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout)
+
+
+class PinnedHttpsClientError(RuntimeError):
+    """Stable, redacted failure for the fixed mobility HTTPS transport."""
+
+
+@dataclass(frozen=True)
+class PinnedHttpsResponse:
+    """A bounded response after a direct, leaf-pinned HTTPS exchange."""
+
+    status: int
+    body: bytes
+
+
+def _direct_https_connection(host: str, port: int, timeout: float, context):
+    """Create one direct connection; unlike urllib this never consults proxies."""
+    return http.client.HTTPSConnection(host, port=port, timeout=timeout, context=context)
+
+
+class PinnedHttpsClient:
+    """One fixed origin whose TLS leaf is checked before authentication.
+
+    This deliberately has no URL input per request, no proxy configuration, and
+    no redirect follow-up.  The caller supplies headers lazily so a bearer is
+    not resolved until after the DER leaf matches its configured pin.
+    """
+
+    _MAX_ORIGIN_LENGTH = 512
+
+    def __init__(
+        self,
+        origin: str,
+        certificate_sha256: str,
+        *,
+        timeout_seconds: float,
+        connection_factory: Callable[..., Any] = _direct_https_connection,
+    ) -> None:
+        self._host, self._port = self._parse_origin(origin)
+        if (
+            not isinstance(certificate_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", certificate_sha256) is None
+        ):
+            raise PinnedHttpsClientError("MOBILITY_CONFIG")
+        if (
+            not isinstance(timeout_seconds, (int, float))
+            or isinstance(timeout_seconds, bool)
+            or not 0 < float(timeout_seconds) <= 30
+        ):
+            raise PinnedHttpsClientError("MOBILITY_CONFIG")
+        if not callable(connection_factory):
+            raise PinnedHttpsClientError("MOBILITY_CONFIG")
+        self._certificate_sha256 = certificate_sha256
+        self._timeout_seconds = float(timeout_seconds)
+        self._connection_factory = connection_factory
+
+    @classmethod
+    def _parse_origin(cls, origin: object) -> tuple[str, int]:
+        """Parse only the root-only HTTPS origin admitted by mobility config."""
+        if (
+            not isinstance(origin, str)
+            or not 1 <= len(origin) <= cls._MAX_ORIGIN_LENGTH
+            or not origin.startswith("https://")
+            or any(ord(character) < 33 or ord(character) > 126 for character in origin)
+        ):
+            raise PinnedHttpsClientError("MOBILITY_CONFIG")
+        authority = origin[len("https://") :]
+        if authority.endswith("/"):
+            authority = authority[:-1]
+        if (
+            not authority
+            or len(authority) > cls._MAX_ORIGIN_LENGTH
+            or any(character in authority for character in "/?#@")
+        ):
+            raise PinnedHttpsClientError("MOBILITY_CONFIG")
+        if authority.startswith("["):
+            closing = authority.find("]")
+            if closing < 1 or authority[closing + 1 : closing + 2] != ":":
+                raise PinnedHttpsClientError("MOBILITY_CONFIG")
+            host, port_text = authority[1:closing], authority[closing + 2 :]
+            try:
+                if not isinstance(ipaddress.ip_address(host), ipaddress.IPv6Address):
+                    raise PinnedHttpsClientError("MOBILITY_CONFIG")
+            except ValueError:
+                raise PinnedHttpsClientError("MOBILITY_CONFIG") from None
+        else:
+            host, separator, port_text = authority.rpartition(":")
+            if (
+                not separator
+                or not host
+                or ":" in host
+                or not cls._valid_host(host)
+            ):
+                raise PinnedHttpsClientError("MOBILITY_CONFIG")
+        if (
+            not port_text.isascii()
+            or not port_text.isdecimal()
+            or len(port_text) > 5
+        ):
+            raise PinnedHttpsClientError("MOBILITY_CONFIG")
+        try:
+            port = int(port_text)
+        except (TypeError, ValueError, OverflowError):
+            raise PinnedHttpsClientError("MOBILITY_CONFIG") from None
+        if not 1 <= port <= 65_535:
+            raise PinnedHttpsClientError("MOBILITY_CONFIG")
+        return host, port
+
+    @staticmethod
+    def _valid_host(host: str) -> bool:
+        try:
+            ipaddress.ip_address(host)
+            return True
+        except ValueError:
+            labels = host.split(".")
+            return bool(labels) and all(
+                re.fullmatch(
+                    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label
+                )
+                is not None
+                for label in labels
+            )
+
+    @staticmethod
+    def _response_length(headers: object, body: bytes) -> bool:
+        try:
+            get_all = getattr(headers, "get_all", None)
+            if callable(get_all):
+                values = get_all("Content-Length") or ()
+                return len(values) == 1 and values[0] == str(len(body))
+            get = getattr(headers, "get", None)
+            return callable(get) and get("Content-Length") == str(len(body))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _target_path(path: object) -> str:
+        if (
+            not isinstance(path, str)
+            or not 1 <= len(path) <= 4096
+            or not path.startswith("/")
+            or any(ord(character) < 33 or ord(character) > 126 for character in path)
+            or any(character in path for character in ("?", "#", "\\"))
+        ):
+            raise PinnedHttpsClientError("MOBILITY_PROTOCOL")
+        return path
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: bytes | None,
+        headers_supplier: Callable[[], dict[str, str]],
+        response_limit: int,
+    ) -> PinnedHttpsResponse:
+        """Make one direct request after pinning the live TLS leaf certificate."""
+        if (
+            not isinstance(method, str)
+            or method not in {"GET", "POST", "PUT"}
+            or (body is not None and not isinstance(body, bytes))
+            or not callable(headers_supplier)
+            or type(response_limit) is not int
+            or not 1 <= response_limit <= 1024 * 1024
+        ):
+            raise PinnedHttpsClientError("MOBILITY_PROTOCOL")
+        path = self._target_path(path)
+        connection = None
+        try:
+            try:
+                context = ssl.create_default_context()
+                connection = self._connection_factory(
+                    self._host, self._port, self._timeout_seconds, context
+                )
+                connection.connect()
+            except ssl.SSLError:
+                raise PinnedHttpsClientError("MOBILITY_TLS") from None
+            except Exception:
+                raise PinnedHttpsClientError("MOBILITY_UNAVAILABLE") from None
+
+            try:
+                certificate = connection.sock.getpeercert(binary_form=True)
+                digest = hashlib.sha256(certificate).hexdigest()
+            except Exception:
+                raise PinnedHttpsClientError("MOBILITY_TLS") from None
+            if not hmac.compare_digest(digest, self._certificate_sha256):
+                raise PinnedHttpsClientError("MOBILITY_TLS")
+
+            # This call stays after the pin check.  In particular, a failed
+            # handshake or leaf mismatch cannot make a credential observable.
+            try:
+                headers = headers_supplier()
+            except Exception:
+                raise PinnedHttpsClientError("MOBILITY_CREDENTIAL") from None
+            if (
+                not isinstance(headers, dict)
+                or any(
+                    not isinstance(name, str)
+                    or not isinstance(value, str)
+                    or "\r" in name
+                    or "\n" in name
+                    or "\r" in value
+                    or "\n" in value
+                    for name, value in headers.items()
+                )
+            ):
+                raise PinnedHttpsClientError("MOBILITY_CREDENTIAL")
+            try:
+                connection.request(method, path, body=body, headers=headers)
+                response = connection.getresponse()
+                status = getattr(response, "status", None)
+            except ssl.SSLError:
+                raise PinnedHttpsClientError("MOBILITY_TLS") from None
+            except Exception:
+                raise PinnedHttpsClientError("MOBILITY_UNAVAILABLE") from None
+            if type(status) is not int:
+                raise PinnedHttpsClientError("MOBILITY_PROTOCOL")
+            if 300 <= status < 400:
+                raise PinnedHttpsClientError("MOBILITY_REDIRECT")
+            try:
+                raw = response.read(response_limit + 1)
+            except Exception:
+                raise PinnedHttpsClientError("MOBILITY_UNAVAILABLE") from None
+            if not isinstance(raw, bytes):
+                raise PinnedHttpsClientError("MOBILITY_PROTOCOL")
+            if len(raw) > response_limit or not self._response_length(
+                getattr(response, "headers", None), raw
+            ):
+                raise PinnedHttpsClientError("MOBILITY_LENGTH")
+            return PinnedHttpsResponse(status=status, body=raw)
+        finally:
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
 
 class HttpsComputeSnapshotSource:
@@ -332,4 +574,10 @@ class HttpsComputeJobTransport:
             ) from exc
 
 
-__all__ = ["HttpsComputeJobTransport", "HttpsComputeSnapshotSource"]
+__all__ = [
+    "HttpsComputeJobTransport",
+    "HttpsComputeSnapshotSource",
+    "PinnedHttpsClient",
+    "PinnedHttpsClientError",
+    "PinnedHttpsResponse",
+]

@@ -32,6 +32,9 @@ def test_default_surface_is_explicitly_local_and_fail_closed():
     assert surface["mobility"]["automatic_takeover_available"] is False
     assert surface["mobility"]["automatic_failback_available"] is False
     assert surface["mobility"]["artifact_transfer_transport"]["available"] is False
+    assert "source-only spool exposes no receiver" in surface["mobility"][
+        "artifact_transfer_transport"
+    ]["reason"]
     assert surface["mobility"]["automatic_memory_migration"]["available"] is False
     assert surface["mobility"]["automatic_artifact_migration"]["available"] is False
 
@@ -104,3 +107,18 @@ def test_surface_reports_owned_work_only_when_enabled_and_composed():
         managed_work_configured=True,
     )
     assert available["control"]["managed_app_work"]["available"] is True
+
+
+def test_fixed_copy_requires_explicit_composition_and_enabled_source_outbound():
+    from dataclasses import replace
+    from sonder_runtime.platform.artifact_mobility_config import ArtifactMobilityConfig
+    from sonder_runtime.platform.artifact_mobility_source_config import ArtifactMobilitySourceConfig
+    config = replace(SonderConfig(),
+        artifact_mobility=ArtifactMobilityConfig(enabled=True),
+        artifact_mobility_source=ArtifactMobilitySourceConfig(enabled=True))
+    assert not build_operational_capabilities(config=config)['mobility']['fixed_peer_artifact_copy']['available']
+    surface = build_operational_capabilities(config=config, fixed_peer_artifact_copy_configured=True)
+    assert surface['mobility']['fixed_peer_artifact_copy']['available']
+    assert not surface['mobility']['automatic_artifact_migration']['available']
+    assert not build_operational_capabilities(config=SonderConfig(),
+        fixed_peer_artifact_copy_configured=True)['mobility']['fixed_peer_artifact_copy']['available']

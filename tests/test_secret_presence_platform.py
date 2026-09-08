@@ -22,6 +22,7 @@ def test_config_secret_redaction_uses_platform_policy():
         "artifact_transfer_key": "[unset]",
         "memory_replication_key": "[unset]",
         "memory_replication_state_integrity_key": "[unset]",
+        "artifact_mobility_peer_key": "[unset]",
     }
 
 
@@ -32,6 +33,7 @@ def test_secrets_repr_omits_all_secret_values():
         artifact_transfer_key="private-artifact-key",
         memory_replication_key="private-memory-key",
         memory_replication_state_integrity_key="private-memory-state-key",
+        artifact_mobility_peer_key="private-mobility-key",
         backup_key_file="C:/private/backup.key",
     )
 
@@ -44,6 +46,7 @@ def test_secrets_repr_omits_all_secret_values():
         "private-artifact-key",
         "private-memory-key",
         "private-memory-state-key",
+        "private-mobility-key",
         "C:/private/backup.key",
     ):
         assert value not in rendered_secrets
@@ -67,3 +70,11 @@ def test_artifact_transfer_secret_redacts_to_presence_only():
     redacted = Secrets(artifact_transfer_key="private-artifact-test-key").as_redacted_dict()
     assert redacted["artifact_transfer_key"] == "[set]"
     assert "private-artifact-test-key" not in str(redacted)
+
+
+def test_artifact_mobility_secret_redacts_to_presence_only():
+    redacted = Secrets(
+        artifact_mobility_peer_key="private-mobility-test-key"
+    ).as_redacted_dict()
+    assert redacted["artifact_mobility_peer_key"] == "[set]"
+    assert "private-mobility-test-key" not in str(redacted)

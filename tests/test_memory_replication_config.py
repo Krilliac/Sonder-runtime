@@ -216,6 +216,7 @@ def test_enabled_config_requires_a_distinct_local_state_integrity_secret(tmp_pat
         "memory_replication_key",
         "api_key",
         "artifact_transfer_key",
+        "artifact_mobility_peer_key",
         "auth_secret",
     ),
 )
@@ -226,6 +227,7 @@ def test_direct_typed_config_rejects_state_key_reuse_with_every_secret_boundary(
         "memory_replication_state_integrity_key": state_key,
         "api_key": "api-" + "a" * 40,
         "artifact_transfer_key": "artifact-" + "b" * 40,
+        "artifact_mobility_peer_key": "mobility-" + "m" * 40,
         "auth_secret": "auth-" + "c" * 40,
     }
     values[field] = state_key
@@ -236,7 +238,8 @@ def test_direct_typed_config_rejects_state_key_reuse_with_every_secret_boundary(
 
     assert errors == [
         "memory replication local state-integrity secret must be distinct "
-        "from replication peer, API, artifact-transfer, and auth secrets"
+        "from replication peer, API, artifact-transfer, artifact-mobility, "
+        "and auth secrets"
     ]
     assert state_key not in repr(errors)
 
@@ -312,6 +315,10 @@ def test_toml_secret_is_rejected_without_reflecting_its_value(tmp_path):
         ({
             "SONDER_MEMORY_REPLICATION_KEY": _key(),
             "SONDER_ARTIFACT_TRANSFER_KEY": _key(),
+        }, "distinct"),
+        ({
+            "SONDER_MEMORY_REPLICATION_KEY": _key(),
+            "SONDER_ARTIFACT_MOBILITY_PEER_KEY": _key(),
         }, "distinct"),
         ({"SONDER_MEMORY_REPLICATION_KEY": _key(), "SONDER_AUTH_SECRET": _key()}, "distinct"),
     ],

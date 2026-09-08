@@ -257,29 +257,43 @@ def memory_replication_errors(config) -> list[str]:
             else:
                 api_key = getattr(secrets, "api_key", None)
                 artifact_key = getattr(secrets, "artifact_transfer_key", None)
+                mobility_key = getattr(secrets, "artifact_mobility_peer_key", None)
                 auth_secret = getattr(secrets, "auth_secret", None)
                 if not all(
                     type(value) is str
                     for value in (
-                        key, state_integrity_key, api_key, artifact_key, auth_secret,
+                        key,
+                        state_integrity_key,
+                        api_key,
+                        artifact_key,
+                        mobility_key,
+                        auth_secret,
                     )
                 ):
                     errors.append(
                         "memory replication secret separation requires exact builtin strings"
                     )
-                elif key == api_key or key == artifact_key or key == auth_secret:
+                elif (
+                    key == api_key
+                    or key == artifact_key
+                    or key == mobility_key
+                    or key == auth_secret
+                ):
                     errors.append(
-                        "memory replication dedicated key must be distinct from API, artifact-transfer, and auth secrets"
+                        "memory replication dedicated key must be distinct from API, "
+                        "artifact-transfer, artifact-mobility, and auth secrets"
                     )
                 elif (
                     state_integrity_key == key
                     or state_integrity_key == api_key
                     or state_integrity_key == artifact_key
+                    or state_integrity_key == mobility_key
                     or state_integrity_key == auth_secret
                 ):
                     errors.append(
                         "memory replication local state-integrity secret must be distinct "
-                        "from replication peer, API, artifact-transfer, and auth secrets"
+                        "from replication peer, API, artifact-transfer, artifact-mobility, "
+                        "and auth secrets"
                     )
         if receiver_enabled:
             if not accepted:

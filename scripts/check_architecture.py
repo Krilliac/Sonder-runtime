@@ -49,6 +49,8 @@ PLATFORM_SUBPROCESS_MODULES = frozenset({
 NPU_ACCELERATOR_EXTERNALS = frozenset({"numpy", "onnxruntime", "tokenizers"})
 FILESYSTEM_OPTIONAL_EXTERNALS = frozenset({"yaml"})
 PLATFORM_OPTIONAL_EXTERNALS = frozenset({"prometheus_client", "psutil"})
+PERSISTENCE_CRYPTO_PATH = "sonder_runtime/adapters/persistence/artifact_mobility.py"
+PERSISTENCE_CRYPTO_EXTERNALS = frozenset({"cryptography"})
 DOMAIN_PURE_URL_MODULES = frozenset({
     "sonder_runtime/domain/ollama_policy.py",
 })
@@ -748,6 +750,12 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
             ):
                 continue
             if (
+                layer == "adapters"
+                and rel.as_posix() == PERSISTENCE_CRYPTO_PATH
+                and top in PERSISTENCE_CRYPTO_EXTERNALS
+            ):
+                continue
+            if (
                 layer == "platform"
                 and rel.as_posix() == "sonder_runtime/platform/metrics.py"
                 and top in PLATFORM_OPTIONAL_EXTERNALS
@@ -766,6 +774,14 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
                 if (
                     rel.as_posix() == UPDATE_ENGINE_PATH
                     and name == "sonder_runtime.bootstrap.app"
+                ):
+                    continue
+                # One pure public-label grammar must govern configuration and
+                # retained receipts. Keep this exception exact in both ends;
+                # platform still cannot import other domain/runtime policy.
+                if (
+                    rel.as_posix() == "sonder_runtime/platform/artifact_mobility_config.py"
+                    and name == "sonder_runtime.domain.artifact_mobility_label"
                 ):
                     continue
                 if target_layer not in ALLOWED_PACKAGE_EDGES[layer]:

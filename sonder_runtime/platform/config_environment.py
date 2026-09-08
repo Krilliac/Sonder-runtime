@@ -10,8 +10,41 @@ import os
 from pathlib import Path
 
 
+_MOBILITY_PEER_KEY = "SONDER_ARTIFACT_MOBILITY_PEER_KEY"
+_MOBILITY_PEER_KEY_ERROR = "[artifact_mobility].peer_key malformed secrets input"
+_SENSITIVE_ENV_FILE_KEY_POLICIES = {
+    _MOBILITY_PEER_KEY: (
+        "artifact_mobility_peer_key",
+        _MOBILITY_PEER_KEY_ERROR,
+    ),
+}
+
+
 class EnvironmentFileError(ValueError):
-    """Malformed compatibility environment-file input."""
+    """Malformed compatibility environment-file input.
+
+    ``field_code`` is deliberately metadata instead of a copy of the rejected
+    line. The configuration boundary can retain a stable error category and
+    line location without ever reflecting malformed file content into
+    exceptions, logs, or serialization.
+    """
+
+    def __init__(self, message: str, *, field_code: str = "") -> None:
+        super().__init__(message)
+        self.field_code = field_code
+
+
+def _sensitive_key_policy_in(value: str) -> tuple[str, str] | None:
+    """Return the non-disclosing policy for a sensitive key-shaped input."""
+    for key, policy in _SENSITIVE_ENV_FILE_KEY_POLICIES.items():
+        if key in value:
+            return policy
+    return None
+
+
+def _raise_sensitive_key_error(policy: tuple[str, str]) -> None:
+    field_code, message = policy
+    raise EnvironmentFileError(message, field_code=field_code)
 
 
 _NONCANONICAL_LINE_SEPARATORS = frozenset(("\u0085", "\u2028", "\u2029"))
@@ -59,9 +92,10 @@ def parse_env_file(path: Path) -> dict[str, str]:
         if not line or line.startswith("#"):
             continue
         if "=" not in line:
-            raise EnvironmentFileError(
-                f"{path}:{lineno}: expected KEY=VALUE"
-            )
+            if policy := _sensitive_key_policy_in(line):
+                _raise_sensitive_key_error(policy)
+            # File content can be a secret even when no known key precedes it.
+            raise EnvironmentFileError(f"{path}:{lineno}: expected KEY=VALUE")
         key, _, value = line.partition("=")
         key = key.strip(" ")
         value = value.strip(" ")

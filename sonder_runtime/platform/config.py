@@ -31,7 +31,19 @@ from urllib.parse import urlsplit
 
 from sonder_runtime.platform import paths as sonder_paths
 from sonder_runtime.platform.secret_presence import redact_presence
-from sonder_runtime.platform.artifact_transfer_config import ArtifactTransferConfig, artifact_transfer_errors
+from sonder_runtime.platform.artifact_transfer_config import (
+    ArtifactTransferConfig,
+    artifact_transfer_errors,
+    private_store_path,
+)
+from sonder_runtime.platform.artifact_mobility_config import (
+    ArtifactMobilityConfig,
+    artifact_mobility_errors,
+)
+from sonder_runtime.platform.artifact_mobility_source_config import ArtifactMobilitySourceConfig
+from sonder_runtime.platform.artifact_mobility_source_config import (
+    artifact_mobility_source_errors,
+)
 from sonder_runtime.platform.app_control_config import AppControlConfig, app_control_errors
 from sonder_runtime.platform.child_storage_config import (
     ChildStorageConfig, child_storage_errors, apply_child_storage_environment,
@@ -67,15 +79,23 @@ SECRET_ENV_KEYS = (
     "SONDER_ARTIFACT_TRANSFER_KEY",
     "SONDER_MEMORY_REPLICATION_KEY",
     "SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY",
+    "SONDER_ARTIFACT_MOBILITY_PEER_KEY",
     "SONDER_AUTH_SECRET",
     "SONDER_BACKUP_KEY_FILE",
     "SONDER_LAUNCHER_HEALTH_TOKEN",
 )
 _SECRET_TOML_KEYS = frozenset(
     {
-        "api_key", "artifact_transfer_key", "memory_replication_key",
+        "api_key",
+        "artifact_transfer_key",
+        "artifact_mobility_peer_key",
+        "memory_replication_key",
         "memory_replication_state_integrity_key",
-        "auth_secret", "backup_key", "backup_key_file", "secret", "token",
+        "auth_secret",
+        "backup_key",
+        "backup_key_file",
+        "secret",
+        "token",
     }
 )
 
@@ -242,6 +262,7 @@ class Secrets:
     artifact_transfer_key: str = field(default="", repr=False)
     memory_replication_key: str = field(default="", repr=False)
     memory_replication_state_integrity_key: str = field(default="", repr=False)
+    artifact_mobility_peer_key: str = field(default="", repr=False)
 
     def as_redacted_dict(self) -> dict:
         return {
@@ -250,6 +271,9 @@ class Secrets:
             "memory_replication_key": redact_presence(self.memory_replication_key),
             "memory_replication_state_integrity_key": redact_presence(
                 self.memory_replication_state_integrity_key
+            ),
+            "artifact_mobility_peer_key": redact_presence(
+                self.artifact_mobility_peer_key
             ),
             "auth_secret": redact_presence(self.auth_secret),
             "backup_key_file": redact_presence(self.backup_key_file),
@@ -277,6 +301,12 @@ class SonderConfig:
     memory_replication: MemoryReplicationConfig = field(
         default_factory=MemoryReplicationConfig
     )
+    artifact_mobility_source: ArtifactMobilitySourceConfig = field(
+        default_factory=ArtifactMobilitySourceConfig
+    )
+    artifact_mobility: ArtifactMobilityConfig = field(
+        default_factory=ArtifactMobilityConfig
+    )
     child_storage: ChildStorageConfig = field(default_factory=ChildStorageConfig)
     app_control: AppControlConfig = field(default_factory=AppControlConfig)
 
@@ -290,6 +320,8 @@ class SonderConfig:
             "server",
             "deployment",
             "artifact_transfer",
+            "artifact_mobility_source",
+            "artifact_mobility",
             "state",
             "ollama",
             "features",
@@ -304,6 +336,21 @@ class SonderConfig:
                 )
                 for f in fields(value)
             }
+        # These values identify private disk boundaries and a fixed remote peer.
+        # Public diagnostics need only show whether an operator configured them;
+        # retaining their text would disclose local layout or peer information.
+        out["artifact_mobility_source"]["store_dir"] = redact_presence(
+            self.artifact_mobility_source.store_dir
+        )
+        for name in (
+            "destination_origin",
+            "destination_tls_certificate_sha256",
+            "expected_recipient_attestation_sha256",
+            "destination_credential_id",
+        ):
+            out["artifact_mobility"][name] = redact_presence(
+                getattr(self.artifact_mobility, name)
+            )
         out["compute"] = {
             "worker_host_id": self.compute.worker_host_id,
             "worker_memory_budget_bytes": self.compute.worker_memory_budget_bytes,
@@ -431,7 +478,59 @@ def parse_env_file(path: Path) -> dict[str, str]:
     try:
         return _parse_env_file(path)
     except EnvironmentFileError as exc:
+        if exc.field_code == "artifact_mobility_peer_key":
+            raise ConfigError(
+                ["[artifact_mobility].peer_key malformed secrets input"]
+            ) from None
         raise ConfigError([str(exc)]) from None
+
+
+def _canonical_private_path(value: str) -> Path | None:
+    """Resolve an already validated private path without surfacing its text."""
+    try:
+        return Path(value).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _paths_overlap(first: Path, second: Path) -> bool:
+    """Return whether two canonical paths are equal or ancestor/descendant."""
+    first_text = os.path.normcase(str(first))
+    second_text = os.path.normcase(str(second))
+    try:
+        common = os.path.commonpath((first_text, second_text))
+    except ValueError:
+        return False
+    return common == first_text or common == second_text
+
+
+def _artifact_mobility_storage_errors(config: SonderConfig) -> list[str]:
+    """Keep the source-only spool outside every configured writable boundary."""
+    source = config.artifact_mobility_source
+    if not source.enabled or not isinstance(source.store_dir, str):
+        return []
+    source_path = _canonical_private_path(source.store_dir)
+    if source_path is None:
+        return ["[artifact_mobility_source].store_dir invalid"]
+
+    errors: list[str] = []
+    writable_roots = (config.state.home, *config.state.workspace_roots)
+    for root in writable_roots:
+        if not isinstance(root, str):
+            continue
+        root_path = _canonical_private_path(root)
+        if root_path is not None and _paths_overlap(source_path, root_path):
+            errors.append(
+                "[artifact_mobility_source].store_dir overlaps configured writable root"
+            )
+            break
+
+    receiver_path = _canonical_private_path(str(private_store_path(config)))
+    if receiver_path is not None and _paths_overlap(source_path, receiver_path):
+        errors.append(
+            "[artifact_mobility_source].store_dir overlaps artifact transfer store"
+        )
+    return errors
 
 
 def _walk_toml_for_secrets(data, path: str, errors: list[str]) -> None:
@@ -450,6 +549,8 @@ _SECTION_TYPES = {
     "server": ServerConfig,
     "deployment": DeploymentConfig,
     "artifact_transfer": ArtifactTransferConfig,
+    "artifact_mobility_source": ArtifactMobilitySourceConfig,
+    "artifact_mobility": ArtifactMobilityConfig,
     "child_storage": ChildStorageConfig,
     "app_control": AppControlConfig,
     "state": StateConfig,
@@ -949,6 +1050,15 @@ def _apply_environment(
                 secrets,
                 memory_replication_state_integrity_key=state_integrity_key.strip(),
             )
+    if "SONDER_ARTIFACT_MOBILITY_PEER_KEY" in env:
+        mobility_peer_key = env["SONDER_ARTIFACT_MOBILITY_PEER_KEY"]
+        if type(mobility_peer_key) is not str:
+            errors.append("SONDER_ARTIFACT_MOBILITY_PEER_KEY must be a string")
+        elif mobility_peer_key != "":
+            secrets = replace(
+                secrets,
+                artifact_mobility_peer_key=mobility_peer_key,
+            )
     if env.get("SONDER_AUTH_SECRET", "").strip():
         secrets = replace(secrets, auth_secret=env["SONDER_AUTH_SECRET"].strip())
     if env.get("SONDER_BACKUP_KEY_FILE", "").strip():
@@ -1008,6 +1118,9 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     errors.extend(app_control_errors(config))
     errors.extend(artifact_transfer_errors(config))
     errors.extend(memory_replication_errors(config))
+    errors.extend(artifact_mobility_source_errors(config))
+    errors.extend(artifact_mobility_errors(config))
+    errors.extend(_artifact_mobility_storage_errors(config))
     errors.extend(deployment_errors(config))
     if config.schema_version != 1:
         errors.append(
