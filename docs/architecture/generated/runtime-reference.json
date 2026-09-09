@@ -690,7 +690,7 @@
       "native": true,
       "params": [],
       "risk": "safe",
-      "summary": "",
+      "summary": "Inspect local outbound artifact receipts with list or status; dispatch is unavailable here.",
       "tool": ""
     },
     {
@@ -10176,7 +10176,7 @@
     "events": 43,
     "tools": 213
   },
-  "digest": "1ae0be88fc00d01bf4ffbfa49900d366c9ecfe8139d15784f2e8da1174adcb77",
+  "digest": "1428085ad492b0755e384626faa2b97ad0836f0e53a5542af34f8b66f4d5ef58",
   "events": [
     {
       "name": "session.started",
@@ -10647,7 +10647,7 @@
   "schema": "sonder-runtime-document-reference-v1",
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "1e63754f4d47dcb52ac7e9b3741f00445f6ad9341626f7f449e7716e43f911e1",
+    "server.py": "675a1a2ce63f75cf537a5bbc35569c501abeea7d4f02feada9a7700b90659171",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/platform/config.py": "1d811a362d2a912a726c98e6bfe2689b1c220c900bd19f82cbbb69f8fe88c055",

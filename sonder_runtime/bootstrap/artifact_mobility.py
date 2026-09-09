@@ -121,7 +121,7 @@ class ArtifactMobilityBinding:
             raise MobilityJournalError('SOURCE_UNAVAILABLE')
         return source
 
-    def _repository_for_read(self):
+    def _repository_for_dispatch(self):
         config = self._config()
         # The journal shares the already validated private source authority root,
         # never the general state/workspace or destination receiver store.
@@ -129,6 +129,8 @@ class ArtifactMobilityBinding:
         settings = (root, config.artifact_mobility.max_live_operations)
         with self._lock:
             self._ensure_open()
+            if self._settings is not None and settings != self._settings:
+                raise MobilityJournalError('RESTART_REQUIRED')
             if self._repository is None:
                 from ..adapters.persistence.artifact_mobility import SQLiteArtifactMobilityJournal
                 self._repository = SQLiteArtifactMobilityJournal(root,
@@ -137,6 +139,20 @@ class ArtifactMobilityBinding:
             elif settings != self._settings:
                 raise MobilityJournalError('RESTART_REQUIRED')
             return self._repository
+
+    def _repository_for_read(self):
+        config = self._config()
+        root = Path(config.artifact_mobility_source.store_dir).absolute() / 'outbound-journal'
+        settings = (root, config.artifact_mobility.max_live_operations)
+        with self._lock:
+            self._ensure_open()
+            if self._settings is not None and settings != self._settings:
+                raise MobilityJournalError('RESTART_REQUIRED')
+            self._settings = settings
+            from ..adapters.persistence.artifact_mobility import SQLiteArtifactMobilityJournal
+            return SQLiteArtifactMobilityJournal(root,
+                max_live_operations=config.artifact_mobility.max_live_operations,
+                read_only=True)
 
     def _context(self):
         config = self._config()
@@ -170,7 +186,7 @@ class ArtifactMobilityBinding:
         from ..adapters.compute_fabric.artifact_mobility import ConfiguredArtifactMobilityPeer
         peer = ConfiguredArtifactMobilityPeer(config,
             credential_provider=lambda credential_id: self._credential(credential_id))
-        repository = _OpenDispatchRepository(self, self._repository_for_read())
+        repository = _OpenDispatchRepository(self, self._repository_for_dispatch())
         journal = ArtifactMobilityJournal(repository)
         return ArtifactMobilityDispatchService(source_reader=reader, peer=peer,
             repository=repository, journal=journal, current_context=self._context)
@@ -197,7 +213,7 @@ class ArtifactMobilityBinding:
         if not isinstance(operation_id, str) or re.fullmatch('[0-9a-f]{32}', operation_id) is None:
             raise MobilityJournalError('NOT_FOUND')
         self._source_for_dispatch(resuming=True)
-        repository = self._repository_for_read()
+        repository = self._repository_for_dispatch()
         repository.load_operation_for_fencing(operation_id)
         # Local recovery only; an explicit resume remains the sole dispatcher.
         repository.recover_expired_leases(now=time.time())

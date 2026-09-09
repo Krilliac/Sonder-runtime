@@ -152,7 +152,7 @@ def _compose(config, clock, *, peer_factory):
     source = ArtifactMobilitySourceBinding(lambda: config,
         publisher_capability=publisher, reader_capability=reader)
     binding = ArtifactMobilityBinding(lambda: config, source_binding=source)
-    repository = binding._repository_for_read()
+    repository = binding._repository_for_dispatch()
     journal = ArtifactMobilityJournal(repository, clock=clock)
     service = ArtifactMobilityDispatchService(source_reader=source.reader_for(reader),
         peer=peer_factory(config), repository=repository, journal=journal,

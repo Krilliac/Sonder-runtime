@@ -55,6 +55,53 @@ def test_binding_reads_and_close_never_construct_peer(tmp_path, monkeypatch):
         binding.list()
 
 
+@pytest.mark.parametrize("initial_store", ("missing", "directory", "database", "schema", "malformed", "partial", "unknown", "wal"))
+@pytest.mark.parametrize("action", ("list", "status"))
+def test_receipt_inspection_never_creates_journal_artifacts(tmp_path, initial_store, action):
+    import sqlite3
+    from pathlib import Path
+    from sonder_runtime.bootstrap.artifact_mobility import compose_artifact_mobility
+    from sonder_runtime.adapters.persistence.artifact_mobility import SQLiteArtifactMobilityJournal
+    from sonder_runtime.application.compute_fabric.artifact_spool import PrivateDirectoryAnchor
+
+    config = config_for(tmp_path)
+    root = Path(config.artifact_mobility_source.store_dir) / "outbound-journal"
+    database = root / "artifact-mobility.sqlite"
+    if initial_store != "missing":
+        with PrivateDirectoryAnchor.open_base(root):
+            pass
+    if initial_store == "database":
+        sqlite3.connect(database).close()
+    elif initial_store in ("schema", "partial", "wal"):
+        SQLiteArtifactMobilityJournal(root).close()
+        if initial_store != "schema":
+            with sqlite3.connect(database) as connection:
+                if initial_store == "partial":
+                    connection.execute("DROP TABLE mobility_tombstones")
+                else:
+                    connection.execute("PRAGMA journal_mode=WAL")
+            connection.close()
+    elif initial_store == "malformed":
+        database.write_bytes(b"not a SQLite database")
+    elif initial_store == "unknown":
+        with sqlite3.connect(database) as connection:
+            connection.execute("CREATE TABLE unrelated(value TEXT)")
+        connection.close()
+    before = {str(p.relative_to(tmp_path)): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    directories = {str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if p.is_dir()}
+    _binding, status, listing, _available, close = compose_artifact_mobility(lambda: config)
+    try:
+        result = listing() if action == "list" else status("f" * 32)
+        if initial_store in ("database", "malformed", "partial", "unknown", "wal"):
+            assert result == {"outcome_code": "UNAVAILABLE"}
+        else:
+            assert result == ({"operations": []} if action == "list" else {"outcome_code": "NOT_FOUND"})
+        assert {str(p.relative_to(tmp_path)): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+        assert {str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if p.is_dir()} == directories
+    finally:
+        close()
+
+
 def test_missing_publisher_and_mismatched_confirmation_fail_before_peer(tmp_path, monkeypatch):
     from sonder_runtime.bootstrap.artifact_mobility import ArtifactMobilityBinding
     from sonder_runtime.adapters.compute_fabric import artifact_mobility as peer
@@ -83,7 +130,7 @@ def test_close_preserves_live_lease_and_reopen_recovers_only_expired(tmp_path):
     source, record = trusted_source(config)
     binding = ArtifactMobilityBinding(lambda: config, source_binding=source)
     context = binding._context()
-    repository = binding._repository_for_read()
+    repository = binding._repository_for_dispatch()
     from sonder_runtime.application.artifacts.mobility import ArtifactMobilityJournal
     journal = ArtifactMobilityJournal(repository)
     request = MobilityOperationRequest(
@@ -184,7 +231,7 @@ def test_close_inside_peer_stops_later_dispatch_without_clearing_lease(tmp_path,
     rows = reopened.list()
     assert len(rows) == 1
     assert rows[0]['state'] == 'dispatching'
-    operation = reopened._repository_for_read().load_operation(rows[0]['operation_id'], 'owner-a')
+    operation = reopened._repository_for_dispatch().load_operation(rows[0]['operation_id'], 'owner-a')
     assert operation.lease_expires_at > time.time()
     assert operation.lease_token is not None
     reopened.close()
@@ -313,3 +360,59 @@ def test_default_application_shutdown_closes_only_existing_mobility(tmp_path, mo
     app.close_default_runtime_resources()
     assert source._closed
     assert application.artifact_mobility_list() == {'outcome_code': 'UNAVAILABLE'}
+
+
+def test_receipt_binding_keeps_owner_mismatch_value_free_and_read_only(tmp_path):
+    from pathlib import Path
+    from sonder_runtime.bootstrap.artifact_mobility import compose_artifact_mobility
+    from sonder_runtime.application.artifacts.mobility import ArtifactMobilityJournal
+    from tests.test_artifact_mobility_persistence import _request
+
+    config = config_for(tmp_path)
+    current = [config]
+    get_binding, status, listing, _available, close = compose_artifact_mobility(lambda: current[0])
+    try:
+        assert listing() == {"operations": []}
+        repository = get_binding()._repository_for_dispatch()
+        journal = ArtifactMobilityJournal(repository)
+        operation = journal.create_operation(_request(source_owner_id="owner-a"),
+            credential_material="c" * 48)
+        expected = status(operation.operation_id)
+        assert expected["state"] == "ready"
+        assert listing() == {"operations": [expected]}
+        root = Path(config.artifact_mobility_source.store_dir) / "outbound-journal"
+        before = {p.name: p.read_bytes() for p in root.iterdir()}
+        current[0] = replace(config, artifact_mobility_source=replace(
+            config.artifact_mobility_source, source_owner_id="owner-b"))
+        assert listing() == {"outcome_code": "UNAVAILABLE"}
+        assert status(operation.operation_id) == {"outcome_code": "UNAVAILABLE"}
+        assert {p.name: p.read_bytes() for p in root.iterdir()} == before
+    finally:
+        close()
+
+
+@pytest.mark.parametrize(("table", "column"), (
+    ("mobility_journal_owner", "source_owner_id"),
+    ("mobility_operations", "receiver_artifact_id"),
+    ("mobility_tombstones", "terminal_at"),
+))
+def test_receipt_inspection_rejects_missing_columns_without_repair(tmp_path, table, column):
+    import sqlite3
+    from pathlib import Path
+    from sonder_runtime.adapters.persistence.artifact_mobility import SQLiteArtifactMobilityJournal
+    from sonder_runtime.bootstrap.artifact_mobility import compose_artifact_mobility
+
+    config = config_for(tmp_path)
+    root = Path(config.artifact_mobility_source.store_dir) / "outbound-journal"
+    SQLiteArtifactMobilityJournal(root).close()
+    with sqlite3.connect(root / "artifact-mobility.sqlite") as connection:
+        connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+    connection.close()
+    before = {p.name: p.read_bytes() for p in root.iterdir()}
+    _binding, status, listing, _available, close = compose_artifact_mobility(lambda: config)
+    try:
+        assert listing() == {"outcome_code": "UNAVAILABLE"}
+        assert status("f" * 32) == {"outcome_code": "UNAVAILABLE"}
+        assert {p.name: p.read_bytes() for p in root.iterdir()} == before
+    finally:
+        close()

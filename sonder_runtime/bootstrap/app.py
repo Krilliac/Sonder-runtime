@@ -243,7 +243,6 @@ def build_application(
             capability_probe_batch_size=config.ollama.worker_capability_probe_batch_size,
             status_page_size=config.ollama.worker_status_page_size,
         )
-        from datetime import datetime, timezone
         from ..adapters.inference.static_membership import StaticMembershipSource
         from ..application.inference_membership.controller import MembershipController
         membership_clock = lambda: datetime.now(timezone.utc)
@@ -1458,7 +1457,7 @@ def _run_claimed_default_runtime_cleanup(claim, *, timeout):
             application = getattr(application_close, "__self__", None)
             try:
                 if type(application) is Application:
-                    from .legacy_root import detach_owned_application
+                    from .legacy_interfaces import detach_owned_application
 
                     detach_owned_application(application)
             finally:
@@ -1534,7 +1533,7 @@ def install_owned_application(application: Application) -> None:
     global _owned_default_application, _default_config
     if type(application) is not Application or type(application.config) is not SonderConfig:
         raise TypeError("exact configured Application required")
-    from .legacy_root import require_inference_application
+    from .legacy_interfaces import require_inference_application
     require_inference_application(application)
     with _default_runtime_close_lock:
         if _default_runtime_closing:
@@ -1556,7 +1555,7 @@ def stop_owned_application(application: Application) -> None:
         _clear_default_runtime_callbacks_locked()
     # Detach before the managed resource ledger reaches its provider closer.
     # This prevents a later compatibility path from retaining a closed graph.
-    from .legacy_root import detach_owned_application
+    from .legacy_interfaces import detach_owned_application
 
     detach_owned_application(application)
 
@@ -1565,7 +1564,7 @@ def default_app(*, config: SonderConfig | None = None) -> Application:
     """Process-wide default graph for compatibility shims."""
     logger.debug(f"default_app called, config_provided={config is not None}")
     global _default_config
-    from .legacy_root import require_inference_application
+    from .legacy_interfaces import require_inference_application
     if config is not None:
         if type(config) is not SonderConfig:
             raise TypeError("config must be a SonderConfig when provided")

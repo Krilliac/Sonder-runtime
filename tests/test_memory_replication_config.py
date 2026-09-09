@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import os
 
 import pytest
 
@@ -144,6 +145,8 @@ def test_dedicated_secret_loads_from_the_secrets_environment_file(tmp_path):
         "SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY=" + state_key + "\n",
         encoding="utf-8",
     )
+    if os.name == "posix":
+        secrets_path.chmod(0o600)
 
     config = load_config(path, secrets_path=secrets_path, env={})
 
@@ -164,6 +167,8 @@ def test_local_state_integrity_secret_is_environment_only_and_redacted(tmp_path)
         "SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY=" + state_key + "\n",
         encoding="utf-8",
     )
+    if os.name == "posix":
+        secrets_path.chmod(0o600)
 
     config = load_config(path, secrets_path=secrets_path, env={})
 
@@ -647,6 +652,8 @@ def test_malformed_secrets_file_after_blank_and_comment_never_echoes_input(tmp_p
         "SONDER_MEMORY_REPLICATION_KEY=" + _key() + "\n# ordinary comment\n\n" + fragment,
         encoding="utf-8",
     )
+    if os.name == "posix":
+        secrets.chmod(0o600)
 
     with pytest.raises(ConfigError) as error:
         load_config(secrets_path=secrets, env={})

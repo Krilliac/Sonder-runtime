@@ -17322,6 +17322,7 @@ _AGENT_SYSTEM_OPERATOR_TOOLS = frozenset({
     # behaviour or unload their models.
     "set_context_size", "unload", "update_emotion_vectors",
     "tune_emotion_vectors", "learn_preference",
+    "ollama_pool_admin_status",
 })
 
 

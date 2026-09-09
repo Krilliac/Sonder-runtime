@@ -54,6 +54,24 @@ _DATABASE_ENTRIES = (
     _DATABASE_NAME + "-wal",
     _DATABASE_NAME + "-shm",
 )
+# Read admission validates the complete stored projection before returning
+# even an empty list. Only these fixed identifiers enter schema PRAGMAs.
+_READ_COLUMNS = {
+    "mobility_journal_owner": frozenset({"singleton", "source_owner_id"}),
+    "mobility_operations": frozenset({
+        "operation_id", "source_owner_id", "source_scope_id", "source_artifact_id",
+        "spec_json", "destination_label", "destination_scope_id", "remote_command_id",
+        "credential_generation", "destination_binding_hmac", "protected_receipt_capability",
+        "state", "outcome_code", "attempt_epoch", "lease_token", "lease_expires_at",
+        "created_at", "updated_at", "receipt_expires_at", "receiver_transfer_id",
+        "receiver_artifact_id", "receipt_state", "receipt_offset", "receipt_chunk_bytes",
+        "receipt_revision",
+    }),
+    "mobility_tombstones": frozenset({
+        "source_owner_id", "destination_scope_id", "operation_id", "terminal_state",
+        "terminal_at",
+    }),
+}
 _OPERATION_ID = re.compile(r"[0-9a-f]{32}")
 _CAPABILITY = re.compile(r"[0-9a-f]{64}")
 _PROTECTED_CAPABILITY = re.compile(r"v1\.[0-9a-f]{24}\.[0-9a-f]{96}")
@@ -248,16 +266,18 @@ class SQLiteArtifactMobilityJournal:
     ordinary service code to obtain a lease and forget the OS fencing layer.
     """
 
-    def __init__(self, root, *, max_live_operations: int = 64) -> None:
+    def __init__(self, root, *, max_live_operations: int = 64, read_only: bool = False) -> None:
         if type(max_live_operations) is not int or not 1 <= max_live_operations <= 256:
             _fail("INVALID_BOUND")
         self.root = Path(root).absolute()
         self._max_live_operations = max_live_operations
+        self._read_only = read_only
         try:
             self._safe_root()
-            with PrivateDirectoryAnchor.open_base(self.root):
-                pass
-            self._initialize()
+            if not read_only:
+                with PrivateDirectoryAnchor.open_base(self.root):
+                    pass
+                self._initialize()
         except MobilityJournalError:
             raise
         except (ArtifactSpoolError, OSError, RuntimeError, sqlite3.Error):
@@ -354,6 +374,8 @@ class SQLiteArtifactMobilityJournal:
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
+        if self._read_only:
+            _fail("UNAVAILABLE")
         connection = None
         try:
             self._safe_root()
@@ -382,6 +404,76 @@ class SQLiteArtifactMobilityJournal:
         finally:
             if connection is not None:
                 connection.close()
+
+    @contextmanager
+    def _read_connection(self):
+        """Inspect existing rollback-mode journals without SQLite recovery/writes."""
+        connection = None
+        try:
+            self._safe_root()
+            # Even a missing root must not hide symlinked/reparse ancestors.
+            if self.root.resolve() != self.root:
+                _fail("UNSAFE_STORE")
+            if not self.root.exists():
+                yield None
+                return
+            with PrivateDirectoryAnchor(self.root) as anchor:
+                for name in _DATABASE_ENTRIES:
+                    if not self._database_entry_is_safe(self.root / name):
+                        _fail("UNSAFE_STORE")
+                database = self.root / _DATABASE_NAME
+                if not database.exists():
+                    yield None
+                else:
+                    # This adapter creates rollback-mode databases. WAL readers
+                    # can create/write shared-memory sidecars even with mode=ro;
+                    # do not admit externally converted journals for inspection.
+                    with database.open("rb") as stream:
+                        header = stream.read(20)
+                    if header[:16] != b"SQLite format 3\x00" or header[18:20] != b"\x01\x01":
+                        _fail("UNAVAILABLE")
+                    connection = owned_sqlite_connect(
+                        database.as_uri() + "?mode=ro", uri=True, timeout=1)
+                    connection.row_factory = sqlite3.Row
+                    connection.execute("PRAGMA query_only=ON")
+                    try:
+                        yield connection
+                    finally:
+                        connection.close()
+                        connection = None
+                anchor.validate()
+        except MobilityJournalError:
+            raise
+        except (ArtifactSpoolError, OSError, RuntimeError, sqlite3.Error):
+            _fail("UNAVAILABLE")
+        finally:
+            if connection is not None:
+                connection.close()
+
+    @staticmethod
+    def _read_owner(connection, owner: str) -> bool:
+        if connection is None:
+            return False
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name IN ('mobility_journal_owner', 'mobility_operations', 'mobility_tombstones')")}
+        if len(tables) != 3:
+            _fail("UNAVAILABLE")
+        for table, required_columns in _READ_COLUMNS.items():
+            columns = {row["name"] for row in connection.execute(
+                f"PRAGMA table_info({table})")}
+            if not required_columns.issubset(columns):
+                _fail("UNAVAILABLE")
+        row = connection.execute(
+            "SELECT source_owner_id FROM mobility_journal_owner WHERE singleton=1"
+        ).fetchone()
+        if row is None:
+            if connection.execute("SELECT 1 FROM mobility_operations LIMIT 1").fetchone():
+                _fail("INTEGRITY")
+            return False
+        if row["source_owner_id"] != owner:
+            _fail("FORBIDDEN")
+        return True
 
     def _initialize(self) -> None:
         with self._connection() as connection:
@@ -672,7 +764,12 @@ class SQLiteArtifactMobilityJournal:
     def public_status(
         self, operation_id: str, source_owner_id: str
     ) -> dict[str, object]:
-        return self.load_operation(operation_id, source_owner_id).public_status()
+        identity = _operation_id(operation_id)
+        owner = _owner(source_owner_id)
+        with self._read_connection() as connection:
+            if not self._read_owner(connection, owner):
+                _fail("NOT_FOUND")
+            return self._record(self._fetch(connection, identity, owner)).public_status()
 
     def list_public_status(
         self, source_owner_id: str, *, limit: int = 256
@@ -680,8 +777,9 @@ class SQLiteArtifactMobilityJournal:
         owner = _owner(source_owner_id)
         if type(limit) is not int or not 1 <= limit <= 256:
             _fail("INVALID_BOUND")
-        with self._connection() as connection:
-            self._ensure_owner(connection, owner)
+        with self._read_connection() as connection:
+            if not self._read_owner(connection, owner):
+                return ()
             rows = connection.execute(
                 """SELECT * FROM mobility_operations WHERE source_owner_id=?
                    ORDER BY created_at DESC, operation_id DESC LIMIT ?""",

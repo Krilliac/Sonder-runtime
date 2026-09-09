@@ -69,6 +69,8 @@ def private_authority_material(tmp_path):
             fd, temporary = anchor.create_temporary()
             with os.fdopen(fd, "wb") as stream: stream.write(raw)
             anchor.publish(temporary, name)
+            if os.name == "posix":
+                os.chmod(anchor.path / name, 0o600)
 
 
 def credentials(tmp_path):

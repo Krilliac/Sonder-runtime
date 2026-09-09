@@ -323,7 +323,7 @@ def test_production_cli_reopens_preadmitted_source_and_resumes_without_construct
         assert cli.main(['artifact-mobility', 'list', '--json']) == 0
         assert json.loads(capsys.readouterr().out) == {'operations': [final]}
         binding = app.default_app()._artifact_mobility_binding()
-        record = binding._repository_for_read().load_operation(first['operation_id'], 'source-owner-a')
+        record = binding._repository_for_dispatch().load_operation(first['operation_id'], 'source-owner-a')
         # Verify the receiver's private durable bytes directly in this test;
         # the protocol correctly denies general artifact reads of mobility rows.
         with service.store._connection() as connection:

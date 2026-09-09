@@ -43,6 +43,15 @@ def test_workbench_child_environment_still_scrubs_control_values(monkeypatch):
     assert env["PYTHONIOENCODING"] == "utf-8"
 
 
+def test_generic_child_environment_strips_selfmod_state_locators():
+    env = runtime_logging.child_environment({
+        "SONDER_SELFMOD_HOME": "/private/selfmod",
+        "SONDER_SELFMOD_DB": "/private/ledger.db",
+        "PATH": "/tools",
+    })
+    assert env == {"PATH": "/tools"}
+
+
 def test_local_observability_uses_canonical_logging_identity_and_redaction():
     assert local_observability.Redactor is runtime_logging.Redactor
     assert local_observability.REDACTION_FAILED == runtime_logging.REDACTION_FAILED

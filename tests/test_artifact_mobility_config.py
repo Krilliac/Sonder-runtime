@@ -1,5 +1,6 @@
 import json
 from dataclasses import replace
+import os
 import time
 
 import pytest
@@ -271,6 +272,8 @@ def test_malformed_mobility_peer_key_line_is_redacted(tmp_path):
         f"{rejected_fragment} SONDER_ARTIFACT_MOBILITY_PEER_KEY",
         encoding="utf-8",
     )
+    if os.name == "posix":
+        secrets.chmod(0o600)
 
     with pytest.raises(ConfigError) as raised:
         load_config(secrets_path=secrets, env={})
@@ -302,6 +305,8 @@ def test_mobility_parser_redacts_controls_and_continuation_like_lines(tmp_path):
         "SONDER_ARTIFACT_MOBILITY_PEER_KEY=mobility-" + "x" * 32 + "\t",
         encoding="utf-8",
     )
+    if os.name == "posix":
+        secrets.chmod(0o600)
 
     with pytest.raises(config_environment.EnvironmentFileError) as raised:
         config_environment.parse_env_file(secrets)
@@ -368,6 +373,8 @@ def test_mobility_parser_failure_stays_out_of_errors_logs_and_serialization(tmp_
         + rejected_fragment,
         encoding="utf-8",
     )
+    if os.name == "posix":
+        secrets.chmod(0o600)
 
     with pytest.raises(ConfigError) as raised:
         load_config(secrets_path=secrets, env={})
@@ -409,6 +416,8 @@ def test_malformed_secrets_input_never_reflects_raw_content_after_unknown_assign
         + rejected_fragment,
         encoding="utf-8",
     )
+    if os.name == "posix":
+        secrets.chmod(0o600)
 
     with pytest.raises(config_environment.EnvironmentFileError) as parser_error:
         config_environment.parse_env_file(secrets)
@@ -635,6 +644,7 @@ def test_mobility_does_not_claim_a_remote_limit_from_local_receiver_config(tmp_p
 
 @pytest.mark.parametrize("invalid_identity", ("receiver\nidentity", 0, None))
 def test_receiver_identity_is_optional_for_legacy_transfer_but_bounded_when_present(
+    tmp_path,
     invalid_identity,
 ):
     from sonder_runtime.platform.artifact_transfer_config import (
@@ -643,11 +653,11 @@ def test_receiver_identity_is_optional_for_legacy_transfer_but_bounded_when_pres
     )
 
     legacy = SonderConfig(
-        state=StateConfig(home="C:/private/state"),
+        state=StateConfig(home=str(tmp_path / "state")),
         secrets=Secrets(artifact_transfer_key="receiver-" + "x" * 32),
         artifact_transfer=ArtifactTransferConfig(
             enabled=True,
-            store_dir="C:/private/receiver",
+            store_dir=str(tmp_path / "receiver"),
             principal_id="private-cluster",
             project_id="sonder",
             peer_node_id="node-a",

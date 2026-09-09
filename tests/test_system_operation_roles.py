@@ -20,7 +20,7 @@ def _context(role):
 
 def test_every_declared_system_operation_has_an_explicit_role():
     assert set(serve.SYSTEM_OPERATION_ROLES) == {
-        "permission_mode_change", "runtime_policy_change",
+        "inference_pool_administration", "permission_mode_change", "runtime_policy_change",
         "permission_rule_change", "account_management", "selfmod_deploy",
         "automation_lifecycle", "workspace_execution",
     }

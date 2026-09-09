@@ -28,6 +28,20 @@ def configure_legacy_application(application) -> None:
     configure_application(application)
 
 
+def require_inference_application(application):
+    """Validate the legacy inference binding through the composition boundary."""
+    from .legacy_root import require_inference_application as require
+
+    return require(application)
+
+
+def detach_owned_application(application) -> None:
+    """Detach a closed owned graph from the legacy compatibility holder."""
+    from .legacy_root import detach_owned_application as detach
+
+    detach(application)
+
+
 def configure_legacy_interfaces(runtime: ModuleType | None = None) -> None:
     """Inject the historical runtime into interfaces before they execute.
 
@@ -74,5 +88,7 @@ __all__ = [
     "configure_legacy_application",
     "configure_legacy_capacity",
     "configure_legacy_interfaces",
+    "detach_owned_application",
     "legacy_runtime",
+    "require_inference_application",
 ]

@@ -110,6 +110,38 @@ def test_backup_creation_and_hash_verification(isolated):
     assert Path(record["backup_path"]).resolve().is_relative_to(selfmod.backups_root().resolve())
 
 
+@pytest.mark.parametrize("configured_home", [False, True])
+def test_rollback_probe_preserves_only_resolved_selfmod_state(isolated, monkeypatch, configured_home):
+    if configured_home:
+        selfmod.sonder_paths.configure_home(isolated / "configured-home")
+    # Keep the ledger separate from the state home to catch fallback to the
+    # default DB, and use relative paths to exercise the child's different cwd.
+    monkeypatch.chdir(isolated)
+    monkeypatch.setenv("SONDER_SELFMOD_HOME", str(isolated / "relative-state"))
+    monkeypatch.setenv("SONDER_SELFMOD_DB", str(isolated / "ledger/custom.db"))
+    monkeypatch.setenv("SONDER_API_KEY", "must-not-reach-probe")
+    monkeypatch.setenv("SONDER_SELFMOD_ACTIVE", "must-not-reach-probe")
+    root = repository(isolated, use_git=False)
+    original = hashes(root)
+    run = plan(root)
+    selfmod.create_backup(run["id"])
+    selfmod._record_deployed_files(run["id"], root, ["calc.py"])
+    monkeypatch.setenv("SONDER_SELFMOD_HOME", "relative-state")
+    monkeypatch.setenv("SONDER_SELFMOD_DB", "ledger/custom.db")
+    command = selfmod.rollback_probe_command(run["id"])
+    command[-1] += (
+        "; import os; assert {key for key in os.environ if key.startswith('SONDER_')} "
+        "== {'SONDER_SELFMOD_HOME', 'SONDER_SELFMOD_DB'}"
+    )
+
+    code, output, _duration = selfmod._run(command, root)
+
+    assert code == 0, output
+    assert "SELFMOD-ROLLBACK-RECEIPT" in output
+    assert hashes(root) == original
+    assert selfmod.get_run(run["id"])["phase"] == "backed_up"
+
+
 def test_observe_mode_cannot_enter_editing_lifecycle(isolated):
     root = repository(isolated, use_git=False)
     selfmod.set_mode("observe")
@@ -117,6 +149,24 @@ def test_observe_mode_cannot_enter_editing_lifecycle(isolated):
     assert run["phase"] == "observed"
     with pytest.raises(RuntimeError, match="proposed"):
         selfmod.create_backup(run["id"])
+
+
+def test_rollback_probe_construction_failure_returns_failed_verification(monkeypatch):
+    def unavailable_probe(run_id):
+        raise OSError("state root unavailable")
+
+    monkeypatch.setattr(selfmod, "rollback_probe_command", unavailable_probe)
+
+    ok, detail, probe, code, output, duration = selfmod._verify_deployed_rollback(
+        "selfmod-probe-failure", Path("unused-probe-root"), 30,
+    )
+
+    assert ok is False
+    assert "OSError" in detail and "state root unavailable" in detail
+    assert probe == []
+    assert code == 1
+    assert output == "state root unavailable"
+    assert duration == 0
 
 
 def test_existing_new_and_deleted_files_restore_atomically(isolated):

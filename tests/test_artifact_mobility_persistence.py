@@ -650,3 +650,73 @@ def test_invalid_private_values_and_owner_mismatch_are_stable_and_nonprojecting(
             }
         )
     assert "private-journal" not in repr(repository)
+
+
+@pytest.mark.parametrize("read_only", (False, True))
+def test_public_receipts_preserve_existing_database_and_owner_fence(tmp_path, read_only):
+    writer, _, operation = _operation(tmp_path)
+    root = tmp_path / "private-journal"
+    reader = SQLiteArtifactMobilityJournal(root, read_only=read_only)
+    before = {p.name: p.read_bytes() for p in root.iterdir()}
+    expected = {
+        "operation_id": "a" * 32,
+        "source_artifact_id": "2" * 32,
+        "destination_label": "node-one",
+        "state": "ready",
+        "outcome_code": "",
+        "created_at": 1000.0,
+        "updated_at": 1000.0,
+    }
+    assert reader.public_status("a" * 32, "source-owner-a") == expected
+    assert reader.list_public_status("source-owner-a") == (expected,)
+    with pytest.raises(MobilityJournalError, match="FORBIDDEN"):
+        reader.list_public_status("source-owner-b")
+    with pytest.raises(MobilityJournalError, match="FORBIDDEN"):
+        reader.public_status("a" * 32, "source-owner-b")
+    assert {p.name: p.read_bytes() for p in root.iterdir()} == before
+    reader.close()
+    writer.close()
+
+
+def test_read_only_journal_refuses_wal_without_creating_shared_memory(tmp_path):
+    writer, _, operation = _operation(tmp_path)
+    root = tmp_path / "private-journal"
+    with sqlite3.connect(root / "artifact-mobility.sqlite") as connection:
+        assert connection.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    connection.close()
+    before = {p.name: p.read_bytes() for p in root.iterdir()}
+    reader = SQLiteArtifactMobilityJournal(root, read_only=True)
+    with pytest.raises(MobilityJournalError, match="UNAVAILABLE"):
+        reader.list_public_status(operation.source_owner_id)
+    assert {p.name: p.read_bytes() for p in root.iterdir()} == before
+    writer.close()
+
+
+def test_read_only_journal_cannot_create_dispatch_lock_or_operation(tmp_path):
+    writer, _, operation = _operation(tmp_path)
+    root = tmp_path / "private-journal"
+    before = {p.name: p.read_bytes() for p in root.iterdir()}
+    reader = SQLiteArtifactMobilityJournal(root, read_only=True)
+    with pytest.raises(MobilityJournalError, match="UNAVAILABLE"):
+        reader.try_acquire_dispatch_lock(operation.operation_id)
+    with pytest.raises(MobilityJournalError, match="UNAVAILABLE"):
+        reader.create_operation(operation)
+    assert {p.name: p.read_bytes() for p in root.iterdir()} == before
+    writer.close()
+
+
+def test_read_only_journal_rejects_linked_database(tmp_path):
+    root = tmp_path / "private-journal"
+    SQLiteArtifactMobilityJournal(root).close()
+    database = root / "artifact-mobility.sqlite"
+    outside = tmp_path / "outside.sqlite"
+    database.replace(outside)
+    try:
+        database.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+    before = outside.read_bytes()
+    reader = SQLiteArtifactMobilityJournal(root, read_only=True)
+    with pytest.raises(MobilityJournalError, match="UNSAFE_STORE"):
+        reader.list_public_status("source-owner-a")
+    assert outside.read_bytes() == before

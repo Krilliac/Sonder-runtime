@@ -42,6 +42,18 @@ def test_legacy_root_is_the_only_production_server_import():
     assert sum(_imports_server(path) for path in paths) == 1
 
 
+def test_application_uses_legacy_interface_wrappers_for_root_lifecycle_access():
+    """App composition may cross the root boundary only through its interface."""
+    source = (_BOOTSTRAP / "app.py").read_text(encoding="utf-8")
+    interfaces = (_BOOTSTRAP / "legacy_interfaces.py").read_text(encoding="utf-8")
+
+    assert "from .legacy_root import" not in source
+    assert "from .legacy_interfaces import require_inference_application" in source
+    assert "from .legacy_interfaces import detach_owned_application" in source
+    assert "def require_inference_application(" in interfaces
+    assert "def detach_owned_application(" in interfaces
+
+
 def test_mcp_accepts_explicit_runtime_and_preserves_hooks():
     events: list[object] = []
     runtime = SimpleNamespace(
