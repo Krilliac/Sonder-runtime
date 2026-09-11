@@ -1030,8 +1030,14 @@ def cmd_repl(args) -> int:
         return 2
     _configure_typed_home(config)
     from sonder_runtime.platform.logging import configure_logging
+    # Interactive REPL must stay readable. JSON INFO lines on stdout/stderr
+    # drown the composer unless the operator explicitly opts into REPL logs.
+    # Serve/MCP keep their configured observability level unchanged.
+    repl_level = (os.environ.get("SONDER_REPL_LOG_LEVEL") or "").strip().upper()
+    if repl_level not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+        repl_level = "WARNING"
     configure_logging(
-        level=config.observability.log_level,
+        level=repl_level,
         log_format=config.observability.log_format,
         redactor=_redactor_for_config(config),
     )
