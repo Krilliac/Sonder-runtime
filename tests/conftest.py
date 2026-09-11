@@ -89,6 +89,7 @@ def _isolate_typed_ollama_endpoint(monkeypatch):
     the endpoint still sees its own value while it runs.
     """
     from sonder_runtime.adapters.inference import ollama_endpoint
+    from sonder_runtime.adapters import embeddings as embeddings
     import weakref
 
     # Each test owns its composed sources. Keep unrelated external-source
@@ -99,6 +100,10 @@ def _isolate_typed_ollama_endpoint(monkeypatch):
         before = ollama_endpoint._configured_endpoint
     yield
     ollama_endpoint.configure_typed_endpoint(before)
+    # __main__/compose pins embeddings.BASE via configure_typed_endpoint as
+    # well as the typed Ollama adapter. Restoring only the adapter left BASE
+    # sticky (e.g. https://worker.example) and poisoned later memory/NPU tests.
+    embeddings.configure_typed_endpoint(before)
 
 
 @pytest.fixture(autouse=True)
