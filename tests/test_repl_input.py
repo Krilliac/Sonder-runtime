@@ -1449,6 +1449,8 @@ def test_embedded_windows_path_selects_workspace_without_ask(monkeypatch, tmp_pa
     game = tmp_path / 'Sonder Games'
     game.mkdir()
     # Drive helper stubs classify_work as: "create" in line.
+    # Absolute POSIX paths start with `/`; they must not be mistaken for
+    # slash-commands (`/workspace`), which is what this case also guards.
     line = '%s create a game and run it' % game
     _drive_workspace_repl(monkeypatch, iter((line, '/exit')), seen)
 
@@ -1459,3 +1461,4 @@ def test_embedded_windows_path_selects_workspace_without_ask(monkeypatch, tmp_pa
     output = capsys.readouterr().out
     assert 'which folder should I use' not in output.lower()
     assert 'workspace:' in output
+    assert 'unknown command' not in output.lower()

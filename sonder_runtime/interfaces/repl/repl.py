@@ -2118,6 +2118,22 @@ def main(*, machine_output=False):
         return path, ""
 
 
+    
+    def _looks_like_slash_command(raw):
+        """True for `/workspace`-style commands, false for absolute Unix paths.
+
+        Interactive lines that start with `/` used to always enter the command
+        router. On POSIX that swallowed work requests that already named an
+        absolute folder (`/home/me/Games create a game`), so require the first
+        token to be a single path segment after the leading slash.
+        """
+        text = str(raw or "").strip()
+        if not text.startswith("/"):
+            return False
+        first = text.split(None, 1)[0]
+        # `/workspace`, `/help` -> one slash; `/tmp/foo` -> two+.
+        return first.count("/") == 1
+
     def _split_existing_workspace_prefix(raw):
         """Peel the longest existing directory prefix off a work request.
 
@@ -2603,7 +2619,7 @@ def main(*, machine_output=False):
                 print(_paint("(interpreted as: %s)" % resolved, _Ansi.muted))
                 line = resolved
 
-        if line.startswith("/"):
+        if _looks_like_slash_command(line):
             parts = line.split(None, 1)
             cmd = parts[0].lower()
             arg = parts[1] if len(parts) > 1 else ""
