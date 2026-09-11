@@ -33,6 +33,35 @@ def test_managed_work_composition_requires_owned_registration():
         )
 
 
+def test_managed_inventory_rebinds_one_baseline_request_scope_to_exact_paths(
+    work_http, monkeypatch
+):
+    """A wire baseline cannot stand in for the larger managed-work closure."""
+    binding = work_http.control
+    service = work_http.service
+    original = binding._inventory
+    calls = []
+
+    def inventory():
+        calls.append(True)
+        return original()
+
+    monkeypatch.setattr(binding, "_inventory", inventory)
+    with binding._private_inventory_scope():
+        baseline = binding._private()
+        required = service.private_paths()
+        assert not baseline.covers(required)
+        accepted = service.inventory()
+        assert accepted.covers(required)
+        # One record established the request and one issuer-owned rebind
+        # established the expanded work closure. Repeated consumers reuse it.
+        assert calls == [True, True]
+        assert service.inventory().covers(required)
+        assert calls == [True, True]
+
+
+import asyncio
+from contextvars import copy_context
 import json
 import http.client
 import threading
@@ -44,6 +73,77 @@ import permission_modes
 import server
 from tests.test_app_control_http import control, invoke
 from tests.test_tier_escalation import _install_agent_fakes
+
+
+def test_managed_verification_cancellation_revalidates_only_its_owner_context(
+    work_http,
+):
+    """Verification may revalidate synchronously, never through a copied context."""
+    from sonder_runtime.application.agents.delegated_verification import (
+        _VerificationCancellation,
+    )
+
+    h = work_http
+    binding, service = h.control, h.service
+    selection = service._issue(h.token, h.credential, "inspect_recovery", {})
+    calls, thread_result = [], []
+    original = SimpleNamespace(
+        cancellation=SimpleNamespace(cancelled=False), expired=False
+    )
+
+    class Verification:
+        def _require_current(self, prepared, context):
+            calls.append((prepared, context))
+            return service.authority.work_atomic(
+                selection, selection.context, lambda tx: True
+            )
+
+    try:
+        with binding._private_inventory_scope(
+            context_roots=selection.original_context.workspace_roots,
+            requirements=service.private_paths(),
+        ):
+            cancellation = _VerificationCancellation(Verification(), object(), original)
+            # The synchronous gateway callback runs in the current managed scope.
+            assert not cancellation.cancelled
+            assert len(calls) == 1
+
+            # A same-thread copied ContextVar, child task, and foreign thread all
+            # fail before invoking the managed revalidation callback.
+            copied = copy_context()
+            assert copied.run(lambda: cancellation.cancelled)
+            # A copied context also cannot close the owner's revalidation marker.
+            copied.run(cancellation.close)
+            assert not cancellation.cancelled
+            assert len(calls) == 2
+
+            async def copied_task():
+                return cancellation.cancelled
+
+            assert asyncio.run(copied_task())
+
+            copied_thread = copy_context()
+
+            def foreign_context():
+                thread_result.append(copied_thread.run(lambda: cancellation.cancelled))
+                copied_thread.run(cancellation.close)
+                thread_result.append(copied_thread.run(lambda: cancellation.cancelled))
+
+            thread = threading.Thread(
+                target=foreign_context, name="verification-cancellation-copy"
+            )
+            thread.start()
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+            assert thread_result == [True, True]
+            assert len(calls) == 2
+            assert not cancellation.cancelled
+            assert len(calls) == 3
+            cancellation.close()
+            assert cancellation.cancelled
+            assert len(calls) == 3
+    finally:
+        service.authority.release_selection(selection)
 
 
 @pytest.fixture

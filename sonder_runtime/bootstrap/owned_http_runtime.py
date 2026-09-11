@@ -94,54 +94,64 @@ def _run(root, namespace, job_id, workspace):
     from ..adapters.persistence import migrations
 
     migrations.migrate_all(busy_timeout_ms=1000)
-    from .app import default_app
+    from .app import close_default_runtime_resources, default_app
 
     application = default_app(config=config)
-    application.delegation_service()
-    from ..interfaces.http import serve
-    from ..adapters.web import lifecycle
-
-    serve.configure_typed_config(config)
-    lifecycle.configure(config)
     stopped = Event()
+    watcher = None
+    watcher_started = False
     watcher_failure = []
-
-    def evidence(phase):
-        write_json_atomic(
-            root / ("runtime-" + job_id + ".json"),
-            {
-                "namespace": namespace,
-                "job_id": job_id,
-                "pid": os.getpid(),
-                "process_identity": identity,
-                "phase": phase,
-                "selection": journal.status()["selection"],
-            },
-        )
-
-    def control():
-        ready = False
-        try:
-            while not stopped.wait(0.1):
-                if not ready and serve.BOUND_PORT == selected["port"]:
-                    evidence("READY")
-                    ready = True
-                pending = journal.pending()
-                if pending is not None and pending.action == "stop":
-                    lifecycle.get().drain("owned runtime stop")
-                    return
-        except BaseException as error:
-            watcher_failure.append(type(error).__name__)
-            lifecycle.get().drain("owned control unavailable")
-
-    watcher = owned_runtime_thread(target=control, name="owned-runtime-control", daemon=True)
-    watcher.start()
     try:
-        serve.main(config=config)
+        # All graph-affecting setup stays inside the same owner guard.  The
+        # canonical serve adapter configures and tears down its own HTTP route
+        # bindings; this child remains the sole default-graph owner.
+        application.delegation_service()
+        from ..interfaces.http import serve
+        from ..adapters.web import lifecycle
+
+        lifecycle.configure(config)
+
+        def evidence(phase):
+            write_json_atomic(
+                root / ("runtime-" + job_id + ".json"),
+                {
+                    "namespace": namespace,
+                    "job_id": job_id,
+                    "pid": os.getpid(),
+                    "process_identity": identity,
+                    "phase": phase,
+                    "selection": journal.status()["selection"],
+                },
+            )
+
+        def control():
+            ready = False
+            try:
+                while not stopped.wait(0.1):
+                    if not ready and serve.BOUND_PORT == selected["port"]:
+                        evidence("READY")
+                        ready = True
+                    pending = journal.pending()
+                    if pending is not None and pending.action == "stop":
+                        lifecycle.get().drain("owned runtime stop")
+                        return
+            except BaseException as error:
+                watcher_failure.append(type(error).__name__)
+                lifecycle.get().drain("owned control unavailable")
+
+        watcher = owned_runtime_thread(
+            target=control, name="owned-runtime-control", daemon=True,
+        )
+        watcher.start()
+        watcher_started = True
+        serve.main(config=config, _close_default_resources=False)
     finally:
         stopped.set()
-        watcher.join(2)
-        application.close_providers(timeout=5)
+        try:
+            if watcher_started:
+                watcher.join(2)
+        finally:
+            close_default_runtime_resources(timeout=5)
     if watcher.is_alive() or watcher_failure:
         raise OwnerRefused("owned control cleanup is incomplete")
     evidence("CLEAN")

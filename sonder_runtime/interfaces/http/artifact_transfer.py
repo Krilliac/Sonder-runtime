@@ -9,6 +9,9 @@ from sonder_runtime.application.errors import DependencyUnavailable, Unauthentic
 RAW_LIMIT = 1024 * 1024
 CONTROL_LIMIT = 32 * 1024
 _ID = r"[0-9a-f]{32}"
+_MOBILITY_VERSION_HEADER = "X-Sonder-Artifact-Mobility-Version"
+_MOBILITY_CAPABILITY_HEADER = "X-Sonder-Artifact-Mobility-Receipt-Capability"
+_MOBILITY_VERSION = "mobility-v1"
 # Admission precedes body allocation and lasts through delivery. This does not
 # bound the listener's connection threads or non-transfer HTTP operations.
 _REQUEST_SLOTS = threading.BoundedSemaphore(8)
@@ -46,15 +49,23 @@ def _route(method, target):
     if len(target) > 4096 or any(ord(char) < 33 or ord(char) > 126 for char in target) or "%" in target:
         raise BindingError(400, "INVALID_ROUTE")
     path, separator, query = target.partition("?")
+    if method == "GET" and path == "/v1/artifact-transfers/recipient-attestation" and not separator:
+        return "attestation", {}
     if method == "POST" and path == "/v1/artifact-transfers" and not separator:
         return "begin", {}
-    match = re.fullmatch(r"/v1/artifact-transfers/(" + _ID + r")(?:/(seal|abort|chunks/([0-9]{1,20})))?", path)
+    match = re.fullmatch(
+        r"/v1/artifact-transfers/(" + _ID
+        + r")(?:/(seal|abort|mobility-receipt|chunks/([0-9]{1,20})))?",
+        path,
+    )
     if match and not separator:
         identity, suffix, offset = match.groups()
         if suffix is None and method == "GET":
             return "inspect", {"transfer_id": identity}
         if suffix in ("seal", "abort") and method == "POST":
             return suffix, {"transfer_id": identity}
+        if suffix == "mobility-receipt" and method == "POST":
+            return "mobility_receipt", {"transfer_id": identity}
         if offset is not None and method == "PUT":
             value = int(offset)
             if value > 64 * 1024**3:
@@ -86,6 +97,14 @@ def _single_header(handler, name, *, required=False):
     return values[0] if values else ""
 
 
+def _optional_single_header(handler, name):
+    """Keep an empty protocol header distinct from an absent legacy header."""
+    values = handler.headers.get_all(name) or ()
+    if len(values) > 1:
+        raise BindingError(400, "INVALID_HEADERS")
+    return values[0] if values else None
+
+
 def _length(handler, limit, *, required):
     raw = _single_header(handler, "Content-Length", required=required)
     if not raw and not required:
@@ -96,6 +115,20 @@ def _length(handler, limit, *, required):
     if length > limit:
         raise BindingError(413, "BODY_TOO_LARGE")
     return length
+
+
+def _mobility_contract(handler, binding, context, action):
+    version = _optional_single_header(handler, _MOBILITY_VERSION_HEADER)
+    capability = _optional_single_header(handler, _MOBILITY_CAPABILITY_HEADER)
+    if version is None and capability is None:
+        return None
+    if version != _MOBILITY_VERSION or action not in {
+        "begin", "append", "seal", "abort", "mobility_receipt",
+    }:
+        raise BindingError(400, "MOBILITY_PROTOCOL")
+    if not isinstance(capability, str) or not re.fullmatch(r"[0-9a-f]{64}", capability):
+        raise BindingError(400, "MOBILITY_PROTOCOL")
+    return binding.mobility_contract(context, capability)
 
 
 def handle_artifact_transfer(handler, method, binding, *, max_request_bytes=None):
@@ -142,7 +175,7 @@ def _handle_admitted(handler, method, binding, *, max_request_bytes):
             if len(body) != length:
                 raise BindingError(400, "INCOMPLETE_BODY")
             handler._request_body_consumed = True
-        elif action in ("begin", "seal", "abort"):
+        elif action in ("begin", "seal", "abort", "mobility_receipt"):
             _length(handler, CONTROL_LIMIT, required=True)
             _single_header(handler, "Content-Type", required=True)
             supplied = handler._read_json(max_bytes=CONTROL_LIMIT)
@@ -153,10 +186,18 @@ def _handle_admitted(handler, method, binding, *, max_request_bytes):
         elif _length(handler, 0, required=False):
             raise BindingError(400, "UNEXPECTED_BODY")
         binding.validate_context(context)  # Recheck after a potentially slow body read.
+        mobility = _mobility_contract(handler, binding, context, action)
         from sonder_runtime.application.artifacts.transfer import ArtifactRange, TransferError
-        from sonder_runtime.interfaces.http.facades.artifact_transfer import dispatch_artifact_transfer, transfer_error_status
+        from sonder_runtime.interfaces.http.facades.artifact_transfer import (
+            ArtifactTransferHttpResult, dispatch_artifact_transfer, transfer_error_status,
+        )
         try:
-            result = dispatch_artifact_transfer(binding.service(), action, payload, context, body=body)
+            if action == "attestation":
+                result = ArtifactTransferHttpResult(200, binding.mobility_attestation(context))
+            else:
+                result = dispatch_artifact_transfer(
+                    binding.service(), action, payload, context, body=body, mobility=mobility
+                )
         except TransferError as error:
             raise BindingError(transfer_error_status(error), str(error)) from None
         if isinstance(result.body, ArtifactRange):

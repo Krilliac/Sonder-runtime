@@ -10,26 +10,95 @@ import os
 from pathlib import Path
 
 
+_MOBILITY_PEER_KEY = "SONDER_ARTIFACT_MOBILITY_PEER_KEY"
+_MOBILITY_PEER_KEY_ERROR = "[artifact_mobility].peer_key malformed secrets input"
+_SENSITIVE_ENV_FILE_KEY_POLICIES = {
+    _MOBILITY_PEER_KEY: (
+        "artifact_mobility_peer_key",
+        _MOBILITY_PEER_KEY_ERROR,
+    ),
+}
+
+
 class EnvironmentFileError(ValueError):
-    """Malformed compatibility environment-file input."""
+    """Malformed compatibility environment-file input.
+
+    ``field_code`` is deliberately metadata instead of a copy of the rejected
+    line. The configuration boundary can retain a stable error category and
+    line location without ever reflecting malformed file content into
+    exceptions, logs, or serialization.
+    """
+
+    def __init__(self, message: str, *, field_code: str = "") -> None:
+        super().__init__(message)
+        self.field_code = field_code
+
+
+def _sensitive_key_policy_in(value: str) -> tuple[str, str] | None:
+    """Return the non-disclosing policy for a sensitive key-shaped input."""
+    for key, policy in _SENSITIVE_ENV_FILE_KEY_POLICIES.items():
+        if key in value:
+            return policy
+    return None
+
+
+def _raise_sensitive_key_error(policy: tuple[str, str]) -> None:
+    field_code, message = policy
+    raise EnvironmentFileError(message, field_code=field_code)
+
+
+_NONCANONICAL_LINE_SEPARATORS = frozenset(("\u0085", "\u2028", "\u2029"))
+
+
+def _unsafe_input_offset(value: str) -> int | None:
+    """Return the first non-CRLF control or noncanonical line separator."""
+    for index, character in enumerate(value):
+        if character == "\r":
+            if index + 1 < len(value) and value[index + 1] == "\n":
+                continue
+            return index
+        if character == "\n":
+            continue
+        if (
+            ord(character) < 32
+            or ord(character) == 127
+            or character in _NONCANONICAL_LINE_SEPARATORS
+        ):
+            return index
+    return None
 
 
 def parse_env_file(path: Path) -> dict[str, str]:
-    """Parse a ``KEY=VALUE`` environment file without owning config types."""
+    """Parse a ``KEY=VALUE`` file without reflecting malformed secret input."""
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            content = handle.read()
+    except UnicodeDecodeError:
+        raise EnvironmentFileError(
+            f"{path}: malformed secrets environment input"
+        ) from None
+
+    unsafe_offset = _unsafe_input_offset(content)
+    if unsafe_offset is not None:
+        line_number = content.count("\n", 0, unsafe_offset) + 1
+        raise EnvironmentFileError(
+            f"{path}:{line_number}: malformed secrets environment input"
+        )
+
     values: dict[str, str] = {}
-    for lineno, raw in enumerate(
-        path.read_text(encoding="utf-8").splitlines(), start=1
-    ):
-        line = raw.strip()
+    for lineno, raw in enumerate(content.split("\n"), start=1):
+        line = raw[:-1] if raw.endswith("\r") else raw
+        line = line.strip(" ")
         if not line or line.startswith("#"):
             continue
         if "=" not in line:
-            raise EnvironmentFileError(
-                f"{path}:{lineno}: expected KEY=VALUE, got {line[:32]!r}"
-            )
+            if policy := _sensitive_key_policy_in(line):
+                _raise_sensitive_key_error(policy)
+            # File content can be a secret even when no known key precedes it.
+            raise EnvironmentFileError(f"{path}:{lineno}: expected KEY=VALUE")
         key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip()
+        key = key.strip(" ")
+        value = value.strip(" ")
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
             value = value[1:-1]
         values[key] = value

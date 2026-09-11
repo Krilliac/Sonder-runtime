@@ -39,7 +39,9 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _default_opener(request: urllib.request.Request, *, timeout: float):
-    return urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout)
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), _NoRedirect()
+    ).open(request, timeout=timeout)
 
 
 def _origin(value: object, *, allow_insecure_loopback: bool) -> str:

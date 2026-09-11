@@ -4,6 +4,7 @@ from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sq
 
 from contextlib import contextmanager
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -51,11 +52,15 @@ class SQLiteArtifactTransferStore:
               grant_id TEXT NOT NULL,grant_revision INTEGER NOT NULL,expires REAL NOT NULL,
               state TEXT NOT NULL,offset INTEGER NOT NULL DEFAULT 0,revision INTEGER NOT NULL DEFAULT 1,
               reserved INTEGER NOT NULL,chunk_bytes INTEGER NOT NULL,seal_command TEXT,abort_command TEXT,
+              mobility_verifier TEXT,
               UNIQUE(scope,command));
             CREATE TABLE IF NOT EXISTS artifact_chunks(
               upload_id TEXT NOT NULL,offset INTEGER NOT NULL,size INTEGER NOT NULL,digest TEXT NOT NULL,
               receipt TEXT NOT NULL,PRIMARY KEY(upload_id,offset));
             """)
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(artifact_uploads)")}
+            if "mobility_verifier" not in columns:
+                conn.execute("ALTER TABLE artifact_uploads ADD COLUMN mobility_verifier TEXT")
 
     def _safe_root(self):
         from ..filesystem.file_ops import allowed_roots
@@ -140,7 +145,7 @@ class SQLiteArtifactTransferStore:
             os.fsync(anchor.fd)
 
     @staticmethod
-    def _row(conn, identity, grant, *, upload=True):
+    def _row(conn, identity, grant, *, upload=True, mobility=None):
         if not isinstance(identity, str) or not re.fullmatch("[0-9a-f]{32}", identity):
             raise TransferError("NOT_FOUND")
         row = conn.execute(
@@ -149,6 +154,8 @@ class SQLiteArtifactTransferStore:
         ).fetchone()
         if row is None:
             raise TransferError("NOT_FOUND")
+        if mobility is not None and (row["mobility_verifier"] is not None) != mobility:
+            raise TransferError("MOBILITY_PROTOCOL")
         if upload and row["state"] not in ("sealed", "aborted"):
             if (
                 row["grant_id"] != grant.grant_id
@@ -157,6 +164,18 @@ class SQLiteArtifactTransferStore:
             ):
                 raise TransferError("FORBIDDEN")
         return row
+
+    @staticmethod
+    def _mobility_row(conn, identity, grant, *, upload=True):
+        """Load a protected row without exposing transfer-id existence."""
+        try:
+            return SQLiteArtifactTransferStore._row(
+                conn, identity, grant, upload=upload, mobility=True
+            )
+        except TransferError as error:
+            if str(error) == "NOT_FOUND":
+                raise TransferError("FORBIDDEN") from None
+            raise
 
     @staticmethod
     def _receipt(row):
@@ -173,6 +192,24 @@ class SQLiteArtifactTransferStore:
             result["artifact"] = dict(artifact_id=row["id"], **spec)
         return result
 
+    @staticmethod
+    def _mobility_record(row):
+        return {
+            "command_id": row["command"],
+            "spec": json.loads(row["spec"]),
+            "receipt": SQLiteArtifactTransferStore._receipt(row),
+        }
+
+    @staticmethod
+    def _verify_mobility_verifier(row, verifier):
+        stored = row["mobility_verifier"]
+        if not isinstance(stored, str) or not re.fullmatch("[0-9a-f]{64}", stored):
+            raise TransferError("MOBILITY_PROTOCOL")
+        if not isinstance(verifier, str) or not re.fullmatch("[0-9a-f]{64}", verifier):
+            raise TransferError("FORBIDDEN")
+        if not hmac.compare_digest(stored, verifier):
+            raise TransferError("FORBIDDEN")
+
     def begin(self, spec, command_id, grant, limits):
         _command(command_id)
         encoded = json.dumps(spec, sort_keys=True, separators=(",", ":"))
@@ -183,6 +220,8 @@ class SQLiteArtifactTransferStore:
                 (grant.scope_id, command_id),
             ).fetchone()
             if prior:
+                if prior["mobility_verifier"] is not None:
+                    raise TransferError("MOBILITY_PROTOCOL")
                 if prior["spec"] != encoded:
                     raise TransferError("COMMAND_CONFLICT")
                 row = self._row(conn, prior["id"], grant)
@@ -235,6 +274,61 @@ class SQLiteArtifactTransferStore:
             )
             return self._receipt(self._row(conn, identity, grant))
 
+    def begin_mobility(self, spec, command_id, grant, limits, verifier_for):
+        _command(command_id)
+        encoded = json.dumps(spec, sort_keys=True, separators=(",", ":"))
+        if not callable(verifier_for):
+            raise TransferError("FORBIDDEN")
+        with self._mutation(), self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            prior = conn.execute(
+                "SELECT * FROM artifact_uploads WHERE scope=? AND command=?",
+                (grant.scope_id, command_id),
+            ).fetchone()
+            if prior:
+                if prior["mobility_verifier"] is None:
+                    raise TransferError("MOBILITY_PROTOCOL")
+                self._verify_mobility_verifier(
+                    prior, verifier_for(prior["scope"], prior["id"], prior["command"])
+                )
+                if prior["spec"] != encoded:
+                    raise TransferError("COMMAND_CONFLICT")
+                row = self._row(conn, prior["id"], grant, mobility=True)
+                self._verify_resume_prefix(conn, row)
+                return self._mobility_record(row)
+            reservation = 2 * spec["size_bytes"]
+            used = conn.execute(
+                "SELECT COALESCE(SUM(reserved),0) FROM artifact_uploads"
+            ).fetchone()[0]
+            scoped = conn.execute(
+                "SELECT COALESCE(SUM(reserved),0) FROM artifact_uploads WHERE scope=?",
+                (grant.scope_id,),
+            ).fetchone()[0]
+            active = conn.execute(
+                "SELECT scope FROM artifact_uploads WHERE state IN ('open','verifying')"
+            ).fetchall()
+            if conn.execute("SELECT COUNT(*) FROM artifact_uploads").fetchone()[0] >= 4096:
+                raise TransferError("CAPACITY")
+            if used + reservation > limits.total_bytes or scoped + reservation > grant.quota_bytes:
+                raise TransferError("QUOTA")
+            if len(active) >= limits.active_total or sum(r[0] == grant.scope_id for r in active) >= limits.active_per_scope:
+                raise TransferError("CAPACITY")
+            identity = uuid.uuid4().hex
+            verifier = verifier_for(grant.scope_id, identity, command_id)
+            if not isinstance(verifier, str) or not re.fullmatch("[0-9a-f]{64}", verifier):
+                raise TransferError("FORBIDDEN")
+            conn.execute(
+                """INSERT INTO artifact_uploads
+              (id,scope,command,spec,grant_id,grant_revision,expires,state,reserved,chunk_bytes,mobility_verifier)
+              VALUES(?,?,?,?,?,?,?,'open',?,?,?)""",
+                (
+                    identity, grant.scope_id, command_id, encoded, grant.grant_id,
+                    grant.revision, min(grant.expires_at, time.time() + limits.ttl_seconds),
+                    reservation, limits.chunk_bytes, verifier,
+                ),
+            )
+            return self._mobility_record(self._row(conn, identity, grant))
+
     def _verify_resume_prefix(self, conn, row):
         if row["state"] not in ("open", "verifying") or not row["offset"]:
             return
@@ -263,7 +357,30 @@ class SQLiteArtifactTransferStore:
 
     def inspect(self, identity, grant):
         with self._connection() as conn:
-            return self._receipt(self._row(conn, identity, grant))
+            return self._receipt(self._row(conn, identity, grant, mobility=False))
+
+    def inspect_mobility(self, identity, command_id, grant, verifier_for):
+        _command(command_id)
+        if not callable(verifier_for):
+            raise TransferError("FORBIDDEN")
+        with self._connection() as conn:
+            row = self._mobility_row(conn, identity, grant)
+            self._verify_mobility_verifier(
+                row, verifier_for(row["scope"], row["id"], command_id)
+            )
+            if row["command"] != command_id:
+                raise TransferError("FORBIDDEN")
+            return self._mobility_record(row)
+
+    def mobility_record(self, identity, grant, verifier_for):
+        if not callable(verifier_for):
+            raise TransferError("FORBIDDEN")
+        with self._connection() as conn:
+            row = self._mobility_row(conn, identity, grant)
+            self._verify_mobility_verifier(
+                row, verifier_for(row["scope"], row["id"], row["command"])
+            )
+            return self._mobility_record(row)
 
     def _after_chunk_publish(self):
         """Fault-injection seam after durable bytes, before SQLite commit."""
@@ -281,10 +398,20 @@ class SQLiteArtifactTransferStore:
             if re.fullmatch(r"snapshot-[A-Za-z0-9_-]+\.part", item.name):
                 stage.unlink(item.name)
 
-    def append(self, identity, offset, digest, body, grant):
+    def append(self, identity, offset, digest, body, grant, *, mobility=False, verifier_for=None):
+        if mobility and not callable(verifier_for):
+            raise TransferError("FORBIDDEN")
         with self._mutation(), self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = self._row(conn, identity, grant)
+            row = (
+                self._mobility_row(conn, identity, grant)
+                if mobility
+                else self._row(conn, identity, grant, mobility=False)
+            )
+            if mobility:
+                self._verify_mobility_verifier(
+                    row, verifier_for(row["scope"], row["id"], row["command"])
+                )
             prior = conn.execute(
                 "SELECT * FROM artifact_chunks WHERE upload_id=? AND offset=?",
                 (identity, offset),
@@ -357,11 +484,21 @@ class SQLiteArtifactTransferStore:
             )
             return ack
 
-    def admit_seal(self, identity, command_id, grant):
+    def admit_seal(self, identity, command_id, grant, *, mobility=False, verifier_for=None):
         _command(command_id)
+        if mobility and not callable(verifier_for):
+            raise TransferError("FORBIDDEN")
         with self._mutation(), self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = self._row(conn, identity, grant)
+            row = (
+                self._mobility_row(conn, identity, grant)
+                if mobility
+                else self._row(conn, identity, grant, mobility=False)
+            )
+            if mobility:
+                self._verify_mobility_verifier(
+                    row, verifier_for(row["scope"], row["id"], row["command"])
+                )
             if row["state"] not in ("open", "verifying", "sealed"):
                 raise TransferError("STATE_CONFLICT")
             if row["seal_command"] is not None and row["seal_command"] != command_id:
@@ -373,12 +510,16 @@ class SQLiteArtifactTransferStore:
                     "UPDATE artifact_uploads SET state='verifying',seal_command=?,revision=revision+1 WHERE id=?",
                     (command_id, identity),
                 )
-            return self._receipt(self._row(conn, identity, grant))
+            return self._receipt(self._row(conn, identity, grant, mobility=mobility))
 
-    def seal(self, identity, grant, revalidate):
+    def seal(self, identity, grant, revalidate, *, mobility=False):
         with self._mutation():
             with self._connection() as conn:
-                row = self._row(conn, identity, grant)
+                row = (
+                    self._mobility_row(conn, identity, grant)
+                    if mobility
+                    else self._row(conn, identity, grant, mobility=False)
+                )
                 chunks = conn.execute(
                     "SELECT * FROM artifact_chunks WHERE upload_id=? ORDER BY offset",
                     (identity,),
@@ -447,7 +588,10 @@ class SQLiteArtifactTransferStore:
                     self._require_grant(revalidate, grant, row["expires"])
                     with self._connection() as conn:
                         conn.execute("BEGIN IMMEDIATE")
-                        self._row(conn, identity, grant)
+                        if mobility:
+                            self._mobility_row(conn, identity, grant)
+                        else:
+                            self._row(conn, identity, grant, mobility=False)
                         conn.execute(
                             "UPDATE artifact_uploads SET state='sealed',reserved=?,revision=revision+1 WHERE id=?",
                             (spec["size_bytes"], identity),
@@ -484,11 +628,21 @@ class SQLiteArtifactTransferStore:
         if total != spec["size_bytes"] or digest.hexdigest() != spec["sha256"]:
             raise TransferError("ARTIFACT_DIGEST_MISMATCH")
 
-    def abort(self, identity, command_id, grant):
+    def abort(self, identity, command_id, grant, *, mobility=False, verifier_for=None):
         _command(command_id)
+        if mobility and not callable(verifier_for):
+            raise TransferError("FORBIDDEN")
         with self._mutation(), self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = self._row(conn, identity, grant)
+            row = (
+                self._mobility_row(conn, identity, grant)
+                if mobility
+                else self._row(conn, identity, grant, mobility=False)
+            )
+            if mobility:
+                self._verify_mobility_verifier(
+                    row, verifier_for(row["scope"], row["id"], row["command"])
+                )
             if row["state"] == "sealed":
                 raise TransferError("STATE_CONFLICT")
             if row["abort_command"] is not None and row["abort_command"] != command_id:
@@ -504,7 +658,7 @@ class SQLiteArtifactTransferStore:
                 "UPDATE artifact_uploads SET state='aborted',abort_command=?,reserved=0,revision=revision+? WHERE id=?",
                 (command_id, 0 if row["state"] == "aborted" else 1, identity),
             )
-            return self._receipt(self._row(conn, identity, grant))
+            return self._receipt(self._row(conn, identity, grant, mobility=mobility))
 
     def reap_expired(self, *, limit=8):
         """Trusted local maintenance only; never deletes sealed objects or their receipts."""
@@ -533,14 +687,14 @@ class SQLiteArtifactTransferStore:
 
     def artifact(self, identity, grant):
         with self._connection() as conn:
-            row = self._row(conn, identity, grant, upload=False)
+            row = self._row(conn, identity, grant, upload=False, mobility=False)
             if row["state"] != "sealed":
                 raise TransferError("NOT_FOUND")
             return self._receipt(row)["artifact"]
 
     def read_range(self, identity, offset, length, grant):
         with self._connection() as conn:
-            row = self._row(conn, identity, grant, upload=False)
+            row = self._row(conn, identity, grant, upload=False, mobility=False)
             if row["state"] != "sealed":
                 raise TransferError("NOT_FOUND")
             spec = json.loads(row["spec"])

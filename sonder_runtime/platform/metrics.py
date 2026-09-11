@@ -26,13 +26,10 @@ except ImportError:  # pragma: no cover - exercised on minimal installs
     PROMETHEUS_AVAILABLE = False
     CONTENT_TYPE_LATEST = "text/plain; version=0.0.4; charset=utf-8"
 
-# Ollama worker-pool label values are assigned by ``ollama_pool.py`` from a
-# bounded ordinal slot ("w0".."w15") or the fixed "overflow" bucket -- never
-# from a raw hostname -- so cardinality stays bounded by construction even
-# though the underlying worker list is operator-configured. This pattern is
-# re-validated here as defense in depth against a future caller passing free
-# text.
-_WORKER_LABEL = re.compile(r"^w[0-9]{1,3}$")
+# Identity reservations belong to the process metric owner, never roster
+# positions. Removed members retain their slots; later identities overflow.
+_WORKER_LABELS = frozenset({*("w%d" % index for index in range(16)), "overflow"})
+_WORKER_IDENTITY = re.compile(r"[0-9a-f]{64}")
 _COMPUTE_REJECTION_REASONS = frozenset({
     "node_avoided",
     "unhealthy",
@@ -83,6 +80,7 @@ class MetricsRegistry:
     def __init__(self, *, enabled: bool = True) -> None:
         self.enabled = enabled and PROMETHEUS_AVAILABLE
         self._lock = threading.Lock()
+        self._ollama_worker_identities: dict[str, str] = {}
         if self.enabled:
             self._registry = CollectorRegistry()
             self.build_info = Gauge(
@@ -301,8 +299,22 @@ class MetricsRegistry:
         outcome = result if result in {"hit", "miss"} else "other"
         self.request_cache_total.labels(result=outcome).inc()
 
+    def reserve_ollama_worker_label(self, identity: str) -> str:
+        """Reserve one of 16 lifetime slots by opaque identity, with no reuse."""
+        if type(identity) is not str or _WORKER_IDENTITY.fullmatch(identity) is None:
+            raise ValueError("worker metric identity must be a SHA-256 digest")
+        with self._lock:
+            existing = self._ollama_worker_identities.get(identity)
+            if existing is not None:
+                return existing
+            if len(self._ollama_worker_identities) >= 16:
+                return "overflow"
+            label = "w%d" % len(self._ollama_worker_identities)
+            self._ollama_worker_identities[identity] = label
+            return label
+
     def _ollama_worker_label(self, worker: str) -> str:
-        if worker == "overflow" or (type(worker) is str and _WORKER_LABEL.match(worker)):
+        if type(worker) is str and worker in _WORKER_LABELS:
             return worker
         return "unknown"
 

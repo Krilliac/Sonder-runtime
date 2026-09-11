@@ -305,7 +305,8 @@ class UpdateManager:
                     evidence={"reason": "explicitly skipped by operator"},
                 )
             else:
-                from sonder_runtime.bootstrap.app import default_app
+                import importlib
+                default_app = importlib.import_module("sonder_runtime.bootstrap.app").default_app
 
                 target = self._backup_target or str(
                     Path(sonder_migrations.store_db_paths()["operations"])

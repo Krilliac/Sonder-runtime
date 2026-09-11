@@ -56,6 +56,7 @@ def _source_hashes() -> dict[str, str]:
         PACKAGE / "application" / "tools" / "generated_catalogs.py",
         PACKAGE / "domain" / "common" / "events.py",
         PACKAGE / "platform" / "config.py",
+        PACKAGE / "platform" / "memory_replication_config.py",
         ROOT / "command_catalog.py",
         ROOT / "server.py",
     )
@@ -103,8 +104,22 @@ def _runtime_reference() -> dict[str, Any]:
     } for kind in events.EventKind]
 
     config = importlib.import_module("sonder_runtime.platform.config")
+    memory_replication = importlib.import_module(
+        "sonder_runtime.platform.memory_replication_config"
+    )
     configuration = []
-    for section, cls in (("root", config.SonderConfig), ("secrets", config.Secrets), *sorted(config._SECTION_TYPES.items())):
+    specialized_sections = (
+        ("memory_replication", memory_replication.MemoryReplicationConfig),
+        (
+            "memory_replication.peers[]",
+            memory_replication.MemoryReplicationPeerConfig,
+        ),
+    )
+    for section, cls in (
+        ("root", config.SonderConfig),
+        ("secrets", config.Secrets),
+        *sorted((*config._SECTION_TYPES.items(), *specialized_sections)),
+    ):
         for field in dataclasses.fields(cls):
             default = field.default if field.default is not dataclasses.MISSING else None
             if section == "secrets":
@@ -116,7 +131,10 @@ def _runtime_reference() -> dict[str, Any]:
                 "type": str(field.type),
             })
     result["configuration"] = configuration
-    result["configuration_source"] = "sonder_runtime.platform.config._SECTION_TYPES"
+    result["configuration_source"] = (
+        "sonder_runtime.platform.config._SECTION_TYPES plus "
+        "sonder_runtime.platform.memory_replication_config"
+    )
     result["counts"] = {name: len(result[name]) for name in ("commands", "tools", "events", "configuration")}
     canonical = json.dumps(result, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     result["digest"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()

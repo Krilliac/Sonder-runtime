@@ -50,6 +50,39 @@ def test_enabled_invalid_or_shared_key_fails_startup(tmp_path):
         ArtifactTransferBinding(lambda: config)
 
 
+@pytest.mark.parametrize("field", ("artifact_transfer_key", "api_key"))
+def test_direct_typed_key_separation_rejects_str_subclasses(tmp_path, field):
+    from sonder_runtime.platform.artifact_transfer_config import artifact_transfer_errors
+
+    class UnequalSecret(str):
+        def __eq__(self, other):
+            return False
+
+    config = configured(tmp_path)
+    shared = (
+        config.secrets.api_key
+        if field == "artifact_transfer_key"
+        else config.secrets.artifact_transfer_key
+    )
+    config = replace(
+        config,
+        secrets=replace(config.secrets, **{field: UnequalSecret(shared)}),
+    )
+
+    errors = artifact_transfer_errors(config)
+
+    assert errors == [
+        "artifact transfer key separation requires exact builtin strings",
+    ]
+    assert shared not in repr(errors)
+
+
+def test_direct_typed_distinct_builtin_artifact_keys_remain_valid(tmp_path):
+    from sonder_runtime.platform.artifact_transfer_config import artifact_transfer_errors
+
+    assert artifact_transfer_errors(configured(tmp_path)) == []
+
+
 def test_invocation_binds_fixed_identity_and_live_config(tmp_path):
     from sonder_runtime.bootstrap.artifact_transfer import ArtifactTransferBinding
     current = [configured(tmp_path)]

@@ -38,7 +38,12 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _default_opener(request: urllib.request.Request, *, timeout: float):
-    return urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout)
+    # Trusted peers are selected exclusively by typed configuration.  Do not let
+    # process-wide proxy environment variables redirect this fixed-peer traffic.
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _NoRedirect(),
+    ).open(request, timeout=timeout)
 
 
 def _identity(value: object, field: str) -> str:

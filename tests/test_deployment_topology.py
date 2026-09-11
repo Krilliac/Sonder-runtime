@@ -60,6 +60,125 @@ def test_direct_lifecycle_configure_cannot_bypass_ha_validation():
     with pytest.raises(ConfigError, match='independent old-owner fencing'):
         lifecycle.configure(SonderConfig(deployment=DeploymentConfig(automatic_takeover=True)))
 
+
+def test_typed_lifecycle_reconfiguration_retires_the_prior_probe(tmp_path, monkeypatch):
+    """A new config cannot orphan the prior lifecycle's endpoint probe."""
+    from sonder_runtime.adapters.web import lifecycle
+    from sonder_runtime.platform.config import StateConfig
+
+    lifecycle.reset_for_tests()
+    monkeypatch.setattr(
+        lifecycle.RuntimeLifecycle, "probe_ollama_once", lambda self, timeout=None: True,
+    )
+    first_config = SonderConfig()
+    second_config = SonderConfig(state=StateConfig(home=str(tmp_path / "next")))
+    try:
+        lifecycle.configure(first_config)
+        first = lifecycle.get()
+        first.begin_ollama_probe(interval_seconds=60)
+        assert first._probe_thread is not None and first._probe_thread.is_alive()
+
+        lifecycle.configure(second_config)
+
+        assert first._probe_stop.is_set()
+        assert not first._probe_thread.is_alive()
+        assert lifecycle.get() is not first
+    finally:
+        lifecycle.reset_for_tests()
+
+
+def test_typed_lifecycle_reconfiguration_refuses_an_unjoined_prior_probe(tmp_path):
+    """A blocked probe retains its exact lifecycle instead of being orphaned."""
+    from threading import Event, Thread
+
+    from sonder_runtime.adapters.web import lifecycle
+    from sonder_runtime.platform.config import StateConfig
+
+    lifecycle.reset_for_tests()
+    first_config = SonderConfig()
+    second_config = SonderConfig(state=StateConfig(home=str(tmp_path / "next")))
+    release = Event()
+    thread = None
+    try:
+        lifecycle.configure(first_config)
+        first = lifecycle.get()
+        first._ollama_probe_timeout = 0
+        thread = Thread(target=release.wait, daemon=True)
+        thread.start()
+        first._probe_thread = thread
+
+        with pytest.raises(RuntimeError, match="probe did not stop"):
+            lifecycle.configure(second_config)
+
+        assert lifecycle._configured_config is first_config
+        assert lifecycle._instance is first
+        assert thread.is_alive()
+    finally:
+        release.set()
+        if thread is not None:
+            thread.join(timeout=5)
+        lifecycle.reset_for_tests()
+
+
+def test_typed_lifecycle_reconfiguration_stops_an_inflight_probe_before_publish(
+    tmp_path, monkeypatch,
+):
+    """A probe starting during reconfiguration cannot publish after retirement."""
+    from threading import Event, Thread
+
+    from sonder_runtime.adapters.web import lifecycle
+    from sonder_runtime.platform.config import StateConfig
+
+    lifecycle.reset_for_tests()
+    first_config = SonderConfig()
+    second_config = SonderConfig(state=StateConfig(home=str(tmp_path / "next")))
+    entered = Event()
+    release = Event()
+    errors = []
+    starter = None
+    replacer = None
+
+    def blocked_probe(self, timeout=None):
+        entered.set()
+        assert release.wait(5)
+        return True
+
+    def replace_lifecycle():
+        try:
+            lifecycle.configure(second_config)
+        except BaseException as error:
+            errors.append(error)
+
+    monkeypatch.setattr(lifecycle.RuntimeLifecycle, "probe_ollama_once", blocked_probe)
+    try:
+        lifecycle.configure(first_config)
+        first = lifecycle.get()
+        first._ollama_probe_timeout = 5
+        starter = Thread(target=first.begin_ollama_probe)
+        starter.start()
+        assert entered.wait(5)
+
+        replacer = Thread(target=replace_lifecycle)
+        replacer.start()
+        assert first._probe_stop.wait(5)
+        release.set()
+        starter.join(timeout=5)
+        replacer.join(timeout=5)
+
+        assert not starter.is_alive()
+        assert not replacer.is_alive()
+        assert errors == []
+        assert first._probe_thread is None
+        assert lifecycle.get() is not first
+    finally:
+        release.set()
+        if starter is not None:
+            starter.join(timeout=5)
+        if replacer is not None:
+            replacer.join(timeout=5)
+        lifecycle.reset_for_tests()
+
+
 @pytest.mark.parametrize('profile,peer_count,valid', [('single-host', 0, True), ('single-host', 1, True),
     ('single-host', 2, True), ('pooled-pair', 0, False), ('pooled-pair', 1, True),
     ('pooled-pair', 2, False), ('preferred-primary-ha', 1, False), ('quorum', 2, False)])

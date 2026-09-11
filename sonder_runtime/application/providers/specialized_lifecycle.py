@@ -16,7 +16,7 @@ Every adapter has the same lifecycle guarantees:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from threading import Condition, Event, RLock
 import time
@@ -36,7 +36,6 @@ from ..ports.specialized_lifecycle import (
     TrainingRequest,
 )
 from .lifecycle_registry import (
-    ProviderLifecycleError,
     ProviderRegistration,
     ProviderRegistrationScope,
     ScopedProviderRegistry,
@@ -265,21 +264,34 @@ class UpdateLifecycleAdapter(_LifecycleAdapter):
             self._leave()
 
 
+@dataclass(slots=True)
+class _SpecializedBundleCloseState:
+    """Mutable close progress kept outside the immutable bundle contract."""
+
+    lock: Any = field(default_factory=RLock)
+    remaining: list[ProviderRegistration] | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class SpecializedProviderBundle:
     """Published registrations with an idempotent bundle close operation."""
 
     registry: ScopedProviderRegistry
     registrations: tuple[ProviderRegistration, ...]
+    _close_state: _SpecializedBundleCloseState = field(
+        default_factory=_SpecializedBundleCloseState,
+        repr=False,
+        compare=False,
+    )
 
     def close(self, timeout: float | None = None) -> None:
-        for registration in reversed(self.registrations):
-            try:
+        with self._close_state.lock:
+            if self._close_state.remaining is None:
+                self._close_state.remaining = list(reversed(self.registrations))
+            while self._close_state.remaining:
+                registration = self._close_state.remaining[0]
                 self.registry.unregister(registration.provider_id, timeout=timeout)
-            except ProviderLifecycleError:
-                # A failed close is not silently converted to success; callers
-                # get a deterministic lifecycle error from the registry.
-                raise
+                self._close_state.remaining.pop(0)
 
 
 def wire_specialized_providers(

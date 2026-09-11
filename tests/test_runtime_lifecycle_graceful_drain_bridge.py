@@ -48,12 +48,15 @@ def test_unconfigured_bridge_is_truthfully_incomplete_and_legacy_surface_remains
         lambda _lifecycle: None,
     )
     lifecycle = RuntimeLifecycle()
+    stopped = []
+    monkeypatch.setattr(lifecycle, "stop_probe", lambda: stopped.append(True) or True)
 
     result = lifecycle.drain_gracefully("not wired")
 
     assert result.stage is DrainStage.INCOMPLETE
     assert not result.clean
     assert "bridge is not configured" in result.errors[0]
+    assert stopped == [True]
 
 
 def test_default_production_bridge_is_complete_after_startup_without_jobs(tmp_path, monkeypatch):
@@ -82,18 +85,45 @@ def test_injected_bridge_runs_graceful_coordinator_and_observation_provider():
     assert seen == ["observed"]
 
 
-def test_injected_bridge_failure_is_truthful_and_does_not_raise():
+def test_graceful_drain_is_unclean_when_the_probe_does_not_stop(monkeypatch):
+    lifecycle = RuntimeLifecycle(
+        graceful_drain_coordinator=_coordinator(),
+        graceful_drain_observations=lambda: (),
+    )
+    monkeypatch.setattr(lifecycle, "stop_probe", lambda: False)
+
+    result = lifecycle.drain_gracefully("probe stalled")
+
+    assert result.stage is DrainStage.COMPLETE
+    assert result.cleanup_completed is False
+    assert not result.clean
+    assert result.errors[-1] == "ollama probe did not stop"
+
+
+def test_legacy_drain_is_unclean_when_the_probe_does_not_stop(monkeypatch):
+    lifecycle = RuntimeLifecycle()
+    lifecycle._graceful_drain_coordinator = None
+    monkeypatch.setattr(lifecycle.coordinator, "drain", lambda **_kwargs: True)
+    monkeypatch.setattr(lifecycle, "stop_probe", lambda: False)
+
+    assert lifecycle.drain("probe stalled") is False
+
+
+def test_injected_bridge_failure_is_truthful_and_does_not_raise(monkeypatch):
     class Broken:
         def drain(self, request, *, observations):
             raise RuntimeError("boom")
 
     lifecycle = RuntimeLifecycle(graceful_drain_coordinator=Broken())
+    stopped = []
+    monkeypatch.setattr(lifecycle, "stop_probe", lambda: stopped.append(True) or True)
 
     result = lifecycle.drain_gracefully("broken")
 
     assert result.stage is DrainStage.INCOMPLETE
     assert not result.clean
     assert result.errors == ("graceful drain bridge: RuntimeError",)
+    assert stopped == [True]
 
 
 def test_legacy_drain_surface_uses_production_bridge_and_stops_cleanly(

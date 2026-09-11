@@ -462,6 +462,9 @@ _UNREGISTERED_BRANCH_WORK = {
     # must remain visible to the permission map rather than resolving as an
     # empty tool set.
     "/recovery": "recovery",
+    # The REPL exposes only local receipt list/status reads.  Outbound send
+    # and resume remain unavailable from this surface.
+    "/artifact-mobility": "artifact-mobility",
     "/selfmod": "selfmod",
     "/selfmodify": "selfmod",
     "/mcp": "mcp",

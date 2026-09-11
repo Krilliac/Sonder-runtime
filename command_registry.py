@@ -4,6 +4,12 @@ import re
 
 COMMANDS = [
     {
+        "name": "/artifact-mobility",
+        "category": "inspect",
+        "risk": "safe",
+        "summary": "Inspect local outbound artifact receipts with list or status; dispatch is unavailable here.",
+    },
+    {
         "name": "/help",
         "category": "basic",
         "risk": "safe",

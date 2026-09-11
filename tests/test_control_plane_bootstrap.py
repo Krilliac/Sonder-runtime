@@ -38,3 +38,8 @@ def test_default_composition_exposes_real_and_explicitly_unavailable_sections(
     assert payload["sections"]["memory_explanations"]["count"] == 8
     assert "content" not in str(payload["sections"]["memory_explanations"])
     assert payload["sections"]["health"]["count"] >= 1
+    # `build_application()` intentionally accepts no explicit config.  The
+    # default graph must still reach the compute-fabric control-plane section;
+    # that closure depends on the module-level clock rather than a config-only
+    # local import.
+    assert payload["sections"]["compute_fabric"]["count"] >= 1

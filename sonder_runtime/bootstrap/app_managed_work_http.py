@@ -19,7 +19,6 @@ from ..adapters.security.continuation_approval import (
 from ..adapters.security.control_plane_paths import (
     ControlPlanePaths,
     control_plane_scope,
-    live_control_plane_inventory,
 )
 from ..application.context import OperationContext
 from ..application.ports.app_control import NotFound, identifier
@@ -129,8 +128,10 @@ class _AppWorkbench(PreparedWorkbenchAdapter):
     def execute_prepared_workbench(
         self, prepared, *, admitted_context, managed_factory
     ):
-        self.service.inventory()
-        with control_plane_scope(self.service.private_paths()), managed_root_scope(
+        with self.service.control._private_inventory_scope(
+            context_roots=admitted_context.workspace_roots,
+            requirements=self.service.private_paths(),
+        ), control_plane_scope(self.service.private_paths()), managed_root_scope(
             lambda: admitted_context.workspace_roots
         ):
             return super().execute_prepared_workbench(
@@ -236,10 +237,12 @@ class AppManagedWorkHttpBinding:
         )
 
     def inventory(self):
-        result = live_control_plane_inventory(additional=self.private_paths)
-        result.require_disjoint(self.model_roots())
-        self.control._private(inventory=result)
-        return result
+        # Demand this consumer's complete normalized closure.  A baseline wire
+        # scope is upgraded once by the binding when it cannot prove coverage;
+        # it is never accepted merely because a request scope exists.
+        return self.control._private(
+            context_roots=self.model_roots(), requirements=self.private_paths()
+        )
 
     def policy(self, context):
         self.require_current()

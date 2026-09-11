@@ -45,7 +45,11 @@ def _app():
     class _Config:
         state = _State()
 
-    return type("App", (), {"config": _Config(), "tool_executor": _Executor()})()
+    return type("App", (), {
+        "config": _Config(),
+        "tool_executor": _Executor(),
+        "close_providers": lambda self, *, timeout: None,
+    })()
 
 
 class _Inspections:

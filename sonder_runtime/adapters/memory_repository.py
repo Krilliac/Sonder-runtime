@@ -8,17 +8,54 @@ from __future__ import annotations
 
 
 class MemoryRepositoryAdapter:
-    """Implement ``MemoryRepository`` over one UnitOfWork connection."""
+    """Implement ``MemoryRepository`` over one UnitOfWork connection.
 
-    def __init__(self, conn) -> None:
+    A composition root may inject the narrow authoritative fact source.  The
+    default remains the legacy store path until a later replication lifecycle
+    slice explicitly composes that source.
+    """
+
+    def __init__(
+        self,
+        conn,
+        *,
+        authoritative_fact_source=None,
+        begin_authoritative_transaction=None,
+    ) -> None:
+        if authoritative_fact_source is not None and (
+            not callable(getattr(authoritative_fact_source, "add_fact", None))
+            or not callable(getattr(authoritative_fact_source, "delete_fact", None))
+        ):
+            raise TypeError(
+                "authoritative fact source must provide add_fact and delete_fact"
+            )
+        if begin_authoritative_transaction is not None and not callable(
+            begin_authoritative_transaction
+        ):
+            raise TypeError("authoritative transaction starter must be callable")
         self._conn = conn
+        self._authoritative_fact_source = authoritative_fact_source
+        self._begin_authoritative_transaction = begin_authoritative_transaction
 
     def add_fact(self, fact_id: str, project: str, text: str, embedding=None) -> None:
+        if self._authoritative_fact_source is not None:
+            if self._begin_authoritative_transaction is not None:
+                self._begin_authoritative_transaction()
+            self._authoritative_fact_source.add_fact(
+                self._conn, fact_id, project, text, embedding
+            )
+            return None
         import sonder_runtime.adapters.memory_store as memory_store
 
         memory_store.add_fact(self._conn, fact_id, project, text, embedding)
 
     def delete_fact(self, fact_id: str, project: str) -> bool:
+        if self._authoritative_fact_source is not None:
+            if self._begin_authoritative_transaction is not None:
+                self._begin_authoritative_transaction()
+            return self._authoritative_fact_source.delete_fact(
+                self._conn, fact_id, project
+            )
         import sonder_runtime.adapters.memory_store as memory_store
 
         return memory_store.delete_fact(self._conn, fact_id, project)

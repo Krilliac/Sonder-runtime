@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from scripts import check_documentation_authority as checker
+from scripts import generate_documentation_catalogs as catalogs
 
 ROOT = Path(__file__).resolve().parents[1]
 GENERATED = ROOT / "docs" / "architecture" / "generated"
@@ -32,6 +33,33 @@ def test_generated_runtime_reference_covers_available_metadata():
     config_keys = {(row["section"], row["field"]) for row in reference["configuration"]}
     assert {("root", "schema_version"), ("secrets", "api_key"), ("server", "host")} <= config_keys
     assert len(reference["digest"]) == 64
+
+
+def test_generated_runtime_reference_covers_specialized_memory_replication_contract():
+    reference = catalogs._runtime_reference()
+    configuration: dict[str, set[tuple[str, str]]] = {}
+    for row in reference["configuration"]:
+        configuration.setdefault(row["section"], set()).add(
+            (row["field"], row["type"])
+        )
+
+    assert configuration["memory_replication"] == {
+        ("enabled", "bool"),
+        ("local_node_id", "str"),
+        ("project_scope", "str"),
+        ("receiver_enabled", "bool"),
+        ("accepted_source_ids", "tuple[str, ...]"),
+        ("peers", "tuple[MemoryReplicationPeerConfig, ...]"),
+        ("request_timeout_seconds", "int"),
+        ("max_request_bytes", "int"),
+        ("max_response_bytes", "int"),
+        ("max_batch_records", "int"),
+    }
+    assert configuration["memory_replication.peers[]"] == {
+        ("node_id", "str"),
+        ("project_scope", "str"),
+        ("origin", "str"),
+    }
 
 
 def test_public_generator_freshness_check_passes():

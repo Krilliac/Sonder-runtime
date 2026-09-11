@@ -1074,6 +1074,31 @@ class SonderApi {
     }
   }
 
+  Future<OllamaPoolPage> ollamaPoolAdminStatus({
+    bool refresh = false,
+    String cursor = '',
+    int pageSize = 32,
+  }) async {
+    final response = await _requestPost(
+      _uri('/v1/sonder/ollama-pool'),
+      headers: _headers(),
+      body: jsonEncode(
+          {'refresh': refresh, 'cursor': cursor, 'page_size': pageSize}),
+    ).timeout(const Duration(seconds: 60));
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      throw SonderException('Administrator authorization is required.');
+    }
+    if (response.statusCode != 200) {
+      throw SonderException(
+          'Worker page unavailable. Inspect the first page again.');
+    }
+    if (response.bodyBytes.length > 65536) {
+      throw SonderException('Worker page exceeds the response limit.');
+    }
+    return OllamaPoolPage.fromJson(
+        jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>);
+  }
+
   /// Durable update state for the System page (SPEC-4 section 14).
   ///
   /// Admin-only on the server; a non-admin key gets 403 and the UI simply
@@ -1903,6 +1928,13 @@ class OperationalCapabilitiesInfo {
   final int workerCount;
   final int healthyWorkerCount;
   final int remoteWorkerCount;
+  final int poolSchemaVersion;
+  final int eligibleWorkerCount;
+  final int availableCapacity;
+  final int queueWaiting;
+  final int queueLimit;
+  final String membershipMode;
+  final String membershipState;
   final OperationalCapabilityInfo requestLevelPooling;
   final OperationalCapabilityInfo modelSharding;
   final OperationalCapabilityInfo wholeJobPlacement;
@@ -1911,6 +1943,8 @@ class OperationalCapabilitiesInfo {
   final OperationalCapabilityInfo artifactTransferTransport;
   final OperationalCapabilityInfo automaticMemoryMigration;
   final OperationalCapabilityInfo automaticArtifactMigration;
+  final bool automaticTakeoverAvailable;
+  final bool automaticFailbackAvailable;
 
   const OperationalCapabilitiesInfo({
     required this.schemaVersion,
@@ -1921,6 +1955,13 @@ class OperationalCapabilitiesInfo {
     required this.workerCount,
     required this.healthyWorkerCount,
     required this.remoteWorkerCount,
+    this.poolSchemaVersion = 1,
+    this.eligibleWorkerCount = 0,
+    this.availableCapacity = 0,
+    this.queueWaiting = 0,
+    this.queueLimit = 0,
+    this.membershipMode = 'unknown',
+    this.membershipState = 'unknown',
     required this.requestLevelPooling,
     required this.modelSharding,
     required this.wholeJobPlacement,
@@ -1929,6 +1970,8 @@ class OperationalCapabilitiesInfo {
     required this.artifactTransferTransport,
     required this.automaticMemoryMigration,
     required this.automaticArtifactMigration,
+    required this.automaticTakeoverAvailable,
+    required this.automaticFailbackAvailable,
   });
 
   factory OperationalCapabilitiesInfo.fromJson(Map<String, dynamic> json) {
@@ -1959,6 +2002,24 @@ class OperationalCapabilitiesInfo {
     final poolMap = rawPool is Map
         ? Map<String, dynamic>.from(rawPool)
         : const <String, dynamic>{};
+    final rawMembershipState = poolMap['membership_state'];
+    final membershipMode = poolMap['membership_mode'] == 'static' ||
+            poolMap['membership_mode'] == 'external'
+        ? poolMap['membership_mode'] as String
+        // Older status payloads had only the static marker. Preserve that
+        // compatible, bounded interpretation without accepting arbitrary text.
+        : rawMembershipState == 'static'
+            ? 'static'
+            : 'unknown';
+    final membershipState =
+        membershipMode == 'static' && rawMembershipState == 'static'
+            ? 'static'
+            : membershipMode == 'external' &&
+                    (rawMembershipState == 'unrefreshed' ||
+                        rawMembershipState == 'current' ||
+                        rawMembershipState == 'stale_or_partial')
+                ? rawMembershipState as String
+                : 'unknown';
     return OperationalCapabilitiesInfo(
       schemaVersion: _asInt(json['schema_version']),
       localNode: compute['local_node']?.toString() ?? '',
@@ -1968,6 +2029,15 @@ class OperationalCapabilitiesInfo {
       workerCount: _asInt(poolMap['worker_count']),
       healthyWorkerCount: _asInt(poolMap['healthy_worker_count']),
       remoteWorkerCount: _asInt(poolMap['remote_worker_count']),
+      poolSchemaVersion: poolMap['schema_version'] == 2 ? 2 : 1,
+      eligibleWorkerCount: _asInt(poolMap['eligible_worker_count']),
+      availableCapacity: _asInt(poolMap['available_capacity']),
+      queueWaiting: _asInt(
+          (poolMap['queue'] is Map ? poolMap['queue'] : const {})['waiting']),
+      queueLimit: _asInt(
+          (poolMap['queue'] is Map ? poolMap['queue'] : const {})['limit']),
+      membershipMode: membershipMode,
+      membershipState: membershipState,
       requestLevelPooling: capability(inference, 'request_level_pooling'),
       modelSharding: capability(inference, 'model_sharding'),
       wholeJobPlacement: capability(compute, 'whole_job_placement'),
@@ -1980,13 +2050,82 @@ class OperationalCapabilitiesInfo {
           capability(mobility, 'automatic_memory_migration'),
       automaticArtifactMigration:
           capability(mobility, 'automatic_artifact_migration'),
+      automaticTakeoverAvailable:
+          _asBool(mobility['automatic_takeover_available']),
+      automaticFailbackAvailable:
+          _asBool(mobility['automatic_failback_available']),
     );
   }
 
   String get workerSummary {
     if (workerCount <= 0) return 'No inference workers reported';
+    if (poolSchemaVersion == 2) {
+      return '$eligibleWorkerCount/$workerCount eligible workers';
+    }
     return '$healthyWorkerCount/$workerCount healthy workers';
   }
+
+  String get poolCapacitySummary =>
+      '$availableCapacity available slots; queue $queueWaiting/$queueLimit; ${membershipMode == 'external' ? '$membershipMode/$membershipState' : membershipState}';
+}
+
+class OllamaPoolWorker {
+  final String origin;
+  final String state;
+  final int modelCount;
+  final List<String> modelPreview;
+  final String errorCategory;
+
+  OllamaPoolWorker.fromJson(Map<String, dynamic> json)
+      : origin = _poolText(json['origin'], 256),
+        state = _poolText(json['state'], 32),
+        modelCount = _asInt(json['model_count']).clamp(0, 2048),
+        modelPreview = (json['model_preview'] is List
+                ? json['model_preview'] as List
+                : const [])
+            .take(8)
+            .whereType<String>()
+            .map((value) => _poolText(value, 128))
+            .toList(growable: false),
+        errorCategory = const {
+          'none',
+          'transport',
+          'timeout',
+          'protocol',
+          'capability',
+          'authorization',
+          'unknown'
+        }.contains(json['error_category'])
+            ? json['error_category'] as String
+            : 'unknown';
+}
+
+String _poolText(Object? value, int limit) {
+  if (value is! String) return '';
+  return value.length <= limit ? value : value.substring(0, limit);
+}
+
+class OllamaPoolPage {
+  final int schemaVersion;
+  final int workerCount;
+  final int omittedWorkerCount;
+  final bool complete;
+  final String nextCursor;
+  final List<OllamaPoolWorker> workers;
+
+  OllamaPoolPage.fromJson(Map<String, dynamic> json)
+      : schemaVersion = json['schema_version'] == 2 ? 2 : 1,
+        workerCount = _asInt(json['worker_count']).clamp(0, 256),
+        omittedWorkerCount = _asInt(json['omitted_worker_count']).clamp(0, 256),
+        complete = json['complete'] == true,
+        nextCursor = _poolText(json['next_cursor'], 128),
+        workers = (json['schema_version'] == 2 && json['workers'] is List
+                ? json['workers'] as List
+                : const [])
+            .take(128)
+            .whereType<Map<String, dynamic>>()
+            .map(OllamaPoolWorker.fromJson)
+            .toList(growable: false);
 }
 
 class ExecutionStatus {

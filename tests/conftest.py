@@ -75,7 +75,7 @@ def _isolate_fleet_ledger(_isolate_runtime_home):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_typed_ollama_endpoint():
+def _isolate_typed_ollama_endpoint(monkeypatch):
     """Restore the process-global typed Ollama endpoint around each test.
 
     ``bootstrap.app`` pins the typed endpoint (``configure_typed_endpoint``)
@@ -89,11 +89,44 @@ def _isolate_typed_ollama_endpoint():
     the endpoint still sees its own value while it runs.
     """
     from sonder_runtime.adapters.inference import ollama_endpoint
+    from sonder_runtime.adapters import embeddings as embeddings
+    import weakref
+
+    # Each test owns its composed sources. Keep unrelated external-source
+    # cycles from another test from restricting this test's static adapter.
+    monkeypatch.setattr(ollama_endpoint, "_external_membership_owners", weakref.WeakSet())
 
     with ollama_endpoint._configuration_lock:
         before = ollama_endpoint._configured_endpoint
+    before_base = embeddings.BASE
+    before_netloc = embeddings.OLLAMA_HOST
     yield
     ollama_endpoint.configure_typed_endpoint(before)
+    # Restore the frozen embeddings origin by assignment. Calling
+    # configure_typed_endpoint(None) re-reads OLLAMA_HOST while monkeypatch
+    # teardown has not run yet, so a test that set a malformed host
+    # (e.g. http://[::1) blew up here with ValueError: Invalid IPv6 URL.
+    embeddings.BASE = before_base
+    embeddings.OLLAMA_HOST = before_netloc
+
+
+@pytest.fixture(autouse=True)
+def _isolate_fleet_worker_cap():
+    """Do not inherit a leftover configure_fleet_worker_cap across tests.
+
+    Composition/capacity tests pin ``_FLEET_WORKER_CAP`` (often 2). When that
+    value ties hardware slot limits, ``capacity()`` reports ``bound_by`` as
+    ``fleet_workers`` instead of ``ram`` / ``gpu_vram`` / ``ollama_num_parallel``,
+    which breaks the hardware capacity suite under xdist.
+    """
+    import master_orchestrator
+
+    before = master_orchestrator._FLEET_WORKER_CAP
+    master_orchestrator._FLEET_WORKER_CAP = None
+    try:
+        yield
+    finally:
+        master_orchestrator._FLEET_WORKER_CAP = before
 
 
 @pytest.fixture(autouse=True)

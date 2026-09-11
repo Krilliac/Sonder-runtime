@@ -58,7 +58,18 @@ def normalize(value=None) -> str:
         logger.warning(f"OLLAMA_HOST uses IPv6 bind-all address ::, rewriting to loopback [::1] -- check if this is intentional")
         replacement = "[::1]"
     else:
-        return candidate
+        # All identity consumers share this spelling without resolving DNS.
+        # DNS is case insensitive; IPv6 compression must happen before roster
+        # uniqueness is checked, including equivalent bind-all literals.
+        host = host.casefold().rstrip(".")
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            replacement = host
+        else:
+            if address.is_unspecified:
+                address = ipaddress.ip_address("::1" if address.version == 6 else "127.0.0.1")
+            replacement = "[%s]" % address.compressed if address.version == 6 else address.compressed
     suffix = ":%d" % port if port is not None else ""
     return "%s://%s%s" % (parsed.scheme.lower(), replacement, suffix)
 

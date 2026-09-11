@@ -11,7 +11,7 @@ alias the local route resolves).
 """
 import json
 import types
-import urllib.request
+from sonder_runtime.adapters.inference import ollama_endpoint
 
 import sonder_doctor
 
@@ -35,7 +35,7 @@ def _install(monkeypatch, payload, *, status=200, url="http://127.0.0.1:11434"):
     config = types.SimpleNamespace(ollama=types.SimpleNamespace(url=url))
     monkeypatch.setattr(sonder_doctor, "_load_config_or_none", lambda: config)
     monkeypatch.setattr(
-        urllib.request, "urlopen", lambda *a, **k: _Response(payload, status)
+        ollama_endpoint._OPENER, "open", lambda *a, **k: _Response(payload, status)
     )
 
 
@@ -89,7 +89,7 @@ def test_unreachable_endpoint_still_fails(monkeypatch):
     def _boom(*_args, **_kwargs):
         raise OSError("connection refused")
 
-    monkeypatch.setattr(urllib.request, "urlopen", _boom)
+    monkeypatch.setattr(ollama_endpoint._OPENER, "open", _boom)
 
     result = sonder_doctor._check_ollama()
 

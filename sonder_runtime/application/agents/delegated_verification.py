@@ -3,9 +3,11 @@
 from .lane_continuation import root_transaction
 
 from dataclasses import replace, asdict
-from contextvars import copy_context
+from contextvars import ContextVar
+import asyncio
 import json
 from pathlib import Path
+import threading
 import time
 import uuid
 from ..ports.delegated_verification import (
@@ -25,16 +27,61 @@ from ..ports.lane_continuation import (
 class _VerificationCancellation:
     def __init__(self, service, prepared, original):
         self.service, self.prepared, self.original = service, prepared, original
-        self._admission_context = copy_context()
+        # Cancellation is queried synchronously by the trusted verification
+        # gateway.  It may revalidate in this exact execution only; a copied
+        # ContextVar is neither a continuation capability nor an authority.
+        self._owner = self._execution_owner()
+        self._marker = ContextVar("delegated_verification_cancellation", default=None)
+        self._marker_value = object()
+        self._marker_token = self._marker.set(self._marker_value)
+        self._closed = False
+
+    @staticmethod
+    def _execution_owner():
+        try:
+            task = asyncio.current_task()
+        except RuntimeError:
+            task = None
+        return threading.get_ident(), task
+
+    def _owns_current_context(self):
+        owner = self._execution_owner()
+        if (
+            self._closed
+            or owner[0] != self._owner[0]
+            or owner[1] is not self._owner[1]
+            or self._marker.get() is not self._marker_value
+        ):
+            return False
+        try:
+            # Tokens are Context-bound.  A copied same-thread Context can
+            # preserve the marker value but cannot reset this owner's token.
+            self._marker.reset(self._marker_token)
+        except (ValueError, RuntimeError):
+            return False
+        self._marker_token = self._marker.set(self._marker_value)
+        return True
+
+    def close(self):
+        """Retire the direct revalidation marker when its check completes."""
+        if self._closed:
+            return
+        if not self._owns_current_context():
+            return
+        self._closed = True
+        try:
+            self._marker.reset(self._marker_token)
+        except (ValueError, RuntimeError):
+            pass
 
     @property
     def cancelled(self):
         if self.original.cancellation.cancelled or self.original.expired:
             return True
+        if not self._owns_current_context():
+            return True
         try:
-            self._admission_context.copy().run(
-                self.service._require_current, self.prepared, self.original
-            )
+            self.service._require_current(self.prepared, self.original)
         except (ValueError, PermissionError, OSError, KeyError):
             return True
         return False
@@ -303,6 +350,7 @@ class DelegatedVerificationService:
             return self._public(value)
         owner = "lane-owner-" + uuid.uuid4().hex
         owner_lease = self.store.acquire_owner(owner)
+        control = None
         try:
             with root_transaction(self.store, context) as tx:
                 value = tx.verification_row(
@@ -567,6 +615,8 @@ class DelegatedVerificationService:
                         prepared.verification_id,
                     )
         finally:
+            if control is not None:
+                control.close()
             owner_lease.close()
         if value["state"] != "incomplete":
             self.lanes.resume_after_verification(prepared.parent_session_id)

@@ -2,6 +2,7 @@
 from dataclasses import dataclass, field, fields
 import hashlib
 import hmac
+import re
 import threading
 from pathlib import Path
 
@@ -103,6 +104,46 @@ class ArtifactTransferBinding:
                              section.grant_id, section.grant_revision, section.expires_at,
                              section.can_read, section.can_write, section.max_object_bytes,
                              section.quota_bytes)
+
+    @staticmethod
+    def _mobility_attestation_fields(config):
+        section = config.artifact_transfer
+        if not section.receiver_identity_id:
+            raise PermissionError("mobility receiver identity is unavailable")
+        from sonder_runtime.application.artifacts.transfer import MOBILITY_V1_VERSION
+        return {
+            "protocol_version": MOBILITY_V1_VERSION,
+            "receiver_identity_id": section.receiver_identity_id,
+            "principal_id": section.principal_id,
+            "project_id": section.project_id,
+            "authorized_source_owner_id": section.peer_node_id,
+            "grant_id": section.grant_id,
+            "grant_revision": section.grant_revision,
+            "can_write": section.can_write,
+            "max_object_bytes": section.max_object_bytes,
+        }
+
+    def mobility_attestation(self, context):
+        """Return the bounded receiver contract; blank identity stays legacy-only."""
+        from sonder_runtime.application.artifacts.transfer import recipient_mobility_attestation
+        return recipient_mobility_attestation(
+            self._mobility_attestation_fields(self.validate_context(context))
+        )
+
+    def mobility_contract(self, context, receipt_capability):
+        if not isinstance(receipt_capability, str) or not re.fullmatch(
+            "[0-9a-f]{64}", receipt_capability
+        ):
+            raise PermissionError("mobility receipt capability is unavailable")
+        config = self.validate_context(context)
+        from sonder_runtime.application.artifacts.transfer import MobilityV1Contract
+        fields = self._mobility_attestation_fields(config)
+        receipt_key = hmac.new(
+            config.secrets.artifact_transfer_key.encode("ascii"),
+            b"sonder-artifact-mobility-v1-receipt\x00" + receipt_capability.encode("ascii"),
+            hashlib.sha256,
+        ).digest()
+        return MobilityV1Contract.issue(fields, receipt_key)
 
     def service(self):
         config = self._current()

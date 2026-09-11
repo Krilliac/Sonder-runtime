@@ -28,6 +28,19 @@ def test_every_tool_typed_as_a_slash_command_dispatches():
     assert "sonder task progress" in output
 
 
+def test_repl_status_renders_cached_pool_summary_without_detail(monkeypatch):
+    from sonder_runtime.adapters.inference.ollama_pool import OllamaWorkerPool
+    pool = OllamaWorkerPool("http://127.0.0.1:11434", ("http://127.0.0.1:11435",))
+    monkeypatch.setattr(server, "OLLAMA_POOL", pool)
+    monkeypatch.setattr(pool, "status", lambda **k: pytest.fail("unexpected detail"))
+    monkeypatch.setattr(pool, "refresh_capabilities", lambda **k: pytest.fail("unexpected refresh"))
+    monkeypatch.setattr(server, "_get", lambda *a, **k: pytest.fail("unexpected inventory"))
+    result = sonder_repl._run_catalogued("/status", "/status")
+    assert "0/2 eligible" in result
+    assert "not_refreshed" in result
+    assert "127.0.0.1" not in result
+
+
 def test_positional_argument_binds_to_the_meaningful_parameter():
     tool, kwargs = command_catalog.parse_invocation("/git_branch feature-x")
 

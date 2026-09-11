@@ -28,6 +28,20 @@ STATE_DATABASES = (
     ("embed-cache.db", "SONDER_EMBED_CACHE_DB"),
 )
 
+_WINDOWS_FORBIDDEN_COMPONENT_CHARS = frozenset('<>:"/\\|?*')
+_WINDOWS_RESERVED_DEVICE_BASENAMES = frozenset(
+    (
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "CONIN$",
+        "CONOUT$",
+        *(f"COM{suffix}" for suffix in "0123456789¹²³"),
+        *(f"LPT{suffix}" for suffix in "0123456789¹²³"),
+    )
+)
+
 
 def _canonical(value):
     path = Path(value).expanduser()
@@ -37,7 +51,61 @@ def _canonical(value):
         raise ValueError("private path encoding is unavailable") from None
     if len(encoded) > 4096:
         raise ValueError("private path exceeds bound")
-    return path.resolve()
+    return _normalize_windows_extended_final_path(path.resolve())
+
+
+def _normal_windows_components(value: str, *, minimum: int = 0) -> tuple[str, ...]:
+    """Return components whose normal Win32 spelling preserves their identity."""
+    parts = value.split("\\") if value else []
+    if parts and not parts[-1]:
+        parts.pop()
+    if len(parts) < minimum or any(not part for part in parts):
+        raise ValueError("unsupported Windows private path namespace")
+    for part in parts:
+        if (
+            part in (".", "..")
+            or part[-1] in ". "
+            or any(
+                ord(character) < 32
+                or character in _WINDOWS_FORBIDDEN_COMPONENT_CHARS
+                for character in part
+            )
+        ):
+            raise ValueError("unsupported Windows private path namespace")
+        basename = part.split(".", 1)[0].rstrip(". ").upper()
+        if basename in _WINDOWS_RESERVED_DEVICE_BASENAMES:
+            raise ValueError("unsupported Windows private path namespace")
+    return tuple(parts)
+
+
+def _normalize_windows_extended_final_path(resolved: Path) -> Path:
+    """Unify only post-resolution extended paths with a safe normal spelling."""
+    if os.name != "nt":
+        return resolved
+    value = os.fspath(resolved)
+    if value.startswith("\\\\.\\"):
+        raise ValueError("unsupported Windows private path namespace")
+    if not value.startswith("\\\\?\\"):
+        return resolved
+    tail = value[4:]
+    if tail[:4].casefold() == "unc\\":
+        parts = _normal_windows_components(tail[4:], minimum=2)
+        normal = Path("\\\\" + "\\".join(parts))
+        if not normal.is_absolute():
+            raise ValueError("unsupported Windows private path namespace")
+        return normal
+    if (
+        len(tail) < 3
+        or tail[0] not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+        or tail[1] != ":"
+        or tail[2] != "\\"
+    ):
+        raise ValueError("unsupported Windows private path namespace")
+    parts = _normal_windows_components(tail[3:])
+    normal = Path(tail[:3] + "\\".join(parts))
+    if not normal.is_absolute():
+        raise ValueError("unsupported Windows private path namespace")
+    return normal
 
 
 @dataclass(frozen=True)

@@ -126,3 +126,88 @@ def test_managed_http_refuses_enabled_work_without_typed_control(monkeypatch):
         managed._install_owned_app_work_if_enabled(
             object(), config, serve=SimpleNamespace(_APP_CONTROL_BINDING=None)
         )
+
+
+def test_managed_provider_close_covers_the_non_delegation_graph_after_failure():
+    import pytest
+    import sonder_runtime.bootstrap.managed_http_runtime as managed
+
+    calls = []
+
+    def artifact_close():
+        calls.append("artifact")
+        raise RuntimeError("artifact close failed")
+
+    application = SimpleNamespace(
+        close_artifact_mobility=artifact_close,
+        close_compute=lambda *, timeout=None: calls.append("compute"),
+        memory_replication=SimpleNamespace(close=lambda: calls.append("memory")),
+        inference_pool=SimpleNamespace(
+            drain=lambda *, timeout_seconds=None: calls.append("pool") or True
+        ),
+        inference_membership=SimpleNamespace(
+            close=lambda *, timeout=None: calls.append("membership") or True
+        ),
+        specialized_providers=SimpleNamespace(
+            close=lambda *, timeout=None: calls.append("specialized")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="artifact close failed"):
+        managed._close_managed_provider_graph(application, timeout=2)
+    assert calls == ["artifact", "compute", "memory", "pool", "membership", "specialized"]
+
+
+def test_managed_runtime_reports_a_probe_that_did_not_stop_as_unclean():
+    import sonder_runtime.bootstrap.managed_http_runtime as managed
+
+    lifecycle_module = SimpleNamespace(
+        _instance=SimpleNamespace(stop_probe=lambda: False),
+    )
+
+    assert not managed._stop_configured_lifecycle_probe(lifecycle_module)
+
+
+def test_managed_runtime_emits_unclean_receipt_before_reraising_startup_error():
+    """An early bind/startup error still leaves durable unclean evidence."""
+    import pytest
+    import sonder_runtime.bootstrap.managed_http_runtime as managed
+
+    events = []
+    try:
+        raise OSError("listener refused")
+    except OSError as primary:
+        with pytest.raises(OSError, match="listener refused"):
+            managed._finish_managed_runtime(
+                errors=[],
+                cleanup_errors=[],
+                receipt=SimpleNamespace(clean=True),
+                evidence=lambda phase, receipt: events.append((phase, receipt)),
+                primary_error=primary,
+                primary_traceback=primary.__traceback__,
+            )
+
+    assert len(events) == 1
+    assert events[0][0] == "UNCLEAN"
+    assert events[0][1].clean is True
+
+
+def test_managed_runtime_preserves_startup_error_when_receipt_write_fails():
+    """A failed evidence write cannot hide the error that triggered rollback."""
+    import pytest
+    import sonder_runtime.bootstrap.managed_http_runtime as managed
+
+    try:
+        raise OSError("listener refused")
+    except OSError as primary:
+        with pytest.raises(OSError, match="listener refused"):
+            managed._finish_managed_runtime(
+                errors=[],
+                cleanup_errors=[],
+                receipt=SimpleNamespace(clean=True),
+                evidence=lambda _phase, _receipt: (_ for _ in ()).throw(
+                    OSError("receipt disk full")
+                ),
+                primary_error=primary,
+                primary_traceback=primary.__traceback__,
+            )

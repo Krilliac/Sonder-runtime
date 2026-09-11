@@ -136,6 +136,7 @@ class DisposableChildMigrationHost(ChildMigrationActivation):
                 self._repository = repository
                 return repository
 
+            application = None
             try:
                 application = build_application(
                     config=config,
@@ -147,8 +148,18 @@ class DisposableChildMigrationHost(ChildMigrationActivation):
                 self._application = application
                 return application
             except BaseException:
-                if self._repository is not None:
+                if application is not None:
+                    # The graph owns its continuation repository once
+                    # delegation has been requested.  Use its full close path
+                    # so failure rollback also retires artifact, memory,
+                    # inference, and specialized-provider authorities.
+                    try:
+                        application.close_providers(timeout=5)
+                    finally:
+                        self._application = self._repository = None
+                elif self._repository is not None:
                     self._repository.close(runners_stopped=True, timeout=5)
+                    self._repository = None
                 raise
 
     @contextmanager
@@ -174,9 +185,16 @@ class DisposableChildMigrationHost(ChildMigrationActivation):
             if self._tracked:
                 raise MigrationRefused("owned database connections remain live")
             if self._application is not None:
-                self._application.close_delegation(timeout=timeout)
-                self._application.close_compute()
-                self._application = None
+                try:
+                    # ``close_providers`` is the only complete graph teardown:
+                    # closing delegation/compute alone leaves mobility,
+                    # replication, membership, and specialized providers live.
+                    self._application.close_providers(timeout=timeout)
+                finally:
+                    # The delegation closer owns the exact repository and is
+                    # non-repeatable; never follow a graph close with a second
+                    # repository close attempt.
+                    self._application = self._repository = None
             if self._repository is not None:
                 if not self._repository.close(runners_stopped=True, timeout=timeout):
                     raise MigrationRefused("owned database cleanup remains incomplete")

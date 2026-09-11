@@ -1,15 +1,20 @@
 # Deployment topology and capability status
 
 Sonder defaults to local SQLite control state. A second configured PC can run
-private compute jobs. Pooling does not merge session, task, or memory databases
-and does not elect a replacement controller. A witness is not part of the local
+private compute jobs. Pooling does not merge session or task databases and
+does not elect a replacement controller. A separately configured bounded
+trusted-peer service can copy only explicitly journaled, project-scoped `fact`
+rows; it does not replicate general memory or control state, and its receipts
+do not make a peer a replacement controller. A witness is not part of the local
 single-PC profile; a pooled pair requires an independent witness and external
-provider before takeover can be considered.
+provider before takeover can be considered. See
+[bounded fact replication](memory-replication.md) for that distinct copy
+contract.
 
 | Profile | Configuration | Behavior |
 | --- | --- | --- |
-| `single-host` | Default | Local control state; existing optional remote compute configurations continue working. |
-| `pooled-pair` | Exactly one distinct `compute.nodes` peer | Explicit two-PC pool; each instance retains its own control state and workers execute legitimate dispatched jobs. |
+| `single-host` | Default | Local control state; existing optional remote compute configurations continue working. The default leaves the separate fact-copy service disabled. |
+| `pooled-pair` | Exactly one distinct `compute.nodes` peer | Explicit two-PC pool; each instance retains its own control state and workers execute legitimate dispatched jobs. A separate reciprocal fact-copy configuration may create receipt evidence for its exact supported facts only. |
 
 The typed domain contract also names these modes `single-pc` and `two-pc`.
 `single-host` and `pooled-pair` remain accepted configuration aliases. The

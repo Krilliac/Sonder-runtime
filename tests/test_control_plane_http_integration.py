@@ -129,6 +129,7 @@ def test_default_application_graph_serves_control_plane(monkeypatch, tmp_path):
         assert payload["snapshot"]["sections"]["plans"]["records"] == []
         assert payload["snapshot"]["sections"]["context"]["records"][0]["available"] is False
         assert payload["snapshot"]["sections"]["health"]["count"] >= 1
+        assert payload["snapshot"]["sections"]["compute_fabric"]["count"] >= 1
     finally:
         httpd.shutdown()
         httpd.server_close()

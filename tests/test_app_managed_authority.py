@@ -106,6 +106,30 @@ def test_private_selection_is_exact_and_cannot_be_replaced(managed):
             pass
 
 
+def test_admission_never_carries_a_mutable_private_inventory(managed):
+    """The admission retains only a binding-issued opaque continuation lease."""
+    authority, selection, lanes, *_ = managed
+    with authority.admit(selection, selection.context) as admission:
+        assert not hasattr(admission, "private_inventory")
+        lease = admission.private_inventory_lease
+        assert repr(lease) == "<private inventory admission lease>"
+        with lanes.store.transaction() as tx:
+            assert authority.authorize_host(
+                admission,
+                selection.context,
+                selection.host_conversation_id,
+                connection=tx.conn,
+            )
+            admission.private_inventory_lease = object()
+            with pytest.raises(PermissionError, match="private admission"):
+                authority.authorize_host(
+                    admission,
+                    selection.context,
+                    selection.host_conversation_id,
+                    connection=tx.conn,
+                )
+
+
 def test_managed_host_registration_uses_private_selection_and_closes_registry(managed):
     authority, selection, lanes, model, context, *_ = managed
     host = authority.continuation_service(selection)
@@ -123,6 +147,98 @@ def test_managed_host_registration_uses_private_selection_and_closes_registry(ma
     assert parent["parent_session_id"] not in authority._parents
     with pytest.raises(PermissionError):
         bound.require_current()
+
+
+def test_each_bound_authorization_reuses_one_fresh_private_inventory(
+    managed, monkeypatch
+):
+    """A single account/fleet admission must not rescan private paths repeatedly."""
+    authority, selection, _, _, _, binding, *_ = managed
+    host = authority.continuation_service(selection)
+    parent = host.open_parent(selection.context)
+    bound = host.register_parent(
+        parent["parent_session_id"],
+        parent["parent_token"],
+        selection.host_conversation_id,
+        context=selection.context,
+        command_id="inventory-bound",
+    )
+    original = binding._inventory
+    calls = []
+
+    def inventory():
+        calls.append(True)
+        return original()
+
+    monkeypatch.setattr(binding, "_inventory", inventory)
+    try:
+        bound.require_current()
+        assert len(calls) == 1
+        # An independent authorization must rebuild rather than holding a global
+        # private-path cache across the next account/fleet admission.
+        bound.require_current()
+        assert len(calls) == 2
+    finally:
+        bound.close()
+
+
+def test_bound_authorization_reuses_only_active_issuer_private_inventory_scope(
+    managed, monkeypatch
+):
+    authority, selection, _, _, _, binding, *_ = managed
+    host = authority.continuation_service(selection)
+    parent = host.open_parent(selection.context)
+    bound = host.register_parent(
+        parent["parent_session_id"],
+        parent["parent_token"],
+        selection.host_conversation_id,
+        context=selection.context,
+        command_id="scoped-inventory-bound",
+    )
+    original = binding._inventory
+    calls = []
+
+    def inventory():
+        calls.append(True)
+        return original()
+
+    monkeypatch.setattr(binding, "_inventory", inventory)
+    try:
+        with binding._private_inventory_scope():
+            bound.require_current()
+            bound.require_current()
+            assert calls == [True]
+        bound.require_current()
+        assert calls == [True, True]
+    finally:
+        bound.close()
+
+
+def test_admission_inventory_rejects_changed_fleet_identity(managed):
+    """An admission snapshot cannot survive a configured control-plane swap."""
+    authority, selection, lanes, _, _, binding, *_ = managed
+    original = binding._fleet_path
+    changed = Path(original()).with_name("replacement-fleet.db")
+    changed.touch()
+    try:
+        with authority.admit(selection, selection.context) as admission:
+            with lanes.store.transaction() as tx:
+                assert authority.authorize_host(
+                    admission,
+                    selection.context,
+                    selection.host_conversation_id,
+                    connection=tx.conn,
+                )
+                binding._fleet_path = lambda: changed
+                with pytest.raises(PermissionError, match="private inventory"):
+                    authority.authorize_host(
+                        admission,
+                        selection.context,
+                        selection.host_conversation_id,
+                        connection=tx.conn,
+                    )
+    finally:
+        binding._fleet_path = original
 
 
 def test_real_registered_app_lane_runs_only_admitted_context(managed):
@@ -192,7 +308,7 @@ def test_live_revocation_fences_bound_and_never_dispatches(
             monkeypatch.setattr(
                 binding,
                 "_grant",
-                lambda *a: (_ for _ in ()).throw(PermissionError("changed")),
+                lambda *a, **kwargs: (_ for _ in ()).throw(PermissionError("changed")),
             )
         else:
             context.cancellation.event.set()

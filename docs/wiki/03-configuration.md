@@ -109,6 +109,58 @@ unauthenticated loopback-only log dashboard is not made available through the
 proxy. Set it to `false` only for a direct local development listener. See
 [Security Model](09-security-model.md).
 
+### Bounded fixed-peer fact replication
+
+`[memory_replication]` is disabled by default. When enabled, it configures a
+single exact project-scoped `fact` stream for one trusted private cluster. It
+does not enable general memory migration, control-state replication, automatic
+retry, discovery, enrollment, sharding, quorum, takeover, failback, or high
+availability.
+
+```toml
+[memory_replication]
+enabled = false
+local_node_id = ""
+project_scope = ""
+receiver_enabled = false
+accepted_source_ids = []
+request_timeout_seconds = 5
+max_request_bytes = 8388608
+max_response_bytes = 65536
+max_batch_records = 256
+# peers = []
+#
+# [[memory_replication.peers]]
+# node_id = "node-b"
+# project_scope = "project-a"
+# origin = "https://<PEER-DNS-NAME>:8443"
+```
+
+An enabled section requires a nonempty bounded local identity, one exact
+project scope, at least one and at most 16 fixed peer records, and a canonical
+credential-free HTTPS origin with an explicit port for every peer. A peer
+scope must exactly match the local scope. A receiver can accept only an
+explicit bounded tuple of source IDs that are already fixed peers. Environment
+and `--set` inputs cannot select this topology. A receiver must remain
+loopback-only or be behind the declared TLS proxy; the direct peer client
+rejects redirects and disables ambient proxies.
+
+The two required replication secrets are environment-only and are separately
+redacted:
+
+```text
+SONDER_MEMORY_REPLICATION_KEY=<shared-current-peer-bearer>
+SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY=<different-local-only-integrity-key>
+```
+
+Each must be a distinct printable 32–512 character value. The peer bearer
+must differ from the API, artifact-transfer, and auth secrets. The local
+state-integrity key must differ from every one of those values and is never
+sent to a peer. A one-sided peer-key change is rejected by the receiver; no
+overlap or automatic key rotation exists. The complete operator procedure,
+two-host acceptance template, rollback boundary, and honest single/two-PC
+limits are in [Bounded, explicit fact replication](../runbooks/memory-replication.md).
+
 ## Secrets file (`packaging/sonder.env.example`, mode 0600)
 
 ```

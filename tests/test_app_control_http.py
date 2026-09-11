@@ -1,5 +1,8 @@
+import asyncio
+from contextvars import copy_context
 import json
 import sqlite3
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -9,6 +12,7 @@ from sonder_runtime.bootstrap.app_control_http import AppControlBinding
 from sonder_runtime.platform.config import SonderConfig, FeaturesConfig
 from sonder_runtime.platform.app_control_config import AppControlConfig
 from sonder_runtime.adapters.security.control_plane_paths import (
+    ControlPlaneInventory,
     ControlPlanePaths,
     live_control_plane_inventory,
 )
@@ -95,52 +99,363 @@ def invoke(binding, token, action, payload, control_token=""):
     return result[0]
 
 
-def test_private_reuses_a_prevalidated_inventory_snapshot(control, monkeypatch):
+def test_private_inventory_scope_is_issuer_owned_and_defensively_snapshotted(
+    control, monkeypatch
+):
+    """A forged or captured raw inventory cannot enter the issuer-owned scope."""
     binding, _, _, _, catalog, _ = control
-    from sonder_runtime.adapters.security.control_plane_paths import (
-        ControlPlanePaths,
-        live_control_plane_inventory,
-    )
-
     db = Path(binding._account_path())
     fleet = Path(binding._fleet_path())
-    snapshot = live_control_plane_inventory(
-        additional=lambda: ControlPlanePaths(
-            databases=(db, fleet), files=(catalog,)
-        )
+    workspace = Path(binding._config_provider().state.workspace_roots[0])
+    monkeypatch.setenv("SONDER_SYSTEM_PROFILE", str(workspace / "profile.md"))
+    # This is the real control-plane/model-root fence that the rejected public
+    # scope could bypass with an inventory stripped of admission directories.
+    with pytest.raises(PermissionError, match="overlaps model workspace"):
+        binding._inventory().require_disjoint((workspace,))
+    forged = ControlPlaneInventory(
+        frozenset((db, fleet, catalog)), (), (), (), ()
     )
+    assert not hasattr(binding, "private_inventory_scope")
+    with pytest.raises(AttributeError):
+        binding.private_inventory_scope(forged)
+    with pytest.raises(TypeError):
+        binding._private_inventory_scope(forged)
+    with pytest.raises(TypeError):
+        binding._private(inventory=forged)
+    monkeypatch.delenv("SONDER_SYSTEM_PROFILE")
+    with binding._private_inventory_scope():
+        exposed = binding._private()
+        object.__setattr__(exposed, "admission_directories", ())
+        # _private returns a defensive value; the private issuer record remains
+        # the sole object used for model-root exclusion.
+        assert binding._private().admission_directories
+    # A snapshot captured during a valid scope cannot be supplied after it
+    # closes through either the public surface or the private scope helper.
+    with pytest.raises(AttributeError):
+        binding.private_inventory_scope(exposed)
+    with pytest.raises(TypeError):
+        binding._private_inventory_scope(exposed)
+    with pytest.raises(TypeError):
+        binding._private(inventory=exposed)
+
+
+def test_private_capability_and_lease_reject_forgery_and_foreign_issuer(control):
+    from sonder_runtime.bootstrap.app_control_http import (
+        _PrivateInventoryCapability,
+        _PrivateInventoryLease,
+    )
+
+    binding, _, _, account_open, _, _ = control
+    foreign = AppControlBinding(
+        binding._config_provider,
+        account_open=account_open,
+        account_path=binding._account_path,
+        fleet_path=binding._fleet_path,
+        private_inventory=binding._inventory,
+    )
+    with foreign._private_inventory_scope():
+        foreign_capability = foreign._private_capability()
+        foreign_lease = foreign._private_admission_lease(foreign_capability)
+        with binding._private_inventory_scope():
+            for capability in (_PrivateInventoryCapability(), foreign_capability):
+                with pytest.raises(PermissionError, match="private inventory"):
+                    binding._require_private_capability(capability)
+            for lease in (_PrivateInventoryLease(), foreign_lease):
+                with pytest.raises(PermissionError, match="private inventory"):
+                    binding._require_private_admission_lease(lease)
+
+
+def test_private_inventory_scope_reuses_matching_snapshot_and_refreshes_env(
+    control, monkeypatch, tmp_path
+):
+    binding, _, _, _, _, _ = control
+    original = binding._inventory
     calls = []
 
-    def unexpected_live_inventory():
+    def inventory():
         calls.append(True)
-        raise AssertionError("prevalidated inventory must be reused")
+        return original()
 
-    monkeypatch.setattr(binding, "_inventory", unexpected_live_inventory)
-    assert binding._private(inventory=snapshot).exact_files
-    assert calls == []
+    monkeypatch.setattr(binding, "_inventory", inventory)
+    with binding._private_inventory_scope():
+        capability = binding._private_capability()
+        lease = binding._private_admission_lease(capability)
+        binding._private()
+        assert calls == [True]
+        monkeypatch.setenv(
+            "SONDER_SYSTEM_PROFILE",
+            str(tmp_path.parent / "sibling-profile" / "profile.md"),
+        )
+        binding._private()
+        # The environment change invalidates the scoped issuer record and
+        # requires one fresh record, never caller-provided replacement.
+        assert calls == [True, True]
+        replacement = binding._private_capability()
+        assert replacement is not capability
+        with pytest.raises(PermissionError, match="private inventory"):
+            binding._require_private_capability(capability)
+        with pytest.raises(PermissionError, match="private inventory"):
+            binding._require_private_admission_lease(lease)
+
+
+def test_private_inventory_scope_rejects_changed_control_source(control, monkeypatch):
+    binding, _, _, _, _, _ = control
+    fleet = Path(binding._fleet_path())
+    changed = fleet.with_name("replacement-fleet.db")
+    changed.touch()
+    original = binding._fleet_path
+    original_inventory = binding._inventory
+    calls = []
+
+    def inventory():
+        calls.append(True)
+        return original_inventory()
+
+    monkeypatch.setattr(binding, "_inventory", inventory)
+    try:
+        with binding._private_inventory_scope():
+            binding._fleet_path = lambda: changed
+            with pytest.raises(PermissionError, match="private inventory"):
+                binding._private()
+        assert calls == [True, True]
+    finally:
+        binding._fleet_path = original
+
+
+def test_private_scope_rebind_keeps_only_admission_lease_live(control):
+    """A broader current request retains only its exact active admission lease."""
+    binding, _, _, _, _, _ = control
+    additional = ControlPlanePaths(
+        files=(Path(binding._account_path()).parent / "recovery-private.json",)
+    )
+    with binding._private_inventory_scope():
+        capability = binding._private_capability()
+        lease = binding._private_admission_lease(capability)
+        expanded = binding._private(requirements=additional)
+        assert expanded.covers(binding._private_requirements(
+            binding._config_provider(), additional
+        ))
+        with pytest.raises(PermissionError, match="private inventory"):
+            binding._require_private_capability(capability)
+        # An already-admitted continuation is the sole retained exception. It
+        # remains bound to this exact owner scope and still needs base coverage.
+        assert binding._require_private_admission_lease(lease).exact_files
+        with pytest.raises(PermissionError, match="private inventory"):
+            binding._require_private_admission_lease(lease, requirements=additional)
+
+
+def test_private_scope_rebind_retires_generic_capability_from_copied_context(
+    control,
+):
+    """A copied ContextVar cannot restore a generic pre-rebind capability."""
+    binding, _, _, _, _, _ = control
+    additional = ControlPlanePaths(
+        files=(Path(binding._account_path()).parent / "copied-rebind-private.json",)
+    )
+    with binding._private_inventory_scope():
+        capability = binding._private_capability()
+        lease = binding._private_admission_lease(capability)
+        copied = copy_context()
+        binding._private(requirements=additional)
+        with pytest.raises(PermissionError, match="private inventory"):
+            copied.run(binding._require_private_capability, capability)
+        with pytest.raises(PermissionError, match="private inventory"):
+            copied.run(binding._require_private_admission_lease, lease)
+        with pytest.raises(PermissionError, match="private inventory scope"):
+            copied.run(binding._private)
+        # The copied context cannot overwrite the owner's expanded cap.
+        assert binding._private(requirements=additional).covers(
+            binding._private_requirements(binding._config_provider(), additional)
+        )
+        # Only the existing exact admission lease can continue in its owner
+        # execution after the requirements rebind.
+        assert binding._require_private_admission_lease(lease).exact_files
+
+
+def test_nested_private_scope_revokes_broader_capability_at_nested_exit(control):
+    binding, _, _, _, _, _ = control
+    expanded_paths = ControlPlanePaths(
+        files=(Path(binding._account_path()).parent / "nested-private.json",)
+    )
+    with binding._private_inventory_scope():
+        outer = binding._private_capability()
+        outer_lease = binding._private_admission_lease(outer)
+        with binding._private_inventory_scope(requirements=expanded_paths):
+            expanded = binding._private_capability(requirements=expanded_paths)
+            expanded_lease = binding._private_admission_lease(expanded)
+            assert binding._require_private_capability(
+                expanded, requirements=expanded_paths
+            ).exact_files
+            assert binding._require_private_admission_lease(
+                expanded_lease, requirements=expanded_paths
+            ).exact_files
+        with pytest.raises(PermissionError, match="private inventory"):
+            binding._require_private_capability(expanded, requirements=expanded_paths)
+        with pytest.raises(PermissionError, match="private inventory"):
+            binding._require_private_admission_lease(
+                expanded_lease, requirements=expanded_paths
+            )
+        assert binding._require_private_capability(outer).exact_files
+        assert binding._require_private_admission_lease(outer_lease).exact_files
+
+
+def test_private_scope_rejects_inherited_async_handles_but_allows_isolated_reissue(
+    control, monkeypatch
+):
+    """A sibling task rejects inherited handles, then establishes its own scope."""
+    binding, _, _, _, _, _ = control
+    original = binding._inventory
+    calls = []
+
+    def inventory():
+        calls.append(True)
+        return original()
+
+    monkeypatch.setattr(binding, "_inventory", inventory)
+
+    async def exercise():
+        with binding._private_inventory_scope():
+            capability = binding._private_capability()
+            lease = binding._private_admission_lease(capability)
+
+            async def copied_child():
+                with pytest.raises(PermissionError, match="private inventory"):
+                    binding._require_private_capability(capability)
+                with pytest.raises(PermissionError, match="private inventory"):
+                    binding._require_private_admission_lease(lease)
+                with pytest.raises(PermissionError, match="private inventory scope"):
+                    binding._private_capability()
+                rebuilt = binding._private()
+                with pytest.raises(PermissionError, match="private inventory"):
+                    binding._require_private_admission_lease(lease)
+                return rebuilt
+
+            rebuilt = await asyncio.create_task(copied_child())
+            assert binding._require_private_capability(capability).exact_files
+            return rebuilt
+
+    assert asyncio.run(exercise()).exact_files
+    assert calls == [True, True]
+
+
+def test_private_scope_rebuilds_after_owning_async_context_exits(control, monkeypatch):
+    """A copied task may rebuild privately after exit, but cannot reuse its owner."""
+    binding, _, _, _, _, _ = control
+    original = binding._inventory
+    calls = []
+
+    def inventory():
+        calls.append(True)
+        return original()
+
+    monkeypatch.setattr(binding, "_inventory", inventory)
+
+    async def exercise():
+        released = asyncio.Event()
+
+        async def copied_child():
+            await released.wait()
+            with pytest.raises(PermissionError, match="private inventory"):
+                binding._require_private_capability(capability)
+            return binding._private()
+
+        with binding._private_inventory_scope():
+            task = asyncio.create_task(copied_child())
+            capability = binding._private_capability()
+            binding._private()
+            assert calls == [True]
+        released.set()
+        return await task
+
+    assert asyncio.run(exercise()).exact_files
+    assert calls == [True, True]
+
+
+def test_private_scope_rebuilds_after_owning_thread_context_exits(control, monkeypatch):
+    """A copied thread context cannot resolve a capability after its owner exits."""
+    binding, _, _, _, _, _ = control
+    original = binding._inventory
+    calls, result, errors = [], [], []
+
+    def inventory():
+        calls.append(True)
+        return original()
+
+    monkeypatch.setattr(binding, "_inventory", inventory)
+    with binding._private_inventory_scope():
+        capability = binding._private_capability()
+        copied = copy_context()
+        binding._private()
+        assert calls == [True]
+
+    def copied_thread():
+        try:
+            with pytest.raises(PermissionError, match="private inventory"):
+                copied.run(binding._require_private_capability, capability)
+            result.append(copied.run(binding._private))
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=copied_thread, name="stale-private-scope")
+    thread.start()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert not errors
+    assert result[0].exact_files
+    assert calls == [True, True]
+
+
+def test_private_scope_rejects_inherited_thread_handles_but_allows_isolated_reissue(
+    control, monkeypatch
+):
+    """A copied thread rejects inherited handles, then establishes its own scope."""
+    binding, _, _, _, _, _ = control
+    original = binding._inventory
+    calls, result, errors = [], [], []
+
+    def inventory():
+        calls.append(True)
+        return original()
+
+    monkeypatch.setattr(binding, "_inventory", inventory)
+    with binding._private_inventory_scope():
+        capability = binding._private_capability()
+        lease = binding._private_admission_lease(capability)
+        copied = copy_context()
+
+        def copied_thread():
+            try:
+                with pytest.raises(PermissionError, match="private inventory"):
+                    copied.run(binding._require_private_capability, capability)
+                with pytest.raises(PermissionError, match="private inventory"):
+                    copied.run(binding._require_private_admission_lease, lease)
+                with pytest.raises(PermissionError, match="private inventory scope"):
+                    copied.run(binding._private_capability)
+                result.append(copied.run(binding._private))
+                with pytest.raises(PermissionError, match="private inventory"):
+                    copied.run(binding._require_private_admission_lease, lease)
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=copied_thread, name="live-private-scope")
+        thread.start()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert not errors
+        assert binding._require_private_capability(capability).exact_files
+    assert result[0].exact_files
+    assert calls == [True, True]
 
 
 def test_private_snapshot_rejects_changed_private_source(control):
-    binding, _, _, _, catalog, _ = control
-    from sonder_runtime.adapters.security.control_plane_paths import (
-        ControlPlanePaths,
-        live_control_plane_inventory,
-    )
-
-    db = Path(binding._account_path())
-    fleet = Path(binding._fleet_path())
-    snapshot = live_control_plane_inventory(
-        additional=lambda: ControlPlanePaths(
-            databases=(db, fleet), files=(catalog,)
-        )
-    )
+    binding, _, _, _, _, _ = control
     changed = replace(
         binding._config_provider(),
         private_source_paths=(str(binding._account_path()) + ".changed",),
     )
     binding._config_provider = lambda: changed
     with pytest.raises(PermissionError, match="private inventory"):
-        binding._private(inventory=snapshot)
+        binding._private()
 
 
 def test_real_enrollment_retry_and_binding_lifecycle(control):
@@ -857,6 +1172,7 @@ def test_actual_http_two_account_binding_isolation(http_control, control):
 
 
 def test_wire_does_not_publish_second_response_after_writer_failure(control):
+    from contextlib import nullcontext
     from email.message import Message
     from types import SimpleNamespace
     from sonder_runtime.interfaces.http.app_control import handle_app_control
@@ -867,6 +1183,8 @@ def test_wire_does_not_publish_second_response_after_writer_failure(control):
     headers["Content-Length"] = "2"
     headers["X-Sonder-Account-Token"] = token
     replies = []
+    scopes = []
+    marker = object()
 
     def write(*args, **kwargs):
         replies.append(args)
@@ -883,11 +1201,13 @@ def test_wire_does_not_publish_second_response_after_writer_failure(control):
     )
     fake = SimpleNamespace(
         store=object(),
+        _private=lambda: marker,
         _config=lambda: state["config"],
+        _private_inventory_scope=lambda: (scopes.append(marker) or nullcontext()),
         transport_allowed=lambda **kwargs: True,
         perform=lambda action, payload, **kwargs: kwargs["publish"](201, {"ok": True}),
     )
     assert handle_app_control(
         handler, "POST", fake, deployment_authorized=lambda *_: True
     )
-    assert len(replies) == 1 and handler.close_connection
+    assert len(replies) == 1 and handler.close_connection and scopes == [marker]

@@ -1386,10 +1386,19 @@ def rollback_probe_command(run_id):
     module rather than a `ModuleNotFoundError` dressed up as a broken rollback.
     """
     fallback = [entry for entry in sys.path if entry]
+    # Generic child commands intentionally lose all SONDER_* configuration.
+    # This host-generated probe needs only the resolved state locators: pin
+    # them before importing deployed code, including an in-process home
+    # override or paths relative to the deploying process's working directory.
+    probe_state = {
+        "SONDER_SELFMOD_HOME": str(state_root().resolve()),
+        "SONDER_SELFMOD_DB": str(database_path().resolve()),
+    }
     return [
         sys.executable, "-c",
-        "import sys; sys.path[:0] = ['.']; sys.path.extend(%r); import selfmod; "
-        "selfmod.verify_rollback_ready(%r)" % (fallback, str(run_id)),
+        "import os, sys; os.environ.update(%r); "
+        "sys.path[:0] = ['.']; sys.path.extend(%r); import selfmod; "
+        "selfmod.verify_rollback_ready(%r)" % (probe_state, fallback, str(run_id)),
     ]
 
 
@@ -1405,13 +1414,14 @@ def _rollback_probe_detail(code, output, expected_receipt):
 
 def _verify_deployed_rollback(run_id, root, timeout):
     """Adjudicated here, performed there. Returns (ok, detail, probe, ...)."""
-    probe = rollback_probe_command(run_id)
+    probe = []
     # Anything that stops this from producing a verdict is itself a failure to
     # verify, and must reach the rollback path rather than escape as an
     # exception the caller's generic handler will decline to restore from --
     # the run is already `deployed` by this point, so an unhandled error here
     # would leave exactly the unverified deployment this check exists to stop.
     try:
+        probe = rollback_probe_command(run_id)
         digest, count = expected_rollback_receipt(run_id)
         expected = "%s intree=%s recover=%s files=%d" % (ROLLBACK_RECEIPT_PREFIX, digest, digest, count)
         code, output, duration = _run(probe, root, timeout)
