@@ -1441,3 +1441,21 @@ def test_selected_tier_is_used_by_the_workbench_work_route(monkeypatch):
 def test_unpinned_work_route_still_lets_runtime_policy_pick(monkeypatch):
     seen = _drive_work_turn(monkeypatch, iter(("/workspace .", "create a script and run it", "/exit")))
     assert seen["tier"] == "auto"
+
+
+def test_embedded_windows_path_selects_workspace_without_ask(monkeypatch, tmp_path, capsys):
+    """A work line that already names an existing folder must not re-ask."""
+    seen = {}
+    game = tmp_path / 'Sonder Games'
+    game.mkdir()
+    # Drive helper stubs classify_work as: "create" in line.
+    line = '%s create a game and run it' % game
+    _drive_workspace_repl(monkeypatch, iter((line, '/exit')), seen)
+
+    sonder_repl.main()
+
+    assert seen['project'] == str(game.resolve())
+    assert seen['prompt'] == 'create a game and run it'
+    output = capsys.readouterr().out
+    assert 'which folder should I use' not in output.lower()
+    assert 'workspace:' in output

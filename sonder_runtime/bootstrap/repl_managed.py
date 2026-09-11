@@ -80,13 +80,45 @@ def run_managed_repl_work(*, application, session_id, project, get_session,
             raise PermissionError('complete live model workspace inventory unavailable')
         return configured
 
+    def _granted(selected_path, root):
+        """True when selected is the root, inside it, or contains it.
+
+        Windows path identity is normalized with ``resolve`` plus ``samefile``
+        so case/separator/realpath drift cannot empty an otherwise valid grant.
+        """
+        try:
+            if selected_path == root or selected_path.samefile(root):
+                return True
+        except OSError:
+            pass
+        try:
+            return selected_path.is_relative_to(root) or root.is_relative_to(selected_path)
+        except (OSError, ValueError, TypeError):
+            return False
+
     def roots():
         configured = model_roots()
-        result = tuple(sorted({selected if selected.is_relative_to(root) else root
-                               for root in configured if root.is_dir() and
-                               (selected.is_relative_to(root) or root.is_relative_to(selected))}))
+        matched = []
+        for root in configured:
+            if not root.is_dir() or not _granted(selected, root):
+                continue
+            # Prefer the selected project when it sits at/under the grant.
+            try:
+                if selected == root or selected.samefile(root) or selected.is_relative_to(root):
+                    matched.append(selected)
+                else:
+                    matched.append(root)
+            except OSError:
+                matched.append(selected if selected.is_relative_to(root) else root)
+        result = tuple(sorted(set(matched)))
         if not 1 <= len(result) <= 16:
-            raise PermissionError('selected project has no bounded current workspace grant')
+            allowed = ", ".join(str(root) for root in configured) or "(none)"
+            raise PermissionError(
+                "selected project has no bounded current workspace grant: %s "
+                "(configured workspace_roots: %s). Pick a path under a configured "
+                "root, or add it to [state].workspace_roots in sonder.toml."
+                % (selected, allowed)
+            )
         return result
 
     output_root = (paths.default_home() / 'terminal-output').resolve()
