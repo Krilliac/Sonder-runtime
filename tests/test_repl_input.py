@@ -1288,7 +1288,7 @@ def test_work_request_without_workspace_asks_for_directory(monkeypatch, capsys):
 
     assert seen == {}
     output = capsys.readouterr().out
-    assert "Where should I create or work on this project?" in output
+    assert "That looks like project work" in output
     assert "/workspace-create" in output
 
 
