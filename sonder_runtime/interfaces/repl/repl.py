@@ -2120,11 +2120,11 @@ def main(*, machine_output=False):
 
     
     def _looks_like_slash_command(raw):
-        """True for `/workspace`-style commands, false for absolute Unix paths.
+        """True for `/workspace`-style commands, false for multi-segment absolute paths.
 
         Interactive lines that start with `/` used to always enter the command
         router. On POSIX that swallowed work requests that already named an
-        absolute folder (`/home/me/Games create a game`), so require the first
+        absolute folder (`/tmp/project/Games create a game`), so require the first
         token to be a single path segment after the leading slash.
         """
         text = str(raw or "").strip()
