@@ -98,12 +98,16 @@ def _isolate_typed_ollama_endpoint(monkeypatch):
 
     with ollama_endpoint._configuration_lock:
         before = ollama_endpoint._configured_endpoint
+    before_base = embeddings.BASE
+    before_netloc = embeddings.OLLAMA_HOST
     yield
     ollama_endpoint.configure_typed_endpoint(before)
-    # __main__/compose pins embeddings.BASE via configure_typed_endpoint as
-    # well as the typed Ollama adapter. Restoring only the adapter left BASE
-    # sticky (e.g. https://worker.example) and poisoned later memory/NPU tests.
-    embeddings.configure_typed_endpoint(before)
+    # Restore the frozen embeddings origin by assignment. Calling
+    # configure_typed_endpoint(None) re-reads OLLAMA_HOST while monkeypatch
+    # teardown has not run yet, so a test that set a malformed host
+    # (e.g. http://[::1) blew up here with ValueError: Invalid IPv6 URL.
+    embeddings.BASE = before_base
+    embeddings.OLLAMA_HOST = before_netloc
 
 
 @pytest.fixture(autouse=True)
