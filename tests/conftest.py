@@ -107,6 +107,25 @@ def _isolate_typed_ollama_endpoint(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_fleet_worker_cap():
+    """Do not inherit a leftover configure_fleet_worker_cap across tests.
+
+    Composition/capacity tests pin ``_FLEET_WORKER_CAP`` (often 2). When that
+    value ties hardware slot limits, ``capacity()`` reports ``bound_by`` as
+    ``fleet_workers`` instead of ``ram`` / ``gpu_vram`` / ``ollama_num_parallel``,
+    which breaks the hardware capacity suite under xdist.
+    """
+    import master_orchestrator
+
+    before = master_orchestrator._FLEET_WORKER_CAP
+    master_orchestrator._FLEET_WORKER_CAP = None
+    try:
+        yield
+    finally:
+        master_orchestrator._FLEET_WORKER_CAP = before
+
+
+@pytest.fixture(autouse=True)
 def _configure_http_legacy_boundary(monkeypatch):
     """Exercise the same explicit runtime injection as the serve bootstrap."""
     import server
