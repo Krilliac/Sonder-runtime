@@ -296,6 +296,11 @@ def classify_work(text):
     This intentionally does not classify explanatory questions or pure content
     requests. A work request needs an action plus a workspace-like target, a
     path, or an explicit reference such as "fix it"/"use the tools".
+
+    Bare action/target collisions such as ``test`` or ``build`` alone are not
+    work: the same token can match both `_WORK_ACTION_RE` and `_WORK_TARGET_RE`,
+    which used to trip the REPL workspace gate instead of letting chat ask for
+    clarification.
     """
     value = re.sub(r"\s+", " ", str(text or "")).strip()
     if not value or value.startswith("/") or len(value) > 12000:
@@ -306,9 +311,17 @@ def classify_work(text):
         return False
     if _WORK_DIRECT_RE.search(candidate):
         return True
-    if not _WORK_ACTION_RE.search(candidate):
+    action = _WORK_ACTION_RE.search(candidate)
+    if not action:
         return bool(_WORK_FILE_READ_RE.search(candidate) and _FILE_LIKE_RE.search(value))
-    return bool(_WORK_TARGET_RE.search(candidate) or _PATH_LIKE_RE.search(value))
+    if _PATH_LIKE_RE.search(value):
+        return True
+    # Require a workspace-like target that is not just the same matched action
+    # token (e.g. bare "test" / "build" / "code").
+    for target in _WORK_TARGET_RE.finditer(candidate):
+        if target.span() != action.span():
+            return True
+    return False
 
 
 def containment_egress_refusal(text):

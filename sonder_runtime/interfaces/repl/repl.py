@@ -1040,6 +1040,25 @@ def _startup_banner(strict, persona, project, tier=None):
         field("update", "%s · /updatecheck | /update" % update, _Ansi.amber),
     ]
     width = _terminal_columns()
+    # Interactive composer already carries live model/lanes/ctx in its frame
+    # (see docs/assets/repl/terminal-repl.png). Keep launch chrome short so the
+    # banner does not compete with that frame; full provenance stays on /status
+    # and /updatecheck.
+    if _composer_available():
+        lines = _header_lines(identity, width) + notes
+        if source.get("restart_required") or str(source.get("state") or "") not in (
+            "", "current", "unknown",
+        ):
+            lines.extend(_header_lines([
+                field("update", "%s · /updatecheck | /update" % update, _Ansi.amber),
+            ], width))
+        sep = _paint(" · ", _Ansi.muted)
+        hint = sep.join([
+            _paint("/help for commands", _Ansi.muted),
+            _paint("just start typing", _Ansi.muted),
+            _paint("Shift+Tab cycles the mode", _Ansi.muted),
+        ])
+        return "%s\n  %s\n" % ("\n".join(lines), hint)
     lines = _header_lines(identity, width) + notes + _header_lines(provenance, width)
     sep = _paint(" · ", _Ansi.muted)
     hint = sep.join([
@@ -1050,6 +1069,7 @@ def _startup_banner(strict, persona, project, tier=None):
     return "%s\n  %s\n%s\n" % (
         "\n".join(lines), hint, _rule(box["h"], min(width, 72)),
     )
+
 
 
 def _composer_available():
@@ -3144,10 +3164,11 @@ def main(*, machine_output=False):
                 last_run_source = None
                 last_turn_metrics = None
                 print(
-                    "Where should I create or work on this project?\n"
-                    "  Existing folder: /workspace <project-folder>\n"
-                    "  New folder:      /workspace-create <project-folder>\n"
-                    "I will keep all guarded project work and requested runs inside that directory."
+                    "That looks like project work — which folder should I use?\n"
+                    "  Existing: /workspace <path>\n"
+                    "  Create:   /workspace-create <path>\n"
+                    "Or say more about what you meant and I will clarify before touching files.\n"
+                    "Guarded project work and runs stay inside the selected directory."
                 )
                 continue
             run_workspace_work(line)

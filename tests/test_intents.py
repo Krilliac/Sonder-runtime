@@ -70,6 +70,17 @@ def test_work_intent_does_not_hijack_questions_or_chat():
     assert intents.classify_work("write me a short poem") is False
     assert intents.classify_work("hello sonder") is False
 
+    # Bare action/target collisions must stay chat so the REPL can clarify
+    # instead of jumping straight to the /workspace gate.
+    assert intents.classify_work("test") is False
+    assert intents.classify_work("build") is False
+    assert intents.classify_work("code") is False
+    assert intents.classify_work("run") is False
+    assert intents.classify_work("list") is False
+    assert intents.classify_work("test it") is True
+    assert intents.classify_work("run the tests") is True
+    assert intents.classify_work("build the app") is True
+
 
 def test_summarising_a_named_file_is_work_but_a_topic_is_chat():
     """Measured 2026-09-03: a file summary on the chat route can only refuse."""
