@@ -2117,6 +2117,45 @@ def main(*, machine_output=False):
             return "", "workspace directory does not exist: %s" % path
         return path, ""
 
+
+    
+    def _looks_like_slash_command(raw):
+        """True for `/workspace`-style commands, false for multi-segment absolute paths.
+
+        Interactive lines that start with `/` used to always enter the command
+        router. On POSIX that swallowed work requests that already named an
+        absolute folder (`/tmp/project/Games create a game`), so require the first
+        token to be a single path segment after the leading slash.
+        """
+        text = str(raw or "").strip()
+        if not text.startswith("/"):
+            return False
+        first = text.split(None, 1)[0]
+        # `/workspace`, `/help` -> one slash; `/tmp/foo` -> two+.
+        return first.count("/") == 1
+
+    def _split_existing_workspace_prefix(raw):
+        """Peel the longest existing directory prefix off a work request.
+
+        Paths may contain spaces (``D:\\Sonder Games work on the FPS game``),
+        so this walks token prefixes instead of splitting on the first space.
+        Returns ``(path, remainder)`` or ``("", original)`` when none exists.
+        """
+        text = str(raw or "").strip().strip('"')
+        if not text:
+            return "", ""
+        if not re.match(r"^(?:[A-Za-z]:[\\/]|~[\\/]|[.]{1,2}[\\/]|[\\/])", text):
+            return "", text
+        parts = text.split()
+        for count in range(len(parts), 0, -1):
+            trial = " ".join(parts[:count])
+            path, error = _workspace_path(trial)
+            if error:
+                continue
+            remainder = " ".join(parts[count:]).strip()
+            return path, remainder
+        return "", text
+
     def _queue_pending_workspace_work():
         nonlocal pending_workspace_work, queued_workspace_work
         if pending_workspace_work and workspace_root:
@@ -2173,6 +2212,16 @@ def main(*, machine_output=False):
             text = match.group(1).strip().strip('"')
         if not re.match(r"^(?:[A-Za-z]:[\\/]|~[\\/]|[.]{1,2}[\\/]|[\\/]{1,2})", text):
             return ""
+        if not create:
+            path, remainder = _split_existing_workspace_prefix(text)
+            if path:
+                if remainder and not pending_workspace_work:
+                    # Path+task in one reply: keep the task as the pending work.
+                    # Pending is assigned by the caller after interpret; stash on
+                    # the reply marker instead by returning workspace only when
+                    # the ask already captured the task.
+                    pass
+                return "/workspace " + path
         return ("/workspace-create " if create else "/workspace ") + text
 
     def run_workspace_work(task):
@@ -2570,7 +2619,7 @@ def main(*, machine_output=False):
                 print(_paint("(interpreted as: %s)" % resolved, _Ansi.muted))
                 line = resolved
 
-        if line.startswith("/"):
+        if _looks_like_slash_command(line):
             parts = line.split(None, 1)
             cmd = parts[0].lower()
             arg = parts[1] if len(parts) > 1 else ""
@@ -3158,6 +3207,17 @@ def main(*, machine_output=False):
 
         if intents.classify_work(line) and not web_intents.explicit_search(line):
             if not workspace_root:
+                embedded_path, remainder = _split_existing_workspace_prefix(line)
+                if embedded_path:
+                    # Path already named the folder - consume it instead of asking.
+                    server._clear_managed_repl_conversation()
+                    workspace_root = embedded_path
+                    print("workspace: %s" % workspace_root)
+                    task = remainder or line
+                    if remainder:
+                        print(_paint("(using folder from your message; working on: %s)" % remainder, _Ansi.muted))
+                    run_workspace_work(task)
+                    continue
                 pending_workspace_work = line
                 last_iid = None
                 last_response = None
