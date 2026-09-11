@@ -77,6 +77,8 @@ def test_cmd_serve_migrates_typed_home_before_binding_when_environment_is_poison
     configured = tmp_path / "configured"
     monkeypatch.setenv("SONDER_HOME", str(poisoned))
     seen: dict[str, str] = {}
+    published = []
+    from sonder_runtime.interfaces.http import serve
 
     class SuccessfulPreflight:
         ok = True
@@ -92,6 +94,11 @@ def test_cmd_serve_migrates_typed_home_before_binding_when_environment_is_poison
         lambda *args, **kwargs: SuccessfulPreflight(),
     )
     monkeypatch.setattr(migrations, "migrate_all", capture_migrations)
+    monkeypatch.setattr(
+        serve, "configure_typed_config", lambda _config: published.append(_config),
+    )
+    monkeypatch.setattr(serve, "_ARTIFACT_TRANSFER_BINDING", None)
+    monkeypatch.setattr(serve, "_APP_CONTROL_BINDING", None)
 
     assert main(
         [
@@ -105,6 +112,9 @@ def test_cmd_serve_migrates_typed_home_before_binding_when_environment_is_poison
 
     assert seen["jobs"] == str(configured / "jobs.db")
     assert not (poisoned / "jobs.db").exists()
+    assert published == []
+    assert serve._ARTIFACT_TRANSFER_BINDING is None
+    assert serve._APP_CONTROL_BINDING is None
 
 
 def test_cmd_serve_refuses_pre_epoch_home_and_points_to_explicit_adoption(

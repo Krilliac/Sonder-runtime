@@ -309,7 +309,7 @@ def test_embedding_mutations_require_learning_health_validation():
 
 @pytest.mark.parametrize("tool_name", (
     "set_context_size", "unload", "update_emotion_vectors",
-    "tune_emotion_vectors", "learn_preference",
+    "tune_emotion_vectors", "learn_preference", "ollama_pool_admin_status",
 ))
 def test_agent_dispatch_refuses_shared_runtime_controls(tool_name):
     out = server._agent_dispatch(tool_name, {})

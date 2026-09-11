@@ -16,6 +16,9 @@ import time
 import sonder_runtime.adapters.process_liveness as process_liveness
 from sonder_runtime.domain.memory import rules as memory_rules
 from sonder_runtime.adapters.persistence.sqlite.outbox import OUTBOX_DDL
+from sonder_runtime.adapters.persistence.sqlite.memory_replication import (
+    MEMORY_REPLICATION_DDL,
+)
 
 
 _ABANDONED_SESSION_CLAIMS_LOCK = globals().get(
@@ -253,6 +256,20 @@ CREATE TRIGGER IF NOT EXISTS refinement_history_no_delete
 BEFORE DELETE ON refinement_history BEGIN
     SELECT RAISE(ABORT, 'refinement history is append-only');
 END;
+"""
+
+# The journal tables live in the same ``memory.db`` as the first supported
+# source mutation set.  That placement is intentional: an authoritative fact
+# state row and the journal evidence must share a single SQLite commit.
+_SCHEMA += MEMORY_REPLICATION_DDL + """
+CREATE TABLE IF NOT EXISTS memory_authoritative_fact_state (
+    project TEXT NOT NULL,
+    fact_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK(version >= 1),
+    tombstoned INTEGER NOT NULL CHECK(tombstoned IN (0, 1)),
+    PRIMARY KEY(project, fact_id)
+);
 """
 
 

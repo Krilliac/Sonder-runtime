@@ -1,6 +1,9 @@
 """WP1 Ninety-Ninth Slice: packaged metrics ownership regression."""
 
 from pathlib import Path
+import hashlib
+
+import pytest
 
 from sonder_runtime.adapters.web import lifecycle
 from sonder_runtime.platform import metrics as platform_metrics
@@ -58,6 +61,26 @@ def test_metric_names_and_labels_remain_unchanged():
     assert registry.admission_queue_wait_seconds is not None
     assert registry.admission_rejections_total is not None
     assert registry.auth_failures_total is not None
+
+
+def test_worker_identity_reservations_are_bounded_and_never_reassigned():
+    registry = platform_metrics.MetricsRegistry(enabled=False)
+    identities = [hashlib.sha256(str(i).encode()).hexdigest() for i in range(1024)]
+    assert [registry.reserve_ollama_worker_label(identity) for identity in identities[:16]] == [
+        "w%d" % i for i in range(16)]
+    assert {registry.reserve_ollama_worker_label(identity) for identity in identities[16:]} == {"overflow"}
+    assert registry.reserve_ollama_worker_label(identities[0]) == "w0"
+    assert len(registry._ollama_worker_identities) == 16
+    with pytest.raises(ValueError):
+        registry.reserve_ollama_worker_label("https://raw-worker.example:11434")
+
+
+def test_worker_labels_reject_values_outside_the_fixed_slot_budget():
+    registry = platform_metrics.MetricsRegistry(enabled=False)
+    assert registry._ollama_worker_label("w15") == "w15"
+    assert registry._ollama_worker_label("overflow") == "overflow"
+    for label in ("w16", "w999", "w0\n", "worker.example"):
+        assert registry._ollama_worker_label(label) == "unknown"
 
 
 def test_enabled_metric_names_and_label_sets_remain_unchanged():

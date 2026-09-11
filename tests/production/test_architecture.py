@@ -26,6 +26,26 @@ def _architecture_module():
     return module
 
 
+def test_membership_crypto_allowance_is_exactly_one_adapter(tmp_path):
+    (tmp_path / "scripts").mkdir()
+    checker = tmp_path / "scripts" / "check_architecture.py"
+    shutil.copy2(_REPO_ROOT / "scripts" / "check_architecture.py", checker)
+    paths = ["sonder_runtime/adapters/inference/external_membership.py",
+             "sonder_runtime/adapters/inference/adjacent.py", "sonder_runtime/platform/adjacent.py"]
+    for name in paths:
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("from cryptography.hazmat.primitives import serialization\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "--", *paths], cwd=tmp_path, check=True)
+    result = subprocess.run([sys.executable, str(checker)], capture_output=True, text=True, timeout=30)
+    crypto_errors = [line.replace("\\", "/") for line in result.stdout.splitlines() if "cryptography" in line]
+    assert len(crypto_errors) == 2
+    assert all("external_membership.py" not in line for line in crypto_errors)
+    assert any("adapters/inference/adjacent.py" in line for line in crypto_errors)
+    assert any("platform/adjacent.py" in line for line in crypto_errors)
+
+
 def test_architecture_check_passes():
     result = subprocess.run(
         [
@@ -57,6 +77,32 @@ def test_absolute_import_index_preserves_compatibility_rule_semantics():
     assert module.absolute_imports(tree) == frozenset({
         "memory_store", "memory_store.child", "fleet_store",
     })
+
+
+def test_mobility_label_exception_is_confined_to_exact_config_import(tmp_path, monkeypatch):
+    module = _architecture_module()
+    package = tmp_path / 'sonder_runtime'
+    platform = package / 'platform'
+    platform.mkdir(parents=True)
+    config = platform / 'artifact_mobility_config.py'
+    config.write_text(
+        'from sonder_runtime.domain.artifact_mobility_label import is_public_mobility_label\n'
+        'from sonder_runtime.domain.other_policy import rule\n', encoding='utf-8')
+    other = platform / 'other_config.py'
+    other.write_text(
+        'from sonder_runtime.domain.artifact_mobility_label import is_public_mobility_label\n',
+        encoding='utf-8')
+    monkeypatch.setattr(module, 'REPO_ROOT', tmp_path)
+    monkeypatch.setattr(module, 'PACKAGE_ROOT', package)
+    monkeypatch.setattr(module, 'tracked_production_python_files', lambda: [config, other])
+    compatibility_check = module.compatibility_import_offenders
+    monkeypatch.setattr(module, 'compatibility_import_offenders',
+        lambda *args, **kwargs: compatibility_check(*args, repo_root=tmp_path, **kwargs))
+    violations = module.check()
+    assert module.ALLOWED_PACKAGE_EDGES['platform'] == {'platform'}
+    assert not any('artifact_mobility_config.py: platform may not import sonder_runtime.domain.artifact_mobility_label' in row for row in violations)
+    assert any('artifact_mobility_config.py: platform may not import sonder_runtime.domain.other_policy' in row for row in violations)
+    assert any('other_config.py: platform may not import sonder_runtime.domain.artifact_mobility_label' in row for row in violations)
 
 
 def test_legacy_root_allowlist_has_a_shrink_only_ratchet():
@@ -393,6 +439,88 @@ def test_checker_detects_a_violation(tmp_path):
     )
     assert result.returncode == 1
     assert "domain may not import" in result.stdout
+
+
+def test_checker_rejects_cryptography_outside_the_exact_mobility_adapter(tmp_path):
+    """The receipt-envelope allowance cannot widen to persistence as a whole."""
+    shutil.copytree(_REPO_ROOT / "sonder_runtime", tmp_path / "sonder_runtime")
+    (tmp_path / "scripts").mkdir()
+    checker = tmp_path / "scripts" / "check_architecture.py"
+    shutil.copy2(_REPO_ROOT / "scripts" / "check_architecture.py", checker)
+    offender = (
+        tmp_path
+        / "sonder_runtime"
+        / "adapters"
+        / "persistence"
+        / "_test_unapproved_cryptography.py"
+    )
+    offender.write_text("import cryptography\n", encoding="utf-8")
+
+    for command in (["git", "init", "-q"], ["git", "add", "-A"]):
+        staged = subprocess.run(
+            command, cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        )
+        if staged.returncode != 0:
+            pytest.skip(
+                "git is required to stage the isolated copy: %s"
+                % (staged.stderr.strip() or staged.stdout.strip())
+            )
+
+    result = subprocess.run(
+        [sys.executable, str(checker)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 1
+    assert "adapters layer may not import root/third-party module 'cryptography'" in (
+        result.stdout
+    )
+
+
+def test_checker_rejects_transport_import_in_pure_config_url_parser(tmp_path):
+    """Catches a pure URL-parser allowance silently admitting transport I/O."""
+    shutil.copytree(_REPO_ROOT / "sonder_runtime", tmp_path / "sonder_runtime")
+    (tmp_path / "scripts").mkdir()
+    checker = tmp_path / "scripts" / "check_architecture.py"
+    shutil.copy2(_REPO_ROOT / "scripts" / "check_architecture.py", checker)
+
+    for command in (["git", "init", "-q"], ["git", "add", "-A"]):
+        staged = subprocess.run(
+            command, cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        )
+        if staged.returncode != 0:
+            pytest.skip(
+                "git is required to stage the isolated copy: %s"
+                % (staged.stderr.strip() or staged.stdout.strip())
+            )
+
+    clean = subprocess.run(
+        [sys.executable, str(checker)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert clean.returncode == 0, clean.stdout + clean.stderr
+
+    parser = (
+        tmp_path
+        / "sonder_runtime"
+        / "platform"
+        / "control_state_rehearsal_config.py"
+    )
+    parser.write_text(
+        parser.read_text(encoding="utf-8") + "\nimport urllib.request\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [sys.executable, str(checker)],
+        capture_output=True, text=True, timeout=120,
+    )
+
+    assert result.returncode == 1
+    assert (
+        "control_state_rehearsal_config.py: network module 'urllib' outside adapters"
+        in result.stdout
+    )
 
 
 # Every reviewed migration boundary the ratchet must keep closed.  One

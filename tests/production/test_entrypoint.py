@@ -171,6 +171,39 @@ def test_the_environment_snapshot_actually_restores_what_the_export_changed():
     assert os.environ["OLLAMA_HOST"] == sentinel
 
 
+def test_entrypoint_redactor_covers_config_file_secrets_before_export(tmp_path):
+    """Secrets loaded from a private env file must be redacted before export."""
+    import sonder_config
+    from sonder_runtime import __main__ as entrypoint
+
+    secrets = sonder_config.Secrets(
+        artifact_transfer_key="artifact-transfer-secret",
+        memory_replication_key="memory-replication-secret",
+        membership_client_key_file="membership-client-key-secret",
+        control_state_rehearsal_key="control-state-rehearsal-secret",
+    )
+    private_source = str(tmp_path / "private" / "sonder.env")
+    rendered = entrypoint._redactor_for_config(sonder_config.SonderConfig(
+        secrets=secrets,
+        private_source_paths=(private_source,),
+    )).redact(" ".join((
+        secrets.artifact_transfer_key,
+        secrets.memory_replication_key,
+        secrets.membership_client_key_file,
+        secrets.control_state_rehearsal_key,
+        private_source,
+    )))
+
+    for value in (
+        secrets.artifact_transfer_key,
+        secrets.memory_replication_key,
+        secrets.membership_client_key_file,
+        secrets.control_state_rehearsal_key,
+        private_source,
+    ):
+        assert value not in rendered
+
+
 def test_user_global_config_is_discovered_when_present(monkeypatch, tmp_path):
     from sonder_runtime.__main__ import _configured_path
 
@@ -232,11 +265,21 @@ def test_mcp_entrypoint_runs_unsafe_gate_before_adapter(
     )
     monkeypatch.setattr(server.mcp, "run", lambda: calls.append("mcp"))
 
-    owned = SimpleNamespace(close_providers=lambda **_kwargs: calls.append("close"))
+    owned = None
+    close = bootstrap_app.Application.close_providers
+
+    def close_owned(self, *, timeout):
+        if self is owned:
+            calls.append("close")
+        return close(self, timeout=timeout)
+
+    monkeypatch.setattr(bootstrap_app.Application, "close_providers", close_owned)
 
     def compose(*, config):
+        nonlocal owned
         assert calls == ["gate"]
         calls.append("configure")
+        owned = bootstrap_app.build_application(config=config)
         return owned
 
     # A real entrypoint starts in its own process. This test shares a process
@@ -246,6 +289,11 @@ def test_mcp_entrypoint_runs_unsafe_gate_before_adapter(
         startup.setattr(server, "_APP_GRAPH", None)
         startup.setattr(legacy_root, "_owned_application", None)
         startup.setattr(bootstrap_app, "default_app", compose)
+        startup.setattr(
+            bootstrap_app,
+            "close_default_runtime_resources",
+            lambda *, timeout: owned.close_providers(timeout=timeout),
+        )
         assert cmd_mcp(SimpleNamespace()) == 0
         assert server._APP_GRAPH is owned
         assert legacy_root._owned_application is owned
@@ -254,17 +302,23 @@ def test_mcp_entrypoint_runs_unsafe_gate_before_adapter(
     assert calls == ["gate", "configure", "mcp", "close"]
 
 
-def test_legacy_composition_still_refuses_caller_owned_graph(monkeypatch):
+def test_legacy_composition_still_refuses_caller_owned_graph(monkeypatch, isolated_home):
     import server
-    from sonder_runtime.bootstrap import legacy_root
+    from sonder_runtime.bootstrap import legacy_root, app as bootstrap
+    from sonder_runtime.adapters.inference import ollama_pool
+    from sonder_runtime.platform.config import SonderConfig, StateConfig
 
     closed = []
     caller = SimpleNamespace(close_providers=lambda **_kwargs: closed.append("caller"))
-    proposed = SimpleNamespace(close_providers=lambda **_kwargs: closed.append("proposed"))
+    proposed = bootstrap.build_application(config=SonderConfig(state=StateConfig(home=str(isolated_home))))
     monkeypatch.setattr(server, "_APP_GRAPH", caller)
     monkeypatch.setattr(legacy_root, "_owned_application", None)
-    with pytest.raises(RuntimeError, match="caller-owned application"):
-        legacy_root.configure_application(proposed)
+    try:
+        with pytest.raises(RuntimeError, match="caller-owned application"):
+            legacy_root.configure_application(proposed)
+    finally:
+        proposed.close_providers(timeout=2)
+        ollama_pool.reset_typed_workers()
     assert server._APP_GRAPH is caller
     assert legacy_root._owned_application is None
     assert closed == []

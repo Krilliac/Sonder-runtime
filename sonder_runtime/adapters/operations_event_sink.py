@@ -7,12 +7,15 @@ operations store remains the durable audit authority when it is available.
 """
 from __future__ import annotations
 
+from sonder_runtime.platform.logging import Redactor
+
 
 class OperationsEventSink:
     """EventSink over the SPEC-2 operations store."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, redactor: Redactor | None = None) -> None:
         self._store = None
+        self._redactor = redactor
 
     def emit(
         self,
@@ -30,7 +33,7 @@ class OperationsEventSink:
                     OperationsStore,
                 )
 
-                self._store = OperationsStore()
+                self._store = OperationsStore(redactor=self._redactor)
             self._store.record_event(
                 component="application",
                 event_code=event_code,

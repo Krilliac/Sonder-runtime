@@ -68,6 +68,8 @@ def test_capability_negotiation_admits_only_a_worker_with_the_model():
         primary, workers, capability_prober=reports.__getitem__,
     )
 
+    # Whole-roster discovery is an explicit refresh; requests probe at most one.
+    pool.refresh_capabilities()
     selected = pool.request(lambda origin: origin, model="coder:latest")
 
     assert selected == workers[0]
@@ -306,6 +308,7 @@ def test_failed_initial_probe_is_not_admitted_and_status_is_safe():
 
     pool = OllamaWorkerPool(primary, workers, capability_prober=probe)
     calls = []
+    pool.refresh_capabilities()
 
     assert pool.request(
         lambda origin: calls.append(origin) or origin,
@@ -314,5 +317,5 @@ def test_failed_initial_probe_is_not_admitted_and_status_is_safe():
     assert calls == [workers[0]]
     assert pool.snapshots()[0].state == "unreachable"
     rendered = "\n".join(pool.operator_status_lines())
-    assert "0.11 forged-status" in rendered
-    assert "\nforged-status" not in rendered
+    assert "version=unknown" in rendered
+    assert "forged-status" not in rendered

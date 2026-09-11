@@ -685,6 +685,16 @@
     },
     {
       "aliases": [],
+      "category": "system",
+      "name": "/artifact-mobility",
+      "native": true,
+      "params": [],
+      "risk": "safe",
+      "summary": "Inspect local outbound artifact receipts with list or status; dispatch is unavailable here.",
+      "tool": ""
+    },
+    {
+      "aliases": [],
       "category": "creative",
       "name": "/artifact_generate",
       "native": false,
@@ -5388,6 +5398,41 @@
     },
     {
       "aliases": [],
+      "category": "system",
+      "name": "/ollama_pool_admin_status",
+      "native": false,
+      "params": [
+        {
+          "default": "",
+          "name": "token",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": false,
+          "name": "refresh",
+          "required": false,
+          "type": "bool"
+        },
+        {
+          "default": "",
+          "name": "cursor",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": 32,
+          "name": "page_size",
+          "required": false,
+          "type": "int"
+        }
+      ],
+      "risk": "ask",
+      "summary": "Read an administrator-only cached worker page; optionally refresh one bounded stale batch.",
+      "tool": "ollama_pool_admin_status"
+    },
+    {
+      "aliases": [],
       "category": "execution",
       "name": "/parallel_generate_run",
       "native": false,
@@ -7423,7 +7468,7 @@
       "native": false,
       "params": [],
       "risk": "safe",
-      "summary": "Report Sonder Runtime's local-model state and current VRAM residency.",
+      "summary": "Report cached inference capacity without contacting Ollama workers.",
       "tool": "status"
     },
     {
@@ -9054,6 +9099,24 @@
     },
     {
       "default": null,
+      "field": "memory_replication",
+      "section": "root",
+      "type": "MemoryReplicationConfig"
+    },
+    {
+      "default": null,
+      "field": "artifact_mobility_source",
+      "section": "root",
+      "type": "ArtifactMobilitySourceConfig"
+    },
+    {
+      "default": null,
+      "field": "artifact_mobility",
+      "section": "root",
+      "type": "ArtifactMobilityConfig"
+    },
+    {
+      "default": null,
       "field": "child_storage",
       "section": "root",
       "type": "ChildStorageConfig"
@@ -9063,6 +9126,18 @@
       "field": "app_control",
       "section": "root",
       "type": "AppControlConfig"
+    },
+    {
+      "default": null,
+      "field": "membership",
+      "section": "root",
+      "type": "MembershipConfig"
+    },
+    {
+      "default": null,
+      "field": "control_state_rehearsal",
+      "section": "root",
+      "type": "ControlStateRehearsalConfig"
     },
     {
       "default": "[redacted]",
@@ -9085,6 +9160,42 @@
     {
       "default": "[redacted]",
       "field": "artifact_transfer_key",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "memory_replication_key",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "memory_replication_state_integrity_key",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "artifact_mobility_peer_key",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "membership_client_cert_file",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "membership_client_key_file",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "control_state_rehearsal_key",
       "section": "secrets",
       "type": "str"
     },
@@ -9181,6 +9292,120 @@
     {
       "default": false,
       "field": "enabled",
+      "section": "artifact_mobility",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": "",
+      "field": "destination_label",
+      "section": "artifact_mobility",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "destination_origin",
+      "section": "artifact_mobility",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "destination_tls_certificate_sha256",
+      "section": "artifact_mobility",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "expected_recipient_attestation_sha256",
+      "section": "artifact_mobility",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "destination_credential_id",
+      "section": "artifact_mobility",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": 268435456,
+      "field": "max_object_bytes",
+      "section": "artifact_mobility",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 30,
+      "field": "attempt_timeout_seconds",
+      "section": "artifact_mobility",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 90,
+      "field": "attempt_lease_seconds",
+      "section": "artifact_mobility",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 604800,
+      "field": "receipt_ttl_seconds",
+      "section": "artifact_mobility",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 64,
+      "field": "max_live_operations",
+      "section": "artifact_mobility",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": false,
+      "field": "enabled",
+      "section": "artifact_mobility_source",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": "",
+      "field": "store_dir",
+      "section": "artifact_mobility_source",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "principal_id",
+      "section": "artifact_mobility_source",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "project_id",
+      "section": "artifact_mobility_source",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "source_owner_id",
+      "section": "artifact_mobility_source",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": 268435456,
+      "field": "max_object_bytes",
+      "section": "artifact_mobility_source",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 2147483648,
+      "field": "total_bytes",
+      "section": "artifact_mobility_source",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 86400,
+      "field": "ttl_seconds",
+      "section": "artifact_mobility_source",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": false,
+      "field": "enabled",
       "section": "artifact_transfer",
       "type": "<class 'bool'>"
     },
@@ -9205,6 +9430,12 @@
     {
       "default": "",
       "field": "peer_node_id",
+      "section": "artifact_transfer",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "receiver_identity_id",
       "section": "artifact_transfer",
       "type": "<class 'str'>"
     },
@@ -9383,6 +9614,54 @@
       "type": "<class 'int'>"
     },
     {
+      "default": false,
+      "field": "enabled",
+      "section": "control_state_rehearsal",
+      "type": "bool"
+    },
+    {
+      "default": "",
+      "field": "cluster_id",
+      "section": "control_state_rehearsal",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "node_id",
+      "section": "control_state_rehearsal",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "witness_id",
+      "section": "control_state_rehearsal",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "provider_id",
+      "section": "control_state_rehearsal",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "origin",
+      "section": "control_state_rehearsal",
+      "type": "str"
+    },
+    {
+      "default": 5,
+      "field": "timeout_seconds",
+      "section": "control_state_rehearsal",
+      "type": "int"
+    },
+    {
+      "default": false,
+      "field": "allow_insecure_loopback",
+      "section": "control_state_rehearsal",
+      "type": "bool"
+    },
+    {
       "default": "single-host",
       "field": "profile",
       "section": "deployment",
@@ -9465,6 +9744,168 @@
       "field": "location_consent",
       "section": "features",
       "type": "bool"
+    },
+    {
+      "default": "static",
+      "field": "mode",
+      "section": "membership",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "cluster_id",
+      "section": "membership",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "issuer_id",
+      "section": "membership",
+      "type": "str"
+    },
+    {
+      "default": 0,
+      "field": "protocol_version",
+      "section": "membership",
+      "type": "int"
+    },
+    {
+      "default": "",
+      "field": "source_origin",
+      "section": "membership",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "source_tls_server_name",
+      "section": "membership",
+      "type": "str"
+    },
+    {
+      "default": [],
+      "field": "source_allowed_cidrs",
+      "section": "membership",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": "",
+      "field": "trust_anchor_file",
+      "section": "membership",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "signature_public_key_file",
+      "section": "membership",
+      "type": "str"
+    },
+    {
+      "default": 0,
+      "field": "refresh_interval_seconds",
+      "section": "membership",
+      "type": "int"
+    },
+    {
+      "default": 0,
+      "field": "snapshot_max_advertisements",
+      "section": "membership",
+      "type": "int"
+    },
+    {
+      "default": 0,
+      "field": "snapshot_max_bytes",
+      "section": "membership",
+      "type": "int"
+    },
+    {
+      "default": null,
+      "field": "local_fallback",
+      "section": "membership",
+      "type": "bool | None"
+    },
+    {
+      "default": [],
+      "field": "member_policies",
+      "section": "membership",
+      "type": "tuple[MembershipEndpointPolicy, ...]"
+    },
+    {
+      "default": false,
+      "field": "enabled",
+      "section": "memory_replication",
+      "type": "bool"
+    },
+    {
+      "default": "",
+      "field": "local_node_id",
+      "section": "memory_replication",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "project_scope",
+      "section": "memory_replication",
+      "type": "str"
+    },
+    {
+      "default": false,
+      "field": "receiver_enabled",
+      "section": "memory_replication",
+      "type": "bool"
+    },
+    {
+      "default": [],
+      "field": "accepted_source_ids",
+      "section": "memory_replication",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": [],
+      "field": "peers",
+      "section": "memory_replication",
+      "type": "tuple[MemoryReplicationPeerConfig, ...]"
+    },
+    {
+      "default": 5,
+      "field": "request_timeout_seconds",
+      "section": "memory_replication",
+      "type": "int"
+    },
+    {
+      "default": 8388608,
+      "field": "max_request_bytes",
+      "section": "memory_replication",
+      "type": "int"
+    },
+    {
+      "default": 65536,
+      "field": "max_response_bytes",
+      "section": "memory_replication",
+      "type": "int"
+    },
+    {
+      "default": 256,
+      "field": "max_batch_records",
+      "section": "memory_replication",
+      "type": "int"
+    },
+    {
+      "default": "",
+      "field": "node_id",
+      "section": "memory_replication.peers[]",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "project_scope",
+      "section": "memory_replication.peers[]",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "origin",
+      "section": "memory_replication.peers[]",
+      "type": "str"
     },
     {
       "default": "json",
@@ -9571,6 +10012,30 @@
     {
       "default": 300,
       "field": "request_timeout_seconds",
+      "section": "ollama",
+      "type": "int"
+    },
+    {
+      "default": 16,
+      "field": "worker_pool_max_workers",
+      "section": "ollama",
+      "type": "int"
+    },
+    {
+      "default": 4,
+      "field": "worker_capability_probe_parallelism",
+      "section": "ollama",
+      "type": "int"
+    },
+    {
+      "default": 32,
+      "field": "worker_capability_probe_batch_size",
+      "section": "ollama",
+      "type": "int"
+    },
+    {
+      "default": 32,
+      "field": "worker_status_page_size",
       "section": "ollama",
       "type": "int"
     },
@@ -9704,14 +10169,14 @@
       "type": "int"
     }
   ],
-  "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES",
+  "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
-    "commands": 317,
-    "configuration": 123,
+    "commands": 319,
+    "configuration": 193,
     "events": 43,
-    "tools": 212
+    "tools": 213
   },
-  "digest": "6ff3ceadbc5c8d95db0e65660292e8c7a3b68299caf93755c8df69bb151bd5c3",
+  "digest": "1428085ad492b0755e384626faa2b97ad0836f0e53a5542af34f8b66f4d5ef58",
   "events": [
     {
       "name": "session.started",
@@ -10182,10 +10647,11 @@
   "schema": "sonder-runtime-document-reference-v1",
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "9a4262ad4dd80fa47d5a1875a46e1e786d2ae5364cf9257140d5c5072456591c",
+    "server.py": "675a1a2ce63f75cf537a5bbc35569c501abeea7d4f02feada9a7700b90659171",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
-    "sonder_runtime/platform/config.py": "e274ff9e0668680d2be026da3283eb7870886b8ca2f46621533ee3a959a3714e"
+    "sonder_runtime/platform/config.py": "1d811a362d2a912a726c98e6bfe2689b1c220c900bd19f82cbbb69f8fe88c055",
+    "sonder_runtime/platform/memory_replication_config.py": "1981bbc57a4e6442fc1b770d9c37cc766c66334089697d762e9b9b7ed578d179"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
   "tools": [
@@ -14399,6 +14865,36 @@
       }
     },
     {
+      "description": "Read an administrator-only cached worker page; optionally refresh one bounded stale batch.\n\n    Page size is 1..128 and the full JSON page is at most 65,536 UTF-8 bytes.\n    Remote probes retain configured consent and HTTPS policy. Callers cannot\n    change configured probe batch size or parallelism. Cursors belong to one\n    administrator and roster generation. Local-open direct use is permitted.\n    ",
+      "name": "ollama_pool_admin_status",
+      "parameters": {
+        "properties": {
+          "cursor": {
+            "default": "",
+            "title": "Cursor",
+            "type": "string"
+          },
+          "page_size": {
+            "default": 32,
+            "title": "Page Size",
+            "type": "integer"
+          },
+          "refresh": {
+            "default": false,
+            "title": "Refresh",
+            "type": "boolean"
+          },
+          "token": {
+            "default": "",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "title": "ollama_pool_admin_statusArguments",
+        "type": "object"
+      }
+    },
+    {
       "description": "Generate several Python code candidates in parallel, then compile/run each.\n\n    The prompt should describe the desired Python solution. `check` is appended to\n    each extracted code block, usually as assertions. This is meant for search:\n    generate multiple attempts, compile them, execute them, and keep the winners.\n    ",
       "name": "parallel_generate_run",
       "parameters": {
@@ -15865,7 +16361,7 @@
       }
     },
     {
-      "description": "Report Sonder Runtime's local-model state and current VRAM residency.\n\n    Use this to check whether the GPU is busy before offloading, or to confirm models pulled.\n    ",
+      "description": "Report cached inference capacity without contacting Ollama workers.\n\n    Inventory and residency remain unknown until explicitly inspected. Use\n    ollama_pool_admin_status for authorized cached detail or a bounded refresh.\n    ",
       "name": "status",
       "parameters": {
         "properties": {},

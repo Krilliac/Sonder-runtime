@@ -17,15 +17,19 @@ from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sq
 
 from sonder_runtime.domain.memory.replication import (
     MemoryMutation,
+    MemoryReplicaReceipt,
     MemoryReplicationBatch,
     MemoryReplicationError,
+)
+from sonder_runtime.adapters.persistence.sqlite.memory_projection import (
+    SQLiteMemoryReplicationProjection,
 )
 
 
 _MAX_EXPORT_ROWS = 1024
 _MAX_PRUNE_ROWS = 1024
 
-_DDL = """
+MEMORY_REPLICATION_DDL = """
 CREATE TABLE IF NOT EXISTS memory_replication_meta (
     source_id TEXT PRIMARY KEY,
     source_epoch INTEGER NOT NULL CHECK(source_epoch >= 1),
@@ -56,6 +60,384 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _validate_source(source_id: object, project_scope: object) -> None:
+    """Validate source metadata without creating a journal row."""
+    MemoryMutation(
+        source_id=source_id,
+        source_epoch=1,
+        sequence=1,
+        entity_kind="fact",
+        entity_id="validation",
+        version=1,
+        operation="delete",
+        project=project_scope or "global",
+        payload={},
+        recorded_at=_utc_now(),
+    )
+    if project_scope is not None and project_scope == "":
+        raise MemoryReplicationError("project scope must not be empty")
+
+
+def ensure_memory_replication_source(
+    connection,
+    *,
+    source_id: str,
+    project_scope: str | None,
+) -> tuple[int, int, str | None]:
+    """Return one durable source cursor inside the caller's transaction.
+
+    The caller owns both the SQLite transaction and the schema.  This narrow
+    helper is shared by the standalone journal and an authoritative write-side
+    adapter, so a materialized row and its mutation record can share one
+    database commit.
+    """
+    _validate_source(source_id, project_scope)
+    row = connection.execute(
+        "SELECT source_epoch,next_sequence,project_scope "
+        "FROM memory_replication_meta WHERE source_id=?",
+        (source_id,),
+    ).fetchone()
+    if row is None:
+        connection.execute(
+            "INSERT INTO memory_replication_meta"
+            "(source_id,source_epoch,next_sequence,project_scope) "
+            "VALUES(?,?,?,?)",
+            (source_id, 1, 1, project_scope),
+        )
+        return 1, 1, project_scope
+    if row[2] is not None and row[2] != project_scope:
+        raise MemoryReplicationError(
+            "journal project scope conflicts with persisted scope"
+        )
+    return int(row[0]), int(row[1]), row[2]
+
+
+def _insert_mutation(connection, mutation: MemoryMutation) -> int:
+    cursor = connection.execute(
+        "INSERT INTO memory_replication_log"
+        "(source_id,source_epoch,sequence,entity_kind,entity_id,version,operation,project,payload_json,recorded_at,digest)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            mutation.source_id, mutation.source_epoch, mutation.sequence,
+            mutation.entity_kind, mutation.entity_id, mutation.version,
+            mutation.operation, mutation.project,
+            json.dumps(
+                dict(mutation.payload), sort_keys=True, separators=(",", ":"),
+                ensure_ascii=True,
+            ),
+            mutation.recorded_at, mutation.digest,
+        ),
+    )
+    return cursor.rowcount
+
+
+def append_memory_mutations_in_transaction(
+    connection,
+    records: tuple[MemoryMutation, ...],
+    *,
+    source_id: str,
+    project_scope: str | None,
+) -> int:
+    """Append a bounded source page without opening or committing a transaction.
+
+    This is intentionally not a general post-hoc journal helper: callers must
+    already own a transaction containing the materialized source mutation.  A
+    failure leaves rollback to that caller, preserving one atomic durable
+    boundary.
+    """
+    if not connection.in_transaction:
+        raise RuntimeError("memory replication append requires an active transaction")
+    if type(records) is not tuple or not 1 <= len(records) <= _MAX_EXPORT_ROWS:
+        raise ValueError("records must be a bounded non-empty tuple")
+    for record in records:
+        if not isinstance(record, MemoryMutation) or record.source_id != source_id:
+            raise MemoryReplicationError("journal records must belong to this source")
+        if project_scope is not None and record.project != project_scope:
+            raise MemoryReplicationError("project scope cannot be widened")
+
+    epoch, next_sequence, _scope = ensure_memory_replication_source(
+        connection,
+        source_id=source_id,
+        project_scope=project_scope,
+    )
+    inserted = 0
+    expected = next_sequence
+    for record in records:
+        if record.source_epoch != epoch:
+            raise MemoryReplicationError("record source epoch is stale or not admitted")
+        if record.sequence != expected:
+            existing = connection.execute(
+                "SELECT digest FROM memory_replication_log "
+                "WHERE source_id=? AND sequence=?",
+                (source_id, record.sequence),
+            ).fetchone()
+            if existing is None or existing[0] != record.digest:
+                raise MemoryReplicationError("journal sequence is not contiguous")
+            # Replaying an already committed prefix is idempotent; it must not
+            # advance the append cursor a second time.
+            continue
+        latest = connection.execute(
+            "SELECT MAX(version) FROM memory_replication_log "
+            "WHERE source_id=? AND project=? AND entity_kind=? AND entity_id=?",
+            (
+                record.source_id,
+                record.project,
+                record.entity_kind,
+                record.entity_id,
+            ),
+        ).fetchone()[0]
+        if latest is not None and record.version <= latest:
+            raise MemoryReplicationError("entity version must advance")
+        try:
+            inserted += _insert_mutation(connection, record)
+        except sqlite3.IntegrityError:
+            existing = connection.execute(
+                "SELECT digest FROM memory_replication_log "
+                "WHERE source_id=? AND sequence=?",
+                (source_id, record.sequence),
+            ).fetchone()
+            if existing is not None:
+                if existing[0] != record.digest:
+                    raise MemoryReplicationError(
+                        "journal sequence conflicts with existing evidence"
+                    )
+            else:
+                same_version = connection.execute(
+                    "SELECT digest FROM memory_replication_log "
+                    "WHERE source_id=? AND project=? AND entity_kind=? "
+                    "AND entity_id=? AND version=?",
+                    (
+                        record.source_id,
+                        record.project,
+                        record.entity_kind,
+                        record.entity_id,
+                        record.version,
+                    ),
+                ).fetchone()
+                if same_version is None or same_version[0] != record.digest:
+                    raise MemoryReplicationError("journal entity version conflicts")
+            if existing is not None and existing[0] == record.digest:
+                # A duplicate at the append cursor is safe to replay without
+                # changing the next sequence.
+                pass
+            elif existing is None:
+                raise MemoryReplicationError("journal entity version conflicts")
+            else:
+                raise MemoryReplicationError(
+                    "journal sequence conflicts with existing evidence"
+                )
+        expected += 1
+    connection.execute(
+        "UPDATE memory_replication_meta SET next_sequence=? WHERE source_id=?",
+        (expected, source_id),
+    )
+    return inserted
+
+
+def apply_memory_replication_batch_in_transaction(
+    connection,
+    batch: MemoryReplicationBatch,
+    *,
+    project_scope: str | None,
+) -> int:
+    """Persist one received page without opening or committing a transaction.
+
+    A caller that also materializes the page into the normal memory tables must
+    use this helper and keep both durable steps inside its own transaction.
+    The standalone journal below wraps the same helper in its legacy
+    connection-owned transaction.
+    """
+    if not getattr(connection, "in_transaction", False):
+        raise RuntimeError("memory replication apply requires an active transaction")
+    if not isinstance(batch, MemoryReplicationBatch):
+        raise TypeError("memory replication batch is required")
+    if len(batch.records) > _MAX_EXPORT_ROWS:
+        raise MemoryReplicationError("replication batch exceeds the journal bound")
+    if project_scope is not None:
+        _validate_source(batch.source_id, project_scope)
+        for record in batch.records:
+            if record.project != project_scope:
+                raise MemoryReplicationError("project scope cannot be widened")
+
+    row = connection.execute(
+        "SELECT source_epoch,next_sequence,project_scope "
+        "FROM memory_replication_meta WHERE source_id=?",
+        (batch.source_id,),
+    ).fetchone()
+    if row is None:
+        connection.execute(
+            "INSERT INTO memory_replication_meta(source_id,source_epoch,next_sequence,project_scope) "
+            "VALUES(?,?,?,?)",
+            (batch.source_id, batch.source_epoch, 1, project_scope),
+        )
+        current_epoch, expected = batch.source_epoch, 1
+    else:
+        current_epoch, expected, persisted_scope = int(row[0]), int(row[1]), row[2]
+        if persisted_scope != project_scope:
+            raise MemoryReplicationError(
+                "journal project scope conflicts with persisted scope"
+            )
+        if batch.source_epoch < current_epoch:
+            raise MemoryReplicationError("replication batch has a stale source epoch")
+        if batch.source_epoch > current_epoch:
+            current_epoch = batch.source_epoch
+            connection.execute(
+                "UPDATE memory_replication_meta SET source_epoch=? WHERE source_id=?",
+                (current_epoch, batch.source_id),
+            )
+
+    inserted = 0
+    for record in batch.records:
+        existing = connection.execute(
+            "SELECT digest FROM memory_replication_log WHERE source_id=? AND sequence=?",
+            (record.source_id, record.sequence),
+        ).fetchone()
+        if existing is not None:
+            if existing[0] != record.digest:
+                raise MemoryReplicationError(
+                    "replication sequence conflicts with existing evidence"
+                )
+            expected = max(expected, record.sequence + 1)
+            continue
+        if record.source_epoch != current_epoch:
+            raise MemoryReplicationError("record source epoch does not match batch")
+        if record.sequence != expected:
+            raise MemoryReplicationError("replication batch has a sequence gap")
+        latest = connection.execute(
+            "SELECT MAX(version) FROM memory_replication_log "
+            "WHERE source_id=? AND project=? AND entity_kind=? AND entity_id=?",
+            (record.source_id, record.project, record.entity_kind, record.entity_id),
+        ).fetchone()[0]
+        if latest is not None and record.version <= latest:
+            raise MemoryReplicationError("replication entity version must advance")
+        try:
+            inserted += _insert_mutation(connection, record)
+        except sqlite3.IntegrityError as exc:
+            raise MemoryReplicationError("replication entity version conflicts") from exc
+        expected += 1
+    connection.execute(
+        "UPDATE memory_replication_meta SET next_sequence=? WHERE source_id=?",
+        (expected, batch.source_id),
+    )
+    return inserted
+
+
+class SQLiteFactReplicationSink:
+    """Atomically receive fact-only evidence and materialize normal facts.
+
+    The caller owns the normal ``memory.db`` connection and explicitly creates
+    this internal sink.  It has no configuration, listener, peer discovery, or
+    retry loop.  A durable receipt is emitted only after the local journal and
+    the normal fact projection commit in one SQLite transaction.
+    """
+
+    def __init__(
+        self,
+        identity: str,
+        connection,
+        *,
+        project_scope: str,
+        max_records: int = 256,
+    ) -> None:
+        if not isinstance(project_scope, str) or not project_scope:
+            raise ValueError("fact replication requires a non-empty project scope")
+        _validate_source(identity, project_scope)
+        if not hasattr(connection, "execute") or not hasattr(connection, "in_transaction"):
+            raise TypeError("a SQLite connection is required")
+        # Python 3.12's ``autocommit=True`` leaves SQLite in autocommit mode:
+        # ``Connection.commit()`` is a no-op even after this sink issues an
+        # explicit BEGIN.  ``autocommit=False`` immediately opens another
+        # transaction after commit, which violates this sink's owned
+        # transaction boundary.  A receipt must follow a commit that another
+        # connection can observe, so support only legacy transaction control.
+        autocommit = getattr(connection, "autocommit", None)
+        if autocommit is True:
+            raise ValueError(
+                "fact replication sink does not support sqlite autocommit=True"
+            )
+        if autocommit is False:
+            raise ValueError(
+                "fact replication sink does not support sqlite autocommit=False"
+            )
+        if connection.in_transaction:
+            raise RuntimeError(
+                "fact replication sink requires a connection outside a transaction"
+            )
+        if type(max_records) is not int or not 1 <= max_records <= _MAX_EXPORT_ROWS:
+            raise ValueError(
+                f"fact replication record bound must be within 1..{_MAX_EXPORT_ROWS}"
+            )
+        facts_table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='facts'"
+        ).fetchone()
+        if facts_table is None:
+            raise ValueError("fact replication sink requires the normal facts table")
+        self.identity = identity
+        self._connection = connection
+        self.project_scope = project_scope
+        self.max_records = max_records
+        self._projection = SQLiteMemoryReplicationProjection(
+            connection, project_scope=project_scope,
+        )
+
+    @contextmanager
+    def _transaction(self):
+        """Commit journal and projection together before a receipt exists."""
+        if self._connection.in_transaction:
+            # A savepoint would permit a receipt to escape before an outer
+            # caller commits.  Reject that shape rather than claiming durable
+            # receipt evidence for a transaction another owner can roll back.
+            raise RuntimeError(
+                "fact replication receipt requires a connection outside a transaction"
+            )
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+            self._connection.commit()
+        except BaseException:
+            # A failed COMMIT can leave the transaction open with its pending
+            # journal and projection rows.  Make one bounded best-effort
+            # rollback before returning any failure so an exact retry is not
+            # blocked by this connection's stranded transaction.
+            try:
+                self._connection.rollback()
+            except sqlite3.Error:
+                pass
+            raise
+
+    def apply(self, batch: MemoryReplicationBatch) -> MemoryReplicaReceipt:
+        if not isinstance(batch, MemoryReplicationBatch):
+            raise TypeError("memory replication batch is required")
+        if not batch.records:
+            raise MemoryReplicationError("fact replication requires a non-empty batch")
+        if len(batch.records) > self.max_records:
+            raise MemoryReplicationError("fact replication batch exceeds the record bound")
+        for record in batch.records:
+            if record.entity_kind != "fact":
+                raise MemoryReplicationError(
+                    "fact replication accepts only fact mutations"
+                )
+            if record.project != self.project_scope:
+                raise MemoryReplicationError("fact replication project scope cannot be widened")
+
+        with self._transaction():
+            inserted = apply_memory_replication_batch_in_transaction(
+                self._connection,
+                batch,
+                project_scope=self.project_scope,
+            )
+            self._projection.apply(batch)
+        return MemoryReplicaReceipt(
+            replica_id=self.identity,
+            source_id=batch.source_id,
+            source_epoch=batch.source_epoch,
+            next_sequence=batch.next_sequence,
+            batch_digest=batch.digest,
+            durable=True,
+            inserted_records=inserted,
+        )
+
+
 class SQLiteMemoryReplicationJournal:
     """Bounded SQLite journal for one source identity and optional project."""
 
@@ -65,27 +447,14 @@ class SQLiteMemoryReplicationJournal:
         self.project_scope = project_scope
         self._memory_connection = None
         # Validate identities and scope before creating any state.
-        MemoryMutation(
-            source_id=source_id, source_epoch=1, sequence=1,
-            entity_kind="fact", entity_id="validation", version=1,
-            operation="delete", project=project_scope or "global",
-            payload={}, recorded_at=_utc_now(),
-        )
-        if project_scope is not None and project_scope == "":
-            raise MemoryReplicationError("project scope must not be empty")
+        _validate_source(source_id, project_scope)
         with self._session() as connection:
-            connection.executescript(_DDL)
-            row = connection.execute(
-                "SELECT project_scope FROM memory_replication_meta WHERE source_id=?",
-                (self.source_id,),
-            ).fetchone()
-            if row is not None and row[0] is not None and row[0] != self.project_scope:
-                raise MemoryReplicationError("journal project scope conflicts with persisted scope")
-            if row is None:
-                connection.execute(
-                    "INSERT INTO memory_replication_meta(source_id,source_epoch,next_sequence,project_scope) VALUES(?,?,?,?)",
-                    (self.source_id, 1, 1, self.project_scope),
-                )
+            connection.executescript(MEMORY_REPLICATION_DDL)
+            ensure_memory_replication_source(
+                connection,
+                source_id=self.source_id,
+                project_scope=self.project_scope,
+            )
 
     def _connect(self):
         # Use the explicit ownership factory so managed runtime children can
@@ -149,19 +518,7 @@ class SQLiteMemoryReplicationJournal:
 
     @staticmethod
     def _insert(connection, mutation: MemoryMutation) -> int:
-        cursor = connection.execute(
-            "INSERT INTO memory_replication_log"
-            "(source_id,source_epoch,sequence,entity_kind,entity_id,version,operation,project,payload_json,recorded_at,digest)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                mutation.source_id, mutation.source_epoch, mutation.sequence,
-                mutation.entity_kind, mutation.entity_id, mutation.version,
-                mutation.operation, mutation.project,
-                json.dumps(dict(mutation.payload), sort_keys=True, separators=(",", ":"), ensure_ascii=True),
-                mutation.recorded_at, mutation.digest,
-            ),
-        )
-        return cursor.rowcount
+        return _insert_mutation(connection, mutation)
 
     def _meta(self, connection):
         row = connection.execute(
@@ -177,9 +534,23 @@ class SQLiteMemoryReplicationJournal:
             raise MemoryReplicationError("source epoch must be positive")
         with self._session() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            current = self._meta(connection)[0]
+            current, next_sequence, _persisted_scope = self._meta(connection)
             if source_epoch <= current:
                 raise MemoryReplicationError("source epoch must advance")
+            has_records = connection.execute(
+                "SELECT 1 FROM memory_replication_log WHERE source_id=? LIMIT 1",
+                (self.source_id,),
+            ).fetchone() is not None
+            if has_records or next_sequence != 1:
+                # The bounded batch schema carries one source epoch for every
+                # exported record.  With sequence keyed only by source, a
+                # rollover after an allocated sequence would make a fresh
+                # projection reject the first record of the new epoch.  Keep
+                # the cursor truthful until an explicit bootstrap/archive
+                # rollover protocol exists.
+                raise MemoryReplicationError(
+                    "source epoch can advance only from an empty bootstrap cursor"
+                )
             connection.execute(
                 "UPDATE memory_replication_meta SET source_epoch=? WHERE source_id=?",
                 (source_epoch, self.source_id),
@@ -187,67 +558,13 @@ class SQLiteMemoryReplicationJournal:
             connection.commit()
 
     def append(self, records: tuple[MemoryMutation, ...]) -> int:
-        if type(records) is not tuple or not 1 <= len(records) <= _MAX_EXPORT_ROWS:
-            raise ValueError("records must be a bounded non-empty tuple")
-        for record in records:
-            if not isinstance(record, MemoryMutation) or record.source_id != self.source_id:
-                raise MemoryReplicationError("journal records must belong to this source")
-            if self.project_scope is not None and record.project != self.project_scope:
-                raise MemoryReplicationError("project scope cannot be widened")
         with self._session() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            epoch, next_sequence, _scope = self._meta(connection)
-            inserted = 0
-            expected = next_sequence
-            for record in records:
-                if record.source_epoch != epoch:
-                    raise MemoryReplicationError("record source epoch is stale or not admitted")
-                if record.sequence != expected:
-                    existing = connection.execute(
-                        "SELECT digest FROM memory_replication_log WHERE source_id=? AND sequence=?",
-                        (self.source_id, record.sequence),
-                    ).fetchone()
-                    if existing is None or existing[0] != record.digest:
-                        raise MemoryReplicationError("journal sequence is not contiguous")
-                    # Replaying an already committed prefix is idempotent;
-                    # it must not advance the append cursor a second time.
-                    continue
-                latest = connection.execute(
-                    "SELECT MAX(version) FROM memory_replication_log "
-                    "WHERE source_id=? AND project=? AND entity_kind=? AND entity_id=?",
-                    (record.source_id, record.project, record.entity_kind, record.entity_id),
-                ).fetchone()[0]
-                if latest is not None and record.version <= latest:
-                    raise MemoryReplicationError("entity version must advance")
-                try:
-                    inserted += self._insert(connection, record)
-                except sqlite3.IntegrityError:
-                    existing = connection.execute(
-                        "SELECT digest FROM memory_replication_log WHERE source_id=? AND sequence=?",
-                        (self.source_id, record.sequence),
-                    ).fetchone()
-                    if existing is not None:
-                        if existing[0] != record.digest:
-                            raise MemoryReplicationError("journal sequence conflicts with existing evidence")
-                    else:
-                        same_version = connection.execute(
-                            "SELECT digest FROM memory_replication_log WHERE source_id=? AND project=? AND entity_kind=? AND entity_id=? AND version=?",
-                            (record.source_id, record.project, record.entity_kind, record.entity_id, record.version),
-                        ).fetchone()
-                        if same_version is None or same_version[0] != record.digest:
-                            raise MemoryReplicationError("journal entity version conflicts")
-                    if existing is not None and existing[0] == record.digest:
-                        # A duplicate that happens to be at the cursor is also
-                        # safe to replay without changing the next sequence.
-                        pass
-                    elif existing is None:
-                        raise MemoryReplicationError("journal entity version conflicts")
-                    else:
-                        raise MemoryReplicationError("journal sequence conflicts with existing evidence")
-                expected += 1
-            connection.execute(
-                "UPDATE memory_replication_meta SET next_sequence=? WHERE source_id=?",
-                (expected, self.source_id),
+            inserted = append_memory_mutations_in_transaction(
+                connection,
+                records,
+                source_id=self.source_id,
+                project_scope=self.project_scope,
             )
             connection.commit()
             return inserted
@@ -280,62 +597,12 @@ class SQLiteMemoryReplicationJournal:
     def apply(self, batch: MemoryReplicationBatch) -> int:
         if not isinstance(batch, MemoryReplicationBatch):
             raise TypeError("memory replication batch is required")
-        if self.project_scope is not None:
-            for record in batch.records:
-                if record.project != self.project_scope:
-                    raise MemoryReplicationError("project scope cannot be widened")
         with self._session() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT source_epoch,next_sequence FROM memory_replication_meta WHERE source_id=?",
-                (batch.source_id,),
-            ).fetchone()
-            if row is None:
-                connection.execute(
-                    "INSERT INTO memory_replication_meta(source_id,source_epoch,next_sequence,project_scope) VALUES(?,?,?,?)",
-                    (batch.source_id, batch.source_epoch, 1, self.project_scope),
-                )
-                current_epoch, expected = batch.source_epoch, 1
-            else:
-                current_epoch, expected = row
-                if batch.source_epoch < current_epoch:
-                    raise MemoryReplicationError("replication batch has a stale source epoch")
-                if batch.source_epoch > current_epoch:
-                    current_epoch = batch.source_epoch
-                    connection.execute(
-                        "UPDATE memory_replication_meta SET source_epoch=? WHERE source_id=?",
-                        (current_epoch, batch.source_id),
-                    )
-            inserted = 0
-            for record in batch.records:
-                existing = connection.execute(
-                    "SELECT digest FROM memory_replication_log WHERE source_id=? AND sequence=?",
-                    (record.source_id, record.sequence),
-                ).fetchone()
-                if existing is not None:
-                    if existing[0] != record.digest:
-                        raise MemoryReplicationError("replication sequence conflicts with existing evidence")
-                    expected = max(expected, record.sequence + 1)
-                    continue
-                if record.source_epoch != current_epoch:
-                    raise MemoryReplicationError("record source epoch does not match batch")
-                if record.sequence != expected:
-                    raise MemoryReplicationError("replication batch has a sequence gap")
-                latest = connection.execute(
-                    "SELECT MAX(version) FROM memory_replication_log "
-                    "WHERE source_id=? AND project=? AND entity_kind=? AND entity_id=?",
-                    (record.source_id, record.project, record.entity_kind, record.entity_id),
-                ).fetchone()[0]
-                if latest is not None and record.version <= latest:
-                    raise MemoryReplicationError("replication entity version must advance")
-                try:
-                    inserted += self._insert(connection, record)
-                except sqlite3.IntegrityError as exc:
-                    raise MemoryReplicationError("replication entity version conflicts") from exc
-                expected += 1
-            connection.execute(
-                "UPDATE memory_replication_meta SET next_sequence=? WHERE source_id=?",
-                (expected, batch.source_id),
+            inserted = apply_memory_replication_batch_in_transaction(
+                connection,
+                batch,
+                project_scope=self.project_scope,
             )
             connection.commit()
             return inserted
@@ -414,4 +681,11 @@ class SQLiteMemoryReplicationJournal:
             return len(rows)
 
 
-__all__ = ["SQLiteMemoryReplicationJournal"]
+__all__ = [
+    "MEMORY_REPLICATION_DDL",
+    "SQLiteFactReplicationSink",
+    "SQLiteMemoryReplicationJournal",
+    "apply_memory_replication_batch_in_transaction",
+    "append_memory_mutations_in_transaction",
+    "ensure_memory_replication_source",
+]

@@ -482,6 +482,7 @@ class LaneContinuationService:
         model_writable_roots=None,
         managed_authority: ManagedAuthority | None = None,
         authority_subject=None,
+        managed_model_writable_roots=None,
     ):
         self.lanes, self.store = lanes, lanes.store
         self.authorize_host, self.projection_codec = authorize_host, projection_codec
@@ -493,8 +494,15 @@ class LaneContinuationService:
             raise PermissionError(
                 "managed authority and private subject required together"
             )
+        if managed_authority is None and managed_model_writable_roots is not None:
+            raise PermissionError(
+                "managed model roots require private managed authority"
+            )
+        if managed_authority is not None and not callable(managed_model_writable_roots):
+            raise PermissionError("managed model roots provider required")
         self.managed_authority = managed_authority
         self.authority_subject = authority_subject
+        self._managed_model_writable_roots = managed_model_writable_roots
         self._minted_parents = {}
         self.cleanup_failures = []
 
@@ -716,9 +724,23 @@ class LaneContinuationService:
             or context.cancellation.cancelled
         ):
             raise PermissionError("live host authorizer unavailable")
-        if not callable(self.model_writable_roots):
-            raise PermissionError("complete model-writable root provider unavailable")
-        configured_roots = tuple(self.model_writable_roots())
+        if self.managed_authority is None:
+            if not callable(self.model_writable_roots):
+                raise PermissionError("complete model-writable root provider unavailable")
+            configured_roots = tuple(self.model_writable_roots())
+            grant = self.authorize_host(context, host_id)
+        else:
+            grant = self.managed_authority.authorize_host(
+                getattr(tx, "managed_admission", None),
+                context,
+                host_id,
+                connection=tx.conn,
+            )
+            configured_roots = tuple(
+                self._managed_model_writable_roots(
+                    getattr(tx, "managed_admission", None)
+                )
+            )
         if len(configured_roots) > 256:
             raise PermissionError("configured model root inventory exceeds bound")
         private_directory = Path(self.store.path).parent.resolve()
@@ -728,15 +750,6 @@ class LaneContinuationService:
         ):
             raise PermissionError(
                 "host continuation store overlaps model-writable scope"
-            )
-        if self.managed_authority is None:
-            grant = self.authorize_host(context, host_id)
-        else:
-            grant = self.managed_authority.authorize_host(
-                getattr(tx, "managed_admission", None),
-                context,
-                host_id,
-                connection=tx.conn,
             )
 
         if (

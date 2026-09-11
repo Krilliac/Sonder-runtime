@@ -32,17 +32,49 @@ def _pool_summary(pool_status: object) -> tuple[dict[str, object], dict[str, obj
         worker_count = 0
     if type(healthy) is not int or healthy < 0:
         healthy = 0
-    enabled = pool_status.get("enabled") is True
+    def count(value, limit=1024):
+        return min(value, limit) if type(value) is int and value >= 0 else 0
+
+    eligible = count(pool_status.get("eligible_worker_count", healthy))
+    admission = pool_status.get("admission")
+    enabled = (pool_status.get("enabled") is True and worker_count > 1
+               and admission == "accepting" and eligible > 0)
+    queue = pool_status.get("queue")
+    queue = queue if isinstance(queue, dict) else {}
+
     remote = pool_status.get("remote_worker_count", 0)
     if type(remote) is not int or remote < 0:
         remote = 0
+    membership_mode = (
+        pool_status.get("membership_mode")
+        if pool_status.get("membership_mode") in {"static", "external"}
+        else "unknown"
+    )
+    raw_membership_state = pool_status.get("membership_state")
+    membership_state = (
+        "static"
+        if membership_mode == "static" and raw_membership_state == "static"
+        else raw_membership_state
+        if membership_mode == "external"
+        and raw_membership_state in {"unrefreshed", "current", "stale_or_partial"}
+        else "unknown"
+    )
     summary = {
         "configured": True,
+        "schema_version": 2 if pool_status.get("schema_version") == 2 else 1,
+        "eligible_worker_count": eligible,
+        "available_capacity": count(pool_status.get("available_capacity"), 16384),
+        "queue": {"waiting": count(queue.get("waiting"), 4096),
+                  "limit": count(queue.get("limit"), 4096), "scope": "global"},
+        "membership_mode": membership_mode,
+        "membership_state": membership_state,
+        "refresh_state": pool_status.get("refresh_state") if pool_status.get("refresh_state") in
+                         {"not_refreshed", "current", "stale_or_partial"} else "unknown",
         "worker_count": min(worker_count, 1024),
         "healthy_worker_count": min(healthy, 1024),
         "remote_worker_count": min(remote, 1024),
-        "routing": str(pool_status.get("routing", ""))[:128],
-        "admission": str(pool_status.get("admission", ""))[:32],
+        "routing": "latency-aware-least-inflight" if pool_status.get("routing") == "latency-aware-least-inflight" else "unknown",
+        "admission": admission if admission in {"accepting", "draining"} else "unknown",
     }
     if enabled:
         reason = (
@@ -61,7 +93,9 @@ def build_operational_capabilities(
     config: object | None,
     inference_pool_status: object = None,
     memory_receiver_configured: bool = False,
+    memory_replication_status: object = None,
     managed_work_configured: bool = False,
+    fixed_peer_artifact_copy_configured: bool = False,
 ) -> dict[str, object]:
     """Build an admin-safe, non-probing capability snapshot.
 
@@ -89,18 +123,66 @@ def build_operational_capabilities(
             "Authenticated, bounded artifact transfer is enabled by an explicit "
             "receiver grant."
             if artifact_enabled
-            else "Artifact transfer is disabled until an explicit receiver grant is applied."
+            else (
+                "Artifact transfer is disabled until an explicit receiver grant is applied; "
+                "a source-only spool exposes no receiver, sender, or public artifact capability."
+            )
         ),
     )
+    # The service status is explicitly local and non-probing.  Treat anything
+    # else as absent rather than accepting an arbitrary object as evidence of
+    # live replication.  Keep ``memory_receiver_configured`` for the older
+    # injected-receiver seam while exposing the richer owned-service posture.
+    replication_status = (
+        memory_replication_status
+        if isinstance(memory_replication_status, dict)
+        else None
+    )
+    service_enabled = bool(
+        replication_status is not None
+        and replication_status.get("enabled") is True
+        and replication_status.get("fact_only") is True
+    )
+    receiver_configured = bool(
+        memory_receiver_configured
+        or (
+            replication_status is not None
+            and replication_status.get("receiver_configured") is True
+        )
+    )
+    configured_peers = ()
+    if replication_status is not None:
+        candidates = replication_status.get("configured_peer_ids")
+        if type(candidates) is tuple:
+            configured_peers = tuple(
+                identity for identity in candidates[:64]
+                if type(identity) is str and identity
+            )
+    memory_available = service_enabled or receiver_configured
     memory_capability = _capability(
-        bool(memory_receiver_configured),
+        memory_available,
         (
-            "An authenticated memory replication receiver is explicitly injected; "
-            "replication remains a bounded batch transport."
-            if memory_receiver_configured
-            else "Memory replication is disabled until an authenticated receiver is injected."
+            "Configured fixed-peer memory replication is an explicit bounded "
+            "authenticated fact-only batch transport; an operator must invoke "
+            "replicate_once. Every configured peer must return a durable receipt "
+            "before the cursor advances; this is not quorum or high availability."
+            if service_enabled
+            else (
+                "An authenticated fixed-peer memory replication receiver is "
+                "explicitly injected; it accepts bounded fact batches only and does "
+                "not provide quorum or high availability."
+                if receiver_configured
+                else "Memory fact replication is disabled until an authenticated receiver is injected."
+            )
         ),
     )
+    memory_capability.update({
+        "fact_only": service_enabled,
+        "configured_peer_count": len(configured_peers),
+        "receiver_configured": receiver_configured,
+        "automatic_takeover_available": False,
+        "automatic_failback_available": False,
+    })
     app_control = getattr(config, "app_control", None)
     app_control_enabled = bool(getattr(app_control, "enabled", False))
     managed_work = _capability(
@@ -146,10 +228,19 @@ def build_operational_capabilities(
         },
         "mobility": {
             "memory_replication_transport": memory_capability,
+            "automatic_takeover_available": False,
+            "automatic_failback_available": False,
             "artifact_transfer_transport": artifact_capability,
             "automatic_memory_migration": _capability(
                 False,
                 "Memory ownership, discovery, election, and automatic migration are not integrated.",
+            ),
+            "fixed_peer_artifact_copy": _capability(
+                bool(fixed_peer_artifact_copy_configured
+                    and getattr(getattr(config, "artifact_mobility_source", None), "enabled", False)
+                    and getattr(getattr(config, "artifact_mobility", None), "enabled", False)),
+                "Operator-invoked copy requires a pre-admitted source-only artifact "
+                "and a composed trusted local source and fixed outbound binding.",
             ),
             "automatic_artifact_migration": _capability(
                 False,

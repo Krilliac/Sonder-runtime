@@ -9,7 +9,7 @@ no hardware, and contacts no services; construction happens inside
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 import importlib
@@ -151,6 +151,7 @@ from ..application.workflows.use_cases import WorkflowService
 from ..application.context_integration import ContextPlanningFacade
 from ..application.control_plane import ControlPlaneSnapshotService
 from ..application.context import OperationContext
+from .artifact_mobility_source import ArtifactMobilitySourceBinding
 from ..platform.config import SonderConfig
 from ..platform import paths as runtime_paths
 from ..adapters.inference import ollama_endpoint
@@ -158,167 +159,8 @@ from ..adapters.inference import ollama_endpoint
 PROFILES = ("workstation-local", "server-private")
 
 
-@dataclass(frozen=True)
-class Application:
-    profile: str
-    runtime_policy: RuntimePolicyService
-    provider_bindings: ProviderBindings
-    model_gateway: ModelGateway
-    provider_registry: ScopedProviderRegistry
-    provider_overrides: ProviderOverrideService
-    specialized_providers: SpecializedProviderBundle
-    chat: ChatService
-    automation: AutomationRepository
-    unit_of_work: Callable[[], UnitOfWork]
-    tool_executor: ToolExecutor
-    process_probe: ProcessProbe
-    events: EventSink
-    clock: Clock
-    backup: BackupService
-    inspections: InspectionService
-    recall: RecallService
-    memory: MemoryLearningFacade
-    evaluation_history: EvaluationHistoryService
-    preferences: PreferenceService
-    workflows: WorkflowService
-    session_repository: Callable[[], SessionRepository]
-    session_capture_service: Callable[[], SessionCaptureService]
-    session_checkpoint_privacy_service: Callable[[], SessionCheckpointPrivacyService]
-    session_continuity_service: Callable[[], SessionContinuityService]
-    session_http_facade: Callable[[], HttpSessionFacade]
-    job_registry: Callable[[], JobRegistry]
-    job_service: Callable[[], JobRegistryService]
-    process_job_provider: Callable[[], ProcessJobProvider] | None = None
-    job_recovery: Callable[..., JobRecoveryReport] | None = None
-    config: SonderConfig | None = None
-    vision: VisionService | None = None
-    web_provider: WebProvider | None = None
-    workflow_engine: Callable[[], ResumableWorkflowEngine] | None = None
-    agent_registry: Callable[[], UnifiedAgentRegistryService] | None = None
-    compaction_service: Callable[[], SessionCompactionService] | None = None
-    extension_registry: Callable[[], ExtensionRegistry] | None = None
-    experiment_manager: Callable[[], EphemeralExperimentManager] | None = None
-    extension_facade: Callable[[], ExtensionApplicationFacade] | None = None
-    selfmod_service: Callable[[], GuardedLegacySelfmodService] | None = None
-    context_planning: ContextPlanningFacade | None = None
-    control_plane_snapshot_service: ControlPlaneSnapshotService | None = None
-    compute_registry: Callable[[], ComputeNodeRegistry] | None = None
-    compute_snapshot: Callable[[], NodeSnapshot] | None = None
-    compute_scheduler: ComputePlacementScheduler | None = None
-    compute_job_worker: Callable[[], ComputeJobWorker] | None = None
-    compute_service: Callable[[], ComputeFabricService] | None = None
-    delegation_service: Callable[[], DelegationService] | None = None
-    agent_lanes: Callable[[], object] | None = None
-    agent_workflow_service: Callable[[], AgentWorkflowService] | None = None
-    lineage_query: Callable[[], DurableLineageQuery] | None = None
-    # The typed tool boundary: the read-only workbench family runs through it
-    # on every surface, with the runtime's permission modes as its evaluator
-    # and operations-grade durable receipts (see bootstrap/typed_tools.py).
-    tools: ToolApplicationFacade | None = None
-    container_world_provider: Any | None = None
-    remote_world_provider: Any | None = None
-    compute_inventory_page: Callable[..., dict] | None = None
-    compute_refresh_page: Callable[..., dict] | None = None
-    close_compute: Callable[..., None] | None = None
-    close_delegation: Callable[..., None] | None = None
+from .application_graph import Application
 
-    @property
-    def private_source_paths(self) -> tuple[str, ...]:
-        """Exact host-loaded provenance, never inferred from diagnostic labels."""
-        return self.config.private_source_paths if self.config is not None else ()
-
-    def provider_health(self):
-        """Return a typed, fail-closed snapshot of published provider health."""
-        return tuple(
-            self.provider_registry.health(item.provider_id)
-            for item in self.provider_registry.providers()
-        )
-
-    def provider_health_data(self):
-        """Return a redacted operator projection of published provider health."""
-        rows = []
-        for item in self.provider_registry.providers():
-            try:
-                report = self.provider_registry.health(item.provider_id)
-                rows.append({
-                    "provider_id": report.provider_id,
-                    "status": report.status.value,
-                    "detail": report.detail,
-                    "checked_at": report.checked_at,
-                })
-            except Exception as exc:
-                # A health probe must never make the control-plane status
-                # endpoint disappear or imply readiness from an exception.
-                logger.error(f"provider health probe failed for provider_id={item.provider_id!r}, reporting as unhealthy", exc_info=True)
-                logger.warning(f"provider health probe failed for provider_id={item.provider_id!r}, reporting as unhealthy: {type(exc).__name__}")
-                rows.append({
-                    "provider_id": item.provider_id,
-                    "status": "unhealthy",
-                    "detail": f"health probe failed: {type(exc).__name__}",
-                    "checked_at": "",
-                })
-        return tuple(rows)
-
-    def cancel_provider(
-        self, provider_id: str, *, reason: str = "cancellation requested",
-    ) -> bool:
-        """Request cooperative cancellation through the composed provider port."""
-        return self.provider_registry.cancel(provider_id, reason=reason)
-
-    def train_provider(
-        self,
-        request: TrainingRequest,
-        context: OperationContext,
-        *,
-        provider_id: str = "training",
-        scopes: Sequence[str] | None = None,
-    ) -> DeploymentResult:
-        """Run an attended training operation through the provider boundary."""
-        provider = self.provider_registry.resolve(provider_id, scopes).provider
-        operation = getattr(provider, "train", None)
-        if not callable(operation):
-            raise ProviderLifecycleError(
-                f"provider {provider_id!r} does not support training"
-            )
-        result = operation(request, context)
-        if not isinstance(result, DeploymentResult):
-            raise ProviderLifecycleError("training provider returned an invalid result")
-        return result
-
-    def activate_provider(
-        self,
-        request: ActivationRequest,
-        context: OperationContext,
-        *,
-        provider_id: str = "update",
-        scopes: Sequence[str] | None = None,
-    ) -> ActivationResult:
-        """Activate a verified release through the provider boundary."""
-        provider = self.provider_registry.resolve(provider_id, scopes).provider
-        operation = getattr(provider, "activate", None)
-        if not callable(operation):
-            raise ProviderLifecycleError(
-                f"provider {provider_id!r} does not support activation"
-            )
-        result = operation(request, context)
-        if not isinstance(result, ActivationResult):
-            raise ProviderLifecycleError("update provider returned an invalid result")
-        return result
-
-    def close_providers(self, timeout: float | None = None) -> None:
-        """Quiesce and unpublish composed providers before process shutdown."""
-        started = monotonic()
-        try:
-            try:
-                if self.close_delegation is not None:
-                    self.close_delegation(timeout=timeout)
-            finally:
-                if self.close_compute is not None:
-                    remaining = None if timeout is None else max(0, timeout - (monotonic() - started))
-                    self.close_compute(timeout=remaining)
-        finally:
-            remaining = None if timeout is None else max(0, timeout - (monotonic() - started))
-            self.specialized_providers.close(timeout=remaining)
 
 
 # Compatibility name for callers that used the bootstrap-private selector.
@@ -340,6 +182,7 @@ def build_application(
     extension_provenance: ProvenanceInventory | None = None,
     control_plane_snapshot_service: ControlPlaneSnapshotService | None = None,
     child_repository_factory=None,
+    _artifact_mobility_source_binding: ArtifactMobilitySourceBinding | None = None,
 ) -> Application:
     """Assemble one application graph for the selected profile.
 
@@ -349,6 +192,7 @@ def build_application(
     """
     logger.info(f"build_application starting, profile={profile!r}")
     logger.debug(f"build_application starting, profile={profile!r}, config_provided={config is not None}")
+    inference_pool = inference_membership = None
     if config is None and any(name.startswith("SONDER_CHILD_STORAGE_") for name in os.environ):
         # Compatibility entrypoints must not ignore an explicit backend opt-in.
         from ..platform.config import load_config
@@ -358,6 +202,8 @@ def build_application(
             raise TypeError("config must be a SonderConfig when provided")
         from ..platform.config import validate_deployment
         validate_deployment(config)
+        from ..platform.config import validate_membership_config
+        validate_membership_config(config.membership, config.secrets, allow_remote=config.ollama.allow_remote)
         from ..platform.child_storage_config import child_storage_errors
         from ..platform.config import ConfigError
         child_errors = child_storage_errors(config)
@@ -365,7 +211,11 @@ def build_application(
             raise ConfigError(child_errors)
         profile = config.profile
         logger.info(f"config applied, effective profile={profile!r}")
-        logger.debug(f"config supplied, effective profile={profile!r}, home={config.state.home!r}")
+        logger.debug(
+            "config supplied, effective profile=%r, typed_home_configured=%s",
+            profile,
+            bool(config.state.home),
+        )
         if config.state.home:
             # Keep typed startup state process-local.  This must happen before
             # any lazy persistence factory can resolve a database path, and
@@ -386,12 +236,49 @@ def build_application(
             probe_timeout_ms=config.ollama.worker_probe_timeout_ms,
             max_inflight_per_worker=config.ollama.worker_max_inflight,
             queue_depth=config.ollama.worker_queue_depth,
+            max_workers=config.ollama.worker_pool_max_workers,
+            capability_probe_parallelism=(
+                config.ollama.worker_capability_probe_parallelism
+            ),
+            capability_probe_batch_size=config.ollama.worker_capability_probe_batch_size,
+            status_page_size=config.ollama.worker_status_page_size,
+        )
+        from ..adapters.inference.static_membership import StaticMembershipSource
+        from ..application.inference_membership.controller import MembershipController
+        membership_clock = lambda: datetime.now(timezone.utc)
+        inference_pool = ollama_pool.from_environment(config.ollama.url)
+        source_limits = high_water_store = None
+        if config.membership.mode == "external":
+            from ..adapters.inference.external_membership import ExternalMembershipSource
+            from ..adapters.inference.membership_high_water import MembershipHighWaterStore
+            from ..application.ports.inference_membership import MembershipSourceLimits
+            source = ExternalMembershipSource(config.membership, config.secrets, clock=membership_clock)
+            high_water_store = MembershipHighWaterStore(runtime_paths.default_home() / "inference-membership" / "high-water.json",
+                cluster_id=config.membership.cluster_id, issuer_id=config.membership.issuer_id, clock=membership_clock)
+            source_limits = MembershipSourceLimits(max_advertisements=config.membership.snapshot_max_advertisements,
+                                                  max_bytes=config.membership.snapshot_max_bytes)
+            interval = config.membership.refresh_interval_seconds
+            inference_pool.configure_external_source(source, probe_timeout_seconds=config.ollama.worker_probe_timeout_ms / 1000)
+        else:
+            source = StaticMembershipSource(config.ollama, clock=membership_clock)
+            interval = max(1, min(30, config.ollama.worker_capability_ttl_seconds / 2))
+        inference_membership = MembershipController(
+            source, inference_pool, clock=membership_clock,
+            cluster_id=source.cluster_id, issuer_id=source.issuer_id,
+            refresh_interval_seconds=interval, high_water_store=high_water_store, source_limits=source_limits,
         )
     if profile not in PROFILES:
         raise ValueError(f"unknown profile {profile!r}; expected {PROFILES}")
     logger.debug("configuring runtime lifecycle")
     from ..adapters.web import lifecycle as runtime_lifecycle
     runtime_lifecycle.configure(config)
+    memory_replication_service = None
+    if config is not None:
+        # This constructs only a local policy owner.  It opens no database or
+        # peer connection until its explicit receiver or replicate_once call.
+        from .memory_replication import compose_memory_replication_service
+
+        memory_replication_service = compose_memory_replication_service(config)
     # Keep the transitional provider behind lazy closures: composing the
     # application must not import the historical root module.
     logger.debug("resolving legacy model provider factories")
@@ -410,6 +297,10 @@ def build_application(
         import sonder_runtime.adapters.embeddings as legacy_embeddings
 
         def embedding_provider(request, context):
+            # The legacy adapter owns a generic endpoint transport, not the
+            # externally admitted pool. It cannot inherit membership authority.
+            if config is not None and config.membership.mode == "external":
+                raise RuntimeError("default embeddings unavailable in external membership mode")
             timeout = context.remaining_seconds
             timeout = 30.0 if timeout is None else max(0.001, timeout)
             vectors = []
@@ -1315,7 +1206,13 @@ def build_application(
     # permission decisions leave their content-free receipts on this same
     # sink, replacing the default the legacy module installs when it loads
     # before a graph exists.
-    events = LocalObservabilitySink(OperationsEventSink())
+    from ..platform.logging import redactor_for_config
+
+    runtime_redactor = redactor_for_config(config or SonderConfig())
+    events = LocalObservabilitySink(
+        OperationsEventSink(redactor=runtime_redactor),
+        redactor=runtime_redactor,
+    )
     permission_receipts.install(lambda: events)
 
     # The typed tool boundary for the workbench file families (the reads and
@@ -1324,12 +1221,11 @@ def build_application(
     # second gate on every typed call that was not already decided by the
     # surface forwarding it; every receipt is durable before it is visible.
     logger.debug("composing typed tool application facade")
-    from ..platform.logging import Redactor as _Redactor
-
     tool_audit = DurableToolAuditRepository(
         runtime_paths.state_path(
             os.path.join("audit", "tool-receipts.jsonl"), "SONDER_TOOL_AUDIT",
         ),
+        redactor=runtime_redactor,
         limits=ToolAuditLimits(),
     )
 
@@ -1337,10 +1233,16 @@ def build_application(
         typed_tool_registry(),
         PackagedToolExecutor(),
         policy=typed_tool_policy(),
-        redactor=PatternOutputRedactor(_Redactor().redact),
+        redactor=PatternOutputRedactor(runtime_redactor.redact),
         receipts=ReceiptStore(),
         audit=tool_audit,
         permissions=(PermissionModesEvaluator(policy_names=POLICY_NAMES),),
+    )
+
+    from .artifact_mobility import compose_artifact_mobility
+    mobility_binding, mobility_status, mobility_list, mobility_available, mobility_close = (
+        compose_artifact_mobility(lambda: config,
+            source_binding=_artifact_mobility_source_binding)
     )
 
     logger.info(f"application graph assembled, profile={profile!r}")
@@ -1394,6 +1296,7 @@ def build_application(
         compaction_service=get_compaction_service,
         job_registry=get_job_registry,
         job_service=get_job_service,
+        memory_replication=memory_replication_service,
         process_job_provider=get_process_job_provider,
         job_recovery=recover_jobs,
         workflow_engine=get_workflow_engine,
@@ -1416,6 +1319,13 @@ def build_application(
         compute_refresh_page=compute_refresh_page,
         close_compute=close_compute,
         close_delegation=close_delegation,
+        artifact_mobility_status=mobility_status,
+        artifact_mobility_list=mobility_list,
+        close_artifact_mobility=mobility_close,
+        _artifact_mobility_binding=mobility_binding,
+        _artifact_mobility_available=mobility_available,
+        inference_pool=inference_pool,
+        inference_membership=inference_membership,
         delegation_service=get_delegation_service,
         agent_lanes=get_agent_lanes,
         agent_workflow_service=get_agent_workflow_service,
@@ -1431,29 +1341,171 @@ def build_application(
         except Exception:
             application.close_providers(timeout=5)
             raise
+    if inference_pool is not None:
+        ollama_pool.configure_typed_pool(inference_pool)
     return application
 
 
 _default_config: SonderConfig | None = None
+_default_runtime_close_lock = RLock()
+_default_runtime_closing = False
+_default_application_close = None
 _default_compute_close = None
 _default_delegation_close = None
+_default_memory_replication_close = None
+_default_artifact_mobility_close = None
+_default_inference_close = None
+_default_inference_pool_close = None
 _owned_default_application = None
 
 
 def close_default_compute(timeout=None):
-    if _default_compute_close is not None:
-        _default_compute_close(timeout=timeout)
+    with _default_runtime_close_lock:
+        if _default_runtime_closing:
+            raise RuntimeError("default application cleanup is in progress")
+        if _default_application_close is not None:
+            raise RuntimeError("full default graph owns compute cleanup")
+        close = _default_compute_close
+    if close is not None:
+        close(timeout=timeout)
+
+
+def _clear_default_runtime_callbacks_locked():
+    """Drop every callback while the default-runtime lock is held."""
+    global _default_application_close, _default_compute_close
+    global _default_delegation_close, _default_memory_replication_close
+    global _default_artifact_mobility_close, _default_inference_close
+    global _default_inference_pool_close
+    _default_application_close = None
+    _default_compute_close = None
+    _default_delegation_close = None
+    _default_memory_replication_close = None
+    _default_artifact_mobility_close = None
+    _default_inference_close = None
+    _default_inference_pool_close = None
+
+
+def _bind_default_runtime_callbacks_locked(application: Application) -> None:
+    """Publish exactly one graph's cleanup callbacks under the lifecycle lock."""
+    global _default_application_close, _default_compute_close
+    global _default_delegation_close, _default_memory_replication_close
+    global _default_artifact_mobility_close, _default_inference_close
+    global _default_inference_pool_close
+    _default_application_close = application.close_providers
+    _default_compute_close = application.close_compute
+    _default_delegation_close = application.close_delegation
+    _default_memory_replication_close = getattr(
+        getattr(application, "memory_replication", None), "close", None,
+    )
+    _default_artifact_mobility_close = application.close_artifact_mobility
+    controller = application.inference_membership
+    _default_inference_close = controller.close if controller is not None else None
+    drain = getattr(application.inference_pool, "drain", None)
+    _default_inference_pool_close = drain if callable(drain) else None
+
+
+def _claim_default_runtime_cleanup():
+    """Atomically detach one default graph for its sole cleanup owner."""
+    global _default_runtime_closing, _default_application_close
+    global _default_compute_close, _default_delegation_close
+    global _default_memory_replication_close, _default_artifact_mobility_close
+    global _default_inference_close, _default_inference_pool_close
+    with _default_runtime_close_lock:
+        if _default_runtime_closing:
+            return None
+        application_close = _default_application_close
+        artifact_close = _default_artifact_mobility_close
+        delegation_close = _default_delegation_close
+        compute_close = _default_compute_close
+        memory_replication_close = _default_memory_replication_close
+        inference_close = _default_inference_close
+        inference_pool_close = _default_inference_pool_close
+        _clear_default_runtime_callbacks_locked()
+        if not any((application_close, artifact_close, delegation_close,
+                    compute_close, memory_replication_close, inference_close,
+                    inference_pool_close)):
+            return None
+        _default_runtime_closing = True
+        return (
+            application_close,
+            artifact_close,
+            delegation_close,
+            compute_close,
+            memory_replication_close,
+            inference_close,
+            inference_pool_close,
+        )
+
+
+def _finish_default_runtime_cleanup():
+    """Retire a closed lazy graph so it can never be rebound."""
+    global _default_runtime_closing
+    with _default_runtime_close_lock:
+        try:
+            if _owned_default_application is None:
+                _application_lifecycle.reset()
+        finally:
+            _default_runtime_closing = False
+
+
+def _run_claimed_default_runtime_cleanup(claim, *, timeout):
+    """Run one detached cleanup outside the lifecycle lock."""
+    (application_close, artifact_close, delegation_close, compute_close,
+     memory_replication_close, inference_close, inference_pool_close) = claim
+    try:
+        if application_close is not None:
+            application = getattr(application_close, "__self__", None)
+            try:
+                if type(application) is Application:
+                    from .legacy_interfaces import detach_owned_application
+
+                    detach_owned_application(application)
+            finally:
+                # The legacy handoff is compatibility bookkeeping.  A busy
+                # legacy lock must never prevent the exact graph from closing
+                # its providers and leaving inference admission live.
+                application_close(timeout=timeout)
+            return
+        started = monotonic()
+        try:
+            if artifact_close is not None:
+                artifact_close()
+        finally:
+            try:
+                if delegation_close is not None:
+                    delegation_close(timeout=timeout)
+            finally:
+                try:
+                    if compute_close is not None:
+                        compute_close(timeout=max(0, timeout - (monotonic() - started)))
+                finally:
+                    try:
+                        if memory_replication_close is not None:
+                            memory_replication_close()
+                    finally:
+                        try:
+                            if inference_pool_close is not None and not inference_pool_close(
+                                timeout_seconds=min(30, max(0, timeout - (monotonic() - started)))
+                            ):
+                                raise TimeoutError("inference worker pool has not drained")
+                        finally:
+                            if inference_close is not None and not inference_close(
+                                timeout=min(30, max(0, timeout - (monotonic() - started)))
+                            ):
+                                raise TimeoutError("inference membership refresh has not stopped")
+    finally:
+        _finish_default_runtime_cleanup()
 
 
 def close_default_runtime_resources(timeout=5):
     """Close only the already composed default graph, without creating one."""
     timeout = 5 if timeout is None else max(0, timeout)
-    started = monotonic()
-    try:
-        if _default_delegation_close is not None:
-            _default_delegation_close(timeout=timeout)
-    finally:
-        close_default_compute(timeout=max(0, timeout - (monotonic() - started)))
+    # A composed Application has one authoritative close path.  The claim
+    # makes provider unregister non-repeatable even across host/atexit races.
+    claim = _claim_default_runtime_cleanup()
+    if claim is None:
+        return
+    _run_claimed_default_runtime_cleanup(claim, timeout=timeout)
 
 
 def _close_default_at_exit():
@@ -1478,60 +1530,115 @@ _application_lifecycle = ApplicationLifecycle(_build_default_application)
 
 def install_owned_application(application: Application) -> None:
     """Private required-new child composition; never an external factory seam."""
-    global _owned_default_application, _default_config, _default_compute_close, _default_delegation_close
-    if type(application) is not Application or not isinstance(application.config, SonderConfig):
+    global _owned_default_application, _default_config
+    if type(application) is not Application or type(application.config) is not SonderConfig:
         raise TypeError("exact configured Application required")
-    _application_lifecycle.install_owned(application)
-    _owned_default_application = application
-    _default_config = application.config
-    _default_compute_close = application.close_compute
-    _default_delegation_close = application.close_delegation
+    from .legacy_interfaces import require_inference_application
+    require_inference_application(application)
+    with _default_runtime_close_lock:
+        if _default_runtime_closing:
+            raise RuntimeError("default application cleanup is in progress")
+        _application_lifecycle.install_owned(application)
+        _owned_default_application = application
+        _default_config = application.config
+        _bind_default_runtime_callbacks_locked(application)
 
 
 def stop_owned_application(application: Application) -> None:
     """Freeze compatibility lookup; the live host still owns actual cleanup."""
-    global _default_compute_close, _default_delegation_close
-    if application is not _owned_default_application:
-        raise RuntimeError("exact owned Application required")
-    _application_lifecycle.stop_owned(application)
-    _default_compute_close = _default_delegation_close = None
+    with _default_runtime_close_lock:
+        if application is not _owned_default_application:
+            raise RuntimeError("exact owned Application required")
+        if _default_runtime_closing:
+            raise RuntimeError("default application cleanup is in progress")
+        _application_lifecycle.stop_owned(application)
+        _clear_default_runtime_callbacks_locked()
+    # Detach before the managed resource ledger reaches its provider closer.
+    # This prevents a later compatibility path from retaining a closed graph.
+    from .legacy_interfaces import detach_owned_application
+
+    detach_owned_application(application)
 
 
 def default_app(*, config: SonderConfig | None = None) -> Application:
     """Process-wide default graph for compatibility shims."""
     logger.debug(f"default_app called, config_provided={config is not None}")
-    global _default_config, _default_compute_close, _default_delegation_close
-    if _owned_default_application is not None:
-        if config is not None and config is not _owned_default_application.config:
-            raise RuntimeError("owned application config selection is immutable")
-        return _application_lifecycle.get()
+    global _default_config
+    from .legacy_interfaces import require_inference_application
     if config is not None:
-        if not isinstance(config, SonderConfig):
+        if type(config) is not SonderConfig:
             raise TypeError("config must be a SonderConfig when provided")
-        if _default_config is not config:
-            # Explicit entrypoint configuration is startup authority.  Reset
-            # the lazy compatibility cache so repeated in-process CLI calls
-            # cannot retain a prior command's config object.
-            close_default_runtime_resources()
-            _default_config = config
-            _application_lifecycle.reset()
-    application = _application_lifecycle.get()
-    _default_compute_close = getattr(application, "close_compute", None)
-    _default_delegation_close = getattr(application, "close_delegation", None)
-    if config is not None and application.config is not config:
-        logger.critical("default application was already built with a different config object -- process-wide state is inconsistent and cannot be recovered")
-        raise RuntimeError("default application was already built without this config")
+    while True:
+        claim = None
+        with _default_runtime_close_lock:
+            if _default_runtime_closing:
+                # A caller may not replace the selected configuration or bind
+                # callbacks while another owner has detached the old graph.
+                raise RuntimeError("default application cleanup is in progress")
+            if _owned_default_application is not None:
+                if config is not None and config is not _owned_default_application.config:
+                    raise RuntimeError("owned application config selection is immutable")
+                application = _application_lifecycle.get()
+                require_inference_application(application)
+                return application
+            if config is not None and _default_config is not config:
+                # Explicit entrypoint configuration is startup authority.  A
+                # bound prior graph must finish its cleanup before a different
+                # configuration can build or publish a replacement.
+                claim = _claim_default_runtime_cleanup()
+                if claim is None:
+                    _default_config = config
+                    _application_lifecycle.reset()
+            if claim is None:
+                application = _application_lifecycle.get()
+                if type(application) is not Application:
+                    raise ValueError("invalid legacy membership binding: exact default Application required")
+                if (application.config is not None or application.inference_pool is not None
+                        or application.inference_membership is not None):
+                    require_inference_application(application)
+                if config is not None and application.config is not config:
+                    logger.critical("default application was already built with a different config object -- process-wide state is inconsistent and cannot be recovered")
+                    raise RuntimeError("default application was already built without this config")
+                _bind_default_runtime_callbacks_locked(application)
+                return application
+        # Cleanup deliberately runs outside the selector lock; default_app
+        # refuses admission during this interval and then retries selection.
+        _run_claimed_default_runtime_cleanup(claim, timeout=5)
+
+
+def _artifact_mobility_operator_application() -> Application:
+    """Use only the host's existing exact graph or canonical first-start files.
+
+    No caller arguments or environment configuration selectors enter this path.
+    Once composed, the default/owned graph pins this authority until host reset.
+    """
+    if _owned_default_application is not None or _default_config is not None:
+        application = default_app()
+    else:
+        from .artifact_mobility import _load_mobility_host_config
+        application = default_app(config=_load_mobility_host_config())
+    if type(application) is not Application or type(application.config) is not SonderConfig:
+        from ..application.artifacts.mobility import MobilityJournalError
+        raise MobilityJournalError("UNAVAILABLE")
     return application
 
 
 def reset_for_tests() -> None:
-    global _default_config, _default_compute_close, _default_delegation_close
-    if _owned_default_application is not None:
-        raise RuntimeError("owned application cannot be reset")
-    close_default_runtime_resources()
-    _default_compute_close = None
-    _default_delegation_close = None
-    _default_config = None
-    _application_lifecycle.reset()
+    global _default_config
+    claim = None
+    with _default_runtime_close_lock:
+        if _owned_default_application is not None:
+            raise RuntimeError("owned application cannot be reset")
+        if _default_runtime_closing:
+            raise RuntimeError("default application cleanup is in progress")
+        claim = _claim_default_runtime_cleanup()
+    if claim is not None:
+        _run_claimed_default_runtime_cleanup(claim, timeout=5)
+    with _default_runtime_close_lock:
+        if _default_runtime_closing:
+            raise RuntimeError("default application cleanup is in progress")
+        _clear_default_runtime_callbacks_locked()
+        _default_config = None
+        _application_lifecycle.reset()
     runtime_paths.reset_home()
     ollama_endpoint.reset_typed_endpoint()

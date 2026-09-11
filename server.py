@@ -22,6 +22,7 @@ from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thre
 from sonder_runtime.platform.runtime_threads import ThreadPoolExecutor as owned_runtime_pool
 
 import collections
+import atexit
 import base64
 import contextlib
 import logging
@@ -1753,11 +1754,12 @@ def _generate_text(prompt, tier="fast", system="", temperature=0.2,
 
 _APP_GRAPH = None
 _APP_GRAPH_LOCK = threading.Lock()
+_APP_GRAPH_OWNED_BY_SERVER = False
 
 
 def _application():
     """Lazily build the SPEC-3 composition-root graph (no import-time cost)."""
-    global _APP_GRAPH
+    global _APP_GRAPH, _APP_GRAPH_OWNED_BY_SERVER
     with _APP_GRAPH_LOCK:
         if _APP_GRAPH is None:
             from sonder_runtime.bootstrap import app as _bootstrap_app
@@ -1765,7 +1767,35 @@ def _application():
                 preference_connection_factory=lambda: _open_db(),
                 preference_module_provider=lambda: preference_learning,
             )
+            _APP_GRAPH_OWNED_BY_SERVER = True
         return _APP_GRAPH
+
+
+def _close_server_owned_application(*, timeout=5) -> None:
+    """Retire only a graph that this legacy module constructed itself."""
+    global _APP_GRAPH, _APP_GRAPH_OWNED_BY_SERVER
+    with _APP_GRAPH_LOCK:
+        if not _APP_GRAPH_OWNED_BY_SERVER or _APP_GRAPH is None:
+            return
+        application = _APP_GRAPH
+        _APP_GRAPH = None
+        _APP_GRAPH_OWNED_BY_SERVER = False
+    # Never hold the legacy graph lock while a provider close can block or
+    # invoke a compatibility hook.  Externally configured graphs are left to
+    # their actual owner.
+    application.close_providers(timeout=timeout)
+
+
+def _close_server_owned_application_at_exit() -> None:
+    try:
+        _close_server_owned_application(timeout=5)
+    except Exception:
+        logging.getLogger("sonder.server").error(
+            "legacy owned application cleanup incomplete", exc_info=True,
+        )
+
+
+atexit.register(_close_server_owned_application_at_exit)
 
 
 class _TypedToolError(RuntimeError):
@@ -4739,7 +4769,7 @@ def _post(
             headers={"Content-Type": "application/json"},
         )
         def transport():
-            with ollama_endpoint.open_url(req, timeout=remaining) as resp:
+            with OLLAMA_POOL.open_url(req, timeout=remaining) as resp:
                 raw = _read_ollama_response_bytes(resp)
                 return json.loads(raw.decode("utf-8"))
 
@@ -4749,6 +4779,8 @@ def _post(
             return dispatch_provider("ollama", path, json.loads(data), transport)
         return transport()
 
+    if local_only and not ollama_endpoint.is_loopback(BASE):
+        raise ollama_pool.WorkerPoolUnavailable("local-only inference requires a loopback primary")
     if local_only or not OLLAMA_POOL.enabled:
         return send(BASE)
     model_hint = payload.get("model") if isinstance(payload, dict) else None
@@ -4820,7 +4852,7 @@ def _get(path: str) -> dict:
 
     def send(origin):
         req = urllib.request.Request(f"{origin}{path}")
-        with ollama_endpoint.open_url(req, timeout=15) as resp:
+        with OLLAMA_POOL.open_url(req, timeout=15) as resp:
             raw = _read_ollama_response_bytes(resp)
             return json.loads(raw.decode("utf-8"))
 
@@ -17290,6 +17322,7 @@ _AGENT_SYSTEM_OPERATOR_TOOLS = frozenset({
     # behaviour or unload their models.
     "set_context_size", "unload", "update_emotion_vectors",
     "tune_emotion_vectors", "learn_preference",
+    "ollama_pool_admin_status",
 })
 
 
@@ -22438,178 +22471,62 @@ def diagnostics() -> str:
 
 @mcp.tool()
 def status() -> str:
-    """Report Sonder Runtime's local-model state and current VRAM residency.
+    """Report cached inference capacity without contacting Ollama workers.
 
-    Use this to check whether the GPU is busy before offloading, or to confirm models pulled.
+    Inventory and residency remain unknown until explicitly inspected. Use
+    ollama_pool_admin_status for authorized cached detail or a bounded refresh.
     """
-    _maybe_live_reload()
-    if OLLAMA_POOL.enabled:
-        OLLAMA_POOL.refresh_capabilities()
-    try:
-        tags = _inventory_rows_policy(_get("/api/tags"), "/api/tags")
-        ps = _inventory_rows_policy(_get("/api/ps"), "/api/ps")
-    except ModelCallError as error:
-        message = _format_runtime_model_call_error_policy(
-            error,
-            endpoint_loopback=_ollama_endpoint_is_local(),
-            display=_ollama_display(),
-        )
-        return "\n".join((message, *OLLAMA_POOL.operator_status_lines()))
-    except urllib.error.URLError as e:
-        return "\n".join((
-            f"ERROR contacting Ollama at {_ollama_display()}: {e}",
-            *OLLAMA_POOL.operator_status_lines(),
-        ))
+    summary = OLLAMA_POOL.summary()
+    queue = summary["queue"]
+    return "\n".join((
+        "Ollama pool: %s; %d/%d eligible; capacity=%d; queue=%d/%d; %s" % (
+            summary["admission"], summary["eligible_worker_count"], summary["worker_count"],
+            summary["available_capacity"], queue["waiting"], queue["limit"], summary["membership_state"],
+        ),
+        "Capability cache: %s; age=%s" % (
+            summary["refresh_state"], "unknown" if summary["refresh_age_seconds"] is None
+            else "%ss" % summary["refresh_age_seconds"],
+        ),
+        "Request placement: whole-worker; model sharding unavailable; indefinite scale unavailable.",
+        "Installed inventory and live residency: unknown (cached status does not probe).",
+    ))
 
-    installed = _inventory_model_names(tags)
-    loaded = [line for line in map(_residency_display, ps) if line]
-    tier_lines = [
-        f"  {k}={v}" + ("  [CLOUD - leaves machine]" if _is_cloud_tier(k, v) else "  [local Ollama]")
-        for k, v in available_tiers(
-            include_disabled=_cloud_allowed_policy(os.environ)
-        ).items()
-    ]
-    if not _ollama_endpoint_is_local():
-        tier_lines = [
-            line.replace("  [local Ollama]", "  [REMOTE OLLAMA - leaves machine]")
-            for line in tier_lines
-        ]
-    worker_lines = []
-    if OLLAMA_POOL.enabled:
-        def _fetch_worker_tags(origin):
-            req = urllib.request.Request(f"{origin}/api/tags")
-            with ollama_endpoint.open_url(req, timeout=5) as resp:
-                raw = _read_ollama_response_bytes(resp)
-                return json.loads(raw.decode("utf-8"))
 
-        # Best-effort per-worker inventory refresh: it feeds the pool's
-        # model-affinity ordering and the operator's health readout, and a
-        # worker that cannot answer keeps its previous inventory record.
-        inventory = OLLAMA_POOL.refresh_inventory(_fetch_worker_tags)
-        for snapshot in OLLAMA_POOL.snapshots():
-            health = (
-                "probing" if snapshot.probing
-                else "ok" if snapshot.healthy
-                else "cooling down"
-            )
-            worker_lines.append(
-                "  worker %s: %s, inflight=%d, failures=%d, trips=%d, "
-                "latency=%.0fms, models=%s" % (
-                    snapshot.worker_id, health, snapshot.inflight,
-                    snapshot.consecutive_failures, snapshot.trips,
-                    snapshot.ewma_latency_ms,
-                    inventory.get(snapshot.worker_id, "?"),
-                )
-            )
-    lines = [
-        "Unsafe lab mode: %s" % unsafe_lab.status_line(),
-        f"Ollama @ {_ollama_display()} ({ollama_endpoint.locality(BASE)})",
-        "Ollama workers: %d configured (%d remote; least-inflight, model POSTs never fail over)" % (
-            len(OLLAMA_POOL.origins),
-            sum(1 for origin in OLLAMA_POOL.origins if not ollama_endpoint.is_loopback(origin)),
-        ),
-        *worker_lines,
-        "Ollama worker TLS: %s; idempotent control reads may fail over" % (
-            OLLAMA_POOL.status()["tls_verification"],
-        ),
-        "Tiers:",
-        *tier_lines,
-        f"Learning tiers: {', '.join(sorted(LEARN_TIERS)) if LEARN_TIERS else '(none)'}",
-        f"Installed/registered models: {', '.join(installed) if installed else '(none)'}",
-        f"Resident in Ollama now: {', '.join(loaded) if loaded else '(none loaded)'}",
-        f"local keep_alive: {KEEP_ALIVE}",
-        "loopback retry: %d transient retry(s), %dms base delay; remote/cloud retries off" % (
-            _local_model_retries_policy(), int(_local_retry_delay_policy(1) * 1000),
-        ),
-        "local runtime: threads={num_thread}, gpu_layers={num_gpu}, batch={num_batch}".format(
-            **_platform_local_runtime_summary(
-                _platform_local_model_options(
-                    0.2,
-                    1,
-                    SESSION_NUM_CTX,
-                    native_context=context_policy.native,
-                    environ=os.environ,
-                ),
-                _platform_requested_context(
-                    SESSION_NUM_CTX,
-                    default_value=SESSION_NUM_CTX,
-                ),
-            )
-        ),
-    ]
+def _ollama_pool_admin_status_data(*, principal: str, refresh=False, cursor="", page_size=32):
+    """Internal page operation; the calling surface must authorize first."""
+    if type(refresh) is not bool:
+        return {"error": "invalid_request"}
     try:
-        hardware_report = sonder_hardware.get_profile(workload="general")
-        hardware = hardware_report.get("hardware") or {}
-        capabilities = (hardware_report.get("recommendation") or {}).get("capabilities") or {}
-        execution = (hardware_report.get("recommendation") or {}).get("model_execution") or {}
-        backend_names = ",".join(capabilities.get("backend_candidates") or ("cpu",))
-        free_vram = capabilities.get("vram_free_gb")
-        vram_text = "%s GB free VRAM" % free_vram if free_vram is not None else "VRAM unknown"
-        lines.append(
-            "hardware: %s %s; %s; backends=%s; 30B=%s"
-            % (
-                capabilities.get("gpu_vendor", hardware.get("gpu_vendor", "unknown")),
-                capabilities.get("gpu_name", hardware.get("gpu_name", "")) or "GPU unknown",
-                vram_text, backend_names, execution.get("mode", "unknown"),
-            )
-        )
+        OLLAMA_POOL.validate_status_request(cursor=cursor, page_size=page_size, principal=principal)
+        if refresh:
+            OLLAMA_POOL.refresh_capabilities()
+        return OLLAMA_POOL.status(cursor=cursor, page_size=page_size, principal=principal)
+    except ValueError:
+        return {"error": "invalid_request"}
     except Exception:
-        lines.append("hardware: unknown (capability report unavailable)")
-    mcp_state = mcp_runtime_data()
-    provenance = mcp_state.get("provenance") or {}
-    if provenance.get("issue"):
-        lines.append(
-            "mcp runtime: ERROR %s (source root: %s)"
-            % (
-                provenance["issue"],
-                "present" if provenance.get("source_root_exists") else "missing",
-            )
-        )
-        action = _safe_mcp_recovery_action(provenance)
-        if action:
-            lines.append("mcp ACTION: %s" % action)
-    try:
-        auto = _application().automation.snapshot(include_finished=False, limit=20)
-        lines.append(
-            "autopilot: %s active, %s resumable"
-            % (auto.get("active_runs", 0), auto.get("resumable_runs", 0))
-        )
-    except Exception as exc:
-        lines.append("autopilot: ERROR %s" % exc)
-    try:
-        lines.append("npu accelerator: %s" % npu_service.diagnostics_line())
-    except Exception:
-        lines.append("npu accelerator: unknown (status unavailable)")
-    try:
-        spec = sonder_speculation.default_predictor().stats()
-        lines.append(
-            "branch predictor: %d predictions, %.0f%% accurate; "
-            "speculation %d issued, %.0f%% retired (%d states); "
-            "cost model decision~%.2fs tool~%.2fs, %.1fs hidden"
-            % (
-                spec["predictions"], spec["accuracy"] * 100,
-                spec["speculations"], spec["speculation_hit_rate"] * 100,
-                spec["transition_states"],
-                spec["ewma_decision_s"], spec["ewma_tool_s"], spec["saved_s"],
-            )
-        )
-    except Exception as exc:
-        lines.append("branch predictor: ERROR %s" % exc)
-    try:
-        source = runtime_source_update_status_data(refresh=False)
-        lines.append(
-            "source update: %s @ %s; newest %s @ %s; %s (behind %s)"
-            % (
-                str(source.get("installed_commit") or "unknown")[:12],
-                source.get("installed_commit_time") or "unknown time",
-                str(source.get("newest_commit") or "unknown")[:12],
-                source.get("newest_commit_time") or "unknown time",
-                source.get("state") or "unknown", source.get("behind", "?"),
-            )
-        )
-    except Exception as exc:
-        lines.append("source update: unavailable (%s)" % type(exc).__name__)
-    return "\n".join(lines)
+        logging.getLogger("sonder.server").warning("Ollama administrative status unavailable")
+        return {"error": "unknown"}
+
+
+@mcp.tool()
+def ollama_pool_admin_status(token: str = "", refresh: bool = False, cursor: str = "", page_size: int = 32) -> str:
+    """Read an administrator-only cached worker page; optionally refresh one bounded stale batch.
+
+    Page size is 1..128 and the full JSON page is at most 65,536 UTF-8 bytes.
+    Remote probes retain configured consent and HTTPS policy. Callers cannot
+    change configured probe batch size or parallelism. Cursors belong to one
+    administrator and roster generation. Local-open direct use is permitted.
+    """
+    principal = "local-open"
+    if token or _deployment_authenticates_callers():
+        ok, _message, account = _admin_require(token, "admin")
+        identity = str((account or {}).get("username") or (account or {}).get("id") or "").strip()
+        if not ok or not identity:
+            return json.dumps({"error": "authorization"})
+        principal = "account:" + identity
+    return json.dumps(_ollama_pool_admin_status_data(
+        principal=principal, refresh=refresh, cursor=cursor, page_size=page_size,
+    ))
 
 
 def _runtime_source_root():
@@ -24692,13 +24609,46 @@ def require_mcp_startup_safety() -> None:
 def run_mcp(*, safety_checked: bool = False) -> None:
     """Run the MCP adapter only after the process-level lab gate succeeds."""
     if not safety_checked:
-        require_mcp_startup_safety()
+        try:
+            require_mcp_startup_safety()
+        except BaseException:
+            # A direct compatibility caller may have forced lazy graph
+            # composition before it reaches the process-wide safety gate.
+            # Retire only that locally constructed graph while preserving the
+            # gate's original refusal for the caller.
+            try:
+                _close_server_owned_application(timeout=5)
+            except Exception:
+                logging.getLogger("sonder.server").error(
+                    "legacy owned application cleanup incomplete after MCP safety refusal",
+                    exc_info=True,
+                )
+            raise
+    from sonder_runtime.bootstrap.legacy_root import require_mcp_inference_binding
+
+    binding_verified = False
     try:
+        try:
+            require_mcp_inference_binding(
+                _APP_GRAPH, OLLAMA_POOL, primary_origin=BASE,
+            )
+        except ValueError:
+            raise ollama_pool.WorkerPoolUnavailable(
+                "MCP requires a trusted application membership binding for configured workers; "
+                "start with python -m sonder_runtime mcp"
+            ) from None
+        binding_verified = True
         mcp.run()
     finally:
         # Stop distributed admission before the adapter exits and give active
-        # transports a bounded chance to release their worker slots.
-        OLLAMA_POOL.drain(timeout_seconds=5.0)
+        # transports a bounded chance to release their worker slots.  A
+        # rejected membership might be an impostor object, so it must never
+        # receive even a cleanup method call.
+        try:
+            if binding_verified:
+                OLLAMA_POOL.drain(timeout_seconds=5.0)
+        finally:
+            _close_server_owned_application(timeout=5)
 
 
 if __name__ == "__main__" and not globals().get("_MCP_HOT_RELOAD_EXEC"):

@@ -7,6 +7,114 @@ import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/models.dart';
 
 void main() {
+  test('pool page parser handles v2 truncation and v1 counts', () {
+    final page = OllamaPoolPage.fromJson({
+      'schema_version': 2,
+      'worker_count': 64,
+      'page_size': 1,
+      'complete': false,
+      'next_cursor': 'opaque',
+      'omitted_worker_count': 63,
+      'serialized_bytes': 1000,
+      'workers': [
+        {
+          'origin': 'https://worker.test:11434',
+          'state': 'ready',
+          'model_count': 2048,
+          'model_preview': ['safe'],
+          'error_category': 'transport'
+        }
+      ],
+    });
+    expect(page.workerCount, 64);
+    expect(page.complete, isFalse);
+    expect(page.nextCursor, 'opaque');
+    expect(page.workers.single.modelCount, 2048);
+    expect(page.workers.single.modelPreview, ['safe']);
+    expect(page.workers.single.errorCategory, 'transport');
+    final legacy =
+        OllamaPoolPage.fromJson({'worker_count': 2, 'healthy_worker_count': 1});
+    expect(legacy.schemaVersion, 1);
+    expect(legacy.workerCount, 2);
+    expect(legacy.workers, isEmpty);
+    expect(
+        OllamaPoolWorker.fromJson({'error_category': 'secret exception'})
+            .errorCategory,
+        'unknown');
+  });
+
+  test('pool detail API sends only explicit page and refresh arguments',
+      () async {
+    late http.Request seen;
+    final client = MockClient((request) async {
+      seen = request;
+      return http.Response(
+          jsonEncode({
+            'schema_version': 2,
+            'worker_count': 1,
+            'complete': true,
+            'workers': []
+          }),
+          200);
+    });
+    await http.runWithClient(
+        () => SonderApi(baseUrl: 'https://host.test', apiKey: 'key')
+            .ollamaPoolAdminStatus(
+                refresh: true, cursor: 'opaque', pageSize: 128),
+        () => client);
+    expect(seen.url.path, '/v1/sonder/ollama-pool');
+    expect(jsonDecode(seen.body),
+        {'refresh': true, 'cursor': 'opaque', 'page_size': 128});
+  });
+
+  test('v2 pool summary shows eligible workers and bounded queue', () {
+    final info = OperationalCapabilitiesInfo.fromJson({
+      'inference': {
+        'pool': {
+          'schema_version': 2,
+          'worker_count': 64,
+          'healthy_worker_count': 63,
+          'eligible_worker_count': 60,
+          'available_capacity': 120,
+          'queue': {'waiting': 3, 'limit': 32},
+          'membership_state': 'static',
+        }
+      }
+    });
+    expect(info.workerSummary, '60/64 eligible workers');
+    expect(info.poolCapacitySummary, '120 available slots; queue 3/32; static');
+  });
+  test('external membership status is preserved only for known bounded states',
+      () {
+    final info = OperationalCapabilitiesInfo.fromJson({
+      'inference': {
+        'pool': {
+          'schema_version': 2,
+          'worker_count': 2,
+          'healthy_worker_count': 1,
+          'eligible_worker_count': 1,
+          'available_capacity': 1,
+          'queue': {'waiting': 0, 'limit': 1},
+          'membership_mode': 'external',
+          'membership_state': 'current',
+        }
+      }
+    });
+    expect(info.membershipMode, 'external');
+    expect(info.membershipState, 'current');
+    expect(info.poolCapacitySummary,
+        '1 available slots; queue 0/1; external/current');
+
+    final malformed = OperationalCapabilitiesInfo.fromJson({
+      'inference': {
+        'pool': {
+          'membership_mode': 'external',
+          'membership_state': 'private-worker.example',
+        }
+      }
+    });
+    expect(malformed.membershipState, 'unknown');
+  });
   test('extension registry fetch parses the admin projection', () async {
     late http.Request seen;
     final client = MockClient((request) async {
@@ -902,7 +1010,8 @@ void main() {
         'preferred_primary': 'primary',
         'control_state_scope': 'local-instance',
         'preference_confers_authority': false,
-        'partition_policy': 'no_promotion_without_fencing_and_acknowledged_data',
+        'partition_policy':
+            'no_promotion_without_fencing_and_acknowledged_data',
         'capabilities': {
           'private_compute': {
             'available': true,
@@ -967,9 +1076,12 @@ void main() {
           },
         },
         'mobility': {
+          'automatic_takeover_available': false,
+          'automatic_failback_available': false,
           'memory_replication_transport': {
             'available': true,
-            'reason': 'Receiver injected.',
+            'reason':
+                'Configured fixed-peer memory replication is an explicit bounded authenticated fact-only batch transport; an operator must invoke replicate_once. Every configured peer must return a durable receipt before the cursor advances; this is not quorum or high availability.',
           },
           'artifact_transfer_transport': {
             'available': false,
@@ -997,7 +1109,24 @@ void main() {
     expect(capabilities.requestLevelPooling.available, isTrue);
     expect(capabilities.modelSharding.available, isFalse);
     expect(capabilities.memoryReplicationTransport.available, isTrue);
+    expect(
+      capabilities.memoryReplicationTransport.reason,
+      contains('fixed-peer memory replication'),
+    );
+    expect(capabilities.automaticTakeoverAvailable, isFalse);
+    expect(capabilities.automaticFailbackAvailable, isFalse);
     expect(capabilities.automaticArtifactMigration.available, isFalse);
+  });
+
+  test(
+      'operational capability defaults automatic recovery flags to unavailable',
+      () {
+    final capabilities = OperationalCapabilitiesInfo.fromJson({
+      'mobility': const <String, dynamic>{},
+    });
+
+    expect(capabilities.automaticTakeoverAvailable, isFalse);
+    expect(capabilities.automaticFailbackAvailable, isFalse);
   });
 
   test('system info parses shared live execution counts', () {
@@ -1289,8 +1418,7 @@ void main() {
       });
 
       await http.runWithClient(
-        () =>
-            SonderApi(baseUrl: 'http://sonder.test').chatDetailed(const [
+        () => SonderApi(baseUrl: 'http://sonder.test').chatDetailed(const [
           ChatMessage(role: Role.user, content: 'first'),
           ChatMessage(
             role: Role.assistant,
@@ -1680,8 +1808,7 @@ void main() {
     });
 
     final text = await http.runWithClient(
-      () => SonderApi(baseUrl: 'http://sonder.test')
-          .commandHelp('/task_plan'),
+      () => SonderApi(baseUrl: 'http://sonder.test').commandHelp('/task_plan'),
       () => client,
     );
 
@@ -1724,8 +1851,7 @@ void main() {
     });
 
     final mode = await http.runWithClient(
-      () =>
-          SonderApi(baseUrl: 'http://sonder.test').fetchPermissionMode(),
+      () => SonderApi(baseUrl: 'http://sonder.test').fetchPermissionMode(),
       () => client,
     );
 
@@ -1757,8 +1883,7 @@ void main() {
       );
 
       final mode = await http.runWithClient(
-        () => SonderApi(baseUrl: 'http://sonder.test')
-            .fetchPermissionMode(),
+        () => SonderApi(baseUrl: 'http://sonder.test').fetchPermissionMode(),
         () => client,
       );
 
@@ -1777,8 +1902,7 @@ void main() {
       // A record that names no mode at all is not a mode: usable is false, so
       // the caller hides the indicator rather than rendering a blank one.
       final empty = await http.runWithClient(
-        () => SonderApi(baseUrl: 'http://sonder.test')
-            .fetchPermissionMode(),
+        () => SonderApi(baseUrl: 'http://sonder.test').fetchPermissionMode(),
         () => MockClient((request) async => http.Response('{}', 200)),
       );
       expect(empty!.isUsable, isFalse);
@@ -1790,8 +1914,7 @@ void main() {
     'permission mode reports an absent route as unsupported, not as a mode',
     () async {
       final missing = await http.runWithClient(
-        () => SonderApi(baseUrl: 'http://sonder.test')
-            .fetchPermissionMode(),
+        () => SonderApi(baseUrl: 'http://sonder.test').fetchPermissionMode(),
         () => MockClient((request) async => http.Response('', 404)),
       );
       expect(missing, isNull);
@@ -1799,16 +1922,14 @@ void main() {
       // Anything else is a failure, never a silently-invented mode.
       await expectLater(
         http.runWithClient(
-          () => SonderApi(baseUrl: 'http://sonder.test')
-              .fetchPermissionMode(),
+          () => SonderApi(baseUrl: 'http://sonder.test').fetchPermissionMode(),
           () => MockClient((request) async => http.Response('nope', 503)),
         ),
         throwsA(isA<SonderException>()),
       );
       await expectLater(
         http.runWithClient(
-          () => SonderApi(baseUrl: 'http://sonder.test')
-              .fetchPermissionMode(),
+          () => SonderApi(baseUrl: 'http://sonder.test').fetchPermissionMode(),
           () => MockClient((request) async => http.Response('', 401)),
         ),
         throwsA(isA<SonderException>()),
@@ -1839,8 +1960,8 @@ void main() {
       });
 
       final mode = await http.runWithClient(
-        () => SonderApi(baseUrl: 'http://sonder.test')
-            .setPermissionMode('plan'),
+        () =>
+            SonderApi(baseUrl: 'http://sonder.test').setPermissionMode('plan'),
         () => client,
       );
 

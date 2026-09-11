@@ -1,5 +1,6 @@
 """Bounded recovery handles never replay an ambiguous callback."""
 
+from contextlib import contextmanager
 import pytest
 from concurrent.futures import ThreadPoolExecutor
 from tests.test_app_managed_authority import managed, control
@@ -87,7 +88,7 @@ def test_exact_recovery_routes(method, path, action):
     assert _route(method, "/v1/app-control" + path)[0] == action
 
 
-def _registry(managed, factory_hook=None, executor=None):
+def _registry(managed, factory_hook=None, executor=None, operation_scope=None):
     from sonder_runtime.bootstrap.app_work_recovery_registry import (
         AppWorkRecoveryRegistry,
     )
@@ -119,9 +120,45 @@ def _registry(managed, factory_hook=None, executor=None):
             authority=authority,
             attempt_factory=factory,
             executor=executor or ThreadPoolExecutor(max_workers=1),
+            operation_scope=operation_scope,
         ),
         called,
     )
+
+
+def test_nonclosing_recovery_callback_has_one_owned_operation_scope(managed):
+    import time
+
+    events = []
+
+    @contextmanager
+    def scope(selection):
+        events.append(("enter", selection))
+        try:
+            yield
+        finally:
+            events.append(("exit", selection))
+
+    registry, _ = _registry(managed, operation_scope=scope)
+    selection = managed[1]
+    try:
+        result = registry.prepare(
+            selection,
+            work_id="missing",
+            attachment_command_id="attach",
+            completion_command_id="complete",
+        )
+        entry = registry._entries[result["attempt_id"]]
+        deadline = time.monotonic() + 10
+        while entry.busy and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert events == [("enter", selection), ("exit", selection)]
+        registry.act(selection, entry.identity, "close")
+        while entry.busy and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert events == [("enter", selection), ("exit", selection)]
+    finally:
+        registry.close()
 
 
 def test_busy_status_keeps_fresh_admission_without_competing_history_scan(

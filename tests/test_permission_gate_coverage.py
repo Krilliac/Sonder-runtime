@@ -451,6 +451,31 @@ def test_recovery_posture_is_mapped_and_graded_as_the_read_only_projection():
     ).action == pm.ALLOW
 
 
+def test_artifact_mobility_receipt_reads_are_mapped_without_outbound_actions():
+    """The REPL only exposes local receipt list/status reads from this family."""
+    maps = _maps()
+    assert maps["console"].get("/artifact-mobility") == (
+        "artifact-mobility",
+    )
+    assert pm.risk_of("artifact-mobility") == "safe"
+    assert pm.decide(
+        "artifact-mobility", mode=pm.PLAN, rule_lookup=lambda _tool: None,
+    ).action == pm.ALLOW
+
+    assert pm.risk_of("artifact_mobility_receipts") == pm.UNCLASSIFIED
+    command_entry = command_catalog.by_name("/artifact-mobility")
+    assert command_entry is not None and command_entry.native
+    assert command_entry.risk == "safe"
+
+    source = open(sonder_repl.__file__, encoding="utf-8").read()
+    command = source.split("def _artifact_mobility_command", 1)[1].split(
+        "def _lanes_command", 1
+    )[0]
+    assert 'parts == ["list"]' in command
+    assert 'parts[0] == "status"' in command
+    assert '"send"' not in command and '"resume"' not in command
+
+
 def test_location_is_gated_rather_than_excused():
     """`/location` grants IP-geolocation consent, so it is not display only.
 
