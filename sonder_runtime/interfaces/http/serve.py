@@ -4788,7 +4788,8 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             try:
-                import sonder_runtime.adapters.updates.engine as sonder_update_engine
+                import importlib as _importlib_sonder_update
+sonder_update_engine = _importlib_sonder_update.import_module("sonder_runtime.adapters.updates.engine")
 
                 payload = sonder_update_engine.UpdateManager().status()
             except Exception as error:

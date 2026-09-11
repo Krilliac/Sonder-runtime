@@ -49,8 +49,10 @@ def configure_legacy_interfaces(runtime: ModuleType | None = None) -> None:
     HTTP and REPL modules remain importable and testable without importing it.
     """
     logger.debug(f"configure_legacy_interfaces: runtime_provided={runtime is not None}")
-    from sonder_runtime.interfaces.http import serve
-    from sonder_runtime.interfaces.repl import repl
+    import importlib
+
+    serve = importlib.import_module("sonder_runtime.interfaces.http.serve")
+    repl = importlib.import_module("sonder_runtime.interfaces.repl.repl")
 
     runtime = runtime or runtime_proxy()
     logger.warning("legacy HTTP/REPL interfaces still in use, deprecated code path exercised")
