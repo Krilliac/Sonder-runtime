@@ -1098,8 +1098,28 @@ class RuntimeLifecycle:
     def live_payload(self) -> dict:
         return {"status": "alive"}
 
+    def _ensure_ollama_dependency_probed(self) -> None:
+        """Start or refresh the Ollama probe if readiness is still unknown.
+
+        Live-reload / child re-entry can rebuild the lifecycle singleton without
+        re-running main()'s begin_ollama_probe(), leaving /ready stuck on
+        "required dependency ollama is unknown" while Ollama itself is fine.
+        """
+        snapshot = self.tracker.snapshot()
+        ollama = next((dep for dep in snapshot.dependencies if dep.name == "ollama"), None)
+        if ollama is None or ollama.state is not DependencyState.UNKNOWN:
+            return
+        self.begin_ollama_probe()
+        still = next(
+            (dep for dep in self.tracker.snapshot().dependencies if dep.name == "ollama"),
+            None,
+        )
+        if still is not None and still.state is DependencyState.UNKNOWN:
+            self.probe_ollama_once()
+
     def ready_payload(self) -> tuple[int, dict]:
         self.adopt_legacy_start()
+        self._ensure_ollama_dependency_probed()
         ready, reason = self.tracker.ready_for_traffic()
         return (200 if ready else 503), {
             "ready": ready,
@@ -1109,6 +1129,7 @@ class RuntimeLifecycle:
 
     def health_payload(self) -> dict:
         self.adopt_legacy_start()
+        self._ensure_ollama_dependency_probed()
         snapshot = self.tracker.snapshot()
         payload = snapshot.as_dict()
         payload["build"] = self._build.as_dict()
