@@ -9,11 +9,30 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
+from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
 
 SERVE_TEMPERATURE_DEFAULT = 0.2
+
+_temperature_override = threading.local()
+
+
+@contextmanager
+def serve_temperature_override(value: float):
+    """Temporarily force serve_temperature() for the current thread only."""
+    previous = getattr(_temperature_override, "value", None)
+    _temperature_override.value = float(value)
+    try:
+        yield float(value)
+    finally:
+        if previous is None:
+            if hasattr(_temperature_override, "value"):
+                delattr(_temperature_override, "value")
+        else:
+            _temperature_override.value = previous
 
 
 def serve_temperature() -> float:
@@ -23,6 +42,9 @@ def serve_temperature() -> float:
     legacy contract: malformed values use the default, while finite values
     are clamped to Ollama's inclusive ``0.0``–``2.0`` range.
     """
+    override = getattr(_temperature_override, "value", None)
+    if override is not None:
+        return float(override)
     raw = os.environ.get("SONDER_SERVE_TEMPERATURE", "").strip()
     if not raw:
         logger.debug(f"serve_temperature: using default={SERVE_TEMPERATURE_DEFAULT}")
