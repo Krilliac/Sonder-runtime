@@ -957,7 +957,7 @@
       ]
     },
     {
-      "file_count": 41,
+      "file_count": 44,
       "name": "platform",
       "python_files": [
         "sonder_runtime/platform/__init__.py",
@@ -996,6 +996,9 @@
         "sonder_runtime/platform/secret_presence.py",
         "sonder_runtime/platform/service_state.py",
         "sonder_runtime/platform/shutdown.py",
+        "sonder_runtime/platform/spanda_config.py",
+        "sonder_runtime/platform/spanda_http.py",
+        "sonder_runtime/platform/spanda_rsc.py",
         "sonder_runtime/platform/speculation.py",
         "sonder_runtime/platform/system_profile.py",
         "sonder_runtime/platform/toolchain_policy.py",

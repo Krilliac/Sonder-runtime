@@ -10,7 +10,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: feat/spanda-rsc
           fetch-depth: 0
@@ -29,3 +29,4 @@ jobs:
           fi
           git commit -m "fix(surface): sync loop docstring after MCP cleandoc"
           git push origin HEAD:feat/spanda-rsc
+

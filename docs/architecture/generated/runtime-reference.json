@@ -9140,6 +9140,12 @@
       "type": "ControlStateRehearsalConfig"
     },
     {
+      "default": null,
+      "field": "spanda",
+      "section": "root",
+      "type": "SpandaConfig"
+    },
+    {
       "default": "[redacted]",
       "field": "api_key",
       "section": "secrets",
@@ -10145,6 +10151,42 @@
       "type": "bool"
     },
     {
+      "default": false,
+      "field": "enabled",
+      "section": "spanda",
+      "type": "bool"
+    },
+    {
+      "default": 3,
+      "field": "k",
+      "section": "spanda",
+      "type": "int"
+    },
+    {
+      "default": 0.35,
+      "field": "threshold",
+      "section": "spanda",
+      "type": "float"
+    },
+    {
+      "default": false,
+      "field": "block",
+      "section": "spanda",
+      "type": "bool"
+    },
+    {
+      "default": 0.5,
+      "field": "alpha",
+      "section": "spanda",
+      "type": "float"
+    },
+    {
+      "default": 0.2,
+      "field": "sample_temperature",
+      "section": "spanda",
+      "type": "float"
+    },
+    {
       "default": "",
       "field": "home",
       "section": "state",
@@ -10172,11 +10214,11 @@
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
     "commands": 319,
-    "configuration": 193,
+    "configuration": 200,
     "events": 43,
     "tools": 213
   },
-  "digest": "1428085ad492b0755e384626faa2b97ad0836f0e53a5542af34f8b66f4d5ef58",
+  "digest": "e16d8e0566916d7928554146ad49275d266f6ff2d6f0a9af54b5b12818f42a81",
   "events": [
     {
       "name": "session.started",
@@ -10650,7 +10692,7 @@
     "server.py": "675a1a2ce63f75cf537a5bbc35569c501abeea7d4f02feada9a7700b90659171",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
-    "sonder_runtime/platform/config.py": "1d811a362d2a912a726c98e6bfe2689b1c220c900bd19f82cbbb69f8fe88c055",
+    "sonder_runtime/platform/config.py": "27c2eee84240cdc4e044020fda72168229f2b3810e4f130d1e85bf5f7ad229ba",
     "sonder_runtime/platform/memory_replication_config.py": "1981bbc57a4e6442fc1b770d9c37cc766c66334089697d762e9b9b7ed578d179"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",

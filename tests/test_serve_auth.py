@@ -2903,8 +2903,10 @@ def test_cors_denies_hostile_origin_and_echoes_only_allowlisted(monkeypatch):
         assert headers["Access-Control-Allow-Origin"] == "https://allowed.example"
         assert headers["Vary"] == "Origin"
         assert headers["Access-Control-Expose-Headers"] == (
-            "X-Sonder-Elapsed-Ms, X-Sonder-Correlation-Id"
+            "X-Sonder-Elapsed-Ms, X-Sonder-Correlation-Id, X-Sonder-Spanda-Rsc, "
+            "X-Sonder-Spanda-Clusters, X-Sonder-Spanda-Decision, X-Sonder-Spanda-Uncertain"
         )
+        assert "X-Sonder-Spanda" in headers["Access-Control-Allow-Headers"]
         assert "Idempotency-Key" in headers["Access-Control-Allow-Headers"]
         status, _, _ = _request(
             port,
