@@ -3836,6 +3836,7 @@ class Handler(BaseHTTPRequestHandler):
         self._request_body_consumed = False
         self._app_control_request = False
         self._memory_replication_request = False
+        self._spanda_headers = None
         if handle_memory_replication(
                 self, "OPTIONS", _MEMORY_REPLICATION_RECEIVER):
             return
@@ -4367,6 +4368,7 @@ class Handler(BaseHTTPRequestHandler):
         self._request_body_consumed = False
         self._app_control_request = False
         self._memory_replication_request = False
+        self._spanda_headers = None
         if handle_memory_replication(
                 self, "PUT", _MEMORY_REPLICATION_RECEIVER):
             return
@@ -4407,6 +4409,7 @@ class Handler(BaseHTTPRequestHandler):
         self._request_body_consumed = False
         self._app_control_request = False
         self._memory_replication_request = False
+        self._spanda_headers = None
         if handle_memory_replication(
                 self, "GET", _MEMORY_REPLICATION_RECEIVER):
             return
@@ -5451,6 +5454,7 @@ class Handler(BaseHTTPRequestHandler):
         self._request_body_consumed = False
         self._app_control_request = False
         self._memory_replication_request = False
+        self._spanda_headers = None
         if handle_memory_replication(
                 self, "POST", _MEMORY_REPLICATION_RECEIVER):
             return
@@ -6345,17 +6349,21 @@ class Handler(BaseHTTPRequestHandler):
                             _sample_turns = []
                             with _serve_temp_override(_sample_temp):
                                 for _si in range(int(_spanda_policy.k)):
+                                    # Candidate samples must not admit durable
+                                    # session capture; only the consensus turn
+                                    # is captured once below via
+                                    # `_capture_live_session_turn`.
                                     _sturn = _run_prompt(
                                         prompt,
                                         history,
                                         model_selector,
                                         context_size=context_size,
-                                        session=storage_session,
+                                        session="",
                                         project=storage_project,
                                         state=state,
                                         return_result=True,
-                                        capture_request_id=self._correlation(),
-                                        capture_turn_id=uuid.uuid4().hex,
+                                        capture_request_id="",
+                                        capture_turn_id="",
                                         capture_stream=False,
                                         cache_scope="",
                                         augment=not bool(context.get("account")),
@@ -6399,6 +6407,14 @@ class Handler(BaseHTTPRequestHandler):
                             turn = next(
                                 t for t in _sample_turns if t.content == _dom
                             )
+                            # Restore learning-feedback pointers to the answer
+                            # the client actually receives (not the last sample).
+                            state.last_iid = turn.iid
+                            state.last_run_source = turn.run_source
+                            state.last_response = turn.content
+                            # No provider admission from samples; finalize via
+                            # capture_turn on the consensus content only.
+                            turn = replace(turn, provider_capture=None)
                             content = _dom
                             response_iid = turn.iid
                             response_reasoning = turn.thinking
@@ -6669,6 +6685,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("X-Sonder-Elapsed-Ms", str(max(0, int(elapsed_ms))))
             if getattr(self, "_correlation_id", ""):
                 self.send_header("X-Sonder-Correlation-Id", self._correlation_id)
+            for _spanda_name, _spanda_value in (getattr(self, "_spanda_headers", None) or {}).items():
+                self.send_header(str(_spanda_name), str(_spanda_value))
             # No Content-Length on an SSE body — signal end-of-response by closing the
             # connection, otherwise HTTP/1.1 keep-alive leaves clients blocked on read().
             self.send_header("Connection", "close")
