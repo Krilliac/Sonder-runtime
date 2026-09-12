@@ -59,7 +59,7 @@ factual recall.
 - Vendored pure Python: `sonder_runtime/platform/spanda_rsc.py` (no hard dep on
   BSL Rust gateway / PyPI `spnda`).
 - Config: `sonder_runtime/platform/spanda_config.py` + `[spanda]` in typed loader.
-- HTTP: `sonder_runtime/interfaces/http/spanda_serve.py` wired from `serve.py`.
+- HTTP: `sonder_runtime/platform/spanda_http.py` wired from `serve.py`.
 
 Reference: [Spnda](https://github.com/Adarshent/Spnda), article intent on
 lexical entropy for production latency.

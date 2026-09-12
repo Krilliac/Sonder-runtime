@@ -7,7 +7,7 @@ import pytest
 
 from sonder_runtime.platform.spanda_rsc import compute_rsc, normalize_answer
 from sonder_runtime.platform.config import ConfigError, load_config
-from sonder_runtime.interfaces.http.spanda_serve import (
+from sonder_runtime.platform.spanda_http import (
     evaluate_samples,
     resolve_spanda_policy,
     response_headers,

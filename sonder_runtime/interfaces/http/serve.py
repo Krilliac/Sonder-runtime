@@ -6318,7 +6318,7 @@ class Handler(BaseHTTPRequestHandler):
                     if structured_schema is None and reply is not None:
                         content = reply
                     elif structured_schema is None:
-                        from sonder_runtime.interfaces.http.spanda_serve import (
+                        from sonder_runtime.platform.spanda_http import (
                             BLOCK_STATUS as _SPANDA_BLOCK_STATUS,
                             evaluate_samples as _spanda_evaluate,
                             resolve_spanda_policy as _resolve_spanda_policy,
