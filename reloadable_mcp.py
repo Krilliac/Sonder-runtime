@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -166,6 +167,32 @@ def _resource_manager_signature(manager: ResourceManager) -> str:
 
 def _prompt_manager_signature(manager: PromptManager) -> str:
     return _model_signature(manager.list_prompts())
+
+
+
+
+def _sync_loop_tool_docstring(fn, action_types) -> None:
+    """Keep ``loop.__doc__`` vocabulary aligned with ``_LOOP_ACTION_TYPES``.
+
+    FastMCP/MCPServer applies ``inspect.cleandoc`` when registering tools, which
+    strips the indent before ``Argument shapes``. The in-module rewrite in
+    ``server.py`` historically looked for that indent and silently no-oped, so
+    the docstring lagged aliases the unknown-action reply already listed. Apply
+    the sync here, after cleandoc, whenever the ``loop`` tool is registered.
+    """
+    if not action_types:
+        return
+    doc = fn.__doc__ or ""
+    marker = "All valid `type` values:"
+    marker_at = doc.find(marker)
+    if marker_at < 0:
+        return
+    tail_match = re.search(r"\n\n[ \t]*Argument shapes", doc[marker_at:])
+    if tail_match is None:
+        return
+    tail_at = marker_at + tail_match.start()
+    head = doc[: marker_at + len(marker)]
+    fn.__doc__ = head + " " + ", ".join(action_types) + "." + doc[tail_at:]
 
 
 class ReloadableMCPServer(MCPServer):
@@ -346,6 +373,26 @@ class ReloadableMCPServer(MCPServer):
                 manager.remove_tool(name)
                 return
         super().remove_tool(name)
+
+
+    def tool(self, *args, **kwargs):
+        """Register a tool; keep ``loop`` docstring vocabulary in lockstep."""
+        inner = super().tool(*args, **kwargs)
+
+        def decorator(fn):
+            result = inner(fn)
+            tool_name = kwargs.get("name") or getattr(fn, "__name__", "")
+            if tool_name != "loop" and getattr(fn, "__name__", "") != "loop":
+                return result
+            module = sys.modules.get(getattr(fn, "__module__", "") or "")
+            action_types = getattr(module, "_LOOP_ACTION_TYPES", None) if module else None
+            target = result if getattr(result, "__doc__", None) is not None else fn
+            _sync_loop_tool_docstring(target, action_types)
+            if target is not fn:
+                _sync_loop_tool_docstring(fn, action_types)
+            return result
+
+        return decorator
 
     def add_resource(self, resource) -> None:
         with self._reload_lock:

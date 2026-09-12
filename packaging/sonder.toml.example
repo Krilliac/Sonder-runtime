@@ -119,3 +119,12 @@ target = "/var/backups/sonder"
 retention_daily = 7
 retention_weekly = 4
 retention_monthly = 6
+
+[spanda]
+# Exact-match semantic-consistency gate (R_sc). Default OFF.
+enabled = false
+k = 3
+threshold = 0.35
+block = false
+alpha = 0.5
+sample_temperature = 0.2

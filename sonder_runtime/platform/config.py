@@ -57,6 +57,7 @@ from sonder_runtime.platform.memory_replication_config import (
     MemoryReplicationPeerConfig,
     memory_replication_errors,
 )
+from sonder_runtime.platform.spanda_config import SpandaConfig, spanda_errors
 from sonder_runtime.platform import unsafe_lab_policy
 from sonder_runtime.platform.config_environment import (
     EnvironmentFileError,
@@ -444,6 +445,7 @@ class SonderConfig:
     control_state_rehearsal: ControlStateRehearsalConfig = field(
         default_factory=ControlStateRehearsalConfig
     )
+    spanda: SpandaConfig = field(default_factory=SpandaConfig)
 
     def as_redacted_dict(self) -> dict:
         out: dict = {
@@ -466,6 +468,7 @@ class SonderConfig:
             "capacity",
             "observability",
             "backup",
+            "spanda",
         ):
             value = getattr(self, section)
             out[section] = {
@@ -717,6 +720,7 @@ _SECTION_TYPES = {
     "capacity": CapacityConfig,
     "observability": ObservabilityConfig,
     "backup": BackupConfig,
+    "spanda": SpandaConfig,
 }
 
 
@@ -767,6 +771,11 @@ def _apply_section(current, section_name: str, raw: dict, errors: list[str]):
                 errors.append(f"[{section_name}].{key} must be an integer")
                 continue
             updates[key] = value
+        elif expected is float:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                errors.append(f"[{section_name}].{key} must be a number")
+                continue
+            updates[key] = float(value)
         else:
             if not isinstance(value, str):
                 errors.append(f"[{section_name}].{key} must be a string")
@@ -1330,6 +1339,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     errors.extend(artifact_mobility_errors(config))
     errors.extend(_artifact_mobility_storage_errors(config))
     errors.extend(control_state_rehearsal_errors(config))
+    errors.extend(spanda_errors(config))
     errors.extend(deployment_errors(config))
     if config.schema_version != 1:
         errors.append(
