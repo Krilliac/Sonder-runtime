@@ -46,6 +46,7 @@ from sonder_runtime.interfaces.http.app_control import handle_app_control, is_ap
 
 _ARTIFACT_TRANSFER_BINDING = None
 _ARTIFACT_TRANSFER_CONFIG = None
+_SPANDA_CONFIG = None
 _MEMORY_REPLICATION_RECEIVER = None
 _MEMORY_REPLICATION_SERVICE = None
 _ACCOUNT_LOGOUT_ADMISSION = threading.BoundedSemaphore(2)
@@ -916,6 +917,8 @@ def configure_typed_config(config) -> None:
     _APP_CONTROL_BINDING = candidate_control
     from sonder_runtime.adapters.web import listener_probe
     listener_probe.configure_typed_config(config)
+    global _SPANDA_CONFIG
+    _SPANDA_CONFIG = config.spanda
     CONFIGURED_PORT = server_config.port
     API_KEY = config.secrets.api_key
     AUTH_SECRET = config.secrets.auth_secret
@@ -3800,11 +3803,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(
                 "Access-Control-Allow-Headers",
                 "Content-Type, Authorization, X-Sonder-Account-Token, "
-                "X-Sonder-Bootstrap-Secret, X-Sonder-App-Control, Idempotency-Key",
+                "X-Sonder-Bootstrap-Secret, X-Sonder-App-Control, X-Sonder-Spanda, Idempotency-Key",
             )
             self.send_header(
                 "Access-Control-Expose-Headers",
-                "X-Sonder-Elapsed-Ms, X-Sonder-Correlation-Id",
+                "X-Sonder-Elapsed-Ms, X-Sonder-Correlation-Id, X-Sonder-Spanda-Rsc, X-Sonder-Spanda-Clusters, X-Sonder-Spanda-Decision, X-Sonder-Spanda-Uncertain",
             )
 
     def send_error(self, code, message=None, explain=None):
@@ -3833,6 +3836,7 @@ class Handler(BaseHTTPRequestHandler):
         self._request_body_consumed = False
         self._app_control_request = False
         self._memory_replication_request = False
+        self._spanda_headers = None
         if handle_memory_replication(
                 self, "OPTIONS", _MEMORY_REPLICATION_RECEIVER):
             return
@@ -4124,6 +4128,9 @@ class Handler(BaseHTTPRequestHandler):
         if _request_route(getattr(self, 'path', '')) == '/v1/sonder/logout':
             headers = {**(headers or {}), 'Cache-Control': 'no-store',
                        'Referrer-Policy': 'no-referrer'}
+        spanda_headers = getattr(self, "_spanda_headers", None)
+        if spanda_headers:
+            headers = {**spanda_headers, **(headers or {})}
         _serve_logger.debug(f"_send_json_payload: status={status}")
         body = json.dumps(payload).encode("utf-8")
         # Keep this low-level delivery helper usable by the focused socket
@@ -4361,6 +4368,7 @@ class Handler(BaseHTTPRequestHandler):
         self._request_body_consumed = False
         self._app_control_request = False
         self._memory_replication_request = False
+        self._spanda_headers = None
         if handle_memory_replication(
                 self, "PUT", _MEMORY_REPLICATION_RECEIVER):
             return
@@ -4401,6 +4409,7 @@ class Handler(BaseHTTPRequestHandler):
         self._request_body_consumed = False
         self._app_control_request = False
         self._memory_replication_request = False
+        self._spanda_headers = None
         if handle_memory_replication(
                 self, "GET", _MEMORY_REPLICATION_RECEIVER):
             return
@@ -5445,6 +5454,7 @@ class Handler(BaseHTTPRequestHandler):
         self._request_body_consumed = False
         self._app_control_request = False
         self._memory_replication_request = False
+        self._spanda_headers = None
         if handle_memory_replication(
                 self, "POST", _MEMORY_REPLICATION_RECEIVER):
             return
@@ -6312,38 +6322,137 @@ class Handler(BaseHTTPRequestHandler):
                     if structured_schema is None and reply is not None:
                         content = reply
                     elif structured_schema is None:
-                        turn = _run_prompt(
-                            prompt,
-                            history,
-                            model_selector,
-                            context_size=context_size,
-                            session=storage_session,
-                            project=storage_project,
-                            state=state,
-                            return_result=True,
-                            capture_request_id=self._correlation(),
-                            capture_turn_id=uuid.uuid4().hex, capture_stream=stream,
-                            # The deterministic request cache is offered only
-                            # to this plain, non-streaming generation
-                            # fall-through: every control/tool/web/work/agent
-                            # route has already returned above, and streamed
-                            # or structured turns never receive a scope.  An
-                            # empty scope is an unconditional cache denial.
-                            cache_scope=(
-                                "" if stream else _request_cache_scope(context)
-                            ),
-                            # Account-backed deployments intentionally do not
-                            # inject or train the legacy global lesson store.
-                            # Their durable chat/session project IDs remain
-                            # principal-namespaced above.
-                            augment=not bool(context.get("account")),
-                            metrics=_lifecycle.metrics,
+                        from sonder_runtime.platform.spanda_http import (
+                            BLOCK_STATUS as _SPANDA_BLOCK_STATUS,
+                            evaluate_samples as _spanda_evaluate,
+                            resolve_spanda_policy as _resolve_spanda_policy,
+                            response_headers as _spanda_response_headers,
+                            uncertainty_error_body as _spanda_uncertainty_body,
                         )
-                        content = turn.content
-                        response_iid = turn.iid
-                        response_reasoning = turn.thinking
-                        response_model = turn.resolved_model
-                        response_tier = turn.resolved_tier
+                        from sonder_runtime.interfaces.http.serve_policy import (
+                            serve_temperature as _live_serve_temperature,
+                            serve_temperature_override as _serve_temp_override,
+                        )
+                        _spanda_policy = _resolve_spanda_policy(
+                            _SPANDA_CONFIG, self.headers
+                        )
+                        self._spanda_headers = None
+                        if _spanda_policy.active:
+                            # Multi-sample exact-match R_sc. Disable request
+                            # cache so each draw is independent; force temp>0.
+                            _sample_temp = max(
+                                float(_spanda_policy.sample_temperature),
+                                float(_live_serve_temperature()) or 0.0,
+                                0.05,
+                            )
+                            _samples = []
+                            _sample_turns = []
+                            with _serve_temp_override(_sample_temp):
+                                for _si in range(int(_spanda_policy.k)):
+                                    # Candidate samples must not admit durable
+                                    # session capture; only the consensus turn
+                                    # is captured once below via
+                                    # `_capture_live_session_turn`.
+                                    _sturn = _run_prompt(
+                                        prompt,
+                                        history,
+                                        model_selector,
+                                        context_size=context_size,
+                                        session="",
+                                        project=storage_project,
+                                        state=state,
+                                        return_result=True,
+                                        capture_request_id="",
+                                        capture_turn_id="",
+                                        capture_stream=False,
+                                        cache_scope="",
+                                        augment=not bool(context.get("account")),
+                                        metrics=_lifecycle.metrics,
+                                    )
+                                    _samples.append(_sturn.content)
+                                    _sample_turns.append(_sturn)
+                            _spanda_eval = _spanda_evaluate(
+                                _samples,
+                                alpha=_spanda_policy.alpha,
+                                threshold=_spanda_policy.threshold,
+                            )
+                            self._spanda_headers = _spanda_response_headers(
+                                _spanda_eval
+                            )
+                            if (
+                                _spanda_policy.block
+                                and _spanda_eval["uncertain"]
+                            ):
+                                self._record_chat_completion_metric(
+                                    _lifecycle,
+                                    "spanda_uncertain",
+                                    getattr(
+                                        self,
+                                        "_request_started",
+                                        _request_started,
+                                    ),
+                                )
+                                self._send_json_payload(
+                                    _spanda_uncertainty_body(
+                                        _spanda_eval,
+                                        threshold=_spanda_policy.threshold,
+                                        correlation_id=self._correlation(),
+                                    ),
+                                    status=_SPANDA_BLOCK_STATUS,
+                                    headers=self._spanda_headers,
+                                )
+                                return
+                            # Dominant consensus becomes the primary message.
+                            _dom = _spanda_eval["dominant_answer"]
+                            turn = next(
+                                t for t in _sample_turns if t.content == _dom
+                            )
+                            # Restore learning-feedback pointers to the answer
+                            # the client actually receives (not the last sample).
+                            state.last_iid = turn.iid
+                            state.last_run_source = turn.run_source
+                            state.last_response = turn.content
+                            # No provider admission from samples; finalize via
+                            # capture_turn on the consensus content only.
+                            turn = replace(turn, provider_capture=None)
+                            content = _dom
+                            response_iid = turn.iid
+                            response_reasoning = turn.thinking
+                            response_model = turn.resolved_model
+                            response_tier = turn.resolved_tier
+                        else:
+                            turn = _run_prompt(
+                                prompt,
+                                history,
+                                model_selector,
+                                context_size=context_size,
+                                session=storage_session,
+                                project=storage_project,
+                                state=state,
+                                return_result=True,
+                                capture_request_id=self._correlation(),
+                                capture_turn_id=uuid.uuid4().hex, capture_stream=stream,
+                                # The deterministic request cache is offered only
+                                # to this plain, non-streaming generation
+                                # fall-through: every control/tool/web/work/agent
+                                # route has already returned above, and streamed
+                                # or structured turns never receive a scope.  An
+                                # empty scope is an unconditional cache denial.
+                                cache_scope=(
+                                    "" if stream else _request_cache_scope(context)
+                                ),
+                                # Account-backed deployments intentionally do not
+                                # inject or train the legacy global lesson store.
+                                # Their durable chat/session project IDs remain
+                                # principal-namespaced above.
+                                augment=not bool(context.get("account")),
+                                metrics=_lifecycle.metrics,
+                            )
+                            content = turn.content
+                            response_iid = turn.iid
+                            response_reasoning = turn.thinking
+                            response_model = turn.resolved_model
+                            response_tier = turn.resolved_tier
                 # OpenAI-compatible content is the answer only.  Observable
                 # execution data is returned separately in the bounded
                 # ``sonder_activity`` vendor extension, never appended where
@@ -6576,6 +6685,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("X-Sonder-Elapsed-Ms", str(max(0, int(elapsed_ms))))
             if getattr(self, "_correlation_id", ""):
                 self.send_header("X-Sonder-Correlation-Id", self._correlation_id)
+            for _spanda_name, _spanda_value in (getattr(self, "_spanda_headers", None) or {}).items():
+                self.send_header(str(_spanda_name), str(_spanda_value))
             # No Content-Length on an SSE body — signal end-of-response by closing the
             # connection, otherwise HTTP/1.1 keep-alive leaves clients blocked on read().
             self.send_header("Connection", "close")

@@ -1,0 +1,32 @@
+name: restore-reloadable-mcp
+on:
+  push:
+    paths:
+      - .github/workflows/restore-reloadable-mcp.yml
+  workflow_dispatch:
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: feat/spanda-rsc
+          fetch-depth: 0
+      - name: Restore and patch reloadable_mcp.py
+        run: |
+          set -euo pipefail
+          python3 scripts/apply_loop_docstring_sync.py
+          rm -f .agent-push-probe.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add reloadable_mcp.py scripts/apply_loop_docstring_sync.py
+          git add -u .agent-push-probe.txt || true
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+            exit 0
+          fi
+          git commit -m "fix(surface): sync loop docstring after MCP cleandoc"
+          git push origin HEAD:feat/spanda-rsc
+
