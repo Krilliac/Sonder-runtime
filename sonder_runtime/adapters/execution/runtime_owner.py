@@ -164,9 +164,8 @@ class WindowsManagedRuntimeProcess(WindowsOwnedRuntimeProcess):
         self._payload.validate(self._payload_roots())
         value = self._payload.manifest
         code = (
-            "import sys,json,site; "
+            "import sys,json; "
             "paths=json.loads(sys.argv.pop(1)); sys.path[:]=paths; "
-            "site.addsitedir(paths[-1]); "
             "import runpy; "
             "runpy.run_module('sonder_runtime.bootstrap.managed_http_runtime', "
             "run_name='__main__')"

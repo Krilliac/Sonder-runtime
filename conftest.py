@@ -14,9 +14,16 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parent
 _TEST_STATE_ROOT = Path(tempfile.mkdtemp(prefix="sonder-pytest-")).resolve()
 _cleanup_complete = False
-for _ambient_variable in tuple(os.environ):
-    if _ambient_variable.startswith(("SONDER_", "OLLAMA_")):
-        os.environ.pop(_ambient_variable, None)
+
+
+def _clear_ambient_deployment_variables() -> None:
+    for _ambient_variable in tuple(os.environ):
+        if (_ambient_variable.upper().startswith(("SONDER_", "OLLAMA_"))
+                and _ambient_variable.upper() != "SONDER_TEST_TIMINGS"):
+            os.environ.pop(_ambient_variable, None)
+
+
+_clear_ambient_deployment_variables()
 os.environ.update(
     {
         "SONDER_HOME": str(_TEST_STATE_ROOT),

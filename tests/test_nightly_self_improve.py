@@ -1,3 +1,7 @@
+from pathlib import Path
+
+import pytest
+
 from scripts import nightly_self_improve
 
 
@@ -28,3 +32,23 @@ def test_nightly_preserves_an_in_checkout_override(tmp_path, monkeypatch):
     assert rebound == ()
     assert nightly_self_improve.os.environ["SONDER_EMOTION_VECTORS"] == str(root / "emotion_vectors.json")
     assert nightly_self_improve.os.environ["SONDER_SYSTEM_PROFILE"] == str(custom)
+
+
+def test_nightly_rejects_an_escaping_checkout_default(tmp_path, monkeypatch):
+    root = (tmp_path / "runtime").resolve()
+    root.mkdir()
+    outside = (tmp_path / "outside").resolve()
+    outside.mkdir()
+    default = root / "emotion_vectors.json"
+    original_resolve = Path.resolve
+
+    def resolve(path, *args, **kwargs):
+        if path == default:
+            return outside / default.name
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    monkeypatch.setenv("SONDER_EMOTION_VECTORS", str(outside / default.name))
+
+    with pytest.raises(ValueError, match="workspace default escapes checkout"):
+        nightly_self_improve._bind_workspace_config_paths(root)

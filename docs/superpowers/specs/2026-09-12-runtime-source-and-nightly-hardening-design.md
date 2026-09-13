@@ -44,8 +44,9 @@ consumer once the workflow is removed.
    failures before the implementation changes.
 5. Validate the branch with focused tests, repository architecture gates, and
    the CI-equivalent suite before publishing it.
-6. Make the sealed Windows managed-runtime payload honor its declared venv
-   `.pth` bootstrap without enabling user-site imports.
+6. Make the sealed Windows managed-runtime payload honor path-only entries
+   from its declared venv without executing `.pth` code or enabling user-site
+   imports.
 
 ## Non-goals and safety boundaries
 
@@ -106,12 +107,13 @@ reintroduced accidentally.
 ### Managed-runtime dependency closure
 
 Managed runtime children intentionally start CPython with `-E -S` and an
-explicit manifest-derived import path. The launch prelude will explicitly call
-`site.addsitedir()` for the manifest’s venv `site-packages` directory. This
-processes the declared dependency directory’s path files, including the
-pywin32 bootstrap that exposes `pywintypes`, while still excluding user-site
-packages and arbitrary inherited import paths. The child’s exact payload,
-manifest, interpreter, and writable-root checks remain unchanged.
+explicit manifest-derived import path. Payload creation reads the declared
+venv `site-packages` `.pth` files as data: it admits only existing relative
+entries that remain below that root, ignores executable `import` lines, and
+rejects escaping entries. The pywin32 `win32`, `win32/lib`, and
+`pywin32_system32` locations are therefore explicit in the sealed import/DLL
+closure without executing third-party bootstrap code. The child’s exact
+payload, manifest, interpreter, and writable-root checks remain unchanged.
 
 ### Error handling
 
@@ -119,8 +121,9 @@ Malformed, missing, or escaping workspace overrides fail closed to the
 checkout default in the nightly launcher. The lower-level profile and emotion
 vector modules continue to reject explicit paths outside their workspace; the
 launcher repair does not weaken those guards. An inability to resolve a path
-is treated as escaping and uses the default, rather than allowing an
-unverified path to cross the boundary.
+is treated as escaping and uses the default only after the default itself is
+resolved and verified inside the checkout. If that default escapes, the
+nightly run aborts before importing the runtime modules.
 
 ## Verification
 
@@ -130,7 +133,10 @@ The red-green cycles cover:
 - rehoming stale absolute nightly overrides and preserving a valid in-root
   override;
 - starting tests without inherited deployment routing variables;
+- preserving the opt-in `SONDER_TEST_TIMINGS` harness control while clearing
+  deployment routing variables;
 - absence of the obsolete CI workflow/helper;
+- data-only `.pth` parsing that ignores executable lines and rejects escapes;
 - managed Windows children reaching readiness with the explicit payload
   dependency closure;
 - the existing profile, emotion-vector, logging, and nightly model-selection

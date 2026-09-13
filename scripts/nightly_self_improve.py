@@ -64,6 +64,12 @@ _WORKSPACE_CONFIG_FILES = (
 def _bind_workspace_config_paths(root: Path | None = None) -> tuple[str, ...]:
     """Keep nightly mutable workspace files inside its own checkout."""
     workspace = (root or _REPO_ROOT).expanduser().resolve()
+
+    def resolve_inside(candidate: Path) -> Path:
+        resolved = candidate.resolve()
+        resolved.relative_to(workspace)
+        return resolved
+
     rebound: list[str] = []
     for variable, default_name in _WORKSPACE_CONFIG_FILES:
         raw = os.environ.get(variable, "").strip()
@@ -71,10 +77,12 @@ def _bind_workspace_config_paths(root: Path | None = None) -> tuple[str, ...]:
         if not candidate.is_absolute():
             candidate = workspace / candidate
         try:
-            resolved = candidate.resolve()
-            resolved.relative_to(workspace)
+            resolved = resolve_inside(candidate)
         except (OSError, RuntimeError, ValueError):
-            resolved = workspace / default_name
+            try:
+                resolved = resolve_inside(workspace / default_name)
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise ValueError("workspace default escapes checkout") from exc
             rebound.append(variable)
         os.environ[variable] = str(resolved)
     return tuple(rebound)
@@ -175,7 +183,17 @@ def main() -> int:
         return 0
 
     log("=== nightly self-improvement start ===")
-    rebound = _bind_workspace_config_paths(_REPO_ROOT)
+    try:
+        rebound = _bind_workspace_config_paths(_REPO_ROOT)
+    except ValueError:
+        log("workspace config binding failed; aborting nightly run")
+        try:
+            lock.unlink(missing_ok=True)
+        except OSError:
+            log("nightly lock cleanup failed")
+        finally:
+            sink.close()
+        return 1
     if rebound:
         log("workspace config paths rehomed: %s" % ", ".join(rebound))
     import server

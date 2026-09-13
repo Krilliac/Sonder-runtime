@@ -22,11 +22,13 @@
 ## File Map
 
 - Modify sonder_runtime/platform/system_profile.py for checkout-root ownership.
-- Modify sonder_runtime/adapters/execution/runtime_owner.py for explicit sealed venv bootstrap.
+- Modify sonder_runtime/adapters/execution/runtime_owner.py for explicit sealed venv launch paths.
+- Modify sonder_runtime/adapters/execution/runtime_payload.py for a data-only sealed venv dependency closure.
 - Modify scripts/nightly_self_improve.py for workspace-local environment binding.
 - Modify conftest.py to clear inherited SONDER_* and OLLAMA_* deployment settings before applying test defaults.
 - Modify tests/conftest.py to restore direct routing-environment and embedding-global mutations after each test.
 - Modify tests/test_system_profile_ownership.py and create tests/test_nightly_self_improve.py.
+- Modify tests/test_managed_runtime_payload.py for the data-only `.pth` closure.
 - Create tests/test_ci_retired_workflow.py.
 - Create tests/test_test_environment.py.
 - Delete .github/workflows/restore-reloadable-mcp.yml and scripts/apply_loop_docstring_sync.py only.
@@ -240,15 +242,17 @@ git add -- tests/test_ci_retired_workflow.py .github/workflows/restore-reloadabl
 git commit -s -m "ci: retire merged-branch reload recovery job"
 ~~~
 
-### Task 4: Restore explicit .pth bootstrap for managed Windows payloads
+### Task 4: Seal explicit dependency paths for managed Windows payloads
 
 **Files:**
 - Modify: sonder_runtime/adapters/execution/runtime_owner.py
+- Modify: sonder_runtime/adapters/execution/runtime_payload.py
 - Test: tests/test_managed_runtime_owner.py
+- Test: tests/test_managed_runtime_payload.py
 
 **Interfaces:**
 - Preserves: the sealed payload manifest, `-E -S` isolation, interpreter identity checks, and managed child readiness evidence.
-- Produces: a managed child launch prelude that processes only the manifest-declared venv site-packages directory.
+- Produces: a managed child launch prelude that uses only explicit manifest-declared paths and never executes `.pth` code.
 
 - [ ] Step 1: Re-run the existing failing integration test as the red state.
 
@@ -258,22 +262,25 @@ D:/sonder-runtime/venv/Scripts/python.exe -m pytest -q tests/test_managed_runtim
 
 Expected: the child exits before READY with the current `ModuleNotFoundError: pywintypes` payload-import failure.
 
-- [ ] Step 2: Add explicit site-directory processing to the managed launch prelude.
+- [ ] Step 2: Add the failing unit tests for data-only `.pth` closure handling.
 
-In `WindowsManagedRuntimeProcess._launch_layout`, change the `code` string to set `paths = json.loads(sys.argv.pop(1))`, assign `sys.path[:] = paths`, call `site.addsitedir(paths[-1])`, and then run the managed module. Keep `-E`, `-S`, `-B`, the manifest-derived paths, and all arguments unchanged.
+Test that path-only entries are included, executable import lines are not run,
+and entries outside the declared site-packages root are refused.
 
 ~~~python
-code = (
-    "import sys,json,site; "
-    "paths=json.loads(sys.argv.pop(1)); sys.path[:]=paths; "
-    "site.addsitedir(paths[-1]); "
-    "import runpy; "
-    "runpy.run_module('sonder_runtime.bootstrap.managed_http_runtime', "
-    "run_name='__main__')"
-)
+paths = _declared_site_package_paths(dependencies)
 ~~~
 
-- [ ] Step 3: Run the managed-runtime integration test and verify readiness/cleanup.
+- [ ] Step 3: Implement the bounded data-only closure.
+
+Read `.pth` files without importing `site` or executing their `import` lines.
+Keep only existing relative paths below `site-packages`, reject escaping
+entries, add the pywin32 system DLL directory to the manifest DLL search path,
+and include the resulting explicit paths in the manifest. Keep `-E`, `-S`,
+`-B`, the manifest-derived paths, and all ownership checks unchanged. The
+launch prelude only assigns `sys.path` and runs the managed module.
+
+- [ ] Step 4: Run the managed-runtime integration test and verify readiness/cleanup.
 
 ~~~powershell
 D:/sonder-runtime/venv/Scripts/python.exe -m pytest -q tests/test_managed_runtime_owner.py::test_full_manifest_owned_http_and_relaunch
@@ -281,11 +288,11 @@ D:/sonder-runtime/venv/Scripts/python.exe -m pytest -q tests/test_managed_runtim
 
 Expected: the test passes and the child reaches its loopback `/live` endpoint, completes both launch/stop cycles, and performs the migration assertions.
 
-- [ ] Step 4: Commit the managed payload fix.
+- [ ] Step 5: Commit the managed payload fix.
 
 ~~~powershell
-git add -- sonder_runtime/adapters/execution/runtime_owner.py
-git commit -s -m "fix: honor venv bootstrap in managed runtime payload"
+git add -- sonder_runtime/adapters/execution/runtime_owner.py sonder_runtime/adapters/execution/runtime_payload.py tests/test_managed_runtime_payload.py
+git commit -s -m "fix: seal managed runtime dependency paths"
 ~~~
 
 ### Task 5: Verify, publish, and report

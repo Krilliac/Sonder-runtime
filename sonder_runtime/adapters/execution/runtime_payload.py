@@ -19,6 +19,8 @@ from ..filesystem.atomic_json import write_json_atomic
 MAX_FILES = 50000
 MAX_BYTES = 4 * 1024**3
 MAX_MANIFEST = 32 * 1024**2
+MAX_PTH_BYTES = 1024 * 1024
+MAX_PTH_ENTRIES = 256
 
 
 def disjoint(paths, writable_roots):
@@ -52,6 +54,59 @@ def files(root, *, exclude_site=False):
             if not stat.S_ISREG(plain(path).st_mode):
                 raise OwnerRefused("runtime artifact is not an ordinary file")
             yield path
+
+
+def _declared_site_package_paths(site_packages):
+    """Return site paths from data-only entries in the venv's ``.pth`` files.
+
+    CPython's normal site initialization executes import statements found in
+    ``.pth`` files.  A managed child deliberately runs with ``-S`` so that
+    executable path-file content cannot extend its dependency closure.  Keep
+    only relative, existing entries beneath the declared site-packages root;
+    executable lines and entries outside that root are never admitted.
+    """
+    root = Path(site_packages).resolve()
+    plain(root)
+    if not root.is_dir():
+        raise OwnerRefused("declared site-packages root is not a directory")
+    paths = [root]
+    seen = {os.path.normcase(str(root))}
+    entry_count = 0
+    for path_file in sorted(root.glob("*.pth")):
+        metadata = plain(path_file)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OwnerRefused("dependency path file is not an ordinary file")
+        if metadata.st_size > MAX_PTH_BYTES:
+            raise OwnerRefused("dependency path file exceeds bounds")
+        try:
+            lines = path_file.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError) as exc:
+            raise OwnerRefused("dependency path file is unreadable") from exc
+        for raw in lines:
+            line = raw.strip()
+            if (not line or line.startswith("#")
+                    or line.startswith(("import ", "import\t"))):
+                continue
+            entry_count += 1
+            if entry_count > MAX_PTH_ENTRIES:
+                raise OwnerRefused("dependency path entries exceed bounds")
+            candidate = Path(line.replace("\\", os.sep))
+            if candidate.is_absolute() or candidate.drive or candidate.root:
+                raise OwnerRefused("dependency path escapes site-packages")
+            try:
+                resolved = (root / candidate).resolve()
+                resolved.relative_to(root)
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise OwnerRefused("dependency path escapes site-packages") from exc
+            if not resolved.exists():
+                continue
+            if not (resolved.is_dir() or resolved.is_file()):
+                raise OwnerRefused("dependency path is not an ordinary file or directory")
+            key = os.path.normcase(str(resolved))
+            if key not in seen:
+                seen.add(key)
+                paths.append(resolved)
+    return tuple(paths)
 
 
 def inventory(roots):
@@ -105,6 +160,14 @@ class RuntimePayload:
         dependencies = Path(sys.prefix).resolve() / "Lib" / "site-packages"
         if executable.parent != base or any(base.glob("*._pth")):
             raise OwnerRefused("unknown Python runtime path configuration")
+        site_paths = _declared_site_package_paths(dependencies)
+        system_dll = dependencies / "pywin32_system32"
+        dll_paths = [str(base), str(base / "DLLs")]
+        if system_dll.exists():
+            plain(system_dll)
+            if not system_dll.is_dir():
+                raise OwnerRefused("pywin32 system directory is not a directory")
+            dll_paths.append(str(system_dll.resolve()))
         external = [(str(base / "Lib"), True), (str(base / "DLLs"), False), (str(dependencies), False)]
         external += [(str(path), False) for path in sorted(base.iterdir()) if path.is_file() and path.suffix.lower() in (".dll", ".exe", ".zip")]
         if not any(Path(path) == executable for path, _ in external):
@@ -129,8 +192,9 @@ class RuntimePayload:
             (self.root / "python-cache").mkdir()
             roots = [(str(self.path), False), *external]
             self.manifest = dict(schema=1, payload=str(self.path), executable=str(executable),
-                paths=[str(self.path), str(base / "Lib"), str(base / "DLLs"), str(dependencies)],
-                dll_paths=[str(base), str(base / "DLLs")], source=str(source), roots=roots,
+                paths=[str(self.path), str(base / "Lib"), str(base / "DLLs"),
+                       *(str(path) for path in site_paths)],
+                dll_paths=dll_paths, source=str(source), roots=roots,
                 files=inventory(roots), python=[3, 12])
             if len(canonical(self.manifest)) > MAX_MANIFEST:
                 raise OwnerRefused("runtime artifact manifest exceeds bounds")
