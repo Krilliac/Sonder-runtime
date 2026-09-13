@@ -55,6 +55,30 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
+_WORKSPACE_CONFIG_FILES = (
+    ("SONDER_EMOTION_VECTORS", "emotion_vectors.json"),
+    ("SONDER_SYSTEM_PROFILE", "system_profile.md"),
+)
+
+
+def _bind_workspace_config_paths(root: Path | None = None) -> tuple[str, ...]:
+    """Keep nightly mutable workspace files inside its own checkout."""
+    workspace = (root or _REPO_ROOT).expanduser().resolve()
+    rebound: list[str] = []
+    for variable, default_name in _WORKSPACE_CONFIG_FILES:
+        raw = os.environ.get(variable, "").strip()
+        candidate = Path(raw).expanduser() if raw else workspace / default_name
+        if not candidate.is_absolute():
+            candidate = workspace / candidate
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(workspace)
+        except (OSError, RuntimeError, ValueError):
+            resolved = workspace / default_name
+            rebound.append(variable)
+        os.environ[variable] = str(resolved)
+    return tuple(rebound)
+
 
 def _stage(log, name, fn):
     started = time.time()
@@ -151,6 +175,9 @@ def main() -> int:
         return 0
 
     log("=== nightly self-improvement start ===")
+    rebound = _bind_workspace_config_paths(_REPO_ROOT)
+    if rebound:
+        log("workspace config paths rehomed: %s" % ", ".join(rebound))
     import server
     import lesson_pruner
     import sonder_runtime.adapters.memory_store as memory_store
