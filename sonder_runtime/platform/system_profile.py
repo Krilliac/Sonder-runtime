@@ -10,6 +10,7 @@ import platform
 import re
 import subprocess
 from dataclasses import asdict, dataclass
+from pathlib import Path
 
 from sonder_runtime.platform.npu_policy import (
     NPU_NAME_RE as _NPU_NAME_RE,
@@ -76,7 +77,7 @@ DEFAULT_TEXT = """# Sonder standing instructions
 
 
 def workspace_root():
-    return os.path.abspath(os.path.dirname(__file__))
+    return str(Path(__file__).resolve().parents[2])
 
 
 def default_path():

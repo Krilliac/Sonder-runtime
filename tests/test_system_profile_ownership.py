@@ -1,6 +1,7 @@
 """Ownership and compatibility tests for the packaged system profile."""
 
 import importlib
+from pathlib import Path
 
 
 def test_root_import_is_the_canonical_module():
@@ -38,3 +39,20 @@ def test_canonical_profile_preserves_hardware_override(monkeypatch):
     assert detected.npu_vendor == "intel"
     assert detected.npu_name == "AI Boost"
     assert detected.npu_detected is True
+
+
+def test_profile_workspace_root_is_the_repository_checkout():
+    profile = importlib.import_module("sonder_runtime.platform.system_profile")
+    expected = Path(__file__).resolve().parents[1]
+
+    assert Path(profile.workspace_root()) == expected
+    assert (expected / "server.py").is_file()
+    assert (expected / "system_profile.md").is_file()
+
+
+def test_profile_accepts_an_explicit_checkout_level_override(monkeypatch):
+    profile = importlib.import_module("sonder_runtime.platform.system_profile")
+    expected = Path(__file__).resolve().parents[1] / "system_profile.md"
+    monkeypatch.setenv("SONDER_SYSTEM_PROFILE", str(expected))
+
+    assert Path(profile._resolve_path()) == expected
