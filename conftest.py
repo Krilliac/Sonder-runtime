@@ -14,11 +14,9 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parent
 _TEST_STATE_ROOT = Path(tempfile.mkdtemp(prefix="sonder-pytest-")).resolve()
 _cleanup_complete = False
-for _workspace_file_variable in (
-    "SONDER_EMOTION_VECTORS",
-    "SONDER_SYSTEM_PROFILE",
-):
-    os.environ.pop(_workspace_file_variable, None)
+for _ambient_variable in tuple(os.environ):
+    if _ambient_variable.startswith(("SONDER_", "OLLAMA_")):
+        os.environ.pop(_ambient_variable, None)
 os.environ.update(
     {
         "SONDER_HOME": str(_TEST_STATE_ROOT),

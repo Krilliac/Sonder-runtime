@@ -86,6 +86,11 @@ log can report a bounded, path-free diagnostic. It will not copy files or
 change the process-wide user environment. This keeps independent checkouts
 isolated while retaining explicit in-checkout customization.
 
+The pytest harness will clear inherited SONDER_* and OLLAMA_* deployment
+variables before installing its safe defaults. Otherwise a developer’s model,
+remote-worker, or provider settings can change CI-equivalent assertions even
+when the test itself uses monkeypatch isolation.
+
 ### CI cleanup
 
 The one-shot workflow and its only-purpose helper will be removed in one
@@ -110,6 +115,7 @@ The red-green cycles cover:
 - profile workspace ownership and acceptance of a checkout-level profile;
 - rehoming stale absolute nightly overrides and preserving a valid in-root
   override;
+- starting tests without inherited deployment routing variables;
 - absence of the obsolete CI workflow/helper;
 - the existing profile, emotion-vector, logging, and nightly model-selection
   tests.

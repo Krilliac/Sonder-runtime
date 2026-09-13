@@ -23,9 +23,10 @@
 
 - Modify sonder_runtime/platform/system_profile.py for checkout-root ownership.
 - Modify scripts/nightly_self_improve.py for workspace-local environment binding.
-- Modify conftest.py to isolate ambient workspace-file overrides during tests.
+- Modify conftest.py to clear inherited SONDER_* and OLLAMA_* deployment settings before applying test defaults.
 - Modify tests/test_system_profile_ownership.py and create tests/test_nightly_self_improve.py.
 - Create tests/test_ci_retired_workflow.py.
+- Create tests/test_test_environment.py.
 - Delete .github/workflows/restore-reloadable-mcp.yml and scripts/apply_loop_docstring_sync.py only.
 
 ### Task 1: Correct packaged system-profile ownership
@@ -76,7 +77,7 @@ Expected: the new assertions fail with the current package-directory root or con
 
 - [ ] Step 3: Make the test harness independent of deployment environment.
 
-Before the existing os.environ.update call in conftest.py, remove SONDER_EMOTION_VECTORS and SONDER_SYSTEM_PROFILE from the test process. This prevents an absolute production path from invalidating tests that monkeypatch a temporary workspace.
+Before the existing os.environ.update call in conftest.py, remove every inherited variable whose name starts with SONDER_ or OLLAMA_. This prevents deployment model selection, remote-worker consent, and absolute workspace paths from changing CI-equivalent tests. The existing os.environ.update call then restores only its documented safe defaults.
 
 - [ ] Step 4: Implement the minimal root fix.
 
@@ -246,7 +247,7 @@ git commit -s -m "ci: retire merged-branch reload recovery job"
 - [ ] Step 1: Run focused regressions.
 
 ~~~powershell
-D:/sonder-runtime/venv/Scripts/python.exe -m pytest -q tests/test_system_profile.py tests/test_system_profile_ownership.py tests/test_nightly_self_improve.py tests/test_nightly_selfmod_model_selection.py tests/test_ci_retired_workflow.py tests/test_logging_platform_seam.py
+    D:/sonder-runtime/venv/Scripts/python.exe -m pytest -q tests/test_system_profile.py tests/test_system_profile_ownership.py tests/test_nightly_self_improve.py tests/test_nightly_selfmod_model_selection.py tests/test_ci_retired_workflow.py tests/test_test_environment.py tests/test_logging_platform_seam.py
 ~~~
 
 - [ ] Step 2: Run every static CI gate.
