@@ -44,6 +44,8 @@ consumer once the workflow is removed.
    failures before the implementation changes.
 5. Validate the branch with focused tests, repository architecture gates, and
    the CI-equivalent suite before publishing it.
+6. Make the sealed Windows managed-runtime payload honor its declared venv
+   `.pth` bootstrap without enabling user-site imports.
 
 ## Non-goals and safety boundaries
 
@@ -99,6 +101,16 @@ runtime tree. A repository policy test will assert that the retired workflow
 and helper are absent, preventing the deleted-branch recovery job from being
 reintroduced accidentally.
 
+### Managed-runtime dependency closure
+
+Managed runtime children intentionally start CPython with `-E -S` and an
+explicit manifest-derived import path. The launch prelude will explicitly call
+`site.addsitedir()` for the manifest’s venv `site-packages` directory. This
+processes the declared dependency directory’s path files, including the
+pywin32 bootstrap that exposes `pywintypes`, while still excluding user-site
+packages and arbitrary inherited import paths. The child’s exact payload,
+manifest, interpreter, and writable-root checks remain unchanged.
+
 ### Error handling
 
 Malformed, missing, or escaping workspace overrides fail closed to the
@@ -117,6 +129,8 @@ The red-green cycles cover:
   override;
 - starting tests without inherited deployment routing variables;
 - absence of the obsolete CI workflow/helper;
+- managed Windows children reaching readiness with the explicit payload
+  dependency closure;
 - the existing profile, emotion-vector, logging, and nightly model-selection
   tests.
 

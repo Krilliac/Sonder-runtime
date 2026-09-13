@@ -22,6 +22,7 @@
 ## File Map
 
 - Modify sonder_runtime/platform/system_profile.py for checkout-root ownership.
+- Modify sonder_runtime/adapters/execution/runtime_owner.py for explicit sealed venv bootstrap.
 - Modify scripts/nightly_self_improve.py for workspace-local environment binding.
 - Modify conftest.py to clear inherited SONDER_* and OLLAMA_* deployment settings before applying test defaults.
 - Modify tests/test_system_profile_ownership.py and create tests/test_nightly_self_improve.py.
@@ -238,7 +239,55 @@ git add -- tests/test_ci_retired_workflow.py .github/workflows/restore-reloadabl
 git commit -s -m "ci: retire merged-branch reload recovery job"
 ~~~
 
-### Task 4: Verify, publish, and report
+### Task 4: Restore explicit .pth bootstrap for managed Windows payloads
+
+**Files:**
+- Modify: sonder_runtime/adapters/execution/runtime_owner.py
+- Test: tests/test_managed_runtime_owner.py
+
+**Interfaces:**
+- Preserves: the sealed payload manifest, `-E -S` isolation, interpreter identity checks, and managed child readiness evidence.
+- Produces: a managed child launch prelude that processes only the manifest-declared venv site-packages directory.
+
+- [ ] Step 1: Re-run the existing failing integration test as the red state.
+
+~~~powershell
+D:/sonder-runtime/venv/Scripts/python.exe -m pytest -q tests/test_managed_runtime_owner.py::test_full_manifest_owned_http_and_relaunch
+~~~
+
+Expected: the child exits before READY with the current `ModuleNotFoundError: pywintypes` payload-import failure.
+
+- [ ] Step 2: Add explicit site-directory processing to the managed launch prelude.
+
+In `WindowsManagedRuntimeProcess._launch_layout`, change the `code` string to set `paths = json.loads(sys.argv.pop(1))`, assign `sys.path[:] = paths`, call `site.addsitedir(paths[-1])`, and then run the managed module. Keep `-E`, `-S`, `-B`, the manifest-derived paths, and all arguments unchanged.
+
+~~~python
+code = (
+    "import sys,json,site; "
+    "paths=json.loads(sys.argv.pop(1)); sys.path[:]=paths; "
+    "site.addsitedir(paths[-1]); "
+    "import runpy; "
+    "runpy.run_module('sonder_runtime.bootstrap.managed_http_runtime', "
+    "run_name='__main__')"
+)
+~~~
+
+- [ ] Step 3: Run the managed-runtime integration test and verify readiness/cleanup.
+
+~~~powershell
+D:/sonder-runtime/venv/Scripts/python.exe -m pytest -q tests/test_managed_runtime_owner.py::test_full_manifest_owned_http_and_relaunch
+~~~
+
+Expected: the test passes and the child reaches its loopback `/live` endpoint, completes both launch/stop cycles, and performs the migration assertions.
+
+- [ ] Step 4: Commit the managed payload fix.
+
+~~~powershell
+git add -- sonder_runtime/adapters/execution/runtime_owner.py
+git commit -s -m "fix: honor venv bootstrap in managed runtime payload"
+~~~
+
+### Task 5: Verify, publish, and report
 
 **Files:**
 - Inspect all changed paths from Tasks 1–3.
@@ -247,7 +296,7 @@ git commit -s -m "ci: retire merged-branch reload recovery job"
 - [ ] Step 1: Run focused regressions.
 
 ~~~powershell
-    D:/sonder-runtime/venv/Scripts/python.exe -m pytest -q tests/test_system_profile.py tests/test_system_profile_ownership.py tests/test_nightly_self_improve.py tests/test_nightly_selfmod_model_selection.py tests/test_ci_retired_workflow.py tests/test_test_environment.py tests/test_logging_platform_seam.py
+D:/sonder-runtime/venv/Scripts/python.exe -m pytest -q tests/test_system_profile.py tests/test_system_profile_ownership.py tests/test_nightly_self_improve.py tests/test_nightly_selfmod_model_selection.py tests/test_ci_retired_workflow.py tests/test_test_environment.py tests/test_logging_platform_seam.py tests/test_managed_runtime_owner.py
 ~~~
 
 - [ ] Step 2: Run every static CI gate.
