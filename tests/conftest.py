@@ -57,6 +57,29 @@ def _isolate_runtime_home():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_routing_environment(monkeypatch):
+    """Restore deployment routing variables after every test.
+
+    A few legacy tests intentionally exercise direct ``os.environ`` updates
+    rather than ``monkeypatch``. Without a per-test snapshot, a remote worker
+    or selected model can leak into a later xdist test process and change its
+    configuration before that test gets a chance to set its own inputs.
+    """
+    del monkeypatch
+    before = {
+        name: value
+        for name, value in os.environ.items()
+        if name.upper().startswith(("SONDER_", "OLLAMA_"))
+    }
+    yield
+    for name in tuple(os.environ):
+        if name.upper().startswith(("SONDER_", "OLLAMA_")):
+            if name not in before:
+                os.environ.pop(name, None)
+    os.environ.update(before)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_fleet_ledger(_isolate_runtime_home):
     """Clear the shared fleet ledger before each test.
 
@@ -100,6 +123,12 @@ def _isolate_typed_ollama_endpoint(monkeypatch):
         before = ollama_endpoint._configured_endpoint
     before_base = embeddings.BASE
     before_netloc = embeddings.OLLAMA_HOST
+    before_embedding = (
+        embeddings.EMBED_MODEL,
+        embeddings.EMBED_IDENTITY,
+        embeddings.EMBED_REVISION,
+        embeddings.EXPECTED_DIMENSION,
+    )
     yield
     ollama_endpoint.configure_typed_endpoint(before)
     # Restore the frozen embeddings origin by assignment. Calling
@@ -108,6 +137,12 @@ def _isolate_typed_ollama_endpoint(monkeypatch):
     # (e.g. http://[::1) blew up here with ValueError: Invalid IPv6 URL.
     embeddings.BASE = before_base
     embeddings.OLLAMA_HOST = before_netloc
+    (
+        embeddings.EMBED_MODEL,
+        embeddings.EMBED_IDENTITY,
+        embeddings.EMBED_REVISION,
+        embeddings.EXPECTED_DIMENSION,
+    ) = before_embedding
 
 
 @pytest.fixture(autouse=True)

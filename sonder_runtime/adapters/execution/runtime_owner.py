@@ -163,7 +163,13 @@ class WindowsManagedRuntimeProcess(WindowsOwnedRuntimeProcess):
             raise OwnerRefused("prepared launch artifact binding is missing")
         self._payload.validate(self._payload_roots())
         value = self._payload.manifest
-        code = "import sys,json; sys.path[:]=json.loads(sys.argv.pop(1)); import runpy; runpy.run_module('sonder_runtime.bootstrap.managed_http_runtime',run_name='__main__')"
+        code = (
+            "import sys,json; "
+            "paths=json.loads(sys.argv.pop(1)); sys.path[:]=paths; "
+            "import runpy; "
+            "runpy.run_module('sonder_runtime.bootstrap.managed_http_runtime', "
+            "run_name='__main__')"
+        )
         arguments = (value["executable"], "-E", "-S", "-B", "-X", "pycache_prefix=" + str(self.root / "python-cache"),
             "-c", code, json.dumps(value["paths"]))
         return (Path(value["payload"]), arguments, str(value["payload"]),

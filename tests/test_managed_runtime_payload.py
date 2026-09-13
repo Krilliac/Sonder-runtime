@@ -7,6 +7,49 @@ from sonder_runtime.bootstrap.managed_runtime_owner import ManagedRuntimeOwner
 from sonder_runtime.application.ports.runtime_owner import OwnerRefused
 
 
+def test_declared_site_package_paths_ignore_executable_pth_lines(tmp_path):
+    from sonder_runtime.adapters.execution.runtime_payload import (
+        _declared_site_package_paths,
+    )
+
+    site_packages = tmp_path / "site-packages"
+    site_packages.mkdir()
+    (site_packages / "win32" / "lib").mkdir(parents=True)
+    (site_packages / "pythonwin").mkdir()
+    marker = tmp_path / "executed.txt"
+    (site_packages / "pywin32.pth").write_text(
+        "# path-only entries are allowed\n"
+        "win32\n"
+        "win32\\lib\n"
+        "pythonwin\n"
+        "import pathlib; pathlib.Path(%r).write_text('no')\n" % str(marker),
+        encoding="utf-8",
+    )
+
+    paths = _declared_site_package_paths(site_packages)
+
+    assert paths == (
+        site_packages.resolve(),
+        (site_packages / "win32").resolve(),
+        (site_packages / "win32" / "lib").resolve(),
+        (site_packages / "pythonwin").resolve(),
+    )
+    assert not marker.exists()
+
+
+def test_declared_site_package_paths_reject_escaping_pth_entries(tmp_path):
+    from sonder_runtime.adapters.execution.runtime_payload import (
+        _declared_site_package_paths,
+    )
+
+    site_packages = tmp_path / "site-packages"
+    site_packages.mkdir()
+    (site_packages / "unsafe.pth").write_text("..\\outside\n", encoding="utf-8")
+
+    with pytest.raises(OwnerRefused, match="dependency path escapes"):
+        _declared_site_package_paths(site_packages)
+
+
 @pytest.mark.skipif(os.name != "nt", reason="actual Windows anchor required")
 def test_invalid_manifest_open_releases_its_anchor(tmp_path):
     from sonder_runtime.adapters.execution.runtime_payload import RuntimePayload
