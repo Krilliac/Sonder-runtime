@@ -89,9 +89,11 @@ change the process-wide user environment. This keeps independent checkouts
 isolated while retaining explicit in-checkout customization.
 
 The pytest harness will clear inherited SONDER_* and OLLAMA_* deployment
-variables before installing its safe defaults. Otherwise a developer’s model,
-remote-worker, or provider settings can change CI-equivalent assertions even
-when the test itself uses monkeypatch isolation.
+variables before installing its safe defaults, then restore direct routing
+environment mutations and embedding globals after each test. Otherwise a
+developer’s model, remote-worker, or provider settings—or a previous test’s
+global state—can change CI-equivalent assertions even when the test itself
+uses monkeypatch isolation.
 
 ### CI cleanup
 

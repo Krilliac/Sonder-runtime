@@ -25,6 +25,7 @@
 - Modify sonder_runtime/adapters/execution/runtime_owner.py for explicit sealed venv bootstrap.
 - Modify scripts/nightly_self_improve.py for workspace-local environment binding.
 - Modify conftest.py to clear inherited SONDER_* and OLLAMA_* deployment settings before applying test defaults.
+- Modify tests/conftest.py to restore direct routing-environment and embedding-global mutations after each test.
 - Modify tests/test_system_profile_ownership.py and create tests/test_nightly_self_improve.py.
 - Create tests/test_ci_retired_workflow.py.
 - Create tests/test_test_environment.py.
