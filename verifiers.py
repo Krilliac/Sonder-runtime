@@ -20,6 +20,7 @@ absent — that is "could not judge", distinct from a Verdict(False) "artifact f
 """
 import collections
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -40,6 +41,9 @@ PLANNED = {
 # cpp_compile interpolates these into an executed .bat, so they are validated:
 _ALLOWED_CPP_STD = {"c++11", "c++14", "c++17", "c++20", "c++23", "c++latest"}
 _BAT_META = set('&|<>^"%\r\n')
+_MAX_LEAN_SOURCE_BYTES = 256_000
+_MAX_LEAN_DETAIL_CHARS = 8_000
+_LEAN_TRUST_GAP_RE = re.compile(r"\b(sorryAx|sorry|admit|axiom)\b")
 
 
 class VerifierUnavailable(RuntimeError):
@@ -198,6 +202,194 @@ def cpp_compile(artifact, spec=None):
         shutil.rmtree(d, ignore_errors=True)
 
 
+# --- Lean 4: kernel-check one self-contained formal proof -----------------
+def _lean_code_only(source):
+    """Blank comments and strings while preserving token boundaries/newlines.
+
+    Lean block comments nest. A regular expression either misses nested trust
+    gaps or flags harmless words in prose, so this deliberately tiny lexer
+    handles only the syntax needed for a conservative placeholder scan.
+    """
+    output = []
+    index = 0
+    block_depth = 0
+    in_string = False
+    escaped = False
+    while index < len(source):
+        char = source[index]
+        pair = source[index:index + 2]
+        if block_depth:
+            if pair == "/-":
+                block_depth += 1
+                output.extend("  ")
+                index += 2
+                continue
+            if pair == "-/":
+                block_depth -= 1
+                output.extend("  ")
+                index += 2
+                continue
+            output.append("\n" if char == "\n" else " ")
+            index += 1
+            continue
+        if in_string:
+            output.append("\n" if char == "\n" else " ")
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if pair == "--":
+            output.extend("  ")
+            index += 2
+            while index < len(source) and source[index] != "\n":
+                output.append(" ")
+                index += 1
+            continue
+        if pair == "/-":
+            block_depth = 1
+            output.extend("  ")
+            index += 2
+            continue
+        if char == '"':
+            in_string = True
+            output.append(" ")
+            index += 1
+            continue
+        output.append(char)
+        index += 1
+    return "".join(output)
+
+
+def _configured_executable(configured, environment_name, default, label):
+    value = str(
+        configured
+        or os.environ.get(environment_name, "").strip()
+        or default
+    ).strip()
+    if not value or "\x00" in value:
+        raise ValueError("%s executable must be a non-empty program name" % label)
+    executable = shutil.which(value)
+    if not executable:
+        raise VerifierUnavailable("%s executable was not discovered: %r" % (label, value))
+    return executable
+
+
+def _lean_executable(configured):
+    return _configured_executable(
+        configured, "SONDER_LEAN_EXE", "lean", "Lean 4",
+    )
+
+
+def _lake_executable(configured):
+    return _configured_executable(
+        configured, "SONDER_LAKE_EXE", "lake", "Lake",
+    )
+
+
+def _lean_project(configured):
+    value = configured
+    if value is None:
+        value = os.environ.get("SONDER_LEAN_PROJECT", "").strip()
+    if value in (None, ""):
+        return None
+    try:
+        root = os.path.abspath(os.path.expanduser(os.fspath(value)))
+    except TypeError as exc:
+        raise ValueError("Lean project must be a filesystem path") from exc
+    if "\x00" in root:
+        raise ValueError("Lean project path contains a null byte")
+    if not os.path.isdir(root):
+        raise VerifierUnavailable("configured Lean project is not a directory: %r" % root)
+    if not any(
+        os.path.isfile(os.path.join(root, name))
+        for name in ("lakefile.toml", "lakefile.lean")
+    ):
+        raise VerifierUnavailable(
+            "configured Lean project has no lakefile.toml or lakefile.lean: %r" % root
+        )
+    return root
+
+
+def lean_check(artifact, spec=None):
+    """Kernel-check Lean 4 source without accepting proof placeholders.
+
+    ``spec={'lean': executable?, 'lake': executable?, 'project': directory?,
+    'timeout': seconds?}``. With a project, the proof runs through ``lake env
+    lean`` so pinned dependencies such as Mathlib are available. The defaults
+    may be supplied through ``SONDER_LEAN_EXE``, ``SONDER_LAKE_EXE``, and
+    ``SONDER_LEAN_PROJECT``. Executables are identity-probed before use.
+    Missing Lean/Lake is ``VerifierUnavailable``; rejected source or a kernel
+    diagnostic is an ordinary failed verdict. Network/package installation is
+    never attempted.
+    """
+    if not isinstance(artifact, str) or not artifact.strip():
+        raise ValueError("Lean source must be a non-empty string")
+    if len(artifact.encode("utf-8")) > _MAX_LEAN_SOURCE_BYTES:
+        raise ValueError("Lean source exceeds the 256000-byte verifier ceiling")
+    spec = dict(spec or {})
+    unknown = set(spec) - {"lean", "lake", "project", "timeout"}
+    if unknown:
+        raise ValueError("unsupported lean_check options: %s" % sorted(unknown))
+    timeout = spec.get("timeout", 120)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise ValueError("lean_check timeout must be numeric")
+    timeout = float(timeout)
+    if not 1 <= timeout <= 300:
+        raise ValueError("lean_check timeout must be within [1, 300] seconds")
+
+    gap = _LEAN_TRUST_GAP_RE.search(_lean_code_only(artifact))
+    if gap:
+        detail = "Lean source contains prohibited unproved trust gap: %s" % gap.group(1)
+        return Verdict(False, "unproved trust gap", detail)
+
+    executable = _lean_executable(spec.get("lean"))
+    project = _lean_project(spec.get("project"))
+    if project:
+        lake = _lake_executable(spec.get("lake"))
+        command = [lake, "env", executable]
+        command_cwd = project
+    else:
+        command = [executable]
+        command_cwd = None
+    try:
+        version_rc, version_output = _run(
+            [*command, "--version"], cwd=command_cwd, timeout=min(timeout, 30),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise VerifierUnavailable(
+            "Lean 4 identity probe failed: %s" % type(exc).__name__
+        ) from exc
+    if (
+        version_rc != 0
+        or re.search(r"\blean\b.*\bversion\b", version_output, re.IGNORECASE) is None
+    ):
+        raise VerifierUnavailable("configured lean executable failed its identity probe")
+
+    directory = tempfile.mkdtemp(prefix="sonder-lean-")
+    try:
+        path = os.path.join(directory, "Main.lean")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(artifact)
+        try:
+            rc, output = _run(
+                [*command, path], cwd=command_cwd or directory, timeout=timeout,
+            )
+        except FileNotFoundError as exc:
+            raise VerifierUnavailable("Lean 4 executable disappeared before checking") from exc
+        detail = output[-_MAX_LEAN_DETAIL_CHARS:]
+        return Verdict(
+            rc == 0,
+            "checked" if rc == 0 else (_last_line(output) or "Lean kernel check failed"),
+            detail,
+        )
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
 # --- llm_judge: model-graded rubric for non-executable outputs -------------
 def llm_judge(artifact, spec=None):
     """spec={'rubric': str, 'threshold': int 0-10, 'judge_fn': callable?}. Weak
@@ -227,6 +419,7 @@ REGISTRY = {
     "pytest_run": pytest_run,
     "typecheck": typecheck,
     "cpp_compile": cpp_compile,
+    "lean_check": lean_check,
     "llm_judge": llm_judge,
 }
 

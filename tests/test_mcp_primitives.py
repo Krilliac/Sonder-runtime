@@ -34,6 +34,7 @@ def test_workflow_prompts_are_discoverable_and_render_arguments():
         "implement_repository_task",
         "review_change",
         "grounded_research",
+        "formal_reasoning",
         "debug_failure",
     } <= names
 
@@ -48,6 +49,16 @@ def test_workflow_prompts_are_discoverable_and_render_arguments():
     assert "fix parser" in text
     assert "D:/repo" in text
     assert "Never claim a build or test that did not run" in text
+
+
+def test_formal_reasoning_prompt_requires_machine_checked_status():
+    text = server._prompt_formal_reasoning(
+        "For every natural n, n + 0 = n", "Lean 4",
+    )
+    assert "lemma dependency graph" in text
+    assert "counterexample" in text
+    assert "sorry" in text and "admit" in text and "axiom" in text
+    assert "machine checker" in text
 
 
 def test_review_prompt_keeps_user_change_as_data():

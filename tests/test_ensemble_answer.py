@@ -429,3 +429,80 @@ def test_a_learned_thinking_model_gets_headroom_up_front(monkeypatch):
         {"model": "r", "messages": [], "options": {"num_predict": 260}}, model="r",
     )
     assert budgets == [server.LOCAL_THINKING_MIN_NUM_PREDICT]
+
+
+def test_reasoning_continuation_compacts_and_reserves_a_final_answer(monkeypatch):
+    server._THINKING_CAPABILITY_CACHE.clear()
+    calls = []
+
+    def fake_post_model(path, payload, **kwargs):
+        budget = payload["options"]["num_predict"]
+        calls.append({
+            "budget": budget,
+            "think": payload.get("think"),
+            "messages": list(payload["messages"]),
+        })
+        if payload.get("think") is False:
+            return {
+                "message": {"content": "checked final answer"},
+                "eval_count": 20,
+                "done_reason": "stop",
+            }, 1
+        return {
+            "message": {
+                "thinking": "private segment %d" % len(calls),
+                "content": "",
+            },
+            "eval_count": budget,
+            "done_reason": "length",
+        }, 1
+
+    monkeypatch.setattr(server, "_post_model", fake_post_model)
+    out, content = server._chat_request(
+        {
+            "model": "r",
+            "messages": [{"role": "user", "content": "solve it"}],
+            "options": {"num_predict": 100},
+        },
+        model="r",
+        reasoning_continuation=True,
+        reasoning_total_tokens=300,
+    )
+
+    assert content == "checked final answer"
+    assert [call["budget"] for call in calls] == [100, 66, 66, 68]
+    assert [call["think"] for call in calls] == [None, None, None, False]
+    assert out["eval_count"] == 252
+    assert out["reasoning_segments"] == 4
+    for call in calls[1:]:
+        checkpoints = [
+            message for message in call["messages"]
+            if str(message.get("content", "")).startswith(
+                "[SONDER_PRIVATE_REASONING_CHECKPOINT_V1]"
+            )
+        ]
+        assert len(checkpoints) == 1
+
+
+def test_explicit_think_false_skips_learned_headroom_and_retry(monkeypatch):
+    server._THINKING_CAPABILITY_CACHE.clear()
+    server._remember_thinking_model("r")
+    seen = []
+
+    def fake_post_model(path, payload, **kwargs):
+        seen.append((payload["options"]["num_predict"], payload.get("think")))
+        return {"message": {"content": "direct answer"}}, 1
+
+    monkeypatch.setattr(server, "_post_model", fake_post_model)
+    _out, content = server._chat_request(
+        {
+            "model": "r",
+            "messages": [],
+            "think": False,
+            "options": {"num_predict": 260},
+        },
+        model="r",
+    )
+
+    assert content == "direct answer"
+    assert seen == [(260, False)]

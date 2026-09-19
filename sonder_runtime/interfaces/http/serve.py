@@ -1771,14 +1771,20 @@ def _a2a_discovery_base_url():
 
 def _selected_listener_port(config=None, argv=None):
     """Resolve the port the direct entrypoint will actually bind."""
-    port = DEFAULT_PORT if config is None else CONFIGURED_PORT
+    # An explicit typed config is the startup authority.  Reading the mutable
+    # compatibility projection here lets unrelated prior hosts (or a late
+    # cleanup callback) replace the just-selected port between configuration
+    # and bind.  Keep CONFIGURED_PORT as the outward projection, not the input.
+    if config is not None:
+        return config.server.port
+    port = DEFAULT_PORT
     arguments = sys.argv if argv is None else argv
     if len(arguments) > 1:
         try:
             port = int(arguments[1])
         except (TypeError, ValueError):
             pass
-    elif config is None:
+    else:
         port = int(os.environ.get("SONDER_PORT", DEFAULT_PORT))
     return port
 
@@ -6845,8 +6851,8 @@ def main(
             thin_handlers = _THIN_HANDLERS
         port = _selected_listener_port(config)
         # Discovery reads the bound-listener value. Keep it synchronized when
-        # the direct compatibility entrypoint overrides typed config with a
-        # positional argument or SONDER_PORT.
+        # the direct compatibility entrypoint (which has no typed config)
+        # selects a positional argument or SONDER_PORT.
         CONFIGURED_PORT = port
 
         _validate_bind_security(HOST)

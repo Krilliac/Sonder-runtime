@@ -191,8 +191,138 @@ def test_pytest_run_rejects_option_select():
 
 def test_registry_covers_all_documented_backends():
     for name in ("python_exec", "program_run", "pytest_run", "typecheck",
-                 "cpp_compile", "llm_judge"):
+                 "cpp_compile", "lean_check", "llm_judge"):
         assert name in V.REGISTRY
+
+
+# --- lean_check — formal proof checking, deterministic without Lean -------
+def test_lean_check_passes_kernel_checked_source(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((tuple(command), kwargs))
+        if "--version" in command:
+            return 0, "Lean (version 4.19.0, x86_64-unknown-linux-gnu)"
+        assert open(command[-1], encoding="utf-8").read() == (
+            "theorem and_comm (p q : Prop) : p ∧ q → q ∧ p := by\n"
+            "  intro h\n  exact ⟨h.right, h.left⟩\n"
+        )
+        return 0, ""
+
+    monkeypatch.setattr(V, "_run", fake_run)
+    verdict = V.lean_check(
+        "theorem and_comm (p q : Prop) : p ∧ q → q ∧ p := by\n"
+        "  intro h\n  exact ⟨h.right, h.left⟩\n",
+        {"lean": V.sys.executable},
+    )
+
+    assert verdict == V.Verdict(True, "checked", "")
+    assert len(calls) == 2
+    assert not os.path.exists(calls[-1][0][-1])
+
+
+@pytest.mark.parametrize("placeholder", ["sorry", "admit", "axiom", "sorryAx"])
+def test_lean_check_rejects_unproved_trust_gaps_without_running_tool(placeholder):
+    verdict = V.lean_check(
+        "theorem impossible : False := by exact %s" % placeholder,
+        {"lean": "definitely-not-a-real-lean-binary"},
+    )
+
+    assert verdict.passed is False
+    assert "trust gap" in verdict.reason
+    assert placeholder.casefold() in verdict.detail.casefold()
+
+
+def test_lean_check_ignores_placeholder_words_in_comments_and_strings(monkeypatch):
+    responses = iter(((0, "Lean (version 4.19.0)"), (0, "")))
+    monkeypatch.setattr(V, "_run", lambda *args, **kwargs: next(responses))
+    source = (
+        '-- "sorry" is forbidden in real proof terms\n'
+        '/- nested /- axiom -/ admit -/\n'
+        'def message := "sorry admit axiom sorryAx"\n'
+        'theorem truth : True := by trivial\n'
+    )
+    assert V.lean_check(source, {"lean": V.sys.executable}).passed is True
+
+
+def test_lean_check_reports_missing_or_wrong_tool_as_unavailable(monkeypatch):
+    with pytest.raises(V.VerifierUnavailable, match="not discovered"):
+        V.lean_check("theorem truth : True := by trivial", {
+            "lean": "definitely-not-a-real-lean-binary-zzz",
+        })
+
+    monkeypatch.setattr(V, "_run", lambda *args, **kwargs: (0, "Python 3.12"))
+    with pytest.raises(V.VerifierUnavailable, match="identity"):
+        V.lean_check("theorem truth : True := by trivial", {
+            "lean": V.sys.executable,
+        })
+
+
+def test_lean_check_returns_bounded_kernel_diagnostic(monkeypatch):
+    responses = iter((
+        (0, "Lean (version 4.19.0)"),
+        (1, "x" * 9000 + "\nMain.lean:1: error: type mismatch"),
+    ))
+    monkeypatch.setattr(V, "_run", lambda *args, **kwargs: next(responses))
+
+    verdict = V.lean_check(
+        "theorem bad : False := by trivial", {"lean": V.sys.executable},
+    )
+
+    assert verdict.passed is False
+    assert "type mismatch" in verdict.reason
+    assert len(verdict.detail) <= 8000
+
+
+def test_lean_check_uses_a_pinned_lake_project(monkeypatch, tmp_path):
+    (tmp_path / "lakefile.toml").write_text(
+        'name = "formal-test"\n', encoding="utf-8",
+    )
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((tuple(command), kwargs))
+        assert command[:3] == [V.sys.executable, "env", V.sys.executable]
+        assert kwargs["cwd"] == str(tmp_path)
+        if command[-1] == "--version":
+            return 0, "Lean (version 4.34.0, x86_64-unknown-linux-gnu)"
+        assert open(command[-1], encoding="utf-8").read().startswith("import Mathlib")
+        return 0, ""
+
+    monkeypatch.setattr(V, "_run", fake_run)
+    verdict = V.lean_check(
+        "import Mathlib\nexample (n : ℕ) : n + 0 = n := by simp\n",
+        {
+            "lean": V.sys.executable,
+            "lake": V.sys.executable,
+            "project": str(tmp_path),
+        },
+    )
+
+    assert verdict.passed is True
+    assert len(calls) == 2
+    assert not os.path.exists(calls[-1][0][-1])
+
+
+def test_lean_check_reads_formal_toolchain_defaults_from_environment(
+    monkeypatch, tmp_path,
+):
+    (tmp_path / "lakefile.lean").write_text("package Formal\n", encoding="utf-8")
+    monkeypatch.setenv("SONDER_LEAN_EXE", V.sys.executable)
+    monkeypatch.setenv("SONDER_LAKE_EXE", V.sys.executable)
+    monkeypatch.setenv("SONDER_LEAN_PROJECT", str(tmp_path))
+    responses = iter(((0, "Lean (version 4.34.0)"), (0, "")))
+    monkeypatch.setattr(V, "_run", lambda *args, **kwargs: next(responses))
+
+    assert V.lean_check("theorem truth : True := by trivial").passed is True
+
+
+def test_lean_check_rejects_a_non_lake_project(tmp_path):
+    with pytest.raises(V.VerifierUnavailable, match="no lakefile"):
+        V.lean_check(
+            "theorem truth : True := by trivial",
+            {"lean": V.sys.executable, "project": str(tmp_path)},
+        )
 
 
 # --- promoted ext backends: the shared-exception contract ------------------

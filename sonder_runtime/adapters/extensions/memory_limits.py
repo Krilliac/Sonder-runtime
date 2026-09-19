@@ -3,8 +3,9 @@
 The adapter deliberately exposes only enforcement, not RSS sampling.  A
  requested limit either gets attached to the child before it is admitted to
  the extension protocol, or startup fails.  Windows uses a Job Object process
- memory limit. Linux uses ``resource.prlimit`` for a hard address-space limit;
- platforms without a native adapter remain explicitly unsupported.
+ memory limit. Linux uses ``resource.prlimit`` for a hard address-space limit
+ and a live systemd manager for descendant-owning process jobs; platforms
+ without a native adapter remain explicitly unsupported.
 """
 from __future__ import annotations
 
@@ -364,6 +365,71 @@ class NativeExtensionMemoryLimiter:
         self._sleeper = sleeper
         self._systemd_user = systemd_user
 
+    def _systemd_user_scope(self) -> bool:
+        user_scope = self._systemd_user
+        if user_scope is not None:
+            return bool(user_scope)
+        environ = getattr(self._os, "environ", os.environ)
+        configured = str(environ.get("SONDER_COMPUTE_SYSTEMD_USER", "")).strip().lower()
+        if configured:
+            if configured not in {"0", "1", "false", "true", "no", "yes"}:
+                raise ExtensionMemoryLimitError(
+                    "SONDER_COMPUTE_SYSTEMD_USER must be a boolean"
+                )
+            return configured in {"1", "true", "yes"}
+        getuid = getattr(self._os, "geteuid", None)
+        return not callable(getuid) or int(getuid()) != 0
+
+    def _systemd_tools(self) -> tuple[str, str, bool]:
+        systemd_run = self._which("systemd-run")
+        systemctl = self._which("systemctl")
+        if not systemd_run or not systemctl:
+            raise ExtensionMemoryLimitUnsupported(
+                "strong POSIX process containment requires systemd-run and systemctl"
+            )
+        return systemd_run, systemctl, self._systemd_user_scope()
+
+    def _probe_systemd_manager(
+        self, systemctl: str, *, user_scope: bool,
+    ) -> tuple[bool, str]:
+        command = [systemctl]
+        if user_scope:
+            command.append("--user")
+        command.extend(("--no-ask-password", "is-system-running"))
+        try:
+            result = self._command_runner(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5.0,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return False, f"systemd manager probe failed: {type(exc).__name__}"
+        state = str(getattr(result, "stdout", "") or "").strip().lower()
+        if state in {"running", "degraded"}:
+            return True, f"systemd manager is {state}"
+        detail = str(getattr(result, "stderr", "") or "").strip()
+        if not detail:
+            detail = state or "no manager state was reported"
+        # Avoid turning an arbitrary helper response into an unbounded error.
+        detail = " ".join(detail.split())[:240]
+        return False, f"systemd manager is unavailable: {detail}"
+
+    def process_job_support(self) -> tuple[bool, str]:
+        """Report whether strong descendant-owning jobs can start now."""
+        if self._platform_name == "nt":
+            return True, "Windows Job Objects are available"
+        if self._platform_name != "posix":
+            return False, "native process containment is unsupported on this platform"
+        try:
+            _, systemctl, user_scope = self._systemd_tools()
+        except ExtensionMemoryLimitError as exc:
+            return False, str(exc)
+        return self._probe_systemd_manager(systemctl, user_scope=user_scope)
+
     def prepare_process_job(
         self,
         job_id: str,
@@ -390,25 +456,15 @@ class NativeExtensionMemoryLimiter:
             raise ExtensionMemoryLimitUnsupported(
                 "native process containment is unsupported on this platform"
             )
-        systemd_run = self._which("systemd-run")
-        systemctl = self._which("systemctl")
-        if not systemd_run or not systemctl:
+        systemd_run, systemctl, user_scope = self._systemd_tools()
+        manager_available, manager_detail = self._probe_systemd_manager(
+            systemctl, user_scope=user_scope,
+        )
+        if not manager_available:
             raise ExtensionMemoryLimitUnsupported(
-                "strong POSIX process containment requires systemd-run and systemctl"
+                "strong POSIX process containment requires a live systemd manager: "
+                + manager_detail
             )
-        user_scope = self._systemd_user
-        if user_scope is None:
-            environ = getattr(self._os, "environ", os.environ)
-            configured = str(environ.get("SONDER_COMPUTE_SYSTEMD_USER", "")).strip().lower()
-            if configured:
-                if configured not in {"0", "1", "false", "true", "no", "yes"}:
-                    raise ExtensionMemoryLimitError(
-                        "SONDER_COMPUTE_SYSTEMD_USER must be a boolean"
-                    )
-                user_scope = configured in {"1", "true", "yes"}
-            else:
-                getuid = getattr(self._os, "geteuid", None)
-                user_scope = not callable(getuid) or int(getuid()) != 0
         unit_stem = "sonder-compute-" + hashlib.sha256(job_id.encode("utf-8")).hexdigest()[:20]
         unit_name = unit_stem + ".scope"
         wrapped = [systemd_run]

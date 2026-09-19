@@ -165,7 +165,7 @@ def _isolate_fleet_worker_cap():
 
 
 @pytest.fixture(autouse=True)
-def _configure_http_legacy_boundary(monkeypatch):
+def _configure_http_legacy_boundary(monkeypatch, live_provider_environment):
     """Exercise the same explicit runtime injection as the serve bootstrap."""
     import server
     from sonder_runtime.interfaces.http import serve

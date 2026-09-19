@@ -66,6 +66,7 @@ from ...domain.model_capabilities import (
     GATEWAY_CAPABILITY_EMBEDDINGS,
     GATEWAY_CAPABILITY_TIERED_ROUTING,
 )
+from ...domain import reasoning_continuation as reasoning_continuation_policy
 
 
 # Static, provider-shape facts — never a live probe result.  Ollama resolves
@@ -232,6 +233,59 @@ class OllamaGateway:
             )
 
         options = dict(request.options or {})
+        num_predict = int(options.get("num_predict", 1024))
+        think_supplied = "think" in options
+        think = options.get("think")
+        if think_supplied and not isinstance(think, bool):
+            raise InvalidInput("model option think must be a boolean")
+        if cloud and think_supplied:
+            raise InvalidInput(
+                "hosted-model thinking is controlled by provider policy"
+            )
+        continuation_default = tier_label == "reasoning" and not cloud and think is not False
+        reasoning_continuation = options.get(
+            "reasoning_continuation", continuation_default,
+        )
+        if not isinstance(reasoning_continuation, bool):
+            raise InvalidInput(
+                "model option reasoning_continuation must be a boolean"
+            )
+        if cloud and reasoning_continuation:
+            raise InvalidInput(
+                "reasoning continuation is available only for local models"
+            )
+        if think is False and reasoning_continuation:
+            raise InvalidInput(
+                "reasoning continuation requires model thinking"
+            )
+        if reasoning_continuation:
+            try:
+                num_predict = reasoning_continuation_policy.strict_token_budget(
+                    num_predict, field="num_predict",
+                )
+            except ValueError as exc:
+                raise InvalidInput(str(exc)) from exc
+        total_supplied = "reasoning_total_tokens" in options
+        reasoning_total_tokens = options.get("reasoning_total_tokens")
+        if total_supplied:
+            if not reasoning_continuation:
+                raise InvalidInput(
+                    "reasoning_total_tokens requires reasoning_continuation"
+                )
+            try:
+                reasoning_total_tokens = reasoning_continuation_policy.strict_token_budget(
+                    reasoning_total_tokens, field="reasoning_total_tokens",
+                )
+            except ValueError as exc:
+                raise InvalidInput(str(exc)) from exc
+            if reasoning_total_tokens < num_predict:
+                raise InvalidInput(
+                    "reasoning_total_tokens cannot be smaller than num_predict"
+                )
+        elif reasoning_continuation:
+            reasoning_total_tokens = max(
+                num_predict, reasoning_continuation_policy.DEFAULT_TOTAL_TOKENS,
+            )
         timeout = _check_liveness(context)
         effective_system = request.system
         if not effective_system and self._system_builder is not None:
@@ -249,11 +303,19 @@ class OllamaGateway:
             f"temperature={options.get('temperature', 0.2)}, num_ctx={options.get('num_ctx', self._session_num_ctx)}, "
             f"timeout={effective_timeout}"
         )
+        generate_options = {}
+        if think_supplied:
+            generate_options["think"] = think
+        if reasoning_continuation:
+            generate_options.update({
+                "reasoning_continuation": True,
+                "reasoning_total_tokens": reasoning_total_tokens,
+            })
         gen = self._generate_factory(
             model,
             effective_system,
             float(options.get("temperature", 0.2)),
-            int(options.get("num_predict", 1024)),
+            num_predict,
             int(options.get("num_ctx", self._session_num_ctx)),
             cloud=cloud,
             # Keep a positive sub-second deadline bounded.  ``int(0.5)`` used
@@ -264,6 +326,7 @@ class OllamaGateway:
                 (lambda: context.cancellation.cancelled)
                 if context.cancellation is not None else None
             ),
+            **generate_options,
         )
         started = time.monotonic()
         try:

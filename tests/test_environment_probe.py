@@ -72,3 +72,20 @@ def test_probe_exposes_specialist_tools_without_subprocesses(monkeypatch):
     assert "sccache" in ep.format_profile()
     monkeypatch.undo()
     ep.probe(refresh=True)  # restore a real probe for later tests
+
+
+def test_formal_toolchains_are_part_of_read_only_discovery(monkeypatch):
+    seen = []
+
+    def fake_which(name):
+        seen.append(name)
+        return "/tools/%s" % name if name in ("elan", "lean", "lake") else None
+
+    monkeypatch.setattr(ep.shutil, "which", fake_which)
+    env = ep.probe(refresh=True)
+    assert env["toolchains"] == {
+        "elan": "/tools/elan", "lean": "/tools/lean", "lake": "/tools/lake",
+    }
+    assert {"elan", "lean", "lake"} <= set(seen)
+    monkeypatch.undo()
+    ep.probe(refresh=True)

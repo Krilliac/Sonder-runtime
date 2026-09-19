@@ -260,7 +260,7 @@ def test_opened_handle_identity_check_rejects_swap_race(workspace, monkeypatch):
     left.write_text("left", encoding="utf-8")
     right.write_text("right", encoding="utf-8")
     replacement.write_text("replacement", encoding="utf-8")
-    real_open = workspace_compare.os.open
+    real_open = workspace_compare._open_file
     swapped = {"done": False}
 
     def racing_open(path, flags):
@@ -270,7 +270,7 @@ def test_opened_handle_identity_check_rejects_swap_race(workspace, monkeypatch):
             swapped["done"] = True
         return real_open(path, flags)
 
-    monkeypatch.setattr(workspace_compare.os, "open", racing_open)
+    monkeypatch.setattr(workspace_compare, "_open_file", racing_open)
     with pytest.raises(workspace_compare.WorkspaceCompareError, match="identity changed"):
         workspace_compare.compare_workspaces(left, right)
 
@@ -280,14 +280,14 @@ def test_hash_open_uses_nofollow_flag_when_platform_exposes_it(workspace, monkey
     right = workspace / "right.txt"
     left.write_text("left", encoding="utf-8")
     right.write_text("right", encoding="utf-8")
-    real_open = workspace_compare.os.open
+    real_open = workspace_compare._open_file
     flags_seen = []
 
     def recording_open(path, flags):
         flags_seen.append(flags)
         return real_open(path, flags)
 
-    monkeypatch.setattr(workspace_compare.os, "open", recording_open)
+    monkeypatch.setattr(workspace_compare, "_open_file", recording_open)
     workspace_compare.compare_workspaces(left, right)
     if getattr(os, "O_NOFOLLOW", 0):
         assert all(flags & os.O_NOFOLLOW for flags in flags_seen)
