@@ -183,4 +183,5 @@ def test_solve_lean_uses_lean_fences_and_formal_repair_prompt():
     assert result["attempts"] == 2
     assert "Lean 4 source" in prompts[1]
     assert "sorry" in prompts[1] and "axiom" in prompts[1]
+    assert "constant" in prompts[1]
     assert "python code block" not in prompts[1]

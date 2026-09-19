@@ -32,3 +32,4 @@ def test_mathematician_keeps_conjecture_separate_from_checked_proof():
     assert "conjecture" in prompt
     assert "Lean" in prompt
     assert "numerical evidence" in prompt
+    assert "constant" in prompt

@@ -41,6 +41,32 @@ def strict_token_budget(value, *, field: str, minimum: int = 1) -> int:
     return value
 
 
+def total_token_budget(*, chunk_tokens: int, total_tokens: int | None = None) -> int:
+    """Resolve a bounded total that reserves a later answer-only segment.
+
+    An omitted total grows with the initial reasoning chunk, up to the hard
+    aggregate ceiling.  Explicit totals must exceed the first chunk: equality
+    would let that call consume the whole allowance before thinking can be
+    disabled for a final answer.
+    """
+    chunk = strict_token_budget(chunk_tokens, field="num_predict")
+    if total_tokens is None:
+        total = min(
+            MAX_TOTAL_TOKENS,
+            max(DEFAULT_TOTAL_TOKENS, chunk * 2),
+        )
+    else:
+        total = strict_token_budget(
+            total_tokens, field="reasoning_total_tokens",
+        )
+    if total <= chunk:
+        raise ValueError(
+            "reasoning_total_tokens must be greater than num_predict to "
+            "reserve a final answer segment"
+        )
+    return total
+
+
 def compact_checkpoint(previous: str, current: str, *, max_chars: int = DEFAULT_CHECKPOINT_CHARS) -> str:
     """Compact private scratchwork deterministically without inventing facts.
 
@@ -150,4 +176,5 @@ __all__ = [
     "compact_checkpoint",
     "plan_next_segment",
     "strict_token_budget",
+    "total_token_budget",
 ]

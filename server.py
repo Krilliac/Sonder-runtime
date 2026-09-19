@@ -1630,21 +1630,14 @@ def _make_generate(
         num_predict = _reasoning_continuation.strict_token_budget(
             num_predict, field="num_predict",
         )
-    if reasoning_total_tokens is not None:
-        reasoning_total_tokens = _reasoning_continuation.strict_token_budget(
-            reasoning_total_tokens, field="reasoning_total_tokens",
+    if reasoning_total_tokens is not None and not reasoning_continuation:
+        raise ValueError(
+            "reasoning_total_tokens requires reasoning_continuation"
         )
-        if not reasoning_continuation:
-            raise ValueError(
-                "reasoning_total_tokens requires reasoning_continuation"
-            )
-        if reasoning_total_tokens < num_predict:
-            raise ValueError(
-                "reasoning_total_tokens cannot be smaller than num_predict"
-            )
-    elif reasoning_continuation:
-        reasoning_total_tokens = max(
-            num_predict, _reasoning_continuation.DEFAULT_TOTAL_TOKENS,
+    if reasoning_continuation:
+        reasoning_total_tokens = _reasoning_continuation.total_token_budget(
+            chunk_tokens=num_predict,
+            total_tokens=reasoning_total_tokens,
         )
     if not cloud and (num_ctx is None or int(num_ctx or 0) <= 0):
         num_ctx = _auto_model_context(model)
@@ -4726,17 +4719,10 @@ def _chat_request(
         initial_chunk = _reasoning_continuation.strict_token_budget(
             initial_chunk, field="num_predict",
         )
-        if reasoning_total_tokens is None:
-            reasoning_total_tokens = max(
-                initial_chunk, _reasoning_continuation.DEFAULT_TOTAL_TOKENS,
-            )
-        reasoning_total_tokens = _reasoning_continuation.strict_token_budget(
-            reasoning_total_tokens, field="reasoning_total_tokens",
+        reasoning_total_tokens = _reasoning_continuation.total_token_budget(
+            chunk_tokens=initial_chunk,
+            total_tokens=reasoning_total_tokens,
         )
-        if reasoning_total_tokens < initial_chunk:
-            raise ValueError(
-                "reasoning_total_tokens cannot be smaller than num_predict"
-            )
         if _reasoning_deadline is None and timeout is not None:
             _reasoning_deadline = time.monotonic() + max(0.0, float(timeout))
     if (
@@ -24798,7 +24784,7 @@ def _prompt_formal_reasoning(statement: str, prover: str = "Lean 4") -> str:
         "small and boundary cases for a counterexample before attempting a general proof. "
         "Keep computational or numerical evidence separate from deduction. Then attempt a "
         "formalization. For Lean 4, return complete source with no sorry, admit, sorryAx, "
-        "or local axiom declarations. Do not describe any result as machine-checked until "
+        "axiom, or constant declarations. Do not describe any result as machine-checked until "
         "the machine checker actually accepts it. End with the checked result, the exact "
         "remaining proof obligations, and any assumptions that still carry the argument."
         % (statement, prover)

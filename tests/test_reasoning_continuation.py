@@ -78,6 +78,29 @@ def test_segment_planner_has_a_hard_total_and_final_segment():
     ) is None
 
 
+def test_default_total_scales_to_reserve_an_answer_segment():
+    assert policy.total_token_budget(chunk_tokens=4096) == 8192
+    assert policy.total_token_budget(chunk_tokens=1024) == 4096
+
+
+@pytest.mark.parametrize(
+    ("chunk_tokens", "total_tokens"),
+    [
+        (4096, 4096),
+        (4096, 2048),
+        (policy.MAX_TOTAL_TOKENS, None),
+    ],
+)
+def test_total_budget_rejects_configurations_without_an_answer_reserve(
+    chunk_tokens, total_tokens,
+):
+    with pytest.raises(ValueError, match="reserve a final answer segment"):
+        policy.total_token_budget(
+            chunk_tokens=chunk_tokens,
+            total_tokens=total_tokens,
+        )
+
+
 @pytest.mark.parametrize("value", [True, 1.5, "100", 0, 65537])
 def test_token_budgets_are_strict_and_bounded(value):
     with pytest.raises(ValueError):

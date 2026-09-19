@@ -33,8 +33,8 @@ first applies the operator's static artifact-risk policy to its exact file.
 
 `verifiers.lean_check` checks a complete Lean 4 source artifact and returns a
 verdict from Lean rather than asking a model to grade its own proof. It rejects
-`sorry`, `admit`, `sorryAx`, and local `axiom` declarations before invoking the
-toolchain, caps source, diagnostics, and runtime, and reports a missing
+`sorry`, `admit`, `sorryAx`, `axiom`, and `constant` declarations before
+invoking the toolchain, caps source, diagnostics, and runtime, and reports a missing
 toolchain as unavailable rather than as a false proof failure.
 
 Set `SONDER_LEAN_EXE` to the Lean executable for core-only checks. For practical

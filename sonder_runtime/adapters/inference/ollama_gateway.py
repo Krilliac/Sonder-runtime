@@ -267,25 +267,25 @@ class OllamaGateway:
                 raise InvalidInput(str(exc)) from exc
         total_supplied = "reasoning_total_tokens" in options
         reasoning_total_tokens = options.get("reasoning_total_tokens")
+        if total_supplied and not reasoning_continuation:
+            raise InvalidInput(
+                "reasoning_total_tokens requires reasoning_continuation"
+            )
         if total_supplied:
-            if not reasoning_continuation:
-                raise InvalidInput(
-                    "reasoning_total_tokens requires reasoning_continuation"
-                )
             try:
                 reasoning_total_tokens = reasoning_continuation_policy.strict_token_budget(
                     reasoning_total_tokens, field="reasoning_total_tokens",
                 )
             except ValueError as exc:
                 raise InvalidInput(str(exc)) from exc
-            if reasoning_total_tokens < num_predict:
-                raise InvalidInput(
-                    "reasoning_total_tokens cannot be smaller than num_predict"
+        if reasoning_continuation:
+            try:
+                reasoning_total_tokens = reasoning_continuation_policy.total_token_budget(
+                    chunk_tokens=num_predict,
+                    total_tokens=reasoning_total_tokens,
                 )
-        elif reasoning_continuation:
-            reasoning_total_tokens = max(
-                num_predict, reasoning_continuation_policy.DEFAULT_TOTAL_TOKENS,
-            )
+            except ValueError as exc:
+                raise InvalidInput(str(exc)) from exc
         timeout = _check_liveness(context)
         effective_system = request.system
         if not effective_system and self._system_builder is not None:

@@ -40,7 +40,7 @@ LEAN_REPAIR_TEMPLATE = (
     "The checker produced:\n{error}\n\n"
     "The theorem task:\n{original}\n\n"
     "Repair the specific failed obligation and return complete Lean 4 source in "
-    "one ```lean code block. Do not use sorry, admit, sorryAx, or local axiom "
+    "one ```lean code block. Do not use sorry, admit, sorryAx, axiom, or constant "
     "declarations. Change the proof strategy if the same diagnostic repeats. "
     "No prose outside the code block."
 )

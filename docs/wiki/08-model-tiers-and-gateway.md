@@ -140,8 +140,9 @@ These are different budgets and recover differently:
   continuation by default: Sonder retains one compact private checkpoint,
   replaces the older checkpoint on every segment, preserves cancellation and
   the original deadline, and reserves the last segment for the public answer.
-  The default aggregate ceiling is 4096 generated tokens across at most four
-  segments. The checkpoint is transport state and never becomes assistant
+  The default aggregate ceiling is the larger of 4096 or twice the initial
+  segment, capped at 65536 generated tokens across at most four segments. The
+  checkpoint is transport state and never becomes assistant
   text or a public transcript turn.
 
 Typed `ModelRequest.options` may set `reasoning_continuation` and

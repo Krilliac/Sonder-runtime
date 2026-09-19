@@ -58,6 +58,7 @@ def test_formal_reasoning_prompt_requires_machine_checked_status():
     assert "lemma dependency graph" in text
     assert "counterexample" in text
     assert "sorry" in text and "admit" in text and "axiom" in text
+    assert "constant" in text
     assert "machine checker" in text
 
 

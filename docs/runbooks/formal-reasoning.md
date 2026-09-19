@@ -1,9 +1,10 @@
 # Formal reasoning setup
 
 Sonder's formal path separates model output from proof evidence: a model writes
-Lean 4 source, `lean_check` rejects explicit proof placeholders, and Lean's
-kernel decides whether the artifact checks. A successful numerical experiment
-or persuasive explanation is not a substitute for that verdict.
+Lean 4 source, `lean_check` rejects `sorry`, `admit`, `sorryAx`, `axiom`, and
+`constant` trust gaps, and Lean's kernel decides whether the artifact checks. A
+successful numerical experiment or persuasive explanation is not a substitute
+for that verdict.
 
 ## Install and pin the toolchain
 

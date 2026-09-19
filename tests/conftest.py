@@ -165,8 +165,13 @@ def _isolate_fleet_worker_cap():
 
 
 @pytest.fixture(autouse=True)
-def _configure_http_legacy_boundary(monkeypatch, live_provider_environment):
-    """Exercise the same explicit runtime injection as the serve bootstrap."""
+def _configure_http_legacy_boundary(monkeypatch):
+    """Exercise the same explicit runtime injection as the serve bootstrap.
+
+    Live-provider credentials are restored only by tests that explicitly
+    request ``live_provider_environment``; this suite-wide boundary must stay
+    hermetic even when the live-test command-line flags are enabled.
+    """
     import server
     from sonder_runtime.interfaces.http import serve
     from sonder_runtime.interfaces.repl import repl

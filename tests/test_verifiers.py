@@ -233,13 +233,29 @@ def test_lean_check_rejects_unproved_trust_gaps_without_running_tool(placeholder
     assert placeholder.casefold() in verdict.detail.casefold()
 
 
+def test_lean_check_rejects_constant_declarations_without_running_tool():
+    source = (
+        "constant falseProof : False\n"
+        "theorem impossible : False := falseProof\n"
+    )
+
+    verdict = V.lean_check(
+        source,
+        {"lean": "definitely-not-a-real-lean-binary"},
+    )
+
+    assert verdict.passed is False
+    assert verdict.reason == "unproved trust gap"
+    assert "constant" in verdict.detail.casefold()
+
+
 def test_lean_check_ignores_placeholder_words_in_comments_and_strings(monkeypatch):
     responses = iter(((0, "Lean (version 4.19.0)"), (0, "")))
     monkeypatch.setattr(V, "_run", lambda *args, **kwargs: next(responses))
     source = (
-        '-- "sorry" is forbidden in real proof terms\n'
-        '/- nested /- axiom -/ admit -/\n'
-        'def message := "sorry admit axiom sorryAx"\n'
+        '-- "sorry" and constant declarations are forbidden in real proof terms\n'
+        '/- nested /- axiom -/ admit constant -/\n'
+        'def message := "sorry admit axiom sorryAx constant"\n'
         'theorem truth : True := by trivial\n'
     )
     assert V.lean_check(source, {"lean": V.sys.executable}).passed is True

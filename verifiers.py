@@ -43,7 +43,7 @@ _ALLOWED_CPP_STD = {"c++11", "c++14", "c++17", "c++20", "c++23", "c++latest"}
 _BAT_META = set('&|<>^"%\r\n')
 _MAX_LEAN_SOURCE_BYTES = 256_000
 _MAX_LEAN_DETAIL_CHARS = 8_000
-_LEAN_TRUST_GAP_RE = re.compile(r"\b(sorryAx|sorry|admit|axiom)\b")
+_LEAN_TRUST_GAP_RE = re.compile(r"\b(sorryAx|sorry|admit|axiom|constant)\b")
 
 
 class VerifierUnavailable(RuntimeError):

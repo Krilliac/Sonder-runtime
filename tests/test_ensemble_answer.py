@@ -484,6 +484,38 @@ def test_reasoning_continuation_compacts_and_reserves_a_final_answer(monkeypatch
         assert len(checkpoints) == 1
 
 
+def test_reasoning_continuation_default_reaches_answer_only_segment(monkeypatch):
+    calls = []
+
+    def fake_post_model(path, payload, **kwargs):
+        calls.append((payload["options"]["num_predict"], payload.get("think")))
+        if payload.get("think") is False:
+            return {
+                "message": {"content": "final answer"},
+                "eval_count": 20,
+                "done_reason": "stop",
+            }, 1
+        return {
+            "message": {"thinking": "private", "content": ""},
+            "eval_count": payload["options"]["num_predict"],
+            "done_reason": "length",
+        }, 1
+
+    monkeypatch.setattr(server, "_post_model", fake_post_model)
+    _out, content = server._chat_request(
+        {
+            "model": "r",
+            "messages": [{"role": "user", "content": "solve it"}],
+            "options": {"num_predict": 4096},
+        },
+        model="r",
+        reasoning_continuation=True,
+    )
+
+    assert content == "final answer"
+    assert calls == [(4096, None), (4096, False)]
+
+
 def test_explicit_think_false_skips_learned_headroom_and_retry(monkeypatch):
     server._THINKING_CAPABILITY_CACHE.clear()
     server._remember_thinking_model("r")

@@ -94,8 +94,9 @@ posture unless the call site declares the request idempotent **and**
 That input-context recovery is separate from local reasoning continuation. A
 thinking model can fit the prompt but spend all of `num_predict` before writing
 an answer. Local `reasoning`-tier requests checkpoint and compact that private
-scratchwork across a bounded aggregate allowance (4096 tokens and four
-segments by default), retain only one checkpoint in the retry prompt, share the
+scratchwork across a bounded aggregate allowance (at least 4096 tokens, scaled
+to twice the initial segment and capped at 65536, across at most four segments),
+retain only one checkpoint in the retry prompt, share the
 original deadline/cancellation, and reserve the final segment for an answer.
 Callers producing exact artifacts can instead request `think=false`; hosted
 thinking remains provider-controlled. Neither path creates an unbounded retry

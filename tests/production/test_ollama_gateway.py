@@ -104,6 +104,51 @@ def test_reasoning_tier_enables_bounded_continuation_by_default(monkeypatch):
     assert "think" not in seen
 
 
+def test_reasoning_default_total_reserves_a_second_full_size_segment(monkeypatch):
+    _fake_target(monkeypatch, tier_label="reasoning")
+    seen = {}
+
+    def make_generate(model, system, temperature, num_predict, num_ctx, **kwargs):
+        seen.update(kwargs)
+
+        def gen(prompt, history=None):
+            return "reasoned answer"
+
+        gen.last_usage = {}
+        gen.last_response_meta = {}
+        return gen
+
+    monkeypatch.setattr(server, "_make_generate", make_generate)
+    OllamaGateway().generate(
+        ModelRequest(
+            prompt="solve", tier="reasoning", options={"num_predict": 4096},
+        ),
+        _context(),
+    )
+
+    assert seen["reasoning_total_tokens"] == 8192
+
+
+@pytest.mark.parametrize("reasoning_total_tokens", [None, 4095, 4096])
+def test_reasoning_total_requires_room_for_a_final_answer(
+    monkeypatch, reasoning_total_tokens,
+):
+    _fake_target(monkeypatch, tier_label="reasoning")
+
+    with pytest.raises(InvalidInput, match="reasoning_total_tokens"):
+        OllamaGateway().generate(
+            ModelRequest(
+                prompt="solve",
+                tier="reasoning",
+                options={
+                    "num_predict": 4096,
+                    "reasoning_total_tokens": reasoning_total_tokens,
+                },
+            ),
+            _context(),
+        )
+
+
 def test_explicit_think_false_reaches_local_generate_factory(monkeypatch):
     _fake_target(monkeypatch, tier_label="reasoning")
     seen = {}
