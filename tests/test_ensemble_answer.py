@@ -474,6 +474,10 @@ def test_reasoning_continuation_compacts_and_reserves_a_final_answer(monkeypatch
     assert [call["think"] for call in calls] == [None, None, None, False]
     assert out["eval_count"] == 252
     assert out["reasoning_segments"] == 4
+    assert out["thinking_chars"] == sum(
+        len("private segment %d" % index) for index in range(1, 4)
+    )
+    assert "private segment" not in json.dumps(out)
     for call in calls[1:]:
         checkpoints = [
             message for message in call["messages"]
@@ -482,6 +486,39 @@ def test_reasoning_continuation_compacts_and_reserves_a_final_answer(monkeypatch
             )
         ]
         assert len(checkpoints) == 1
+
+
+def test_make_generate_reports_aggregate_continued_thinking_without_text(monkeypatch):
+    private_thinking = "private telemetry text"
+
+    def fake_post_model(path, payload, **kwargs):
+        if payload.get("think") is False:
+            return {
+                "message": {"content": "final answer"},
+                "eval_count": 10,
+                "done_reason": "stop",
+            }, 1
+        return {
+            "message": {"thinking": private_thinking, "content": ""},
+            "eval_count": 100,
+            "done_reason": "length",
+        }, 1
+
+    monkeypatch.setattr(server, "_post_model", fake_post_model)
+    generate = server._make_generate(
+        "r",
+        "",
+        0.2,
+        100,
+        2048,
+        reasoning_continuation=True,
+        reasoning_total_tokens=200,
+    )
+
+    assert generate("solve it") == "final answer"
+    assert generate.last_response_meta["thinking_chars"] == len(private_thinking)
+    assert generate.last_response_meta["reasoning_segments"] == 2
+    assert private_thinking not in json.dumps(generate.last_response_meta)
 
 
 def test_reasoning_continuation_default_reaches_answer_only_segment(monkeypatch):

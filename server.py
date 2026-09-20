@@ -1727,6 +1727,15 @@ def _make_generate(
             # Gateways can expose measured phase timing without retaining prompts,
             # responses, or arbitrary provider fields.
             thinking = out.get("message", {}).get("thinking", "") if isinstance(out.get("message"), dict) else ""
+            aggregate_thinking_chars = (
+                _model_usage_count(out.get("thinking_chars"))
+                if "reasoning_segments" in out else None
+            )
+            thinking_chars = (
+                aggregate_thinking_chars
+                if aggregate_thinking_chars is not None
+                else len(thinking) if isinstance(thinking, str) else 0
+            )
             gen.last_response_meta = {
                 "done_reason": str(out.get("done_reason") or "").strip().casefold(),
                 **{
@@ -1743,7 +1752,7 @@ def _make_generate(
                 # Preserve the historical empty-metadata contract.  A positive
                 # scalar lets fanout explain output budgets without retaining
                 # private reasoning text.
-                **({"thinking_chars": len(thinking)} if isinstance(thinking, str) and thinking else {}),
+                **({"thinking_chars": thinking_chars} if thinking_chars > 0 else {}),
             }
             ok = True
         except ModelCallError as error:
@@ -4687,6 +4696,28 @@ def _merge_reasoning_response_usage(first, later, *, segments: int) -> dict:
             merged[key] = left + right
         elif isinstance(left, int) and not isinstance(left, bool) and left >= 0:
             merged[key] = left
+    first_message = first.get("message") if isinstance(first, dict) else None
+    first_thinking = (
+        first_message.get("thinking") if isinstance(first_message, dict) else None
+    )
+    first_thinking_chars = (
+        len(first_thinking) if isinstance(first_thinking, str) else 0
+    )
+    later_thinking_chars = None
+    if isinstance(later, dict) and "reasoning_segments" in later:
+        later_thinking_chars = _model_usage_count(later.get("thinking_chars"))
+    if later_thinking_chars is None:
+        later_message = later.get("message") if isinstance(later, dict) else None
+        later_thinking = (
+            later_message.get("thinking")
+            if isinstance(later_message, dict) else None
+        )
+        later_thinking_chars = (
+            len(later_thinking) if isinstance(later_thinking, str) else 0
+        )
+    thinking_chars = first_thinking_chars + later_thinking_chars
+    if thinking_chars > 0:
+        merged["thinking_chars"] = thinking_chars
     merged["reasoning_segments"] = max(1, int(segments))
     return merged
 
