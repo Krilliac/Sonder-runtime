@@ -45,6 +45,13 @@ LEAN_REPAIR_TEMPLATE = (
     "No prose outside the code block."
 )
 
+LEAN_CONTRACT_TEMPLATE = (
+    "\n\nFormal acceptance contract: the complete source must define the declaration "
+    "`{declaration}` with type `{expected_type}`. The checker independently asks "
+    "Lean's kernel to use that exact declaration at that type; proving a different "
+    "theorem will not pass."
+)
+
 
 def _repair_prompt(original, code, error):
     return REPAIR_TEMPLATE.format(original=original, code=code or "", error=(error or "").strip()[:1500])
@@ -250,11 +257,22 @@ def solve_lean(prompt, gen_fn, spec=None, max_attempts=3, verify_fn=None):
     """Generate, kernel-check, and repair a Lean 4 proof candidate.
 
     This is the formal-reasoning counterpart to ``solve``: candidates must be
-    in an explicit Lean fence, and ordinary kernel diagnostics are fed back for
+    in an explicit Lean fence, define the caller-supplied expected declaration
+    at the expected type, and ordinary kernel diagnostics are fed back for
     bounded repair. A missing Lean toolchain remains ``VerifierUnavailable``.
     """
+    import verifiers
+
+    spec = dict(spec or {})
+    declaration, expected_type = verifiers.lean_contract(spec, required=True)
+    spec["expected_declaration"] = declaration
+    spec["expected_type"] = expected_type
+    contract_prompt = prompt + LEAN_CONTRACT_TEMPLATE.format(
+        declaration=declaration,
+        expected_type=expected_type,
+    )
     return solve_verified(
-        prompt,
+        contract_prompt,
         gen_fn,
         "lean_check",
         spec=spec,

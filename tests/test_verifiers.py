@@ -221,6 +221,64 @@ def test_lean_check_passes_kernel_checked_source(monkeypatch):
     assert not os.path.exists(calls[-1][0][-1])
 
 
+def test_lean_check_binds_success_to_the_requested_declaration(monkeypatch):
+    checked_sources = []
+
+    def fake_run(command, **kwargs):
+        if "--version" in command:
+            return 0, "Lean (version 4.19.0)"
+        source = open(command[-1], encoding="utf-8").read()
+        checked_sources.append(source)
+        if "_root_.requested" not in source:
+            return 0, ""
+        return 1, "Main.lean: error: unknown identifier 'requested'"
+
+    monkeypatch.setattr(V, "_run", fake_run)
+    verdict = V.lean_check(
+        "example : True := by trivial\n",
+        {
+            "lean": V.sys.executable,
+            "expected_declaration": "requested",
+            "expected_type": "False",
+        },
+    )
+
+    assert verdict.passed is False
+    assert "unknown identifier" in verdict.reason
+    assert "example : (False) := _root_.requested" in checked_sources[0]
+
+
+def test_lean_check_accepts_a_matching_requested_declaration(monkeypatch):
+    sources = []
+
+    def fake_run(command, **kwargs):
+        if "--version" in command:
+            return 0, "Lean (version 4.19.0)"
+        sources.append(open(command[-1], encoding="utf-8").read())
+        return 0, ""
+
+    monkeypatch.setattr(V, "_run", fake_run)
+    verdict = V.lean_check(
+        "theorem requested : True := by trivial\n",
+        {
+            "lean": V.sys.executable,
+            "expected_declaration": "requested",
+            "expected_type": "True",
+        },
+    )
+
+    assert verdict.passed is True
+    assert "example : (True) := _root_.requested" in sources[0]
+
+
+def test_lean_check_requires_the_contract_fields_as_a_pair():
+    with pytest.raises(ValueError, match="supplied together"):
+        V.lean_check(
+            "theorem truth : True := by trivial",
+            {"lean": V.sys.executable, "expected_declaration": "truth"},
+        )
+
+
 @pytest.mark.parametrize("placeholder", ["sorry", "admit", "axiom", "sorryAx"])
 def test_lean_check_rejects_unproved_trust_gaps_without_running_tool(placeholder):
     verdict = V.lean_check(
@@ -339,6 +397,41 @@ def test_lean_check_rejects_a_non_lake_project(tmp_path):
             "theorem truth : True := by trivial",
             {"lean": V.sys.executable, "project": str(tmp_path)},
         )
+
+
+def test_lean_check_applies_and_verifies_the_repository_pin(monkeypatch):
+    calls = []
+    monkeypatch.delenv("SONDER_LEAN_EXE", raising=False)
+    monkeypatch.delenv("SONDER_LEAN_PROJECT", raising=False)
+    monkeypatch.setattr(V.shutil, "which", lambda value: "/fake/lean")
+
+    def fake_run(command, **kwargs):
+        calls.append((tuple(command), kwargs))
+        cwd = kwargs["cwd"]
+        assert open(os.path.join(cwd, "lean-toolchain"), encoding="utf-8").read() == (
+            "leanprover/lean4:v4.34.0\n"
+        )
+        if "--version" in command:
+            return 0, "Lean (version 4.34.0, x86_64-unknown-linux-gnu)"
+        return 0, ""
+
+    monkeypatch.setattr(V, "_run", fake_run)
+    assert V.lean_check("theorem truth : True := by trivial").passed is True
+    assert len(calls) == 2
+
+
+def test_lean_check_fails_closed_when_default_lean_ignores_the_pin(monkeypatch):
+    monkeypatch.delenv("SONDER_LEAN_EXE", raising=False)
+    monkeypatch.delenv("SONDER_LEAN_PROJECT", raising=False)
+    monkeypatch.setattr(V.shutil, "which", lambda value: "/fake/lean")
+    monkeypatch.setattr(
+        V,
+        "_run",
+        lambda *args, **kwargs: (0, "Lean (version 4.33.0)"),
+    )
+
+    with pytest.raises(V.VerifierUnavailable, match="does not match repository pin"):
+        V.lean_check("theorem truth : True := by trivial")
 
 
 # --- promoted ext backends: the shared-exception contract ------------------

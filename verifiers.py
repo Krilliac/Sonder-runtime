@@ -43,7 +43,18 @@ _ALLOWED_CPP_STD = {"c++11", "c++14", "c++17", "c++20", "c++23", "c++latest"}
 _BAT_META = set('&|<>^"%\r\n')
 _MAX_LEAN_SOURCE_BYTES = 256_000
 _MAX_LEAN_DETAIL_CHARS = 8_000
+_MAX_LEAN_EXPECTED_TYPE_BYTES = 8_192
 _LEAN_TRUST_GAP_RE = re.compile(r"\b(sorryAx|sorry|admit|axiom|constant)\b")
+_LEAN_DECLARATION_RE = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*\Z"
+)
+_LEAN_VERSION_RE = re.compile(
+    r"\blean\b.*?\bversion\s+([0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?)",
+    re.IGNORECASE,
+)
+_LEAN_PIN_VERSION_RE = re.compile(
+    r"(?:^|:)v?([0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?)\Z"
+)
 
 
 class VerifierUnavailable(RuntimeError):
@@ -314,14 +325,74 @@ def _lean_project(configured):
     return root
 
 
+def lean_contract(spec, required=False):
+    """Validate and normalize an optional task-level Lean theorem contract."""
+    has_declaration = "expected_declaration" in spec
+    has_type = "expected_type" in spec
+    if has_declaration != has_type:
+        raise ValueError(
+            "expected_declaration and expected_type must be supplied together"
+        )
+    if not has_declaration:
+        if required:
+            raise ValueError(
+                "expected_declaration and expected_type are required"
+            )
+        return None
+
+    declaration = spec["expected_declaration"]
+    expected_type = spec["expected_type"]
+    if not isinstance(declaration, str) or not _LEAN_DECLARATION_RE.fullmatch(
+        declaration.strip()
+    ):
+        raise ValueError(
+            "expected_declaration must be a qualified Lean identifier"
+        )
+    if not isinstance(expected_type, str) or not expected_type.strip():
+        raise ValueError("expected_type must be a non-empty Lean type expression")
+    expected_type = expected_type.strip()
+    if "\x00" in expected_type:
+        raise ValueError("expected_type contains a null byte")
+    if len(expected_type.encode("utf-8")) > _MAX_LEAN_EXPECTED_TYPE_BYTES:
+        raise ValueError("expected_type exceeds the 8192-byte verifier ceiling")
+    return declaration.strip(), expected_type
+
+
+def _repository_lean_toolchain():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lean-toolchain")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            pin = handle.read().strip()
+    except OSError as exc:
+        raise VerifierUnavailable("repository lean-toolchain pin is unavailable") from exc
+    match = _LEAN_PIN_VERSION_RE.search(pin)
+    if not pin or "\n" in pin or not match:
+        raise VerifierUnavailable("repository lean-toolchain pin is invalid")
+    return pin, match.group(1)
+
+
+def _lean_contract_witness(contract):
+    if contract is None:
+        return ""
+    declaration, expected_type = contract
+    return (
+        "\n\n-- Sonder task contract: the requested declaration must inhabit this type.\n"
+        "example : (%s) := _root_.%s\n" % (expected_type, declaration)
+    )
+
+
 def lean_check(artifact, spec=None):
     """Kernel-check Lean 4 source without accepting proof placeholders.
 
     ``spec={'lean': executable?, 'lake': executable?, 'project': directory?,
-    'timeout': seconds?}``. With a project, the proof runs through ``lake env
-    lean`` so pinned dependencies such as Mathlib are available. The defaults
-    may be supplied through ``SONDER_LEAN_EXE``, ``SONDER_LAKE_EXE``, and
-    ``SONDER_LEAN_PROJECT``. Executables are identity-probed before use.
+    'timeout': seconds?, 'expected_declaration': name?, 'expected_type': type?}``.
+    The expected declaration/type pair adds a kernel-checked witness that binds
+    a successful artifact to the caller's theorem contract. With a project, the
+    proof runs through ``lake env lean`` so pinned dependencies such as Mathlib
+    are available. The defaults may be supplied through ``SONDER_LEAN_EXE``,
+    ``SONDER_LAKE_EXE``, and ``SONDER_LEAN_PROJECT``. Without an explicit Lean
+    executable or project, the repository ``lean-toolchain`` pin is applied and
+    its exact version is verified. Executables are identity-probed before use.
     Missing Lean/Lake is ``VerifierUnavailable``; rejected source or a kernel
     diagnostic is an ordinary failed verdict. Network/package installation is
     never attempted.
@@ -331,7 +402,10 @@ def lean_check(artifact, spec=None):
     if len(artifact.encode("utf-8")) > _MAX_LEAN_SOURCE_BYTES:
         raise ValueError("Lean source exceeds the 256000-byte verifier ceiling")
     spec = dict(spec or {})
-    unknown = set(spec) - {"lean", "lake", "project", "timeout"}
+    unknown = set(spec) - {
+        "lean", "lake", "project", "timeout",
+        "expected_declaration", "expected_type",
+    }
     if unknown:
         raise ValueError("unsupported lean_check options: %s" % sorted(unknown))
     timeout = spec.get("timeout", 120)
@@ -340,14 +414,20 @@ def lean_check(artifact, spec=None):
     timeout = float(timeout)
     if not 1 <= timeout <= 300:
         raise ValueError("lean_check timeout must be within [1, 300] seconds")
+    contract = lean_contract(spec)
 
     gap = _LEAN_TRUST_GAP_RE.search(_lean_code_only(artifact))
     if gap:
         detail = "Lean source contains prohibited unproved trust gap: %s" % gap.group(1)
         return Verdict(False, "unproved trust gap", detail)
 
-    executable = _lean_executable(spec.get("lean"))
     project = _lean_project(spec.get("project"))
+    configured_lean = spec.get("lean")
+    environment_lean = os.environ.get("SONDER_LEAN_EXE", "").strip()
+    use_repository_pin = (
+        project is None and not configured_lean and not environment_lean
+    )
+    executable = _lean_executable(configured_lean)
     if project:
         lake = _lake_executable(spec.get("lake"))
         command = [lake, "env", executable]
@@ -355,25 +435,41 @@ def lean_check(artifact, spec=None):
     else:
         command = [executable]
         command_cwd = None
-    try:
-        version_rc, version_output = _run(
-            [*command, "--version"], cwd=command_cwd, timeout=min(timeout, 30),
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise VerifierUnavailable(
-            "Lean 4 identity probe failed: %s" % type(exc).__name__
-        ) from exc
-    if (
-        version_rc != 0
-        or re.search(r"\blean\b.*\bversion\b", version_output, re.IGNORECASE) is None
-    ):
-        raise VerifierUnavailable("configured lean executable failed its identity probe")
 
     directory = tempfile.mkdtemp(prefix="sonder-lean-")
     try:
+        expected_version = None
+        if use_repository_pin:
+            pin, expected_version = _repository_lean_toolchain()
+            with open(
+                os.path.join(directory, "lean-toolchain"), "w", encoding="utf-8"
+            ) as handle:
+                handle.write(pin + "\n")
+            command_cwd = directory
+        try:
+            version_rc, version_output = _run(
+                [*command, "--version"],
+                cwd=command_cwd or directory,
+                timeout=min(timeout, 30),
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise VerifierUnavailable(
+                "Lean 4 identity probe failed: %s" % type(exc).__name__
+            ) from exc
+        version_match = _LEAN_VERSION_RE.search(version_output)
+        if version_rc != 0 or version_match is None:
+            raise VerifierUnavailable(
+                "configured lean executable failed its identity probe"
+            )
+        if expected_version and version_match.group(1) != expected_version:
+            raise VerifierUnavailable(
+                "default Lean version %s does not match repository pin %s"
+                % (version_match.group(1), expected_version)
+            )
+
         path = os.path.join(directory, "Main.lean")
         with open(path, "w", encoding="utf-8") as handle:
-            handle.write(artifact)
+            handle.write(artifact + _lean_contract_witness(contract))
         try:
             rc, output = _run(
                 [*command, path], cwd=command_cwd or directory, timeout=timeout,

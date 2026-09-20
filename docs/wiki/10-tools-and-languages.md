@@ -37,12 +37,20 @@ verdict from Lean rather than asking a model to grade its own proof. It rejects
 invoking the toolchain, caps source, diagnostics, and runtime, and reports a missing
 toolchain as unavailable rather than as a false proof failure.
 
+A raw call is a compiler check. For task-bound evidence, provide
+`expected_declaration` and `expected_type`; Sonder adds a separate kernel witness
+that the named declaration has the requested type. `solver.solve_lean` requires
+both fields and will not accept a compiling proof of an unrelated proposition.
+
 Set `SONDER_LEAN_EXE` to the Lean executable for core-only checks. For practical
 mathematics, also set `SONDER_LAKE_EXE` and `SONDER_LEAN_PROJECT` to a pinned
 Lake project with Mathlib; checks then run as `lake env lean` and can import the
 project's exact dependencies. Sonder never downloads packages during a proof
 check. The repository's `lean-toolchain` pins the supported Lean release; see
 [Formal reasoning setup](../runbooks/formal-reasoning.md).
+When no executable or project override is configured, the core checker applies
+that repository pin in its isolated directory and fails closed on a version
+mismatch.
 
 ## Host tool versions — `environment_status` / `toolchain_status`
 

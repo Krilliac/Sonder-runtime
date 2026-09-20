@@ -6,6 +6,11 @@ Lean 4 source, `lean_check` rejects `sorry`, `admit`, `sorryAx`, `axiom`, and
 successful numerical experiment or persuasive explanation is not a substitute
 for that verdict.
 
+Raw `lean_check(source)` is a compiler check. Task completion must also supply
+`expected_declaration` and `expected_type`; the verifier appends an independent
+kernel witness for that exact declaration and type. `solve_lean` requires this
+contract, so a valid proof of an unrelated theorem cannot satisfy the request.
+
 ## Install and pin the toolchain
 
 Install Lean through the official `elan` toolchain manager, then install the
@@ -17,7 +22,10 @@ lean --version
 lake --version
 ```
 
-For core-language theorems, configure only Lean:
+For core-language theorems, the default `lean` command is run from an isolated
+directory containing the repository's `lean-toolchain` pin, and its reported
+version must match that pin. An explicit executable remains available for
+provisioned deployments:
 
 ```bash
 export SONDER_LEAN_EXE=/absolute/path/to/lean
@@ -48,10 +56,13 @@ python - <<'PY'
 import verifiers
 
 source = """import Mathlib
-example (a b : ℝ) : (a + b) ^ 2 = a ^ 2 + 2 * a * b + b ^ 2 := by
+theorem square_sum (a b : ℝ) : (a + b) ^ 2 = a ^ 2 + 2 * a * b + b ^ 2 := by
   ring
 """
-print(verifiers.lean_check(source))
+print(verifiers.lean_check(source, {
+    "expected_declaration": "square_sum",
+    "expected_type": "∀ (a b : ℝ), (a + b) ^ 2 = a ^ 2 + 2 * a * b + b ^ 2",
+}))
 PY
 ```
 
