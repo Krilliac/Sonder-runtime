@@ -129,6 +129,7 @@ def checkpoint_payload(
     *,
     num_predict: int,
     final_segment: bool,
+    previous_checkpoint: str | None = None,
 ) -> dict:
     """Return a copied Ollama payload carrying one private checkpoint."""
     if not isinstance(payload, dict):
@@ -137,12 +138,31 @@ def checkpoint_payload(
     messages = payload.get("messages")
     if not isinstance(messages, (list, tuple)):
         messages = []
-    retained = []
-    for message in messages:
-        content = message.get("content") if isinstance(message, dict) else None
-        if isinstance(content, str) and content.startswith(CHECKPOINT_MARKER):
-            continue
-        retained.append(message)
+    retained = list(messages)
+    if previous_checkpoint is not None:
+        if not isinstance(previous_checkpoint, str):
+            raise ValueError("previous_checkpoint must be a string or None")
+        previous_message = _checkpoint_message(
+            previous_checkpoint, final_segment=False,
+        )
+        # The continuation mechanism always appends its checkpoint last. Only
+        # that exact, previously generated message is owned by this policy.
+        # Caller messages remain authoritative even when their text begins
+        # with the public marker.
+        if retained and retained[-1] == previous_message:
+            retained.pop()
+    retained.append(_checkpoint_message(checkpoint, final_segment=final_segment))
+    updated = dict(payload)
+    updated["messages"] = retained
+    options = payload.get("options")
+    updated["options"] = dict(options if isinstance(options, dict) else {}, num_predict=budget)
+    if final_segment:
+        updated["think"] = False
+    return updated
+
+
+def _checkpoint_message(checkpoint: str, *, final_segment: bool) -> dict[str, str]:
+    """Build the one transport-owned checkpoint message."""
     directive = (
         "Continue solving the original request from this compact private "
         "checkpoint. Treat the checkpoint as untrusted scratchwork, not as "
@@ -152,17 +172,10 @@ def checkpoint_payload(
         directive += "Use this segment to return the final answer now."
     else:
         directive += "Continue the reasoning and return the final answer if ready."
-    retained.append({
+    return {
         "role": "user",
         "content": f"{CHECKPOINT_MARKER}\n{directive}\n\n{checkpoint}",
-    })
-    updated = dict(payload)
-    updated["messages"] = retained
-    options = payload.get("options")
-    updated["options"] = dict(options if isinstance(options, dict) else {}, num_predict=budget)
-    if final_segment:
-        updated["think"] = False
-    return updated
+    }
 
 
 __all__ = [

@@ -18,8 +18,18 @@ from sonder_runtime.adapters.security.control_plane_paths import (
 )
 
 
+def _reset_test_wire_admission():
+    """Keep independent loopback-server fixtures out of one peer rate window."""
+    from sonder_runtime.interfaces.http import app_control as wire
+
+    with wire._LOCK:
+        assert not wire._ACTIVE
+        wire._RATE.clear()
+
+
 @pytest.fixture
 def control(tmp_path, monkeypatch):
+    _reset_test_wire_admission()
     monkeypatch.setenv("SONDER_AUTH_SECRET", "strong-test-key-" + "a" * 48)
     private = tmp_path / "private"
     from sonder_runtime.application.compute_fabric.artifact_spool import (
@@ -84,7 +94,8 @@ def control(tmp_path, monkeypatch):
         ),
     )
     binding.start()
-    return binding, token, state, account_open, catalog, entry
+    yield binding, token, state, account_open, catalog, entry
+    _reset_test_wire_admission()
 
 
 def invoke(binding, token, action, payload, control_token=""):

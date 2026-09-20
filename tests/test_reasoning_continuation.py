@@ -18,22 +18,25 @@ def test_checkpoint_compaction_is_bounded_and_keeps_both_ends():
 
 
 def test_checkpoint_payload_replaces_prior_checkpoint_and_reserves_final_answer():
-    old = {
-        "role": "user",
-        "content": policy.CHECKPOINT_MARKER + "\nold private state",
-    }
     payload = {
         "model": "local",
         "messages": [
             {"role": "system", "content": "rules"},
             {"role": "user", "content": "original request"},
-            old,
         ],
         "options": {"temperature": 0.1, "num_predict": 100},
     }
+    first = policy.checkpoint_payload(
+        payload, "old private state", num_predict=80, final_segment=False,
+    )
+    old = first["messages"][-1]
 
     updated = policy.checkpoint_payload(
-        payload, "new private state", num_predict=75, final_segment=True,
+        first,
+        "new private state",
+        num_predict=75,
+        final_segment=True,
+        previous_checkpoint="old private state",
     )
 
     checkpoint_messages = [
@@ -45,8 +48,27 @@ def test_checkpoint_payload_replaces_prior_checkpoint_and_reserves_final_answer(
     assert "old private state" not in checkpoint_messages[0]["content"]
     assert updated["think"] is False
     assert updated["options"] == {"temperature": 0.1, "num_predict": 75}
-    assert payload["messages"][-1] is old
+    assert first["messages"][-1] is old
     assert payload["options"]["num_predict"] == 100
+
+
+def test_checkpoint_payload_preserves_caller_message_with_checkpoint_prefix():
+    caller_message = {
+        "role": "user",
+        "content": policy.CHECKPOINT_MARKER + "\nExplain this protocol marker",
+    }
+    payload = {
+        "model": "local",
+        "messages": [caller_message],
+        "options": {"num_predict": 100},
+    }
+
+    updated = policy.checkpoint_payload(
+        payload, "private state", num_predict=50, final_segment=False,
+    )
+
+    assert updated["messages"][0] is caller_message
+    assert len(updated["messages"]) == 2
 
 
 def test_segment_planner_has_a_hard_total_and_final_segment():

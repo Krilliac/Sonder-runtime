@@ -142,8 +142,10 @@ These are different budgets and recover differently:
   the original deadline, and reserves the last segment for the public answer.
   The default aggregate ceiling is the larger of 4096 or twice the initial
   segment, capped at 65536 generated tokens across at most four segments. The
-  checkpoint is transport state and never becomes assistant
-  text or a public transcript turn.
+  checkpoint is transport state and never becomes assistant text or a public
+  transcript turn. Replacement targets only the exact last checkpoint message
+  created by the continuation mechanism; a caller-owned message is never
+  removed merely because it begins with the public checkpoint marker.
 
 Typed `ModelRequest.options` may set `reasoning_continuation` and
 `reasoning_total_tokens` for a local request. Set `think=false` when the task

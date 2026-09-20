@@ -516,6 +516,48 @@ def test_reasoning_continuation_default_reaches_answer_only_segment(monkeypatch)
     assert calls == [(4096, None), (4096, False)]
 
 
+def test_reasoning_continuation_preserves_user_owned_checkpoint_prefix(monkeypatch):
+    calls = []
+    caller_message = {
+        "role": "user",
+        "content": (
+            "[SONDER_PRIVATE_REASONING_CHECKPOINT_V1]\n"
+            "Explain why this marker is public protocol text"
+        ),
+    }
+
+    def fake_post_model(path, payload, **kwargs):
+        calls.append(list(payload["messages"]))
+        if payload.get("think") is False:
+            return {
+                "message": {"content": "final answer"},
+                "eval_count": 10,
+                "done_reason": "stop",
+            }, 1
+        return {
+            "message": {"thinking": "private", "content": ""},
+            "eval_count": 100,
+            "done_reason": "length",
+        }, 1
+
+    monkeypatch.setattr(server, "_post_model", fake_post_model)
+    _out, content = server._chat_request(
+        {
+            "model": "r",
+            "messages": [caller_message],
+            "options": {"num_predict": 100},
+        },
+        model="r",
+        reasoning_continuation=True,
+        reasoning_total_tokens=200,
+    )
+
+    assert content == "final answer"
+    assert calls[1][0] is caller_message
+    assert calls[1][0]["content"].endswith("public protocol text")
+    assert len(calls[1]) == 2
+
+
 def test_explicit_think_false_skips_learned_headroom_and_retry(monkeypatch):
     server._THINKING_CAPABILITY_CACHE.clear()
     server._remember_thinking_model("r")

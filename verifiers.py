@@ -55,6 +55,32 @@ _LEAN_VERSION_RE = re.compile(
 _LEAN_PIN_VERSION_RE = re.compile(
     r"(?:^|:)v?([0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?)\Z"
 )
+_LEAN_AXIOM_AUDIT_REJECTION = "Sonder rejected unproved axiom dependencies:"
+_LEAN_AXIOM_AUDITOR_SOURCE = r'''import Lean
+
+open Lean
+
+def audit (moduleName declaration : Name) : IO UInt32 := do
+  let env <- importModules #[{ module := moduleName }] {}
+  let axioms <- Lean.Core.CoreM.toIO' (collectAxioms declaration)
+    { fileName := "<sonder-axiom-audit>", fileMap := default }
+    { env := env }
+  let some moduleIdx := env.getModuleIdx? moduleName
+    | IO.eprintln s!"Sonder axiom audit could not locate module {moduleName}"; return 2
+  let untrusted := axioms.filter fun name =>
+    name == ``sorryAx || env.getModuleIdxFor? name == some moduleIdx
+  if untrusted.isEmpty then
+    return 0
+  IO.eprintln s!"Sonder rejected unproved axiom dependencies: {untrusted.toList}"
+  return 1
+
+def main (args : List String) : IO UInt32 :=
+  match args with
+  | [moduleName, declaration] => audit moduleName.toName declaration.toName
+  | _ => do
+    IO.eprintln "Sonder axiom audit requires module and declaration"
+    return 2
+'''
 
 
 class VerifierUnavailable(RuntimeError):
@@ -76,10 +102,13 @@ def _last_line(text):
     return lines[-1] if lines else ""
 
 
-def _run(cmd, cwd=None, timeout=180, shell=False):
+def _run(cmd, cwd=None, timeout=180, shell=False, env_overrides=None):
+    environment = sonder_logging.child_environment()
+    if env_overrides:
+        environment.update(env_overrides)
     p = subprocess.run(
         cmd, cwd=cwd, capture_output=True, timeout=timeout, shell=shell,
-        env=sonder_logging.child_environment(),
+        env=environment,
     )
     out = ((p.stdout or b"").decode("utf-8", "replace")
            + (p.stderr or b"").decode("utf-8", "replace"))
@@ -470,12 +499,54 @@ def lean_check(artifact, spec=None):
         path = os.path.join(directory, "Main.lean")
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(artifact + _lean_contract_witness(contract))
+        compile_command = [*command, path]
+        if contract is not None:
+            compile_command = [
+                *command,
+                "-R", directory,
+                "-o", os.path.join(directory, "Main.olean"),
+                path,
+            ]
         try:
             rc, output = _run(
-                [*command, path], cwd=command_cwd or directory, timeout=timeout,
+                compile_command, cwd=command_cwd or directory, timeout=timeout,
             )
         except FileNotFoundError as exc:
             raise VerifierUnavailable("Lean 4 executable disappeared before checking") from exc
+        if rc == 0 and contract is not None:
+            auditor_path = os.path.join(directory, "SonderAxiomAudit.lean")
+            with open(auditor_path, "w", encoding="utf-8") as handle:
+                handle.write(_LEAN_AXIOM_AUDITOR_SOURCE)
+            lean_path = directory
+            if os.environ.get("LEAN_PATH"):
+                lean_path += os.pathsep + os.environ["LEAN_PATH"]
+            try:
+                audit_rc, audit_output = _run(
+                    [
+                        *command,
+                        "-R", directory,
+                        "--run", auditor_path,
+                        "Main", contract[0],
+                    ],
+                    cwd=command_cwd or directory,
+                    timeout=timeout,
+                    env_overrides={"LEAN_PATH": lean_path},
+                )
+            except FileNotFoundError as exc:
+                raise VerifierUnavailable(
+                    "Lean 4 executable disappeared before the axiom audit"
+                ) from exc
+            if audit_rc != 0:
+                audit_detail = audit_output[-_MAX_LEAN_DETAIL_CHARS:]
+                if _LEAN_AXIOM_AUDIT_REJECTION in audit_output:
+                    return Verdict(
+                        False, "unproved axiom dependency", audit_detail,
+                    )
+                raise VerifierUnavailable(
+                    "Lean axiom dependency audit failed: %s"
+                    % (_last_line(audit_output) or "unknown audit failure")
+                )
+            output += audit_output
         detail = output[-_MAX_LEAN_DETAIL_CHARS:]
         return Verdict(
             rc == 0,

@@ -41,6 +41,9 @@ A raw call is a compiler check. For task-bound evidence, provide
 `expected_declaration` and `expected_type`; Sonder adds a separate kernel witness
 that the named declaration has the requested type. `solver.solve_lean` requires
 both fields and will not accept a compiling proof of an unrelated proposition.
+After compilation, a separate trusted Lean audit traces that declaration's
+transitive axiom dependencies and rejects any axiom introduced by the submitted
+module, including one installed through metaprogramming.
 
 Set `SONDER_LEAN_EXE` to the Lean executable for core-only checks. For practical
 mathematics, also set `SONDER_LAKE_EXE` and `SONDER_LEAN_PROJECT` to a pinned

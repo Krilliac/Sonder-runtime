@@ -2,14 +2,19 @@
 
 Sonder's formal path separates model output from proof evidence: a model writes
 Lean 4 source, `lean_check` rejects `sorry`, `admit`, `sorryAx`, `axiom`, and
-`constant` trust gaps, and Lean's kernel decides whether the artifact checks. A
-successful numerical experiment or persuasive explanation is not a substitute
-for that verdict.
+`constant` trust gaps, and Lean's kernel decides whether the artifact checks.
+For a task-bound check, Sonder then loads the compiled module in a separate
+trusted audit and rejects any transitive axiom dependency introduced by the
+submitted artifact, including axioms added through metaprogramming. Imported
+axioms come only from the configured pinned toolchain/project. A successful
+numerical experiment or persuasive explanation is not a substitute for that
+verdict.
 
 Raw `lean_check(source)` is a compiler check. Task completion must also supply
 `expected_declaration` and `expected_type`; the verifier appends an independent
 kernel witness for that exact declaration and type. `solve_lean` requires this
 contract, so a valid proof of an unrelated theorem cannot satisfy the request.
+The separate axiom audit targets that same declaration.
 
 ## Install and pin the toolchain
 
@@ -83,3 +88,6 @@ local `reasoning` tier. If one reasoning segment reaches `num_predict` without
 an answer, Sonder carries one compact private checkpoint into the next segment
 under a hard aggregate token limit and the same deadline. This is distinct
 from conversation compaction, which makes room in the model's input context.
+Replacement matches only the exact last checkpoint message created by Sonder;
+caller messages are preserved even when their text begins with the public
+checkpoint marker.

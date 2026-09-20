@@ -254,6 +254,8 @@ def test_lean_check_accepts_a_matching_requested_declaration(monkeypatch):
     def fake_run(command, **kwargs):
         if "--version" in command:
             return 0, "Lean (version 4.19.0)"
+        if "--run" in command:
+            return 0, ""
         sources.append(open(command[-1], encoding="utf-8").read())
         return 0, ""
 
@@ -269,6 +271,48 @@ def test_lean_check_accepts_a_matching_requested_declaration(monkeypatch):
 
     assert verdict.passed is True
     assert "example : (True) := _root_.requested" in sources[0]
+
+
+def test_lean_check_rejects_metaprogrammed_axiom_dependencies(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((tuple(command), kwargs))
+        if "--version" in command:
+            return 0, "Lean (version 4.19.0)"
+        if "--run" in command:
+            return 1, "Sonder rejected unproved axiom dependencies: [falseProof]"
+        return 0, ""
+
+    monkeypatch.setattr(V, "_run", fake_run)
+    source = """import Lean
+run_cmd
+  Lean.Elab.Command.liftCoreM <| Lean.addDecl (.axiomDecl {
+    name := `falseProof
+    levelParams := []
+    type := .const ``False []
+    isUnsafe := false
+  })
+theorem requested : False := falseProof
+"""
+
+    verdict = V.lean_check(
+        source,
+        {
+            "lean": V.sys.executable,
+            "expected_declaration": "requested",
+            "expected_type": "False",
+        },
+    )
+
+    assert verdict.passed is False
+    assert verdict.reason == "unproved axiom dependency"
+    assert "falseProof" in verdict.detail
+    compile_call = calls[1]
+    assert "-o" in compile_call[0]
+    audit_call = calls[2]
+    assert "--run" in audit_call[0]
+    assert audit_call[1]["env_overrides"]["LEAN_PATH"]
 
 
 def test_lean_check_requires_the_contract_fields_as_a_pair():

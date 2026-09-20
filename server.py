@@ -4831,6 +4831,9 @@ def _chat_request(
                     checkpoint,
                     num_predict=plan.num_predict,
                     final_segment=plan.final_segment,
+                    previous_checkpoint=(
+                        _reasoning_checkpoint if _reasoning_segments else None
+                    ),
                 )
                 activity_tracker.record_event(
                     "model_reasoning_continuation",
