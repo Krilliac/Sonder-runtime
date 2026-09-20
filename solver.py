@@ -52,6 +52,12 @@ LEAN_CONTRACT_TEMPLATE = (
     "theorem will not pass."
 )
 
+LEAN_TRUSTED_PRELUDE_TEMPLATE = (
+    "\n\nThe checker supplies this caller-owned trusted prelude before your source:\n"
+    "```lean\n{prelude}```\n"
+    "Use these declarations directly; do not redefine or repeat them in your artifact."
+)
+
 
 def _repair_prompt(original, code, error):
     return REPAIR_TEMPLATE.format(original=original, code=code or "", error=(error or "").strip()[:1500])
@@ -265,12 +271,17 @@ def solve_lean(prompt, gen_fn, spec=None, max_attempts=3, verify_fn=None):
 
     spec = dict(spec or {})
     declaration, expected_type = verifiers.lean_contract(spec, required=True)
+    trusted_prelude = verifiers.lean_trusted_prelude(spec)
     spec["expected_declaration"] = declaration
     spec["expected_type"] = expected_type
     contract_prompt = prompt + LEAN_CONTRACT_TEMPLATE.format(
         declaration=declaration,
         expected_type=expected_type,
     )
+    if trusted_prelude is not None:
+        contract_prompt += LEAN_TRUSTED_PRELUDE_TEMPLATE.format(
+            prelude=trusted_prelude,
+        )
     return solve_verified(
         contract_prompt,
         gen_fn,

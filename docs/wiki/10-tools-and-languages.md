@@ -39,12 +39,19 @@ toolchain as unavailable rather than as a false proof failure.
 
 A raw call is a compiler check. For task-bound evidence, provide
 `expected_declaration` and `expected_type`; Sonder compiles the expected type in
-a trusted module before the submission and compares kernel types in a separate
-audit, so submitted macros cannot rewrite the check. `solver.solve_lean` requires
-both fields and will not accept a compiling proof of an unrelated proposition.
-That same trusted Lean audit traces the declaration's
+a trusted module after the submission's compiler process exits and compares
+kernel types in a separate audit, so submitted macros cannot rewrite or inspect
+the randomized check while compiling. `solver.solve_lean` requires both fields
+and will not accept a compiling proof of an unrelated proposition. That same
+trusted Lean audit traces the declaration's
 transitive axiom dependencies and rejects any axiom introduced by the submitted
 module, including one installed through metaprogramming.
+
+Contracts that use task-local definitions may add a caller-owned
+`trusted_prelude`. Sonder compiles it separately and makes its declarations
+available to both the expected type and the submitted proof without exposing
+the contract axiom to the submission. This field is a trust boundary and must
+never contain model-generated source.
 
 Set `SONDER_LEAN_EXE` to the Lean executable for core-only checks. For practical
 mathematics, also set `SONDER_LAKE_EXE` and `SONDER_LEAN_PROJECT` to a pinned

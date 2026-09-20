@@ -248,7 +248,7 @@ def test_lean_check_binds_success_to_the_requested_declaration(monkeypatch):
 
     assert verdict.passed is False
     assert verdict.reason == "theorem contract mismatch"
-    assert checked_sources[-1] == "example : True := by trivial\n"
+    assert "example : True := by trivial\n" in checked_sources
     assert any("axiom contract : (False)" in source for source in checked_sources)
 
 
@@ -274,7 +274,7 @@ def test_lean_check_accepts_a_matching_requested_declaration(monkeypatch):
     )
 
     assert verdict.passed is True
-    assert sources[-1] == "theorem requested : True := by trivial\n"
+    assert "theorem requested : True := by trivial\n" in sources
     assert any("axiom contract : (True)" in source for source in sources)
 
 
@@ -313,13 +313,14 @@ theorem requested : False := falseProof
     assert verdict.passed is False
     assert verdict.reason == "unproved axiom dependency"
     assert "falseProof" in verdict.detail
-    expected_call = calls[1]
-    assert "SonderExpectedContract_" in expected_call[0][-1]
-    compile_call = calls[2]
+    compile_call = calls[1]
     assert "-o" in compile_call[0]
+    expected_call = calls[2]
+    assert "SonderExpectedContract_" in expected_call[0][-1]
     audit_call = calls[3]
     assert "--run" in audit_call[0]
     assert audit_call[1]["env_overrides"]["LEAN_PATH"]
+    assert "name == expectedDeclaration" in V._LEAN_AXIOM_AUDITOR_SOURCE
 
 
 def test_lean_check_verifies_contract_outside_the_submitted_module(monkeypatch):
@@ -369,11 +370,82 @@ theorem requested : True := by trivial
     assert "macro_rules" not in contract_sources[0]
 
 
+def test_lean_check_supports_caller_owned_contract_prelude(monkeypatch):
+    checked_sources = {}
+
+    def fake_run(command, **kwargs):
+        if "--version" in command:
+            return 0, "Lean (version 4.19.0)"
+        if "--run" in command:
+            return 0, ""
+        source_path = command[-1]
+        checked_sources[os.path.basename(source_path)] = open(
+            source_path, encoding="utf-8",
+        ).read()
+        return 0, ""
+
+    monkeypatch.setattr(V, "_run", fake_run)
+    artifact = "theorem requested : IsZero 0 := rfl\n"
+    prelude = "def IsZero (n : Nat) : Prop := n = 0\n"
+
+    verdict = V.lean_check(
+        artifact,
+        {
+            "lean": V.sys.executable,
+            "expected_declaration": "requested",
+            "expected_type": "IsZero 0",
+            "trusted_prelude": prelude,
+        },
+    )
+
+    assert verdict.passed is True
+    prelude_names = [
+        name for name in checked_sources
+        if name.startswith("SonderTrustedPrelude_")
+    ]
+    contract_names = [
+        name for name in checked_sources
+        if name.startswith("SonderExpectedContract_")
+    ]
+    assert len(prelude_names) == len(contract_names) == 1
+    prelude_module = os.path.splitext(prelude_names[0])[0]
+    expected_module = os.path.splitext(contract_names[0])[0]
+    assert checked_sources[prelude_names[0]] == prelude
+    assert checked_sources[contract_names[0]].startswith(
+        "import %s\n\n" % prelude_module
+    )
+    assert "axiom contract : (IsZero 0)" in checked_sources[contract_names[0]]
+    assert checked_sources["Main.lean"] == (
+        "import %s\n\n%s" % (prelude_module, artifact)
+    )
+    assert expected_module not in checked_sources["Main.lean"]
+
+
 def test_lean_check_requires_the_contract_fields_as_a_pair():
     with pytest.raises(ValueError, match="supplied together"):
         V.lean_check(
             "theorem truth : True := by trivial",
             {"lean": V.sys.executable, "expected_declaration": "truth"},
+        )
+
+    with pytest.raises(ValueError, match="trusted_prelude requires"):
+        V.lean_check(
+            "theorem truth : True := by trivial",
+            {"lean": V.sys.executable, "trusted_prelude": "def helper := 1"},
+        )
+
+
+@pytest.mark.parametrize("prelude", [None, "", " \n", 7])
+def test_lean_check_rejects_invalid_trusted_prelude(prelude):
+    with pytest.raises(ValueError, match="trusted_prelude"):
+        V.lean_check(
+            "theorem truth : True := by trivial",
+            {
+                "lean": V.sys.executable,
+                "expected_declaration": "truth",
+                "expected_type": "True",
+                "trusted_prelude": prelude,
+            },
         )
 
 

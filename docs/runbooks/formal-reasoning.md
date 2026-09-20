@@ -12,11 +12,21 @@ verdict.
 
 Raw `lean_check(source)` is a compiler check. Task completion must also supply
 `expected_declaration` and `expected_type`; the verifier compiles that type in a
-separate trusted module before compiling the artifact, then compares the two
-kernel types in its trusted audit. Submitted syntax and macros therefore cannot
-rewrite the contract check. `solve_lean` requires this contract, so a valid proof
-of an unrelated theorem cannot satisfy the request. The same audit checks that
-declaration's transitive axiom dependencies.
+separate trusted module after the artifact compiler process exits, then compares
+the two kernel types in its trusted audit. Submitted syntax and macros therefore
+cannot rewrite the contract check or discover the randomized contract module
+during compilation. `solve_lean` requires this contract, so a valid proof of an
+unrelated theorem cannot satisfy the request. The same audit checks that
+declaration's transitive axiom dependencies, including an attempted dependency
+on the trusted contract witness itself.
+
+If the contract type needs task-local predicates, structures, or functions,
+put those definitions in `trusted_prelude`. Sonder compiles that caller-owned
+source into a separate module and imports it into both the contract and proof
+modules; the proof never imports the module containing the contract axiom.
+Only task authors may populate this field—never copy model output into it. The
+generation loop shows the prelude to the model and tells it to use, not repeat,
+those declarations.
 
 ## Install and pin the toolchain
 
@@ -71,6 +81,17 @@ print(verifiers.lean_check(source, {
     "expected_type": "∀ (a b : ℝ), (a + b) ^ 2 = a ^ 2 + 2 * a * b + b ^ 2",
 }))
 PY
+```
+
+For a contract with a task-local definition:
+
+```python
+source = "theorem requested : IsZero 0 := rfl\n"
+print(verifiers.lean_check(source, {
+    "expected_declaration": "requested",
+    "expected_type": "IsZero 0",
+    "trusted_prelude": "def IsZero (n : Nat) : Prop := n = 0\n",
+}))
 ```
 
 A missing executable or invalid project raises `VerifierUnavailable`. A source

@@ -45,6 +45,7 @@ _BAT_META = set('&|<>^"%\r\n')
 _MAX_LEAN_SOURCE_BYTES = 256_000
 _MAX_LEAN_DETAIL_CHARS = 8_000
 _MAX_LEAN_EXPECTED_TYPE_BYTES = 8_192
+_MAX_LEAN_TRUSTED_PRELUDE_BYTES = 32_768
 _LEAN_TRUST_GAP_RE = re.compile(r"\b(sorryAx|sorry|admit|axiom|constant)\b")
 _LEAN_DECLARATION_RE = re.compile(
     r"[A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*\Z"
@@ -86,7 +87,8 @@ def audit (moduleName declaration expectedModule expectedDeclaration : Name) : I
   let some moduleIdx := env.getModuleIdx? moduleName
     | IO.eprintln s!"Sonder axiom audit could not locate module {moduleName}"; return 2
   let untrusted := axioms.filter fun name =>
-    name == ``sorryAx || env.getModuleIdxFor? name == some moduleIdx
+    name == ``sorryAx || name == expectedDeclaration ||
+      env.getModuleIdxFor? name == some moduleIdx
   if untrusted.isEmpty then
     return 0
   IO.eprintln s!"Sonder rejected unproved axiom dependencies: {untrusted.toList}"
@@ -406,6 +408,25 @@ def lean_contract(spec, required=False):
     return declaration.strip(), expected_type
 
 
+def lean_trusted_prelude(spec):
+    """Validate caller-owned Lean definitions shared with a proof contract.
+
+    This source belongs to the task author, never to the generated artifact. It
+    is compiled into its own module so contract-local predicates and structures
+    can be named without exposing the trusted contract axiom to the submission.
+    """
+    if "trusted_prelude" not in spec:
+        return None
+    source = spec["trusted_prelude"]
+    if not isinstance(source, str) or not source.strip():
+        raise ValueError("trusted_prelude must be non-empty Lean source")
+    if "\x00" in source:
+        raise ValueError("trusted_prelude contains a null byte")
+    if len(source.encode("utf-8")) > _MAX_LEAN_TRUSTED_PRELUDE_BYTES:
+        raise ValueError("trusted_prelude exceeds the 32768-byte verifier ceiling")
+    return source if source.endswith("\n") else source + "\n"
+
+
 def _repository_lean_toolchain():
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lean-toolchain")
     try:
@@ -419,8 +440,8 @@ def _repository_lean_toolchain():
     return pin, match.group(1)
 
 
-def _lean_expected_contract_source(artifact, expected_type, module_name):
-    """Build a trusted type declaration using only the artifact's safe imports."""
+def _lean_import_lines(artifact):
+    """Return deduplicated, code-only import declarations from an artifact."""
     imports = []
     seen = set()
     for match in _LEAN_IMPORT_RE.finditer(_lean_code_only(artifact)):
@@ -431,12 +452,30 @@ def _lean_expected_contract_source(artifact, expected_type, module_name):
         if line not in seen:
             imports.append(line)
             seen.add(line)
-    prefix = "\n".join(imports)
+    return imports
+
+
+def _lean_trusted_prelude_source(artifact, trusted_prelude):
+    """Build the caller-owned prelude with the artifact's safe imports."""
+    prefix = "\n".join(_lean_import_lines(artifact))
     if prefix:
         prefix += "\n\n"
+    return prefix + trusted_prelude
+
+
+def _lean_expected_contract_source(
+    artifact, expected_type, module_name, prelude_module=None,
+):
+    """Build a trusted type declaration outside the submitted module."""
+    if prelude_module:
+        prefix = "import %s\n\n" % prelude_module
+    else:
+        prefix = "\n".join(_lean_import_lines(artifact))
+        if prefix:
+            prefix += "\n\n"
     return (
         prefix
-        + "-- Generated before the submitted module; its macros cannot rewrite this contract.\n"
+        + "-- Generated outside the submitted module; its macros cannot rewrite this contract.\n"
         + "namespace %s\n" % module_name
         + "axiom contract : (%s)\n" % expected_type
         + "end %s\n" % module_name
@@ -447,12 +486,17 @@ def lean_check(artifact, spec=None):
     """Kernel-check Lean 4 source without accepting proof placeholders.
 
     ``spec={'lean': executable?, 'lake': executable?, 'project': directory?,
-    'timeout': seconds?, 'expected_declaration': name?, 'expected_type': type?}``.
+    'timeout': seconds?, 'expected_declaration': name?, 'expected_type': type?,
+    'trusted_prelude': caller-owned Lean source?}``.
     The expected declaration/type pair is compiled into a separate trusted
-    module before the artifact. A separate auditor compares the resulting
-    kernel types and checks axiom dependencies, so submitted syntax/macros
-    cannot rewrite the contract check. With a project, the proof runs through
-    ``lake env lean`` so pinned dependencies such as Mathlib are available. The
+    module after the artifact compiler process exits. A separate auditor
+    compares the resulting kernel types and checks axiom dependencies, so
+    submitted syntax/macros cannot rewrite the contract check. Contract-local
+    definitions may be put in
+    ``trusted_prelude``; that caller-owned source is compiled separately and
+    imported by both sides without exposing the contract axiom to the artifact.
+    With a project, the proof runs through ``lake env lean`` so pinned
+    dependencies such as Mathlib are available. The
     defaults may be supplied through ``SONDER_LEAN_EXE``,
     ``SONDER_LAKE_EXE``, and ``SONDER_LEAN_PROJECT``. Without an explicit Lean
     executable or project, the repository ``lean-toolchain`` pin is applied and
@@ -468,7 +512,7 @@ def lean_check(artifact, spec=None):
     spec = dict(spec or {})
     unknown = set(spec) - {
         "lean", "lake", "project", "timeout",
-        "expected_declaration", "expected_type",
+        "expected_declaration", "expected_type", "trusted_prelude",
     }
     if unknown:
         raise ValueError("unsupported lean_check options: %s" % sorted(unknown))
@@ -479,6 +523,11 @@ def lean_check(artifact, spec=None):
     if not 1 <= timeout <= 300:
         raise ValueError("lean_check timeout must be within [1, 300] seconds")
     contract = lean_contract(spec)
+    trusted_prelude = lean_trusted_prelude(spec)
+    if trusted_prelude is not None and contract is None:
+        raise ValueError(
+            "trusted_prelude requires expected_declaration and expected_type"
+        )
 
     gap = _LEAN_TRUST_GAP_RE.search(_lean_code_only(artifact))
     if gap:
@@ -532,15 +581,101 @@ def lean_check(artifact, spec=None):
             )
 
         output = ""
-        expected_module = None
-        expected_declaration = None
+        lean_path = directory
+        if os.environ.get("LEAN_PATH"):
+            lean_path += os.pathsep + os.environ["LEAN_PATH"]
+        module_env = {"LEAN_PATH": lean_path}
+        prelude_module = None
+        prelude_path = None
+        prelude_source = None
+        prelude_compile_command = None
+        if trusted_prelude is not None:
+            prelude_module = "SonderTrustedPrelude_%s" % secrets.token_hex(12)
+            prelude_path = os.path.join(directory, prelude_module + ".lean")
+            prelude_source = _lean_trusted_prelude_source(
+                artifact, trusted_prelude,
+            )
+            with open(prelude_path, "w", encoding="utf-8") as handle:
+                handle.write(prelude_source)
+            prelude_compile_command = [
+                *command,
+                "-R", directory,
+                "-o", os.path.join(directory, prelude_module + ".olean"),
+                prelude_path,
+            ]
+            try:
+                prelude_rc, prelude_output = _run(
+                    prelude_compile_command,
+                    cwd=command_cwd or directory,
+                    timeout=timeout,
+                    env_overrides=module_env,
+                )
+            except FileNotFoundError as exc:
+                raise VerifierUnavailable(
+                    "Lean 4 executable disappeared before checking the trusted prelude"
+                ) from exc
+            output += prelude_output
+            if prelude_rc != 0:
+                detail = output[-_MAX_LEAN_DETAIL_CHARS:]
+                return Verdict(
+                    False,
+                    _last_line(output) or "Lean trusted prelude failed",
+                    detail,
+                )
+
+        path = os.path.join(directory, "Main.lean")
+        submitted_source = artifact
+        if prelude_module:
+            submitted_source = "import %s\n\n%s" % (prelude_module, artifact)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(submitted_source)
+        compile_command = [*command, path]
         if contract is not None:
+            compile_command = [
+                *command,
+                "-R", directory,
+                "-o", os.path.join(directory, "Main.olean"),
+                path,
+            ]
+        try:
+            rc, compile_output = _run(
+                compile_command, cwd=command_cwd or directory, timeout=timeout,
+                env_overrides=module_env,
+            )
+        except FileNotFoundError as exc:
+            raise VerifierUnavailable("Lean 4 executable disappeared before checking") from exc
+        output += compile_output
+        if rc == 0 and contract is not None:
+            # The artifact can execute metaprogram commands while it compiles.
+            # Create the randomized contract only after that process exits, and
+            # restore the caller-owned prelude from memory before trusting it.
+            if prelude_compile_command is not None:
+                with open(prelude_path, "w", encoding="utf-8") as handle:
+                    handle.write(prelude_source)
+                try:
+                    restored_rc, restored_output = _run(
+                        prelude_compile_command,
+                        cwd=command_cwd or directory,
+                        timeout=timeout,
+                        env_overrides=module_env,
+                    )
+                except FileNotFoundError as exc:
+                    raise VerifierUnavailable(
+                        "Lean 4 executable disappeared while restoring the trusted prelude"
+                    ) from exc
+                output += restored_output
+                if restored_rc != 0:
+                    raise VerifierUnavailable(
+                        "trusted Lean prelude could not be restored after artifact compilation: %s"
+                        % (_last_line(restored_output) or "unknown compiler failure")
+                    )
+
             expected_module = "SonderExpectedContract_%s" % secrets.token_hex(12)
             expected_declaration = "%s.contract" % expected_module
             expected_path = os.path.join(directory, expected_module + ".lean")
             with open(expected_path, "w", encoding="utf-8") as handle:
                 handle.write(_lean_expected_contract_source(
-                    artifact, contract[1], expected_module,
+                    artifact, contract[1], expected_module, prelude_module,
                 ))
             try:
                 expected_rc, expected_output = _run(
@@ -552,6 +687,7 @@ def lean_check(artifact, spec=None):
                     ],
                     cwd=command_cwd or directory,
                     timeout=timeout,
+                    env_overrides=module_env,
                 )
             except FileNotFoundError as exc:
                 raise VerifierUnavailable(
@@ -566,31 +702,9 @@ def lean_check(artifact, spec=None):
                     detail,
                 )
 
-        path = os.path.join(directory, "Main.lean")
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(artifact)
-        compile_command = [*command, path]
-        if contract is not None:
-            compile_command = [
-                *command,
-                "-R", directory,
-                "-o", os.path.join(directory, "Main.olean"),
-                path,
-            ]
-        try:
-            rc, compile_output = _run(
-                compile_command, cwd=command_cwd or directory, timeout=timeout,
-            )
-        except FileNotFoundError as exc:
-            raise VerifierUnavailable("Lean 4 executable disappeared before checking") from exc
-        output += compile_output
-        if rc == 0 and contract is not None:
             auditor_path = os.path.join(directory, "SonderAxiomAudit.lean")
             with open(auditor_path, "w", encoding="utf-8") as handle:
                 handle.write(_LEAN_AXIOM_AUDITOR_SOURCE)
-            lean_path = directory
-            if os.environ.get("LEAN_PATH"):
-                lean_path += os.pathsep + os.environ["LEAN_PATH"]
             try:
                 audit_rc, audit_output = _run(
                     [
@@ -602,7 +716,7 @@ def lean_check(artifact, spec=None):
                     ],
                     cwd=command_cwd or directory,
                     timeout=timeout,
-                    env_overrides={"LEAN_PATH": lean_path},
+                    env_overrides=module_env,
                 )
             except FileNotFoundError as exc:
                 raise VerifierUnavailable(

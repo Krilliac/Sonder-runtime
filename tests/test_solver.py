@@ -180,7 +180,11 @@ def test_solve_lean_uses_lean_fences_and_formal_repair_prompt():
     result = solver.solve_lean(
         "Prove True",
         generate,
-        spec={"expected_declaration": "truth", "expected_type": "True"},
+        spec={
+            "expected_declaration": "truth",
+            "expected_type": "True",
+            "trusted_prelude": "def suppliedTruth : Prop := True",
+        },
         verify_fn=verify,
         max_attempts=2,
     )
@@ -192,6 +196,8 @@ def test_solve_lean_uses_lean_fences_and_formal_repair_prompt():
     assert "constant" in prompts[1]
     assert "python code block" not in prompts[1]
     assert "`truth`" in prompts[0] and "`True`" in prompts[0]
+    assert "def suppliedTruth : Prop := True" in prompts[0]
+    assert "do not redefine" in prompts[0]
 
 
 def test_solve_lean_requires_an_explicit_theorem_contract():
