@@ -213,6 +213,24 @@ def test_reasoning_continuation_requires_a_bounded_positive_chunk(
         )
 
 
+@pytest.mark.parametrize("num_predict", [True, "512", 1.5])
+def test_reasoning_continuation_rejects_coercible_non_integer_chunks(
+    monkeypatch, num_predict,
+):
+    _fake_target(monkeypatch, tier_label="reasoning")
+    _fake_gen(monkeypatch)
+
+    with pytest.raises(InvalidInput, match="num_predict"):
+        OllamaGateway().generate(
+            ModelRequest(
+                prompt="x",
+                tier="reasoning",
+                options={"num_predict": num_predict},
+            ),
+            _context(),
+        )
+
+
 def test_generate_preserves_backend_measured_phases(monkeypatch):
     _fake_target(monkeypatch)
     _fake_gen(

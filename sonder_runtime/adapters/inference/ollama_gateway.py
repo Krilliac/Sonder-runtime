@@ -233,7 +233,7 @@ class OllamaGateway:
             )
 
         options = dict(request.options or {})
-        num_predict = int(options.get("num_predict", 1024))
+        num_predict = options.get("num_predict", 1024)
         think_supplied = "think" in options
         think = options.get("think")
         if think_supplied and not isinstance(think, bool):
@@ -265,6 +265,8 @@ class OllamaGateway:
                 )
             except ValueError as exc:
                 raise InvalidInput(str(exc)) from exc
+        else:
+            num_predict = int(num_predict)
         total_supplied = "reasoning_total_tokens" in options
         reasoning_total_tokens = options.get("reasoning_total_tokens")
         if total_supplied and not reasoning_continuation:

@@ -38,10 +38,11 @@ invoking the toolchain, caps source, diagnostics, and runtime, and reports a mis
 toolchain as unavailable rather than as a false proof failure.
 
 A raw call is a compiler check. For task-bound evidence, provide
-`expected_declaration` and `expected_type`; Sonder adds a separate kernel witness
-that the named declaration has the requested type. `solver.solve_lean` requires
+`expected_declaration` and `expected_type`; Sonder compiles the expected type in
+a trusted module before the submission and compares kernel types in a separate
+audit, so submitted macros cannot rewrite the check. `solver.solve_lean` requires
 both fields and will not accept a compiling proof of an unrelated proposition.
-After compilation, a separate trusted Lean audit traces that declaration's
+That same trusted Lean audit traces the declaration's
 transitive axiom dependencies and rejects any axiom introduced by the submitted
 module, including one installed through metaprogramming.
 

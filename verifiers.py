@@ -21,6 +21,7 @@ absent — that is "could not judge", distinct from a Verdict(False) "artifact f
 import collections
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -48,6 +49,11 @@ _LEAN_TRUST_GAP_RE = re.compile(r"\b(sorryAx|sorry|admit|axiom|constant)\b")
 _LEAN_DECLARATION_RE = re.compile(
     r"[A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*\Z"
 )
+_LEAN_IMPORT_RE = re.compile(
+    r"^[ \t]*import[ \t]+(?:(all)[ \t]+)?"
+    r"([A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*)[ \t]*$",
+    re.MULTILINE,
+)
 _LEAN_VERSION_RE = re.compile(
     r"\blean\b.*?\bversion\s+([0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?)",
     re.IGNORECASE,
@@ -56,12 +62,24 @@ _LEAN_PIN_VERSION_RE = re.compile(
     r"(?:^|:)v?([0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?)\Z"
 )
 _LEAN_AXIOM_AUDIT_REJECTION = "Sonder rejected unproved axiom dependencies:"
+_LEAN_CONTRACT_AUDIT_REJECTION = "Sonder rejected theorem contract type mismatch:"
 _LEAN_AXIOM_AUDITOR_SOURCE = r'''import Lean
 
 open Lean
 
-def audit (moduleName declaration : Name) : IO UInt32 := do
-  let env <- importModules #[{ module := moduleName }] {}
+def audit (moduleName declaration expectedModule expectedDeclaration : Name) : IO UInt32 := do
+  let env <- importModules #[{ module := expectedModule }, { module := moduleName }] {}
+  let some actualInfo := env.find? declaration
+    | IO.eprintln s!"Sonder rejected theorem contract type mismatch: missing declaration {declaration}"; return 1
+  let some expectedInfo := env.find? expectedDeclaration
+    | IO.eprintln s!"Sonder contract audit could not locate trusted declaration {expectedDeclaration}"; return 2
+  let typesMatch <- Lean.Core.CoreM.toIO'
+    ((Lean.Meta.isDefEq actualInfo.type expectedInfo.type).run')
+    { fileName := "<sonder-contract-audit>", fileMap := default }
+    { env := env }
+  if !typesMatch then
+    IO.eprintln s!"Sonder rejected theorem contract type mismatch: {declaration} has type {actualInfo.type}, expected {expectedInfo.type}"
+    return 1
   let axioms <- Lean.Core.CoreM.toIO' (collectAxioms declaration)
     { fileName := "<sonder-axiom-audit>", fileMap := default }
     { env := env }
@@ -76,9 +94,10 @@ def audit (moduleName declaration : Name) : IO UInt32 := do
 
 def main (args : List String) : IO UInt32 :=
   match args with
-  | [moduleName, declaration] => audit moduleName.toName declaration.toName
+  | [moduleName, declaration, expectedModule, expectedDeclaration] =>
+      audit moduleName.toName declaration.toName expectedModule.toName expectedDeclaration.toName
   | _ => do
-    IO.eprintln "Sonder axiom audit requires module and declaration"
+    IO.eprintln "Sonder contract audit requires artifact and expected declarations"
     return 2
 '''
 
@@ -400,13 +419,27 @@ def _repository_lean_toolchain():
     return pin, match.group(1)
 
 
-def _lean_contract_witness(contract):
-    if contract is None:
-        return ""
-    declaration, expected_type = contract
+def _lean_expected_contract_source(artifact, expected_type, module_name):
+    """Build a trusted type declaration using only the artifact's safe imports."""
+    imports = []
+    seen = set()
+    for match in _LEAN_IMPORT_RE.finditer(_lean_code_only(artifact)):
+        line = "import %s%s" % (
+            "all " if match.group(1) else "",
+            match.group(2),
+        )
+        if line not in seen:
+            imports.append(line)
+            seen.add(line)
+    prefix = "\n".join(imports)
+    if prefix:
+        prefix += "\n\n"
     return (
-        "\n\n-- Sonder task contract: the requested declaration must inhabit this type.\n"
-        "example : (%s) := _root_.%s\n" % (expected_type, declaration)
+        prefix
+        + "-- Generated before the submitted module; its macros cannot rewrite this contract.\n"
+        + "namespace %s\n" % module_name
+        + "axiom contract : (%s)\n" % expected_type
+        + "end %s\n" % module_name
     )
 
 
@@ -415,10 +448,12 @@ def lean_check(artifact, spec=None):
 
     ``spec={'lean': executable?, 'lake': executable?, 'project': directory?,
     'timeout': seconds?, 'expected_declaration': name?, 'expected_type': type?}``.
-    The expected declaration/type pair adds a kernel-checked witness that binds
-    a successful artifact to the caller's theorem contract. With a project, the
-    proof runs through ``lake env lean`` so pinned dependencies such as Mathlib
-    are available. The defaults may be supplied through ``SONDER_LEAN_EXE``,
+    The expected declaration/type pair is compiled into a separate trusted
+    module before the artifact. A separate auditor compares the resulting
+    kernel types and checks axiom dependencies, so submitted syntax/macros
+    cannot rewrite the contract check. With a project, the proof runs through
+    ``lake env lean`` so pinned dependencies such as Mathlib are available. The
+    defaults may be supplied through ``SONDER_LEAN_EXE``,
     ``SONDER_LAKE_EXE``, and ``SONDER_LEAN_PROJECT``. Without an explicit Lean
     executable or project, the repository ``lean-toolchain`` pin is applied and
     its exact version is verified. Executables are identity-probed before use.
@@ -496,9 +531,44 @@ def lean_check(artifact, spec=None):
                 % (version_match.group(1), expected_version)
             )
 
+        output = ""
+        expected_module = None
+        expected_declaration = None
+        if contract is not None:
+            expected_module = "SonderExpectedContract_%s" % secrets.token_hex(12)
+            expected_declaration = "%s.contract" % expected_module
+            expected_path = os.path.join(directory, expected_module + ".lean")
+            with open(expected_path, "w", encoding="utf-8") as handle:
+                handle.write(_lean_expected_contract_source(
+                    artifact, contract[1], expected_module,
+                ))
+            try:
+                expected_rc, expected_output = _run(
+                    [
+                        *command,
+                        "-R", directory,
+                        "-o", os.path.join(directory, expected_module + ".olean"),
+                        expected_path,
+                    ],
+                    cwd=command_cwd or directory,
+                    timeout=timeout,
+                )
+            except FileNotFoundError as exc:
+                raise VerifierUnavailable(
+                    "Lean 4 executable disappeared before checking the contract"
+                ) from exc
+            output += expected_output
+            if expected_rc != 0:
+                detail = output[-_MAX_LEAN_DETAIL_CHARS:]
+                return Verdict(
+                    False,
+                    _last_line(output) or "Lean theorem contract type failed",
+                    detail,
+                )
+
         path = os.path.join(directory, "Main.lean")
         with open(path, "w", encoding="utf-8") as handle:
-            handle.write(artifact + _lean_contract_witness(contract))
+            handle.write(artifact)
         compile_command = [*command, path]
         if contract is not None:
             compile_command = [
@@ -508,11 +578,12 @@ def lean_check(artifact, spec=None):
                 path,
             ]
         try:
-            rc, output = _run(
+            rc, compile_output = _run(
                 compile_command, cwd=command_cwd or directory, timeout=timeout,
             )
         except FileNotFoundError as exc:
             raise VerifierUnavailable("Lean 4 executable disappeared before checking") from exc
+        output += compile_output
         if rc == 0 and contract is not None:
             auditor_path = os.path.join(directory, "SonderAxiomAudit.lean")
             with open(auditor_path, "w", encoding="utf-8") as handle:
@@ -527,6 +598,7 @@ def lean_check(artifact, spec=None):
                         "-R", directory,
                         "--run", auditor_path,
                         "Main", contract[0],
+                        expected_module, expected_declaration,
                     ],
                     cwd=command_cwd or directory,
                     timeout=timeout,
@@ -541,6 +613,10 @@ def lean_check(artifact, spec=None):
                 if _LEAN_AXIOM_AUDIT_REJECTION in audit_output:
                     return Verdict(
                         False, "unproved axiom dependency", audit_detail,
+                    )
+                if _LEAN_CONTRACT_AUDIT_REJECTION in audit_output:
+                    return Verdict(
+                        False, "theorem contract mismatch", audit_detail,
                     )
                 raise VerifierUnavailable(
                     "Lean axiom dependency audit failed: %s"

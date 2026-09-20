@@ -227,11 +227,14 @@ def test_lean_check_binds_success_to_the_requested_declaration(monkeypatch):
     def fake_run(command, **kwargs):
         if "--version" in command:
             return 0, "Lean (version 4.19.0)"
+        if "--run" in command:
+            return 1, (
+                "Sonder rejected theorem contract type mismatch: "
+                "missing declaration requested"
+            )
         source = open(command[-1], encoding="utf-8").read()
         checked_sources.append(source)
-        if "_root_.requested" not in source:
-            return 0, ""
-        return 1, "Main.lean: error: unknown identifier 'requested'"
+        return 0, ""
 
     monkeypatch.setattr(V, "_run", fake_run)
     verdict = V.lean_check(
@@ -244,8 +247,9 @@ def test_lean_check_binds_success_to_the_requested_declaration(monkeypatch):
     )
 
     assert verdict.passed is False
-    assert "unknown identifier" in verdict.reason
-    assert "example : (False) := _root_.requested" in checked_sources[0]
+    assert verdict.reason == "theorem contract mismatch"
+    assert checked_sources[-1] == "example : True := by trivial\n"
+    assert any("axiom contract : (False)" in source for source in checked_sources)
 
 
 def test_lean_check_accepts_a_matching_requested_declaration(monkeypatch):
@@ -270,7 +274,8 @@ def test_lean_check_accepts_a_matching_requested_declaration(monkeypatch):
     )
 
     assert verdict.passed is True
-    assert "example : (True) := _root_.requested" in sources[0]
+    assert sources[-1] == "theorem requested : True := by trivial\n"
+    assert any("axiom contract : (True)" in source for source in sources)
 
 
 def test_lean_check_rejects_metaprogrammed_axiom_dependencies(monkeypatch):
@@ -308,11 +313,60 @@ theorem requested : False := falseProof
     assert verdict.passed is False
     assert verdict.reason == "unproved axiom dependency"
     assert "falseProof" in verdict.detail
-    compile_call = calls[1]
+    expected_call = calls[1]
+    assert "SonderExpectedContract_" in expected_call[0][-1]
+    compile_call = calls[2]
     assert "-o" in compile_call[0]
-    audit_call = calls[2]
+    audit_call = calls[3]
     assert "--run" in audit_call[0]
     assert audit_call[1]["env_overrides"]["LEAN_PATH"]
+
+
+def test_lean_check_verifies_contract_outside_the_submitted_module(monkeypatch):
+    checked_sources = {}
+
+    def fake_run(command, **kwargs):
+        if "--version" in command:
+            return 0, "Lean (version 4.19.0)"
+        if "--run" in command:
+            return 1, (
+                "Sonder rejected theorem contract type mismatch: "
+                "requested has type True, expected False"
+            )
+        source_path = command[-1]
+        checked_sources[os.path.basename(source_path)] = open(
+            source_path, encoding="utf-8",
+        ).read()
+        return 0, ""
+
+    monkeypatch.setattr(V, "_run", fake_run)
+    source = """import Lean
+syntax (priority := high) "example" ":" "(" term ")" ":=" term : command
+macro_rules
+  | `(example : ($expected) := $declaration) =>
+      `(def swallowedContractWitness : True := by trivial)
+theorem requested : True := by trivial
+"""
+
+    verdict = V.lean_check(
+        source,
+        {
+            "lean": V.sys.executable,
+            "expected_declaration": "requested",
+            "expected_type": "False",
+        },
+    )
+
+    assert verdict.passed is False
+    assert verdict.reason == "theorem contract mismatch"
+    assert checked_sources["Main.lean"] == source
+    contract_sources = [
+        text for name, text in checked_sources.items()
+        if name.startswith("SonderExpectedContract_")
+    ]
+    assert len(contract_sources) == 1
+    assert "axiom contract : (False)" in contract_sources[0]
+    assert "macro_rules" not in contract_sources[0]
 
 
 def test_lean_check_requires_the_contract_fields_as_a_pair():

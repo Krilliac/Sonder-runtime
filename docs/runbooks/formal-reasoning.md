@@ -11,10 +11,12 @@ numerical experiment or persuasive explanation is not a substitute for that
 verdict.
 
 Raw `lean_check(source)` is a compiler check. Task completion must also supply
-`expected_declaration` and `expected_type`; the verifier appends an independent
-kernel witness for that exact declaration and type. `solve_lean` requires this
-contract, so a valid proof of an unrelated theorem cannot satisfy the request.
-The separate axiom audit targets that same declaration.
+`expected_declaration` and `expected_type`; the verifier compiles that type in a
+separate trusted module before compiling the artifact, then compares the two
+kernel types in its trusted audit. Submitted syntax and macros therefore cannot
+rewrite the contract check. `solve_lean` requires this contract, so a valid proof
+of an unrelated theorem cannot satisfy the request. The same audit checks that
+declaration's transitive axiom dependencies.
 
 ## Install and pin the toolchain
 
