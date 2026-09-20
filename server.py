@@ -4722,6 +4722,33 @@ def _merge_reasoning_response_usage(first, later, *, segments: int) -> dict:
     return merged
 
 
+def _preserve_reasoning_failure_usage(
+    error: ModelCallError,
+    first: dict,
+    *,
+    segments: int,
+) -> None:
+    """Attach aggregate scalar usage to a failed continuation exception."""
+    first_message = first.get("message") if isinstance(first, dict) else None
+    first_thinking = (
+        first_message.get("thinking") if isinstance(first_message, dict) else None
+    )
+    first_thinking_chars = (
+        len(first_thinking) if isinstance(first_thinking, str) else 0
+    )
+    later_metadata = _response_error_metadata(error)
+    later_thinking_chars = _model_usage_count(
+        later_metadata.get("thinking_chars")
+    ) or 0
+    thinking_chars = first_thinking_chars + later_thinking_chars
+    if thinking_chars > 0:
+        error.thinking_chars = thinking_chars
+    later_segments = _model_usage_count(
+        later_metadata.get("reasoning_segments")
+    ) or 0
+    error.reasoning_segments = max(1, int(segments), later_segments)
+
+
 def _chat_request(
     payload: dict,
     *,
@@ -4838,13 +4865,19 @@ def _chat_request(
                 if _reasoning_deadline is not None:
                     remaining_seconds = _reasoning_deadline - time.monotonic()
                     if remaining_seconds < 1.0:
-                        raise ModelCallError(
+                        error = ModelCallError(
                             "timeout",
                             "reasoning continuation deadline exhausted",
                             transient=True,
                             attempts=attempts,
                             cloud=False,
                         )
+                        _preserve_reasoning_failure_usage(
+                            error,
+                            out,
+                            segments=completed_segments,
+                        )
+                        raise error
                     next_timeout = max(1, math.ceil(remaining_seconds))
                 else:
                     next_timeout = timeout
@@ -4874,23 +4907,31 @@ def _chat_request(
                     total_tokens=reasoning_total_tokens,
                     final_segment=plan.final_segment,
                 )
-                later, final_content = _chat_request(
-                    continued_payload,
-                    model=model,
-                    cloud=False,
-                    timeout=next_timeout,
-                    cancel_check=cancel_check,
-                    accept_native_tool_calls=accept_native_tool_calls,
-                    idempotent=idempotent,
-                    local_only=local_only,
-                    _budget_retried=True,
-                    reasoning_continuation=True,
-                    reasoning_total_tokens=reasoning_total_tokens,
-                    _reasoning_spent=spent,
-                    _reasoning_segments=completed_segments,
-                    _reasoning_checkpoint=checkpoint,
-                    _reasoning_deadline=_reasoning_deadline,
-                )
+                try:
+                    later, final_content = _chat_request(
+                        continued_payload,
+                        model=model,
+                        cloud=False,
+                        timeout=next_timeout,
+                        cancel_check=cancel_check,
+                        accept_native_tool_calls=accept_native_tool_calls,
+                        idempotent=idempotent,
+                        local_only=local_only,
+                        _budget_retried=True,
+                        reasoning_continuation=True,
+                        reasoning_total_tokens=reasoning_total_tokens,
+                        _reasoning_spent=spent,
+                        _reasoning_segments=completed_segments,
+                        _reasoning_checkpoint=checkpoint,
+                        _reasoning_deadline=_reasoning_deadline,
+                    )
+                except ModelCallError as error:
+                    _preserve_reasoning_failure_usage(
+                        error,
+                        out,
+                        segments=completed_segments + 1,
+                    )
+                    raise
                 return _merge_reasoning_response_usage(
                     out, later,
                     segments=later.get(

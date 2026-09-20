@@ -521,6 +521,84 @@ def test_make_generate_reports_aggregate_continued_thinking_without_text(monkeyp
     assert private_thinking not in json.dumps(generate.last_response_meta)
 
 
+@pytest.mark.parametrize("final_failure", ["empty_response", "timeout"])
+def test_make_generate_preserves_continued_thinking_when_final_segment_fails(
+    monkeypatch, final_failure,
+):
+    private_thinking = "private telemetry before failure"
+
+    def fake_post_model(path, payload, **kwargs):
+        if payload.get("think") is False:
+            if final_failure == "timeout":
+                raise server.ModelCallError(
+                    "timeout", "final answer segment timed out", transient=True,
+                )
+            return {
+                "message": {"content": ""},
+                "done_reason": "stop",
+            }, 1
+        return {
+            "message": {"thinking": private_thinking, "content": ""},
+            "eval_count": 100,
+            "done_reason": "length",
+        }, 1
+
+    monkeypatch.setattr(server, "_post_model", fake_post_model)
+    generate = server._make_generate(
+        "r",
+        "",
+        0.2,
+        100,
+        2048,
+        reasoning_continuation=True,
+        reasoning_total_tokens=200,
+    )
+
+    with pytest.raises(server.ModelCallError) as caught:
+        generate("solve it")
+
+    assert caught.value.kind == final_failure
+    assert generate.last_response_meta["thinking_chars"] == len(private_thinking)
+    assert generate.last_response_meta["reasoning_segments"] == 2
+    assert private_thinking not in json.dumps(generate.last_response_meta)
+    assert private_thinking not in caught.value.detail
+
+
+def test_reasoning_continuation_preserves_usage_when_deadline_stops_next_segment(
+    monkeypatch,
+):
+    private_thinking = "private telemetry before deadline"
+
+    monkeypatch.setattr(
+        server,
+        "_post_model",
+        lambda *args, **kwargs: ({
+            "message": {"thinking": private_thinking, "content": ""},
+            "eval_count": 100,
+            "done_reason": "length",
+        }, 1),
+    )
+
+    with pytest.raises(server.ModelCallError) as caught:
+        server._chat_request(
+            {
+                "model": "r",
+                "messages": [{"role": "user", "content": "solve it"}],
+                "options": {"num_predict": 100},
+            },
+            model="r",
+            timeout=10,
+            reasoning_continuation=True,
+            reasoning_total_tokens=200,
+            _reasoning_deadline=0.0,
+        )
+
+    assert caught.value.kind == "timeout"
+    assert caught.value.thinking_chars == len(private_thinking)
+    assert caught.value.reasoning_segments == 1
+    assert private_thinking not in caught.value.detail
+
+
 def test_reasoning_continuation_default_reaches_answer_only_segment(monkeypatch):
     calls = []
 
