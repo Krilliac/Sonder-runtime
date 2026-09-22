@@ -306,6 +306,7 @@ from sonder_runtime.domain.thinking_controls import (
     think_option_unsupported as _think_option_unsupported,
     with_local_thinking_budget as _with_local_thinking_budget,
 )
+from sonder_runtime.domain import reasoning_continuation as _reasoning_continuation
 from sonder_runtime.domain.fanout_receipts import (
     safe_answer as _fanout_safe_answer,
     snapshot_allows as _fanout_snapshot_allows_policy,
@@ -1599,6 +1600,7 @@ def _make_generate(
     model, system, temperature, num_predict, num_ctx, cloud=False, timeout=None,
     cancel_check=None, accept_native_tool_calls=False,
     compact_cloud_reasoning=False, schema=None, allow_cloud_fallback=True,
+    think=None, reasoning_continuation=False, reasoning_total_tokens=None,
 ):
     """Build a generate(prompt, history) closure for `model`.
 
@@ -1614,6 +1616,29 @@ def _make_generate(
     `_require_schema_match`, which callers apply to the returned text.
     """
     cloud = bool(cloud or _is_cloud_model_name(model))
+    if think is not None and not isinstance(think, bool):
+        raise ValueError("think must be a boolean when supplied")
+    if not isinstance(reasoning_continuation, bool):
+        raise ValueError("reasoning_continuation must be a boolean")
+    if cloud and think is not None:
+        raise ValueError("hosted-model thinking is controlled by provider policy")
+    if cloud and reasoning_continuation:
+        raise ValueError("reasoning continuation is available only for local models")
+    if think is False and reasoning_continuation:
+        raise ValueError("reasoning continuation requires model thinking")
+    if reasoning_continuation:
+        num_predict = _reasoning_continuation.strict_token_budget(
+            num_predict, field="num_predict",
+        )
+    if reasoning_total_tokens is not None and not reasoning_continuation:
+        raise ValueError(
+            "reasoning_total_tokens requires reasoning_continuation"
+        )
+    if reasoning_continuation:
+        reasoning_total_tokens = _reasoning_continuation.total_token_budget(
+            chunk_tokens=num_predict,
+            total_tokens=reasoning_total_tokens,
+        )
     if not cloud and (num_ctx is None or int(num_ctx or 0) <= 0):
         num_ctx = _auto_model_context(model)
 
@@ -1644,6 +1669,8 @@ def _make_generate(
             )
         payload = {"model": model, "messages": messages, "stream": False,
                    "options": options}
+        if think is not None:
+            payload["think"] = think
         if schema is not None:
             payload["format"] = schema
         if cloud:
@@ -1667,6 +1694,12 @@ def _make_generate(
                     allow_cloud_fallback=allow_cloud_fallback,
                 )
             else:
+                local_chat_options = {}
+                if reasoning_continuation:
+                    local_chat_options.update({
+                        "reasoning_continuation": True,
+                        "reasoning_total_tokens": reasoning_total_tokens,
+                    })
                 out, content = _chat_request(
                     payload,
                     model=model,
@@ -1675,6 +1708,7 @@ def _make_generate(
                     cancel_check=cancel_check,
                     accept_native_tool_calls=accept_native_tool_calls,
                     idempotent=True,
+                    **local_chat_options,
                 )
             tokens_in = _model_usage_count(out.get("prompt_eval_count"))
             tokens_out = _model_usage_count(out.get("eval_count"))
@@ -1693,6 +1727,15 @@ def _make_generate(
             # Gateways can expose measured phase timing without retaining prompts,
             # responses, or arbitrary provider fields.
             thinking = out.get("message", {}).get("thinking", "") if isinstance(out.get("message"), dict) else ""
+            aggregate_thinking_chars = (
+                _model_usage_count(out.get("thinking_chars"))
+                if "reasoning_segments" in out else None
+            )
+            thinking_chars = (
+                aggregate_thinking_chars
+                if aggregate_thinking_chars is not None
+                else len(thinking) if isinstance(thinking, str) else 0
+            )
             gen.last_response_meta = {
                 "done_reason": str(out.get("done_reason") or "").strip().casefold(),
                 **{
@@ -1702,13 +1745,14 @@ def _make_generate(
                         "prompt_eval_count", "prompt_eval_duration",
                         "eval_count", "eval_duration",
                         "load_state", "cold_start",
+                        "reasoning_segments",
                     )
                     if key in out
                 },
                 # Preserve the historical empty-metadata contract.  A positive
                 # scalar lets fanout explain output budgets without retaining
                 # private reasoning text.
-                **({"thinking_chars": len(thinking)} if isinstance(thinking, str) and thinking else {}),
+                **({"thinking_chars": thinking_chars} if thinking_chars > 0 else {}),
             }
             ok = True
         except ModelCallError as error:
@@ -4618,6 +4662,93 @@ def _native_tool_call_decision(message):
     return _native_tool_call_policy(message)
 
 
+def _reasoning_segment_tokens(out, payload) -> int:
+    """Best available accounting for one exhausted reasoning segment."""
+    measured = _model_usage_count(
+        out.get("eval_count") if isinstance(out, dict) else None
+    )
+    if measured is not None and measured > 0:
+        return measured
+    options = payload.get("options") if isinstance(payload, dict) else None
+    requested = options.get("num_predict") if isinstance(options, dict) else None
+    if isinstance(requested, int) and not isinstance(requested, bool) and requested > 0:
+        return requested
+    return 1
+
+
+def _merge_reasoning_response_usage(first, later, *, segments: int) -> dict:
+    """Combine provider counters while retaining only the final response body."""
+    merged = dict(later if isinstance(later, dict) else {})
+    for key in (
+        "total_duration",
+        "load_duration",
+        "prompt_eval_count",
+        "prompt_eval_duration",
+        "eval_count",
+        "eval_duration",
+    ):
+        left = first.get(key) if isinstance(first, dict) else None
+        right = later.get(key) if isinstance(later, dict) else None
+        if all(
+            isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            for value in (left, right)
+        ):
+            merged[key] = left + right
+        elif isinstance(left, int) and not isinstance(left, bool) and left >= 0:
+            merged[key] = left
+    first_message = first.get("message") if isinstance(first, dict) else None
+    first_thinking = (
+        first_message.get("thinking") if isinstance(first_message, dict) else None
+    )
+    first_thinking_chars = (
+        len(first_thinking) if isinstance(first_thinking, str) else 0
+    )
+    later_thinking_chars = None
+    if isinstance(later, dict) and "reasoning_segments" in later:
+        later_thinking_chars = _model_usage_count(later.get("thinking_chars"))
+    if later_thinking_chars is None:
+        later_message = later.get("message") if isinstance(later, dict) else None
+        later_thinking = (
+            later_message.get("thinking")
+            if isinstance(later_message, dict) else None
+        )
+        later_thinking_chars = (
+            len(later_thinking) if isinstance(later_thinking, str) else 0
+        )
+    thinking_chars = first_thinking_chars + later_thinking_chars
+    if thinking_chars > 0:
+        merged["thinking_chars"] = thinking_chars
+    merged["reasoning_segments"] = max(1, int(segments))
+    return merged
+
+
+def _preserve_reasoning_failure_usage(
+    error: ModelCallError,
+    first: dict,
+    *,
+    segments: int,
+) -> None:
+    """Attach aggregate scalar usage to a failed continuation exception."""
+    first_message = first.get("message") if isinstance(first, dict) else None
+    first_thinking = (
+        first_message.get("thinking") if isinstance(first_message, dict) else None
+    )
+    first_thinking_chars = (
+        len(first_thinking) if isinstance(first_thinking, str) else 0
+    )
+    later_metadata = _response_error_metadata(error)
+    later_thinking_chars = _model_usage_count(
+        later_metadata.get("thinking_chars")
+    ) or 0
+    thinking_chars = first_thinking_chars + later_thinking_chars
+    if thinking_chars > 0:
+        error.thinking_chars = thinking_chars
+    later_segments = _model_usage_count(
+        later_metadata.get("reasoning_segments")
+    ) or 0
+    error.reasoning_segments = max(1, int(segments), later_segments)
+
+
 def _chat_request(
     payload: dict,
     *,
@@ -4629,8 +4760,35 @@ def _chat_request(
     idempotent: bool = False,
     local_only: bool = False,
     _budget_retried: bool = False,
+    reasoning_continuation: bool = False,
+    reasoning_total_tokens: int | None = None,
+    _reasoning_spent: int = 0,
+    _reasoning_segments: int = 0,
+    _reasoning_checkpoint: str = "",
+    _reasoning_deadline: float | None = None,
 ) -> tuple[dict, str]:
-    if not cloud and _known_thinking_model(model):
+    if not isinstance(reasoning_continuation, bool):
+        raise ValueError("reasoning_continuation must be a boolean")
+    if cloud and reasoning_continuation:
+        raise ValueError("reasoning continuation is available only for local models")
+    if reasoning_continuation:
+        options = payload.get("options") if isinstance(payload, dict) else None
+        initial_chunk = options.get("num_predict") if isinstance(options, dict) else None
+        initial_chunk = _reasoning_continuation.strict_token_budget(
+            initial_chunk, field="num_predict",
+        )
+        reasoning_total_tokens = _reasoning_continuation.total_token_budget(
+            chunk_tokens=initial_chunk,
+            total_tokens=reasoning_total_tokens,
+        )
+        if _reasoning_deadline is None and timeout is not None:
+            _reasoning_deadline = time.monotonic() + max(0.0, float(timeout))
+    if (
+        not cloud
+        and _known_thinking_model(model)
+        and payload.get("think") is not False
+        and not reasoning_continuation
+    ):
         # A reasoning model spends num_predict on thought BEFORE writing any
         # content, so a tight cap hits done_reason "length" having emitted
         # nothing. Give thinking headroom, as the cloud path does. Cache-only:
@@ -4688,6 +4846,102 @@ def _chat_request(
             out, message, inline_thinking=inline_thinking,
         )
         if (
+            not cloud
+            and reasoning_continuation
+            and exhausted_thinking
+            and payload.get("think") is not False
+        ):
+            completed_segments = _reasoning_segments + 1
+            spent = _reasoning_spent + _reasoning_segment_tokens(out, payload)
+            current_options = payload.get("options")
+            current_chunk = current_options.get("num_predict")
+            plan = _reasoning_continuation.plan_next_segment(
+                spent_tokens=spent,
+                total_tokens=reasoning_total_tokens,
+                chunk_tokens=current_chunk,
+                completed_segments=completed_segments,
+            )
+            if plan is not None:
+                if _reasoning_deadline is not None:
+                    remaining_seconds = _reasoning_deadline - time.monotonic()
+                    if remaining_seconds < 1.0:
+                        error = ModelCallError(
+                            "timeout",
+                            "reasoning continuation deadline exhausted",
+                            transient=True,
+                            attempts=attempts,
+                            cloud=False,
+                        )
+                        _preserve_reasoning_failure_usage(
+                            error,
+                            out,
+                            segments=completed_segments,
+                        )
+                        raise error
+                    # Keep each continuation request within the shared
+                    # deadline.  Rounding up could give the nested request
+                    # more time than remains in the outer budget.
+                    next_timeout = max(1, math.floor(remaining_seconds))
+                else:
+                    next_timeout = timeout
+                private_segment = (
+                    thinking
+                    if isinstance(thinking, str) and thinking.strip()
+                    else raw_content
+                )
+                checkpoint = _reasoning_continuation.compact_checkpoint(
+                    _reasoning_checkpoint,
+                    private_segment if isinstance(private_segment, str) else "",
+                )
+                continued_payload = _reasoning_continuation.checkpoint_payload(
+                    payload,
+                    checkpoint,
+                    num_predict=plan.num_predict,
+                    final_segment=plan.final_segment,
+                    previous_checkpoint=(
+                        _reasoning_checkpoint if _reasoning_segments else None
+                    ),
+                )
+                activity_tracker.record_event(
+                    "model_reasoning_continuation",
+                    model=str(model or "")[:80],
+                    segment=completed_segments + 1,
+                    tokens_spent=spent,
+                    total_tokens=reasoning_total_tokens,
+                    final_segment=plan.final_segment,
+                )
+                try:
+                    later, final_content = _chat_request(
+                        continued_payload,
+                        model=model,
+                        cloud=False,
+                        timeout=next_timeout,
+                        cancel_check=cancel_check,
+                        accept_native_tool_calls=accept_native_tool_calls,
+                        idempotent=idempotent,
+                        local_only=local_only,
+                        _budget_retried=True,
+                        reasoning_continuation=True,
+                        reasoning_total_tokens=reasoning_total_tokens,
+                        _reasoning_spent=spent,
+                        _reasoning_segments=completed_segments,
+                        _reasoning_checkpoint=checkpoint,
+                        _reasoning_deadline=_reasoning_deadline,
+                    )
+                except ModelCallError as error:
+                    _preserve_reasoning_failure_usage(
+                        error,
+                        out,
+                        segments=completed_segments + 1,
+                    )
+                    raise
+                return _merge_reasoning_response_usage(
+                    out, later,
+                    segments=later.get(
+                        "reasoning_segments", completed_segments + 1,
+                    ),
+                ), final_content
+        if (
             cloud
             and not _budget_retried
             and exhausted_thinking
@@ -4712,7 +4966,13 @@ def _chat_request(
                 local_only=local_only,
                 _budget_retried=True,
             )
-        if not cloud and not _budget_retried and exhausted_thinking:
+        if (
+            not cloud
+            and not reasoning_continuation
+            and payload.get("think") is not False
+            and not _budget_retried
+            and exhausted_thinking
+        ):
             # The model reasoned right up to the cap and never got to an answer.
             # Now that the response has identified it, retry once with the
             # headroom it needed rather than reporting an empty response.
@@ -13388,6 +13648,11 @@ def _vision_analyze_impl(
             {"role": "user", "content": question, "images": [encoded]},
         ],
         "stream": False,
+        # Image description is an answer-producing path, not a private
+        # deliberation surface.  Reserve the bounded output allowance for the
+        # answer; older VLMs that do not implement this optional Ollama field
+        # take the existing one-shot compatibility retry without it.
+        "think": False,
         "options": _platform_local_model_options(
             0.1,
             1024,
@@ -24580,6 +24845,27 @@ def _prompt_grounded_research(question: str, constraints: str = "") -> str:
         "dates for drift-prone claims, expose disagreement, and do not fill missing facts "
         "from model recall. End with the answer, direct source links, and unresolved "
         "uncertainty." % (question, constraints or "none")
+    )
+
+
+@mcp.prompt(
+    name="formal_reasoning",
+    title="Formal Mathematical Reasoning",
+    description="Develop a theorem through explicit obligations and machine-checkable proof.",
+)
+def _prompt_formal_reasoning(statement: str, prover: str = "Lean 4") -> str:
+    return (
+        "Investigate this mathematical statement: %s\n\n"
+        "Target prover: %s\n"
+        "First freeze the definitions and assumptions. Build a lemma dependency graph, "
+        "marking every node as established, conjectural, refuted, or still open. Search "
+        "small and boundary cases for a counterexample before attempting a general proof. "
+        "Keep computational or numerical evidence separate from deduction. Then attempt a "
+        "formalization. For Lean 4, return complete source with no sorry, admit, sorryAx, "
+        "axiom, or constant declarations. Do not describe any result as machine-checked until "
+        "the machine checker actually accepts it. End with the checked result, the exact "
+        "remaining proof obligations, and any assumptions that still carry the argument."
+        % (statement, prover)
     )
 
 

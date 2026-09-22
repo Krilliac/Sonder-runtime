@@ -12,6 +12,11 @@ import time
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
 
+# Keep an adapter-local seam: tests that simulate open races must not replace
+# the process-global ``os.open`` while background job threads are still active.
+_open_file = os.open
+
+
 DEFAULT_MAX_ENTRIES = 2_000
 MAX_ENTRIES = 10_000
 DEFAULT_MAX_FILE_BYTES = 64_000_000
@@ -160,7 +165,7 @@ def _hash_file(path, budget):
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(path, flags)
+        descriptor = _open_file(path, flags)
     except OSError as exc:
         raise WorkspaceCompareError("file could not be safely opened for hashing") from exc
     digest = hashlib.sha256()

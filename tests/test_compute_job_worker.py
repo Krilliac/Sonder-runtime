@@ -32,6 +32,10 @@ from sonder_runtime.application.ports.jobs import JobIdentity, JobRecord, JobSta
 from sonder_runtime.domain.common.errors import Conflict, InvalidInput
 from sonder_runtime.domain.compute_fabric import WorkloadKind
 from sonder_runtime.adapters.execution.process_jobs import SubprocessJobProvider
+from sonder_runtime.adapters.extensions.memory_limits import (
+    PreparedProcessContainment,
+    ProcessContainmentResult,
+)
 from sonder_runtime.adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
 from sonder_runtime.adapters.process_termination import ProcessTreeSupervisor
 
@@ -80,6 +84,34 @@ class CapturingProvider:
     def cancel(self, job_id, reason="cancelled"):
         self.cancelled = (job_id, reason)
         return {"quiescent": True}
+
+
+class _TestScopeToken:
+    """Unit-test containment proof; no claim about the host's systemd state."""
+
+    identity = "test-scope"
+
+    def close(self):
+        return None
+
+    def quiesce(self, *, force):
+        return ProcessContainmentResult(True, forced=bool(force))
+
+
+class _TestScopeLimiter:
+    def prepare_process_job(self, job_id, argv, memory_limit_bytes, process_limit):
+        return PreparedProcessContainment(
+            argv=tuple(argv),
+            launch_options={},
+            token=_TestScopeToken(),
+            metadata=(("test_scope", str(job_id)),),
+        )
+
+    def restore_process_job(self, job_id, metadata):
+        return _TestScopeToken()
+
+    def apply(self, process, limit_bytes):
+        raise AssertionError("scoped jobs must not use fallback memory limiting")
 
 
 def _entry() -> JobCatalogEntry:
@@ -389,6 +421,7 @@ def test_failed_launch_is_immediately_discoverable_by_idempotency(tmp_path: Path
         process_cleanup=Cleanup(),
         launcher=fail_launch,
         platform_name=os.name,
+        memory_limiter=_TestScopeLimiter(),
     )
     worker = ComputeJobWorker(
         worker_id="worker-1",
@@ -1055,6 +1088,7 @@ def test_worker_rehydrates_digest_bound_receipt_after_restart(tmp_path: Path) ->
         SQLiteDurableJobRegistry(database),
         process_cleanup=cleanup,
         platform_name=os.name,
+        memory_limiter=_TestScopeLimiter(),
     )
     entry = replace(_entry(), program=sys.executable)
     first = ComputeJobWorker(
@@ -1070,6 +1104,7 @@ def test_worker_rehydrates_digest_bound_receipt_after_restart(tmp_path: Path) ->
             SQLiteDurableJobRegistry(database),
             process_cleanup=cleanup,
             platform_name=os.name,
+            memory_limiter=_TestScopeLimiter(),
         )
         reopened = ComputeJobWorker(
             worker_id="worker-1",

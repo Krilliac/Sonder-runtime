@@ -29,12 +29,46 @@ build), `parallel_run_code` (many snippets concurrently), `script_run` /
 `workspace_run` (argv-only execution of a real script/program). `script_run`
 first applies the operator's static artifact-risk policy to its exact file.
 
+## Formal proofs — Lean 4 / Mathlib
+
+`verifiers.lean_check` checks a complete Lean 4 source artifact and returns a
+verdict from Lean rather than asking a model to grade its own proof. It rejects
+`sorry`, `admit`, `sorryAx`, `axiom`, and `constant` declarations before
+invoking the toolchain, caps source, diagnostics, and runtime, and reports a missing
+toolchain as unavailable rather than as a false proof failure.
+
+A raw call is a compiler check. For task-bound evidence, provide
+`expected_declaration` and `expected_type`; Sonder compiles the expected type in
+a trusted module after the submission's compiler process exits and compares
+kernel types in a separate audit, so submitted macros cannot rewrite or inspect
+the randomized check while compiling. `solver.solve_lean` requires both fields
+and will not accept a compiling proof of an unrelated proposition. That same
+trusted Lean audit traces the declaration's
+transitive axiom dependencies and rejects any axiom introduced by the submitted
+module, including one installed through metaprogramming.
+
+Contracts that use task-local definitions may add a caller-owned
+`trusted_prelude`. Sonder compiles it separately and makes its declarations
+available to both the expected type and the submitted proof without exposing
+the contract axiom to the submission. This field is a trust boundary and must
+never contain model-generated source.
+
+Set `SONDER_LEAN_EXE` to the Lean executable for core-only checks. For practical
+mathematics, also set `SONDER_LAKE_EXE` and `SONDER_LEAN_PROJECT` to a pinned
+Lake project with Mathlib; checks then run as `lake env lean` and can import the
+project's exact dependencies. Sonder never downloads packages during a proof
+check. The repository's `lean-toolchain` pins the supported Lean release; see
+[Formal reasoning setup](../runbooks/formal-reasoning.md).
+When no executable or project override is configured, the core checker applies
+that repository pin in its isolated directory and fails closed on a version
+mismatch.
+
 ## Host tool versions — `environment_status` / `toolchain_status`
 
 Use `environment_status` first to discover the local shells, toolchains, and
 specialist utilities actually available on this host. To obtain a grounded
 version for a discovered supported tool, call
-`toolchain_status(name="cargo")` (or `git`, `cmake`, `sccache`, and similar
+`toolchain_status(name="cargo")` (or `lean`, `lake`, `git`, `cmake`, `sccache`, and similar
 listed tools). It invokes only the tool's fixed, non-interactive version
 switch; it accepts no executable path, command text, or extra arguments.
 

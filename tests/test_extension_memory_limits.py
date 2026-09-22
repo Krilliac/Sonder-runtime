@@ -35,6 +35,10 @@ class FakeLimiter:
         return self.token
 
 
+def _available_systemd(_argv, **_kwargs):
+    return SimpleNamespace(returncode=0, stdout="running\n", stderr="")
+
+
 def test_requested_limit_is_applied_before_ready_and_closed_with_process():
     limiter = FakeLimiter()
     host = ExtensionHost(
@@ -84,6 +88,8 @@ def test_posix_compute_job_uses_systemd_scope_for_aggregate_limits():
 
     def runner(argv, **_kwargs):
         calls.append(tuple(argv))
+        if "is-system-running" in argv:
+            return SimpleNamespace(returncode=0, stdout="running\n", stderr="")
         if "show" in argv:
             return SimpleNamespace(returncode=0, stdout=next(states) + "\n", stderr="")
         if "kill" in argv:
@@ -133,6 +139,33 @@ def test_posix_compute_job_fails_closed_without_systemd_scope_tools():
     )
     with pytest.raises(ExtensionMemoryLimitUnsupported, match="systemd"):
         limiter.prepare_process_job("job-1", ("python",), None, 2)
+
+
+def test_posix_compute_job_fails_closed_when_systemd_binaries_have_no_manager():
+    calls = []
+
+    def runner(argv, **_kwargs):
+        calls.append(tuple(argv))
+        return SimpleNamespace(
+            returncode=0,
+            stdout='"systemd" is not running in this container\n',
+            stderr="",
+        )
+
+    limiter = NativeExtensionMemoryLimiter(
+        os_module=SimpleNamespace(name="posix", environ={}, geteuid=lambda: 0),
+        platform_name="posix",
+        which=lambda name: f"/usr/bin/{name}",
+        command_runner=runner,
+    )
+
+    supported, detail = limiter.process_job_support()
+    assert supported is False
+    assert "not running" in detail
+    with pytest.raises(ExtensionMemoryLimitUnsupported, match="live systemd manager"):
+        limiter.prepare_process_job("job-1", ("python",), None, 2)
+    assert len(calls) == 2
+    assert all(call[-1] == "is-system-running" for call in calls)
 
 
 def test_restored_systemd_scope_must_belong_to_the_exact_job():
@@ -211,7 +244,8 @@ def test_windows_token_query_failure_does_not_claim_empty_or_drop_handle(monkeyp
 def test_isolated_scope_bus_context_is_wrapper_only(user_scope):
     limiter = NativeExtensionMemoryLimiter(
         os_module=SimpleNamespace(name="posix", environ={"DBUS_SESSION_BUS_ADDRESS": "malicious", "SECRET": "private"}, geteuid=lambda: 1000),
-        platform_name="posix", which=lambda name: f"/usr/bin/{name}", systemd_user=user_scope)
+        platform_name="posix", which=lambda name: f"/usr/bin/{name}",
+        command_runner=_available_systemd, systemd_user=user_scope)
     argv = ("/usr/bin/python3", "-c", "pass")
     prepared = limiter.prepare_process_job("isolated", argv, 1024 * 1024, 3)
     environment = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
@@ -236,7 +270,8 @@ def test_isolated_scope_bus_context_is_wrapper_only(user_scope):
 def test_isolated_scope_rejects_unsupported_environment_without_values_in_argv(key):
     limiter = NativeExtensionMemoryLimiter(
         os_module=SimpleNamespace(name="posix", environ={}, geteuid=lambda: 1000),
-        platform_name="posix", which=lambda name: f"/usr/bin/{name}")
+        platform_name="posix", which=lambda name: f"/usr/bin/{name}",
+        command_runner=_available_systemd)
     argv = ("/usr/bin/python3", "-c", "pass")
     prepared = limiter.prepare_process_job("unsupported-env", argv, 1024 * 1024, 3)
     with pytest.raises(ExtensionMemoryLimitUnsupported, match="unsupported keys"):

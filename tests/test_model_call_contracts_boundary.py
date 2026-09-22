@@ -29,6 +29,19 @@ def test_metadata_is_read_only_from_the_allowlisted_empty_response_detail():
     assert read(weird) == {"done_reason": "other"}
 
 
+def test_metadata_accepts_only_typed_scalar_usage_from_other_failures():
+    read = model_response_metadata.response_error_metadata
+    error = ModelCallError(
+        "timeout",
+        "private provider detail",
+        thinking_chars="12",
+        reasoning_segments=2,
+    )
+
+    assert read(error) == {"thinking_chars": 12, "reasoning_segments": 2}
+    assert "private provider detail" not in str(read(error))
+
+
 def test_schema_argument_normalizes_or_raises_a_typed_configuration_error():
     parse = offload_schema_argument.parse_schema_arg
     assert parse(None) is None

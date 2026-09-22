@@ -1518,11 +1518,15 @@ def test_unsupported_isolated_systemd_environment_refuses_before_launch(key):
     limiter = NativeExtensionMemoryLimiter(
         os_module=SimpleNamespace(name="posix", environ={}, geteuid=lambda: 1000),
         platform_name="posix", which=lambda name: f"/usr/bin/{name}",
-        command_runner=lambda *args, **kwargs: commands.append(args))
+        command_runner=lambda *args, **kwargs: (
+            commands.append(args)
+            or SimpleNamespace(returncode=0, stdout="running\n", stderr="")
+        ))
     provider = SubprocessJobProvider(DurableJobRegistry(), process_cleanup=_Cleanup(complete=True),
         launcher=lambda *args, **kwargs: launches.append(args), platform_name="posix", memory_limiter=limiter)
     request = replace(_request("unsupported-env"), require_job_scope=True, inherit_environment=False,
         environment=((key, "secret-value"),))
     with pytest.raises(ExtensionMemoryLimitUnsupported, match="unsupported keys"):
         provider.start(request)
-    assert not launches and not commands and not provider._processes and not provider._memory_tokens
+    assert not launches and commands and not provider._processes and not provider._memory_tokens
+    assert all("secret-value" not in str(command) for command in commands)

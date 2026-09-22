@@ -1,7 +1,7 @@
 """Optional live ModelGateway smoke, intentionally outside offline conformance.
 
 Run explicitly with ``SONDER_LIVE_MODEL_GATEWAY=ollama`` (or ``openai``) and
-``pytest -m 'model and network' tests/live/test_model_gateway_live_smoke.py``.
+``pytest --run-network --run-model -m 'model and network'`` against this file.
 Remote OpenAI-compatible endpoints additionally require
 ``SONDER_LIVE_ALLOW_REMOTE=1``.  Bare CI only collects a skip and never calls a
 provider.
@@ -20,7 +20,8 @@ from sonder_runtime.application.ports.model_gateway import ModelRequest
 pytestmark = [pytest.mark.model, pytest.mark.network]
 
 
-def test_live_model_gateway_smoke():
+def test_live_model_gateway_smoke(live_provider_environment):
+    del live_provider_environment
     backend = os.environ.get("SONDER_LIVE_MODEL_GATEWAY", "").strip().lower()
     if backend not in {"ollama", "openai"}:
         pytest.skip("set SONDER_LIVE_MODEL_GATEWAY=ollama or openai")
@@ -33,7 +34,14 @@ def test_live_model_gateway_smoke():
         remote_ollama_allowed=allow_remote,
     )
     response = gateway.generate(
-        ModelRequest(prompt="Reply with exactly: SONDER_GATEWAY_OK", tier="fast"),
+        ModelRequest(
+            prompt="Reply with exactly: SONDER_GATEWAY_OK",
+            tier="fast",
+            options={
+                "num_predict": 64,
+                **({"think": False} if backend == "ollama" else {}),
+            },
+        ),
         context,
     )
     assert "SONDER_GATEWAY_OK" in response.text

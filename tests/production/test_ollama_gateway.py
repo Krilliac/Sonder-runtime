@@ -76,6 +76,161 @@ def test_generate_returns_domain_response(monkeypatch):
     assert response.tokens_in == 10 and response.tokens_out == 5
 
 
+def test_reasoning_tier_enables_bounded_continuation_by_default(monkeypatch):
+    _fake_target(monkeypatch, tier_label="reasoning")
+    seen = {}
+
+    def make_generate(model, system, temperature, num_predict, num_ctx, **kwargs):
+        seen.update(kwargs)
+
+        def gen(prompt, history=None):
+            return "reasoned answer"
+
+        gen.last_usage = {}
+        gen.last_response_meta = {}
+        return gen
+
+    monkeypatch.setattr(server, "_make_generate", make_generate)
+    response = OllamaGateway().generate(
+        ModelRequest(
+            prompt="solve", tier="reasoning", options={"num_predict": 512},
+        ),
+        _context(),
+    )
+
+    assert response.text == "reasoned answer"
+    assert seen["reasoning_continuation"] is True
+    assert seen["reasoning_total_tokens"] == 4096
+    assert "think" not in seen
+
+
+def test_reasoning_default_total_reserves_a_second_full_size_segment(monkeypatch):
+    _fake_target(monkeypatch, tier_label="reasoning")
+    seen = {}
+
+    def make_generate(model, system, temperature, num_predict, num_ctx, **kwargs):
+        seen.update(kwargs)
+
+        def gen(prompt, history=None):
+            return "reasoned answer"
+
+        gen.last_usage = {}
+        gen.last_response_meta = {}
+        return gen
+
+    monkeypatch.setattr(server, "_make_generate", make_generate)
+    OllamaGateway().generate(
+        ModelRequest(
+            prompt="solve", tier="reasoning", options={"num_predict": 4096},
+        ),
+        _context(),
+    )
+
+    assert seen["reasoning_total_tokens"] == 8192
+
+
+@pytest.mark.parametrize("reasoning_total_tokens", [None, 4095, 4096])
+def test_reasoning_total_requires_room_for_a_final_answer(
+    monkeypatch, reasoning_total_tokens,
+):
+    _fake_target(monkeypatch, tier_label="reasoning")
+
+    with pytest.raises(InvalidInput, match="reasoning_total_tokens"):
+        OllamaGateway().generate(
+            ModelRequest(
+                prompt="solve",
+                tier="reasoning",
+                options={
+                    "num_predict": 4096,
+                    "reasoning_total_tokens": reasoning_total_tokens,
+                },
+            ),
+            _context(),
+        )
+
+
+def test_explicit_think_false_reaches_local_generate_factory(monkeypatch):
+    _fake_target(monkeypatch, tier_label="reasoning")
+    seen = {}
+
+    def make_generate(model, system, temperature, num_predict, num_ctx, **kwargs):
+        seen.update(kwargs)
+
+        def gen(prompt, history=None):
+            return "direct answer"
+
+        gen.last_usage = {}
+        gen.last_response_meta = {}
+        return gen
+
+    monkeypatch.setattr(server, "_make_generate", make_generate)
+    response = OllamaGateway().generate(
+        ModelRequest(
+            prompt="emit code",
+            tier="reasoning",
+            options={"think": False, "num_predict": 512},
+        ),
+        _context(),
+    )
+
+    assert response.text == "direct answer"
+    assert seen["think"] is False
+    assert "reasoning_continuation" not in seen
+
+
+@pytest.mark.parametrize("value", ["false", 0, 1, None])
+def test_non_boolean_think_option_is_rejected(monkeypatch, value):
+    _fake_target(monkeypatch)
+    with pytest.raises(InvalidInput, match="think"):
+        OllamaGateway().generate(
+            ModelRequest(prompt="x", tier="code", options={"think": value}),
+            _context(),
+        )
+
+
+def test_hosted_tier_rejects_caller_controlled_thinking(monkeypatch):
+    _fake_target(monkeypatch, cloud=True, tier_label="cloud")
+    with pytest.raises(InvalidInput, match="provider policy"):
+        OllamaGateway().generate(
+            ModelRequest(prompt="x", tier="cloud", options={"think": False}),
+            _context(cloud_allowed=True),
+        )
+
+
+@pytest.mark.parametrize("num_predict", [0, -1, 65537])
+def test_reasoning_continuation_requires_a_bounded_positive_chunk(
+    monkeypatch, num_predict,
+):
+    _fake_target(monkeypatch, tier_label="reasoning")
+    with pytest.raises(InvalidInput, match="num_predict"):
+        OllamaGateway().generate(
+            ModelRequest(
+                prompt="x",
+                tier="reasoning",
+                options={"num_predict": num_predict},
+            ),
+            _context(),
+        )
+
+
+@pytest.mark.parametrize("num_predict", [True, "512", 1.5])
+def test_reasoning_continuation_rejects_coercible_non_integer_chunks(
+    monkeypatch, num_predict,
+):
+    _fake_target(monkeypatch, tier_label="reasoning")
+    _fake_gen(monkeypatch)
+
+    with pytest.raises(InvalidInput, match="num_predict"):
+        OllamaGateway().generate(
+            ModelRequest(
+                prompt="x",
+                tier="reasoning",
+                options={"num_predict": num_predict},
+            ),
+            _context(),
+        )
+
+
 def test_generate_preserves_backend_measured_phases(monkeypatch):
     _fake_target(monkeypatch)
     _fake_gen(
