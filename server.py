@@ -4878,7 +4878,10 @@ def _chat_request(
                             segments=completed_segments,
                         )
                         raise error
-                    next_timeout = max(1, math.ceil(remaining_seconds))
+                    # Keep each continuation request within the shared
+                    # deadline.  Rounding up could give the nested request
+                    # more time than remains in the outer budget.
+                    next_timeout = max(1, math.floor(remaining_seconds))
                 else:
                     next_timeout = timeout
                 private_segment = (

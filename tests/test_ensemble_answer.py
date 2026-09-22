@@ -631,6 +631,41 @@ def test_reasoning_continuation_default_reaches_answer_only_segment(monkeypatch)
     assert calls == [(4096, None), (4096, False)]
 
 
+def test_reasoning_continuation_floors_fractional_remaining_timeout(monkeypatch):
+    timeouts = []
+
+    def fake_post_model(path, payload, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        if payload.get("think") is False:
+            return {
+                "message": {"content": "final answer"},
+                "done_reason": "stop",
+            }, 1
+        return {
+            "message": {"thinking": "private", "content": ""},
+            "eval_count": payload["options"]["num_predict"],
+            "done_reason": "length",
+        }, 1
+
+    monkeypatch.setattr(server, "_post_model", fake_post_model)
+    monkeypatch.setattr(server.time, "monotonic", lambda: 100.0)
+    _out, content = server._chat_request(
+        {
+            "model": "r",
+            "messages": [{"role": "user", "content": "solve it"}],
+            "options": {"num_predict": 100},
+        },
+        model="r",
+        timeout=10,
+        reasoning_continuation=True,
+        reasoning_total_tokens=200,
+        _reasoning_deadline=101.1,
+    )
+
+    assert content == "final answer"
+    assert timeouts == [10, 1]
+
+
 def test_reasoning_continuation_preserves_user_owned_checkpoint_prefix(monkeypatch):
     calls = []
     caller_message = {
