@@ -18,7 +18,7 @@ _TOOLCHAINS = (
     "cargo", "rustc", "go", "dotnet", "msbuild", "java", "javac", "mvn",
     "gradle", "cmake", "ninja", "make", "gcc", "g++", "clang", "clang++",
     "cl", "git", "gh", "docker", "kubectl", "rg", "curl", "wget", "tar",
-    "7z", "unzip", "pip", "uv", "ruff", "pytest",
+    "7z", "unzip", "pip", "uv", "ruff", "pytest", "elan", "lean", "lake",
 )
 _SPECIALIST_TOOLS = (
     "sccache", "clcache", "doxygen", "xperf", "wpaexporter", "nssm",

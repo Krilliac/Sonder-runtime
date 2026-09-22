@@ -29,9 +29,46 @@ REPAIR_TEMPLATE = (
 
 NO_CODE_HINT = "Your reply contained no ```python code block. Return the full solution in one python code block."
 
+LEAN_NO_CODE_HINT = (
+    "Your reply contained no ```lean code block. Return the complete Lean 4 "
+    "source in one lean code block."
+)
+
+LEAN_REPAIR_TEMPLATE = (
+    "The Lean 4 source below did not pass its formal check.\n\n"
+    "```lean\n{code}\n```\n\n"
+    "The checker produced:\n{error}\n\n"
+    "The theorem task:\n{original}\n\n"
+    "Repair the specific failed obligation and return complete Lean 4 source in "
+    "one ```lean code block. Do not use sorry, admit, sorryAx, axiom, or constant "
+    "declarations. Change the proof strategy if the same diagnostic repeats. "
+    "No prose outside the code block."
+)
+
+LEAN_CONTRACT_TEMPLATE = (
+    "\n\nFormal acceptance contract: the complete source must define the declaration "
+    "`{declaration}` with type `{expected_type}`. The checker independently asks "
+    "Lean's kernel to use that exact declaration at that type; proving a different "
+    "theorem will not pass."
+)
+
+LEAN_TRUSTED_PRELUDE_TEMPLATE = (
+    "\n\nThe checker supplies this caller-owned trusted prelude before your source:\n"
+    "```lean\n{prelude}```\n"
+    "Use these declarations directly; do not redefine or repeat them in your artifact."
+)
+
 
 def _repair_prompt(original, code, error):
     return REPAIR_TEMPLATE.format(original=original, code=code or "", error=(error or "").strip()[:1500])
+
+
+def _lean_repair_prompt(original, code, error):
+    return LEAN_REPAIR_TEMPLATE.format(
+        original=original,
+        code=code or "",
+        error=(error or "").strip()[:4000],
+    )
 
 
 def solve(prompt, check, generate_fn, run_code_fn=grounding.run_code,
@@ -186,7 +223,8 @@ def rotate_solve(prompt, check, gen_fns, run_code_fn=grounding.run_code,
 
 
 def solve_verified(prompt, gen_fn, verifier, spec=None,
-                   extract_fn=grounding.extract_code_block, max_attempts=3, verify_fn=None):
+                   extract_fn=grounding.extract_code_block, max_attempts=3, verify_fn=None,
+                   repair_prompt_fn=None, no_code_hint=NO_CODE_HINT):
     """Execution-grounded self-repair driven by a NAMED verifier from the registry.
 
     Generalizes solve() beyond run_code_fn: `verifier` is a key like 'python_exec',
@@ -204,11 +242,12 @@ def solve_verified(prompt, gen_fn, verifier, spec=None,
     transcript = []
     cur_prompt = prompt
     last_code = None
+    repair_prompt_fn = repair_prompt_fn or _repair_prompt
     for attempt in range(1, max_attempts + 1):
         code = extract_fn(gen_fn(cur_prompt))
         if code is None:
             transcript.append({"attempt": attempt, "code": None, "ok": False, "output": "no code block"})
-            cur_prompt = _repair_prompt(prompt, last_code, NO_CODE_HINT)
+            cur_prompt = repair_prompt_fn(prompt, last_code, no_code_hint)
             continue
         last_code = code
         v = verify_fn(code)
@@ -216,8 +255,44 @@ def solve_verified(prompt, gen_fn, verifier, spec=None,
         transcript.append({"attempt": attempt, "code": code, "ok": v.passed, "output": detail})
         if v.passed:
             return {"passed": True, "code": code, "attempts": attempt, "transcript": transcript}
-        cur_prompt = _repair_prompt(prompt, code, detail)
+        cur_prompt = repair_prompt_fn(prompt, code, detail)
     return {"passed": False, "code": last_code, "attempts": max_attempts, "transcript": transcript}
+
+
+def solve_lean(prompt, gen_fn, spec=None, max_attempts=3, verify_fn=None):
+    """Generate, kernel-check, and repair a Lean 4 proof candidate.
+
+    This is the formal-reasoning counterpart to ``solve``: candidates must be
+    in an explicit Lean fence, define the caller-supplied expected declaration
+    at the expected type, and ordinary kernel diagnostics are fed back for
+    bounded repair. A missing Lean toolchain remains ``VerifierUnavailable``.
+    """
+    import verifiers
+
+    spec = dict(spec or {})
+    declaration, expected_type = verifiers.lean_contract(spec, required=True)
+    trusted_prelude = verifiers.lean_trusted_prelude(spec)
+    spec["expected_declaration"] = declaration
+    spec["expected_type"] = expected_type
+    contract_prompt = prompt + LEAN_CONTRACT_TEMPLATE.format(
+        declaration=declaration,
+        expected_type=expected_type,
+    )
+    if trusted_prelude is not None:
+        contract_prompt += LEAN_TRUSTED_PRELUDE_TEMPLATE.format(
+            prelude=trusted_prelude,
+        )
+    return solve_verified(
+        contract_prompt,
+        gen_fn,
+        "lean_check",
+        spec=spec,
+        extract_fn=lambda response: grounding.extract_code_block(response, "lean"),
+        max_attempts=max_attempts,
+        verify_fn=verify_fn,
+        repair_prompt_fn=_lean_repair_prompt,
+        no_code_hint=LEAN_NO_CODE_HINT,
+    )
 
 
 def best_of_n(prompt, generate_fn, check="", run_code_fn=grounding.run_code,

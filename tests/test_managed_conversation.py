@@ -6,7 +6,12 @@ import pytest
 
 from tests.test_delegated_verification import lanes, _verifier
 from tests.test_managed_standalone_session import setup, command
-from tests.test_lane_coding_acceptance import coding, make_service, tool
+from tests.test_lane_coding_acceptance import (
+    coding,
+    make_service,
+    require_native_process_containment,
+    tool,
+)
 from sonder_runtime.interfaces.standalone_agent_lanes import HostTerminalDraft
 from sonder_runtime.adapters.agent_terminal_evidence import HostObservationLedger
 from sonder_runtime.application.ports.host_final import HostFinalFacts
@@ -379,6 +384,7 @@ def test_missing_terminal_evidence_and_foreign_app_refuse_new_turn(lanes):
 
 
 def test_two_turns_use_real_catalog_processes_and_released_job_proofs(coding):
+    require_native_process_containment()
     from sonder_runtime.bootstrap.managed_conversation import (
         ManagedConversationLifetime,
     )

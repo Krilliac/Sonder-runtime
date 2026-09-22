@@ -1824,7 +1824,19 @@ def test_training_start_requires_confirmation_and_dry_run_never_runs():
     assert calls == []
 
 
-def test_minimal_mocked_training_flow_builds_command_and_validates(monkeypatch, tmp_path):
+@pytest.fixture
+def enough_training_disk(monkeypatch):
+    """Keep mocked workflow tests independent of the runner's real free disk."""
+    monkeypatch.setattr(
+        adaptive_training,
+        "_disk_ok",
+        lambda _path, required_gb: (True, float(required_gb) + 1.0),
+    )
+
+
+def test_minimal_mocked_training_flow_builds_command_and_validates(
+    monkeypatch, tmp_path, enough_training_disk,
+):
     data = tmp_path / "training.jsonl"
     data.write_text('{"messages":[{"role":"user","content":"x"},{"role":"assistant","content":"y"}]}\n', encoding="utf-8")
     output = tmp_path / "lora"
@@ -1880,7 +1892,7 @@ def test_minimal_mocked_training_flow_builds_command_and_validates(monkeypatch, 
 
 
 def test_new_training_run_freshly_exports_memory_into_immutable_run(
-    monkeypatch, tmp_path,
+    monkeypatch, tmp_path, enough_training_disk,
 ):
     import export_training_data
 
@@ -1931,7 +1943,7 @@ def test_new_training_run_freshly_exports_memory_into_immutable_run(
 
 
 def test_memory_export_resume_reuses_exact_snapshot_without_reexport(
-    monkeypatch, tmp_path,
+    monkeypatch, tmp_path, enough_training_disk,
 ):
     import export_training_data
 
@@ -1979,7 +1991,9 @@ def test_memory_export_resume_reuses_exact_snapshot_without_reexport(
     assert len(calls) == 1
 
 
-def test_prelaunch_dataset_failures_remove_new_run_directory(monkeypatch, tmp_path):
+def test_prelaunch_dataset_failures_remove_new_run_directory(
+    monkeypatch, tmp_path, enough_training_disk,
+):
     invalid = tmp_path / "invalid.jsonl"
     invalid.write_text("{}\n", encoding="utf-8")
     output_root = tmp_path / "lora"
@@ -2025,7 +2039,9 @@ def _create_failed_training_run(monkeypatch, tmp_path):
     return plan, data
 
 
-def test_resume_rejects_changed_dataset_content(monkeypatch, tmp_path):
+def test_resume_rejects_changed_dataset_content(
+    monkeypatch, tmp_path, enough_training_disk,
+):
     plan, data = _create_failed_training_run(monkeypatch, tmp_path)
     data.write_text(
         data.read_text(encoding="utf-8")
@@ -2043,7 +2059,9 @@ def test_resume_rejects_changed_dataset_content(monkeypatch, tmp_path):
     assert called == []
 
 
-def test_resume_rejects_changed_dataset_path(monkeypatch, tmp_path):
+def test_resume_rejects_changed_dataset_path(
+    monkeypatch, tmp_path, enough_training_disk,
+):
     plan, data = _create_failed_training_run(monkeypatch, tmp_path)
     replacement = tmp_path / "replacement.jsonl"
     replacement.write_bytes(data.read_bytes())
@@ -2058,7 +2076,9 @@ def test_resume_rejects_changed_dataset_path(monkeypatch, tmp_path):
     assert called == []
 
 
-def test_resume_rejects_tampered_plan_and_out_of_run_snapshot(monkeypatch, tmp_path):
+def test_resume_rejects_tampered_plan_and_out_of_run_snapshot(
+    monkeypatch, tmp_path, enough_training_disk,
+):
     plan, _data = _create_failed_training_run(monkeypatch, tmp_path)
     state_path = tmp_path / "state.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -2103,7 +2123,9 @@ def test_resume_rejects_tampered_plan_and_out_of_run_snapshot(monkeypatch, tmp_p
     assert called == []
 
 
-def test_resume_rejects_still_live_prior_training_child(monkeypatch, tmp_path):
+def test_resume_rejects_still_live_prior_training_child(
+    monkeypatch, tmp_path, enough_training_disk,
+):
     plan, _data = _create_failed_training_run(monkeypatch, tmp_path)
     state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     claim = Path(state["run_dir"]) / ".launch-claimed"

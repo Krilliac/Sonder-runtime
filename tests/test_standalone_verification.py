@@ -4,7 +4,12 @@ from types import SimpleNamespace
 import json
 import pytest
 from tests.test_delegated_verification import lanes as lane_env, _verifier
-from tests.test_lane_coding_acceptance import coding, make_service, tool
+from tests.test_lane_coding_acceptance import (
+    coding,
+    make_service,
+    require_native_process_containment,
+    tool,
+)
 from sonder_runtime.interfaces.standalone_agent_lanes import StandaloneLaneController
 
 
@@ -163,6 +168,7 @@ def test_aborting_dispatched_failure_is_in_terminal_ledger(consumer, monkeypatch
 
 
 def test_standalone_composed_catalog_certifies_real_repair_and_diff(coding, monkeypatch):
+    require_native_process_containment()
     import subprocess
     import server
     from sonder_runtime.interfaces import standalone_agent_lanes

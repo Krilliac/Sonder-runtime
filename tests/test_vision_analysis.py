@@ -50,6 +50,7 @@ def test_vision_analysis_sends_guarded_png_to_bound_local_model(monkeypatch, tmp
         "idempotent": True, "local_only": True,
     }
     assert payload["model"] == "qwen2.5vl:3b"
+    assert payload["think"] is False
     assert payload["options"]["num_ctx"] == 4000
     assert payload["messages"][1]["content"] == "What color is this?"
     assert base64.b64decode(payload["messages"][1]["images"][0]) == image.read_bytes()

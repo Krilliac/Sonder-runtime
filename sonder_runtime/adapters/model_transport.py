@@ -9,6 +9,8 @@ from __future__ import annotations
 import urllib.error
 import math
 
+from sonder_runtime.domain.model_usage import usage_count
+
 
 class ModelCallError(urllib.error.URLError):
     """Safe, classified failure from one logical model call.
@@ -28,6 +30,8 @@ class ModelCallError(urllib.error.URLError):
         attempts: int = 1,
         cloud: bool = False,
         retry_after_seconds: float | None = None,
+        thinking_chars: int | None = None,
+        reasoning_segments: int | None = None,
     ):
         self.kind = str(kind or "unknown")
         self.detail = str(detail or self.kind)[:800]
@@ -43,6 +47,11 @@ class ModelCallError(urllib.error.URLError):
             max(0.0, retry_after)
             if retry_after is not None and math.isfinite(retry_after) else None
         )
+        # These explicit scalar fields let a failed multi-segment reasoning
+        # call retain bounded usage telemetry without attaching provider text
+        # or private reasoning content to the exception.
+        self.thinking_chars = usage_count(thinking_chars)
+        self.reasoning_segments = usage_count(reasoning_segments)
         super().__init__(self.detail)
 
 

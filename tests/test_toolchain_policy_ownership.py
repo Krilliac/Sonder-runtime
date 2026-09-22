@@ -8,6 +8,8 @@ def test_toolchain_policy_owns_fixed_argument_allowlist():
     assert toolchain_policy.allowed_arguments(" cargo ") == ("--version",)
     assert toolchain_policy.allowed_arguments("made-up") is None
     assert toolchain_policy.VERSION_ARGUMENTS["go"] == ("version",)
+    assert toolchain_policy.allowed_arguments("lean") == ("--version",)
+    assert toolchain_policy.allowed_arguments("lake") == ("--version",)
 
 
 def test_toolchain_policy_resolves_only_canonical_discovery(monkeypatch):

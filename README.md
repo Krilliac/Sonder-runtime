@@ -90,6 +90,18 @@ limits, and missing models are recognised as explicitly *not* overflow and are
 never retried this way. Hosted and remote routes keep their single-attempt
 posture unless the call site declares the request idempotent **and**
 `SONDER_HOSTED_OVERFLOW_RETRY=1` is set.
+
+That input-context recovery is separate from local reasoning continuation. A
+thinking model can fit the prompt but spend all of `num_predict` before writing
+an answer. Local `reasoning`-tier requests checkpoint and compact that private
+scratchwork across a bounded aggregate allowance (at least 4096 tokens, scaled
+to twice the initial segment and capped at 65536, across at most four segments),
+retain only one checkpoint in the retry prompt, share the
+original deadline/cancellation, and reserve the final segment for an answer.
+Callers producing exact artifacts can instead request `think=false`; hosted
+thinking remains provider-controlled. Neither path creates an unbounded retry
+loop.
+
 Good-outcome lesson reflection does not queue another model request behind an
 active fleet: the outcome is committed immediately and its lesson remains
 retryable. When the fleet is idle, reflection uses a separate shared generation

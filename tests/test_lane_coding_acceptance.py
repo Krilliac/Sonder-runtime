@@ -21,6 +21,7 @@ from sonder_runtime.adapters.persistence.sqlite.job_registry import (
     SQLiteDurableJobRegistry,
 )
 from sonder_runtime.adapters.execution.process_jobs import SubprocessJobProvider
+from sonder_runtime.adapters.extensions.memory_limits import NativeExtensionMemoryLimiter
 from sonder_runtime.adapters.process_termination import ProcessTreeSupervisor
 from sonder_runtime.application.agents.interactive_lanes import AgentLaneService
 from sonder_runtime.application.jobs.session_lifecycle import (
@@ -53,6 +54,13 @@ class ScriptedModel:
 
 def tool(name, **args):
     return json.dumps({"tool": name, "arguments": args})
+
+
+def require_native_process_containment():
+    """Skip real-process acceptance where the OS cannot own descendants."""
+    supported, detail = NativeExtensionMemoryLimiter().process_job_support()
+    if not supported:
+        pytest.skip("strong native process containment unavailable: " + detail)
 
 
 @pytest.fixture
@@ -163,6 +171,7 @@ def make_service(coding, replies):
 
 
 def test_scripted_model_real_edit_failing_test_repair_passing_test_and_diff(coding):
+    require_native_process_containment()
     repo, _, store, sessions, jobs, _, facade, context = coding
     service, model = make_service(
         coding,
@@ -239,6 +248,7 @@ def test_scripted_model_real_edit_failing_test_repair_passing_test_and_diff(codi
 
 
 def test_process_restart_consumes_known_test_request_once(coding):
+    require_native_process_containment()
     repo, _, store, sessions, jobs, _, facade, context = coding
     service, _ = make_service(coding, [])
     lane = service.spawn(
@@ -298,6 +308,7 @@ service.run_pending(sys.argv[2], local_owner_context(correlation_id='restart-chi
 
 
 def test_live_test_process_cancellation_records_proven_cleanup(coding):
+    require_native_process_containment()
     repo, _, _, _, jobs, _, facade, context = coding
     service, _ = make_service(
         coding, [tool("run_tests", target="slow"), "should not execute"]
@@ -392,6 +403,7 @@ def test_test_execution_requires_explicit_lane_grant(coding):
 
 
 def test_provider_deadline_cleanup_race_retains_cancelled_receipt(coding, monkeypatch):
+    require_native_process_containment()
     repo, _, _, _, _, provider, facade, context = coding
     original_wait = provider.wait
 
@@ -468,6 +480,7 @@ def test_missing_native_containment_refuses_before_process_launch(coding, monkey
 def test_real_test_process_receives_no_ambient_credentials_or_controls(
     coding, monkeypatch
 ):
+    require_native_process_containment()
     repo, path, store, sessions, jobs, provider, _, context = coding
     names = [
         "GH_TOKEN",
@@ -534,6 +547,8 @@ def test_real_test_process_receives_no_ambient_credentials_or_controls(
 def test_supported_composition_preserves_operator_execution_gate(
     coding, monkeypatch, admitted
 ):
+    if admitted:
+        require_native_process_containment()
     from sonder_runtime.bootstrap.lane_tests import compose_lane_test_tools
     from sonder_runtime.adapters.security.permission_evaluator import (
         PermissionModesEvaluator,
@@ -584,6 +599,7 @@ def test_supported_composition_preserves_operator_execution_gate(
 
 @pytest.mark.parametrize("revocation", ["catalog", "parent_grant"])
 def test_catalog_revocation_cancels_running_job(coding, revocation):
+    require_native_process_containment()
     repo, path, _, _, jobs, _, facade, context = coding
     service, _ = make_service(
         coding, [tool("run_tests", target="slow"), "No tests passed"]
@@ -617,6 +633,7 @@ def test_catalog_revocation_cancels_running_job(coding, revocation):
 
 
 def test_delegated_independent_certificate_after_real_scripted_repair(coding):
+    require_native_process_containment()
     from sonder_runtime.bootstrap.delegated_verification import (
         compose_delegated_verification,
     )
@@ -691,6 +708,7 @@ def test_delegated_independent_certificate_after_real_scripted_repair(coding):
 
 
 def test_test_command_mutating_source_cannot_certify(coding):
+    require_native_process_containment()
     from sonder_runtime.bootstrap.delegated_verification import (
         compose_delegated_verification,
     )

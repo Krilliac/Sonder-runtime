@@ -1,3 +1,5 @@
+import pytest
+
 import solver
 
 
@@ -157,3 +159,61 @@ def test_solve_verified_repairs_via_a_registry_verifier():
     assert res["passed"] is True
     assert res["attempts"] == 2
     assert res["transcript"][0]["ok"] is False
+
+
+def test_solve_lean_uses_lean_fences_and_formal_repair_prompt():
+    import verifiers
+
+    prompts = []
+
+    def generate(prompt):
+        prompts.append(prompt)
+        if "kernel diagnostic" in prompt:
+            return "```lean\ntheorem truth : True := by trivial\n```"
+        return "```lean\ntheorem truth : True := by exact broken\n```"
+
+    def verify(source):
+        if "broken" in source:
+            return verifiers.Verdict(False, "unknown identifier", "kernel diagnostic")
+        return verifiers.Verdict(True, "checked", "")
+
+    result = solver.solve_lean(
+        "Prove True",
+        generate,
+        spec={
+            "expected_declaration": "truth",
+            "expected_type": "True",
+            "trusted_prelude": "def suppliedTruth : Prop := True",
+        },
+        verify_fn=verify,
+        max_attempts=2,
+    )
+
+    assert result["passed"] is True
+    assert result["attempts"] == 2
+    assert "Lean 4 source" in prompts[1]
+    assert "sorry" in prompts[1] and "axiom" in prompts[1]
+    assert "constant" in prompts[1]
+    assert "python code block" not in prompts[1]
+    assert "`truth`" in prompts[0] and "`True`" in prompts[0]
+    assert "def suppliedTruth : Prop := True" in prompts[0]
+    assert "do not redefine" in prompts[0]
+
+
+def test_solve_lean_requires_an_explicit_theorem_contract():
+    with pytest.raises(ValueError, match="expected_declaration"):
+        solver.solve_lean("Prove True", lambda _: "```lean\nexample : True := by trivial\n```")
+
+    with pytest.raises(ValueError, match="expected_type"):
+        solver.solve_lean(
+            "Prove True",
+            lambda _: "```lean\nexample : True := by trivial\n```",
+            spec={"expected_declaration": "truth"},
+        )
+
+    with pytest.raises(ValueError, match="qualified Lean identifier"):
+        solver.solve_lean(
+            "Prove True",
+            lambda _: "```lean\ntheorem truth : True := by trivial\n```",
+            spec={"expected_declaration": "truth; #check False", "expected_type": "True"},
+        )

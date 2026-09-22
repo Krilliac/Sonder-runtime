@@ -61,10 +61,21 @@ RUNNABLE_FENCE_LANGS = {
     "rs": "rust",
 }
 
+# Formal proof fences are selectable by ``extract_code_block`` but are not
+# executable through the general-purpose /run language surface. They go to the
+# dedicated Lean verifier, which applies trust-gap checks and the pinned Lake
+# environment before invoking the kernel.
+EXTRACTION_FENCE_LANGS = {
+    "lean": "lean",
+    "lean4": "lean",
+}
+
 
 def normalize_language(language):
     lang = (language or "python").strip().lower()
-    return RUNNABLE_FENCE_LANGS.get(lang, lang)
+    return RUNNABLE_FENCE_LANGS.get(
+        lang, EXTRACTION_FENCE_LANGS.get(lang, lang),
+    )
 
 
 _LANG_FENCE = {

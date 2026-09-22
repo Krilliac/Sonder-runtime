@@ -3,13 +3,19 @@
 from dataclasses import replace
 import time
 
-from tests.test_lane_coding_acceptance import coding, make_service, tool
+from tests.test_lane_coding_acceptance import (
+    coding,
+    make_service,
+    require_native_process_containment,
+    tool,
+)
 from tests.test_lane_continuation import granted
 from tests.test_lane_pending_verification import pending
 from tests.test_lane_continuation_projection import Codec, HostProjection
 
 
 def test_real_catalog_certificate_after_explicit_pending_host_reattachment(coding):
+    require_native_process_containment()
     from sonder_runtime.application.agents.lane_continuation import (
         LaneContinuationService,
     )

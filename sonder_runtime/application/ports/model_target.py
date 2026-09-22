@@ -55,6 +55,9 @@ class ModelGenerateFactory(Protocol):
         cloud: bool = False,
         timeout: float | None = None,
         cancel_check: Callable[[], bool] | None = None,
+        think: bool | None = None,
+        reasoning_continuation: bool = False,
+        reasoning_total_tokens: int | None = None,
     ): ...
 
 

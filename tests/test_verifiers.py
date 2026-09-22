@@ -191,8 +191,465 @@ def test_pytest_run_rejects_option_select():
 
 def test_registry_covers_all_documented_backends():
     for name in ("python_exec", "program_run", "pytest_run", "typecheck",
-                 "cpp_compile", "llm_judge"):
+                 "cpp_compile", "lean_check", "llm_judge"):
         assert name in V.REGISTRY
+
+
+# --- lean_check — formal proof checking, deterministic without Lean -------
+@pytest.fixture(autouse=True)
+def _configured_lean_sandbox(monkeypatch, tmp_path, request):
+    """Keep legacy unit fakes hermetic while production requires containment."""
+    monkeypatch.setenv("SONDER_LEAN_SANDBOX_IMAGE", "sonder-lean:test")
+    monkeypatch.setenv("SONDER_LEAN_SANDBOX_ROOT", str(tmp_path))
+    monkeypatch.setenv("SONDER_ISOLATED_ROOTS", str(tmp_path))
+    if not request.node.get_closest_marker("real_lean_sandbox_helper"):
+        monkeypatch.setattr(
+            V,
+            "_run_lean_in_sandbox",
+            lambda command, **kwargs: V._run(command, **kwargs),
+            raising=False,
+        )
+
+
+def test_lean_check_refuses_unconfigured_unsandboxed_compilation(monkeypatch):
+    monkeypatch.delenv("SONDER_LEAN_SANDBOX_IMAGE", raising=False)
+    monkeypatch.setattr(
+        V, "_run", lambda *_args, **_kwargs: (0, "Lean (version 4.34.0)")
+    )
+
+    with pytest.raises(V.VerifierUnavailable, match="sandbox image"):
+        V.lean_check("theorem truth : True := by trivial", {"lean": V.sys.executable})
+
+
+def test_lean_check_routes_compiler_calls_through_the_sandbox(monkeypatch):
+    calls = []
+
+    def fake_sandbox(command, **kwargs):
+        calls.append((tuple(command), kwargs))
+        if "--version" in command:
+            return 0, "Lean (version 4.34.0)"
+        return 0, ""
+
+    monkeypatch.setattr(V, "_run_lean_in_sandbox", fake_sandbox)
+    verdict = V.lean_check(
+        "theorem truth : True := by trivial", {"lean": V.sys.executable},
+    )
+
+    assert verdict.passed is True
+    assert len(calls) == 2
+
+
+@pytest.mark.real_lean_sandbox_helper
+def test_lean_sandbox_runner_preserves_a_success_exit_code(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(image, command, project, **kwargs):
+        calls.append((image, command, project, kwargs))
+        return {"ok": True, "returncode": 0, "stdout": "ok\n", "stderr": ""}
+
+    monkeypatch.setenv("SONDER_LEAN_SANDBOX_IMAGE", "sonder-lean:test")
+    monkeypatch.setenv("SONDER_LEAN_SANDBOX_ROOT", str(tmp_path))
+    monkeypatch.setenv("SONDER_ISOLATED_ROOTS", str(tmp_path))
+    monkeypatch.setattr(V.isolated_runner, "run_isolated", fake_run)
+
+    code, output = V._run_lean_in_sandbox(
+        ["lean", "--version"], cwd=str(tmp_path), timeout=30,
+    )
+
+    assert (code, output) == (0, "ok\n")
+    assert calls[0][0:3] == ("sonder-lean:test", ["lean", "--version"], str(tmp_path))
+    assert calls[0][3]["writable_workspace"] is True
+
+
+def test_lean_check_passes_kernel_checked_source(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((tuple(command), kwargs))
+        if "--version" in command:
+            return 0, "Lean (version 4.19.0, x86_64-unknown-linux-gnu)"
+        assert open(command[-1], encoding="utf-8").read() == (
+            "theorem and_comm (p q : Prop) : p ∧ q → q ∧ p := by\n"
+            "  intro h\n  exact ⟨h.right, h.left⟩\n"
+        )
+        return 0, ""
+
+    monkeypatch.setattr(V, "_run", fake_run)
+    verdict = V.lean_check(
+        "theorem and_comm (p q : Prop) : p ∧ q → q ∧ p := by\n"
+        "  intro h\n  exact ⟨h.right, h.left⟩\n",
+        {"lean": V.sys.executable},
+    )
+
+    assert verdict == V.Verdict(True, "checked", "")
+    assert len(calls) == 2
+    assert not os.path.exists(calls[-1][0][-1])
+
+
+def test_lean_check_binds_success_to_the_requested_declaration(monkeypatch):
+    checked_sources = []
+
+    def fake_run(command, **kwargs):
+        if "--version" in command:
+            return 0, "Lean (version 4.19.0)"
+        if "--run" in command:
+            return 1, (
+                "Sonder rejected theorem contract type mismatch: "
+                "missing declaration requested"
+            )
+        source = open(command[-1], encoding="utf-8").read()
+        checked_sources.append(source)
+        return 0, ""
+
+    monkeypatch.setattr(V, "_run", fake_run)
+    verdict = V.lean_check(
+        "example : True := by trivial\n",
+        {
+            "lean": V.sys.executable,
+            "expected_declaration": "requested",
+            "expected_type": "False",
+        },
+    )
+
+    assert verdict.passed is False
+    assert verdict.reason == "theorem contract mismatch"
+    assert "example : True := by trivial\n" in checked_sources
+    assert any("axiom contract : (False)" in source for source in checked_sources)
+
+
+def test_lean_check_accepts_a_matching_requested_declaration(monkeypatch):
+    sources = []
+
+    def fake_run(command, **kwargs):
+        if "--version" in command:
+            return 0, "Lean (version 4.19.0)"
+        if "--run" in command:
+            return 0, ""
+        sources.append(open(command[-1], encoding="utf-8").read())
+        return 0, ""
+
+    monkeypatch.setattr(V, "_run", fake_run)
+    verdict = V.lean_check(
+        "theorem requested : True := by trivial\n",
+        {
+            "lean": V.sys.executable,
+            "expected_declaration": "requested",
+            "expected_type": "True",
+        },
+    )
+
+    assert verdict.passed is True
+    assert "theorem requested : True := by trivial\n" in sources
+    assert any("axiom contract : (True)" in source for source in sources)
+
+
+def test_lean_check_rejects_metaprogrammed_axiom_dependencies(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((tuple(command), kwargs))
+        if "--version" in command:
+            return 0, "Lean (version 4.19.0)"
+        if "--run" in command:
+            return 1, "Sonder rejected unproved axiom dependencies: [falseProof]"
+        return 0, ""
+
+    monkeypatch.setattr(V, "_run", fake_run)
+    source = """import Lean
+run_cmd
+  Lean.Elab.Command.liftCoreM <| Lean.addDecl (.axiomDecl {
+    name := `falseProof
+    levelParams := []
+    type := .const ``False []
+    isUnsafe := false
+  })
+theorem requested : False := falseProof
+"""
+
+    verdict = V.lean_check(
+        source,
+        {
+            "lean": V.sys.executable,
+            "expected_declaration": "requested",
+            "expected_type": "False",
+        },
+    )
+
+    assert verdict.passed is False
+    assert verdict.reason == "unproved axiom dependency"
+    assert "falseProof" in verdict.detail
+    compile_call = calls[1]
+    assert "-o" in compile_call[0]
+    expected_call = calls[2]
+    assert "SonderExpectedContract_" in expected_call[0][-1]
+    audit_call = calls[3]
+    assert "--run" in audit_call[0]
+    assert audit_call[1]["env_overrides"]["LEAN_PATH"]
+    assert "name == expectedDeclaration" in V._LEAN_AXIOM_AUDITOR_SOURCE
+
+
+def test_lean_check_verifies_contract_outside_the_submitted_module(monkeypatch):
+    checked_sources = {}
+
+    def fake_run(command, **kwargs):
+        if "--version" in command:
+            return 0, "Lean (version 4.19.0)"
+        if "--run" in command:
+            return 1, (
+                "Sonder rejected theorem contract type mismatch: "
+                "requested has type True, expected False"
+            )
+        source_path = command[-1]
+        checked_sources[os.path.basename(source_path)] = open(
+            source_path, encoding="utf-8",
+        ).read()
+        return 0, ""
+
+    monkeypatch.setattr(V, "_run", fake_run)
+    source = """import Lean
+syntax (priority := high) "example" ":" "(" term ")" ":=" term : command
+macro_rules
+  | `(example : ($expected) := $declaration) =>
+      `(def swallowedContractWitness : True := by trivial)
+theorem requested : True := by trivial
+"""
+
+    verdict = V.lean_check(
+        source,
+        {
+            "lean": V.sys.executable,
+            "expected_declaration": "requested",
+            "expected_type": "False",
+        },
+    )
+
+    assert verdict.passed is False
+    assert verdict.reason == "theorem contract mismatch"
+    assert checked_sources["Main.lean"] == source
+    contract_sources = [
+        text for name, text in checked_sources.items()
+        if name.startswith("SonderExpectedContract_")
+    ]
+    assert len(contract_sources) == 1
+    assert "axiom contract : (False)" in contract_sources[0]
+    assert "macro_rules" not in contract_sources[0]
+
+
+def test_lean_check_supports_caller_owned_contract_prelude(monkeypatch):
+    checked_sources = {}
+
+    def fake_run(command, **kwargs):
+        if "--version" in command:
+            return 0, "Lean (version 4.19.0)"
+        if "--run" in command:
+            return 0, ""
+        source_path = command[-1]
+        checked_sources[os.path.basename(source_path)] = open(
+            source_path, encoding="utf-8",
+        ).read()
+        return 0, ""
+
+    monkeypatch.setattr(V, "_run", fake_run)
+    artifact = "theorem requested : IsZero 0 := rfl\n"
+    prelude = "def IsZero (n : Nat) : Prop := n = 0\n"
+
+    verdict = V.lean_check(
+        artifact,
+        {
+            "lean": V.sys.executable,
+            "expected_declaration": "requested",
+            "expected_type": "IsZero 0",
+            "trusted_prelude": prelude,
+        },
+    )
+
+    assert verdict.passed is True
+    prelude_names = [
+        name for name in checked_sources
+        if name.startswith("SonderTrustedPrelude_")
+    ]
+    contract_names = [
+        name for name in checked_sources
+        if name.startswith("SonderExpectedContract_")
+    ]
+    assert len(prelude_names) == len(contract_names) == 1
+    prelude_module = os.path.splitext(prelude_names[0])[0]
+    expected_module = os.path.splitext(contract_names[0])[0]
+    assert checked_sources[prelude_names[0]] == prelude
+    assert checked_sources[contract_names[0]].startswith(
+        "import %s\n\n" % prelude_module
+    )
+    assert "axiom contract : (IsZero 0)" in checked_sources[contract_names[0]]
+    assert checked_sources["Main.lean"] == (
+        "import %s\n\n%s" % (prelude_module, artifact)
+    )
+    assert expected_module not in checked_sources["Main.lean"]
+
+
+def test_lean_check_requires_the_contract_fields_as_a_pair():
+    with pytest.raises(ValueError, match="supplied together"):
+        V.lean_check(
+            "theorem truth : True := by trivial",
+            {"lean": V.sys.executable, "expected_declaration": "truth"},
+        )
+
+    with pytest.raises(ValueError, match="trusted_prelude requires"):
+        V.lean_check(
+            "theorem truth : True := by trivial",
+            {"lean": V.sys.executable, "trusted_prelude": "def helper := 1"},
+        )
+
+
+@pytest.mark.parametrize("prelude", [None, "", " \n", 7])
+def test_lean_check_rejects_invalid_trusted_prelude(prelude):
+    with pytest.raises(ValueError, match="trusted_prelude"):
+        V.lean_check(
+            "theorem truth : True := by trivial",
+            {
+                "lean": V.sys.executable,
+                "expected_declaration": "truth",
+                "expected_type": "True",
+                "trusted_prelude": prelude,
+            },
+        )
+
+
+@pytest.mark.parametrize("placeholder", ["sorry", "admit", "axiom", "sorryAx"])
+def test_lean_check_rejects_unproved_trust_gaps_without_running_tool(placeholder):
+    verdict = V.lean_check(
+        "theorem impossible : False := by exact %s" % placeholder,
+        {"lean": "definitely-not-a-real-lean-binary"},
+    )
+
+    assert verdict.passed is False
+    assert "trust gap" in verdict.reason
+    assert placeholder.casefold() in verdict.detail.casefold()
+
+
+def test_lean_check_rejects_constant_declarations_without_running_tool():
+    source = (
+        "constant falseProof : False\n"
+        "theorem impossible : False := falseProof\n"
+    )
+
+    verdict = V.lean_check(
+        source,
+        {"lean": "definitely-not-a-real-lean-binary"},
+    )
+
+    assert verdict.passed is False
+    assert verdict.reason == "unproved trust gap"
+    assert "constant" in verdict.detail.casefold()
+
+
+def test_lean_check_ignores_placeholder_words_in_comments_and_strings(monkeypatch):
+    responses = iter(((0, "Lean (version 4.19.0)"), (0, "")))
+    monkeypatch.setattr(V, "_run", lambda *args, **kwargs: next(responses))
+    source = (
+        '-- "sorry" and constant declarations are forbidden in real proof terms\n'
+        '/- nested /- axiom -/ admit constant -/\n'
+        'def message := "sorry admit axiom sorryAx constant"\n'
+        'theorem truth : True := by trivial\n'
+    )
+    assert V.lean_check(source, {"lean": V.sys.executable}).passed is True
+
+
+def test_lean_check_reports_missing_or_wrong_tool_as_unavailable(monkeypatch):
+    with pytest.raises(V.VerifierUnavailable, match="identity probe"):
+        V.lean_check("theorem truth : True := by trivial", {
+            "lean": "definitely-not-a-real-lean-binary-zzz",
+        })
+
+    monkeypatch.setattr(V, "_run", lambda *args, **kwargs: (0, "Python 3.12"))
+    with pytest.raises(V.VerifierUnavailable, match="identity"):
+        V.lean_check("theorem truth : True := by trivial", {
+            "lean": V.sys.executable,
+        })
+
+
+def test_lean_check_returns_bounded_kernel_diagnostic(monkeypatch):
+    responses = iter((
+        (0, "Lean (version 4.19.0)"),
+        (1, "x" * 9000 + "\nMain.lean:1: error: type mismatch"),
+    ))
+    monkeypatch.setattr(V, "_run", lambda *args, **kwargs: next(responses))
+
+    verdict = V.lean_check(
+        "theorem bad : False := by trivial", {"lean": V.sys.executable},
+    )
+
+    assert verdict.passed is False
+    assert "type mismatch" in verdict.reason
+    assert len(verdict.detail) <= 8000
+
+
+def test_lean_check_rejects_host_project_mounts(monkeypatch, tmp_path):
+    (tmp_path / "lakefile.toml").write_text(
+        'name = "formal-test"\n', encoding="utf-8",
+    )
+    with pytest.raises(V.VerifierUnavailable, match="host projects are not mounted"):
+        V.lean_check(
+            "import Mathlib\nexample (n : ℕ) : n + 0 = n := by simp\n",
+            {
+                "lean": V.sys.executable,
+                "lake": V.sys.executable,
+                "project": str(tmp_path),
+            },
+        )
+
+
+def test_lean_check_rejects_environment_host_project_defaults(
+    monkeypatch, tmp_path,
+):
+    (tmp_path / "lakefile.lean").write_text("package Formal\n", encoding="utf-8")
+    monkeypatch.setenv("SONDER_LEAN_EXE", V.sys.executable)
+    monkeypatch.setenv("SONDER_LAKE_EXE", V.sys.executable)
+    monkeypatch.setenv("SONDER_LEAN_PROJECT", str(tmp_path))
+    with pytest.raises(V.VerifierUnavailable, match="host projects are not mounted"):
+        V.lean_check("theorem truth : True := by trivial")
+
+
+def test_lean_check_rejects_a_non_lake_project(tmp_path):
+    with pytest.raises(V.VerifierUnavailable, match="no lakefile"):
+        V.lean_check(
+            "theorem truth : True := by trivial",
+            {"lean": V.sys.executable, "project": str(tmp_path)},
+        )
+
+
+def test_lean_check_applies_and_verifies_the_repository_pin(monkeypatch):
+    calls = []
+    monkeypatch.delenv("SONDER_LEAN_EXE", raising=False)
+    monkeypatch.delenv("SONDER_LEAN_PROJECT", raising=False)
+    monkeypatch.setattr(V.shutil, "which", lambda value: "/fake/lean")
+
+    def fake_run(command, **kwargs):
+        calls.append((tuple(command), kwargs))
+        cwd = kwargs["cwd"]
+        assert open(os.path.join(cwd, "lean-toolchain"), encoding="utf-8").read() == (
+            "leanprover/lean4:v4.34.0\n"
+        )
+        if "--version" in command:
+            return 0, "Lean (version 4.34.0, x86_64-unknown-linux-gnu)"
+        return 0, ""
+
+    monkeypatch.setattr(V, "_run", fake_run)
+    assert V.lean_check("theorem truth : True := by trivial").passed is True
+    assert len(calls) == 2
+
+
+def test_lean_check_fails_closed_when_default_lean_ignores_the_pin(monkeypatch):
+    monkeypatch.delenv("SONDER_LEAN_EXE", raising=False)
+    monkeypatch.delenv("SONDER_LEAN_PROJECT", raising=False)
+    monkeypatch.setattr(V.shutil, "which", lambda value: "/fake/lean")
+    monkeypatch.setattr(
+        V,
+        "_run",
+        lambda *args, **kwargs: (0, "Lean (version 4.33.0)"),
+    )
+
+    with pytest.raises(V.VerifierUnavailable, match="does not match repository pin"):
+        V.lean_check("theorem truth : True := by trivial")
 
 
 # --- promoted ext backends: the shared-exception contract ------------------

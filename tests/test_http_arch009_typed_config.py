@@ -88,6 +88,16 @@ def test_typed_main_uses_configured_port_when_environment_is_poisoned(monkeypatc
     assert bound["address"] == ("127.0.0.1", 12345)
 
 
+def test_typed_listener_selection_ignores_stale_compatibility_projection(
+    monkeypatch,
+):
+    monkeypatch.setattr(serve, "CONFIGURED_PORT", serve.DEFAULT_PORT)
+
+    assert serve._selected_listener_port(
+        _config(port=12345), ["sonder", "11435"],
+    ) == 12345
+
+
 def test_typed_auth_secret_is_used_for_non_loopback_validation(monkeypatch):
     monkeypatch.setenv("SONDER_AUTH_SECRET", "poisoned-environment-secret")
     typed_secret = "typed-auth-secret-" + ("s" * 32)

@@ -127,6 +127,35 @@ All model transport is moving behind a single port,
 Session summarization and titling already route through it
 (`ChatService` → `OllamaGateway`); more call-sites migrate incrementally.
 
+### Context limits versus reasoning-output limits
+
+These are different budgets and recover differently:
+
+- A **context-window overflow** means the prompt plus history does not fit.
+  Sonder can drop old complete turns once and retry inside the original
+  deadline; session summaries and retrieval cover longer conversations.
+- A **reasoning-output exhaustion** means a local thinking model spent its
+  per-call `num_predict` allowance in private reasoning before it emitted an
+  answer. Local requests on the `reasoning` tier use bounded checkpoint
+  continuation by default: Sonder retains one compact private checkpoint,
+  replaces the older checkpoint on every segment, preserves cancellation and
+  the original deadline, and reserves the last segment for the public answer.
+  The default aggregate ceiling is the larger of 4096 or twice the initial
+  segment, capped at 65536 generated tokens across at most four segments. The
+  checkpoint is transport state and never becomes assistant text or a public
+  transcript turn. Replacement targets only the exact last checkpoint message
+  created by the continuation mechanism; a caller-owned message is never
+  removed merely because it begins with the public checkpoint marker.
+
+Typed `ModelRequest.options` may set `reasoning_continuation` and
+`reasoning_total_tokens` for a local request. Set `think=false` when the task
+needs direct, deterministic output instead of private deliberation (for
+example, a small Lean source artifact); that explicitly disables checkpoint
+continuation and leaves the requested `num_predict` unchanged. These controls
+cannot be supplied for hosted tiers, whose thinking mode remains provider
+policy, and every total remains a hard ceiling rather than a target the model
+must consume.
+
 ### Backend selection and typed capability metadata
 
 `SONDER_MODEL_BACKEND` (default `ollama`) picks the transport constructed by

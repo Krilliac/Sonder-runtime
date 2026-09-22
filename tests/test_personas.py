@@ -21,5 +21,15 @@ def test_get_case_and_whitespace_insensitive():
     assert personas.get("  Teacher  ") == personas.PERSONAS["teacher"]
 
 
-def test_names_includes_all_four():
-    assert personas.names() == ["coder", "explainer", "reviewer", "teacher"]
+def test_names_includes_all_personas():
+    assert personas.names() == [
+        "coder", "explainer", "mathematician", "reviewer", "teacher",
+    ]
+
+
+def test_mathematician_keeps_conjecture_separate_from_checked_proof():
+    prompt = personas.get("mathematician")
+    assert "conjecture" in prompt
+    assert "Lean" in prompt
+    assert "numerical evidence" in prompt
+    assert "constant" in prompt

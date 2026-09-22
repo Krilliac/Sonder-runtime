@@ -713,7 +713,7 @@
       ]
     },
     {
-      "file_count": 184,
+      "file_count": 185,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -849,6 +849,7 @@
         "sonder_runtime/domain/protocol/subsystem_protocols.py",
         "sonder_runtime/domain/provider_override_policy.py",
         "sonder_runtime/domain/query_limits.py",
+        "sonder_runtime/domain/reasoning_continuation.py",
         "sonder_runtime/domain/recipe.py",
         "sonder_runtime/domain/reconnect_reconciliation.py",
         "sonder_runtime/domain/replication_ack.py",

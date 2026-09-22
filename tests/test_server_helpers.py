@@ -589,6 +589,36 @@ def test_make_generate_cloud_omits_local_runtime_options(monkeypatch):
     assert "think" not in seen["payload"]
 
 
+def test_make_generate_can_disable_local_thinking_without_budget_inflation(
+    monkeypatch,
+):
+    seen = {}
+    server._THINKING_CAPABILITY_CACHE.clear()
+    server._remember_thinking_model("local-reasoner")
+
+    def fake_post(path, payload):
+        seen["payload"] = payload
+        return {"message": {"content": "ok"}}
+
+    monkeypatch.setattr(server, "_post", fake_post)
+    gen = server._make_generate(
+        "local-reasoner", "", 0.0, 88, 4096, think=False,
+    )
+
+    assert gen("hello") == "ok"
+    assert seen["payload"]["think"] is False
+    assert seen["payload"]["options"]["num_predict"] == 88
+
+
+def test_make_generate_rejects_conflicting_reasoning_controls():
+    with pytest.raises(ValueError, match="requires model thinking"):
+        server._make_generate(
+            "local", "", 0.0, 88, 4096,
+            think=False,
+            reasoning_continuation=True,
+        )
+
+
 @pytest.mark.parametrize(
     ("model", "expected_think"),
     [

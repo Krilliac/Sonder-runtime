@@ -257,9 +257,15 @@ def test_filesystem_root_cannot_be_authorized(monkeypatch):
 def test_project_tree_with_socket_is_rejected(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
-    sock = socket.socket(socket.AF_UNIX)
     try:
-        sock.bind(str(project / "agent.sock"))
+        sock = socket.socket(socket.AF_UNIX)
+    except OSError as exc:
+        pytest.skip(f"AF_UNIX socket creation is unavailable: {exc}")
+    try:
+        try:
+            sock.bind(str(project / "agent.sock"))
+        except OSError as exc:
+            pytest.skip(f"AF_UNIX socket binding is unavailable: {exc}")
         with pytest.raises(ValueError, match="socket or special"):
             isolated_runner.resolve_project(str(project))
     finally:

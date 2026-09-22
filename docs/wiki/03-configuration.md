@@ -180,6 +180,13 @@ Core paths/identity: `SONDER_HOME`, `SONDER_DB`, `SONDER_AUTOPILOT_DB`,
 (the typed tool gateway's durable receipts), `SONDER_RUNTIME_POLICY`,
 `SONDER_TRAINING_STATE`.
 
+Formal verification: `SONDER_LEAN_EXE` selects Lean 4. Optional
+`SONDER_LAKE_EXE` plus `SONDER_LEAN_PROJECT` select a pinned Lake project so
+proofs can import Mathlib. These paths configure already-installed local tools;
+the verifier never downloads a toolchain or dependency. Without overrides, the
+verifier applies the repository `lean-toolchain` pin and verifies the discovered
+Lean reports the pinned version.
+
 Serving/auth: `SONDER_API_KEY`, `SONDER_HOST`, `SONDER_PORT`,
 `SONDER_AUTH_MODE`, `SONDER_AUTH_SECRET`, `SONDER_MAX_REQUEST_BYTES`,
 `SONDER_MAX_CONCURRENT_REQUESTS`, `SONDER_QUEUE_DEPTH`, `SONDER_CORS_ORIGINS`.

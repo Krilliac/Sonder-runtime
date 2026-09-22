@@ -47,6 +47,19 @@ def test_constructor_keeps_legacy_normalization_and_bounds():
         model_transport.ModelCallError("http", "bad status", status="nope")
 
 
+def test_constructor_normalizes_scalar_reasoning_telemetry():
+    error = model_transport.ModelCallError(
+        "timeout", "slow", thinking_chars="12", reasoning_segments=2,
+    )
+    assert error.thinking_chars == 12
+    assert error.reasoning_segments == 2
+    invalid = model_transport.ModelCallError(
+        "timeout", "slow", thinking_chars=-1, reasoning_segments="bad",
+    )
+    assert invalid.thinking_chars is None
+    assert invalid.reasoning_segments is None
+
+
 def test_gateway_and_adapter_do_not_import_retired_root_transport():
     gateway = (ROOT / "sonder_runtime" / "adapters" / "ollama" / "gateway.py").read_text(
         encoding="utf-8"

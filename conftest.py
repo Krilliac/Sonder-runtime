@@ -15,6 +15,23 @@ _REPO_ROOT = Path(__file__).resolve().parent
 _TEST_STATE_ROOT = Path(tempfile.mkdtemp(prefix="sonder-pytest-")).resolve()
 _cleanup_complete = False
 
+_LIVE_PROVIDER_VARIABLES = (
+    "SONDER_LIVE_MODEL_GATEWAY",
+    "SONDER_LIVE_ALLOW_REMOTE",
+    "OLLAMA_HOST",
+    "SONDER_ALLOW_REMOTE_OLLAMA",
+    "SONDER_OLLAMA_WORKERS",
+    "SONDER_OPENAI_BASE_URL",
+    "SONDER_OPENAI_API_KEY",
+    "SONDER_OPENAI_MODEL",
+    "SONDER_OPENAI_EMBED_MODEL",
+)
+_CAPTURED_LIVE_PROVIDER_ENV = {
+    name: os.environ[name]
+    for name in _LIVE_PROVIDER_VARIABLES
+    if name in os.environ
+}
+
 
 def _clear_ambient_deployment_variables() -> None:
     for _ambient_variable in tuple(os.environ):
@@ -68,6 +85,24 @@ def _isolate_deployment_posture():
             os.environ.pop(name, None)
         else:
             os.environ[name] = value
+
+
+@pytest.fixture
+def live_provider_environment(request, monkeypatch):
+    """Restore only explicit live-provider inputs for doubly opted-in tests."""
+    run_live = request.config.getoption("--run-network") and request.config.getoption(
+        "--run-model"
+    )
+    if run_live:
+        values = dict(_CAPTURED_LIVE_PROVIDER_ENV)
+        if (
+            values.get("SONDER_LIVE_MODEL_GATEWAY", "").strip().lower() == "ollama"
+            and "OLLAMA_HOST" not in values
+        ):
+            values["OLLAMA_HOST"] = "http://127.0.0.1:11434"
+        for name, value in values.items():
+            monkeypatch.setenv(name, value)
+    yield
 
 
 def _cleanup_test_state() -> None:
