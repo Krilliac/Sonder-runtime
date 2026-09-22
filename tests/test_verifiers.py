@@ -196,6 +196,71 @@ def test_registry_covers_all_documented_backends():
 
 
 # --- lean_check — formal proof checking, deterministic without Lean -------
+@pytest.fixture(autouse=True)
+def _configured_lean_sandbox(monkeypatch, tmp_path, request):
+    """Keep legacy unit fakes hermetic while production requires containment."""
+    monkeypatch.setenv("SONDER_LEAN_SANDBOX_IMAGE", "sonder-lean:test")
+    monkeypatch.setenv("SONDER_LEAN_SANDBOX_ROOT", str(tmp_path))
+    monkeypatch.setenv("SONDER_ISOLATED_ROOTS", str(tmp_path))
+    if not request.node.get_closest_marker("real_lean_sandbox_helper"):
+        monkeypatch.setattr(
+            V,
+            "_run_lean_in_sandbox",
+            lambda command, **kwargs: V._run(command, **kwargs),
+            raising=False,
+        )
+
+
+def test_lean_check_refuses_unconfigured_unsandboxed_compilation(monkeypatch):
+    monkeypatch.delenv("SONDER_LEAN_SANDBOX_IMAGE", raising=False)
+    monkeypatch.setattr(
+        V, "_run", lambda *_args, **_kwargs: (0, "Lean (version 4.34.0)")
+    )
+
+    with pytest.raises(V.VerifierUnavailable, match="sandbox image"):
+        V.lean_check("theorem truth : True := by trivial", {"lean": V.sys.executable})
+
+
+def test_lean_check_routes_compiler_calls_through_the_sandbox(monkeypatch):
+    calls = []
+
+    def fake_sandbox(command, **kwargs):
+        calls.append((tuple(command), kwargs))
+        if "--version" in command:
+            return 0, "Lean (version 4.34.0)"
+        return 0, ""
+
+    monkeypatch.setattr(V, "_run_lean_in_sandbox", fake_sandbox)
+    verdict = V.lean_check(
+        "theorem truth : True := by trivial", {"lean": V.sys.executable},
+    )
+
+    assert verdict.passed is True
+    assert len(calls) == 2
+
+
+@pytest.mark.real_lean_sandbox_helper
+def test_lean_sandbox_runner_preserves_a_success_exit_code(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(image, command, project, **kwargs):
+        calls.append((image, command, project, kwargs))
+        return {"ok": True, "returncode": 0, "stdout": "ok\n", "stderr": ""}
+
+    monkeypatch.setenv("SONDER_LEAN_SANDBOX_IMAGE", "sonder-lean:test")
+    monkeypatch.setenv("SONDER_LEAN_SANDBOX_ROOT", str(tmp_path))
+    monkeypatch.setenv("SONDER_ISOLATED_ROOTS", str(tmp_path))
+    monkeypatch.setattr(V.isolated_runner, "run_isolated", fake_run)
+
+    code, output = V._run_lean_in_sandbox(
+        ["lean", "--version"], cwd=str(tmp_path), timeout=30,
+    )
+
+    assert (code, output) == (0, "ok\n")
+    assert calls[0][0:3] == ("sonder-lean:test", ["lean", "--version"], str(tmp_path))
+    assert calls[0][3]["writable_workspace"] is True
+
+
 def test_lean_check_passes_kernel_checked_source(monkeypatch):
     calls = []
 
@@ -490,7 +555,7 @@ def test_lean_check_ignores_placeholder_words_in_comments_and_strings(monkeypatc
 
 
 def test_lean_check_reports_missing_or_wrong_tool_as_unavailable(monkeypatch):
-    with pytest.raises(V.VerifierUnavailable, match="not discovered"):
+    with pytest.raises(V.VerifierUnavailable, match="identity probe"):
         V.lean_check("theorem truth : True := by trivial", {
             "lean": "definitely-not-a-real-lean-binary-zzz",
         })
@@ -518,47 +583,30 @@ def test_lean_check_returns_bounded_kernel_diagnostic(monkeypatch):
     assert len(verdict.detail) <= 8000
 
 
-def test_lean_check_uses_a_pinned_lake_project(monkeypatch, tmp_path):
+def test_lean_check_rejects_host_project_mounts(monkeypatch, tmp_path):
     (tmp_path / "lakefile.toml").write_text(
         'name = "formal-test"\n', encoding="utf-8",
     )
-    calls = []
-
-    def fake_run(command, **kwargs):
-        calls.append((tuple(command), kwargs))
-        assert command[:3] == [V.sys.executable, "env", V.sys.executable]
-        assert kwargs["cwd"] == str(tmp_path)
-        if command[-1] == "--version":
-            return 0, "Lean (version 4.34.0, x86_64-unknown-linux-gnu)"
-        assert open(command[-1], encoding="utf-8").read().startswith("import Mathlib")
-        return 0, ""
-
-    monkeypatch.setattr(V, "_run", fake_run)
-    verdict = V.lean_check(
-        "import Mathlib\nexample (n : ℕ) : n + 0 = n := by simp\n",
-        {
-            "lean": V.sys.executable,
-            "lake": V.sys.executable,
-            "project": str(tmp_path),
-        },
-    )
-
-    assert verdict.passed is True
-    assert len(calls) == 2
-    assert not os.path.exists(calls[-1][0][-1])
+    with pytest.raises(V.VerifierUnavailable, match="host projects are not mounted"):
+        V.lean_check(
+            "import Mathlib\nexample (n : ℕ) : n + 0 = n := by simp\n",
+            {
+                "lean": V.sys.executable,
+                "lake": V.sys.executable,
+                "project": str(tmp_path),
+            },
+        )
 
 
-def test_lean_check_reads_formal_toolchain_defaults_from_environment(
+def test_lean_check_rejects_environment_host_project_defaults(
     monkeypatch, tmp_path,
 ):
     (tmp_path / "lakefile.lean").write_text("package Formal\n", encoding="utf-8")
     monkeypatch.setenv("SONDER_LEAN_EXE", V.sys.executable)
     monkeypatch.setenv("SONDER_LAKE_EXE", V.sys.executable)
     monkeypatch.setenv("SONDER_LEAN_PROJECT", str(tmp_path))
-    responses = iter(((0, "Lean (version 4.34.0)"), (0, "")))
-    monkeypatch.setattr(V, "_run", lambda *args, **kwargs: next(responses))
-
-    assert V.lean_check("theorem truth : True := by trivial").passed is True
+    with pytest.raises(V.VerifierUnavailable, match="host projects are not mounted"):
+        V.lean_check("theorem truth : True := by trivial")
 
 
 def test_lean_check_rejects_a_non_lake_project(tmp_path):

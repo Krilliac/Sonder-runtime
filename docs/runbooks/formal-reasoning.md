@@ -3,6 +3,8 @@
 Sonder's formal path separates model output from proof evidence: a model writes
 Lean 4 source, `lean_check` rejects `sorry`, `admit`, `sorryAx`, `axiom`, and
 `constant` trust gaps, and Lean's kernel decides whether the artifact checks.
+The model-authored source is compiled only in a guarded local Linux OCI
+container; it is never passed to a host Lean process.
 For a task-bound check, Sonder then loads the compiled module in a separate
 trusted audit and rejects any transitive axiom dependency introduced by the
 submitted artifact, including axioms added through metaprogramming. Imported
@@ -28,41 +30,59 @@ Only task authors may populate this field—never copy model output into it. The
 generation loop shows the prelude to the model and tells it to use, not repeat,
 those declarations.
 
-## Install and pin the toolchain
+## Configure the containment image
 
-Install Lean through the official `elan` toolchain manager, then install the
-release named by the repository's `lean-toolchain` file. Keep the installation
-outside the source checkout. Confirm both fixed, non-interactive probes:
+Formal verification is fail-closed until an operator provides a locally
+installed, pinned OCI image containing the approved Lean toolchain and any
+approved libraries. The image must expose `lean` (or the explicitly configured
+image-local executable) and `/usr/bin/env`. It is inspected to an immutable
+image ID before each run; the verifier never pulls an image at request time.
+
+Set all of the following in the runtime service environment:
+
+```text
+SONDER_ISOLATED_RUNTIME=docker                 # or podman; a ready local Linux engine
+SONDER_ISOLATED_ROOTS=/absolute/scratch-parent
+SONDER_LEAN_SANDBOX_ROOT=/absolute/scratch-parent
+SONDER_LEAN_SANDBOX_IMAGE=registry/lean@sha256:<pinned-image-digest>
+SONDER_LEAN_SANDBOX_EXECUTABLE=lean            # optional image-local path/name
+```
+
+The scratch parent must already exist, be inside `SONDER_ISOLATED_ROOTS`, and
+contain no links, sockets, devices, or secrets. Each check creates an empty
+temporary child below that parent. The guarded executor mounts only that child,
+with network disabled, a read-only root filesystem, no Linux capabilities,
+`no-new-privileges`, UID/GID 65534, a bounded writable scratch mount, and fixed
+CPU, memory, PID, timeout, and output ceilings. It uses no host project mount,
+Docker socket mount, device passthrough, or inherited runtime environment.
+
+Host `SONDER_LEAN_EXE`, `SONDER_LAKE_EXE`, and `SONDER_LEAN_PROJECT` values are
+not executable authority for this path. A container image owns its complete
+toolchain and dependencies; host Lake projects are rejected rather than mounted
+into the container. Build and admit a separate, digest-pinned image for Mathlib
+or another approved dependency set during provisioning.
+
+## Install and pin the toolchain image
+
+Build the image from the release named by the repository's `lean-toolchain`
+file, with all dependencies preinstalled. Keep source and toolchain provisioning
+outside the live runtime. Confirm the image's fixed, non-interactive probes:
 
 ```bash
 lean --version
 lake --version
 ```
 
-For core-language theorems, the default `lean` command is run from an isolated
-directory containing the repository's `lean-toolchain` pin, and its reported
-version must match that pin. An explicit executable remains available for
-provisioned deployments:
-
-```bash
-export SONDER_LEAN_EXE=/absolute/path/to/lean
-```
+For core-language theorems, the image-local `lean` command is run from the
+guarded temporary directory. Without legacy host executable configuration, its
+reported version must match the repository pin.
 
 ## Enable Mathlib
 
-Create a separate Lake project whose `lean-toolchain` and Mathlib revision are
-both pinned. Fetch its dependencies and precompiled cache during provisioning,
-not during a proof check. Then configure all three paths:
-
-```bash
-export SONDER_LEAN_EXE=/absolute/path/to/lean
-export SONDER_LAKE_EXE=/absolute/path/to/lake
-export SONDER_LEAN_PROJECT=/absolute/path/to/pinned-mathlib-project
-```
-
-The project must contain `lakefile.toml` or `lakefile.lean`. With this setting,
-`lean_check` runs `lake env lean` from that project, so an artifact may begin
-with `import Mathlib` while retaining the project's locked dependency graph.
+Create a separate image whose Lean toolchain and Mathlib revision are both
+pinned. Fetch dependencies and precompiled cache during image provisioning, not
+during a proof check. Point `SONDER_LEAN_SANDBOX_IMAGE` at that immutable image
+digest before verifying an artifact that begins with `import Mathlib`.
 
 ## Smoke check
 

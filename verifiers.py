@@ -19,6 +19,7 @@ Raises VerifierUnavailable when a backend's external tool (compiler, mypy) is
 absent — that is "could not judge", distinct from a Verdict(False) "artifact failed".
 """
 import collections
+import math
 import os
 import re
 import secrets
@@ -28,6 +29,7 @@ import sys
 import tempfile
 
 import grounding
+import isolated_runner
 import sonder_logging
 from sonder_runtime.adapters.execution_tools import code_runner
 
@@ -46,6 +48,10 @@ _MAX_LEAN_SOURCE_BYTES = 256_000
 _MAX_LEAN_DETAIL_CHARS = 8_000
 _MAX_LEAN_EXPECTED_TYPE_BYTES = 8_192
 _MAX_LEAN_TRUSTED_PRELUDE_BYTES = 32_768
+_LEAN_SANDBOX_IMAGE_ENV = "SONDER_LEAN_SANDBOX_IMAGE"
+_LEAN_SANDBOX_ROOT_ENV = "SONDER_LEAN_SANDBOX_ROOT"
+_LEAN_SANDBOX_EXECUTABLE_ENV = "SONDER_LEAN_SANDBOX_EXECUTABLE"
+_LEAN_SANDBOX_EXECUTABLE_RE = re.compile(r"(?:/[A-Za-z0-9._+-]+)+|[A-Za-z0-9._+-]+\Z")
 _LEAN_TRUST_GAP_RE = re.compile(r"\b(sorryAx|sorry|admit|axiom|constant)\b")
 _LEAN_DECLARATION_RE = re.compile(
     r"[A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*\Z"
@@ -482,6 +488,94 @@ def _lean_expected_contract_source(
     )
 
 
+def _lean_sandbox_image():
+    """Return the operator-configured, locally inspected Lean image reference."""
+    image = os.environ.get(_LEAN_SANDBOX_IMAGE_ENV, "").strip()
+    if not image:
+        raise VerifierUnavailable(
+            "Lean verification requires a configured sandbox image (%s)"
+            % _LEAN_SANDBOX_IMAGE_ENV
+        )
+    return image
+
+
+def _lean_sandbox_executable():
+    executable = os.environ.get(_LEAN_SANDBOX_EXECUTABLE_ENV, "lean").strip()
+    if not _LEAN_SANDBOX_EXECUTABLE_RE.fullmatch(executable):
+        raise VerifierUnavailable("configured Lean sandbox executable is invalid")
+    return executable
+
+
+def _lean_sandbox_root():
+    root = os.environ.get(_LEAN_SANDBOX_ROOT_ENV, "").strip()
+    if not root:
+        raise VerifierUnavailable(
+            "Lean verification requires a configured sandbox root (%s)"
+            % _LEAN_SANDBOX_ROOT_ENV
+        )
+    try:
+        return isolated_runner.resolve_project(root)
+    except ValueError as exc:
+        raise VerifierUnavailable(
+            "configured Lean sandbox root is unavailable: %s" % exc
+        ) from exc
+
+
+def _sandbox_lean_argument(value, directory):
+    """Map only verifier-owned paths into the container workspace."""
+    raw = str(value)
+    try:
+        relative = os.path.relpath(raw, directory)
+    except ValueError:
+        return raw
+    if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+        return raw
+    return "/workspace" if relative == "." else "/workspace/" + relative.replace("\\", "/")
+
+
+def _run_lean_in_sandbox(command, *, cwd, timeout, env_overrides=None):
+    """Run a verifier-owned Lean argv through the guarded OCI executor.
+
+    The submitted source is never compiled by a host process.  The only host
+    mount is an empty verifier-owned temporary directory; the executor applies
+    no network, a read-only container root, non-root UID, dropped capabilities,
+    bounded resources, and immutable image inspection.  ``env_overrides`` is
+    deliberately ignored because a sandboxed process receives a fixed minimal
+    environment rather than the runtime's environment.
+    """
+    del env_overrides
+    image = _lean_sandbox_image()
+    root = _lean_sandbox_root()
+    if os.path.realpath(cwd) != os.path.realpath(root) and not os.path.commonpath(
+        (os.path.realpath(cwd), os.path.realpath(root))
+    ) == os.path.realpath(root):
+        raise VerifierUnavailable("Lean sandbox working directory escaped its configured root")
+    if not command:
+        raise VerifierUnavailable("Lean sandbox received an empty compiler command")
+    sandbox_command = [_lean_sandbox_executable()]
+    sandbox_command.extend(_sandbox_lean_argument(item, cwd) for item in command[1:])
+    result = isolated_runner.run_isolated(
+        image,
+        sandbox_command,
+        cwd,
+        writable_workspace=True,
+        timeout=max(1, min(120, int(math.ceil(timeout)))),
+        memory_mb=1024,
+        cpus=1,
+        pids=64,
+        output_bytes=isolated_runner.MAX_OUTPUT_BYTES,
+    )
+    output = (result.get("stdout") or "") + (result.get("stderr") or "")
+    if result.get("runtime") == "" and not result.get("ok"):
+        raise VerifierUnavailable(result.get("error") or "Lean sandbox is unavailable")
+    if result.get("error"):
+        raise VerifierUnavailable("Lean sandbox failed: %s" % result["error"])
+    returncode = result.get("returncode")
+    if type(returncode) is not int:
+        raise VerifierUnavailable("Lean sandbox returned no compiler exit code")
+    return returncode, output
+
+
 def lean_check(artifact, spec=None):
     """Kernel-check Lean 4 source without accepting proof placeholders.
 
@@ -534,22 +628,23 @@ def lean_check(artifact, spec=None):
         detail = "Lean source contains prohibited unproved trust gap: %s" % gap.group(1)
         return Verdict(False, "unproved trust gap", detail)
 
+    # Model-authored Lean is executable metaprogram code.  Never select a host
+    # executable or project directory for it: the configured OCI image owns the
+    # complete Lean toolchain and any approved libraries.
+    _lean_sandbox_image()
     project = _lean_project(spec.get("project"))
+    if project is not None:
+        raise VerifierUnavailable(
+            "Lean sandbox images must contain approved dependencies; host projects are not mounted"
+        )
     configured_lean = spec.get("lean")
     environment_lean = os.environ.get("SONDER_LEAN_EXE", "").strip()
-    use_repository_pin = (
-        project is None and not configured_lean and not environment_lean
-    )
-    executable = _lean_executable(configured_lean)
-    if project:
-        lake = _lake_executable(spec.get("lake"))
-        command = [lake, "env", executable]
-        command_cwd = project
-    else:
-        command = [executable]
-        command_cwd = None
+    use_repository_pin = not configured_lean and not environment_lean
+    # Legacy host executable settings are intentionally not executed.  The
+    # image-local executable is the only compiler authority for this path.
+    command = [_lean_sandbox_executable()]
 
-    directory = tempfile.mkdtemp(prefix="sonder-lean-")
+    directory = tempfile.mkdtemp(prefix="sonder-lean-", dir=_lean_sandbox_root())
     try:
         expected_version = None
         if use_repository_pin:
@@ -558,11 +653,10 @@ def lean_check(artifact, spec=None):
                 os.path.join(directory, "lean-toolchain"), "w", encoding="utf-8"
             ) as handle:
                 handle.write(pin + "\n")
-            command_cwd = directory
         try:
-            version_rc, version_output = _run(
+            version_rc, version_output = _run_lean_in_sandbox(
                 [*command, "--version"],
-                cwd=command_cwd or directory,
+                cwd=directory,
                 timeout=min(timeout, 30),
             )
         except (OSError, subprocess.SubprocessError) as exc:
@@ -604,9 +698,9 @@ def lean_check(artifact, spec=None):
                 prelude_path,
             ]
             try:
-                prelude_rc, prelude_output = _run(
+                prelude_rc, prelude_output = _run_lean_in_sandbox(
                     prelude_compile_command,
-                    cwd=command_cwd or directory,
+                    cwd=directory,
                     timeout=timeout,
                     env_overrides=module_env,
                 )
@@ -638,8 +732,8 @@ def lean_check(artifact, spec=None):
                 path,
             ]
         try:
-            rc, compile_output = _run(
-                compile_command, cwd=command_cwd or directory, timeout=timeout,
+            rc, compile_output = _run_lean_in_sandbox(
+                compile_command, cwd=directory, timeout=timeout,
                 env_overrides=module_env,
             )
         except FileNotFoundError as exc:
@@ -653,9 +747,9 @@ def lean_check(artifact, spec=None):
                 with open(prelude_path, "w", encoding="utf-8") as handle:
                     handle.write(prelude_source)
                 try:
-                    restored_rc, restored_output = _run(
+                    restored_rc, restored_output = _run_lean_in_sandbox(
                         prelude_compile_command,
-                        cwd=command_cwd or directory,
+                        cwd=directory,
                         timeout=timeout,
                         env_overrides=module_env,
                     )
@@ -678,14 +772,14 @@ def lean_check(artifact, spec=None):
                     artifact, contract[1], expected_module, prelude_module,
                 ))
             try:
-                expected_rc, expected_output = _run(
+                expected_rc, expected_output = _run_lean_in_sandbox(
                     [
                         *command,
                         "-R", directory,
                         "-o", os.path.join(directory, expected_module + ".olean"),
                         expected_path,
                     ],
-                    cwd=command_cwd or directory,
+                    cwd=directory,
                     timeout=timeout,
                     env_overrides=module_env,
                 )
@@ -706,7 +800,7 @@ def lean_check(artifact, spec=None):
             with open(auditor_path, "w", encoding="utf-8") as handle:
                 handle.write(_LEAN_AXIOM_AUDITOR_SOURCE)
             try:
-                audit_rc, audit_output = _run(
+                audit_rc, audit_output = _run_lean_in_sandbox(
                     [
                         *command,
                         "-R", directory,
@@ -714,7 +808,7 @@ def lean_check(artifact, spec=None):
                         "Main", contract[0],
                         expected_module, expected_declaration,
                     ],
-                    cwd=command_cwd or directory,
+                    cwd=directory,
                     timeout=timeout,
                     env_overrides=module_env,
                 )
