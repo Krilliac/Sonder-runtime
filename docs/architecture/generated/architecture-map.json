@@ -342,7 +342,7 @@
       ]
     },
     {
-      "file_count": 323,
+      "file_count": 325,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -478,6 +478,7 @@
         "sonder_runtime/application/operations/tracing_health.py",
         "sonder_runtime/application/output_stream/__init__.py",
         "sonder_runtime/application/output_stream/accumulator.py",
+        "sonder_runtime/application/owner_process.py",
         "sonder_runtime/application/persistence/cross_domain.py",
         "sonder_runtime/application/persistence/domain_ownership.py",
         "sonder_runtime/application/persistence/facade.py",
@@ -663,6 +664,7 @@
         "sonder_runtime/application/vision/__init__.py",
         "sonder_runtime/application/vision/use_cases.py",
         "sonder_runtime/application/worker_registry/__init__.py",
+        "sonder_runtime/application/worker_registry/continuation.py",
         "sonder_runtime/application/worker_registry/service.py",
         "sonder_runtime/application/workflows/__init__.py",
         "sonder_runtime/application/workflows/loop.py",
