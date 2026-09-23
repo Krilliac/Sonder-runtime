@@ -26,9 +26,12 @@ python -m pytest -q tests/test_interactive_agent_lanes.py tests/test_session_com
 
 Adversarial recovery coverage also proves mid-page hash and sequence
 corruption fail closed, a 10,001-event history exceeds the bounded recovery
-limit, and live continuation surfaces that bound as recoverable overflow.
+limit, per-event payloads cannot exceed 8 MiB, and a 257-event history with
+300 KiB payloads per event exceeds the 64 MiB total recovery ceiling before
+page materialization. Live continuation surfaces each bound as recoverable
+overflow.
 The combined focused session, replay, compaction, lane, and production wiring
-suite passes with 100 tests.
+suite passes with 102 tests.
 
 The canary
 `test_live_request_compacts_canonical_tool_output_and_recovers_after_restart`

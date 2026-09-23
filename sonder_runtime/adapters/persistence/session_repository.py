@@ -48,6 +48,10 @@ CREATE TRIGGER IF NOT EXISTS session_event_no_delete
     BEGIN SELECT RAISE(ABORT, 'session event history is append-only'); END;
 """
 
+_MAX_EVENT_PAYLOAD_BYTES = 8 * 1024 * 1024
+_MAX_COMPLETE_PAYLOAD_BYTES = 64 * 1024 * 1024
+_COMPLETE_PAGE_SIZE = 256
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -124,9 +128,12 @@ class SQLiteSessionRepository:
         if not isinstance(payload, Mapping):
             raise TypeError("payload must be a mapping")
         try:
-            return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         except (TypeError, ValueError) as exc:
             raise TypeError("payload must contain JSON-serializable values") from exc
+        if len(encoded.encode("utf-8")) > _MAX_EVENT_PAYLOAD_BYTES:
+            raise ValueError("payload exceeds the session event byte bound")
+        return encoded
 
     @staticmethod
     def _hash(session_id: str, sequence: int, event_id: str, event_type: str,
@@ -220,24 +227,32 @@ class SQLiteSessionRepository:
         """
         if not isinstance(max_events, int) or isinstance(max_events, bool) or not 1 <= max_events <= 100_000:
             raise ValueError("max_events must be between 1 and 100000")
-        page_size = min(max_events, self._max_read_limit)
+        page_size = min(max_events, self._max_read_limit, _COMPLETE_PAGE_SIZE)
         events: list[SessionEvent] = []
+        recovered_payload_bytes = 0
         next_sequence = 1
         while len(events) <= max_events:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(payload_bytes), 0) FROM ("
+                    "SELECT length(CAST(payload_json AS BLOB)) AS payload_bytes "
+                    "FROM session_event WHERE session_id=? AND sequence>=? "
+                    "ORDER BY sequence LIMIT ?) ",
+                    (session_id, next_sequence, page_size),
+                ).fetchone()
+            page_count, page_bytes = int(row[0]), int(row[1])
+            if page_count == 0:
+                break
+            if len(events) + page_count > max_events:
+                raise ValueError("session history exceeds recovery bound")
+            if recovered_payload_bytes + page_bytes > _MAX_COMPLETE_PAYLOAD_BYTES:
+                raise ValueError("session history payload bytes exceed recovery bound")
             page = self.read_range(
                 session_id, start_sequence=next_sequence, limit=page_size,
             )
             events.extend(page)
-            if len(events) > max_events:
-                raise ValueError("session history exceeds recovery bound")
+            recovered_payload_bytes += page_bytes
             if len(page) < page_size:
-                break
-            if len(events) >= max_events:
-                probe = self.read_range(
-                    session_id, start_sequence=next_sequence + len(page), limit=1,
-                )
-                if probe:
-                    raise ValueError("session history exceeds recovery bound")
                 break
             next_sequence += len(page)
         expected = 1
