@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from sonder_runtime.platform import config as platform_config
@@ -24,11 +26,13 @@ def test_default_compute_config_is_local_only_and_remote_disabled() -> None:
 
 
 def test_local_only_catalog_rejects_mapping_without_a_configured_workspace_root(tmp_path) -> None:
+    workspace = tmp_path / "workspaces"
+    workspace.mkdir()
     path = tmp_path / "sonder.toml"
     path.write_text(
-        """
+        f"""
 [state]
-workspace_roots = ["/srv/sonder/workspaces"]
+workspace_roots = ['{workspace.as_posix()}']
 
 [[compute.jobs]]
 id = "node-build"
@@ -40,6 +44,53 @@ workspace_mappings = ["node1-workspaces"]
     )
     with pytest.raises(ConfigError, match="not available locally"):
         load_config(path, env={})
+
+
+def test_duplicate_effective_workspace_mapping_names_fail_at_config_load(tmp_path) -> None:
+    first = tmp_path / "first" / "work"
+    second = tmp_path / "second" / "work"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    path = tmp_path / "sonder.toml"
+    path.write_text(
+        f"[state]\nworkspace_roots = ['{first.as_posix()}', '{second.as_posix()}']\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="duplicate effective workspace mapping"):
+        load_config(path, env={})
+
+
+def test_tilde_workspace_root_is_not_a_literal_absolute_path(tmp_path) -> None:
+    path = tmp_path / "sonder.toml"
+    path.write_text("[state]\nworkspace_roots = ['~/work']\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="not absolute"):
+        load_config(path, env={})
+
+
+def test_symlink_root_uses_resolved_basename_for_local_catalog(tmp_path) -> None:
+    actual = tmp_path / "actual"
+    actual.mkdir()
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(actual, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("directory symlinks are unavailable on this host")
+    path = tmp_path / "sonder.toml"
+    path.write_text(
+        f"""
+[state]
+workspace_roots = ['{alias.as_posix()}']
+
+[[compute.jobs]]
+id = "local-build"
+workload = "build"
+program = '{sys.executable.replace(chr(92), "/")}'
+workspace_mappings = ["actual"]
+""",
+        encoding="utf-8",
+    )
+    config = load_config(path, env={})
+    assert config.compute.jobs[0].workspace_mappings == ("actual",)
 
 
 def test_remote_consent_does_not_make_an_invalid_local_catalog_mapping_valid(tmp_path) -> None:

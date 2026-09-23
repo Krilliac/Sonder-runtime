@@ -1443,9 +1443,28 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         errors.append("[state].minimum_free_disk_bytes must be >= 0")
     if config.state.sqlite_busy_timeout_ms < 0:
         errors.append("[state].sqlite_busy_timeout_ms must be >= 0")
-    for root in config.state.workspace_roots:
-        if not Path(root).expanduser().is_absolute():
+    local_workspace_mappings = {"default"}
+    effective_workspace_roots: dict[str, Path] = {}
+    for index, root in enumerate(config.state.workspace_roots):
+        raw_path = Path(root)
+        if not raw_path.is_absolute():
             errors.append(f"[state].workspace_roots entry not absolute: {root!r}")
+            continue
+        try:
+            resolved = raw_path.resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            errors.append(f"[state].workspace_roots entry cannot be resolved: {root!r}")
+            continue
+        mapping = resolved.name
+        if not mapping:
+            errors.append(f"[state].workspace_roots entry has no mapping name: {root!r}")
+            continue
+        if mapping in effective_workspace_roots or (mapping == "default" and index > 0):
+            errors.append(
+                f"[state].workspace_roots has duplicate effective workspace mapping: {mapping!r}"
+            )
+        effective_workspace_roots[mapping] = resolved
+        local_workspace_mappings.add(mapping)
 
     for cidr in config.ollama.trusted_origins:
         try:
@@ -1702,12 +1721,8 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             errors.append(f"{where}.workspace_mappings contains an invalid workspace identity")
         # compute.jobs is the local worker's catalog even when the controller
         # is also allowed to place work on remote nodes.
-        local_mappings = {"default"}
-        local_mappings.update(
-            Path(root).name for root in config.state.workspace_roots if Path(root).name
-        )
         unknown_local_mappings = sorted(
-            set(job.workspace_mappings) - local_mappings
+            set(job.workspace_mappings) - local_workspace_mappings
         )
         if unknown_local_mappings:
             errors.append(

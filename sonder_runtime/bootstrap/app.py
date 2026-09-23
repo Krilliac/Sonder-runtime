@@ -520,11 +520,8 @@ def build_application(
                 item for item in WorkloadKind if item is not WorkloadKind.INFERENCE
             )
             mapping_names = {"default"}
-            mapping_names.update(
-                Path(root).name
-                for root in effective_config.state.workspace_roots
-                if Path(root).name
-            )
+            for root in effective_config.state.workspace_roots:
+                mapping_names.add(Path(root).resolve().name)
             local = ComputeNode(
                 node_id=effective_config.compute.node_id,
                 origin=None,

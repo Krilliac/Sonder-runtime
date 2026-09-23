@@ -22,6 +22,7 @@ from sonder_runtime.domain.compute_fabric import (
     NodeHealth,
     NodeResources,
     NodeSnapshot,
+    PlacementPolicy,
     WorkloadKind,
     WorkloadRequest,
 )
@@ -240,6 +241,21 @@ def test_local_only_rejection_reports_local_inventory_scope() -> None:
     with pytest.raises(DependencyUnavailable, match="no eligible node is available"):
         service.submit(request, _envelope())
     assert local.calls == 0
+
+
+@pytest.mark.parametrize(
+    "workload_request",
+    (
+        replace(_request(allow_local_fallback=True),
+                required_capabilities=frozenset({ComputeCapability.CUDA})),
+        replace(_request(), placement_policy=PlacementPolicy.RANK_ALL,
+                required_capabilities=frozenset({ComputeCapability.CUDA})),
+    ),
+)
+def test_local_and_remote_rejection_reports_combined_inventory_scope(workload_request) -> None:
+    service, _transport, _local = _service(remote_age=60)
+    with pytest.raises(DependencyUnavailable, match="no eligible node is available"):
+        service.submit(workload_request, _envelope())
 
 
 def test_workload_profile_capabilities_are_merged_before_placement() -> None:
