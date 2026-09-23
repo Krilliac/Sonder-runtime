@@ -7,6 +7,7 @@ model can adjust warmth, confidence, curiosity, and similar response qualities.
 import json
 import os
 import re
+from pathlib import Path
 
 
 DEFAULT_VECTORS = {
@@ -99,7 +100,7 @@ TUNE_RULES = [
 
 
 def workspace_root():
-    return os.path.abspath(os.path.dirname(__file__))
+    return str(Path(__file__).resolve().parent)
 
 
 def default_path():
@@ -109,19 +110,34 @@ def default_path():
     )
 
 
+def _inside_workspace(path, root):
+    """Containment that matches Windows drive/8.3 spelling of the same checkout.
+
+    ``os.path.commonpath`` is case-sensitive and does not expand short names, so
+    a worktree path spelled ``D:\\sonder-wt\\...`` was refused when ``__file__``
+    used ``d:\\`` or ``SONDER~1``. Fail closed on mixed-drive errors.
+    """
+    path_text = os.path.normcase(os.path.normpath(str(path)))
+    root_text = os.path.normcase(os.path.normpath(str(root)))
+    try:
+        return os.path.commonpath([path_text, root_text]) == root_text
+    except ValueError:
+        return False
+
+
 def _resolve_path(path=None):
     path = path or default_path()
-    if not os.path.isabs(path):
-        path = os.path.join(workspace_root(), path)
-    path = os.path.abspath(path)
-    root = workspace_root()
+    root = Path(workspace_root()).resolve()
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
     try:
-        inside = os.path.commonpath([root, path]) == root
-    except ValueError:
-        inside = False
-    if not inside:
-        raise ValueError("emotion vector path must stay inside workspace: %r" % path)
-    return path
+        resolved = candidate.resolve()
+    except OSError:
+        resolved = Path(os.path.normpath(os.path.abspath(str(candidate))))
+    if not _inside_workspace(resolved, root):
+        raise ValueError("emotion vector path must stay inside workspace: %r" % str(resolved))
+    return str(resolved)
 
 
 def _clamp(value):
