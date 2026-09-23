@@ -83,3 +83,26 @@ roll back and no receipt is issued.  Consequently a node cannot currently both
 own a scope authoritatively and accept peer fact batches for the same scope;
 multi-writer reconciliation for one scope is not supported.  Projection into
 scopes that are not activated keeps its existing behavior.
+
+Because a refused batch would otherwise be retried forever by its peer, the
+receiver fails fast at startup instead. The live application graph always
+activates the authoritative source for the configured replication scope and
+memory database, so its replication service refuses to create a receiver when
+`[memory_replication].receiver_enabled = true`, raising a `ConfigError` that
+names the scope; HTTP startup then stops before the listener binds. A
+standalone replication service also refuses a receiver database that already
+carries an activation marker for the scope. Operators must disable
+`receiver_enabled` on a node that owns the scope.
+
+## Per-transaction activation cost
+
+Every live unit of work re-enters activation under SQLite's writer lock.  The
+full per-row journal authentication (canonical digest, payload, and embedding
+comparison) runs only when a source first claims a scope, and during migration
+planning and apply.  When the activation marker already names the same
+source, each unit of work instead checks with indexed anti-joins that there are
+no unowned or foreign rows, that every owned state row has its exact versioned
+upsert or delete journal record, and that every live state row still has its
+fact.  This check does not re-authenticate journal payload bytes on every
+transaction; payload tampering by a raw SQL writer after activation is
+detected only by a fresh claim or a migration plan.
