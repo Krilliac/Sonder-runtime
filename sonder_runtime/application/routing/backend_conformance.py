@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 import tempfile
@@ -167,7 +168,7 @@ class RecentCapabilityEvidence:
 
     def __init__(self, path: str | os.PathLike[str], *, max_age_seconds: float = 86_400,
                  max_records: int = 32):
-        if max_age_seconds <= 0:
+        if not math.isfinite(max_age_seconds) or max_age_seconds <= 0:
             raise ValueError("max_age_seconds must be positive")
         self.path = Path(path)
         self.max_age_seconds = float(max_age_seconds)
@@ -186,7 +187,7 @@ class RecentCapabilityEvidence:
             fd, temp_name = tempfile.mkstemp(prefix=self.path.name + ".", dir=str(self.path.parent), text=True)
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                    json.dump(payload, stream, sort_keys=True)
+                    json.dump(payload, stream, sort_keys=True, allow_nan=False)
                     stream.flush()
                     os.fsync(stream.fileno())
                 os.replace(temp_name, self.path)
@@ -207,6 +208,8 @@ class RecentCapabilityEvidence:
         if record is None:
             return False, EvidenceReason.MISSING.value
         current = time.time() if now is None else float(now)
+        if not math.isfinite(current):
+            return False, EvidenceReason.MISSING.value
         if record.synthetic:
             return False, EvidenceReason.SYNTHETIC.value
         if record.checked_at > current:
