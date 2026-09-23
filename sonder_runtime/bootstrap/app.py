@@ -17,7 +17,7 @@ import atexit
 import logging
 import os
 from threading import RLock
-from time import monotonic
+from time import monotonic, time_ns
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -369,6 +369,12 @@ def build_application(
     process_job_provider: ProcessJobProvider | None = None
     process_cleanup: ProcessTreeSupervisor | None = None
     spill_output: DurableExecutionOutput | None = None
+    worker_effect_journal = None
+    # One host-owned epoch identifies this composition instance.  It is
+    # deliberately generated here instead of accepting identity values from
+    # any application caller; a new process therefore cannot silently
+    # reattach an older worker's unresolved intent.
+    worker_owner_epoch = time_ns()
     workflow_engine: ResumableWorkflowEngine | None = None
     agent_registry: UnifiedAgentRegistryService | None = None
     extension_registry: ExtensionRegistry | None = None
@@ -394,6 +400,47 @@ def build_application(
                 return operation(*args, **kwargs)
         return synchronized
     effective_config = config or SonderConfig()
+
+    def get_worker_effect_journal():
+        """Return the single durable journal shared by direct worker adapters."""
+        nonlocal worker_effect_journal
+        if worker_effect_journal is None:
+            from ..adapters.persistence.sqlite.effect_journal import SQLiteEffectJournal
+            from ..platform.paths import state_path
+
+            worker_effect_journal = SQLiteEffectJournal(
+                state_path("worker-effects.db", "SONDER_WORKER_EFFECTS_DB")
+            )
+        return worker_effect_journal
+
+    def worker_binding(*, family: str, scope: str, run_id: str):
+        """Compose an authenticated binding from host-owned worker metadata."""
+        from ..application.execution.worker_bindings import AuthenticatedWorkerBinding
+
+        worker_id = f"{family}:{effective_config.compute.node_id}"
+        return AuthenticatedWorkerBinding(
+            get_worker_effect_journal(), run_id, worker_id,
+            worker_owner_epoch, scope,
+        )
+
+    def _compose_subagent_binding(run_id: str):
+        binding = worker_binding(
+            family="subagent",
+            scope="local-subagents",
+            run_id=f"subagent:{run_id}",
+        )
+        binding.recover_before_restart()
+        return binding
+
+    def _compose_selfmod_binding(run_id: str):
+        binding = worker_binding(
+            family="selfmod",
+            scope="selfmod-mutation",
+            run_id=f"selfmod:{run_id}",
+        )
+        binding.recover_before_restart()
+        return binding
+
     compute_scheduler = ComputePlacementScheduler(
         snapshot_ttl=timedelta(seconds=effective_config.compute.snapshot_ttl_seconds)
     )
@@ -508,6 +555,11 @@ def build_application(
                 lifecycle=get_job_service()._lifecycle,
                 output=spill_output,
                 max_concurrent_processes=effective_config.capacity.tool_processes,
+                effect_binding=worker_binding(
+                    family="process",
+                    scope="process-jobs",
+                    run_id="runtime:process-jobs",
+                ),
             )
         return process_job_provider
 
@@ -642,6 +694,11 @@ def build_application(
                 capacity=get_job_registry(),
                 budget=worker_budget,
                 reservation_seconds=effective_config.compute.worker_reservation_seconds,
+                effect_binding=worker_binding(
+                    family="compute",
+                    scope="compute-jobs",
+                    run_id="runtime:compute-jobs",
+                ),
             )
         return compute_job_worker
 
@@ -756,7 +813,10 @@ def build_application(
         if interactive_lanes is None:
             from ..adapters.persistence.agent_lanes import SQLiteAgentLaneStore
             from ..adapters.persistence.fleet_store import database_path
+            from ..adapters.persistence.sqlite.effect_journal import SQLiteEffectJournal
+            from ..platform.paths import state_path
             from ..application.agents.interactive_lanes import AgentLaneService
+            from ..application.live_context import LiveAgentContextProducer
             sessions = get_session_repository()
             lane_tools = tools
             lane_test_catalog = None
@@ -783,6 +843,12 @@ def build_application(
                 SQLiteAgentLaneStore(database_path(), sessions), sessions, gateway, lane_tools,
                 authorize_grant=authorize_lane_grant,
                 allowed_tools=tuple(item.name for item in lane_tools.graph.registry.list_all()),
+                context_planning=context_planning,
+                live_context=LiveAgentContextProducer.from_config(effective_config),
+                effect_journal=SQLiteEffectJournal(
+                    state_path("agent-effects.db", "SONDER_AGENT_EFFECTS_DB")
+                ),
+                compaction_service=get_compaction_service(),
             )
         return interactive_lanes
 
@@ -813,6 +879,11 @@ def build_application(
                     continuation_service,
                     runner_factory=conversational_runner_factory(
                         gateway, get_session_repository(), get_session_capture_service(),
+                    ),
+                    effect_binding_factory=(
+                        lambda request, _context: _compose_subagent_binding(
+                            request.child_id or request.parent_id
+                        )
                     ),
                 )
                 delegation = DelegationService(subagent_provider, events, worker_registry)
@@ -926,6 +997,9 @@ def build_application(
                 logger.warning("self-modification service running in UNRESTRICTED mode, safety guards bypassed")
             selfmod_service = GuardedLegacySelfmodService(
                 _LegacySelfmodModulePort(), unrestricted=unrestricted_selfmod,
+                effect_binding_factory=(
+                    lambda run_id: _compose_selfmod_binding(run_id)
+                ),
             )
         return selfmod_service
 
@@ -1081,8 +1155,24 @@ def build_application(
             "running_count": sum(1 for item in experiments if item.state == "running"),
         },)
 
+    memory_unit_of_work = UnitOfWorkAdapter
+    if effective_config.memory_replication.enabled:
+        from ..adapters.persistence.sqlite.authoritative_memory import (
+            SQLiteAuthoritativeFactSource,
+        )
+
+        fact_source = SQLiteAuthoritativeFactSource(
+            effective_config.memory_replication.local_node_id,
+            project_scope=effective_config.memory_replication.project_scope,
+        )
+
+        def memory_unit_of_work(db_path=None):
+            return UnitOfWorkAdapter(
+                db_path, authoritative_fact_source=fact_source,
+            )
+
     memory_facade = MemoryLearningFacade(
-        UnitOfWorkAdapter,
+        memory_unit_of_work,
         recall_service=RecallService(LegacyRecallGateway()),
     )
 
@@ -1277,7 +1367,7 @@ def build_application(
         automation=AutopilotRepository(),
         # A UnitOfWork is per-transaction, so the graph exposes a factory, not
         # a singleton; each call opens and owns its own connection scope.
-        unit_of_work=UnitOfWorkAdapter,
+        unit_of_work=memory_unit_of_work,
         tool_executor=ToolExecutorAdapter(),
         tools=tools,
         process_probe=ProcessProbeAdapter(),

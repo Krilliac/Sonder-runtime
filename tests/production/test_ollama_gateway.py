@@ -10,6 +10,7 @@ from sonder_runtime.adapters.inference import ollama_pool
 from sonder_runtime.adapters.inference.ollama_gateway import OllamaGateway
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelRequest
+from sonder_runtime.application.ports.model_target import ModelTarget
 from sonder_runtime.domain.common.errors import (
     Cancelled,
     DeadlineExceeded,
@@ -74,6 +75,64 @@ def test_generate_returns_domain_response(monkeypatch):
     assert response.text == "generated text"
     assert response.tier == "code"
     assert response.tokens_in == 10 and response.tokens_out == 5
+
+
+def test_resolved_route_pins_provider_identity_and_prevents_reresolution():
+    calls = []
+
+    def resolve(tier, strict=False):
+        calls.append((tier, strict))
+        return ModelTarget(
+            "resolved-model", False, "code", True,
+            provider_id="ollama", tokenizer="tokenizer-v2", template="chat-v4",
+        )
+
+    def make_generate(model, system, temperature, num_predict, num_ctx, **kwargs):
+        assert model == "resolved-model"
+
+        def gen(prompt, history=None):
+            return "pinned"
+
+        gen.last_usage = {}
+        gen.last_response_meta = {}
+        return gen
+
+    gateway = OllamaGateway(target_resolver=resolve, generate_factory=make_generate)
+    route = gateway.resolve_route(ModelRequest("hello", "code"), _context())
+    assert route.model == "resolved-model"
+    assert route.tokenizer == "tokenizer-v2"
+    assert route.template == "chat-v4"
+
+    def fail_resolve(*args, **kwargs):
+        raise AssertionError("generation must consume the resolved route")
+
+    gateway._target_resolver = fail_resolve
+    response = gateway.generate(
+        ModelRequest("hello", "code", _resolved_route=route),
+        _context(),
+    )
+    assert response.text == "pinned"
+    assert calls == [("code", False)]
+
+
+def test_caller_options_cannot_forge_a_resolved_model_route():
+    def resolve(_tier, _strict=False):
+        return ModelTarget("allowed-model", False, "code")
+
+    gateway = OllamaGateway(target_resolver=resolve, generate_factory=lambda *args, **kwargs: None)
+    forged = {
+        "provider_id": "ollama", "model": "arbitrary-model",
+        "tier_label": "code", "cloud": False,
+    }
+    with pytest.raises(InvalidInput, match="cannot be supplied"):
+        gateway.generate(
+            ModelRequest("hello", "code", options={"_resolved_route": forged}),
+            _context(),
+        )
+    other = OllamaGateway(target_resolver=resolve, generate_factory=lambda *args, **kwargs: None)
+    route = other.resolve_route(ModelRequest("hello", "code"), _context())
+    with pytest.raises(InvalidInput, match="not issued"):
+        gateway.generate(ModelRequest("hello", "code", _resolved_route=route), _context())
 
 
 def test_reasoning_tier_enables_bounded_continuation_by_default(monkeypatch):
@@ -259,6 +318,34 @@ def test_generate_preserves_backend_measured_phases(monkeypatch):
     assert response.telemetry.output_tokens_per_second == 10.0
     # A load duration is evidence of elapsed work, not a standardized cold flag.
     assert response.telemetry.load_state is None
+
+
+def test_real_transport_factory_forwards_provider_cached_prompt_count(monkeypatch):
+    """Exercise the transport-to-gateway metadata seam, not a fabricated gen."""
+    monkeypatch.setattr(
+        server, "_chat_request",
+        lambda *_args, **_kwargs: (
+            {
+                "prompt_eval_count": 20,
+                "prompt_eval_cached_count": 12,
+                "eval_count": 1,
+                "message": {"content": "done"},
+            },
+            "done",
+        ),
+    )
+    gateway = OllamaGateway(
+        target_resolver=lambda _tier, _strict=False: ModelTarget(
+            "sonder:latest", False, "code", provider_id="ollama",
+            tokenizer="tokenizer-v1", template="chat-v1",
+        ),
+        generate_factory=server._make_generate,
+    )
+    response = gateway.generate(ModelRequest("hello", "code"), _context())
+    assert response.telemetry is not None
+    assert response.telemetry.prompt_tokens == 20
+    assert response.telemetry.prompt_cached_tokens == 12
+    assert response.telemetry.prompt_uncached_tokens == 8
 
 
 def test_cloud_tier_requires_context_consent(monkeypatch):

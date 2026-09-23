@@ -48,8 +48,11 @@ class ProgressiveSkillRegistry:
     safe for missing roots and never reads full skill content.
     """
 
-    def __init__(self, sources: Iterable[SkillSource] = ()) -> None:
+    def __init__(self, sources: Iterable[SkillSource] = (), *, max_entries: int = 128) -> None:
+        if type(max_entries) is not int or not 1 <= max_entries <= 128:
+            raise ValueError("max_entries is out of bounds")
         self._sources = tuple(sources)
+        self._max_entries = max_entries
         self._catalog: dict[str, _Manifest] = {}
         self.refresh()
 
@@ -71,6 +74,8 @@ class ProgressiveSkillRegistry:
                 manifest = _read_manifest(content_path, source.kind)
                 if manifest is not None:
                     catalog[manifest.summary.name] = manifest
+                    if len(catalog) > self._max_entries:
+                        raise ValueError("skill catalog exceeds entry limit")
         self._catalog = catalog
 
     def discover(self, query: str = "") -> tuple[SkillSummary, ...]:

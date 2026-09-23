@@ -465,6 +465,7 @@ from sonder_runtime.interfaces.http.serve_policy import (
     serve_temperature as _serve_temperature,
 )
 from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool
+from sonder_runtime.domain import ollama_policy
 from sonder_runtime.domain.runtime_model_configuration import (
     RuntimeModelConfiguration,
 )
@@ -1546,6 +1547,98 @@ _MODEL_CONTEXT_CACHE_TTL = 300.0
 # not undersize a large model's window for the full positive TTL.
 _MODEL_CONTEXT_CACHE_NEGATIVE_TTL = 30.0
 
+_MODEL_PROMPT_IDENTITY_CACHE = {}
+_MODEL_PROMPT_IDENTITY_CACHE_LOCK = threading.Lock()
+
+
+def _ollama_model_tag_metadata(model):
+    """Return the selected tag's digest/revision, or ``None`` if unproven."""
+    payload = _get("/api/tags")
+    rows = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return None
+    wanted = str(model or "").strip().casefold()
+    match = None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or row.get("model") or "").strip()
+        if name.casefold() != wanted:
+            continue
+        digest = row.get("digest")
+        modified_at = row.get("modified_at")
+        if (
+            match is not None
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-fA-F]{64}", digest.strip()) is None
+            or not isinstance(modified_at, str)
+            or not modified_at.strip()
+        ):
+            return None
+        match = digest.strip().lower(), modified_at.strip()
+    return match
+
+
+def _model_prompt_identity(model):
+    """Return stable local prompt identities proven by Ollama model metadata.
+
+    Ollama's ``/api/show`` exposes the tokenizer family and chat template, but
+    not a portable tokenizer object, so the template identity is a digest of
+    the provider template. Positive identities are never cached: an operator
+    may replace a model tag in place while retaining its name, and stale
+    identity would make a reusable prefix unsound. Missing metadata is cached
+    briefly to avoid hammering an unavailable provider and remains fail-closed.
+    """
+    key = str(model or "").strip().casefold()
+    if not key or _is_cloud_model_name(model):
+        return None, None
+    # A metadata lookup can land on a different configured worker than the
+    # subsequent generation request.  Until worker-bound route receipts exist,
+    # only the single configured loopback origin is safe for reusable prefixes.
+    try:
+        primary = ollama_policy.normalize(BASE).rstrip("/")
+        if (
+            not ollama_endpoint.is_loopback(BASE)
+            or tuple(OLLAMA_POOL.configured_origins) != (primary,)
+        ):
+            return None, None
+    except Exception:
+        return None, None
+    now = time.monotonic()
+    with _MODEL_PROMPT_IDENTITY_CACHE_LOCK:
+        cached = _MODEL_PROMPT_IDENTITY_CACHE.get(key)
+        if cached and not (cached[1] and cached[2]):
+            if now - cached[0] < _MODEL_CONTEXT_CACHE_NEGATIVE_TTL:
+                return cached[1], cached[2]
+    tokenizer = template_identity = None
+    try:
+        before = _ollama_model_tag_metadata(model)
+        if before is None:
+            raise ValueError("selected Ollama tag lacks a stable digest/revision")
+        details = _post("/api/show", {"name": model}, timeout=30)
+        info = details.get("model_info") if isinstance(details, dict) else {}
+        info = info if isinstance(info, dict) else {}
+        tokenizer_value = info.get("tokenizer.ggml.model")
+        template_value = details.get("template") if isinstance(details, dict) else None
+        show_modified_at = details.get("modified_at") if isinstance(details, dict) else None
+        if not isinstance(show_modified_at, str) or show_modified_at.strip() != before[1]:
+            raise ValueError("Ollama tag/show revision mismatch")
+        after = _ollama_model_tag_metadata(model)
+        if after != before:
+            raise ValueError("Ollama tag changed during prompt identity probe")
+        if isinstance(tokenizer_value, str) and tokenizer_value.strip():
+            tokenizer = tokenizer_value.strip()
+        if isinstance(template_value, str) and template_value.strip():
+            template_identity = "ollama-template-sha256:" + hashlib.sha256(
+                template_value.encode("utf-8")
+            ).hexdigest() + ";ollama-model-sha256:" + before[0]
+    except Exception:
+        tokenizer = template_identity = None
+    if not (tokenizer and template_identity):
+        with _MODEL_PROMPT_IDENTITY_CACHE_LOCK:
+            _MODEL_PROMPT_IDENTITY_CACHE[key] = (now, tokenizer, template_identity)
+    return tokenizer, template_identity
+
 
 def _model_context_metadata(model):
     """Read and briefly cache Ollama's context/parameter metadata for a model."""
@@ -1742,7 +1835,8 @@ def _make_generate(
                     key: out.get(key)
                     for key in (
                         "total_duration", "load_duration",
-                        "prompt_eval_count", "prompt_eval_duration",
+                        "prompt_eval_count", "prompt_eval_cached_count",
+                        "prompt_eval_duration",
                         "eval_count", "eval_duration",
                         "load_state", "cold_start",
                         "reasoning_segments",
@@ -13729,8 +13823,77 @@ def sonder_sessions(limit: int = 20) -> str:
     return "\n".join(lines)
 
 
+def _surface_fact_metadata(
+    entities_json: str = "",
+    decision_json: str = "",
+    valid_from: str = "",
+    valid_until: str = "",
+    supersedes: str = "",
+    provenance_json: str = "",
+):
+    """Decode explicit metadata without inferring policy from fact text."""
+    from sonder_runtime.adapters.persistence.sqlite.authoritative_memory import AuthoritativeFactMetadata
+
+    fields = {
+        "entities_json": entities_json,
+        "decision_json": decision_json,
+        "valid_from": valid_from,
+        "valid_until": valid_until,
+        "supersedes": supersedes,
+        "provenance_json": provenance_json,
+    }
+    if any(not isinstance(value, str) for value in fields.values()):
+        raise ValueError("authoritative metadata inputs must be strings")
+    if not any((entities_json, decision_json, valid_from, valid_until, supersedes, provenance_json)):
+        return None
+
+    def bounded_json(value, label, expected):
+        if not value:
+            return expected()
+        if not isinstance(value, str) or len(value) > 8192:
+            raise ValueError(label + " exceeds the input bound")
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(label + " must be valid JSON") from exc
+        return parsed
+
+    entities = bounded_json(entities_json, "entities_json", list)
+    if not isinstance(entities, list) or len(entities) > 32 or any(
+        not isinstance(item, str) or not item.strip() or len(item) > 160
+        for item in entities
+    ):
+        raise ValueError("entities_json must be a bounded list of identifiers")
+    decision = bounded_json(decision_json, "decision_json", lambda: None)
+    if decision is not None and (
+        not isinstance(decision, dict) or set(decision) != {"id", "value"}
+        or any(not isinstance(item, str) or not item.strip() or len(item) > 2048
+               for item in decision.values())
+    ):
+        raise ValueError("decision_json must contain only bounded id and value")
+    provenance = bounded_json(provenance_json, "provenance_json", list)
+    if not isinstance(provenance, list) or len(provenance) > 32 or any(
+        not isinstance(item, str) or not item.strip() or len(item) > 256
+        for item in provenance
+    ):
+        raise ValueError("provenance_json must be a bounded list of strings")
+    values = {"valid_from": valid_from, "valid_until": valid_until, "supersedes": supersedes}
+    for label, value in values.items():
+        if value and (not isinstance(value, str) or len(value) > 64):
+            raise ValueError(label + " exceeds the input bound")
+    return AuthoritativeFactMetadata(
+        entities=tuple(entities), decision=decision,
+        valid_from=valid_from or None, valid_until=valid_until or None,
+        supersedes=supersedes or None, provenance=tuple(provenance),
+    )
+
+
 @mcp.tool()
-def sonder_remember_fact(text: str, project: str = "") -> str:
+def sonder_remember_fact(
+    text: str, project: str = "", entities_json: str = "",
+    decision_json: str = "", valid_from: str = "", valid_until: str = "",
+    supersedes: str = "", provenance_json: str = "",
+) -> str:
     """Store a durable fact sonder should ALWAYS know for a project.
 
     Unlike lessons (earned from good outcomes), facts are asserted directly and are
@@ -13743,6 +13906,13 @@ def sonder_remember_fact(text: str, project: str = "") -> str:
     text = (text or "").strip()
     if not text:
         return "ERROR: empty fact."
+    try:
+        metadata = _surface_fact_metadata(
+            entities_json, decision_json, valid_from, valid_until,
+            supersedes, provenance_json,
+        )
+    except ValueError as exc:
+        raise InvalidInput(str(exc)) from exc
     project_id = _resolve_project(project) or DEFAULT_PROJECT
     emb = embeddings.embed(text)
     if not embeddings.valid_vector(emb):
@@ -13767,9 +13937,48 @@ def sonder_remember_fact(text: str, project: str = "") -> str:
                 "same statement. Use sonder_forget_fact first if it should be "
                 "replaced." % (project_id, n, duplicate.get("id"))
             )
-        uow.memory.add_fact(fact_id, project_id, text, blob)
+        try:
+            uow.memory.add_fact(fact_id, project_id, text, blob, metadata=metadata)
+        except ValueError as exc:
+            # A configured authoritative source owns one exact project scope.
+            # Keep the external tool boundary stable while refusing a scope
+            # widening attempt; do not fall back to the legacy store.
+            raise InvalidInput(str(exc)) from exc
         n = uow.memory.count_facts(project_id)
     return "Remembered fact for project '%s' (%d total). id=%s" % (project_id, n, fact_id)
+
+
+@mcp.tool()
+def sonder_authoritative_indexes(
+    project: str = "", entity_id: str = "", decision_id: str = "", now: str = "", offset: int = 0,
+) -> str:
+    """Retrieve committed, scoped explicit entity/decision fact indexes."""
+    _maybe_live_reload()
+    from sonder_runtime.adapters.persistence.sqlite.authoritative_indexes import MAX_INDEX_RESULTS
+    project_id = _resolve_project(project) or DEFAULT_PROJECT
+    if any(not isinstance(value, str) or len(value) > 160 for value in (entity_id, decision_id, now)):
+        raise InvalidInput("index selector exceeds the input bound")
+    if type(offset) is not int or not 0 <= offset <= 100_000:
+        raise InvalidInput("index offset must be within 0..100000")
+    facade = getattr(_application(), "memory", None)
+    if facade is None:
+        from sonder_runtime.domain.common.errors import DependencyUnavailable
+
+        raise DependencyUnavailable("memory facade is unavailable")
+    try:
+        return json.dumps({
+            "project": project_id,
+            "offset": offset,
+            "page_size": MAX_INDEX_RESULTS,
+            "entities": facade.authoritative_entities(
+                project_id, entity_id=entity_id or None, now=now or None, offset=offset,
+            ),
+            "decisions": facade.authoritative_decisions(
+                project_id, decision_id=decision_id or None, now=now or None, offset=offset,
+            ),
+        }, sort_keys=True, ensure_ascii=True)
+    except (TypeError, ValueError) as exc:
+        raise InvalidInput(str(exc)) from exc
 
 
 @mcp.tool()

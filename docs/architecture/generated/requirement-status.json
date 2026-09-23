@@ -36,9 +36,9 @@
       "verified": 0
     },
     "DOC": {
-      "checked": 1,
+      "checked": 5,
       "total": 7,
-      "verified": 1
+      "verified": 5
     },
     "EVAL": {
       "checked": 0,
@@ -127,13 +127,13 @@
     }
   },
   "overall": {
-    "checked": 2,
+    "checked": 6,
     "statuses": {
-      "implemented_unverified": 202,
-      "verified": 2
+      "implemented_unverified": 198,
+      "verified": 6
     },
     "total": 204,
-    "verified": 2
+    "verified": 6
   },
   "requirements": [
     {
@@ -173,9 +173,9 @@
     },
     {
       "checked": false,
-      "claim": "Child agents expose continuable durable state.",
+      "claim": "Delegation retries with a new proposed child ID propagate the canonical terminal child ID returned by the durable key registry, reuse the persisted result without a runner, and reject ambiguous duplicate terminal rows or foreign operation context.",
       "requirement_id": "AGENT-006",
-      "revision": 2,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -516,9 +516,9 @@
     },
     {
       "checked": false,
-      "claim": "The provider-neutral prefix manifest/cache contract and local Ollama telemetry are implemented, but live Sonder consumption is not proved.",
+      "claim": "A bounded local Ollama probe through the live AgentLaneService path observed scoped skill refresh invalidating the application prefix while preserving provider model identity and forwarding provider cache telemetry.",
       "requirement_id": "CTX-009",
-      "revision": 3,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
@@ -578,25 +578,25 @@
       "status": "implemented_unverified"
     },
     {
-      "checked": false,
-      "claim": "A documentation authority index identifies current sources of truth.",
+      "checked": true,
+      "claim": "The architecture README directly maps the authoritative master specification, all six focused current contracts, and the three historical program documents with checked classifications and links.",
       "requirement_id": "DOC-001",
-      "revision": 2,
-      "status": "implemented_unverified"
+      "revision": 4,
+      "status": "verified"
     },
     {
-      "checked": false,
-      "claim": "Historical architecture and program documents are explicitly labeled.",
+      "checked": true,
+      "claim": "SPEC-5 architecture and migration documents are labeled superseded, and the former program status is labeled historical, while all three records and decision history remain linked and intact.",
       "requirement_id": "DOC-002",
-      "revision": 2,
-      "status": "implemented_unverified"
+      "revision": 3,
+      "status": "verified"
     },
     {
-      "checked": false,
-      "claim": "New ADRs have a canonical date-prefixed namespace.",
+      "checked": true,
+      "claim": "New ADR records are constrained to one canonical docs/adr directory and valid date-prefixed unique IDs; the two exact historical numeric series remain preserved and frozen.",
       "requirement_id": "DOC-003",
-      "revision": 2,
-      "status": "implemented_unverified"
+      "revision": 4,
+      "status": "verified"
     },
     {
       "checked": false,
@@ -606,11 +606,11 @@
       "status": "implemented_unverified"
     },
     {
-      "checked": false,
-      "claim": "Generated references are reproducible from typed runtime sources.",
+      "checked": true,
+      "claim": "Source-derived tool, command, event, configuration, MCP/OpenAI/client/event schema, and SDK/operational capability references are generated and freshness-gated directly in CI with unavailable tool sources rejected.",
       "requirement_id": "DOC-005",
-      "revision": 2,
-      "status": "implemented_unverified"
+      "revision": 4,
+      "status": "verified"
     },
     {
       "checked": true,
@@ -866,9 +866,9 @@
     },
     {
       "checked": false,
-      "claim": "Retry execution and durable facts retain explicit operation identity for idempotent behavior.",
+      "claim": "Live agent tools and composed process, compute, local subagent, and self-mod worker adapters persist host-owned effect intents and outcomes; checkpoint restore validates journal high-water and unresolved effects.",
       "requirement_id": "LOOP-008",
-      "revision": 2,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -887,23 +887,23 @@
     },
     {
       "checked": false,
-      "claim": "The facade preserves evidence-backed typed memory and procedural-promotion candidates without fabricating support.",
+      "claim": "Host-current delegated verifier results can produce immutable project-scoped positive or verified-negative observations bound to an exact check, unchanged source manifest, cleanup proofs, authenticated child worker, and durable receipt.",
       "requirement_id": "MEM-003",
-      "revision": 2,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Outcome recording uses the existing typed source and interaction identity boundary for temporal learning truth.",
+      "claim": "Composed authoritative fact writes now require an acyclic same-source and same-project supersession link, and scoped entity and decision indexes hide the predecessor after the successor becomes effective across restart and journal rebuild.",
       "requirement_id": "MEM-004",
-      "revision": 2,
+      "revision": 7,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Recall remains behind the application facade and bounded recall service instead of transport handlers reaching into storage.",
+      "claim": "Configured project-scoped facts expose bounded entity and decision index pages with source/version/provenance and validity filtering through the application facade and MCP surface.",
       "requirement_id": "MEM-005",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "f62f7471b8e411c9dbc8f618c70450fc93d3a581ec1079d916b2f624b08d6275",
-    "spec_sha256": "4797da92d2d1845ce944b2dc32353d52fe7a6e48dfa92593753ca727761ca714"
+    "ledger_sha256": "6de57af4e57d8869d863a0c1357735c752390c27eafe4156d681cea84665f496",
+    "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
   }
 }

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from enum import StrEnum
 import hashlib
 
@@ -19,8 +20,9 @@ from threading import RLock
 from typing import Any, Callable, Mapping
 
 from ..execution.process_jobs import ProcessJobProvider, ProcessJobRequest
+from ..execution.worker_bindings import AuthenticatedWorkerBinding, journaled_effect
 from ..ports.jobs import JobIdentity
-from ...domain.common.errors import Conflict, DependencyUnavailable, InvalidInput, NotFound
+from ...domain.common.errors import CapacityExceeded, Conflict, DependencyUnavailable, InvalidInput, NotFound
 from ...domain.compute_fabric import WorkloadKind
 from .capacity import WorkerBudget, WorkerCapacity, bounded_positive
 from .artifact_spool import (
@@ -513,6 +515,7 @@ class ComputeJobWorker:
         capacity: WorkerCapacity | None = None,
         budget: WorkerBudget | Callable[[], WorkerBudget] | None = None,
         reservation_seconds: int = 30,
+        effect_binding: AuthenticatedWorkerBinding | None = None,
     ) -> None:
         _identity(worker_id, "worker_id")
         if set(catalog) != {entry.entry_id for entry in catalog.values()}:
@@ -534,6 +537,11 @@ class ComputeJobWorker:
         self._catalog = dict(catalog)
         self._workspaces = roots
         self._provider = provider
+        if effect_binding is not None and not isinstance(
+            effect_binding, AuthenticatedWorkerBinding
+        ):
+            raise TypeError("effect_binding must be an AuthenticatedWorkerBinding")
+        self._effect_binding = effect_binding
         self._by_idempotency: dict[str, RemoteJobReceipt] = {}
         self._by_job: dict[str, RemoteJobReceipt] = {}
         self._artifact_context: dict[
@@ -548,6 +556,8 @@ class ComputeJobWorker:
             )
         except (ArtifactSpoolError, OSError) as exc:
             raise InvalidInput("private compute artifact spool is unsafe") from exc
+        if self._effect_binding is not None:
+            self._effect_binding.recover_before_restart()
         self._rehydrate()
         logger.info(f"compute job worker initialized: worker_id={worker_id!r}, catalog_entries={sorted(catalog.keys())}, workspace_mappings={sorted(roots.keys())}")
 
@@ -605,6 +615,60 @@ class ComputeJobWorker:
                     self._input_stages[receipt.remote_job_id] = stage
 
     def submit(self, envelope: RemoteJobEnvelope) -> RemoteJobReceipt:
+        if self._effect_binding is not None:
+            with self._lock:
+                prior = self._by_idempotency.get(envelope.idempotency_key)
+            if prior is not None:
+                if prior.request_sha256 != envelope.request_sha256:
+                    raise Conflict("idempotency key is already bound to another request")
+                return prior
+            self._reject_occupied_capacity_before_intent(envelope)
+            return journaled_effect(
+                self._effect_binding,
+                operation_id=f"compute-submit:{self.worker_id}:{envelope.idempotency_key}",
+                idempotency_key=envelope.idempotency_key,
+                request=envelope,
+                invoke=lambda: self._submit_unjournaled(envelope),
+                receipt_key=lambda result: result.remote_job_id,
+                reconciliation="idempotent",
+            )
+        return self._submit_unjournaled(envelope)
+
+    def _reject_occupied_capacity_before_intent(self, envelope: RemoteJobEnvelope) -> None:
+        """Avoid an effect intent for a known admission-only capacity refusal.
+
+        The durable reservation remains the authoritative race-safe gate in
+        ``_submit_unjournaled``.  This read-only check prevents a caller from
+        turning a clearly occupied slot into an uncertain effect that blocks
+        a later retry after the running job is cancelled.
+        """
+        if self._capacity is None:
+            return
+        entry = self._catalog.get(envelope.catalog_entry_id)
+        list_capacity = getattr(self._capacity, "list_capacity", None)
+        if entry is None or not callable(list_capacity):
+            return
+        budget = self._budget() if callable(self._budget) else self._budget
+        demand = budget.memory_bytes if entry.memory_reservation_bytes is None else entry.memory_reservation_bytes
+        if budget.memory_bytes == 0 or demand > budget.memory_bytes:
+            raise CapacityExceeded("worker RAM budget is unconfigured or insufficient")
+        rows = list_capacity(host_id=budget.host_id, limit=256)
+        if len(rows) >= 256:
+            return  # The transactional reservation remains authoritative.
+        now = datetime.now(timezone.utc)
+        occupied = tuple(
+            row for row in rows
+            if row.state == "dispatched" or (
+                row.state == "reserved" and datetime.fromisoformat(row.expires_at) > now
+            )
+        )
+        if (
+            len(occupied) >= budget.max_jobs
+            or sum(row.memory_bytes for row in occupied) + demand > budget.memory_bytes
+        ):
+            raise CapacityExceeded("worker catalog capacity is occupied")
+
+    def _submit_unjournaled(self, envelope: RemoteJobEnvelope) -> RemoteJobReceipt:
         logger.debug(f"ComputeJobWorker.submit: worker_id={self.worker_id!r}, catalog_entry={envelope.catalog_entry_id!r}, idempotency_key={envelope.idempotency_key!r}, workload={envelope.workload.value!r}")
         try:
             envelope.verify()
@@ -1329,6 +1393,19 @@ class ComputeJobWorker:
             raise InvalidInput("compute artifact snapshot changed after publication") from exc
 
     def cancel(self, remote_job_id: str, reason: str = "cancelled") -> RemoteJobReceipt:
+        if self._effect_binding is not None:
+            return journaled_effect(
+                self._effect_binding,
+                operation_id=f"compute-cancel:{self.worker_id}:{remote_job_id}",
+                idempotency_key=f"cancel:{remote_job_id}",
+                request={"remote_job_id": remote_job_id, "reason": reason},
+                invoke=lambda: self._cancel_unjournaled(remote_job_id, reason),
+                receipt_key=lambda result: f"{result.remote_job_id}:{result.state}",
+                reconciliation="idempotent",
+            )
+        return self._cancel_unjournaled(remote_job_id, reason)
+
+    def _cancel_unjournaled(self, remote_job_id: str, reason: str = "cancelled") -> RemoteJobReceipt:
         logger.debug(f"ComputeJobWorker.cancel: remote_job_id={remote_job_id!r}, reason={reason!r}")
         receipt = self.status(remote_job_id)
         if not isinstance(reason, str) or not reason.strip() or len(reason) > 512:

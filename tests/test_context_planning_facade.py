@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from sonder_runtime.adapters.context_planning import RuntimeContextPlanningAdapter
 from sonder_runtime.application.context_integration import ContextPlanningFacade
-from sonder_runtime.application.context_manifests import ContextRecord
+from sonder_runtime.application.context_manifests import ContextRecord, PrefixManifestCache
 from sonder_runtime.application.context_planner import CONTEXT_SECTIONS, ModelContext
 from sonder_runtime.domain.context.hardware_sizing import MeasuredContextCapability
 from sonder_runtime.domain.context.priority import ContextItem
@@ -79,6 +79,26 @@ def test_facade_prefix_identity_telemetry_and_last_good_restore_after_compaction
     assert facade.last_good() is not None
 
 
+def test_facade_keeps_its_own_cache_observation_when_another_request_interleaves():
+    class InterleavingCache(PrefixManifestCache):
+        def resolve_observed(self, records, *, version="1", **identity):
+            selected = super().resolve_observed(records, version=version, **identity)
+            super().resolve_observed(
+                (ContextRecord("other", "stable_instructions", "other", "policy", stable=True),),
+                version=version, **identity,
+            )
+            return selected
+
+    cache = InterleavingCache()
+    result = ContextPlanningFacade(prefix_cache=cache).assemble(
+        ModelContext("model", 20_000, 2_000), {}, _budgets(20),
+        records=(ContextRecord("rules", "stable_instructions", "safe", "policy", stable=True),),
+    )
+    assert result.prefix is not None and result.prefix_observation is not None
+    assert result.prefix_observation.cache_key == result.prefix.cache_key
+    assert cache.last_observation.cache_key != result.prefix.cache_key
+
+
 def test_facade_builds_identity_prefix_without_stable_records():
     result = ContextPlanningFacade().assemble(
         ModelContext("model-a", 20_000, 2_000), {}, _budgets(20),
@@ -100,3 +120,15 @@ def test_runtime_adapter_exposes_the_same_facade_boundary():
         section_budgets=_budgets(20),
     )
     assert result.plan.input_budget_tokens == 30_000
+def test_prefix_identity_separates_provider_bindings():
+    from sonder_runtime.application.context_manifests import build_prefix_manifest
+
+    first = build_prefix_manifest(
+        (), model="shared-name", provider_id="ollama",
+        tokenizer="tokenizer-v1", template="chat-v1",
+    )
+    second = build_prefix_manifest(
+        (), model="shared-name", provider_id="openai_compatible",
+        tokenizer="tokenizer-v1", template="chat-v1",
+    )
+    assert first.cache_key != second.cache_key

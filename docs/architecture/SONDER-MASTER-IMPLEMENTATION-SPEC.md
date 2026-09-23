@@ -539,16 +539,16 @@ schema, cancellation, cleanup-to-quiescence contract, and conformance tests.
 
 ## 18. Documentation consolidation and governance
 
-- [ ] **DOC-001 — Authority index.** Maintain `docs/architecture/README.md` as the map of
+- [x] **DOC-001 — Authority index.** Maintain `docs/architecture/README.md` as the map of
   authoritative, focused, and historical documents.
-- [ ] **DOC-002 — Historical labeling.** Mark SPEC-5, its migration runbook, and old
+- [x] **DOC-002 — Historical labeling.** Mark SPEC-5, its migration runbook, and old
   program status as superseded without erasing decision history.
-- [ ] **DOC-003 — ADR namespace.** Consolidate new ADRs under one directory with globally
+- [x] **DOC-003 — ADR namespace.** Consolidate new ADRs under one directory with globally
   unique IDs; retain the two old directories as historical series until normalized.
 - [ ] **DOC-004 — Focused contracts.** Keep `ARCHITECTURE.md`, `SECURITY.md`,
   `SELFMOD.md`, `TRAINING.md`, `CLIENT.md`, and `MOBILE_HOST_CONTROL.md` focused on
   current behavior and link their unfinished implementation work here.
-- [ ] **DOC-005 — Generated references.** Generate tool, command, event, configuration,
+- [x] **DOC-005 — Generated references.** Generate tool, command, event, configuration,
   schema, and capability references from source and freshness-gate them.
 - [x] **DOC-006 — Status evidence.** Check off an item only in the same change that adds
   or links its verifiable evidence.
