@@ -100,3 +100,15 @@ def test_runtime_adapter_exposes_the_same_facade_boundary():
         section_budgets=_budgets(20),
     )
     assert result.plan.input_budget_tokens == 30_000
+def test_prefix_identity_separates_provider_bindings():
+    from sonder_runtime.application.context_manifests import build_prefix_manifest
+
+    first = build_prefix_manifest(
+        (), model="shared-name", provider_id="ollama",
+        tokenizer="tokenizer-v1", template="chat-v1",
+    )
+    second = build_prefix_manifest(
+        (), model="shared-name", provider_id="openai_compatible",
+        tokenizer="tokenizer-v1", template="chat-v1",
+    )
+    assert first.cache_key != second.cache_key

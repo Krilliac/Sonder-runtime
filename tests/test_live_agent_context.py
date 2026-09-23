@@ -8,6 +8,7 @@ from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.context_integration import ContextPlanningFacade
 from sonder_runtime.application.live_context import LiveAgentContextProducer
 from sonder_runtime.application.ports.model_gateway import ModelResponse
+from sonder_runtime.application.ports.model_target import ResolvedModelRoute
 
 
 class _Model:
@@ -17,6 +18,12 @@ class _Model:
     def generate(self, request, context):
         self.requests.append(request)
         return ModelResponse("done", "fake", request.tier, tokens_out=1)
+
+    def resolve_route(self, request, context):
+        return ResolvedModelRoute(
+            "fake", "fake-model", request.tier, request.tier,
+            False, "fake-tokenizer", "fake-template", self,
+        )
 
 
 def _project(root: Path, *, name: str, rule: str) -> Path:
@@ -57,12 +64,12 @@ def test_live_agent_request_assembles_scoped_rules_skills_and_reuses_prefix(tmp_
 
     # A changed dynamic turn does not change stable producer identity.
     messages = service.inspect(lane, context)["messages"]
-    service._request(store.read_lane(lane), messages, request_id="replay")
+    service._request(store.read_lane(lane), messages, request_id="replay", context=context)
     assert planner.prefix_cache_telemetry.hits == 1
 
     (project / "AGENTS.md").write_text("ALPHA RULE: require review", encoding="utf-8")
     changed = service._request(
-        store.read_lane(lane), messages, request_id="changed-rules"
+        store.read_lane(lane), messages, request_id="changed-rules", context=context
     )
     assert "ALPHA RULE: require review" in changed.system
     assert planner.prefix_cache_telemetry.writes == 2
@@ -107,10 +114,10 @@ def test_stale_project_rules_are_retained_but_not_injected_as_authoritative(tmp_
         workspace_root=str(project), context=context,
     )["lane"]["id"]
     lane = store.read_lane(lane_id)
-    first = service._request(lane, (), request_id="before-removal")
+    first = service._request(lane, (), request_id="before-removal", context=context)
     assert "ALPHA RULE" in first.system
     (project / "AGENTS.md").write_text("x" * (128 * 1024 + 1), encoding="utf-8")
-    stale = service._request(lane, (), request_id="after-removal")
+    stale = service._request(lane, (), request_id="after-removal", context=context)
     assert "ALPHA RULE" not in stale.system
     assert "Live stable context unavailable: last_good:" in stale.system
     assert planner.prefix_cache_telemetry.writes == 1
@@ -137,7 +144,7 @@ def test_empty_project_catalog_is_a_complete_live_prefix(tmp_path):
         command_id="spawn-empty", parent_session_id="parent", task="inspect",
         workspace_root=str(project), context=context,
     )["lane"]["id"]
-    request = service._request(store.read_lane(lane_id), (), request_id="empty-request")
+    request = service._request(store.read_lane(lane_id), (), request_id="empty-request", context=context)
     assert "No project-specific rules" in request.system
     assert "No project skills" in request.system
     assert planner.prefix_cache_telemetry.writes == 1

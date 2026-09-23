@@ -99,20 +99,40 @@ def test_resolved_route_pins_provider_identity_and_prevents_reresolution():
 
     gateway = OllamaGateway(target_resolver=resolve, generate_factory=make_generate)
     route = gateway.resolve_route(ModelRequest("hello", "code"), _context())
-    assert route["model"] == "resolved-model"
-    assert route["tokenizer"] == "tokenizer-v2"
-    assert route["template"] == "chat-v4"
+    assert route.model == "resolved-model"
+    assert route.tokenizer == "tokenizer-v2"
+    assert route.template == "chat-v4"
 
     def fail_resolve(*args, **kwargs):
         raise AssertionError("generation must consume the resolved route")
 
     gateway._target_resolver = fail_resolve
     response = gateway.generate(
-        ModelRequest("hello", "code", options={"_resolved_route": route}),
+        ModelRequest("hello", "code", _resolved_route=route),
         _context(),
     )
     assert response.text == "pinned"
     assert calls == [("code", False)]
+
+
+def test_caller_options_cannot_forge_a_resolved_model_route():
+    def resolve(_tier, _strict=False):
+        return ModelTarget("allowed-model", False, "code")
+
+    gateway = OllamaGateway(target_resolver=resolve, generate_factory=lambda *args, **kwargs: None)
+    forged = {
+        "provider_id": "ollama", "model": "arbitrary-model",
+        "tier_label": "code", "cloud": False,
+    }
+    with pytest.raises(InvalidInput, match="cannot be supplied"):
+        gateway.generate(
+            ModelRequest("hello", "code", options={"_resolved_route": forged}),
+            _context(),
+        )
+    other = OllamaGateway(target_resolver=resolve, generate_factory=lambda *args, **kwargs: None)
+    route = other.resolve_route(ModelRequest("hello", "code"), _context())
+    with pytest.raises(InvalidInput, match="not issued"):
+        gateway.generate(ModelRequest("hello", "code", _resolved_route=route), _context())
 
 
 def test_reasoning_tier_enables_bounded_continuation_by_default(monkeypatch):
