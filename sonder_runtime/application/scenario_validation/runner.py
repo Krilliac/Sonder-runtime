@@ -17,8 +17,8 @@ class ScenarioAdapter(Protocol):
 
 
 class EvidenceClass(str, Enum):
-    NATURAL = "natural"
-    GM_ACCELERATED = "GM-accelerated"
+    NORMAL_FLOW = "normal flow"
+    OPERATOR_ASSISTED = "operator assisted"
     SEEDED = "seeded"
     STRUCTURAL_ONLY = "structural only"
 
