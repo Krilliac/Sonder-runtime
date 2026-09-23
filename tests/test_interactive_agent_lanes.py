@@ -562,6 +562,12 @@ def test_tool_request_uses_scoped_typed_gateway_and_records_artifact(env):
     assert '"name": "write_file"' in first_request.system
     assert '"path"' in first_request.system
     assert len(gateway_requests) == 1
+    visible_selection_id = next(
+        line.split(": ", 1)[1]
+        for line in first_request.system.splitlines()
+        if line.startswith("Tool schema selection id: ")
+    )
+    assert gateway_requests[0].schema_selection.selection_id == visible_selection_id
     assert gateway_requests[0].schema_selection.visible_names == frozenset({"write_file"})
     assert len(observed) == 1
     assert observed[0][0].arguments["path"] == str(
