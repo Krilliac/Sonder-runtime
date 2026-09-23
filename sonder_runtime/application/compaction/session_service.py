@@ -14,6 +14,7 @@ from ..ports.compaction import (
     SourceRange,
 )
 from ..ports.session_repository import SessionEvent, SessionRepository
+from ..session.archive import ArchivedContext, SessionContextArchiveService
 
 
 class SessionCompactionError(ValueError):
@@ -40,6 +41,7 @@ class SessionCompactionService:
         engine: CompactionEngine | None = None,
         event_id_factory: Callable[[], str] | None = None,
         max_events: int = 1_000,
+        archive_service: SessionContextArchiveService | None = None,
     ) -> None:
         if isinstance(max_events, bool) or max_events < 1:
             raise ValueError("max_events must be positive")
@@ -52,6 +54,59 @@ class SessionCompactionService:
         )
         self._event_id_factory = event_id_factory or (lambda: f"compaction-{uuid4().hex}")
         self._max_events = max_events
+        self._archive = archive_service or SessionContextArchiveService(repository)
+
+    def archive_context(
+        self,
+        session_id: str,
+        *,
+        start_sequence: int = 1,
+        end_sequence: int | None = None,
+        budget_bytes: int,
+    ) -> ArchivedContext:
+        """Prepare a bounded model context through the durable compaction seam.
+
+        This is intentionally explicit: the provider-facing caller supplies
+        the already assembled session event range and measured byte budget.
+        The archive service appends references before returning placeholders;
+        no live provider request is changed implicitly by this application
+        service.
+        """
+        if end_sequence is None:
+            # Probe one event beyond the service bound.  Without this probe a
+            # longer session could be mistaken for a complete prefix and its
+            # later failure/decision history would disappear from context.
+            probe_limit = self._max_events + 1
+            adapter_limit = getattr(self._repository, "_max_read_limit", probe_limit)
+            if isinstance(adapter_limit, int) and not isinstance(adapter_limit, bool):
+                probe_limit = min(probe_limit, adapter_limit)
+            events = self._repository.read_range(
+                session_id, start_sequence=start_sequence, limit=probe_limit,
+            )
+            if len(events) > self._max_events:
+                raise SessionCompactionError("source range exceeds the service bound")
+            if probe_limit <= self._max_events and len(events) == probe_limit:
+                raise SessionCompactionError("source range tail cannot be proven within adapter bound")
+        else:
+            if end_sequence < start_sequence:
+                raise SessionCompactionError("source range must be non-empty and ordered")
+            count = end_sequence - start_sequence + 1
+            if count > self._max_events:
+                raise SessionCompactionError("source range exceeds the service bound")
+            events = self._repository.read_range(
+                session_id, start_sequence=start_sequence,
+                end_sequence=end_sequence, limit=count,
+            )
+        if not events or events[0].sequence != start_sequence:
+            raise SessionCompactionError("source range is unavailable or truncated")
+        if end_sequence is not None and events[-1].sequence != end_sequence:
+            raise SessionCompactionError("source range is unavailable or truncated")
+        try:
+            return self._archive.prepare_context(
+                session_id, events, budget_bytes=budget_bytes,
+            )
+        except (ValueError, TypeError) as exc:
+            raise SessionCompactionError(str(exc)) from exc
 
     def compact(
         self,
