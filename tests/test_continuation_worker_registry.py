@@ -81,6 +81,103 @@ def test_registry_reserves_in_the_continuation_store_and_provider_consumes_it(tm
     assert record.launch.owner_id == "owner"
 
 
+def test_completed_child_is_reused_after_service_restart_before_spawn(tmp_path):
+    repository = SQLiteDurableContinuationRepository(tmp_path / "continuation.sqlite")
+    root_request = SubagentRequest(
+        "root-1", "provider root", SubagentBudget(max_steps=8), "root-1",
+        (("provider_root", "true"),),
+    )
+    repository.create(DurableChildSession(root_request, ChildSessionLineage("root-1")))
+    launch = _launch(tmp_path / "repo")
+    request = _request_for_reservation(launch)
+    context = local_owner_context(
+        correlation_id="delegation-1", workspace_roots=(tmp_path / "repo",)
+    )
+    object.__setattr__(context, "principal_id", "owner")
+    values = dict(request.metadata)
+    values.update({
+        "context_workspace_roots": str(tmp_path / "repo"),
+        "context_cloud_allowed": str(context.cloud_allowed),
+        "context_remote_ollama_allowed": str(context.remote_ollama_allowed),
+        "context_session_id": str(context.session_id),
+    })
+    request = replace(request, metadata=tuple(values.items()))
+    calls = []
+
+    def runner(state, save, cancellation):
+        calls.append(1)
+        return "persisted result"
+
+    first = DurableContinuationService(repository)
+    first_handle = first.spawn(request, context, runner)
+    assert first_handle.result(timeout=5).output == "persisted result"
+    first.close(timeout=1)
+
+    restarted = DurableContinuationService(repository)
+    reused = restarted.spawn(request, context, lambda *_: calls.append(2) or "wrong")
+    assert reused.child_id == launch.worker_id
+    assert reused.result(timeout=1).output == "persisted result"
+    assert calls == [1]
+
+
+def test_terminal_child_scope_mismatch_cannot_be_reused_or_respawned(tmp_path):
+    repository = SQLiteDurableContinuationRepository(tmp_path / "continuation.sqlite")
+    root_request = SubagentRequest(
+        "root-1", "provider root", SubagentBudget(max_steps=8), "root-1",
+        (("provider_root", "true"),),
+    )
+    repository.create(DurableChildSession(root_request, ChildSessionLineage("root-1")))
+    launch = _launch(tmp_path / "repo")
+    request = _request_for_reservation(launch)
+    context = local_owner_context(
+        correlation_id="delegation-1", workspace_roots=(tmp_path / "repo",)
+    )
+    object.__setattr__(context, "principal_id", "owner")
+    values = dict(request.metadata)
+    values.update({
+        "context_workspace_roots": str(tmp_path / "repo"),
+        "context_cloud_allowed": str(context.cloud_allowed),
+        "context_remote_ollama_allowed": str(context.remote_ollama_allowed),
+        "context_session_id": str(context.session_id),
+    })
+    request = replace(request, metadata=tuple(values.items()))
+    service = DurableContinuationService(repository)
+    assert service.spawn(request, context, lambda *_: "done").result(timeout=5).output == "done"
+    mismatched = replace(request, prompt="changed prompt")
+    with pytest.raises(InvalidSubagentRequest, match="terminal child identity"):
+        DurableContinuationService(repository).spawn(
+            mismatched, context, lambda *_: pytest.fail("runner must not run")
+        )
+
+
+def test_terminal_reuse_rejects_different_operation_context_owner(tmp_path):
+    repository = SQLiteDurableContinuationRepository(tmp_path / "owner.sqlite")
+    root_request = SubagentRequest(
+        "root-1", "provider root", SubagentBudget(max_steps=8), "root-1",
+        (("provider_root", "true"),),
+    )
+    repository.create(DurableChildSession(root_request, ChildSessionLineage("root-1")))
+    launch = _launch(tmp_path / "repo")
+    request = _request_for_reservation(launch)
+    context = local_owner_context(correlation_id="delegation-1", workspace_roots=(tmp_path / "repo",))
+    object.__setattr__(context, "principal_id", "owner")
+    values = dict(request.metadata)
+    values.update({
+        "context_workspace_roots": str(tmp_path / "repo"),
+        "context_cloud_allowed": str(context.cloud_allowed),
+        "context_remote_ollama_allowed": str(context.remote_ollama_allowed),
+        "context_session_id": str(context.session_id),
+    })
+    request = replace(request, metadata=tuple(values.items()))
+    assert DurableContinuationService(repository).spawn(
+        request, context, lambda *_: "done"
+    ).result(timeout=5).output == "done"
+    foreign = local_owner_context(correlation_id="foreign", workspace_roots=(tmp_path / "repo",))
+    object.__setattr__(foreign, "principal_id", "foreign-owner")
+    with pytest.raises(InvalidSubagentRequest, match="operation scope cannot be proven"):
+        DurableContinuationService(repository).spawn(request, foreign, lambda *_: pytest.fail("runner must not run"))
+
+
 def test_reserved_worker_cannot_be_claimed_by_another_owner(tmp_path):
     repository = SQLiteDurableContinuationRepository(tmp_path / "continuation.sqlite")
     root = SubagentRequest("root-1", "provider root", SubagentBudget(max_steps=8), "root-1", (("provider_root", "true"),))
@@ -235,3 +332,45 @@ def test_delegation_service_consumes_continuation_backed_reservation(tmp_path):
     ).get("child-1")
     assert reopened is not None
     assert reopened.terminal_verification["artifacts"] == ("evidence.json",)
+
+
+def test_delegation_restart_reuses_terminal_by_key_with_new_child_id(tmp_path):
+    database = tmp_path / "continuation.sqlite"
+    root = tmp_path / "repo"
+    preset = resolve_preset("researcher")
+    workspace = WorkspaceAssignment((str(root),), (str(root / "write"),))
+    lineage = LineageRecord("line-1", "root-1", "parent-1", "child-1", 1, preset.name, preset.role, workspace)
+    request = DelegationRequest("delegation-1", lineage, "research the change", preset, workspace)
+    root_request = SubagentRequest(
+        "parent-1", "provider root", SubagentBudget(max_steps=30, max_output_tokens=6000, max_wall_seconds=600),
+        "parent-1", (("provider_root", "true"),),
+    )
+    repository = SQLiteDurableContinuationRepository(database)
+    repository.create(DurableChildSession(root_request, ChildSessionLineage("parent-1")))
+    calls = []
+    first_service = DurableContinuationService(repository)
+    first_provider = RunnerBoundSubagentProvider(
+        first_service, lambda state, save, cancellation: calls.append("first") or "persisted"
+    )
+    first = DelegationService(first_provider, worker_registry=ContinuationWorkerRegistry(repository))
+    context = local_owner_context(correlation_id="delegation-1", workspace_roots=(root,))
+    assert first.dispatch(request, context).result(timeout=5).output == "persisted"
+    first.integrate(
+        request,
+        SubagentResult("child-1", "parent-1", SubagentStatus.SUCCEEDED, output="persisted", usage=SubagentUsage(steps=1)),
+    )
+    first_service.close(timeout=1)
+
+    restarted_repository = SQLiteDurableContinuationRepository(database)
+    restarted_service = DurableContinuationService(restarted_repository)
+    second_calls = []
+    second_provider = RunnerBoundSubagentProvider(
+        restarted_service, lambda state, save, cancellation: second_calls.append("spawned") or "wrong"
+    )
+    second = DelegationService(second_provider, worker_registry=ContinuationWorkerRegistry(restarted_repository))
+    retry = replace(request, lineage=replace(lineage, child_id="child-2"))
+    reused = second.dispatch(retry, context)
+    assert reused.child_id == "child-1"
+    assert reused.result(timeout=1).output == "persisted"
+    assert calls == ["first"]
+    assert second_calls == []

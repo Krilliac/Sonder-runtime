@@ -90,3 +90,22 @@ that provider-reported KV reuse is present for these exact stable sections.
 Other providers and cross-process cache coordination remain unverified. CTX-
 009 remains `implemented_unverified` until a live provider invocation and
 end-to-end telemetry evidence cover the full requirement.
+
+## Model-tag replacement guard
+
+`server._model_prompt_identity` now requires a single loopback Ollama origin,
+an exact 64-hex digest and revision from `/api/tags`, and a matching
+`modified_at` from `/api/show`. It reads `/api/tags` again after `/api/show`
+and refuses a positive prompt identity if the tag digest or revision changes.
+The returned template identity includes both the template digest and the
+selected model artifact digest. Missing, malformed, or mismatched metadata
+therefore disables reusable-prefix identity instead of reusing a key for a
+replaced model tag. Tests cover same-template changed-digest, missing metadata,
+revision mismatch, tag changes during probing, multi-worker locality refusal,
+and the absence of positive caching. Test fixtures contain no prompt content.
+
+The two tag reads establish a versioned snapshot during request assembly, not
+an atomic lease on Ollama's mutable model tag. A concurrent replacement after
+the second read and before generation remains possible. Binding generation to
+an immutable artifact digest or an operator-controlled model update boundary
+is still required for a complete replacement guarantee; CTX-009 remains open.
