@@ -1366,6 +1366,14 @@ class AgentLaneService:
             )
         except (AttributeError, TypeError, ValueError) as exc:
             raise RuntimeError("canonical session tail is unavailable") from exc
+        if events and events[0].sequence > 1:
+            # A bounded tail cannot prove whether an omitted earlier event
+            # carried a user constraint, decision, or failure. Stop before
+            # presenting an apparently complete continuation to the model.
+            raise ContextHistoryOverflowError(
+                "canonical session tail omits earlier events; "
+                "resume after operator-led compaction"
+            )
         # Use the durable compaction seam immediately before provider request
         # assembly. Only tool results are eligible for eviction; model/user
         # events, including decisions and failures, stay in the source range.
