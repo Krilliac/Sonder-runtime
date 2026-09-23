@@ -9,7 +9,7 @@ through the trusted supplemental snapshot before host admission.
 
 | Shared source | Inventory |
 |---|---|
-| bootstrap/app.py | sessions, jobs, execution-spill (same SONDER_JOBS_DB override), child-sessions, extensions; tool audit; lane-test catalog; STATE_HOME task memory fallback |
+| bootstrap/app.py | sessions, jobs, execution-spill (same SONDER_JOBS_DB override), child-sessions, extensions, agent-effects (SONDER_AGENT_EFFECTS_DB), worker-effects (SONDER_WORKER_EFFECTS_DB); tool audit; lane-test catalog; STATE_HOME task memory fallback |
 | platform/paths.py | memory SONDER_DB (including canonical home default); state_path configured-home precedence; no migration or mkdir invoked by inventory |
 | adapters/security/approval_ledger.py | approvals.db / SONDER_APPROVALS_DB |
 | adapters/persistence/migrations.py `_STORE_FILENAMES` | autopilot, fleet, operations, queued_actions, updates, jobs and their declared environment names |

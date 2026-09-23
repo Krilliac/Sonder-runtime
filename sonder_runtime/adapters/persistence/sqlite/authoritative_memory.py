@@ -20,6 +20,8 @@ from sonder_runtime.domain.memory.replication import (
     MemoryMutation,
     MemoryReplicationError,
 )
+from sonder_runtime.domain.memory.authoritative_fact_metadata import AuthoritativeFactMetadata
+from .authoritative_indexes import materialize_authoritative_fact_index
 
 
 _MAX_EMBEDDING = 16_384
@@ -30,10 +32,14 @@ def _recorded_at() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _fact_payload(text: object, embedding: object) -> dict[str, object]:
+def _fact_payload(text: object, embedding: object, metadata: AuthoritativeFactMetadata | None) -> dict[str, object]:
     if not isinstance(text, str) or not text.strip():
         raise MemoryReplicationError("fact text must be a bounded non-empty string")
+    if metadata is not None and not isinstance(metadata, AuthoritativeFactMetadata):
+        raise MemoryReplicationError("fact metadata must use the typed authoritative contract")
     payload: dict[str, object] = {"text": text, "embedding": None}
+    if metadata is not None:
+        payload["metadata"] = metadata.as_payload()
     if embedding is None:
         return payload
     if isinstance(embedding, memoryview):
@@ -136,6 +142,26 @@ class SQLiteAuthoritativeFactSource:
             raise MemoryReplicationError("fact is owned by another source")
         return state
 
+    def _require_scoped_facts_authoritative(self, connection) -> None:
+        """Refuse activation over facts with no matching source evidence.
+
+        Existing project facts need an explicit migration before a live writer
+        can claim this project is an authoritative replication source.
+        """
+        legacy = connection.execute(
+            "SELECT 1 FROM facts AS fact LEFT JOIN "
+            "memory_authoritative_fact_state AS state "
+            "ON state.project=fact.project AND state.fact_id=fact.id "
+            "WHERE fact.project=? AND "
+            "(state.fact_id IS NULL OR state.source_id<>? OR state.tombstoned<>0) "
+            "LIMIT 1",
+            (self.project_scope, self.source_id),
+        ).fetchone()
+        if legacy is not None:
+            raise MemoryReplicationError(
+                "existing project facts require authoritative migration"
+            )
+
     def _record(
         self,
         connection,
@@ -184,11 +210,12 @@ class SQLiteAuthoritativeFactSource:
         text: str,
         embedding=None,
         *,
+        metadata: AuthoritativeFactMetadata | None = None,
         replace: bool = False,
     ) -> MemoryMutation:
         if project != self.project_scope:
             raise MemoryReplicationError("authoritative fact scope cannot be widened")
-        payload = _fact_payload(text, embedding)
+        payload = _fact_payload(text, embedding, metadata)
         with self._transaction(connection):
             record = self._record(
                 connection,
@@ -196,6 +223,7 @@ class SQLiteAuthoritativeFactSource:
                 operation="upsert",
                 payload=payload,
             )
+            self._require_scoped_facts_authoritative(connection)
             existing = connection.execute(
                 "SELECT project FROM facts WHERE id=?", (fact_id,)
             ).fetchone()
@@ -225,6 +253,7 @@ class SQLiteAuthoritativeFactSource:
                 source_id=self.source_id,
                 project_scope=self.project_scope,
             )
+            materialize_authoritative_fact_index(connection, record)
         return record
 
     def add_fact(
@@ -234,9 +263,10 @@ class SQLiteAuthoritativeFactSource:
         project: str,
         text: str,
         embedding=None,
+        metadata: AuthoritativeFactMetadata | None = None,
     ) -> MemoryMutation:
         """Insert a new supported fact and its journal mutation together."""
-        return self._write_fact(connection, fact_id, project, text, embedding)
+        return self._write_fact(connection, fact_id, project, text, embedding, metadata=metadata)
 
     def upsert_fact(
         self,
@@ -245,10 +275,11 @@ class SQLiteAuthoritativeFactSource:
         project: str,
         text: str,
         embedding=None,
+        metadata: AuthoritativeFactMetadata | None = None,
     ) -> MemoryMutation:
         """Advance one supported fact's version without changing its scope."""
         return self._write_fact(
-            connection, fact_id, project, text, embedding, replace=True
+            connection, fact_id, project, text, embedding, metadata=metadata, replace=True
         )
 
     def delete_fact(self, connection, fact_id: str, project: str) -> bool:
@@ -271,6 +302,7 @@ class SQLiteAuthoritativeFactSource:
                 operation="delete",
                 payload={},
             )
+            self._require_scoped_facts_authoritative(connection)
             deleted = connection.execute(
                 "DELETE FROM facts WHERE id=? AND project=?",
                 (fact_id, self.project_scope),
@@ -284,6 +316,7 @@ class SQLiteAuthoritativeFactSource:
                 source_id=self.source_id,
                 project_scope=self.project_scope,
             )
+            materialize_authoritative_fact_index(connection, record)
         return True
 
     def advance_epoch(self, connection, source_epoch: int) -> None:
@@ -318,4 +351,4 @@ class SQLiteAuthoritativeFactSource:
             )
 
 
-__all__ = ["SQLiteAuthoritativeFactSource"]
+__all__ = ["AuthoritativeFactMetadata", "SQLiteAuthoritativeFactSource"]

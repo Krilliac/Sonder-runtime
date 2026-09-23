@@ -11,6 +11,7 @@ from sonder_runtime.adapters.persistence.agent_lanes import SQLiteAgentLaneStore
 from sonder_runtime.adapters.persistence.session_repository import (
     SQLiteSessionRepository,
 )
+from sonder_runtime.adapters.persistence.sqlite.effect_journal import SQLiteEffectJournal
 
 
 class Model:
@@ -613,6 +614,40 @@ def test_lane_history_rejects_archive_reference_from_another_project(env):
     )
 
     assert all("archive-other" not in item["content"] for item in service._history(lane))
+
+
+def test_live_lane_tool_boundary_persists_effect_intent_and_outcome(env):
+    from sonder_runtime.application.ports.tool_registry import InMemoryToolRegistry, ToolDescriptor
+    from sonder_runtime.application.ports.tool_execution import ToolExecutionResult
+    from sonder_runtime.application.tools.facade import ToolApplicationFacade
+    from sonder_runtime.application.tools.resource_policy import ResourcePolicy, PolicyRule, Decision
+    from sonder_runtime.domain.tools.descriptors import ToolEffect
+
+    service, _, _, model, context, _ = env
+    journal = SQLiteEffectJournal(env[-1] / "effects.db")
+    service.effect_journal = journal
+
+    class Executor:
+        def execute(self, descriptor, call, ctx, execution_class):
+            return ToolExecutionResult(tool_name=descriptor.name, success=True, output="ok")
+
+    descriptor = ToolDescriptor(
+        "write_file",
+        input_schema={"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                      "required": ["path", "content"]},
+        effects=frozenset({ToolEffect.WRITE_FILES}),
+    )
+    service.tools = ToolApplicationFacade.compose(
+        InMemoryToolRegistry([descriptor]), Executor(),
+        policy=ResourcePolicy([PolicyRule("allow", Decision.ALLOW, tool="write_file")]),
+    )
+    lane = spawn(env, command="journal-lane")["lane"]["id"]
+    replies = iter(['{"tool":"write_file","arguments":{"path":"result.txt","content":"ok"}}', "done"])
+    model.generate = lambda request, ctx: ModelResponse(next(replies), "fake", "code", tokens_out=1)
+    service.run_pending(lane, context)
+    attempt = service.store.read_lane(lane)["attempt_id"]
+    record = journal.get(f"{attempt}:call-{attempt}-step-1")
+    assert record is not None and record.state.value == "completed"
 
 
 def test_archive_projection_failure_does_not_rerun_committed_tool(env, monkeypatch):

@@ -133,6 +133,19 @@ class ManagedConversationLifetime:
                 raise PermissionError("current attached host owner required")
             return self._owner.terminal_eligibility(expected_turn, verifier_factory=verifier_factory)
 
+    def persist_learning_observation(
+        self, expected_turn, *, verifier_factory, repository,
+    ):
+        with self._lock:
+            self._require_current()
+            if self._owner is None:
+                raise PermissionError("current attached host owner required")
+            return self._owner.persist_learning_observation(
+                expected_turn,
+                verifier_factory=verifier_factory,
+                repository=repository,
+            )
+
     def close(self):
         with self._lock:
             if self._released:

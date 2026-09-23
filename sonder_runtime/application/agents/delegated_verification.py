@@ -259,6 +259,7 @@ class DelegatedVerificationService:
                 code="",
                 job_ids=[],
                 certificate=None,
+                failure_receipt=None,
                 owner="",
             )
             tx.acquire_verification_barrier(
@@ -351,6 +352,10 @@ class DelegatedVerificationService:
         owner = "lane-owner-" + uuid.uuid4().hex
         owner_lease = self.store.acquire_owner(owner)
         control = None
+        before = None
+        failed_check = None
+        failed_proof = None
+        proofs_by_job = {}
         try:
             with root_transaction(self.store, context) as tx:
                 value = tx.verification_row(
@@ -496,7 +501,10 @@ class DelegatedVerificationService:
                     job_id, prepared.parent_session_id, context.principal_id
                 )
                 proofs.append(proof)
+                proofs_by_job[job_id] = proof
                 if proof["status"] != "succeeded" or proof["exit_code"] != 0:
+                    failed_check = (index, check, job_id)
+                    failed_proof = proof
                     raise ValueError("independent check failed")
             after = self.snapshotter.capture(tuple(Path(p) for p in prepared.roots))
             if before != after:
@@ -584,13 +592,51 @@ class DelegatedVerificationService:
                 if value["state"] == "certified":
                     return self._public(value)
                 clean = True
+                cleanup_proofs = {}
                 for job_id in value["job_ids"]:
                     try:
-                        self._proof(
+                        proof = self._proof(
                             job_id, prepared.parent_session_id, context.principal_id
                         )
+                        prior_proof = proofs_by_job.get(job_id)
+                        if prior_proof is not None and digest(prior_proof) != digest(proof):
+                            clean = False
+                        cleanup_proofs[job_id] = proof
                     except (ValueError, KeyError, OSError):
                         clean = False
+                failure_receipt = None
+                if clean and failed_check is not None and failed_proof is not None:
+                    try:
+                        after = self.snapshotter.capture(tuple(Path(p) for p in prepared.roots))
+                        if before is not None and after.digest == before.digest:
+                            index, check, job_id = failed_check
+                            if (
+                                failed_proof.get("job_id") == job_id
+                                and failed_proof.get("status") != "succeeded"
+                                and failed_proof.get("exit_code") != 0
+                                and cleanup_proofs.get(job_id) is not None
+                            ):
+                                failed_check_payload = asdict(check)
+                                failed_check_payload["argv"] = list(
+                                    failed_check_payload["argv"]
+                                )
+                                payload = dict(
+                                    schema="delegated-verification-failure-v1",
+                                    verification_id=prepared.verification_id,
+                                    generation=prepared.generation,
+                                    bundle=prepared.approval_payload(),
+                                    failed_check_index=index,
+                                    failed_check=failed_check_payload,
+                                    failed_job_id=job_id,
+                                    failed_proof=failed_proof,
+                                    before_manifest_digest=before.digest,
+                                    after_manifest_digest=after.digest,
+                                    cleanup_proofs=[cleanup_proofs[job] for job in value["job_ids"]],
+                                )
+                                payload["receipt_digest"] = digest(payload)
+                                failure_receipt = payload
+                    except (ValueError, KeyError, OSError):
+                        failure_receipt = None
                 unknown_approval = (
                     managed is not None and value["state"] == "approval_deciding"
                 )
@@ -604,8 +650,13 @@ class DelegatedVerificationService:
                     code=(
                         "APPROVAL_OUTCOME_UNKNOWN"
                         if unknown_approval
-                        else ("VERIFICATION_REFUSED" if clean else "CLEANUP_UNRESOLVED")
+                        else (
+                            "VERIFICATION_CHECK_FAILED"
+                            if failure_receipt is not None
+                            else ("VERIFICATION_REFUSED" if clean else "CLEANUP_UNRESOLVED")
+                        )
                     ),
+                    failure_receipt=failure_receipt,
                 )
                 tx.save_verification(value)
                 if clean:
@@ -636,6 +687,9 @@ class DelegatedVerificationService:
                 "job_ids",
             )
         }
+        # Older durable verification rows predate the negative-evidence
+        # field. Their absence means unavailable, never a fabricated failure.
+        result["failure_receipt"] = value.get("failure_receipt")
         if value.get("pending_approval"):
             result["pending_approval"] = dict(value["pending_approval"])
         return result
