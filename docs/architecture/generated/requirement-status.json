@@ -173,9 +173,9 @@
     },
     {
       "checked": false,
-      "claim": "Stable-key retries with a new child ID search terminal rows through the authoritative durable continuation repository, reuse only one exact result with proven owner/workspace/consent/session context, and fail closed on ambiguous rows or foreign context before any runner spawn.",
+      "claim": "Delegation retries with a new proposed child ID propagate the canonical terminal child ID returned by the durable key registry, reuse the persisted result without a runner, and reject ambiguous duplicate terminal rows or foreign operation context.",
       "requirement_id": "AGENT-006",
-      "revision": 4,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "17d3ac97d6a3c1962bc40e0f3e784c82c0da4f86e224e185a325a8cc3cd5e7e4",
+    "ledger_sha256": "ac6cbdf03d58443f0506d539dfcbecd144e8b86d2863e0616b445c9ad32485f6",
     "spec_sha256": "4797da92d2d1845ce944b2dc32353d52fe7a6e48dfa92593753ca727761ca714"
   }
 }

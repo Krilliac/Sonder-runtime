@@ -128,7 +128,7 @@ class DelegationService:
             canonical_launch = getattr(admitted, "launch", worker_launch)
             child_request = SubagentRequest(
                 child_request.parent_id, child_request.prompt, child_request.budget,
-                child_request.child_id, canonical_launch.metadata,
+                canonical_launch.worker_id, canonical_launch.metadata,
                 child_request.resume_key, child_request.idempotency_key,
             )
         logger.debug(f"DelegationService.dispatch: spawning child_id={request.lineage.child_id!r}, parent_id={request.lineage.parent_id!r}")
