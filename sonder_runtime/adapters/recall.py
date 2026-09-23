@@ -268,6 +268,7 @@ def recall_page(conn, task, k=2, embed_fn=None, min_sim=None,
     elif mode == "temporal":
         at = datetime.now(timezone.utc)
     specialized = mode != "hybrid"
+    lexical_fallback = False
     runtime_default = embed_fn is None
     query_provenance = {}
     if not specialized:
@@ -275,15 +276,13 @@ def recall_page(conn, task, k=2, embed_fn=None, min_sim=None,
         if qv is None:
             qv = embed_fn(task)
         if qv is None or not embeddings.valid_vector(qv):
-            return RecallPage(
-                (), False, None, "no_query_embedding", 0, 0,
-                degradation_reasons=("no_query_embedding",),
-            )
-        query_provenance = embeddings.trusted_provenance(qv, embed_fn, runtime_default)
-        if embedding_model is None:
-            embedding_model = query_provenance.get("model")
-        if embedding_revision is None:
-            embedding_revision = query_provenance.get("revision")
+            lexical_fallback = True
+        else:
+            query_provenance = embeddings.trusted_provenance(qv, embed_fn, runtime_default)
+            if embedding_model is None:
+                embedding_model = query_provenance.get("model")
+            if embedding_revision is None:
+                embedding_revision = query_provenance.get("revision")
 
     candidates = memory_store.good_interaction_candidate_page(
         conn,
@@ -292,7 +291,7 @@ def recall_page(conn, task, k=2, embed_fn=None, min_sim=None,
         include_all_projects=include_all_projects,
         embedding_model=embedding_model,
         embedding_revision=embedding_revision,
-        require_embedding=not specialized,
+        require_embedding=not (specialized or lexical_fallback),
         max_created_at=(at.isoformat() if mode == "temporal" else None),
         embedding_dim=(len(qv) if qv is not None else None),
         cursor=candidate_cursor,
@@ -305,7 +304,7 @@ def recall_page(conn, task, k=2, embed_fn=None, min_sim=None,
         response = row.get("response")
         if response is not None and not isinstance(response, str):
             continue
-        if specialized:
+        if specialized or lexical_fallback:
             scored_count += 1
             scored.append((0.0, candidate_rank, row))
             continue
@@ -356,6 +355,8 @@ def recall_page(conn, task, k=2, embed_fn=None, min_sim=None,
         for (similarity, _, row), text in zip(selected, formatted)
     )
     degradation_reasons = []
+    if lexical_fallback:
+        degradation_reasons.append("embedding_unavailable_lexical_fallback")
     if candidates.incomplete:
         degradation_reasons.append(
             "candidate_enumeration_%s" % candidates.termination
