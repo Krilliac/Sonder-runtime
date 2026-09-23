@@ -164,6 +164,18 @@ def _ruff_command(py: str) -> list[str] | None:
     return [py, "-m", "ruff"] if probe.returncode == 0 else None
 
 
+def _regression_command(py: str) -> list[str]:
+    """Use bounded xdist when installed; keep a portable serial fallback."""
+    probe = subprocess.run(
+        [py, "-c", "import xdist"],
+        capture_output=True, stdin=subprocess.DEVNULL, check=False,
+        timeout=10,
+    )
+    if probe.returncode == 0:
+        return [py, "-m", "pytest", "-q", "-n", "4", "--dist", "load"]
+    return [py, "-m", "pytest", "-q"]
+
+
 _NON_EXECUTABLE_OBJECTIVE = re.compile(
     r"\b(?:add|improve|fix|clarify|update|document)\b[^\n]{0,40}\b"
     r"(?:docstring|comment|comments|formatting|style|whitespace)\b|"
@@ -762,7 +774,7 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
         log("  lint: Ruff available")
     else:
         log("  lint: Ruff unavailable; Python compilation is the syntax gate")
-    checks.append(("regression", [py, "-m", "pytest", "-q"]))
+    checks.append(("regression", _regression_command(py)))
     for kind, command in checks:
         # cwd is deliberately NOT passed: the default is the candidate
         # workspace, which keeps imports and pytest collection grounded in

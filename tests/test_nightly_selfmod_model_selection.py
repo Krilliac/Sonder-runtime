@@ -110,6 +110,24 @@ def test_selfmod_uses_worker_interpreter_when_worktree_has_no_venv(tmp_path, mon
     assert nightly_selfmod._test_python() == sys.executable
 
 
+def test_regression_command_uses_bounded_four_worker_xdist(monkeypatch):
+    monkeypatch.setattr(nightly_selfmod.subprocess, "run", lambda *args, **kwargs: type(
+        "Result", (), {"returncode": 0}
+    )())
+    assert nightly_selfmod._regression_command("python") == [
+        "python", "-m", "pytest", "-q", "-n", "4", "--dist", "load",
+    ]
+
+
+def test_regression_command_falls_back_to_serial_without_xdist(monkeypatch):
+    monkeypatch.setattr(nightly_selfmod.subprocess, "run", lambda *args, **kwargs: type(
+        "Result", (), {"returncode": 1}
+    )())
+    assert nightly_selfmod._regression_command("python") == [
+        "python", "-m", "pytest", "-q",
+    ]
+
+
 def test_protected_and_missing_modules_are_not_eligible_candidates(tmp_path, monkeypatch):
     monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
     (tmp_path / "reflection.py").write_text("def f():\n    return 1\n", encoding="utf-8")
