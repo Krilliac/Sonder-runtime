@@ -2048,6 +2048,10 @@ def delete_path(
 
 INSPECT_PREVIEW_ITEMS = 20
 INSPECT_PREVIEW_CHARS = 2000
+# Walking a compressed TAR decompresses every payload to reach the next
+# header; previews stop at these bounds and report counts as floors.
+INSPECT_MAX_ARCHIVE_MEMBERS = 10_000
+INSPECT_MAX_ARCHIVE_SCAN_BYTES = 64 * 1024 * 1024
 
 
 class _InspectSizeError(Exception):
@@ -2208,16 +2212,34 @@ def _inspect_zip(p: Path) -> dict:
 def _inspect_tar(p: Path) -> dict:
     import tarfile
 
+    names = []
+    expanded = 0
+    truncated = False
     with tarfile.open(p) as archive:
-        members = archive.getmembers()
-    names = [m.name for m in members]
+        # Iterate instead of getmembers(): stop before decompressing past
+        # the scan budget or collecting an unbounded member list.
+        for member in archive:
+            names.append(member.name)
+            expanded += max(0, int(member.size))
+            if (
+                len(names) >= INSPECT_MAX_ARCHIVE_MEMBERS
+                or expanded >= INSPECT_MAX_ARCHIVE_SCAN_BYTES
+            ):
+                # Do not peek at the next header: reaching it would
+                # decompress this member's payload.  Stopping here means the
+                # counts may be incomplete, so they are reported as floors.
+                truncated = True
+                break
     listing = "\n".join(names[:INSPECT_PREVIEW_ITEMS])
     if len(names) > INSPECT_PREVIEW_ITEMS:
         listing += "\n… (%d more)" % (len(names) - INSPECT_PREVIEW_ITEMS)
+    if truncated:
+        listing += "\n… (scan stopped at preview bound; counts are floors)"
     return {
         "kind": "tar",
         "members": len(names),
-        "expanded_bytes": sum(m.size for m in members),
+        "expanded_bytes": expanded,
+        "truncated": truncated,
         "text": listing,
     }
 

@@ -18,10 +18,24 @@ class FilesystemRecoveryEvidenceRepository:
     The underlying artifact service is the durable store.  This adapter adds
     a typed read/write boundary and carries the mandatory same-user disclosure
     alongside every verified record.
+
+    ``unrestricted_selfmod`` is the frozen startup capability of the running
+    process.  When it is set, every record -- including one returned by a
+    later ``verify`` -- discloses that the process could have rewritten the
+    artifact and audit chain together.  A per-call flag can add that
+    disclosure but can never remove it.
     """
 
-    def __init__(self, artifacts: RecoveryArtifactService) -> None:
+    def __init__(
+        self,
+        artifacts: RecoveryArtifactService,
+        *,
+        unrestricted_selfmod: bool = False,
+    ) -> None:
+        if not isinstance(unrestricted_selfmod, bool):
+            raise TypeError("unrestricted_selfmod must be bool")
         self._artifacts = artifacts
+        self._unrestricted_selfmod = unrestricted_selfmod
 
     def record(
         self,
@@ -36,7 +50,7 @@ class FilesystemRecoveryEvidenceRepository:
         boundary = RecoveryBoundary.assess(
             actor=actor,
             resource_owner=resource_owner or self._artifacts.owner,
-            unrestricted_selfmod=unrestricted_selfmod,
+            unrestricted_selfmod=unrestricted_selfmod or self._unrestricted_selfmod,
             audit_files=(str(self._artifacts.audit_path),),
         )
         artifact = self._artifacts.write(
@@ -62,6 +76,7 @@ class FilesystemRecoveryEvidenceRepository:
         boundary = RecoveryBoundary.assess(
             actor=actor,
             resource_owner=artifact.owner,
+            unrestricted_selfmod=self._unrestricted_selfmod,
             audit_files=(str(self._artifacts.audit_path),),
         )
         return RecoveryEvidenceRecord(

@@ -18,7 +18,7 @@ editing/testing/reviewing -> rejected -> restored
 deployed -> rollback_requested -> restored
 ```
 
-`selfmod.py` owns SQLite state, immutable backups, hashes, budgets, test
+`selfmod.py` owns SQLite state, hash-verified backups, hashes, budgets, test
 evidence, acceptance, deployment locks, and restoration. `server.py` may ask the
 existing guarded workbench agent to edit the isolated workspace, but the host
 independently inventories its complete diff and runs deterministic commands.
@@ -63,6 +63,24 @@ The SQLite `selfmod_events` table is append-only through the public API and
 records proposals, backups, edits, diffs, tests, reviews, approvals, locks,
 deployments, health checks, and rollback. Retention is age/size bounded and
 never deletes the newest valid rollback bundle.
+
+### Recovery and audit are not a security boundary
+
+Backups, manifests, `manifest.sha256`, the `selfmod_events` table, and recovery
+evidence artifacts are written by the same operating-system user that runs
+Sonder. They make accidental corruption and ordinary guarded-mode mistakes
+detectable and recoverable. They are tamper-evident, not tamper-resistant: a
+same-user process can rewrite a backup, its manifest, its checksum, and the
+audit chain together so that verification still passes.
+
+Starting Sonder with `--unrestricted-selfmod` grants self-modification exactly
+that authority. Recovery state and audit files are therefore not a security
+boundary against `--unrestricted-selfmod`, and a successful verification made
+while that flag is active is not evidence that the process left them
+untouched. Typed recovery evidence carries this limitation on every record
+(`sonder_runtime/application/security/recovery_boundary.py`). Protection
+against an unrestricted process must come from outside it: a separate OS
+account, read-only or off-host backups, or an external append-only log.
 
 ## Protected policy
 

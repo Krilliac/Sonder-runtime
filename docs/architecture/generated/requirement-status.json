@@ -1258,9 +1258,9 @@
     },
     {
       "checked": false,
-      "claim": "Recovery evidence is stored through a bounded repository boundary.",
+      "claim": "Recovery evidence discloses same-user, audit, and startup unrestricted-selfmod limits on every recorded and verified record, operator documents state that recovery and audit are not a security boundary against --unrestricted-selfmod, and a repository-wide claim ratchet rejects new recovery/audit assurance overclaims.",
       "requirement_id": "SEC-009",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "6de57af4e57d8869d863a0c1357735c752390c27eafe4156d681cea84665f496",
+    "ledger_sha256": "2c8835e1b22f535574457276129e9d1e28bdd7d469448d5e1d08819af5d23297",
     "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
   }
 }
