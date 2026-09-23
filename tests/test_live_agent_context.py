@@ -174,4 +174,3 @@ def test_live_context_configured_source_overrides_project_and_global(tmp_path):
     assert "Configured skill" in rendered
     assert "PROJECT RULE" not in rendered
     assert "GLOBAL RULE" not in rendered
-

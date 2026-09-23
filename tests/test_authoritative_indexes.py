@@ -169,4 +169,3 @@ def test_scoped_index_retrieval_pages_without_silent_loss(tmp_path):
     with pytest.raises(ValueError, match="offset"):
         entities_for_project(conn, "repo-a", offset=-1)
     conn.close()
-
