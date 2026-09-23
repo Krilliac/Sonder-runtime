@@ -76,6 +76,60 @@ def test_selfmod_model_pin_is_passed_as_an_explicit_catalog_selector():
     }]
 
 
+def test_selfmod_model_pin_accepts_a_bounded_request_timeout():
+    server = _FakeServer()
+
+    nightly_selfmod._ask(
+        server, "inspect", num_predict=32,
+        model="qwen2.5-coder:14b", timeout=7,
+    )
+
+    assert server.calls[-1]["timeout"] == 7
+
+
+def test_objective_proposal_deadline_stops_before_another_model_call(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        nightly_selfmod, "_eligible_candidate_files",
+        lambda: ["reflection.py", "memory_quality.py"],
+    )
+    monkeypatch.setattr(
+        nightly_selfmod.time, "monotonic", lambda: 10.0,
+    )
+    monkeypatch.setattr(
+        nightly_selfmod, "_ask",
+        lambda *args, **kwargs: calls.append(kwargs) or "NONE",
+    )
+
+    result = nightly_selfmod.propose_objective(
+        object(), lambda _message: None, deadline=9.0,
+    )
+
+    assert result is None
+    assert calls == []
+
+
+def test_objective_proposal_caps_each_request_to_remaining_window(monkeypatch):
+    calls = []
+    clock = iter((10.0, 19.0, 21.0))
+    monkeypatch.setattr(
+        nightly_selfmod, "_eligible_candidate_files",
+        lambda: ["reflection.py", "memory_quality.py"],
+    )
+    monkeypatch.setattr(nightly_selfmod.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(
+        nightly_selfmod, "_ask",
+        lambda *args, **kwargs: calls.append(kwargs) or "NONE",
+    )
+
+    result = nightly_selfmod.propose_objective(
+        object(), lambda _message: None, deadline=20.0,
+    )
+
+    assert result is None
+    assert [call["timeout"] for call in calls] == [10, 1]
+
+
 def test_selfmod_refuses_unknown_or_cloud_explicit_models():
     server = _FakeServer()
     try:

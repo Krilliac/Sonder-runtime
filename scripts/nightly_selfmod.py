@@ -523,7 +523,7 @@ def _local_catalog_model(server, selected: str) -> str | None:
     return None
 
 
-def _ask(server, prompt, num_predict=1200, model="", num_ctx=0):
+def _ask(server, prompt, num_predict=1200, model="", num_ctx=0, timeout=60):
     # An explicit model is a catalog selector, not a temporary tier mutation.
     # The server refreshes its persisted runtime policy at every request, so
     # changing ``server.TIERS['code']`` in a caller is overwritten before the
@@ -545,7 +545,7 @@ def _ask(server, prompt, num_predict=1200, model="", num_ctx=0):
             raise RuntimeError("model unavailable: local model gateway is unavailable")
         reply = factory(
             resolved, "", 0.2, num_predict, num_ctx,
-            cloud=False, timeout=60,
+            cloud=False, timeout=timeout,
         )(prompt)
     else:
         kwargs = {
@@ -896,7 +896,9 @@ def _discard_workspace(run_id) -> None:
         pass
 
 
-def propose_objective(server, log, model="", num_ctx=0) -> tuple[str, str] | None:
+def propose_objective(
+    server, log, model="", num_ctx=0, *, deadline=None,
+) -> tuple[str, str] | None:
     """Ask the local model for ONE small, concrete improvement.
 
     Grounded in a real file's real contents, never from memory: asked to
@@ -911,6 +913,10 @@ def propose_objective(server, log, model="", num_ctx=0) -> tuple[str, str] | Non
 
     candidates = _eligible_candidate_files()
     for name in random.sample(candidates, k=len(candidates)):
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            log("  objective proposal deadline reached")
+            return None
         path = REPO / name
         source = path.read_text(encoding="utf-8", errors="replace")
         if len(source) > 60_000:
@@ -927,7 +933,8 @@ def propose_objective(server, log, model="", num_ctx=0) -> tuple[str, str] | Non
             "WHY: <one sentence naming the concrete wrong behaviour>\n\n"
             "If the module has no such defect, reply exactly: NONE\n\n"
             "=== %s ===\n%s" % (name, source[:60_000])
-        ), num_predict=300, model=model, num_ctx=num_ctx)
+        ), num_predict=300, model=model, num_ctx=num_ctx,
+            timeout=min(60, max(1, int(remaining))) if remaining is not None else 60)
         if answer.strip().upper().startswith("NONE"):
             log("  %s: model reports no defect" % name)
             continue
@@ -974,7 +981,10 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
         return ("working tree dirty (%d path(s)); a run started here could not "
                 "be committed, so none was started" % len(status.splitlines()))
 
-    proposed = propose_objective(server, log, model=model, num_ctx=num_ctx)
+    proposal_deadline = time.monotonic() + min(300.0, max(60.0, float(test_timeout)))
+    proposed = propose_objective(
+        server, log, model=model, num_ctx=num_ctx, deadline=proposal_deadline,
+    )
     if not proposed:
         return "no objective proposed"
     target, objective = proposed
