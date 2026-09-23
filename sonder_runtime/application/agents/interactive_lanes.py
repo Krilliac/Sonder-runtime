@@ -29,6 +29,7 @@ from ..ports.model_gateway import ModelRequest, require_model_text
 from ..session.capture import CapturedRequest, SessionCaptureService, _snapshot_payload
 from ..session.archive import ArchiveReference, SessionContextArchiveService
 from ..tools.gateway_contract import ToolGatewayRequest, ToolScope, ToolPermission
+from ..execution.effect_journal import JournalBinding, bound as bound_effect_journal
 from ..ports.tool_registry import ToolSchemaSelection
 from ..context_integration import ContextPlanningFacade
 from ..context_planner import CONTEXT_SECTIONS, ModelContext
@@ -189,6 +190,7 @@ class AgentLaneService:
         loop_factory=None,
         context_planning: ContextPlanningFacade | None = None,
         live_context: LiveAgentContextProducer | None = None,
+        effect_journal=None,
     ):
         self.store, self.sessions, self.gateway, self.tools = (
             store,
@@ -197,6 +199,7 @@ class AgentLaneService:
             tools,
         )
         self.authorize_grant = authorize_grant
+        self.effect_journal = effect_journal
         self.managed_authority = None
         self._worker_issuer = object()
         self._app_dispatch = {}
@@ -1822,7 +1825,9 @@ class AgentLaneService:
 
     def _execute_tool(self, lane, tool, context):
         name, args, effects = tool
-        call_id = "call-" + uuid.uuid4().hex
+        # A retry of the same durable attempt/step must address the same
+        # journal intent.  Random call IDs would make a replay look new.
+        call_id = "call-%s-step-%s" % (lane["attempt_id"], lane["used_steps"])
         with self._transaction(context, lane_id=lane["id"]) as tx:
             fresh = tx.lane(lane["id"])
             if fresh["owner"] != self.owner or fresh["status"] != "running":
@@ -1841,29 +1846,38 @@ class AgentLaneService:
         self._done()
         loop_step = self._loop_tool_step(lane, call_id, name)
         self._fresh_execution(lane["id"], context)
-        receipt = self.tools.execute(
-            ToolGatewayRequest(
-                call_id,
-                name,
-                args,
-                ToolScope(
-                    lane["principal_id"],
-                    (lane["workspace_root"],),
-                    effects,
-                    source="worker",
-                    auth_level=lane["auth_level"],
-                ),
-                ToolPermission(effects),
-                deadline_monotonic=context.deadline_monotonic,
-                cancellation=context.cancellation,
-                session_id=lane["session_id"],
-                # The model request was built before this turn incremented the
-                # durable step counter; execution sees the incremented value.
-                schema_selection=self._tool_schema_selection(
-                    lane, turn_number=lane["used_steps"]
-                ),
-            )
+        request = ToolGatewayRequest(
+            call_id,
+            name,
+            args,
+            ToolScope(
+                lane["principal_id"],
+                (lane["workspace_root"],),
+                effects,
+                source="worker",
+                auth_level=lane["auth_level"],
+            ),
+            ToolPermission(effects),
+            deadline_monotonic=context.deadline_monotonic,
+            cancellation=context.cancellation,
+            session_id=lane["session_id"],
+            # The model request was built before this turn incremented the
+            # durable step counter; execution sees the incremented value.
+            schema_selection=self._tool_schema_selection(
+                lane, turn_number=lane["used_steps"]
+            ),
         )
+        binding_context = nullcontext()
+        if self.effect_journal is not None:
+            binding_context = bound_effect_journal(JournalBinding(
+                self.effect_journal,
+                str(lane["attempt_id"]),
+                str(self.owner),
+                int(lane["revision"]),
+                str(lane["workspace_root"]),
+            ))
+        with binding_context:
+            receipt = self.tools.execute(request)
         output = getattr(receipt, "output", None)
         if hasattr(output, "output"):
             output = output.output

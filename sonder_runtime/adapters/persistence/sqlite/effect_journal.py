@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 from threading import Lock
 
@@ -88,7 +89,7 @@ class SQLiteEffectJournal:
                 if prior is not None:
                     if prior.request_digest != intent.request_digest:
                         raise EffectJournalError("idempotency key conflicts with request digest")
-                    return prior
+                    return replace(prior, replayed=True)
                 sequence = int(connection.execute(
                     "SELECT COALESCE(MAX(sequence),0)+1 FROM effect_journal WHERE run_id=?",
                     (intent.run_id,),
@@ -111,7 +112,7 @@ class SQLiteEffectJournal:
                 existing.request_digest) != (intent.run_id, intent.worker_id,
                                              intent.operation_id, intent.request_digest):
                 raise EffectJournalError("intent identity conflicts with durable record")
-            return existing
+            return replace(existing, replayed=True)
 
     def get(self, intent_id: str) -> EffectIntent | None:
         with self._connect() as connection:

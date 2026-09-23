@@ -23,7 +23,7 @@ def test_intent_is_idempotent_and_conflicts_are_rejected(tmp_path):
     journal = SQLiteEffectJournal(tmp_path / "effects.db")
     first = journal.begin(_intent())
     replay = journal.begin(_intent())
-    assert replay == first and first.sequence == 1
+    assert replay != first and replay.replayed and first.sequence == 1
     with pytest.raises(EffectJournalError):
         journal.begin(_intent(request_digest="b" * 64))
 
@@ -86,8 +86,9 @@ def test_gateway_records_intent_before_live_invocation(tmp_path):
     class Approval:
         def approve(self, _request): return True
     class Invoker:
-        def __init__(self, journal): self.journal = journal
+        def __init__(self, journal): self.journal = journal; self.calls = 0
         def invoke(self, _request):
+            self.calls += 1
             assert self.journal.high_water("run-1") == 1
             return ToolInvocationOutput(True, output="changed")
     class Redactor:
@@ -97,9 +98,10 @@ def test_gateway_records_intent_before_live_invocation(tmp_path):
 
     journal = SQLiteEffectJournal(tmp_path / "effects.db")
     receipts = Receipts()
+    invoker = Invoker(journal)
     gateway = ToolGateway(Schema(), type("Permissions", (), {
         "authorize_request": lambda self, _request: "permission:mode",
-    })(), Approval(), Invoker(journal), Redactor(), receipts)
+    })(), Approval(), invoker, Redactor(), receipts)
     request = ToolGatewayRequest(
         "req-1", "file_write", {"path": "a.txt", "content": "x"},
         ToolScope("worker", allowed_effects=frozenset({"mutation"}), source="worker"),
@@ -107,7 +109,10 @@ def test_gateway_records_intent_before_live_invocation(tmp_path):
     )
     with bound(JournalBinding(journal, "run-1", "w-1", 1, "/workspace")):
         receipt = gateway.execute(request)
+        with pytest.raises(EffectJournalError, match="duplicate effect intent"):
+            gateway.execute(request)
     assert receipt.success and journal.high_water("run-1") == 1
+    assert invoker.calls == 1
     journal.validate_checkpoint("run-1", 1)
 
 

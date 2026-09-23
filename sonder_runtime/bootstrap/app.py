@@ -756,6 +756,8 @@ def build_application(
         if interactive_lanes is None:
             from ..adapters.persistence.agent_lanes import SQLiteAgentLaneStore
             from ..adapters.persistence.fleet_store import database_path
+            from ..adapters.persistence.sqlite.effect_journal import SQLiteEffectJournal
+            from ..platform.paths import state_path
             from ..application.agents.interactive_lanes import AgentLaneService
             from ..application.live_context import LiveAgentContextProducer
             sessions = get_session_repository()
@@ -786,6 +788,9 @@ def build_application(
                 allowed_tools=tuple(item.name for item in lane_tools.graph.registry.list_all()),
                 context_planning=context_planning,
                 live_context=LiveAgentContextProducer(),
+                effect_journal=SQLiteEffectJournal(
+                    state_path("agent-effects.db", "SONDER_AGENT_EFFECTS_DB")
+                ),
             )
         return interactive_lanes
 
