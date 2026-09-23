@@ -167,7 +167,7 @@ def _local_ollama_json(server, path: str, payload: dict | None, timeout: float):
 
 
 def _prewarm_code_model(server, timeout_seconds: int = 60) -> str:
-    """Wait for the configured local code model to become resident."""
+    """Exercise the local chat route self-mod actually uses, then confirm residency."""
     model = str(getattr(server, "TIERS", {}).get("code") or "").strip()
     if not model:
         raise _CodeModelUnavailable("code tier has no configured model")
@@ -184,14 +184,29 @@ def _prewarm_code_model(server, timeout_seconds: int = 60) -> str:
                 for row in rows if isinstance(row, dict)
             )
 
-        if not resident():
-            _local_ollama_json(
-                server, "/api/generate",
-                {"model": model, "prompt": "", "stream": False, "keep_alive": "2m"},
-                max(60, int(timeout_seconds or 60)),
-            )
-            if resident():
-                return "ready model=%s" % model
+        options = {"num_predict": 32}
+        num_ctx = int(getattr(server, "SESSION_NUM_CTX", 0) or 0)
+        if num_ctx > 0:
+            options["num_ctx"] = num_ctx
+        response = _local_ollama_json(
+            server, "/api/chat",
+            {
+                "model": model,
+                "messages": [{"role": "user", "content": "Reply READY."}],
+                "stream": False,
+                "keep_alive": "2m",
+                "options": options,
+            },
+            max(60, int(timeout_seconds or 60)),
+        )
+        if (
+            not isinstance(response, dict)
+            or response.get("error")
+            or response.get("done") is not True
+        ):
+            raise _CodeModelUnavailable("local code chat probe did not complete")
+        if resident():
+            return "ready model=%s" % model
         while time.monotonic() < deadline:
             if resident():
                 return "ready model=%s" % model
@@ -454,6 +469,13 @@ def _run_locked(args, log, sonder_paths):
     critical_failures = []
     code_model_ready = True
     rounds = max(1, min(int(args.rounds or 1), 12))
+    if args.skip_campaign:
+        # Skipping campaign still runs self-mod. Never let that candidate use a
+        # code model whose actual chat route has not passed the readiness gate.
+        code_model_ready = _stage(
+            log, "code-model-prewarm",
+            lambda: _prewarm_code_model(server), critical_failures,
+        ) is not None
     for round_index in range(rounds):
         if rounds > 1:
             log("--- round %d/%d ---" % (round_index + 1, rounds))

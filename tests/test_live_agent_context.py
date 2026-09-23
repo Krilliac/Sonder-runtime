@@ -82,6 +82,24 @@ def test_live_agent_request_assembles_scoped_rules_skills_and_reuses_prefix(tmp_
     assert planner.prefix_cache_telemetry.writes == 2
     assert planner.prefix_cache_telemetry.last_reason == "prefix_changed"
 
+    # A live skill catalog update is also stable prefix input.  It must be
+    # observed through the real lane request path and carried into replay,
+    # rather than being hidden behind the producer's previous snapshot.
+    (project / "play" / "SKILL.md").write_text(
+        "---\nname: play\ndescription: Updated scoped review skill\n---\n",
+        encoding="utf-8",
+    )
+    changed_skill = service._request(
+        store.read_lane(lane), messages, request_id="changed-skill", context=context
+    )
+    assert "play: Updated scoped review skill" in changed_skill.system
+    assert changed_skill.prefix_cache_observation.result == "miss"
+    assert changed_skill.prefix_cache_observation.reason == "prefix_changed"
+    assert changed_skill.prefix_manifest.cache_key != changed.prefix_manifest.cache_key
+    assert changed_skill.replay_manifest.prefix_key == changed_skill.prefix_manifest.cache_key
+    assert changed_skill.replay_manifest.manifest_digest != changed.replay_manifest.manifest_digest
+    assert planner.prefix_cache_telemetry.writes == 3
+
 
 def test_live_prefix_request_crosses_provider_dispatch_with_sealed_route(tmp_path):
     project = _project(tmp_path, name="dispatch", rule="DISPATCH RULE")
