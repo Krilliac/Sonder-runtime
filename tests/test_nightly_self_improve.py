@@ -147,6 +147,67 @@ def test_nightly_stage_records_critical_failure():
     assert "FAILED" in messages[0]
 
 
+def test_nightly_lock_fails_closed_when_path_is_inaccessible(tmp_path):
+    messages = []
+    path = tmp_path / "missing" / "nightly.lock"
+
+    assert nightly_self_improve._claim_lock(path, messages.append) is None
+    assert any("refusing nightly run" in message for message in messages)
+
+
+def test_nightly_reports_failed_task_result_when_lock_cannot_be_opened(tmp_path, monkeypatch):
+    import sonder_paths
+
+    monkeypatch.setattr(nightly_self_improve.sys, "argv", ["nightly_self_improve.py"])
+    monkeypatch.setattr(sonder_paths, "state_path", lambda name: str(tmp_path / name))
+    monkeypatch.setattr(nightly_self_improve, "_claim_lock", lambda *_: None)
+
+    assert nightly_self_improve.main() == 1
+
+
+def test_nightly_does_not_reclaim_old_lock_owned_by_live_process(tmp_path, monkeypatch):
+    path = tmp_path / "nightly.lock"
+    path.write_text("4242", encoding="utf-8")
+    old = nightly_self_improve.time.time() - 7 * 3600
+    import os
+    os.utime(path, (old, old))
+    monkeypatch.setattr(nightly_self_improve, "_pid_state", lambda pid: "running")
+    messages = []
+
+    assert not nightly_self_improve._claim_lock(path, messages.append)
+    assert path.read_text(encoding="utf-8") == "4242"
+    assert any("still alive" in message for message in messages)
+
+
+def test_nightly_reclaims_old_lock_when_owner_is_gone(tmp_path, monkeypatch):
+    path = tmp_path / "nightly.lock"
+    path.write_text("4242", encoding="utf-8")
+    old = nightly_self_improve.time.time() - 7 * 3600
+    import os
+    os.utime(path, (old, old))
+
+    monkeypatch.setattr(nightly_self_improve, "_pid_state", lambda pid: "gone")
+    messages = []
+
+    assert nightly_self_improve._claim_lock(path, messages.append)
+    assert path.read_text(encoding="utf-8") == str(nightly_self_improve.os.getpid())
+
+
+def test_windows_lock_owner_probe_never_terminates_a_live_process():
+    if nightly_self_improve.os.name != "nt":
+        pytest.skip("Windows process handle probe")
+    import subprocess
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
+    try:
+        assert nightly_self_improve._pid_state(child.pid) == "running"
+        assert child.poll() is None
+    finally:
+        if child.poll() is None:
+            child.terminate()
+        child.wait(timeout=5)
+
+
 def test_nightly_classifies_known_blocking_results_but_keeps_intentional_skips():
     cases = [
         ("selfmod", "working tree dirty (4 path(s)); none was started", True),

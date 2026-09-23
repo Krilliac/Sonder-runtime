@@ -46,6 +46,19 @@ SENSITIVE_PREFIXES = (
     "sonder_runtime/domain/context/compaction.py",
     "sonder_runtime/domain/cloud_agent_tool_policy.py",
     "process_liveness.py", "ollama_endpoint.py",
+    # Evaluation and verifier implementations are the truth source for
+    # candidate acceptance.  A candidate may not alter the oracle it is
+    # being judged by during its own trial.
+    "verifiers.py", "promotion_eval.py", "eval_retrieval.py",
+    "ruff_verifier.py", "node_verifier.py", "json_schema_verifier.py",
+    "sql_verifier.py",
+    "scripts/nightly_selfmod.py", "scripts/nightly_self_improve.py",
+    "scripts/check_", "scripts/generate_documentation_catalogs.py",
+    "tests/test_verifiers", "tests/test_promotion_eval",
+    "tests/test_eval_retrieval", "tests/test_ruff_verifier",
+    "tests/test_node_verifier", "tests/test_json_schema_verifier",
+    "tests/test_sql_verifier", "tests/test_nightly_selfmod",
+    "tests/test_nightly_self_improve",
     "autopilot_controller.py", "autopilot_store.py", "sonder_paths.py", "sonder_serve.py",
     "deploy_", "sonder-runtime", "tests/test_permission", "tests/test_admin",
     "tests/test_control_plane", "tests/test_read_only_agent_policy",
