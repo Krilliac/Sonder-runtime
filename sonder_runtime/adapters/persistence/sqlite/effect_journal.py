@@ -52,6 +52,10 @@ class SQLiteEffectJournal:
         with self._connect() as connection:
             connection.executescript(_DDL)
 
+    @property
+    def database_path(self) -> Path:
+        return self._path
+
     @contextmanager
     def _connect(self):
         with owned_sqlite_transaction(str(self._path), timeout=5.0) as connection:
@@ -213,18 +217,29 @@ class SQLiteEffectJournal:
             ).fetchone()[0])
 
     def validate_checkpoint(self, run_id: str, high_water: int) -> None:
-        actual = self.high_water(run_id)
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            self.validate_checkpoint_in_transaction(connection, run_id, high_water)
+
+    def validate_checkpoint_in_transaction(self, connection, run_id: str, high_water: int) -> int:
+        """Validate one effect snapshot using the checkpoint caller's connection."""
+        if not connection.in_transaction:
+            raise EffectJournalError("checkpoint effect validation needs a transaction")
+        actual = int(connection.execute(
+            "SELECT COALESCE(MAX(sequence),0) FROM effect_journal WHERE run_id=?",
+            (run_id,),
+        ).fetchone()[0])
         if type(high_water) is not int or high_water != actual:
             raise EffectJournalError(
                 f"checkpoint effect high-water mismatch: expected {high_water}, actual {actual}"
             )
-        with self._connect() as connection:
-            unresolved = connection.execute(
-                "SELECT 1 FROM effect_journal WHERE run_id=? AND state IN (?,?) LIMIT 1",
-                (run_id, EffectState.INTENT.value, EffectState.UNCERTAIN.value),
-            ).fetchone()
+        unresolved = connection.execute(
+            "SELECT 1 FROM effect_journal WHERE run_id=? AND state IN (?,?) LIMIT 1",
+            (run_id, EffectState.INTENT.value, EffectState.UNCERTAIN.value),
+        ).fetchone()
         if unresolved is not None:
             raise EffectJournalError("checkpoint has an admitted effect without a definitive outcome")
+        return actual
 
     def recover(self, run_id: str, *, live_workers: Mapping[str, int], max_records: int = 100) -> RecoveryDecision:
         if isinstance(max_records, bool) or not 1 <= max_records <= 10_000:
