@@ -894,9 +894,9 @@
     },
     {
       "checked": false,
-      "claim": "An explicit operator command can plan and atomically adopt bounded legacy facts into one project-scoped authoritative source with a verified no-clobber SQLite backup, exact source/scope/row digest, and final in-transaction stale-plan refusal.",
+      "claim": "The active project/source fence is enforced on direct authoritative upsert and delete paths, and the composed authoritative repository rejects cross-project fact, count, entity, and decision reads while preserving the unconfigured legacy behavior.",
       "requirement_id": "MEM-004",
-      "revision": 4,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "b375dc60620060afb2cbe9812b241ec0b5d79f1f3802e530249ad25c94fa87e6",
+    "ledger_sha256": "53909c10bec03a0d52a6d36f7ea2dcc6e1a788c5d723371dce50c7d61529a247",
     "spec_sha256": "4797da92d2d1845ce944b2dc32353d52fe7a6e48dfa92593753ca727761ca714"
   }
 }
