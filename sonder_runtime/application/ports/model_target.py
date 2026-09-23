@@ -7,7 +7,7 @@ adapters can be tested and assembled with provider-owned dependencies.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Mapping, Protocol
 
 
@@ -19,6 +19,27 @@ class ModelTarget:
     cloud: bool
     tier_label: str | None
     augment_system: bool = True
+    # Provider-resolved prompt identity.  These remain optional because older
+    # bootstrap providers cannot prove their tokenizer or chat template.
+    provider_id: str | None = None
+    tokenizer: str | None = None
+    template: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedModelRoute:
+    """In-process route capability issued by the selected model gateway."""
+
+    provider_id: str
+    model: str
+    tier: str
+    tier_label: str
+    cloud: bool
+    tokenizer: str
+    template: str
+    _issuer: object = field(repr=False, compare=False)
+    dispatch_provider: str = ""
+    _dispatch_issuer: object | None = field(default=None, repr=False, compare=False)
 
 
 class ModelTargetResolver(Protocol):
@@ -65,5 +86,6 @@ __all__ = [
     "ModelGenerateFactory",
     "ModelSystemBuilder",
     "ModelTarget",
+    "ResolvedModelRoute",
     "ModelTargetResolver",
 ]

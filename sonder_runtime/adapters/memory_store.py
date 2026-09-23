@@ -19,6 +19,9 @@ from sonder_runtime.adapters.persistence.sqlite.outbox import OUTBOX_DDL
 from sonder_runtime.adapters.persistence.sqlite.memory_replication import (
     MEMORY_REPLICATION_DDL,
 )
+from sonder_runtime.adapters.persistence.sqlite.authoritative_indexes import (
+    AUTHORITATIVE_INDEX_DDL,
+)
 
 
 _ABANDONED_SESSION_CLAIMS_LOCK = globals().get(
@@ -270,7 +273,15 @@ CREATE TABLE IF NOT EXISTS memory_authoritative_fact_state (
     tombstoned INTEGER NOT NULL CHECK(tombstoned IN (0, 1)),
     PRIMARY KEY(project, fact_id)
 );
+CREATE TABLE IF NOT EXISTS memory_authoritative_fact_activation (
+    project_scope TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL
+);
 """
+
+# Derived entity/decision materializations share the authoritative fact
+# database and are always rebuildable from memory_replication_log.
+_SCHEMA += AUTHORITATIVE_INDEX_DDL
 
 
 def connect(path=":memory:", check_same_thread=True):
@@ -3561,7 +3572,23 @@ def find_duplicate_fact(conn, project, text):
     return find_duplicate_fact_in(facts_for_project(conn, project), text)
 
 
+def _reject_authoritative_fact_bypass(conn, project):
+    """Reject legacy fact helpers after an authoritative scope is activated."""
+    from sonder_runtime.domain.memory.replication import MemoryReplicationError
+
+    active = conn.execute(
+        "SELECT 1 FROM memory_authoritative_fact_activation "
+        "WHERE project_scope=? LIMIT 1",
+        (project,),
+    ).fetchone()
+    if active is not None:
+        raise MemoryReplicationError(
+            "legacy fact writes are disabled for an authoritative project scope"
+        )
+
+
 def add_fact(conn, fact_id, project, text, embedding=None):
+    _reject_authoritative_fact_bypass(conn, project)
     conn.execute(
         "INSERT INTO facts(id, project, text, embedding) VALUES(?, ?, ?, ?)",
         (fact_id, project, text, embedding),
@@ -3585,6 +3612,7 @@ def delete_fact(conn, fact_id, project):
     match or an unscoped identifier: either could remove a similarly-worded
     fact or a fact belonging to another project.
     """
+    _reject_authoritative_fact_bypass(conn, project)
     cursor = conn.execute(
         "DELETE FROM facts WHERE id=? AND project=?", (fact_id, project),
     )

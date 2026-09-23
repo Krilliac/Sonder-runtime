@@ -137,6 +137,9 @@ def reconstruct_model_visible_request(
         prompt=_text(payload, "prompt"), tier=_text(payload, "tier"),
         system=_text(payload, "system", required=False), history=tuple(history),
         options=MappingProxyType(dict(options)), stream=stream,
+        prefix_manifest=payload.get("prefix_manifest"),
+        replay_manifest=payload.get("replay_manifest"),
+        prefix_cache_observation=payload.get("prefix_cache_observation"),
     )
     return ModelVisibleRequest(
         request=request,

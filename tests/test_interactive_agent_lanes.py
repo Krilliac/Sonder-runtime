@@ -11,6 +11,7 @@ from sonder_runtime.adapters.persistence.agent_lanes import SQLiteAgentLaneStore
 from sonder_runtime.adapters.persistence.session_repository import (
     SQLiteSessionRepository,
 )
+from sonder_runtime.adapters.persistence.sqlite.effect_journal import SQLiteEffectJournal
 
 
 class Model:
@@ -615,6 +616,40 @@ def test_lane_history_rejects_archive_reference_from_another_project(env):
     assert all("archive-other" not in item["content"] for item in service._history(lane))
 
 
+def test_live_lane_tool_boundary_persists_effect_intent_and_outcome(env):
+    from sonder_runtime.application.ports.tool_registry import InMemoryToolRegistry, ToolDescriptor
+    from sonder_runtime.application.ports.tool_execution import ToolExecutionResult
+    from sonder_runtime.application.tools.facade import ToolApplicationFacade
+    from sonder_runtime.application.tools.resource_policy import ResourcePolicy, PolicyRule, Decision
+    from sonder_runtime.domain.tools.descriptors import ToolEffect
+
+    service, _, _, model, context, _ = env
+    journal = SQLiteEffectJournal(env[-1] / "effects.db")
+    service.effect_journal = journal
+
+    class Executor:
+        def execute(self, descriptor, call, ctx, execution_class):
+            return ToolExecutionResult(tool_name=descriptor.name, success=True, output="ok")
+
+    descriptor = ToolDescriptor(
+        "write_file",
+        input_schema={"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                      "required": ["path", "content"]},
+        effects=frozenset({ToolEffect.WRITE_FILES}),
+    )
+    service.tools = ToolApplicationFacade.compose(
+        InMemoryToolRegistry([descriptor]), Executor(),
+        policy=ResourcePolicy([PolicyRule("allow", Decision.ALLOW, tool="write_file")]),
+    )
+    lane = spawn(env, command="journal-lane")["lane"]["id"]
+    replies = iter(['{"tool":"write_file","arguments":{"path":"result.txt","content":"ok"}}', "done"])
+    model.generate = lambda request, ctx: ModelResponse(next(replies), "fake", "code", tokens_out=1)
+    service.run_pending(lane, context)
+    attempt = service.store.read_lane(lane)["attempt_id"]
+    record = journal.get(f"{attempt}:call-{attempt}-step-1")
+    assert record is not None and record.state.value == "completed"
+
+
 def test_archive_projection_failure_does_not_rerun_committed_tool(env, monkeypatch):
     service, _, _, _, context, _ = env
     lane_id = spawn(env)["lane"]["id"]
@@ -648,6 +683,296 @@ def test_small_lane_tool_result_stays_inline_without_archive_reference(env):
     assert sessions.search(
         session_id=lane["session_id"], event_type="context.archive.created", limit=10
     ) == ()
+
+
+def test_live_request_compacts_canonical_tool_output_and_recovers_after_restart(env):
+    service, store, sessions, model, context, _ = env
+    lane_id = spawn(env, command="compact-live")['lane']['id']
+    lane = service.store.read_lane(lane_id)
+    sessions.append(
+        lane["session_id"], "goal.updated",
+        {"decision": "preserve user contract", "constraint": "keep failure visible"},
+        event_id="decision-1",
+    )
+    sessions.append(
+        lane["session_id"], "tool.result",
+        {"call_id": "canonical-large", "content": "private output " * 5000},
+        event_id="canonical-large",
+    )
+    sessions.append(
+        lane["session_id"], "model.failed",
+        {"request_id": "prior", "error_code": "timeout", "detail": "retry required"},
+        event_id="failure-1",
+    )
+
+    service.run_pending(lane_id, context)
+    request = model.requests[0][0]
+    pointer = next(
+        item["content"] for item in request.history
+        if "tool output archived" in item["content"]
+    )
+    assert "private output" not in pointer
+    assert any("preserve user contract" in item["content"] for item in request.history)
+    assert any("retry required" in item["content"] for item in request.history)
+
+    archive = sessions.search(
+        session_id=lane["session_id"],
+        event_type="context.archive.created",
+        text="canonical-large",
+        limit=4,
+    )[0]
+    archive_id = archive.payload["archive_id"]
+    recovered = service.retrieve_archived_tool(lane_id, archive_id, context)
+    assert recovered["payload"]["content"].startswith("private output")
+
+    reopened = AgentLaneService(store, sessions, model, auto_start=False)
+    recovered_after_restart = reopened.retrieve_archived_tool(
+        lane_id, archive_id, context
+    )
+    assert recovered_after_restart == recovered
+    assert any(
+        "tool output archived" in item["content"]
+        for item in reopened._history(reopened.store.read_lane(lane_id))
+    )
+
+
+def test_live_request_merges_evicted_placeholders_in_source_order(env):
+    service, _, sessions, model, context, _ = env
+    lane_id = spawn(env, command="compact-order")['lane']['id']
+    lane = service.store.read_lane(lane_id)
+    sessions.append(
+        lane["session_id"], "model.response", {"content": "before"},
+        event_id="before",
+    )
+    for index in range(3):
+        sessions.append(
+            lane["session_id"], "tool.result",
+            {"call_id": f"ordered-{index}", "content": "private-%d " % index * 5000},
+            event_id=f"ordered-{index}",
+        )
+        sessions.append(
+            lane["session_id"], "model.response", {"content": f"after-{index}"},
+            event_id=f"after-{index}",
+        )
+
+    service.run_pending(lane_id, context)
+    history = [item["content"] for item in model.requests[0][0].history]
+    archive_ids = [
+        event.payload["archive_id"]
+        for event in sorted(
+            sessions.search(
+                session_id=lane["session_id"],
+                event_type="context.archive.created",
+                limit=8,
+            ),
+            key=lambda event: event.payload["source_sequence"],
+        )
+    ]
+    positions = [
+        next(i for i, value in enumerate(history) if archive_id in value)
+        for archive_id in archive_ids
+    ]
+    assert positions == sorted(positions)
+    assert history.index("before") < positions[0]
+    assert positions[-1] < history.index("after-2")
+
+
+def test_live_request_fails_recoverably_when_protected_history_exceeds_budget(env):
+    service, _, sessions, model, context, _ = env
+    lane_id = spawn(env, command="compact-protected-overflow")['lane']['id']
+    lane = service.store.read_lane(lane_id)
+    for index in range(41):
+        sessions.append(
+            lane["session_id"], "model.response",
+            {
+                "content": f"rationale-{index}",
+                "decisions": (["keep marked decision"] if index == 0 else []),
+            }, event_id=f"response-{index}",
+        )
+
+    service.run_pending(lane_id, context)
+    failed = service.inspect(lane_id, context)["lane"]
+    assert failed["status"] == "awaiting_input"
+    assert failed["error"] == "CONTEXT_HISTORY_OVERFLOW"
+
+    current = sessions.read_tail(lane["session_id"], limit=256)
+    compacted = service._compaction.compact(
+        lane["session_id"],
+        start_sequence=current[0].sequence,
+        end_sequence=current[-1].sequence,
+    )
+    assert compacted.event_type == "compaction.completed"
+
+    resumed = service.control(
+        lane_id, "resume", command_id="resume-overflow", context=context,
+    )["lane"]
+    assert resumed["status"] == "queued"
+    service.run_pending(lane_id, context)
+    assert len(model.requests) == 1
+    history = [item["content"] for item in model.requests[0][0].history]
+    assert any("keep marked decision" in item for item in history)
+    assert any("CONTEXT_HISTORY_OVERFLOW" in item for item in history)
+    assert any(
+        event.event_id == "response-0"
+        for event in sessions.read_range(lane["session_id"], limit=256)
+    )
+    assert sessions.search(
+        session_id=lane["session_id"], text="keep marked decision", limit=8,
+    )
+
+
+def test_live_request_rejects_malformed_or_overlapping_compaction_summaries(env):
+    from sonder_runtime.application.compaction import SessionCompactionError
+
+    service, _, sessions, _, context, root = env
+    lane_id = spawn(env, command="compact-invalid")['lane']['id']
+    lane = service.store.read_lane(lane_id)
+    source = [
+        sessions.append(lane["session_id"], "model.response", {"content": f"r-{i}"})
+        for i in range(3)
+    ]
+    first = service._compaction.compact(
+        lane["session_id"],
+        start_sequence=source[0].sequence,
+        end_sequence=source[1].sequence,
+    )
+    second = service._compaction.compact(
+        lane["session_id"],
+        start_sequence=source[1].sequence,
+        end_sequence=source[2].sequence,
+    )
+    with pytest.raises(SessionCompactionError, match="overlap"):
+        service._history(lane)
+
+    malformed = sessions.append(
+        lane["session_id"], "compaction.completed",
+        {"source_range": {"session_id": lane["session_id"]}, "summary": {}},
+        event_id="malformed-compaction",
+    )
+    assert malformed.event_type == "compaction.completed"
+    with pytest.raises(SessionCompactionError):
+        service._history(lane)
+
+
+def test_live_request_rejects_forged_extra_summary_fields_and_tampered_modalities(env):
+    from sonder_runtime.application.compaction import SessionCompactionError
+
+    service, _, sessions, _, context, root = env
+
+    def append_forged(lane, source, summary, event_id):
+        sessions.append(
+            lane["session_id"], "compaction.completed",
+            {
+                "source_range": {
+                    "session_id": lane["session_id"],
+                    "start_sequence": source.sequence,
+                    "end_sequence": source.sequence,
+                    "start_event_id": source.event_id,
+                    "end_event_id": source.event_id,
+                },
+                "summary": summary,
+            },
+            event_id=event_id,
+        )
+
+    extra_root = root / "child-extra"
+    extra_root.mkdir()
+    lane = service.store.read_lane(
+        service.spawn(
+            command_id="compact-forged-extra", parent_session_id="parent",
+            task="implement parser", workspace_root=str(extra_root), context=context,
+        )["lane"]["id"]
+    )
+    source = sessions.append(
+        lane["session_id"], "model.response",
+        {"content": "original", "decisions": ["real decision"]},
+        event_id="forged-source-extra",
+    )
+    modality = {
+        "event_id": source.event_id,
+        "event_type": "model.response",
+        "modality": "text",
+        "payload": dict(source.payload),
+    }
+    append_forged(
+        lane, source,
+        {
+            "facts": [], "decisions": ["real decision", "FABRICATED DECISION"],
+            "unresolved_tasks": [], "artifacts": [], "tool_outcomes": [],
+            "confidence": None, "modalities": [modality],
+        },
+        "forged-extra-summary",
+    )
+    with pytest.raises(SessionCompactionError, match="canonical"):
+        service._history(lane)
+
+    modality_root = root / "child-modality"
+    modality_root.mkdir()
+    lane = service.store.read_lane(
+        service.spawn(
+            command_id="compact-forged-modality", parent_session_id="parent",
+            task="implement parser", workspace_root=str(modality_root), context=context,
+        )["lane"]["id"]
+    )
+    source = sessions.append(
+        lane["session_id"], "model.response",
+        {"content": "original", "decisions": ["real decision"]},
+        event_id="forged-source-modality",
+    )
+    tampered = {
+        "event_id": source.event_id,
+        "event_type": "model.response",
+        "modality": "text",
+        "payload": {"content": "tampered", "decisions": ["real decision"]},
+    }
+    append_forged(
+        lane, source,
+        {
+            "facts": [], "decisions": ["real decision"],
+            "unresolved_tasks": [], "artifacts": [], "tool_outcomes": [],
+            "confidence": None, "modalities": [tampered],
+        },
+        "forged-modality-summary",
+    )
+    with pytest.raises(SessionCompactionError, match="canonical"):
+        service._history(lane)
+
+
+def test_live_request_keeps_bounded_tail_gap_explicit_for_long_sessions(env):
+    from sonder_runtime.application.agents.interactive_lanes import ContextHistoryOverflowError
+
+    service, _, sessions, _, _, _ = env
+    lane_id = spawn(env, command="compact-long-tail")['lane']['id']
+    lane = service.store.read_lane(lane_id)
+    for index in range(257):
+        sessions.append(
+            lane["session_id"], "model.response",
+            {"content": f"long-rationale-{index}"}, event_id=f"long-{index}",
+        )
+
+    with pytest.raises(ContextHistoryOverflowError, match="canonical session tail omits"):
+        service._history(lane)
+
+
+def test_live_request_rejects_tail_gap_hiding_an_earlier_model_decision(env):
+    from sonder_runtime.application.agents.interactive_lanes import ContextHistoryOverflowError
+
+    service, _, sessions, _, _, _ = env
+    lane_id = spawn(env, command="compact-hidden-decision")["lane"]["id"]
+    lane = service.store.read_lane(lane_id)
+    sessions.append(
+        lane["session_id"], "model.response",
+        {"content": "Accepted decision: preserve the first project rule."},
+        event_id="early-decision",
+    )
+    for index in range(257):
+        sessions.append(
+            lane["session_id"], "tool.requested",
+            {"call_id": f"late-{index}"}, event_id=f"late-request-{index}",
+        )
+
+    with pytest.raises(ContextHistoryOverflowError, match="canonical session tail omits"):
+        service._history(lane)
 
 
 def test_recent_tool_context_cap_applies_to_matched_completed_calls(env):
@@ -698,7 +1023,7 @@ def test_recent_lane_tool_context_is_capped_ordered_and_survives_canonical_prefi
     service, _, sessions, _, context, _ = env
     lane_id = spawn(env)["lane"]["id"]
     lane = service.store.read_lane(lane_id)
-    for index in range(1_050):
+    for index in range(30):
         sessions.append(
             lane["session_id"], "model.response",
             {"content": f"historical-{index}"}, event_id=f"history-{index}",
@@ -726,7 +1051,7 @@ def test_recent_lane_tool_context_is_capped_ordered_and_survives_canonical_prefi
     ]
     assert [pointer.split("Tool result archived for this project; ", 1)[1].rstrip(".") for pointer in pointers] == expected
     assert len(archive_events) == 10
-    assert any(item["content"] == "historical-1049" for item in history)
+    assert any(item["content"] == "historical-29" for item in history)
     assert any(
         event.payload.get("content") == "historical-0"
         for event in sessions.read_range(lane["session_id"], limit=16)

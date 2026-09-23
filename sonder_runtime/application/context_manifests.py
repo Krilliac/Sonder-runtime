@@ -14,6 +14,7 @@ import re
 import string
 from collections import Counter, OrderedDict
 from dataclasses import dataclass
+from threading import RLock
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 
@@ -196,6 +197,34 @@ class PrefixCacheTelemetry:
 
 
 @dataclass(frozen=True)
+class PrefixCacheObservation:
+    """The cache decision for one concrete request assembly.
+
+    Aggregate counters are useful for operations, but cannot be attached to a
+    provider request without racing the next request.  This immutable record
+    binds the per-request result to the exact prefix and identity that was
+    resolved.
+    """
+
+    cache_key: str
+    identity_key: str
+    version: str
+    result: str
+    reason: str
+    wrote: bool
+
+    def __post_init__(self) -> None:
+        if not all(isinstance(value, str) and value for value in (
+            self.cache_key, self.identity_key, self.version, self.result, self.reason,
+        )):
+            raise ValueError("prefix cache observation identity is invalid")
+        if self.result not in {"hit", "miss"}:
+            raise ValueError("prefix cache observation result is invalid")
+        if type(self.wrote) is not bool:
+            raise TypeError("prefix cache observation wrote must be a bool")
+
+
+@dataclass(frozen=True)
 class PrefixIdentity:
     """Stable inputs that can make a rendered prefix reusable.
 
@@ -209,11 +238,13 @@ class PrefixIdentity:
     system_prefix: str = ""
     visible_tool_schemas: Any = ()
     project_policy: Any = None
+    provider_id: str = ""
 
     @property
     def digest(self) -> str:
         return _digest({
             "model": self.model,
+            "provider_id": self.provider_id,
             "tokenizer": self.tokenizer,
             "template": self.template,
             "system_prefix": self.system_prefix,
@@ -224,7 +255,7 @@ class PrefixIdentity:
 
 def build_prefix_manifest(
     records: Sequence[ContextRecord], *, version: str = "1",
-    model: str = "", tokenizer: str = "", template: str = "",
+    model: str = "", provider_id: str = "", tokenizer: str = "", template: str = "",
     system_prefix: str = "", visible_tool_schemas: Any = (),
     tool_schemas: Any = None,
     project_policy: Any = None, dynamic_memory: Any = None,
@@ -237,7 +268,10 @@ def build_prefix_manifest(
     ordered = tuple(sorted(stable, key=lambda item: (item.section, item.item_id, item.content_digest)))
     if tool_schemas is not None:
         visible_tool_schemas = tool_schemas
-    identity = PrefixIdentity(model, tokenizer, template, system_prefix, visible_tool_schemas, project_policy)
+    identity = PrefixIdentity(
+        model, tokenizer, template, system_prefix, visible_tool_schemas,
+        project_policy, provider_id,
+    )
     material = {
         "version": version,
         "identity": identity.digest,
@@ -262,9 +296,26 @@ class PrefixManifestCache:
         self._last_cache_key: str | None = None
         self._last_identity_key: str | None = None
         self._last_version: str | None = None
+        self._last_observation: PrefixCacheObservation | None = None
+        self._lock = RLock()
 
     def resolve(self, records: Sequence[ContextRecord], *, version: str = "1", **identity: Any) -> PrefixManifest:
+        manifest, _observation = self.resolve_observed(
+            records, version=version, **identity,
+        )
+        return manifest
+
+    def resolve_observed(
+        self, records: Sequence[ContextRecord], *, version: str = "1", **identity: Any,
+    ) -> tuple[PrefixManifest, PrefixCacheObservation]:
+        """Return the manifest and its own cache decision as one result."""
         manifest = build_prefix_manifest(records, version=version, **identity)
+        with self._lock:
+            return self._resolve_observed_locked(manifest)
+
+    def _resolve_observed_locked(
+        self, manifest: PrefixManifest,
+    ) -> tuple[PrefixManifest, PrefixCacheObservation]:
         cached = self._values.get(manifest.cache_key)
         if cached is not None:
             self.hits += 1
@@ -272,7 +323,12 @@ class PrefixManifestCache:
             self._reasons["hit"] += 1
             self._values.move_to_end(manifest.cache_key)
             self._remember(manifest)
-            return cached
+            observation = PrefixCacheObservation(
+                manifest.cache_key, manifest.identity_key, manifest.version,
+                "hit", "hit", False,
+            )
+            self._last_observation = observation
+            return cached, observation
         self.misses += 1
         if not self._values:
             reason = "cold_start"
@@ -290,7 +346,12 @@ class PrefixManifestCache:
             self._values.popitem(last=False)
         self.writes += 1
         self._remember(manifest)
-        return manifest
+        observation = PrefixCacheObservation(
+            manifest.cache_key, manifest.identity_key, manifest.version,
+            "miss", reason, True,
+        )
+        self._last_observation = observation
+        return manifest, observation
 
     def _remember(self, manifest: PrefixManifest) -> None:
         self._last_cache_key = manifest.cache_key
@@ -299,7 +360,13 @@ class PrefixManifestCache:
 
     @property
     def telemetry(self) -> PrefixCacheTelemetry:
-        return PrefixCacheTelemetry(self.hits, self.misses, self.writes, self._last_reason, MappingProxyType(dict(self._reasons)))
+        with self._lock:
+            return PrefixCacheTelemetry(self.hits, self.misses, self.writes, self._last_reason, MappingProxyType(dict(self._reasons)))
+
+    @property
+    def last_observation(self) -> PrefixCacheObservation | None:
+        with self._lock:
+            return self._last_observation
 
 
 @dataclass(frozen=True)
@@ -341,5 +408,6 @@ def build_replay_manifest(
 __all__ = [
     "ContextRecord", "DedupProvenance", "DeduplicationResult", "deduplicate_context",
     "Snapshot", "LastGoodSnapshot", "PrefixManifest", "PrefixIdentity", "PrefixCacheTelemetry", "PrefixManifestCache",
+    "PrefixCacheObservation",
     "ReplaySection", "ReplayManifest", "build_prefix_manifest", "build_replay_manifest",
 ]

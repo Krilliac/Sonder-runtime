@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from sonder_runtime.adapters.persistence.session_repository import SQLiteSessionRepository
 from sonder_runtime.application.ports.model_gateway import ModelRequest
+from sonder_runtime.application.context_manifests import (
+    ContextRecord, PrefixCacheObservation, build_prefix_manifest,
+    build_replay_manifest,
+)
 from sonder_runtime.application.session.capture import SessionCaptureService
 from sonder_runtime.domain.common.errors import InvalidInput
 
@@ -99,3 +105,77 @@ def test_retrospective_response_keeps_supplied_request_identity(tmp_path):
     )
     assert len(result.appended) == 3
     assert result.appended[-1].payload["request_id"] == "legacy-r1"
+
+
+def test_capture_persists_prefix_and_replay_evidence_without_prompt_contents(tmp_path):
+    record = ContextRecord(
+        "rule-1", "project_rules", "keep changes bounded", "project", 1, True,
+    )
+    prefix = build_prefix_manifest((record,), model="model", provider_id="ollama")
+    replay = build_replay_manifest(
+        "r1", "model", (record,), prefix_key=prefix.cache_key,
+        metadata={"producer": "live-agent-context"},
+    )
+    request = ModelRequest(
+        prompt="hello", tier="code", prefix_manifest=prefix,
+        replay_manifest=replay,
+        prefix_cache_observation=PrefixCacheObservation(
+            prefix.cache_key, prefix.identity_key, prefix.version,
+            "miss", "cold_start", True,
+        ),
+    )
+    repository = SQLiteSessionRepository(tmp_path / "session.db")
+    result = SessionCaptureService(repository).capture_turn(
+        "s1", "t1", request, request_id="r1", model_response="world",
+    )
+    payload = result.appended[0].payload
+    assert payload["prefix_manifest"]["cache_key"] == prefix.cache_key
+    assert payload["replay_manifest"]["manifest_digest"] == replay.manifest_digest
+    assert payload["replay_manifest"]["sections"][0]["content_digest"] == record.content_digest
+    assert "keep changes bounded" not in str(payload)
+    reconstructed = result.replay.replay.request
+    assert reconstructed is not None
+    assert reconstructed.replay_manifest["manifest_digest"] == replay.manifest_digest
+    assert reconstructed.prefix_cache_observation["reason"] == "cold_start"
+
+
+def test_request_rejects_cache_observation_for_another_prefix():
+    first = build_prefix_manifest(
+        (ContextRecord("first", "project_rules", "one", "project", 1, True),),
+        model="model", provider_id="ollama",
+    )
+    second = build_prefix_manifest(
+        (ContextRecord("second", "project_rules", "two", "project", 1, True),),
+        model="model", provider_id="ollama",
+    )
+    with pytest.raises(ValueError, match="does not match"):
+        ModelRequest(
+            prompt="hello", tier="code", prefix_manifest=first,
+            prefix_cache_observation=PrefixCacheObservation(
+                second.cache_key, second.identity_key, second.version,
+                "hit", "hit", False,
+            ),
+        )
+    with pytest.raises(ValueError, match="replay manifest"):
+        ModelRequest(
+            prompt="hello", tier="code", prefix_manifest=first,
+            replay_manifest=build_replay_manifest(
+                "r2", "model", (), prefix_key=second.cache_key,
+            ),
+        )
+
+    forged = ModelRequest(
+        prompt="hello", tier="code",
+        prefix_manifest=SimpleNamespace(
+            cache_key=first.cache_key, identity_key=first.identity_key,
+            version=first.version, sections=first.sections,
+        ),
+        prefix_cache_observation=PrefixCacheObservation(
+            first.cache_key, first.identity_key, first.version,
+            "hit", "hit", False,
+        ),
+    )
+    with pytest.raises(InvalidInput, match="live immutable manifest"):
+        SessionCaptureService(SQLiteSessionRepository(":memory:")).capture_turn(
+            "s1", "t1", forged, request_id="r1", model_response="world",
+        )

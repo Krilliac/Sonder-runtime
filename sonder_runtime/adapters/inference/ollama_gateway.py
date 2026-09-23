@@ -42,6 +42,7 @@ from ...application.ports.model_target import (
     ModelSystemBuilder,
     ModelTarget,
     ModelTargetResolver,
+    ResolvedModelRoute,
 )
 from ...platform import context_policy
 from ...platform.metrics import default_registry
@@ -183,6 +184,7 @@ class OllamaGateway:
         session_num_ctx: int | None = None,
     ):
         self._target_resolver = target_resolver or type(self)._default_target_resolver
+        self._route_issuer = object()
         self._system_builder = system_builder
         self._generate_factory = generate_factory or type(self)._default_generate_factory
         self._embedding_provider = embedding_provider
@@ -199,6 +201,37 @@ class OllamaGateway:
         """Typed capability metadata; shape matches ``ProviderHealth.capabilities``."""
         return CAPABILITIES
 
+    def resolve_route(self, request: ModelRequest, context: OperationContext):
+        """Resolve the route whose identity may be used by a live prefix."""
+        _check_liveness(context)
+        if self._target_resolver is None:
+            raise DependencyUnavailable(
+                "Ollama gateway requires an injected target provider"
+            )
+        target = self._target_resolver(request.tier or "sonder", False)
+        if not isinstance(target, ModelTarget):
+            raise DependencyUnavailable("model target provider returned invalid target")
+        if target.tier_label == "cloud-disabled":
+            raise Forbidden("cloud tiers are disabled on this runtime")
+        if not isinstance(target.model, str) or not target.model.strip():
+            raise DependencyUnavailable("model route identity is unavailable")
+        if not isinstance(target.tier_label, str) or not target.tier_label.strip():
+            raise InvalidInput("unknown model tier %r" % (request.tier,))
+        if type(target.cloud) is not bool:
+            raise DependencyUnavailable("model cloud classification is invalid")
+        if target.tokenizer is not None and not isinstance(target.tokenizer, str):
+            raise DependencyUnavailable("model tokenizer identity is invalid")
+        if target.template is not None and not isinstance(target.template, str):
+            raise DependencyUnavailable("model template identity is invalid")
+        _enforce_local_endpoint(ollama_endpoint.normalize(), context)
+        if target.cloud and not context.cloud_allowed:
+            raise Forbidden("cloud tier requires caller consent")
+        return ResolvedModelRoute(
+            "ollama", target.model, request.tier, target.tier_label,
+            target.cloud, target.tokenizer or "", target.template or "",
+            self._route_issuer,
+        )
+
     def generate(
         self, request: ModelRequest, context: OperationContext
     ) -> ModelResponse:
@@ -209,10 +242,30 @@ class OllamaGateway:
                 "Ollama gateway requires injected target and generate providers"
             )
         logger.debug(f"OllamaGateway.generate: tier={request.tier!r}")
-        target = self._target_resolver(request.tier or "sonder", False)
-        if not isinstance(target, ModelTarget):
-            raise DependencyUnavailable("model target provider returned invalid target")
-        model, cloud, tier_label = target.model, target.cloud, target.tier_label
+        options = dict(request.options or {})
+        if "_resolved_route" in options:
+            raise InvalidInput("resolved routes cannot be supplied as model options")
+        resolved_route = request._resolved_route
+        if resolved_route is None:
+            target = self._target_resolver(request.tier or "sonder", False)
+            if not isinstance(target, ModelTarget):
+                raise DependencyUnavailable("model target provider returned invalid target")
+            model, cloud, tier_label = target.model, target.cloud, target.tier_label
+        else:
+            if (
+                not isinstance(resolved_route, ResolvedModelRoute)
+                or resolved_route._issuer is not self._route_issuer
+                or resolved_route.provider_id != "ollama"
+                or resolved_route.tier != request.tier
+            ):
+                raise InvalidInput("resolved model route was not issued for this request")
+            model = resolved_route.model
+            cloud = resolved_route.cloud
+            tier_label = resolved_route.tier_label
+            if (not isinstance(model, str) or not model.strip()
+                    or not isinstance(tier_label, str) or not tier_label.strip()
+                    or not isinstance(cloud, bool)):
+                raise InvalidInput("resolved model route has invalid fields")
         logger.debug(f"OllamaGateway.generate: resolved model={model!r}, cloud={cloud}, tier_label={tier_label!r}")
         if tier_label == "cloud-disabled":
             raise Forbidden("cloud tiers are disabled on this runtime")
@@ -232,7 +285,6 @@ class OllamaGateway:
                 "does not allow cloud" % (request.tier,)
             )
 
-        options = dict(request.options or {})
         num_predict = options.get("num_predict", 1024)
         think_supplied = "think" in options
         think = options.get("think")

@@ -340,6 +340,23 @@ class ManagedStandaloneSession:
             self, expected_turn, verifier_factory=verifier_factory
         )
 
+    def persist_learning_observation(
+        self, expected_turn, *, verifier_factory, repository,
+    ):
+        """Persist one observation only after current terminal eligibility passes."""
+        if not callable(getattr(repository, "append", None)):
+            raise TypeError("verifier observation repository is required")
+        eligibility = self.terminal_eligibility(
+            expected_turn, verifier_factory=verifier_factory
+        )
+        from ..application.memory.receipt_observation import ReceiptObservationProducer
+
+        receipt, observation = ReceiptObservationProducer.from_terminal_eligibility(
+            eligibility
+        )
+        repository.append(receipt, observation)
+        return observation
+
     def recovery_verification(self, *, verifier_factory):
         self._compose_verifier(verifier_factory)
         identity = self._bound.pending_verification()
