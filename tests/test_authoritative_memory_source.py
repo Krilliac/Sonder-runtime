@@ -351,6 +351,12 @@ def test_activation_pages_large_authoritative_state_without_rejecting_valid_rows
     source.activate(connection)
     for index in range(1025):
         source.add_fact(connection, f"fact-{index:04d}", "repo-a", f"value-{index}")
+    # Full paged journal authentication runs when a source first claims a
+    # scope (for example after an operator migration or restore); re-entry on
+    # an already-claimed scope uses the bounded check in
+    # test_authoritative_activation_cost.py.
+    connection.execute("DELETE FROM memory_authoritative_fact_activation")
+    connection.commit()
 
     statements = []
     connection.set_trace_callback(statements.append)

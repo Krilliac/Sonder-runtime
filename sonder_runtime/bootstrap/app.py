@@ -316,7 +316,13 @@ def build_application(
         # peer connection until its explicit receiver or replicate_once call.
         from .memory_replication import compose_memory_replication_service
 
-        memory_replication_service = compose_memory_replication_service(config)
+        # compose_memory_unit_of_work() activates the authoritative fact
+        # source for this same scope and memory database whenever
+        # replication is enabled, so a receiver here could never land a
+        # peer fact; the service refuses to expose one.
+        memory_replication_service = compose_memory_replication_service(
+            config, authoritative_fact_scope_owned=True,
+        )
     # Keep the transitional provider behind lazy closures: composing the
     # application must not import the historical root module.
     logger.debug("resolving legacy model provider factories")

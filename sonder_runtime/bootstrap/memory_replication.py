@@ -648,6 +648,31 @@ class _SerializedFactSink:
             self.connection.close()
 
 
+def _receiver_scope_conflict(project_scope: str) -> str:
+    return (
+        "[memory_replication].receiver_enabled cannot receive peer facts for "
+        f"project scope {project_scope!r}: that scope is owned by the local "
+        "authoritative fact source, which rejects replicated fact writes. "
+        "Disable receiver_enabled for this node or receive into a database "
+        "without an authoritative activation for the scope."
+    )
+
+
+def _authoritative_scope_active(connection, project_scope: str) -> bool:
+    """Return whether a local authoritative source already owns the scope."""
+    table = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='memory_authoritative_fact_activation'"
+    ).fetchone()
+    if table is None:
+        return False
+    return connection.execute(
+        "SELECT 1 FROM memory_authoritative_fact_activation "
+        "WHERE project_scope=? LIMIT 1",
+        (project_scope,),
+    ).fetchone() is not None
+
+
 class MemoryReplicationService:
     """One explicit, bounded fact-replication owner for a typed config.
 
@@ -667,9 +692,12 @@ class MemoryReplicationService:
         journal_factory: Callable[..., Any] = _default_journal_factory,
         sink_factory: Callable[..., MemoryReplicationSink] = _default_sink_factory,
         connection_factory: Callable[[Path], Any] = _default_connection_factory,
+        authoritative_fact_scope_owned: bool = False,
     ) -> None:
         if type(config) is not SonderConfig:
             raise TypeError("memory replication requires an exact typed SonderConfig")
+        if type(authoritative_fact_scope_owned) is not bool:
+            raise TypeError("authoritative_fact_scope_owned must be a boolean")
         errors = memory_replication_errors(config)
         if errors:
             raise ConfigError(errors)
@@ -686,6 +714,9 @@ class MemoryReplicationService:
         self._journal_factory = journal_factory
         self._sink_factory = sink_factory
         self._connection_factory = connection_factory
+        # True when the same composition root also activates the local
+        # authoritative fact source for this scope and database.
+        self._authoritative_fact_scope_owned = authoritative_fact_scope_owned
         self._lock = RLock()
         self._started = False
         self._closed = False
@@ -1121,8 +1152,17 @@ class MemoryReplicationService:
                 return None
             if self._receiver is not None:
                 return self._receiver
+            if self._authoritative_fact_scope_owned:
+                # Refuse before opening the database: every peer fact batch
+                # would be rejected by the authoritative projection fence and
+                # retried forever, wedging that peer's stream.
+                raise ConfigError([_receiver_scope_conflict(self._section.project_scope)])
             connection = self._connection_factory(self._database_path_for_operation())
             try:
+                if _authoritative_scope_active(connection, self._section.project_scope):
+                    raise ConfigError([
+                        _receiver_scope_conflict(self._section.project_scope)
+                    ])
                 from sonder_runtime.adapters.persistence.sqlite.memory_replication import (
                     SQLiteFactReplicationSink,
                 )
@@ -1215,6 +1255,7 @@ def compose_memory_replication_service(
     journal_factory: Callable[..., Any] = _default_journal_factory,
     sink_factory: Callable[..., MemoryReplicationSink] = _default_sink_factory,
     connection_factory: Callable[[Path], Any] = _default_connection_factory,
+    authoritative_fact_scope_owned: bool = False,
 ) -> MemoryReplicationService | None:
     """Return an owner only for a valid enabled typed configuration."""
     if type(config) is not SonderConfig:
@@ -1230,6 +1271,7 @@ def compose_memory_replication_service(
         journal_factory=journal_factory,
         sink_factory=sink_factory,
         connection_factory=connection_factory,
+        authoritative_fact_scope_owned=authoritative_fact_scope_owned,
     )
 
 

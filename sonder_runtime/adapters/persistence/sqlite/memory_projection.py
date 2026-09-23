@@ -390,7 +390,7 @@ class SQLiteMemoryReplicationProjection:
 
     def _materialize_fact(self, record: MemoryMutation, payload: dict) -> None:
         self._reject_active_authoritative_scope(record)
-        existing =self._conn.execute("SELECT project FROM facts WHERE id=?", (record.entity_id,)).fetchone()
+        existing = self._conn.execute("SELECT project FROM facts WHERE id=?", (record.entity_id,)).fetchone()
         if existing is not None and existing[0] != record.project:
             raise MemoryProjectionError("fact identity is already bound to another project")
         if record.is_tombstone:

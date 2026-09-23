@@ -267,3 +267,88 @@ def test_older_schema_copy_migrates_then_activates_through_live_root(
     finally:
         readback.close()
     assert original.read_bytes() == pristine
+
+
+# --- receiver startup refuses an authoritatively owned scope (review P2) ---
+
+
+def test_live_graph_receiver_fails_fast_with_operator_error(tmp_path, monkeypatch):
+    from sonder_runtime.platform.config import ConfigError
+    from tests.test_memory_replication_service import _config as receiver_config
+
+    monkeypatch.setenv("SONDER_DB", str(tmp_path / "memory.db"))
+    application = build_application(config=receiver_config(tmp_path))
+    try:
+        service = application.memory_replication
+        service.start()
+        with pytest.raises(ConfigError, match="receiver_enabled cannot receive peer facts"):
+            service.receiver()
+        # The refusal happens before a receiver connection is opened or kept.
+        assert service._receiver is None and service._receiver_sink is None
+    finally:
+        application.close_providers()
+
+
+def test_standalone_receiver_refuses_a_database_with_an_active_scope(tmp_path):
+    from sonder_runtime.bootstrap.memory_replication import (
+        compose_memory_replication_service,
+    )
+    from sonder_runtime.platform.config import ConfigError
+    from tests.test_memory_replication_service import _config as receiver_config
+
+    owned = tmp_path / "owned.db"
+    _activate_live_scope(owned)
+    service = compose_memory_replication_service(
+        receiver_config(tmp_path), database_path=owned,
+    )
+    service.start()
+    try:
+        with pytest.raises(ConfigError, match="owned by the local authoritative fact source"):
+            service.receiver()
+    finally:
+        service.close()
+
+    # A receiver database without that activation is still served.
+    free = compose_memory_replication_service(
+        receiver_config(tmp_path / "free"), database_path=tmp_path / "free.db",
+    )
+    free.start()
+    try:
+        assert free.receiver() is not None
+    finally:
+        free.close()
+
+
+def test_serve_main_refuses_receiver_before_listener_bind(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from sonder_runtime.bootstrap import app as bootstrap_app
+    from sonder_runtime.interfaces.http import serve
+    from tests.test_memory_replication_service import _config as receiver_config
+
+    bootstrap_app.reset_for_tests()
+    lifecycle = SimpleNamespace(
+        startup=lambda **_kwargs: None,
+        begin_ollama_probe=lambda: None,
+        stop_probe=lambda: None,
+        coordinator=SimpleNamespace(add_flush_hook=lambda _hook: None, draining=False),
+        drain=lambda _reason: True,
+    )
+    for name in (
+        "_SESSION_FACADE", "_CONTROL_PLANE_SERVICE",
+        "_MEMORY_REPLICATION_RECEIVER", "_MEMORY_REPLICATION_SERVICE",
+        "_ARTIFACT_TRANSFER_BINDING", "_APP_CONTROL_BINDING",
+    ):
+        monkeypatch.setattr(serve, name, None)
+    monkeypatch.setattr(serve.sonder_lifecycle, "get", lambda: lifecycle)
+
+    def listener(*_args, **_kwargs):
+        pytest.fail("listener must not bind when the receiver is refused")
+
+    try:
+        with pytest.raises(Exception, match="receiver_enabled cannot receive peer facts"):
+            serve.main(receiver_config(tmp_path), _server_factory=listener)
+        assert serve._MEMORY_REPLICATION_RECEIVER is None
+        assert serve._MEMORY_REPLICATION_SERVICE is None
+    finally:
+        bootstrap_app.reset_for_tests()

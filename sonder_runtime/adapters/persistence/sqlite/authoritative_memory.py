@@ -442,10 +442,30 @@ class SQLiteAuthoritativeFactSource:
             # the explicit bounded migration first; leaving the marker absent
             # keeps a failed activation restartable and avoids claiming that
             # unjournaled facts are authoritative.
+            #
+            # The full per-row journal authentication (digest, payload, and
+            # embedding comparison) is linear in the scope and would run under
+            # the writer lock on every unit of work, so it is paid only when
+            # this source first claims the scope.  Once the marker names this
+            # source, fact mutations go through this source's atomic journal
+            # path and the legacy and replication writers are fenced; each
+            # later unit of work re-checks ownership and exact journal
+            # presence with indexed anti-joins instead.
+            active = connection.execute(
+                "SELECT source_id FROM memory_authoritative_fact_activation "
+                "WHERE project_scope=?",
+                (self.project_scope,),
+            ).fetchone()
+            already_active = active is not None and active[0] == self.source_id
             self._require_scoped_facts_authoritative(
-                connection, verify_journal_evidence=True,
+                connection,
+                verify_journal_evidence=not already_active,
+                check_journal_presence=already_active,
             )
-            self._activate_in_transaction(connection)
+            if already_active:
+                self._source_cursor(connection)
+            else:
+                self._activate_in_transaction(connection)
 
     def _activate_in_transaction(self, connection) -> None:
         existing = connection.execute(
@@ -489,6 +509,7 @@ class SQLiteAuthoritativeFactSource:
 
     def _require_scoped_facts_authoritative(
         self, connection, *, verify_journal_evidence: bool = False,
+        check_journal_presence: bool = False,
     ) -> None:
         """Refuse activation over facts with no matching source evidence.
 
@@ -517,6 +538,29 @@ class SQLiteAuthoritativeFactSource:
             raise MemoryReplicationError(
                 "existing project facts have conflicting authoritative ownership"
             )
+        if check_journal_presence:
+            # Bounded per-transaction invariant: every owned state row has its
+            # exact versioned upsert/delete journal record, and every live
+            # state row still has its materialized fact.
+            missing = connection.execute(
+                "SELECT 1 FROM memory_authoritative_fact_state AS state "
+                "WHERE state.project=? AND state.source_id=? AND ("
+                "NOT EXISTS (SELECT 1 FROM memory_replication_log AS journal "
+                "WHERE journal.source_id=state.source_id "
+                "AND journal.project=state.project AND journal.entity_kind='fact' "
+                "AND journal.entity_id=state.fact_id "
+                "AND journal.version=state.version "
+                "AND journal.operation=CASE WHEN state.tombstoned<>0 "
+                "THEN 'delete' ELSE 'upsert' END) "
+                "OR (state.tombstoned=0 AND NOT EXISTS (SELECT 1 FROM facts AS fact "
+                "WHERE fact.project=state.project AND fact.id=state.fact_id))"
+                ") LIMIT 1",
+                (self.project_scope, self.source_id),
+            ).fetchone()
+            if missing is not None:
+                raise MemoryReplicationError(
+                    "existing project facts require authoritative journal evidence"
+                )
         if not verify_journal_evidence:
             return
         try:

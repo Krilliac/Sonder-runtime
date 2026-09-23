@@ -894,9 +894,9 @@
     },
     {
       "checked": false,
-      "claim": "After the live composition root activates a project scope, the replication projection and receiver sink refuse fact writes into that scope with full rollback, and an older-schema database copy is adopted through schema upgrade, operator migration, live writes, and restart.",
+      "claim": "Live authoritative activation pays full journal authentication only on first claim and keeps a bounded indexed invariant per unit of work, and the replication receiver fails fast at startup instead of retrying peer fact batches rejected by an authoritatively owned scope.",
       "requirement_id": "MEM-004",
-      "revision": 8,
+      "revision": 9,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "0cabd2153995c67948a4fea0bd3ede5c3ce4b220df97c5494a278a188a6f2e4d",
+    "ledger_sha256": "69f50d97e97c2adf8d36227e14e5a0d14a4d41f620c1ae7ae2a2299ccb82e198",
     "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
   }
 }

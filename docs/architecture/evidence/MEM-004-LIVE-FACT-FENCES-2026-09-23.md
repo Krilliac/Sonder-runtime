@@ -22,6 +22,34 @@ have produced unjournaled fact rows that made the next activation fail;
 it is now rejected up front. Multi-writer reconciliation for one scope
 remains unsupported.
 
+Review follow-up: a rejected batch would be retried forever by its peer, so
+the receiver now fails fast. The live application graph composes its
+replication service with `authoritative_fact_scope_owned=True`, and
+`receiver()` raises a `ConfigError` naming the scope before opening a
+database; `serve.main` stops before the listener binds. A standalone service
+refuses a receiver database that already has an activation marker for the
+scope, and still serves one that does not. The HTTP lifecycle tests in
+`tests/test_memory_replication_service.py` that only covered route lifecycle
+now use `receiver_enabled=False`.
+
+## Per-transaction activation cost
+
+Full per-row journal authentication now runs only when a source first claims
+a scope (and in migration plan/apply). Re-entry on a scope already claimed by
+the same source uses indexed anti-joins for ownership, exact versioned
+upsert/delete journal presence, and live-row materialization. Payload bytes
+are not re-authenticated on every transaction.
+
+Measured locally on 2000 facts x 384-dim embeddings (per empty unit of work,
+minimum of 5): 0.614 s before the change versus a 0.0096 s reference query
+(the anti-join main runs before this PR); after the change the bounded test
+passes. A 3000 x 384 run after the change measured 0.039 s per empty unit of
+work against a 0.014 s reference query. Evidence:
+`tests/test_authoritative_activation_cost.py` (call-count test and a timing
+bound of `max(0.25 s, 20 x reference)`, both failing before the change) plus
+corruption cases showing re-entry still fails closed on a dropped journal
+row, a dropped fact row, or a mismatched state version.
+
 Older-schema adoption is exercised end to end on a copy of a database created
 with the original `facts` DDL and no authoritative tables: schema upgrade
 through the normal memory store, a refused live start that publishes no
@@ -31,7 +59,8 @@ an unapproved project and the original file are left byte-for-byte unchanged.
 
 Evidence: `tests/test_authoritative_live_fences.py`. With the projection
 fence removed, the projection and receiver-sink tests fail (2 failed,
-2 passed); with it restored all 4 pass.
+2 passed); with the receiver refusal removed, the three receiver-startup
+tests fail (3 failed, 4 passed); with both in place all 7 pass.
 
 Still open: no live user database has been migrated; automatic migration,
 contradiction reconciliation, per-source multi-writer ownership, and broader
