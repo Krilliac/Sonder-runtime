@@ -385,12 +385,20 @@ def _plan(source: Path, limits: dict, *, deadline: float | None = None) -> dict:
         with tarfile.open(source, "r:*") as archive:
             if archive.pax_headers:
                 raise ArchiveRejected("TAR global PAX special metadata is not allowed")
+            # Reaching the next header of a compressed TAR decompresses the
+            # previous payload, so the aggregate budget is enforced during
+            # the walk rather than only after every header was read.
+            walked_bytes = 0
             for info in archive:
                 if time.monotonic() > deadline:
                     raise ArchiveRejected("archive prevalidation exceeded time ceiling")
-                entries.append(_tar_entry(info, limits))
+                entry = _tar_entry(info, limits)
+                entries.append(entry)
                 if len(entries) > limits["max_entries"]:
                     raise ArchiveRejected("archive exceeds entry ceiling")
+                walked_bytes += entry["bytes"]
+                if walked_bytes > limits["max_total_bytes"]:
+                    raise ArchiveRejected("archive exceeds aggregate byte ceiling")
     _require_same_source(source, signature, deadline=deadline)
     _validate_entries(entries, limits, source.stat().st_size)
     entries.sort(key=lambda row: row["path"])
