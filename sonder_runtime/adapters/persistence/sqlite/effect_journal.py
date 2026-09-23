@@ -4,7 +4,9 @@ from __future__ import annotations
 from contextlib import contextmanager
 import hashlib
 import json
+import queue
 import sqlite3
+import threading
 from dataclasses import replace
 from pathlib import Path
 from threading import Lock
@@ -58,11 +60,30 @@ CREATE TABLE IF NOT EXISTS effect_owner (
 );
 """
 
+_HOST_CAPABILITY_TOKEN = object()
+
+
+class HostReconciliationCapability:
+    """Opaque capability issued only by trusted host composition."""
+
+    __slots__ = ()
+
+    def __init__(self, token) -> None:
+        if token is not _HOST_CAPABILITY_TOKEN:
+            raise TypeError("host reconciliation capability is sealed")
+
+
+def _new_host_reconciliation_capability() -> HostReconciliationCapability:
+    return HostReconciliationCapability(_HOST_CAPABILITY_TOKEN)
+
 
 class SQLiteEffectJournal:
     """Append-only intent ledger with idempotent terminal transitions."""
 
-    def __init__(self, db_path: str | Path, *, max_detail: int = 4096) -> None:
+    def __init__(
+        self, db_path: str | Path, *, max_detail: int = 4096,
+        host_capability: HostReconciliationCapability | None = None,
+    ) -> None:
         if type(max_detail) is not int or not 1 <= max_detail <= 1 << 20:
             raise ValueError("max_detail must be within 1..1048576")
         self._path = Path(db_path)
@@ -70,6 +91,7 @@ class SQLiteEffectJournal:
         self._max_detail = max_detail
         self._lock = Lock()
         self._reconciliation_verifiers = {}
+        self._reconciliation_capability = host_capability
         with self._connect() as connection:
             connection.executescript(_DDL)
             columns = {
@@ -236,13 +258,18 @@ class SQLiteEffectJournal:
                     (owner_epoch, run_id, worker_id),
                 )
 
-    def register_reconciliation_verifier(self, verifier) -> None:
+    def register_reconciliation_verifier(self, capability, verifier) -> None:
         """Register a host-owned verifier for its declared operation family.
 
         The journal never accepts a proof supplied directly by a worker or
         caller.  A verifier must be registered by trusted composition before
         reconciliation, and each operation id can have only one owner.
         """
+        if (
+            type(capability) is not HostReconciliationCapability
+            or capability is not self._reconciliation_capability
+        ):
+            raise EffectJournalError("host reconciliation capability is required")
         verifier_id = getattr(verifier, "verifier_id", None)
         operation_ids = getattr(verifier, "operation_ids", None)
         verify = getattr(verifier, "verify", None)
@@ -263,7 +290,7 @@ class SQLiteEffectJournal:
             for operation_id in operation_ids:
                 self._reconciliation_verifiers[operation_id] = verifier
 
-    def reconcile(self, intent_id: str, *, owner_epoch: int) -> EffectIntent:
+    def reconcile(self, intent_id: str, *, owner_epoch: int, timeout_seconds: float = 2.0) -> EffectIntent:
         """Apply one registered verifier result and clear the fence atomically.
 
         The owner epoch is checked both before and during the transaction.
@@ -274,6 +301,45 @@ class SQLiteEffectJournal:
             raise EffectJournalError("reconciliation owner epoch must be positive")
         if type(intent_id) is not str or not intent_id.strip():
             raise EffectJournalError("reconciliation intent_id is required")
+        if type(timeout_seconds) not in (int, float) or not 0 < timeout_seconds <= 30:
+            raise EffectJournalError("reconciliation timeout must be within 0..30 seconds")
+        # Obtain the external proof without holding the SQLite lock or a
+        # write transaction. A hung provider can delay its own reconciliation
+        # but cannot block ordinary journal writes.
+        with self._lock, self._connect() as connection:
+            snapshot = self._row(connection.execute(
+                "SELECT intent_id,run_id,worker_id,operation_id,scope,owner_epoch,"
+                "idempotency_key,request_digest,reconciliation,sequence,state,"
+                "outcome_digest,receipt_key,detail FROM effect_journal WHERE intent_id=?",
+                (intent_id,),
+            ).fetchone())
+            if snapshot is None:
+                raise KeyError(intent_id)
+            if snapshot.state in {EffectState.COMPLETED, EffectState.FAILED}:
+                return snapshot
+            verifier = self._reconciliation_verifiers.get(snapshot.operation_id)
+            if verifier is None:
+                raise EffectJournalError(
+                    f"no trusted reconciliation verifier for {snapshot.operation_id}"
+                )
+        result_queue = queue.Queue(maxsize=1)
+
+        def run_verifier() -> None:
+            try:
+                result_queue.put((True, verifier.verify(snapshot)))
+            except BaseException as exc:  # transport/provider failures are fenced
+                result_queue.put((False, exc))
+
+        verifier_thread = threading.Thread(
+            target=run_verifier, name="sonder-effect-verifier", daemon=True,
+        )
+        verifier_thread.start()
+        verifier_thread.join(float(timeout_seconds))
+        if verifier_thread.is_alive():
+            raise EffectJournalError("host reconciliation verifier timed out")
+        succeeded, proof = result_queue.get_nowait()
+        if not succeeded:
+            raise EffectJournalError("host reconciliation verifier failed") from proof
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             current = self._row(connection.execute(
@@ -286,11 +352,8 @@ class SQLiteEffectJournal:
                 raise KeyError(intent_id)
             if current.state in {EffectState.COMPLETED, EffectState.FAILED}:
                 return current
-            verifier = self._reconciliation_verifiers.get(current.operation_id)
-            if verifier is None:
-                raise EffectJournalError(
-                    f"no trusted reconciliation verifier for {current.operation_id}"
-                )
+            if current != snapshot:
+                raise EffectJournalError("reconciliation proof was obtained from stale effect state")
             owner = connection.execute(
                 "SELECT owner_epoch,recovery_required FROM effect_owner "
                 "WHERE run_id=? AND worker_id=?",
@@ -298,7 +361,6 @@ class SQLiteEffectJournal:
             ).fetchone()
             if owner is None or int(owner[0]) != owner_epoch:
                 raise EffectJournalError("stale reconciliation owner epoch")
-            proof = verifier.verify(current)
             if type(proof) is not ReconciliationProof:
                 raise EffectJournalError("host verifier returned no trusted proof")
             if (

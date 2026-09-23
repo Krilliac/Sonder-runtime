@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import replace
 import pytest
 
-from sonder_runtime.adapters.persistence.sqlite.effect_journal import SQLiteEffectJournal
+from sonder_runtime.adapters.persistence.sqlite.effect_journal import (
+    SQLiteEffectJournal, _new_host_reconciliation_capability,
+)
 from sonder_runtime.adapters.persistence.sqlite.runtime_checkpoints import SQLiteRuntimeCheckpointRepository
 from sonder_runtime.application.execution.effect_journal import (
     EffectIntent, EffectJournalError, EffectOutcome, EffectState, JournalBinding, bound,
@@ -447,8 +449,13 @@ class _ExternalVerifier:
 
 
 def _uncertain_for_reconciliation(tmp_path, operation="reconcile-op"):
-    journal = SQLiteEffectJournal(tmp_path / "effects.db")
-    journal.register_reconciliation_verifier(_ExternalVerifier())
+    journal = SQLiteEffectJournal(
+        tmp_path / "effects.db",
+        host_capability=_new_host_reconciliation_capability(),
+    )
+    journal.register_reconciliation_verifier(
+        journal._reconciliation_capability, _ExternalVerifier(),
+    )
     first = AuthenticatedWorkerBinding(journal, "run", "worker", 1, "/workspace")
     intent = first.binding().begin_request(
         operation_id=operation, idempotency_key="reconcile-key", request_digest="a" * 64,
@@ -491,8 +498,11 @@ def test_stale_epoch_cannot_reconcile_after_restart(tmp_path):
 
 
 def test_conflicting_verifier_proof_is_rejected_and_fence_remains(tmp_path):
-    journal = SQLiteEffectJournal(tmp_path / "effects.db")
-    journal.register_reconciliation_verifier(_ExternalVerifier(
+    journal = SQLiteEffectJournal(
+        tmp_path / "effects.db",
+        host_capability=_new_host_reconciliation_capability(),
+    )
+    journal.register_reconciliation_verifier(journal._reconciliation_capability, _ExternalVerifier(
         lambda intent: ReconciliationProof(
             intent_id="wrong", operation_id=intent.operation_id,
             receipt_key="receipt", outcome_digest="e" * 64,
@@ -521,3 +531,83 @@ def test_reconciliation_is_idempotent_under_replay_and_concurrent_call(tmp_path)
     assert {result.state for result in results} == {EffectState.COMPLETED}
     replay = journal.reconcile(intent.intent_id, owner_epoch=2)
     assert replay.receipt_key == "external-receipt-1"
+
+
+def test_forged_registration_cannot_mint_host_verifier_capability(tmp_path):
+    journal = SQLiteEffectJournal(
+        tmp_path / "effects.db",
+        host_capability=_new_host_reconciliation_capability(),
+    )
+    with pytest.raises(EffectJournalError, match="capability"):
+        journal.register_reconciliation_verifier(object(), _ExternalVerifier())
+
+
+def test_hung_verifier_does_not_block_journal_writes(tmp_path):
+    import threading
+    journal = SQLiteEffectJournal(
+        tmp_path / "effects.db",
+        host_capability=_new_host_reconciliation_capability(),
+    )
+    started = threading.Event()
+
+    class HungVerifier(_ExternalVerifier):
+        def verify(self, intent):
+            started.set()
+            threading.Event().wait(30)
+
+    journal.register_reconciliation_verifier(
+        journal._reconciliation_capability, HungVerifier(),
+    )
+    first = AuthenticatedWorkerBinding(journal, "run", "worker", 1, "/workspace")
+    intent = first.binding().begin_request(
+        operation_id="reconcile-op", idempotency_key="key", request_digest="a" * 64,
+    )
+    first.binding().mark_uncertain(intent, detail="crash")
+    journal.claim_owner("run", "worker", 2)
+    with pytest.raises(EffectJournalError, match="timed out"):
+        journal.reconcile(intent.intent_id, owner_epoch=2, timeout_seconds=0.05)
+    assert started.is_set()
+    # A separate write is immediately available despite the hung verifier.
+    assert journal.high_water("run") == 1
+
+
+def test_owner_epoch_race_invalidates_proof_before_atomic_clear(tmp_path):
+    import threading
+    journal = SQLiteEffectJournal(
+        tmp_path / "effects.db",
+        host_capability=_new_host_reconciliation_capability(),
+    )
+    started = threading.Event()
+    release = threading.Event()
+
+    class PausedVerifier(_ExternalVerifier):
+        def verify(self, intent):
+            started.set()
+            release.wait(2)
+            return super().verify(intent)
+
+    journal.register_reconciliation_verifier(
+        journal._reconciliation_capability, PausedVerifier(),
+    )
+    first = AuthenticatedWorkerBinding(journal, "run", "worker", 1, "/workspace")
+    intent = first.binding().begin_request(
+        operation_id="reconcile-op", idempotency_key="key", request_digest="a" * 64,
+    )
+    first.binding().mark_uncertain(intent, detail="crash")
+    journal.claim_owner("run", "worker", 2)
+    errors = []
+
+    def reconcile():
+        try:
+            journal.reconcile(intent.intent_id, owner_epoch=2)
+        except EffectJournalError as exc:
+            errors.append(str(exc))
+
+    thread = threading.Thread(target=reconcile)
+    thread.start()
+    assert started.wait(1)
+    journal.claim_owner("run", "worker", 3)
+    release.set()
+    thread.join(2)
+    assert errors == ["stale reconciliation owner epoch"]
+    assert journal.get(intent.intent_id).state is EffectState.UNCERTAIN
