@@ -8,7 +8,7 @@ from sonder_runtime.adapters.persistence.sqlite.runtime_checkpoints import SQLit
 from sonder_runtime.application.execution.effect_journal import (
     EffectIntent, EffectJournalError, EffectOutcome, EffectState, JournalBinding, bound,
 )
-from sonder_runtime.application.ports.runtime_checkpoints import RestoreStatus, RuntimeCheckpoint
+from sonder_runtime.application.ports.runtime_checkpoints import CheckpointError, RestoreStatus, RuntimeCheckpoint
 
 
 def _intent(intent_id="i-1", run_id="run-1", worker_id="w-1", key="k-1", request_digest="a" * 64):
@@ -100,6 +100,21 @@ def test_checkpoint_binds_effect_high_water_and_refuses_unresolved_replay(tmp_pa
     journal.outcome(EffectOutcome("i-1", EffectState.COMPLETED, "b" * 64, "receipt-1", worker_id="w-1", owner_epoch=2))
     checkpoints.save(_checkpoint(), expected_generation=-1)
     assert checkpoints.restore("run-1").status is RestoreStatus.RESTORED
+    journal.begin(_intent("after-checkpoint", key="after-checkpoint"))
+    journal.outcome(EffectOutcome(
+        "after-checkpoint", EffectState.COMPLETED, "c" * 64,
+        "receipt-after", worker_id="w-1", owner_epoch=2,
+    ))
+    assert checkpoints.restore("run-1").status is RestoreStatus.CORRUPT
+
+
+def test_checkpoint_refuses_a_separate_effect_database(tmp_path):
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    with pytest.raises(CheckpointError, match="share"):
+        SQLiteRuntimeCheckpointRepository(
+            tmp_path / "checkpoints.db", seal_key=b"k" * 32,
+            effect_journal=journal,
+        )
 
 
 def test_gateway_records_intent_before_live_invocation(tmp_path):

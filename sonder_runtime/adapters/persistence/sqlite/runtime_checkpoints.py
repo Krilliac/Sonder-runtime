@@ -41,6 +41,12 @@ class SQLiteRuntimeCheckpointRepository:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._max_payload_bytes = max_payload_bytes
         self._effect_journal = effect_journal
+        if effect_journal is not None and (
+            not isinstance(getattr(effect_journal, "database_path", None), Path)
+            or effect_journal.database_path.resolve() != self._path.resolve()
+            or not callable(getattr(effect_journal, "validate_checkpoint_in_transaction", None))
+        ):
+            raise CheckpointError("effect journal must share the checkpoint SQLite database")
         if isinstance(seal_key, str):
             seal_key = seal_key.encode("utf-8")
         if not isinstance(seal_key, bytes) or len(seal_key) < 32 or len(seal_key) > 4096:
@@ -75,12 +81,17 @@ class SQLiteRuntimeCheckpointRepository:
             raise CheckpointError("checkpoint exceeds repository payload bound")
         digest = checkpoint.digest()
         seal = hmac.new(self._seal_key, payload, hashlib.sha256).hexdigest()
-        effect_high_water = None
-        if self._effect_journal is not None:
-            effect_high_water = self._effect_journal.high_water(checkpoint.run_id)
-            self._effect_journal.validate_checkpoint(checkpoint.run_id, effect_high_water)
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            effect_high_water = None
+            if self._effect_journal is not None:
+                effect_high_water = int(connection.execute(
+                    "SELECT COALESCE(MAX(sequence),0) FROM effect_journal WHERE run_id=?",
+                    (checkpoint.run_id,),
+                ).fetchone()[0])
+                self._effect_journal.validate_checkpoint_in_transaction(
+                    connection, checkpoint.run_id, effect_high_water,
+                )
             current = connection.execute(
                 "SELECT generation,digest FROM runtime_checkpoint WHERE run_id=? ORDER BY generation DESC LIMIT 1",
                 (checkpoint.run_id,),
@@ -102,22 +113,30 @@ class SQLiteRuntimeCheckpointRepository:
     def restore(self, run_id: str) -> RestoreResult:
         if not isinstance(run_id, str) or not run_id.strip():
             raise CheckpointError("run_id is required")
+        effect_binding = None
+        effect_error = None
         with self._connect() as connection:
+            connection.execute("BEGIN")
             row = connection.execute(
-                "SELECT payload_json,digest,seal FROM runtime_checkpoint WHERE run_id=? ORDER BY generation DESC LIMIT 1",
+                "SELECT generation,payload_json,digest,seal FROM runtime_checkpoint WHERE run_id=? ORDER BY generation DESC LIMIT 1",
                 (run_id,),
             ).fetchone()
-        if row is None:
-            return RestoreResult(RestoreStatus.EMPTY, detail="no checkpoint exists")
-        effect_binding = None
-        if self._effect_journal is not None:
-            with self._connect() as connection:
+            if row is not None and self._effect_journal is not None:
                 effect_binding = connection.execute(
                     "SELECT effect_high_water FROM runtime_checkpoint_effect "
-                    "WHERE run_id=? AND generation=(SELECT MAX(generation) FROM runtime_checkpoint WHERE run_id=?)",
-                    (run_id, run_id),
+                    "WHERE run_id=? AND generation=?",
+                    (run_id, int(row[0])),
                 ).fetchone()
-        raw, stored_digest, stored_seal = str(row[0]), str(row[1]), str(row[2])
+                if effect_binding is not None:
+                    try:
+                        self._effect_journal.validate_checkpoint_in_transaction(
+                            connection, run_id, int(effect_binding[0]),
+                        )
+                    except (EffectJournalError, ValueError) as exc:
+                        effect_error = str(exc)
+        if row is None:
+            return RestoreResult(RestoreStatus.EMPTY, detail="no checkpoint exists")
+        raw, stored_digest, stored_seal = str(row[1]), str(row[2]), str(row[3])
         try:
             encoded = raw.encode("ascii")
             if len(encoded) > self._max_payload_bytes:
@@ -145,10 +164,8 @@ class SQLiteRuntimeCheckpointRepository:
             if self._effect_journal is not None:
                 if effect_binding is None:
                     return RestoreResult(RestoreStatus.CORRUPT, detail="checkpoint effect binding is missing")
-                try:
-                    self._effect_journal.validate_checkpoint(run_id, int(effect_binding[0]))
-                except (EffectJournalError, ValueError) as exc:
-                    return RestoreResult(RestoreStatus.CORRUPT, detail=str(exc))
+                if effect_error is not None:
+                    return RestoreResult(RestoreStatus.CORRUPT, detail=effect_error)
             return RestoreResult(RestoreStatus.RESTORED, checkpoint=checkpoint)
         except (CheckpointError, ValueError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
             return RestoreResult(RestoreStatus.CORRUPT, detail=f"checkpoint rejected: {type(exc).__name__}")
