@@ -322,6 +322,24 @@ def test_activation_rejects_state_without_matching_journal_evidence(tmp_path):
         connection.close()
 
 
+def test_authoritative_write_does_not_rescan_all_journal_evidence(tmp_path):
+    connection = connect(tmp_path / "incremental-write.db")
+    statements = []
+    connection.set_trace_callback(statements.append)
+    try:
+        source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+        source.add_fact(connection, "fact-1", "repo-a", "incremental write")
+        assert not any(
+            statement.casefold().startswith("select")
+            and "not exists" in statement.casefold()
+            and "memory_replication_log" in statement.casefold()
+            for statement in statements
+        )
+    finally:
+        connection.set_trace_callback(None)
+        connection.close()
+
+
 def test_live_source_and_fact_rollback_together_when_journal_fails(tmp_path, monkeypatch):
     from sonder_runtime.adapters.persistence.sqlite import authoritative_memory
 
