@@ -137,18 +137,22 @@ class LiveAgentContextProducer:
                 raise ValueError("skill catalog exceeds byte limit")
             records = tuple(
                 ContextRecord(
-                    f"rule:{record.name}", "policy", record.content,
+                    f"rule:{record.name}", "project_rules", record.content,
                     f"project-rule:{record.source}", ordinal=index, stable=True,
                 )
                 for index, record in enumerate(rule_records)
             )
-            if skill_lines:
-                records += (ContextRecord(
-                    "skill-catalog", "skills", skill_text,
-                    "scoped-skill-catalog", ordinal=len(records), stable=True,
+            if not records:
+                records = (ContextRecord(
+                    "project-rules-empty", "project_rules",
+                    "No project-specific rules are configured.",
+                    "scoped-project-rules", ordinal=0, stable=True,
                 ),)
-            if not rule_records or not skill_lines:
-                raise ValueError("authoritative project rules or skill catalog is absent")
+            records += (ContextRecord(
+                "skill-catalog", "skill_catalog",
+                skill_text or "No project skills are configured.",
+                "scoped-skill-catalog", ordinal=len(records), stable=True,
+            ),)
             digest = sha256(
                 "\n".join(record.content for record in records).encode("utf-8")
             ).hexdigest()
