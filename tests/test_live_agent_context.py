@@ -1,3 +1,7 @@
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 import pytest
 
@@ -271,3 +275,150 @@ def test_live_context_configured_source_overrides_project_and_global(tmp_path):
     assert "Configured skill" in rendered
     assert "PROJECT RULE" not in rendered
     assert "GLOBAL RULE" not in rendered
+
+
+_SELECTION_MARKER = "\nTool schema selection id: "
+
+
+def _tool_worker(worker_dir: Path, workspace_parent: Path):
+    """One independent worker: its own stores, planner cache, and producer."""
+    from sonder_runtime.application.ports.tool_registry import (
+        InMemoryToolRegistry,
+        ToolDescriptor,
+    )
+    from sonder_runtime.application.tools.facade import ToolApplicationFacade
+
+    worker_dir.mkdir(parents=True, exist_ok=True)
+    sessions = SQLiteSessionRepository(worker_dir / "sessions.db")
+    store = SQLiteAgentLaneStore(worker_dir / "lanes.db", sessions)
+    model = _Model()
+    planner = ContextPlanningFacade()
+    service = AgentLaneService(
+        store, sessions, model, auto_start=False,
+        context_planning=planner, live_context=LiveAgentContextProducer(),
+    )
+    service.tools = ToolApplicationFacade.compose(InMemoryToolRegistry([
+        ToolDescriptor("read_file", input_schema={
+            "type": "object", "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        }),
+        ToolDescriptor("text_search", input_schema={
+            "type": "object",
+            "properties": {"query": {"type": "string"}, "path": {"type": "string"}},
+            "required": ["query"],
+        }),
+        ToolDescriptor("directory_tree", input_schema={
+            "type": "object", "properties": {"path": {"type": "string"}},
+        }),
+    ]))
+    context = local_owner_context(
+        correlation_id="worker", workspace_roots=(workspace_parent,),
+    )
+    return service, store, planner, context
+
+
+def _spawn_request(service, store, context, project: Path, command: str, request_id: str):
+    lane_id = service.spawn(
+        command_id=command, parent_session_id="parent", task="inspect",
+        workspace_root=str(project), context=context,
+    )["lane"]["id"]
+    lane = store.read_lane(lane_id)
+    return lane, service._request(lane, (), request_id=request_id, context=context)
+
+
+def _stable_system(request) -> str:
+    """Text before the dynamic per-turn selection id, if it is the tail."""
+    stable, marker, selection_id = request.system.rpartition(_SELECTION_MARKER)
+    if not marker or "\n" in selection_id:
+        return request.system
+    return stable
+
+
+def _worker_prefix_evidence(worker_dir: Path, project: Path) -> dict:
+    service, store, _planner, context = _tool_worker(worker_dir, project.parent)
+    _lane, request = _spawn_request(
+        service, store, context, project, "spawn-worker", "worker-request",
+    )
+    return {
+        "cache_key": request.prefix_manifest.cache_key,
+        "identity_key": request.prefix_manifest.identity_key,
+        "result": request.prefix_cache_observation.result,
+        "reason": request.prefix_cache_observation.reason,
+        "stable_system": _stable_system(request),
+    }
+
+
+def test_turn_selection_id_is_visible_but_outside_reusable_prefix(tmp_path):
+    project = _project(tmp_path, name="alpha", rule="ALPHA RULE")
+    service, store, planner, context = _tool_worker(tmp_path / "worker", tmp_path)
+    lane, first = _spawn_request(service, store, context, project, "spawn-turns", "turn-1")
+    next_turn = dict(lane, used_steps=lane["used_steps"] + 1)
+    second = service._request(next_turn, (), request_id="turn-2", context=context)
+
+    # The per-turn id is dynamic: the reusable key and stable bytes are equal.
+    assert first.prefix_manifest.cache_key == second.prefix_manifest.cache_key
+    assert second.prefix_cache_observation.result == "hit"
+    first_id = first.system.rpartition(_SELECTION_MARKER)[2]
+    second_id = second.system.rpartition(_SELECTION_MARKER)[2]
+    assert first.system.endswith(_SELECTION_MARKER + first_id)
+    assert first_id == lane["attempt_id"] + ":1"
+    assert second_id == lane["attempt_id"] + ":2"
+    assert "Visible tool schemas" in _stable_system(first)
+    assert '"name": "text_search"' in _stable_system(first)
+    assert "ALPHA RULE" in _stable_system(first)
+    assert _stable_system(first) == _stable_system(second)
+    assert first_id not in first.prefix_manifest.sections[0].content
+    assert first.prefix_cache_observation.reason == "cold_start"
+    assert planner.prefix_cache_telemetry.writes == 1
+    assert planner.prefix_cache_telemetry.hits == 1
+    assert first.replay_manifest.manifest_digest != second.replay_manifest.manifest_digest
+
+
+def test_independent_workers_derive_identical_prefix_for_same_project(tmp_path):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    project = _project(shared, name="alpha", rule="ALPHA RULE")
+    other = _project(shared, name="beta", rule="BETA RULE")
+    one = _worker_prefix_evidence(tmp_path / "worker-1", project)
+    two = _worker_prefix_evidence(tmp_path / "worker-2", project)
+    beta = _worker_prefix_evidence(tmp_path / "worker-3", other)
+
+    assert one["cache_key"] == two["cache_key"]
+    assert one["identity_key"] == two["identity_key"]
+    assert one["stable_system"] == two["stable_system"]
+    # Each worker's application cache is process-local and says so honestly.
+    assert (one["result"], one["reason"]) == ("miss", "cold_start")
+    assert (two["result"], two["reason"]) == ("miss", "cold_start")
+    # Cross-project scope never shares a reusable prefix.
+    assert beta["cache_key"] != one["cache_key"]
+    assert "ALPHA RULE" not in beta["stable_system"]
+
+
+def test_prefix_identity_is_stable_across_processes_and_hash_seeds(tmp_path):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    project = _project(shared, name="alpha", rule="ALPHA RULE")
+    repo = Path(__file__).resolve().parents[1]
+    observed = []
+    for index, seed in enumerate(("1", "4242")):
+        env = dict(os.environ, PYTHONHASHSEED=seed)
+        completed = subprocess.run(
+            [sys.executable, "-m", "tests.test_live_agent_context",
+             str(tmp_path / ("process-%d" % index)), str(project)],
+            cwd=repo, env=env, capture_output=True, text=True, timeout=120,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr[-2000:]
+        observed.append(json.loads(completed.stdout.strip().splitlines()[-1]))
+    in_process = _worker_prefix_evidence(tmp_path / "in-process", project)
+    assert observed[0]["cache_key"] == observed[1]["cache_key"] == in_process["cache_key"]
+    assert observed[0]["stable_system_sha256"] == observed[1]["stable_system_sha256"]
+
+
+if __name__ == "__main__":
+    import hashlib
+
+    evidence = _worker_prefix_evidence(Path(sys.argv[1]), Path(sys.argv[2]))
+    stable = evidence.pop("stable_system")
+    evidence["stable_system_sha256"] = hashlib.sha256(stable.encode("utf-8")).hexdigest()
+    print(json.dumps(evidence, sort_keys=True))
