@@ -8,10 +8,10 @@ they do not expand model-writable workspace roots or project authority.
 ```toml
 [context]
 instruction_bundled_roots = ["D:/Sonder-runtime/bundled"]
-instruction_global_roots = ["C:/Users/Nathan/.sonder/instructions"]
+instruction_global_roots = ["C:/ProgramData/Sonder/instructions"]
 instruction_configured_roots = []
 skill_bundled_roots = ["D:/Sonder-runtime/skills"]
-skill_global_roots = ["C:/Users/Nathan/.sonder/skills"]
+skill_global_roots = ["C:/ProgramData/Sonder/skills"]
 skill_configured_roots = []
 ```
 
