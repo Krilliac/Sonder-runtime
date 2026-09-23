@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import sqlite3
 
@@ -80,6 +81,27 @@ class LegacyFactMigrationPlan:
     digest: str
 
 
+def _migration_digest(
+    source_id: str,
+    project_scope: str,
+    rows: tuple[tuple[str, str, str, bytes | None], ...],
+) -> str:
+    """Bind the operator approval to the complete migration scope."""
+    return hashlib.sha256(json.dumps(
+        {
+            "source_id": source_id,
+            "project_scope": project_scope,
+            "rows": [
+                [fact_id, project, text, embedding.hex() if embedding is not None else None]
+                for fact_id, project, text, embedding in rows
+            ],
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+
+
 def plan_legacy_fact_migration(connection, *, source_id: str, project_scope: str) -> LegacyFactMigrationPlan:
     """Capture unjournaled facts for one scope without changing the database."""
     if type(project_scope) is not str or not project_scope:
@@ -99,11 +121,7 @@ def plan_legacy_fact_migration(connection, *, source_id: str, project_scope: str
         (str(row[0]), str(row[1]), str(row[2]), bytes(row[3]) if row[3] is not None else None)
         for row in rows
     )
-    digest = hashlib.sha256(json.dumps(
-        [(fact_id, project, text, embedding.hex() if embedding is not None else None)
-         for fact_id, project, text, embedding in normalized],
-        ensure_ascii=True, separators=(",", ":"),
-    ).encode("utf-8")).hexdigest()
+    digest = _migration_digest(source_id, project_scope, normalized)
     return LegacyFactMigrationPlan(source_id, project_scope, normalized, digest)
 
 
@@ -115,28 +133,56 @@ def migrate_legacy_facts(
 ) -> int:
     """Adopt exactly the planned rows, with an optional SQLite backup first.
 
-    The backup is made before the write transaction.  The fact rows, source
-    state, journal records, and derived indexes then share one commit.  A
-    changed database invalidates the plan and performs no writes.
+    This is an operator-offline protocol.  The caller must not have an open
+    transaction.  A backup is created and integrity-checked before acquiring
+    the write lock; the exact plan is then re-read under ``BEGIN IMMEDIATE``.
+    Any writer that raced the backup invalidates the plan before mutation.
+    The fact rows, source state, journal records, and derived indexes then
+    share one commit.
     """
-    current = plan_legacy_fact_migration(
-        connection, source_id=plan.source_id, project_scope=plan.project_scope,
-    )
-    if current.digest != plan.digest or current.rows != plan.rows:
-        raise MemoryReplicationError("legacy fact migration plan is stale")
+    if not isinstance(plan, LegacyFactMigrationPlan):
+        raise TypeError("a LegacyFactMigrationPlan is required")
+    if connection.in_transaction:
+        raise MemoryReplicationError("legacy fact migration requires an idle connection")
     if backup_path is not None:
-        backup = Path(backup_path)
-        if backup.exists():
-            raise MemoryReplicationError("migration backup already exists")
+        backup = Path(backup_path).expanduser()
         backup.parent.mkdir(parents=True, exist_ok=True)
-        target = sqlite3.connect(str(backup))
         try:
-            connection.backup(target)
-            target.commit()
-        finally:
-            target.close()
-    source = SQLiteAuthoritativeFactSource(plan.source_id, project_scope=plan.project_scope)
-    with source._transaction(connection):
+            fd = os.open(str(backup), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError as exc:
+            raise MemoryReplicationError("migration backup already exists") from exc
+        os.close(fd)
+        if backup.is_symlink() or not backup.is_file():
+            raise MemoryReplicationError("migration backup is not a regular file")
+        try:
+            target = sqlite3.connect(str(backup))
+            try:
+                connection.backup(target)
+                target.commit()
+                integrity = target.execute("PRAGMA integrity_check").fetchone()
+                if integrity != ("ok",):
+                    raise MemoryReplicationError("migration backup failed integrity verification")
+            finally:
+                target.close()
+        except Exception:
+            # The path was created exclusively by this invocation.  Do not
+            # leave an operator-facing partial backup that could be mistaken
+            # for a verified recovery point.
+            try:
+                backup.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        # This check is deliberately inside the write transaction.  It is the
+        # final guard against a writer changing the source after the backup.
+        current = plan_legacy_fact_migration(
+            connection, source_id=plan.source_id, project_scope=plan.project_scope,
+        )
+        if current.digest != plan.digest or current.rows != plan.rows:
+            raise MemoryReplicationError("legacy fact migration plan is stale")
+        source = SQLiteAuthoritativeFactSource(plan.source_id, project_scope=plan.project_scope)
         epoch, sequence = source._source_cursor(connection)
         records = []
         for fact_id, project, text, embedding in plan.rows:
@@ -159,6 +205,10 @@ def migrate_legacy_facts(
                 connection, tuple(records), source_id=plan.source_id,
                 project_scope=plan.project_scope,
             )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
     return len(plan.rows)
 
 

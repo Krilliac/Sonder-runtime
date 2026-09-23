@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 
 import pytest
 
@@ -116,4 +117,78 @@ def test_migration_keeps_tombstones_and_conflicting_ownership_fail_closed(tmp_pa
     )
     connection.commit()
     assert plan_legacy_fact_migration(connection, source_id="node-a", project_scope="repo-a").rows == ()
+    connection.close()
+
+
+def test_migration_digest_binds_source_and_project_scope(tmp_path):
+    connection = connect(tmp_path / "memory.db")
+    connection.execute(
+        "INSERT INTO facts(id,project,text,embedding) VALUES(?,?,?,?)",
+        ("legacy", "repo-a", "old fact", None),
+    )
+    connection.commit()
+    plan = plan_legacy_fact_migration(connection, source_id="node-a", project_scope="repo-a")
+    assert plan.digest != plan_legacy_fact_migration(
+        connection, source_id="node-b", project_scope="repo-a"
+    ).digest
+    assert plan.digest != plan_legacy_fact_migration(
+        connection, source_id="node-a", project_scope="repo-b"
+    ).digest
+    with pytest.raises(MemoryReplicationError, match="stale"):
+        migrate_legacy_facts(connection, replace(plan, source_id="node-b"))
+    connection.close()
+
+
+def test_migration_requires_idle_connection(tmp_path):
+    connection = connect(tmp_path / "memory.db")
+    connection.execute(
+        "INSERT INTO facts(id,project,text,embedding) VALUES(?,?,?,?)",
+        ("legacy", "repo-a", "old fact", None),
+    )
+    connection.commit()
+    plan = plan_legacy_fact_migration(connection, source_id="node-a", project_scope="repo-a")
+    connection.execute("BEGIN")
+    with pytest.raises(MemoryReplicationError, match="idle connection"):
+        migrate_legacy_facts(connection, plan)
+    connection.rollback()
+    connection.close()
+
+
+def test_migration_rechecks_after_backup_race(tmp_path):
+    path = tmp_path / "memory.db"
+    connection = connect(path)
+    racer = connect(path)
+    connection.execute(
+        "INSERT INTO facts(id,project,text,embedding) VALUES(?,?,?,?)",
+        ("legacy", "repo-a", "old fact", None),
+    )
+    connection.commit()
+    plan = plan_legacy_fact_migration(connection, source_id="node-a", project_scope="repo-a")
+
+    class RacingConnection:
+        def __init__(self, inner):
+            self.inner = inner
+            self.in_transaction = inner.in_transaction
+
+        def execute(self, *args, **kwargs):
+            return self.inner.execute(*args, **kwargs)
+
+        def backup(self, target):
+            result = self.inner.backup(target)
+            racer.execute("UPDATE facts SET text=? WHERE id=?", ("raced", "legacy"))
+            racer.commit()
+            return result
+
+        def commit(self):
+            return self.inner.commit()
+
+        def rollback(self):
+            return self.inner.rollback()
+
+    raced = RacingConnection(connection)
+    with pytest.raises(MemoryReplicationError, match="stale"):
+        migrate_legacy_facts(raced, plan, backup_path=tmp_path / "backup.db")
+    assert connection.execute("SELECT text FROM facts WHERE id=?", ("legacy",)).fetchone()[0] == "raced"
+    assert connection.execute("SELECT COUNT(*) FROM memory_replication_log").fetchone()[0] == 0
+    racer.close()
     connection.close()
