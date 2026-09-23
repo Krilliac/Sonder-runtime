@@ -59,7 +59,7 @@ def test_recovery_reattaches_live_owner_and_marks_dead_owner_uncertain(tmp_path)
     journal.begin(_intent("live", worker_id="w-live", key="live"))
     journal.begin(_intent("dead", worker_id="w-dead", key="dead"))
     decision = journal.recover("run-1", live_workers={"w-live": 2})
-    assert decision.action == "reattach"
+    assert decision.action == "reconcile"
     assert decision.intent_ids == ("live", "dead")
     assert journal.get("dead").state is EffectState.UNCERTAIN
     with pytest.raises(EffectJournalError):
@@ -86,6 +86,18 @@ def test_uncertain_effect_never_reattaches_even_if_old_owner_is_live(tmp_path):
     assert decision.action == "reconcile"
     assert decision.intent_ids == ("i-1",)
     assert journal.get("i-1").state is EffectState.UNCERTAIN
+
+
+def test_uncertain_effect_blocks_an_otherwise_live_intent(tmp_path):
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    journal.begin(_intent("live", worker_id="worker", key="live"))
+    journal.begin(_intent("uncertain", worker_id="worker", key="uncertain"))
+    journal.uncertain("uncertain", detail="external outcome unknown")
+
+    decision = journal.recover("run-1", live_workers={"worker": 2})
+
+    assert decision.action == "reconcile"
+    assert decision.intent_ids == ("live", "uncertain")
 
 
 def test_crash_cut_points_never_turn_an_unresolved_effect_into_completion(tmp_path):

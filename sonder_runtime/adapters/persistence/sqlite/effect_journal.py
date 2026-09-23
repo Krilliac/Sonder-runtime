@@ -282,15 +282,15 @@ class SQLiteEffectJournal:
                 connection.execute(
                     "UPDATE effect_journal SET state=?,detail=? WHERE intent_id=? "
                     "AND state IN (?,?)",
-                    (EffectState.UNCERTAIN.value, "owner unavailable during restart", intent_id,
+                    (EffectState.UNCERTAIN.value, "effect requires reconciliation after restart", intent_id,
                      EffectState.INTENT.value, EffectState.UNCERTAIN.value),
                 )
-            if attached:
-                action = "reattach"
-                detail = "confirmed live owner may continue its existing intent"
-            elif orphaned:
+            if orphaned:
                 action = "reconcile"
                 detail = "unresolved effects require explicit reconciliation"
+            elif attached:
+                action = "reattach"
+                detail = "confirmed live owner may continue its existing intent"
             else:
                 action = "resume"
                 detail = "no unresolved effects"
