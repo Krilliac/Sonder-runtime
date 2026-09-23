@@ -164,6 +164,14 @@ class ContinuationWorkerRegistry(WorkerRegistry):
                 existing = self._repository.get_active_by_key(launch.parent_id, key, namespace)
                 if existing is not None:
                     break
+        if existing is None:
+            lookup = getattr(self._repository, "get_by_key", None)
+            if callable(lookup):
+                for key, namespace in ((launch.resume_key, "resume"), (launch.idempotency_key, "idempotency")):
+                    if key:
+                        existing = lookup(launch.parent_id, key, namespace)
+                        if existing is not None:
+                            break
         if existing is None and self._owner_nonce and dict(request.metadata).get("owner_nonce") != self._owner_nonce:
             raise WorkerRegistryError("worker launch owner nonce does not match this provider")
         if existing is not None:

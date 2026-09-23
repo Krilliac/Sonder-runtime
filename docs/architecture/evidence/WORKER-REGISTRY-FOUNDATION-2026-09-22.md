@@ -44,6 +44,14 @@ idempotency key is rejected; a terminal record marked `recovery_required`
 still requires the explicit resume path. The reuse handle reads the persisted
 terminal result, so the repository remains the only worker truth.
 
+Stable-key retries with a new child ID now search terminal rows as well as
+active rows through one bounded durable lookup. Multiple rows for one parent
+and stable key are treated as ambiguous and fail closed. Terminal reuse also
+requires persisted owner, workspace, consent, and session metadata to match
+the current `OperationContext`; missing proof or a foreign principal cannot
+read the persisted result. Distinct resume/idempotency keys remain available
+for intentional parallel lanes.
+
 Additional verification:
 
 ```text
