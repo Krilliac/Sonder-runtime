@@ -50,12 +50,18 @@ This demonstrates provider-reported raw Ollama prefix reuse.
 
 ## Limitations
 
-The current runtime graph instantiates `ContextPlanningFacade`, but the
-repository audit found no production caller of
-`ContextPlanningFacade.assemble` or `RuntimeContextPlanningAdapter.assemble`;
-those calls are confined to tests. The raw Ollama probe therefore does not
-prove that a live Sonder request consumes this cache or that Sonder stable
-sections reach Ollama. Other providers, cross-process cache coordination, and
-production traffic remain unverified. CTX-009 remains
-`implemented_unverified` until a live invocation path and end-to-end evidence
-cover the full requirement.
+The runtime graph now instantiates `LiveAgentContextProducer` and passes it to
+the production `AgentLaneService`. The lane request builder discovers the
+scoped project rules and skill catalog, resolves a provider-owned route, and
+passes the resulting request through `ProviderDispatchGateway`; the dispatch
+wrapper verifies that the route was issued by the selected provider before
+generation. `tests/test_live_agent_context.py::test_live_prefix_request_crosses_provider_dispatch_with_sealed_route`
+covers this boundary and verifies that the generated request contains both
+scoped sections while the prefix cache records a write.
+
+The test uses a deterministic provider double. The raw Ollama probe therefore
+does not prove that a real production Ollama request consumes this cache or
+that provider-reported KV reuse is present for these exact stable sections.
+Other providers and cross-process cache coordination remain unverified. CTX-
+009 remains `implemented_unverified` until a live provider invocation and
+end-to-end telemetry evidence cover the full requirement.
