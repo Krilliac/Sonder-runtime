@@ -173,9 +173,9 @@
     },
     {
       "checked": false,
-      "claim": "Child agents expose continuable durable state.",
+      "claim": "Delegation retries with a new proposed child ID propagate the canonical terminal child ID returned by the durable key registry, reuse the persisted result without a runner, and reject ambiguous duplicate terminal rows or foreign operation context.",
       "requirement_id": "AGENT-006",
-      "revision": 2,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "ac3d8a4780ba22cd2f72b2bc7cfbebd0a2d14b27df9e9e5a70e8d7cb7e57d33c",
+    "ledger_sha256": "aef04d9f7c6c6673ee98d92dae0a79d26ab858c6d5ec9b049986d1951e76a662",
     "spec_sha256": "61faa94ce65d66c87613361fa79a5afbd4053660e10f6801c6dc8be62c0c92d8"
   }
 }
