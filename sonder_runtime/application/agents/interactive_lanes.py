@@ -203,6 +203,12 @@ class AgentLaneService:
         )
         self._deferred_verification = {}
         self._condition = threading.Condition()
+        # A lane can be scheduled by several durable command paths (spawn,
+        # resume, and mailbox delivery).  Keep one in-flight submission per
+        # lane so repeated notifications do not fill the executor queue with
+        # no-op run_pending calls.  The marker is released by the wrapper even
+        # when the worker raises, allowing a later recovery/resume to retry.
+        self._scheduled_lanes = set()
         self._capture = SessionCaptureService(sessions)
         self._archive = SessionContextArchiveService(sessions)
         if loop is not None and loop_factory is not None:
@@ -573,18 +579,45 @@ class AgentLaneService:
         managed = (
             self.managed_authority is not None and context.principal_id != LOCAL_OWNER
         )
+        if not self._pool:
+            return
+        # Reserve before installing managed-dispatch proof.  Otherwise a
+        # duplicate notification could replace the context proof belonging to
+        # the already queued worker and make that valid worker fail closed.
+        with self._condition:
+            if lane_id in self._scheduled_lanes:
+                return
+            if managed and len(self._app_dispatch) >= 256:
+                raise CapacityExceeded("managed dispatch capacity unavailable")
+            self._scheduled_lanes.add(lane_id)
         if managed:
-            lane = self._fresh_execution(lane_id, context)
+            try:
+                lane = self._fresh_execution(lane_id, context)
+            except Exception:
+                with self._condition:
+                    self._scheduled_lanes.discard(lane_id)
+                raise
             with self._condition:
-                if len(self._app_dispatch) >= 256 and lane_id not in self._app_dispatch:
-                    raise CapacityExceeded("managed dispatch capacity unavailable")
                 self._app_dispatch[lane_id] = (context, lane["attempt_id"])
-        if self._pool:
-            self._pool.submit(
-                self.run_pending,
-                lane_id,
-                context if managed else replace(context, deadline_monotonic=None),
-            )
+        worker_context = context if managed else replace(context, deadline_monotonic=None)
+        try:
+            self._pool.submit(self._run_scheduled, lane_id, worker_context)
+        except Exception:
+            with self._condition:
+                self._scheduled_lanes.discard(lane_id)
+                if managed and self._app_dispatch.get(lane_id) == (
+                    context,
+                    lane["attempt_id"],
+                ):
+                    self._app_dispatch.pop(lane_id, None)
+            raise
+
+    def _run_scheduled(self, lane_id, context):
+        try:
+            self.run_pending(lane_id, context)
+        finally:
+            with self._condition:
+                self._scheduled_lanes.discard(lane_id)
 
     @_recover_committed_command
     def spawn(
