@@ -1374,10 +1374,22 @@ class AgentLaneService:
             ),
         }
 
-    def _request(self, lane, messages, *, request_id=None):
+    def _request(self, lane, messages, *, request_id=None, context=None):
         prompt = "\n\n".join("[" + m["author"] + "] " + m["content"] for m in messages)
         if not prompt:
             prompt = "Continue from the recorded tool result."
+        route = None
+        resolve_route = getattr(self.gateway, "resolve_route", None)
+        if callable(resolve_route) and context is not None:
+            try:
+                route = resolve_route(
+                    ModelRequest(prompt, tier=lane["tier"]), context
+                )
+            except Exception:
+                # Route resolution is advisory for prefix reuse.  The actual
+                # gateway call remains authoritative and reports its own
+                # provider error; an unknown route must never create a cache.
+                route = None
         system = (
             "You are a scoped child agent. Preserve separately authored user constraints; if instructions conflict, "
             "explain the conflict and ask for input. Work only within "
@@ -1413,9 +1425,17 @@ class AgentLaneService:
                 + "\nVisible tool schemas (only these tools may be requested): "
                 + rendered
             )
+        route_identity = (
+            route if isinstance(route, dict)
+            and all(isinstance(route.get(key), str) and route[key].strip()
+                    for key in ("model", "tokenizer", "template"))
+            else None
+        )
         if self._context_planning is not None and self._live_context is not None:
             live = self._live_context.refresh(Path(lane["workspace_root"]))
-            if not live.complete:
+            if route_identity is None:
+                system += "\nProvider model/tokenizer/template identity unavailable; reusable prefix disabled"
+            elif not live.complete:
                 # Keep the failure visible to the model and operators, while
                 # refusing to claim a reusable prefix for incomplete inputs.
                 system += "\nLive stable context unavailable: " + live.reason
@@ -1442,13 +1462,13 @@ class AgentLaneService:
                 budgets = {section: 8192 for section in CONTEXT_SECTIONS}
                 try:
                     assembly = self._context_planning.assemble(
-                        ModelContext(lane["tier"], 32768, min(
+                        ModelContext(route_identity["model"], 32768, min(
                             max(1, lane["max_output_tokens"]), 32767
                         )),
                         items, budgets, records=records,
                         prefix_version="agent-lane-v1",
-                        tokenizer="provider-default",
-                        template="agent-lane-system-v1",
+                        tokenizer=route_identity["tokenizer"],
+                        template=route_identity["template"],
                         system_prefix=system,
                         visible_tool_schemas=(schemas if selection is not None else ()),
                         project_policy={
@@ -1474,14 +1494,17 @@ class AgentLaneService:
                         )
                 except (TypeError, ValueError) as exc:
                     system += "\nLive stable context unavailable: " + type(exc).__name__
+        request_options = {
+            "num_predict": max(1, lane["max_output_tokens"] - lane["used_tokens"])
+        }
+        if route is not None:
+            request_options["_resolved_route"] = route
         return ModelRequest(
             prompt,
             tier=lane["tier"],
             system=system,
             history=self._history(lane),
-            options={
-                "num_predict": max(1, lane["max_output_tokens"] - lane["used_tokens"])
-            },
+            options=request_options,
         )
 
     def _tool_schema_selection(self, lane, *, turn_number=None):
@@ -1652,7 +1675,9 @@ class AgentLaneService:
                         break
                     continue
                 request_id = "request-" + uuid.uuid4().hex
-                request = self._request(lane, messages, request_id=request_id)
+                request = self._request(
+                    lane, messages, request_id=request_id, context=run_context
+                )
                 turn_id = lane["attempt_id"] + "-" + str(lane["used_steps"] + 1)
                 with self._transaction(run_context, lane_id=lane_id) as tx:
                     fresh = tx.lane(lane_id)

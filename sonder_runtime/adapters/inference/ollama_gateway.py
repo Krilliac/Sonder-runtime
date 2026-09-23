@@ -199,6 +199,33 @@ class OllamaGateway:
         """Typed capability metadata; shape matches ``ProviderHealth.capabilities``."""
         return CAPABILITIES
 
+    def resolve_route(self, request: ModelRequest, context: OperationContext):
+        """Resolve the route whose identity may be used by a live prefix."""
+        del context
+        if self._target_resolver is None:
+            raise DependencyUnavailable(
+                "Ollama gateway requires an injected target provider"
+            )
+        target = self._target_resolver(request.tier or "sonder", False)
+        if not isinstance(target, ModelTarget):
+            raise DependencyUnavailable("model target provider returned invalid target")
+        if target.tier_label == "cloud-disabled":
+            raise Forbidden("cloud tiers are disabled on this runtime")
+        if not isinstance(target.model, str) or not target.model.strip():
+            raise DependencyUnavailable("model route identity is unavailable")
+        if not isinstance(target.tier_label, str) or not target.tier_label.strip():
+            raise InvalidInput("unknown model tier %r" % (request.tier,))
+        return {
+            # This adapter owns the transport route; target.provider_id is
+            # model metadata and must not let a route be replayed here.
+            "provider_id": "ollama",
+            "model": target.model,
+            "tier_label": target.tier_label,
+            "cloud": bool(target.cloud),
+            "tokenizer": target.tokenizer or "",
+            "template": target.template or "",
+        }
+
     def generate(
         self, request: ModelRequest, context: OperationContext
     ) -> ModelResponse:
@@ -209,10 +236,28 @@ class OllamaGateway:
                 "Ollama gateway requires injected target and generate providers"
             )
         logger.debug(f"OllamaGateway.generate: tier={request.tier!r}")
-        target = self._target_resolver(request.tier or "sonder", False)
-        if not isinstance(target, ModelTarget):
-            raise DependencyUnavailable("model target provider returned invalid target")
-        model, cloud, tier_label = target.model, target.cloud, target.tier_label
+        options = dict(request.options or {})
+        resolved_route = options.pop("_resolved_route", None)
+        if resolved_route is None:
+            target = self._target_resolver(request.tier or "sonder", False)
+            if not isinstance(target, ModelTarget):
+                raise DependencyUnavailable("model target provider returned invalid target")
+            model, cloud, tier_label = target.model, target.cloud, target.tier_label
+        else:
+            if not isinstance(resolved_route, dict):
+                raise InvalidInput("resolved model route must be an object")
+            required = ("provider_id", "model", "tier_label", "cloud")
+            if any(key not in resolved_route for key in required):
+                raise InvalidInput("resolved model route is incomplete")
+            if resolved_route.get("provider_id") != "ollama":
+                raise InvalidInput("resolved model route belongs to another provider")
+            model = resolved_route["model"]
+            cloud = resolved_route["cloud"]
+            tier_label = resolved_route["tier_label"]
+            if (not isinstance(model, str) or not model.strip()
+                    or not isinstance(tier_label, str) or not tier_label.strip()
+                    or not isinstance(cloud, bool)):
+                raise InvalidInput("resolved model route has invalid fields")
         logger.debug(f"OllamaGateway.generate: resolved model={model!r}, cloud={cloud}, tier_label={tier_label!r}")
         if tier_label == "cloud-disabled":
             raise Forbidden("cloud tiers are disabled on this runtime")
@@ -232,7 +277,6 @@ class OllamaGateway:
                 "does not allow cloud" % (request.tier,)
             )
 
-        options = dict(request.options or {})
         num_predict = options.get("num_predict", 1024)
         think_supplied = "think" in options
         think = options.get("think")

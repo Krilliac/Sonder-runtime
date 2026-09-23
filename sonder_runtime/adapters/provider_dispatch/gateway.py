@@ -37,6 +37,18 @@ class ProviderDispatchGateway:
         self._default_generation_provider = default_generation_provider
         self._embedding_provider = embedding_provider
 
+    def resolve_route(self, request: ModelRequest, context: OperationContext):
+        """Delegate route identity to the same provider used for generation."""
+        provider_name = self._tier_providers.get(request.tier)
+        if provider_name is None and request.tier == "sonder":
+            provider_name = self._default_generation_provider
+        if provider_name is None:
+            raise InvalidInput("no provider binding for tier %r" % request.tier)
+        resolver = getattr(self._providers[provider_name], "resolve_route", None)
+        if not callable(resolver):
+            return None
+        return resolver(request, context)
+
     def generate(
         self, request: ModelRequest, context: OperationContext
     ) -> ModelResponse:

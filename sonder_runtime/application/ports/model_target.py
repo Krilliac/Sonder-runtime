@@ -19,6 +19,11 @@ class ModelTarget:
     cloud: bool
     tier_label: str | None
     augment_system: bool = True
+    # Provider-resolved prompt identity.  These remain optional because older
+    # bootstrap providers cannot prove their tokenizer or chat template.
+    provider_id: str | None = None
+    tokenizer: str | None = None
+    template: str | None = None
 
 
 class ModelTargetResolver(Protocol):
