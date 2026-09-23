@@ -1,0 +1,152 @@
+"""Durable intent/outcome contract for mutating worker effects.
+
+The journal is deliberately independent of a particular tool or runner.  A
+worker binds a journal while it owns a run; the typed tool gateway then records
+the intent immediately before invoking a mutating tool and records the outcome
+only after the invoker returns.  An intent without an outcome is never treated
+as success during restart recovery.
+"""
+from __future__ import annotations
+
+import contextlib
+import contextvars
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Iterator, Protocol
+
+
+class EffectJournalError(ValueError):
+    """The journal rejected an invalid or conflicting transition."""
+
+
+class EffectState(str, Enum):
+    INTENT = "intent"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    UNCERTAIN = "uncertain"
+
+
+@dataclass(frozen=True, slots=True)
+class EffectIntent:
+    intent_id: str
+    run_id: str
+    worker_id: str
+    operation_id: str
+    scope: str
+    owner_epoch: int
+    idempotency_key: str
+    request_digest: str
+    reconciliation: str = "idempotent"
+    sequence: int = 0
+    state: EffectState = EffectState.INTENT
+    outcome_digest: str = ""
+    receipt_key: str = ""
+    detail: str = ""
+
+    def __post_init__(self) -> None:
+        for name in ("intent_id", "run_id", "worker_id", "operation_id", "scope",
+                     "idempotency_key", "request_digest"):
+            if not isinstance(getattr(self, name), str) or not getattr(self, name).strip():
+                raise EffectJournalError(f"{name} must be non-empty")
+        if type(self.owner_epoch) is not int or self.owner_epoch < 0:
+            raise EffectJournalError("owner_epoch must be non-negative")
+        if self.reconciliation not in {"idempotent", "query", "manual"}:
+            raise EffectJournalError("unsupported reconciliation strategy")
+        if type(self.sequence) is not int or self.sequence < 0:
+            raise EffectJournalError("sequence cannot be negative")
+        if self.state in {EffectState.COMPLETED, EffectState.FAILED}:
+            if not self.outcome_digest or not self.receipt_key:
+                raise EffectJournalError("terminal outcome requires digest and receipt")
+
+
+@dataclass(frozen=True, slots=True)
+class EffectOutcome:
+    intent_id: str
+    state: EffectState
+    outcome_digest: str
+    receipt_key: str
+    detail: str = ""
+    worker_id: str = ""
+    owner_epoch: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.state not in {EffectState.COMPLETED, EffectState.FAILED, EffectState.UNCERTAIN}:
+            raise EffectJournalError("outcome must be terminal or uncertain")
+        if not self.intent_id.strip() or not self.outcome_digest.strip():
+            raise EffectJournalError("outcome identity and digest are required")
+        if self.state is not EffectState.UNCERTAIN and not self.receipt_key.strip():
+            raise EffectJournalError("definitive outcome requires receipt")
+        if self.worker_id and (self.owner_epoch is None or self.owner_epoch < 0):
+            raise EffectJournalError("outcome owner epoch is required with worker identity")
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryDecision:
+    run_id: str
+    action: str
+    intent_ids: tuple[str, ...] = ()
+    high_water: int = 0
+    detail: str = ""
+
+
+class EffectJournal(Protocol):
+    def begin(self, intent: EffectIntent) -> EffectIntent: ...
+    def outcome(self, outcome: EffectOutcome) -> EffectIntent: ...
+    def uncertain(self, intent_id: str, *, detail: str) -> EffectIntent: ...
+    def high_water(self, run_id: str) -> int: ...
+    def recover(self, run_id: str, *, live_workers: set[str], max_records: int = 100) -> RecoveryDecision: ...
+    def validate_checkpoint(self, run_id: str, high_water: int) -> None: ...
+
+
+@dataclass
+class JournalBinding:
+    journal: EffectJournal
+    run_id: str
+    worker_id: str
+    owner_epoch: int
+    scope: str
+
+    def begin_request(self, *, operation_id: str, idempotency_key: str,
+                      request_digest: str, reconciliation: str = "idempotent") -> EffectIntent:
+        intent = EffectIntent(
+            f"{self.run_id}:{operation_id}", self.run_id, self.worker_id,
+            operation_id, self.scope, self.owner_epoch, idempotency_key,
+            request_digest, reconciliation,
+        )
+        return self.journal.begin(intent)
+
+    def complete(self, intent: EffectIntent, *, outcome_digest: str,
+                 receipt_key: str, detail: str = "", success: bool = True) -> EffectIntent:
+        return self.journal.outcome(EffectOutcome(
+            intent.intent_id,
+            EffectState.COMPLETED if success else EffectState.FAILED,
+            outcome_digest, receipt_key, detail,
+            self.worker_id, self.owner_epoch,
+        ))
+
+    def mark_uncertain(self, intent: EffectIntent, *, detail: str) -> EffectIntent:
+        return self.journal.uncertain(intent.intent_id, detail=detail)
+
+
+_CURRENT: contextvars.ContextVar[JournalBinding | None] = contextvars.ContextVar(
+    "sonder_effect_journal", default=None,
+)
+
+
+def current() -> JournalBinding | None:
+    return _CURRENT.get()
+
+
+@contextlib.contextmanager
+def bound(binding: JournalBinding) -> Iterator[JournalBinding]:
+    if not isinstance(binding, JournalBinding):
+        raise TypeError("binding must be a JournalBinding")
+    token = _CURRENT.set(binding)
+    try:
+        yield binding
+    finally:
+        _CURRENT.reset(token)
+
+
+__all__ = ["EffectIntent", "EffectJournal", "EffectJournalError", "EffectOutcome",
+           "EffectState", "JournalBinding", "RecoveryDecision", "bound", "current"]
