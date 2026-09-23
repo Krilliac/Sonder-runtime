@@ -593,9 +593,9 @@
     },
     {
       "checked": false,
-      "claim": "New ADRs have a canonical date-prefixed namespace.",
+      "claim": "The canonical docs/adr namespace now rejects newly numbered ADRs, invalid calendar dates, and writes to the frozen historical directory while retaining both existing numeric series.",
       "requirement_id": "DOC-003",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "aef04d9f7c6c6673ee98d92dae0a79d26ab858c6d5ec9b049986d1951e76a662",
+    "ledger_sha256": "0da7457ffa9f24ccc4a3b4b368d32c11d61ce495a19f16f5fb64567c59712af3",
     "spec_sha256": "61faa94ce65d66c87613361fa79a5afbd4053660e10f6801c6dc8be62c0c92d8"
   }
 }
