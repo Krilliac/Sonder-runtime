@@ -16,6 +16,117 @@ from sonder_runtime.adapters.persistence.sqlite.memory_projection import (
     SQLiteMemoryReplicationProjection,
 )
 from sonder_runtime.domain.memory.replication import MemoryReplicationError
+from sonder_runtime.bootstrap.app import build_application
+from sonder_runtime.platform.config import Secrets, SonderConfig
+from sonder_runtime.platform.memory_replication_config import (
+    MemoryReplicationConfig, MemoryReplicationPeerConfig,
+)
+
+
+def _live_replication_config() -> SonderConfig:
+    return SonderConfig(
+        secrets=Secrets(
+            api_key="api-" + "a" * 32,
+            artifact_transfer_key="artifact-" + "b" * 32,
+            auth_secret="auth-" + "c" * 32,
+            memory_replication_key="replication-" + "d" * 48,
+            memory_replication_state_integrity_key="state-" + "e" * 48,
+        ),
+        memory_replication=MemoryReplicationConfig(
+            enabled=True,
+            local_node_id="node-a",
+            project_scope="repo-a",
+            peers=(MemoryReplicationPeerConfig(
+                node_id="node-b", project_scope="repo-a",
+                origin="https://node-b.example:8443",
+            ),),
+        ),
+    )
+
+
+def test_live_application_composes_authoritative_fact_write_and_restart(tmp_path, monkeypatch):
+    path = tmp_path / "memory.db"
+    monkeypatch.setenv("SONDER_DB", str(path))
+    config = _live_replication_config()
+    first = build_application(config=config)
+    try:
+        with first.unit_of_work() as scope:
+            scope.memory.add_fact("fact-1", "repo-a", "first")
+        with pytest.raises(MemoryReplicationError, match="scope"):
+            with first.unit_of_work() as scope:
+                scope.memory.add_fact("wrong-project", "repo-b", "not admitted")
+        assert first.memory_replication._database_path_for_operation() == path
+    finally:
+        first.close_providers()
+
+    restarted = build_application(config=config)
+    try:
+        with restarted.unit_of_work() as scope:
+            assert scope.memory.facts_for_project("repo-a")[0]["text"] == "first"
+            scope.memory.add_fact("fact-2", "repo-a", "second")
+    finally:
+        restarted.close_providers()
+
+    journal = SQLiteMemoryReplicationJournal(
+        path, source_id="node-a", project_scope="repo-a",
+    )
+    try:
+        assert [(record.sequence, record.entity_id) for record in journal.export(limit=10).records] == [
+            (1, "fact-1"), (2, "fact-2"),
+        ]
+    finally:
+        journal.close()
+
+
+def test_live_activation_refuses_existing_unjournaled_scoped_facts(tmp_path):
+    from sonder_runtime.adapters import memory_store
+
+    path = tmp_path / "memory.db"
+    connection = connect(path)
+    memory_store.add_fact(connection, "legacy", "repo-a", "existing")
+    connection.close()
+
+    application = build_application(config=_live_replication_config())
+    try:
+        with pytest.raises(MemoryReplicationError, match="authoritative migration"):
+            with application.unit_of_work(db_path=str(path)) as scope:
+                scope.memory.add_fact("new", "repo-a", "must not mix")
+    finally:
+        application.close_providers()
+
+    connection = connect(path)
+    try:
+        assert [row["id"] for row in facts_for_project(connection, "repo-a")] == ["legacy"]
+        assert connection.execute("SELECT COUNT(*) FROM memory_replication_log").fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_live_source_and_fact_rollback_together_when_journal_fails(tmp_path, monkeypatch):
+    from sonder_runtime.adapters.persistence.sqlite import authoritative_memory
+
+    path = tmp_path / "memory.db"
+    def reject_journal(*args, **kwargs):
+        raise RuntimeError("journal failed")
+
+    monkeypatch.setattr(
+        authoritative_memory, "append_memory_mutations_in_transaction", reject_journal,
+    )
+    application = build_application(config=_live_replication_config())
+    try:
+        with pytest.raises(RuntimeError, match="journal failed"):
+            with application.unit_of_work(db_path=str(path)) as scope:
+                scope.memory.add_fact("fact-1", "repo-a", "uncommitted")
+    finally:
+        application.close_providers()
+
+    connection = connect(path)
+    try:
+        assert facts_for_project(connection, "repo-a") == []
+        assert connection.execute("SELECT COUNT(*) FROM memory_authoritative_fact_state").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM memory_replication_log").fetchone()[0] == 0
+    finally:
+        connection.close()
 
 
 def test_authoritative_fact_source_commits_fact_and_journal_record_together(tmp_path):

@@ -156,6 +156,18 @@ class StateConfig:
 
 
 @dataclass(frozen=True)
+class ContextConfig:
+    """Explicit read-only roots for live instruction and skill discovery."""
+
+    instruction_bundled_roots: tuple[str, ...] = ()
+    instruction_global_roots: tuple[str, ...] = ()
+    instruction_configured_roots: tuple[str, ...] = ()
+    skill_bundled_roots: tuple[str, ...] = ()
+    skill_global_roots: tuple[str, ...] = ()
+    skill_configured_roots: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class OllamaConfig:
     url: str = "http://127.0.0.1:11434"
     allow_remote: bool = False
@@ -419,6 +431,7 @@ class SonderConfig:
     profile: str = "workstation-local"
     server: ServerConfig = field(default_factory=ServerConfig)
     state: StateConfig = field(default_factory=StateConfig)
+    context: ContextConfig = field(default_factory=ContextConfig)
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
     compute: ComputeConfig = field(default_factory=ComputeConfig)
     deployment: DeploymentConfig = field(default_factory=DeploymentConfig)
@@ -543,6 +556,10 @@ class SonderConfig:
             for item in fields(self.app_control)
         }
         out["secrets"] = self.secrets.as_redacted_dict()
+        out["context"] = {
+            item.name: list(getattr(self.context, item.name))
+            for item in fields(self.context)
+        }
         out["memory_replication"] = {
             "enabled": self.memory_replication.enabled,
             "local_node_id": self.memory_replication.local_node_id,
@@ -716,6 +733,7 @@ _SECTION_TYPES = {
     "app_control": AppControlConfig,
     "control_state_rehearsal": ControlStateRehearsalConfig,
     "state": StateConfig,
+    "context": ContextConfig,
     "ollama": OllamaConfig,
     "features": FeaturesConfig,
     "capacity": CapacityConfig,
@@ -1329,7 +1347,40 @@ def validate_deployment(config: SonderConfig) -> None:
         raise ConfigError(errors)
 
 
+def _context_root_errors(config: SonderConfig) -> list[str]:
+    errors: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for field_name in (
+        "instruction_bundled_roots", "instruction_global_roots",
+        "instruction_configured_roots", "skill_bundled_roots",
+        "skill_global_roots", "skill_configured_roots",
+    ):
+        values = getattr(config.context, field_name)
+        if len(values) > 16:
+            errors.append(f"[context].{field_name} exceeds 16 roots")
+        for raw in values:
+            if not isinstance(raw, str) or not raw.strip():
+                errors.append(f"[context].{field_name} contains an empty root")
+                continue
+            try:
+                path = Path(raw).expanduser()
+                if not path.is_absolute():
+                    raise ValueError
+                resolved = path.resolve(strict=False)
+                if path.is_symlink():
+                    raise ValueError
+            except (OSError, RuntimeError, ValueError):
+                errors.append(f"[context].{field_name} root must be an absolute non-link path")
+                continue
+            key = (field_name, os.path.normcase(str(resolved)))
+            if key in seen:
+                errors.append(f"[context].{field_name} contains a duplicate root")
+            seen.add(key)
+    return errors
+
+
 def _validate(config: SonderConfig, errors: list[str]) -> None:
+    errors.extend(_context_root_errors(config))
     try:
         validate_membership_config(config.membership, config.secrets, allow_remote=config.ollama.allow_remote)
     except ValueError as error:

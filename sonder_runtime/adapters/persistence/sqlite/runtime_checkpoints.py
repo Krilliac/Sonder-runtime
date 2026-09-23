@@ -9,6 +9,7 @@ from pathlib import Path
 from threading import Lock
 
 from sonder_runtime.adapters.persistence.owned_sqlite import transaction as owned_sqlite_transaction
+from sonder_runtime.application.execution.effect_journal import EffectJournalError
 from sonder_runtime.application.ports.runtime_checkpoints import (
     CheckpointConflict, CheckpointError, RestoreResult, RestoreStatus,
     RuntimeCheckpoint, SCHEMA_VERSION, canonical_json,
@@ -32,12 +33,20 @@ CREATE INDEX IF NOT EXISTS ix_runtime_checkpoint_latest
 class SQLiteRuntimeCheckpointRepository:
     """Append-only generations with expected-generation compare-and-set."""
 
-    def __init__(self, db_path: str | Path, *, seal_key: bytes | str, max_payload_bytes: int = 256 * 1024) -> None:
+    def __init__(self, db_path: str | Path, *, seal_key: bytes | str,
+                 max_payload_bytes: int = 256 * 1024, effect_journal=None) -> None:
         if type(max_payload_bytes) is not int or not 1024 <= max_payload_bytes <= 256 * 1024:
             raise ValueError("max_payload_bytes must be between 1024 and 262144")
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._max_payload_bytes = max_payload_bytes
+        self._effect_journal = effect_journal
+        if effect_journal is not None and (
+            not isinstance(getattr(effect_journal, "database_path", None), Path)
+            or effect_journal.database_path.resolve() != self._path.resolve()
+            or not callable(getattr(effect_journal, "validate_checkpoint_in_transaction", None))
+        ):
+            raise CheckpointError("effect journal must share the checkpoint SQLite database")
         if isinstance(seal_key, str):
             seal_key = seal_key.encode("utf-8")
         if not isinstance(seal_key, bytes) or len(seal_key) < 32 or len(seal_key) > 4096:
@@ -45,7 +54,14 @@ class SQLiteRuntimeCheckpointRepository:
         self._seal_key = seal_key
         self._lock = Lock()
         with self._connect() as connection:
-            connection.executescript(_DDL)
+            connection.executescript(_DDL + """
+            CREATE TABLE IF NOT EXISTS runtime_checkpoint_effect (
+                run_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                effect_high_water INTEGER NOT NULL,
+                PRIMARY KEY(run_id, generation)
+            );
+            """)
 
     @contextmanager
     def _connect(self):
@@ -67,6 +83,15 @@ class SQLiteRuntimeCheckpointRepository:
         seal = hmac.new(self._seal_key, payload, hashlib.sha256).hexdigest()
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            effect_high_water = None
+            if self._effect_journal is not None:
+                effect_high_water = int(connection.execute(
+                    "SELECT COALESCE(MAX(sequence),0) FROM effect_journal WHERE run_id=?",
+                    (checkpoint.run_id,),
+                ).fetchone()[0])
+                self._effect_journal.validate_checkpoint_in_transaction(
+                    connection, checkpoint.run_id, effect_high_water,
+                )
             current = connection.execute(
                 "SELECT generation,digest FROM runtime_checkpoint WHERE run_id=? ORDER BY generation DESC LIMIT 1",
                 (checkpoint.run_id,),
@@ -78,19 +103,40 @@ class SQLiteRuntimeCheckpointRepository:
                 "INSERT INTO runtime_checkpoint(run_id,generation,payload_json,digest,seal) VALUES(?,?,?,?,?)",
                 (checkpoint.run_id, checkpoint.generation, payload.decode("ascii"), digest, seal),
             )
+            if effect_high_water is not None:
+                connection.execute(
+                    "INSERT INTO runtime_checkpoint_effect(run_id,generation,effect_high_water) VALUES(?,?,?)",
+                    (checkpoint.run_id, checkpoint.generation, effect_high_water),
+                )
         return checkpoint
 
     def restore(self, run_id: str) -> RestoreResult:
         if not isinstance(run_id, str) or not run_id.strip():
             raise CheckpointError("run_id is required")
+        effect_binding = None
+        effect_error = None
         with self._connect() as connection:
+            connection.execute("BEGIN")
             row = connection.execute(
-                "SELECT payload_json,digest,seal FROM runtime_checkpoint WHERE run_id=? ORDER BY generation DESC LIMIT 1",
+                "SELECT generation,payload_json,digest,seal FROM runtime_checkpoint WHERE run_id=? ORDER BY generation DESC LIMIT 1",
                 (run_id,),
             ).fetchone()
+            if row is not None and self._effect_journal is not None:
+                effect_binding = connection.execute(
+                    "SELECT effect_high_water FROM runtime_checkpoint_effect "
+                    "WHERE run_id=? AND generation=?",
+                    (run_id, int(row[0])),
+                ).fetchone()
+                if effect_binding is not None:
+                    try:
+                        self._effect_journal.validate_checkpoint_in_transaction(
+                            connection, run_id, int(effect_binding[0]),
+                        )
+                    except (EffectJournalError, ValueError) as exc:
+                        effect_error = str(exc)
         if row is None:
             return RestoreResult(RestoreStatus.EMPTY, detail="no checkpoint exists")
-        raw, stored_digest, stored_seal = str(row[0]), str(row[1]), str(row[2])
+        raw, stored_digest, stored_seal = str(row[1]), str(row[2]), str(row[3])
         try:
             encoded = raw.encode("ascii")
             if len(encoded) > self._max_payload_bytes:
@@ -115,6 +161,11 @@ class SQLiteRuntimeCheckpointRepository:
             checkpoint = RuntimeCheckpoint(**body)
             if checkpoint.run_id != run_id or checkpoint.digest() != value["digest"]:
                 return RestoreResult(RestoreStatus.CORRUPT, detail="checkpoint identity mismatch")
+            if self._effect_journal is not None:
+                if effect_binding is None:
+                    return RestoreResult(RestoreStatus.CORRUPT, detail="checkpoint effect binding is missing")
+                if effect_error is not None:
+                    return RestoreResult(RestoreStatus.CORRUPT, detail=effect_error)
             return RestoreResult(RestoreStatus.RESTORED, checkpoint=checkpoint)
         except (CheckpointError, ValueError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
             return RestoreResult(RestoreStatus.CORRUPT, detail=f"checkpoint rejected: {type(exc).__name__}")

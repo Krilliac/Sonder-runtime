@@ -126,3 +126,17 @@ def test_unknown_tier_and_missing_provider_fail_closed():
             default_generation_provider="ollama",
             embedding_provider="ollama",
         )
+
+
+def test_dispatch_rejects_caller_route_options_before_provider_call():
+    ollama = RecordingGateway("ollama")
+    prism = RecordingGateway("prism")
+    gateway = _gateway(ollama, prism)
+    with pytest.raises(InvalidInput, match="cannot be supplied"):
+        gateway.generate(
+            ModelRequest("hello", "code", options={"_resolved_route": {
+                "provider_id": "ollama", "model": "arbitrary-model", "cloud": False,
+            }}),
+            _context(),
+        )
+    assert ollama.generated == []

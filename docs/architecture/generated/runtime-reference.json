@@ -7285,6 +7285,47 @@
     },
     {
       "aliases": [],
+      "category": "system",
+      "name": "/sonder_authoritative_indexes",
+      "native": false,
+      "params": [
+        {
+          "default": "",
+          "name": "project",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "entity_id",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "decision_id",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "now",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": 0,
+          "name": "offset",
+          "required": false,
+          "type": "int"
+        }
+      ],
+      "risk": "ask",
+      "summary": "Retrieve committed, scoped explicit entity/decision fact indexes.",
+      "tool": "sonder_authoritative_indexes"
+    },
+    {
+      "aliases": [],
       "category": "memory",
       "name": "/sonder_forget_fact",
       "native": false,
@@ -7327,6 +7368,42 @@
         {
           "default": "",
           "name": "project",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "entities_json",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "decision_json",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "valid_from",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "valid_until",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "supersedes",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "provenance_json",
           "required": false,
           "type": "str"
         }
@@ -9033,6 +9110,12 @@
     },
     {
       "default": null,
+      "field": "context",
+      "section": "root",
+      "type": "ContextConfig"
+    },
+    {
+      "default": null,
       "field": "ollama",
       "section": "root",
       "type": "OllamaConfig"
@@ -9618,6 +9701,42 @@
       "field": "cancel_timeout_seconds",
       "section": "child_storage",
       "type": "<class 'int'>"
+    },
+    {
+      "default": [],
+      "field": "instruction_bundled_roots",
+      "section": "context",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": [],
+      "field": "instruction_global_roots",
+      "section": "context",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": [],
+      "field": "instruction_configured_roots",
+      "section": "context",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": [],
+      "field": "skill_bundled_roots",
+      "section": "context",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": [],
+      "field": "skill_global_roots",
+      "section": "context",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": [],
+      "field": "skill_configured_roots",
+      "section": "context",
+      "type": "tuple[str, ...]"
     },
     {
       "default": false,
@@ -10219,12 +10338,12 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
-    "commands": 319,
-    "configuration": 201,
+    "commands": 320,
+    "configuration": 208,
     "events": 43,
-    "tools": 213
+    "tools": 214
   },
-  "digest": "ec4c9902e36b01f053ce6d541d342e1128e6eae1db8439e66c4fa67985538db0",
+  "digest": "f7607a8b4307f61806f28198dfa0e787305d451d10fb8996857820ca66062012",
   "events": [
     {
       "name": "session.started",
@@ -10695,10 +10814,10 @@
   "schema": "sonder-runtime-document-reference-v1",
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "51d3691d572734027fe1a6b12ff58380924b02d7327d6bbd9104b1823291d1eb",
+    "server.py": "735b1fa093163fdbd374c52b5c5ae51798d41d2b34e166ddf55215e15145f97a",
     "sonder_runtime/application/tools/generated_catalogs.py": "57a490ddd581e3e7a5d4b7b73379d205048f1db6de8e7e73c71f1124c6d84900",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
-    "sonder_runtime/platform/config.py": "4f0a7ce76709cdf1b12a729abb56f9e4933f7def5789ef8b23c3ba6f22bd4e2c",
+    "sonder_runtime/platform/config.py": "9715b77d76bda6c59460f6d74a7b1877ebc1386e0b2b08b7344d752ae92a8ea0",
     "sonder_runtime/platform/memory_replication_config.py": "1981bbc57a4e6442fc1b770d9c37cc766c66334089697d762e9b9b7ed578d179"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
@@ -16269,6 +16388,41 @@
       }
     },
     {
+      "description": "Retrieve committed, scoped explicit entity/decision fact indexes.",
+      "name": "sonder_authoritative_indexes",
+      "parameters": {
+        "properties": {
+          "decision_id": {
+            "default": "",
+            "title": "Decision Id",
+            "type": "string"
+          },
+          "entity_id": {
+            "default": "",
+            "title": "Entity Id",
+            "type": "string"
+          },
+          "now": {
+            "default": "",
+            "title": "Now",
+            "type": "string"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "project": {
+            "default": "",
+            "title": "Project",
+            "type": "string"
+          }
+        },
+        "title": "sonder_authoritative_indexesArguments",
+        "type": "object"
+      }
+    },
+    {
       "description": "Forget one asserted project fact after an exact confirmation.\n\n    List fact IDs first with ``/facts`` (or the matching MCP/session surface),\n    then pass that same full ID as ``confirm``.  This never deletes learned\n    lessons, conversations, or facts from another project.\n    ",
       "name": "sonder_forget_fact",
       "parameters": {
@@ -16300,13 +16454,43 @@
       "name": "sonder_remember_fact",
       "parameters": {
         "properties": {
+          "decision_json": {
+            "default": "",
+            "title": "Decision Json",
+            "type": "string"
+          },
+          "entities_json": {
+            "default": "",
+            "title": "Entities Json",
+            "type": "string"
+          },
           "project": {
             "default": "",
             "title": "Project",
             "type": "string"
           },
+          "provenance_json": {
+            "default": "",
+            "title": "Provenance Json",
+            "type": "string"
+          },
+          "supersedes": {
+            "default": "",
+            "title": "Supersedes",
+            "type": "string"
+          },
           "text": {
             "title": "Text",
+            "type": "string"
+          },
+          "valid_from": {
+            "default": "",
+            "title": "Valid From",
+            "type": "string"
+          },
+          "valid_until": {
+            "default": "",
+            "title": "Valid Until",
             "type": "string"
           }
         },

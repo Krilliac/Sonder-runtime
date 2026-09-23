@@ -8,8 +8,18 @@ from sonder_runtime.adapters.persistence.session_repository import (
     SQLiteSessionRepository,
 )
 from sonder_runtime.application.agents.interactive_lanes import AgentLaneService
+from sonder_runtime.application.agents.delegated_verification import DelegatedVerificationService
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelResponse
+
+
+def test_legacy_verification_row_has_no_invented_failure_receipt():
+    row = {
+        "verification_id": "verification-old", "parent_session_id": "parent",
+        "state": "failed", "generation": 1, "code": "VERIFICATION_REFUSED",
+        "certificate": None, "job_ids": [],
+    }
+    assert DelegatedVerificationService._public(row)["failure_receipt"] is None
 
 
 @pytest.fixture
@@ -201,6 +211,54 @@ def test_certificate_requires_separate_exact_approval_and_invalidates_on_steerin
         context=context,
         bound_parent_revision=1,
     ).valid
+
+
+def test_failed_check_retains_immutable_specific_negative_receipt_and_restart_proof(
+    lanes,
+):
+    service, store, model, root, context, parent = lanes
+    service.run_pending(spawn(lanes), context)
+    verifier, gateway, proofs = _verifier(lanes)
+    prepared = _prepared(lanes, verifier)
+    *_, context, parent = lanes
+
+    def failed_check(check, call_id, parent_session, execution_context, *, permit):
+        proofs["lane-test-" + call_id] = dict(
+            job_id="lane-test-" + call_id,
+            parent_session_id=parent_session,
+            principal_id=execution_context.principal_id,
+            process_exited=True,
+            containment_empty=True,
+            resources_released=True,
+            status="failed",
+            exit_code=7,
+            job_revision=3,
+            digest="proof-failed",
+        )
+
+    gateway.execute_check = failed_check
+    result = verifier.execute_prepared(
+        prepared, context=context, approve=lambda *a: "approval"
+    )
+    assert result["state"] == "failed"
+    assert result["code"] == "VERIFICATION_CHECK_FAILED"
+    receipt = result["failure_receipt"]
+    assert receipt["schema"] == "delegated-verification-failure-v1"
+    assert receipt["failed_check"] == {
+        "target": "unit",
+        "catalog_digest": "catalog",
+        "argv_digest": "argv",
+        "workspace_root": str(lanes[3]),
+        "argv": [],
+    }
+    assert receipt["before_manifest_digest"] == receipt["after_manifest_digest"]
+    assert receipt["failed_proof"]["exit_code"] == 7
+
+    reopened = SQLiteAgentLaneStore(lanes[1].path, lanes[1].sessions)
+    with reopened.transaction() as tx:
+        persisted = tx.verification_row(prepared.verification_id, context.principal_id)
+    assert persisted["failure_receipt"] == receipt
+    assert persisted["certificate"] is None
 
 
 def _verifier(lanes, callback=None):

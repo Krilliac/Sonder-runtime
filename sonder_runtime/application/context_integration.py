@@ -136,6 +136,7 @@ class ContextPlanningFacade:
         capability: MeasuredContextCapability | None = None,
         records: Sequence[ContextRecord] = (),
         prefix_version: str = "1",
+        provider_id: str = "",
         tokenizer: str = "",
         template: str = "",
         system_prefix: str = "",
@@ -165,7 +166,7 @@ class ContextPlanningFacade:
         manifest_records = tuple(records)
         deduped = deduplicate_context(manifest_records).retained if manifest_records else ()
         has_prefix_identity = any((
-            tokenizer, template, system_prefix,
+            provider_id, tokenizer, template, system_prefix,
             visible_tool_schemas not in ((), {}, None),
             tool_schemas is not None,
             project_policy is not None,
@@ -175,6 +176,7 @@ class ContextPlanningFacade:
             deduped,
             version=prefix_version,
             model=effective_model.model,
+            provider_id=provider_id,
             tokenizer=tokenizer,
             template=template,
             system_prefix=system_prefix,

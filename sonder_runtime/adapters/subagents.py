@@ -13,6 +13,10 @@ from ..application.ports.subagents import (
 from ..application.subagents.durable_continuation import (
     DurableCancellation, DurableContinuationService, ContinuableCheckpoint,
 )
+from ..application.execution.effect_journal import bound as bound_effect_journal
+from ..application.execution.worker_bindings import (
+    AuthenticatedWorkerBinding, journaled_effect,
+)
 
 
 Runner = Callable[[Mapping[str, object], Callable[[Mapping[str, object], str | None], ContinuableCheckpoint], DurableCancellation], str]
@@ -58,6 +62,7 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
         *,
         runner_factory: Callable[[SubagentRequest, OperationContext], Runner] | None = None,
         provider: str = "local",
+        effect_binding_factory: Callable[[SubagentRequest, OperationContext], AuthenticatedWorkerBinding] | None = None,
     ) -> None:
         if provider != "local":
             raise UnsupportedSubagentProvider(
@@ -68,6 +73,9 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
         super().__init__(service, runner)
         self._runner_factory = runner_factory
         self._local_service = service
+        if effect_binding_factory is not None and not callable(effect_binding_factory):
+            raise TypeError("effect_binding_factory must be callable")
+        self._effect_binding_factory = effect_binding_factory
 
     def register_root(self, root_id: str, budget: SubagentBudget) -> None:
         self._local_service.register_root(root_id, budget)
@@ -90,7 +98,31 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
                     raise TimeoutError("subagent step budget exhausted")
                 return save(next_state, cursor)
 
-            output = runner(state, bounded_save, control)
+            def invoke_runner():
+                binding = (
+                    self._effect_binding_factory(request, context)
+                    if self._effect_binding_factory is not None else None
+                )
+                if binding is None:
+                    return runner(state, bounded_save, control)
+                if not isinstance(binding, AuthenticatedWorkerBinding):
+                    raise TypeError("effect_binding_factory returned an invalid binding")
+                with bound_effect_journal(binding.binding()):
+                    return journaled_effect(
+                        binding,
+                        operation_id=f"subagent-run:{request.child_id}",
+                        idempotency_key=request.idempotency_key or request.child_id,
+                        request={
+                            "child_id": request.child_id,
+                            "parent_id": request.parent_id,
+                            "prompt": request.prompt,
+                        },
+                        invoke=lambda: runner(state, bounded_save, control),
+                        receipt_key=f"subagent:{request.child_id}",
+                        reconciliation="manual",
+                    )
+
+            output = invoke_runner()
             if not isinstance(output, str):
                 raise InvalidSubagentRequest("local runner output must be text")
             # Four UTF-8 characters is a conservative local token estimate;

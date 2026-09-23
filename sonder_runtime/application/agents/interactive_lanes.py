@@ -26,10 +26,17 @@ from ..loop_contract import StepState
 from ..loop_event_classification import DurableSessionFact
 from ..loop_steering import SteeringCommand
 from ..ports.model_gateway import ModelRequest, require_model_text
+from ..ports.model_target import ResolvedModelRoute
 from ..session.capture import CapturedRequest, SessionCaptureService, _snapshot_payload
 from ..session.archive import ArchiveReference, SessionContextArchiveService
 from ..tools.gateway_contract import ToolGatewayRequest, ToolScope, ToolPermission
+from ..execution.effect_journal import JournalBinding, bound as bound_effect_journal
 from ..ports.tool_registry import ToolSchemaSelection
+from ..context_integration import ContextPlanningFacade
+from ..context_planner import CONTEXT_SECTIONS, ModelContext
+from ..context_manifests import ContextRecord
+from ..live_context import LiveAgentContextProducer
+from ...domain.context.priority import ContextItem
 
 _LANE_TOOLS = frozenset(
     {
@@ -182,6 +189,9 @@ class AgentLaneService:
         allowed_tools=None,
         loop=None,
         loop_factory=None,
+        context_planning: ContextPlanningFacade | None = None,
+        live_context: LiveAgentContextProducer | None = None,
+        effect_journal=None,
     ):
         self.store, self.sessions, self.gateway, self.tools = (
             store,
@@ -190,6 +200,7 @@ class AgentLaneService:
             tools,
         )
         self.authorize_grant = authorize_grant
+        self.effect_journal = effect_journal
         self.managed_authority = None
         self._worker_issuer = object()
         self._app_dispatch = {}
@@ -234,6 +245,8 @@ class AgentLaneService:
         self._loop_bindings = {}
         self._loop_lock = threading.RLock()
         self._loop_steering_sequence = {}
+        self._context_planning = context_planning
+        self._live_context = live_context
 
     @property
     def loop(self):
@@ -1362,10 +1375,22 @@ class AgentLaneService:
             ),
         }
 
-    def _request(self, lane, messages):
+    def _request(self, lane, messages, *, request_id=None, context=None):
         prompt = "\n\n".join("[" + m["author"] + "] " + m["content"] for m in messages)
         if not prompt:
             prompt = "Continue from the recorded tool result."
+        route = None
+        resolve_route = getattr(self.gateway, "resolve_route", None)
+        if callable(resolve_route) and context is not None:
+            try:
+                route = resolve_route(
+                    ModelRequest(prompt, tier=lane["tier"]), context
+                )
+            except Exception:
+                # Route resolution is advisory for prefix reuse.  The actual
+                # gateway call remains authoritative and reports its own
+                # provider error; an unknown route must never create a cache.
+                route = None
         system = (
             "You are a scoped child agent. Preserve separately authored user constraints; if instructions conflict, "
             "explain the conflict and ask for input. Work only within "
@@ -1401,14 +1426,90 @@ class AgentLaneService:
                 + "\nVisible tool schemas (only these tools may be requested): "
                 + rendered
             )
+        route = route if isinstance(route, ResolvedModelRoute) else None
+        route_identity = (
+            route if route is not None
+            and all(isinstance(getattr(route, key), str) and getattr(route, key).strip()
+                    for key in ("provider_id", "model", "tokenizer", "template"))
+            else None
+        )
+        if self._context_planning is not None and self._live_context is not None:
+            live = self._live_context.refresh(Path(lane["workspace_root"]))
+            if not live.complete:
+                # Keep the failure visible to the model and operators, while
+                # refusing to claim a reusable prefix for incomplete inputs.
+                system += "\nLive stable context unavailable: " + live.reason
+            elif route_identity is None:
+                system += "\nProvider model/tokenizer/template identity unavailable; reusable prefix disabled"
+                system += "\nAuthoritative project context:\n" + "\n\n".join(
+                    record.content for record in live.records
+                )
+            else:
+                base = ContextRecord(
+                    "agent-system", "stable_instructions", system,
+                    "agent-lane-system", ordinal=0, stable=True,
+                )
+                records = (base,) + tuple(
+                    ContextRecord(
+                        record.item_id, record.section, record.content,
+                        record.source, ordinal=index + 1, stable=True,
+                    )
+                    for index, record in enumerate(live.records)
+                )
+                items = {section: [] for section in CONTEXT_SECTIONS}
+                for record in records:
+                    section = record.section if record.section in items else "policy"
+                    items[section].append(ContextItem(
+                        record.item_id, section,
+                        max(1, (len(record.content.encode("utf-8")) + 3) // 4),
+                        100, record.source, protected=True, ordinal=record.ordinal,
+                    ))
+                budgets = {section: 8192 for section in CONTEXT_SECTIONS}
+                try:
+                    assembly = self._context_planning.assemble(
+                        ModelContext(route_identity.model, 32768, min(
+                            max(1, lane["max_output_tokens"]), 32767
+                        )),
+                        items, budgets, records=records,
+                        prefix_version="agent-lane-v1",
+                        provider_id=route_identity.provider_id,
+                        tokenizer=route_identity.tokenizer,
+                        template=route_identity.template,
+                        system_prefix=system,
+                        visible_tool_schemas=(schemas if selection is not None else ()),
+                        project_policy={
+                            "workspace_root": lane["workspace_root"],
+                            "allowed_tools": tuple(sorted(lane["allowed_tools"])),
+                        },
+                        request_id=request_id or "pending-agent-request",
+                        replay_metadata={
+                            "workspace_root": lane["workspace_root"],
+                            "producer": "live-agent-context",
+                            "producer_status": live.reason,
+                            "producer_digest": live.digest,
+                        },
+                    )
+                    if assembly.prefix is None or any(
+                        selection.emergency_overflow
+                        for selection in assembly.selections.values()
+                    ):
+                        system += "\nLive stable context exceeded the bounded prefix budget"
+                    else:
+                        system += "\nAuthoritative project context:\n" + "\n\n".join(
+                            record.content for record in live.records
+                        )
+                except (TypeError, ValueError) as exc:
+                    system += "\nLive stable context unavailable: " + type(exc).__name__
+        request_options = {
+            "num_predict": max(1, lane["max_output_tokens"] - lane["used_tokens"])
+        }
         return ModelRequest(
             prompt,
             tier=lane["tier"],
             system=system,
             history=self._history(lane),
-            options={
-                "num_predict": max(1, lane["max_output_tokens"] - lane["used_tokens"])
-            },
+            options=request_options,
+            _resolved_route=route,
         )
 
     def _tool_schema_selection(self, lane, *, turn_number=None):
@@ -1578,8 +1679,10 @@ class AgentLaneService:
                     if self._consume_response(lane_id, run_context, started):
                         break
                     continue
-                request = self._request(lane, messages)
                 request_id = "request-" + uuid.uuid4().hex
+                request = self._request(
+                    lane, messages, request_id=request_id, context=run_context
+                )
                 turn_id = lane["attempt_id"] + "-" + str(lane["used_steps"] + 1)
                 with self._transaction(run_context, lane_id=lane_id) as tx:
                     fresh = tx.lane(lane_id)
@@ -1752,7 +1855,9 @@ class AgentLaneService:
 
     def _execute_tool(self, lane, tool, context):
         name, args, effects = tool
-        call_id = "call-" + uuid.uuid4().hex
+        # A retry of the same durable attempt/step must address the same
+        # journal intent.  Random call IDs would make a replay look new.
+        call_id = "call-%s-step-%s" % (lane["attempt_id"], lane["used_steps"])
         with self._transaction(context, lane_id=lane["id"]) as tx:
             fresh = tx.lane(lane["id"])
             if fresh["owner"] != self.owner or fresh["status"] != "running":
@@ -1771,29 +1876,38 @@ class AgentLaneService:
         self._done()
         loop_step = self._loop_tool_step(lane, call_id, name)
         self._fresh_execution(lane["id"], context)
-        receipt = self.tools.execute(
-            ToolGatewayRequest(
-                call_id,
-                name,
-                args,
-                ToolScope(
-                    lane["principal_id"],
-                    (lane["workspace_root"],),
-                    effects,
-                    source="worker",
-                    auth_level=lane["auth_level"],
-                ),
-                ToolPermission(effects),
-                deadline_monotonic=context.deadline_monotonic,
-                cancellation=context.cancellation,
-                session_id=lane["session_id"],
-                # The model request was built before this turn incremented the
-                # durable step counter; execution sees the incremented value.
-                schema_selection=self._tool_schema_selection(
-                    lane, turn_number=lane["used_steps"]
-                ),
-            )
+        request = ToolGatewayRequest(
+            call_id,
+            name,
+            args,
+            ToolScope(
+                lane["principal_id"],
+                (lane["workspace_root"],),
+                effects,
+                source="worker",
+                auth_level=lane["auth_level"],
+            ),
+            ToolPermission(effects),
+            deadline_monotonic=context.deadline_monotonic,
+            cancellation=context.cancellation,
+            session_id=lane["session_id"],
+            # The model request was built before this turn incremented the
+            # durable step counter; execution sees the incremented value.
+            schema_selection=self._tool_schema_selection(
+                lane, turn_number=lane["used_steps"]
+            ),
         )
+        binding_context = nullcontext()
+        if self.effect_journal is not None:
+            binding_context = bound_effect_journal(JournalBinding(
+                self.effect_journal,
+                str(lane["attempt_id"]),
+                str(self.owner),
+                int(lane["revision"]),
+                str(lane["workspace_root"]),
+            ))
+        with binding_context:
+            receipt = self.tools.execute(request)
         output = getattr(receipt, "output", None)
         if hasattr(output, "output"):
             output = output.output

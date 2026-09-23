@@ -209,11 +209,13 @@ class PrefixIdentity:
     system_prefix: str = ""
     visible_tool_schemas: Any = ()
     project_policy: Any = None
+    provider_id: str = ""
 
     @property
     def digest(self) -> str:
         return _digest({
             "model": self.model,
+            "provider_id": self.provider_id,
             "tokenizer": self.tokenizer,
             "template": self.template,
             "system_prefix": self.system_prefix,
@@ -224,7 +226,7 @@ class PrefixIdentity:
 
 def build_prefix_manifest(
     records: Sequence[ContextRecord], *, version: str = "1",
-    model: str = "", tokenizer: str = "", template: str = "",
+    model: str = "", provider_id: str = "", tokenizer: str = "", template: str = "",
     system_prefix: str = "", visible_tool_schemas: Any = (),
     tool_schemas: Any = None,
     project_policy: Any = None, dynamic_memory: Any = None,
@@ -237,7 +239,10 @@ def build_prefix_manifest(
     ordered = tuple(sorted(stable, key=lambda item: (item.section, item.item_id, item.content_digest)))
     if tool_schemas is not None:
         visible_tool_schemas = tool_schemas
-    identity = PrefixIdentity(model, tokenizer, template, system_prefix, visible_tool_schemas, project_policy)
+    identity = PrefixIdentity(
+        model, tokenizer, template, system_prefix, visible_tool_schemas,
+        project_policy, provider_id,
+    )
     material = {
         "version": version,
         "identity": identity.digest,

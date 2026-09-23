@@ -24,6 +24,7 @@ from enum import Enum
 from typing import Any, Mapping, Protocol
 
 from ...domain.common.errors import Cancelled, DeadlineExceeded, Forbidden, InvalidInput
+from ..execution import effect_journal
 from ..ports.tool_registry import ToolSchemaSelection
 
 # Where a request came from and what privilege it carries. These mirror the
@@ -91,10 +92,13 @@ class ToolScope:
 class ToolPermission:
     effects: frozenset[str] = frozenset()
     approval: ApprovalMode = ApprovalMode.NOT_REQUIRED
+    reconciliation: str = "manual"
 
     def __post_init__(self) -> None:
         if any(not effect.strip() for effect in self.effects):
             raise InvalidInput("tool permission effects must be non-empty")
+        if self.reconciliation not in {"manual", "idempotent", "query"}:
+            raise InvalidInput("tool reconciliation must be manual, idempotent, or query")
 
 
 @dataclass(frozen=True)
@@ -307,6 +311,8 @@ class ToolGateway:
     def execute(self, request: ToolGatewayRequest) -> ToolReceipt:
         started = time.monotonic()
         policy_match = ""
+        journal_binding = effect_journal.current()
+        journal_intent = None
         try:
             self._check_control(request)
             if request.schema_selection is None:
@@ -328,7 +334,21 @@ class ToolGateway:
                 if not request.approval_token or not self._approvals.approve(request):
                     raise Forbidden("tool approval is required")
             self._check_control(request)
-            result = self._invoker.invoke(request)
+            if journal_binding is not None and request.permission.effects:
+                journal_intent = journal_binding.begin_request(
+                    operation_id=request.request_id,
+                    idempotency_key=request.request_id,
+                    request_digest=_digest(dict(request.arguments)),
+                    reconciliation=request.permission.reconciliation,
+                )
+            try:
+                result = self._invoker.invoke(request)
+            except Exception as exc:
+                if journal_binding is not None and journal_intent is not None:
+                    journal_binding.mark_uncertain(
+                        journal_intent, detail=f"invoker raised {type(exc).__name__}"
+                    )
+                raise
             # The executor returned the terminal outcome of an already admitted
             # effect. Preserve that truth even if cancellation/deadline arrived
             # in flight; the next invocation still fails its admission checks.
@@ -378,6 +398,14 @@ class ToolGateway:
                       else FAILED),
             evidence=safe_evidence if isinstance(safe_evidence, Mapping) else {},
         )
+        if journal_binding is not None and journal_intent is not None:
+            journal_binding.complete(
+                journal_intent,
+                outcome_digest=receipt.result_digest,
+                receipt_key=receipt.request_id,
+                detail=receipt.error,
+                success=receipt.success,
+            )
         self._publish(request, receipt)
         return receipt
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from types import MappingProxyType
 
 from ...application.context import OperationContext
@@ -11,6 +12,7 @@ from ...application.ports.model_gateway import (
     ModelRequest,
     ModelResponse,
 )
+from ...application.ports.model_target import ResolvedModelRoute
 from ...domain.common.errors import InvalidInput
 
 
@@ -36,6 +38,31 @@ class ProviderDispatchGateway:
         self._tier_providers = MappingProxyType(tier_map)
         self._default_generation_provider = default_generation_provider
         self._embedding_provider = embedding_provider
+        self._route_issuer = object()
+
+    def resolve_route(self, request: ModelRequest, context: OperationContext):
+        """Delegate route identity to the same provider used for generation."""
+        provider_name = self._tier_providers.get(request.tier)
+        if provider_name is None and request.tier == "sonder":
+            provider_name = self._default_generation_provider
+        if provider_name is None:
+            raise InvalidInput("no provider binding for tier %r" % request.tier)
+        resolver = getattr(self._providers[provider_name], "resolve_route", None)
+        if not callable(resolver):
+            return None
+        route = resolver(request, context)
+        if route is None:
+            return None
+        if (
+            not isinstance(route, ResolvedModelRoute)
+            or route.provider_id != provider_name
+            or route.tier != request.tier
+        ):
+            raise InvalidInput("provider returned a route for another binding")
+        return replace(
+            route, dispatch_provider=provider_name,
+            _dispatch_issuer=self._route_issuer,
+        )
 
     def generate(
         self, request: ModelRequest, context: OperationContext
@@ -45,6 +72,18 @@ class ProviderDispatchGateway:
             provider = self._default_generation_provider
         if provider is None:
             raise InvalidInput("no provider binding for tier %r" % request.tier)
+        if "_resolved_route" in (request.options or {}):
+            raise InvalidInput("resolved routes cannot be supplied as model options")
+        if request._resolved_route is not None:
+            route = request._resolved_route
+            if (
+                not isinstance(route, ResolvedModelRoute)
+                or route._dispatch_issuer is not self._route_issuer
+                or route.dispatch_provider != provider
+                or route.provider_id != provider
+                or route.tier != request.tier
+            ):
+                raise InvalidInput("resolved model route was not issued by this dispatch")
         return self._providers[provider].generate(request, context)
 
     def embed(

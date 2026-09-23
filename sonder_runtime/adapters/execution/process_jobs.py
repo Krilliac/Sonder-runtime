@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from ...application.capabilities.jobs import JobCancellationResult, JobRegistryService
 from ...application.execution.process_jobs import ProcessJobRequest, ProcessJobStart, ProcessJobWait
+from ...application.execution.worker_bindings import AuthenticatedWorkerBinding, journaled_effect
 from ...application.jobs.durable_registry import ProcessTreeCleanupContract
 from ...application.jobs.session_lifecycle import JobRegistryLifecycleAdapter
 from ...application.execution.world_control import OutputStream
@@ -65,6 +66,7 @@ class SubprocessJobProvider:
         timer_factory=threading.Timer,
         cleanup_retry_seconds: float = 1.0,
         max_concurrent_processes: int | None = None,
+        effect_binding: AuthenticatedWorkerBinding | None = None,
     ) -> None:
         if not all(callable(getattr(registry, name, None)) for name in (
             "start", "attach_process", "poll", "transition", "append_output", "stream",
@@ -107,6 +109,11 @@ class SubprocessJobProvider:
         self._output_failure_lock = threading.Lock()
         self._timer_lock = threading.RLock()
         self._max_concurrent_processes = max_concurrent_processes
+        if effect_binding is not None and not isinstance(
+            effect_binding, AuthenticatedWorkerBinding
+        ):
+            raise TypeError("effect_binding must be an AuthenticatedWorkerBinding")
+        self._effect_binding = effect_binding
         self._process_slots: threading.BoundedSemaphore | None = (
             threading.BoundedSemaphore(max_concurrent_processes)
             if max_concurrent_processes is not None and max_concurrent_processes >= 1
@@ -115,11 +122,26 @@ class SubprocessJobProvider:
         self._process_slot_owners: dict[str, _ProcessSlotLease] = {}
         self._failed_launches: set[str] = set()
         self._cleanup_observations: dict[str, int] = {}
+        if self._effect_binding is not None:
+            self._effect_binding.recover_before_restart()
         self._restore_deadlines()
 
     def start(self, request: ProcessJobRequest) -> ProcessJobStart:
         if not isinstance(request, ProcessJobRequest):
             raise TypeError("request must be a ProcessJobRequest")
+        if self._effect_binding is not None:
+            return journaled_effect(
+                self._effect_binding,
+                operation_id=f"process-start:{request.identity.job_id}",
+                idempotency_key=request.identity.idempotency_key,
+                request=request,
+                invoke=lambda: self._start_unjournaled(request),
+                receipt_key=lambda result: f"{request.identity.job_id}:{result.process_id}",
+                reconciliation="idempotent",
+            )
+        return self._start_unjournaled(request)
+
+    def _start_unjournaled(self, request: ProcessJobRequest) -> ProcessJobStart:
         if self._process_slots is not None and not self._process_slots.acquire(blocking=False):
             raise RuntimeError(
                 f"tool process capacity exhausted ({self._max_concurrent_processes} concurrent)"

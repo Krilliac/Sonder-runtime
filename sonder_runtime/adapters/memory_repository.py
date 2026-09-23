@@ -37,15 +37,18 @@ class MemoryRepositoryAdapter:
         self._authoritative_fact_source = authoritative_fact_source
         self._begin_authoritative_transaction = begin_authoritative_transaction
 
-    def add_fact(self, fact_id: str, project: str, text: str, embedding=None) -> None:
+    def add_fact(self, fact_id: str, project: str, text: str, embedding=None, *, metadata=None) -> None:
         if self._authoritative_fact_source is not None:
             if self._begin_authoritative_transaction is not None:
                 self._begin_authoritative_transaction()
             self._authoritative_fact_source.add_fact(
-                self._conn, fact_id, project, text, embedding
+                self._conn, fact_id, project, text, embedding, metadata
             )
             return None
         import sonder_runtime.adapters.memory_store as memory_store
+
+        if metadata is not None:
+            raise ValueError("authoritative metadata requires the configured fact source")
 
         memory_store.add_fact(self._conn, fact_id, project, text, embedding)
 
@@ -69,6 +72,18 @@ class MemoryRepositoryAdapter:
         import sonder_runtime.adapters.memory_store as memory_store
 
         return memory_store.count_facts(self._conn, project)
+
+    def entities_for_project(self, project: str, *, entity_id: str | None = None, now: str | None = None, offset: int = 0) -> list[dict]:
+        from .persistence.sqlite.authoritative_indexes import entities_for_project
+        return entities_for_project(self._conn, project, entity_id=entity_id, now=now, offset=offset)
+
+    def decisions_for_project(self, project: str, *, decision_id: str | None = None, now: str | None = None, offset: int = 0) -> list[dict]:
+        from .persistence.sqlite.authoritative_indexes import decisions_for_project
+        return decisions_for_project(self._conn, project, decision_id=decision_id, now=now, offset=offset)
+
+    def rebuild_authoritative_indexes(self, project: str | None = None) -> int:
+        from .persistence.sqlite.authoritative_indexes import rebuild_authoritative_fact_indexes
+        return rebuild_authoritative_fact_indexes(self._conn, project=project)
 
     def log_interaction(
         self,
