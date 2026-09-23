@@ -53,6 +53,15 @@ bounded process-wide, and a timed-out provider retains its slot until its
 thread actually exits. This bounds resource use while preserving fail-closed
 behavior when a provider hangs.
 
+The production bootstrap now composes one concrete verifier for the
+`process-start:<job_id>` family. It reads the durable process job registry's
+terminal record and derives a bounded outcome digest from the job identity,
+status, and revision. `succeeded` produces a completed proof; `failed` or
+`cancelled` produces a failed proof. Pending, missing, malformed, or otherwise
+unknown registry state produces no proof and leaves the fence set. The
+verifier never uses process output, caller text, or an in-memory process handle
+as authority. Other worker families remain unsupported and fenced.
+
 Trust boundary: this is a cooperative host-process API, not an in-process
 Python authentication boundary. Any code that can open the effects database
 can construct a second journal with its own verifier registry, or mutate the

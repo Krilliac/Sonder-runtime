@@ -4,6 +4,7 @@ from dataclasses import replace
 import pytest
 
 from sonder_runtime.adapters.persistence.sqlite.effect_journal import SQLiteEffectJournal
+from sonder_runtime.adapters.execution.process_jobs import DurableProcessEffectVerifier
 from sonder_runtime.adapters.persistence.sqlite.runtime_checkpoints import SQLiteRuntimeCheckpointRepository
 from sonder_runtime.application.execution.effect_journal import (
     EffectIntent, EffectJournalError, EffectOutcome, EffectState, JournalBinding, bound,
@@ -11,6 +12,7 @@ from sonder_runtime.application.execution.effect_journal import (
 )
 from sonder_runtime.application.execution.worker_bindings import AuthenticatedWorkerBinding
 from sonder_runtime.application.ports.runtime_checkpoints import CheckpointError, RestoreStatus, RuntimeCheckpoint
+from sonder_runtime.application.ports.jobs import JobIdentity, JobRecord, JobStatus
 
 
 def _intent(intent_id="i-1", run_id="run-1", worker_id="w-1", key="k-1", request_digest="a" * 64):
@@ -614,3 +616,48 @@ def test_verifier_admission_is_bounded_across_journal_instances(tmp_path):
         for acquired in held:
             if acquired:
                 module._VERIFIER_SLOTS.release()
+
+
+def test_production_process_registry_verifier_reconciles_after_restart(tmp_path):
+    class Registry:
+        def __init__(self, status):
+            self.status = status
+
+        def poll(self, job_id):
+            return JobRecord(
+                JobIdentity(job_id, "process", "launch", job_id),
+                self.status, revision=4,
+            )
+
+    registry = Registry(JobStatus.SUCCEEDED)
+    journal = SQLiteEffectJournal(
+        tmp_path / "effects.db",
+        reconciliation_verifiers={
+            "process-start": DurableProcessEffectVerifier(lambda: registry),
+        },
+    )
+    old = AuthenticatedWorkerBinding(journal, "run", "process", 1, "/workspace")
+    intent = old.binding().begin_request(
+        operation_id="process-start:job-1", idempotency_key="job-1",
+        request_digest="a" * 64, reconciliation="idempotent",
+    )
+    old.binding().mark_uncertain(intent, detail="crash after process launch")
+    current = AuthenticatedWorkerBinding(journal, "run", "process", 2, "/workspace")
+    with pytest.raises(EffectJournalError, match="explicit reconciliation"):
+        current.recover_before_restart()
+    resolved = journal.reconcile(intent.intent_id, owner_epoch=2)
+    assert resolved.state is EffectState.COMPLETED
+    assert resolved.receipt_key == "process-job:job-1:4"
+
+    registry.status = JobStatus.PENDING
+    old_two = AuthenticatedWorkerBinding(journal, "run-2", "process", 1, "/workspace")
+    pending = old_two.binding().begin_request(
+        operation_id="process-start:job-2", idempotency_key="job-2",
+        request_digest="b" * 64, reconciliation="idempotent",
+    )
+    old_two.binding().mark_uncertain(pending, detail="unknown process outcome")
+    current_two = AuthenticatedWorkerBinding(journal, "run-2", "process", 2, "/workspace")
+    with pytest.raises(EffectJournalError, match="explicit reconciliation"):
+        current_two.recover_before_restart()
+    with pytest.raises(EffectJournalError, match="host verifier returned no trusted proof"):
+        journal.reconcile(pending.intent_id, owner_epoch=2)
