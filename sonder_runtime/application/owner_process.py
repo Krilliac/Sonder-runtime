@@ -11,7 +11,10 @@ def process_is_alive(pid: int, host: str) -> bool | None:
 
     Windows uses ``OpenProcess(SYNCHRONIZE)`` and a zero-time wait.  This is a
     read-only probe; ``os.kill(pid, 0)`` is intentionally not used on Windows
-    because it maps to process termination there.
+    because it maps to process termination there.  A live PID, including one
+    reused by another process, fails closed.  We therefore do not need to
+    widen the reservation metadata with a creation-time authority: reclaim is
+    allowed only after the PID is currently proven dead.
     """
     if type(pid) is not int or pid <= 0 or not isinstance(host, str) or not host.strip():
         return None
@@ -28,9 +31,16 @@ def process_is_alive(pid: int, host: str) -> bool | None:
             return None
         return True
     import ctypes
+    from ctypes import wintypes
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    handle = kernel32.OpenProcess(0x00100000, False, pid)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(0x00100000, False, wintypes.DWORD(pid))
     if not handle:
         error = ctypes.get_last_error()
         return False if error == 87 or error == 1168 else None
