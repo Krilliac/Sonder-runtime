@@ -36,6 +36,24 @@ python scripts/check_architecture.py
 passed
 ```
 
+The live request builder now carries the immutable `PrefixManifest`, the
+per-request `PrefixCacheObservation`, and the `ReplayManifest` through the
+typed `ModelRequest` into the selected provider boundary. Session capture
+persists their bounded section identities and content digests without prompt
+text, and replay reconstructs that evidence. Focused live-provider and
+session-capture tests exercise this path with provider-reported prompt-cache
+counts.
+
+On the current implementation branch (`01ed36043a47d8adaa28d0f322eb0e880da55696`
+plus this change), the focused boundary and durability checks reported:
+
+```text
+python -m pytest -q tests/test_live_agent_context.py tests/test_wp4_ctx004_006_009_010.py tests/test_session_split_capture.py tests/test_session_replay.py tests/test_remaining_session_durable_replay.py
+48 passed
+python -m compileall -q <affected modules>
+passed
+```
+
 A bounded loopback probe used Ollama `0.34.2`, endpoint
 `http://127.0.0.1:11434/api/generate`, model `sonder:latest`, and the public
 fixed prompt `Reply with the single word cache.`. Response text was omitted.
@@ -57,7 +75,8 @@ passes the resulting request through `ProviderDispatchGateway`; the dispatch
 wrapper verifies that the route was issued by the selected provider before
 generation. `tests/test_live_agent_context.py::test_live_prefix_request_crosses_provider_dispatch_with_sealed_route`
 covers this boundary and verifies that the generated request contains both
-scoped sections while the prefix cache records a write.
+scoped sections, exact replay/prefix evidence, and a real cache decision while
+the provider returns measured prompt-cache counts.
 
 The test uses a deterministic provider double. The raw Ollama probe therefore
 does not prove that a real production Ollama request consumes this cache or

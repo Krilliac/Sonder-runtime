@@ -4,6 +4,10 @@ import pytest
 
 from sonder_runtime.adapters.persistence.session_repository import SQLiteSessionRepository
 from sonder_runtime.application.ports.model_gateway import ModelRequest
+from sonder_runtime.application.context_manifests import (
+    ContextRecord, PrefixCacheObservation, build_prefix_manifest,
+    build_replay_manifest,
+)
 from sonder_runtime.application.session.capture import SessionCaptureService
 from sonder_runtime.domain.common.errors import InvalidInput
 
@@ -99,3 +103,35 @@ def test_retrospective_response_keeps_supplied_request_identity(tmp_path):
     )
     assert len(result.appended) == 3
     assert result.appended[-1].payload["request_id"] == "legacy-r1"
+
+
+def test_capture_persists_prefix_and_replay_evidence_without_prompt_contents(tmp_path):
+    record = ContextRecord(
+        "rule-1", "project_rules", "keep changes bounded", "project", 1, True,
+    )
+    prefix = build_prefix_manifest((record,), model="model", provider_id="ollama")
+    replay = build_replay_manifest(
+        "r1", "model", (record,), prefix_key=prefix.cache_key,
+        metadata={"producer": "live-agent-context"},
+    )
+    request = ModelRequest(
+        prompt="hello", tier="code", prefix_manifest=prefix,
+        replay_manifest=replay,
+        prefix_cache_observation=PrefixCacheObservation(
+            prefix.cache_key, prefix.identity_key, prefix.version,
+            "miss", "cold_start", True,
+        ),
+    )
+    repository = SQLiteSessionRepository(tmp_path / "session.db")
+    result = SessionCaptureService(repository).capture_turn(
+        "s1", "t1", request, request_id="r1", model_response="world",
+    )
+    payload = result.appended[0].payload
+    assert payload["prefix_manifest"]["cache_key"] == prefix.cache_key
+    assert payload["replay_manifest"]["manifest_digest"] == replay.manifest_digest
+    assert payload["replay_manifest"]["sections"][0]["content_digest"] == record.content_digest
+    assert "keep changes bounded" not in str(payload)
+    reconstructed = result.replay.replay.request
+    assert reconstructed is not None
+    assert reconstructed.replay_manifest["manifest_digest"] == replay.manifest_digest
+    assert reconstructed.prefix_cache_observation["reason"] == "cold_start"

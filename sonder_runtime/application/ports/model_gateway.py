@@ -26,6 +26,11 @@ class ModelRequest:
     stream: bool = False
     provenance: ModelRequestProvenance | None = None
     context_packet: ContextPacket | None = None
+    # Immutable context evidence produced by the live request builder.  These
+    # fields are provider-boundary metadata, not model-visible prompt text.
+    prefix_manifest: object | None = None
+    replay_manifest: object | None = None
+    prefix_cache_observation: object | None = None
     # In-process capability only. It is intentionally excluded from the
     # JSON-serializable durable request options captured for replay.
     _resolved_route: object | None = field(default=None, repr=False, compare=False)
