@@ -516,9 +516,9 @@
     },
     {
       "checked": false,
-      "claim": "Live agent-lane requests now consume deterministic scoped project-rule and skill-catalog records through the context planner, with explicit empty catalogs, selected tool schemas, prefix telemetry, and stale-refresh refusal.",
+      "claim": "Live agent lanes accept configured bounded instruction and skill roots and bind reusable prefix identity to a sealed provider route, including provider, model, tokenizer, and template.",
       "requirement_id": "CTX-009",
-      "revision": 4,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -866,9 +866,9 @@
     },
     {
       "checked": false,
-      "claim": "Live agent-lane mutating tool calls now journal exact effect intents and outcomes, reject duplicate invocation, validate owner epochs, and bind checkpoint generations to an atomic SQLite high-water mark.",
+      "claim": "Live agent tools and composed process, compute, local subagent, and self-mod worker adapters persist host-owned effect intents and outcomes; checkpoint restore validates journal high-water and unresolved effects.",
       "requirement_id": "LOOP-008",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "d7dae8ab633ab3875f7de6c2a939a090bac558d3d4d6fc6e139fa0de0b86363e",
+    "ledger_sha256": "6192a3db73c5cc9e1d3eeaf48e1e88439974a7435081df2e80a1bf8fb9d56a7d",
     "spec_sha256": "4797da92d2d1845ce944b2dc32353d52fe7a6e48dfa92593753ca727761ca714"
   }
 }
