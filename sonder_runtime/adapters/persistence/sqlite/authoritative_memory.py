@@ -355,7 +355,10 @@ class SQLiteAuthoritativeFactSource:
             connection.execute("BEGIN IMMEDIATE")
         try:
             yield
-        except Exception:
+        except BaseException:
+            # Cancellation must release the writer lock/savepoint too.  A
+            # caller may deliberately retry on the same connection after an
+            # interrupted authoritative operation.
             if nested:
                 connection.execute("ROLLBACK TO SAVEPOINT " + _SAVEPOINT)
                 connection.execute("RELEASE SAVEPOINT " + _SAVEPOINT)
