@@ -435,3 +435,62 @@ def test_execution_contract_command_mismatch_cannot_certify_restarted_child(tmp_
     result = SubagentResult("child-1", "parent-1", SubagentStatus.SUCCEEDED, output="persisted", usage=SubagentUsage(steps=1))
     with pytest.raises(IntegrationError, match="commands"):
         service.integrate(request, result, verification=contract.success_criteria, verification_commands=(("pytest",),))
+
+
+def test_contract_requires_durable_registry_for_dispatch_and_integration(tmp_path):
+    preset = resolve_preset("researcher")
+    root = tmp_path / "repo"
+    workspace = WorkspaceAssignment((str(root),), ())
+    contract = WorkerExecutionContract(("tests pass",), (("pytest", "-q"),))
+    lineage = LineageRecord("line-1", "root-1", "parent-1", "child-1", 1, preset.name, preset.role, workspace)
+    request = DelegationRequest("delegation-1", lineage, "research", preset, workspace, execution_contract=contract)
+
+    class Provider:
+        def spawn(self, request, context):
+            raise AssertionError("contract dispatch must be gated before provider spawn")
+
+    service = DelegationService(Provider())
+    context = local_owner_context(correlation_id="delegation-1", workspace_roots=(root,))
+    with pytest.raises(IntegrationError, match="durable worker registry"):
+        service.dispatch(request, context)
+    result = SubagentResult("child-1", "parent-1", SubagentStatus.SUCCEEDED, output="done", usage=SubagentUsage(steps=1))
+    with pytest.raises(IntegrationError, match="durable worker registry"):
+        service.integrate(request, result, verification=contract.success_criteria, verification_commands=contract.verification_commands)
+
+
+@pytest.mark.parametrize(
+    "criteria_json,commands_json",
+    [
+        ('{"criterion": "tests pass"}', '[]'),
+        ('[]', '["pytest", "-q"]'),
+        ('[]', '[[]]'),
+        ('[]', '[["pytest", 7]]'),
+    ],
+)
+def test_malformed_persisted_execution_contract_fails_closed(tmp_path, criteria_json, commands_json):
+    repository = SQLiteDurableContinuationRepository(tmp_path / "malformed-contract.sqlite")
+    root = SubagentRequest(
+        "root-1", "provider root", SubagentBudget(max_steps=8), "root-1", (("provider_root", "true"),),
+    )
+    repository.create(DurableChildSession(root, ChildSessionLineage("root-1")))
+    child = SubagentRequest(
+        "root-1", "worker prompt", SubagentBudget(max_steps=8), "child-1",
+        (
+            ("worker_registry_admitted", "true"),
+            ("worker_role", "researcher"),
+            ("model", "local-provider"),
+            ("backend", "subagent-provider"),
+            ("effort", "default"),
+            ("scope", str(tmp_path)),
+            ("allowed_tools", "research"),
+            ("owner_id", "owner"),
+            ("worker_id", "child-1"),
+            ("retry_max_attempts", "1"),
+            ("execution_success_criteria", criteria_json),
+            ("execution_verification_commands", commands_json),
+        ),
+        "resume-1", "idempotency-1",
+    )
+    repository.create(DurableChildSession(child, ChildSessionLineage("root-1")))
+    with pytest.raises(WorkerRegistryError, match="execution contract"):
+        ContinuationWorkerRegistry(repository).get("child-1")

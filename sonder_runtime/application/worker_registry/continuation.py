@@ -311,9 +311,22 @@ class ContinuationWorkerRegistry(WorkerRegistry):
         tools = tuple(filter(None, metadata.get("allowed_tools", "").split("|")))
         max_attempts = int(metadata.get("retry_max_attempts", "1"))
         try:
+            raw_criteria = json.loads(metadata.get("execution_success_criteria", "[]"))
+            raw_commands = json.loads(metadata.get("execution_verification_commands", "[]"))
+            if (
+                type(raw_criteria) is not list
+                or any(type(item) is not str for item in raw_criteria)
+                or type(raw_commands) is not list
+                or any(
+                    type(command) is not list
+                    or not command
+                    or any(type(argument) is not str for argument in command)
+                    for command in raw_commands
+                )
+            ):
+                raise ValueError("execution contract JSON shape is invalid")
             execution_contract = WorkerExecutionContract(
-                tuple(json.loads(metadata.get("execution_success_criteria", "[]"))),
-                tuple(tuple(item) for item in json.loads(metadata.get("execution_verification_commands", "[]"))),
+                tuple(raw_criteria), tuple(tuple(item) for item in raw_commands)
             )
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise WorkerRegistryError("persisted worker execution contract is invalid") from exc
