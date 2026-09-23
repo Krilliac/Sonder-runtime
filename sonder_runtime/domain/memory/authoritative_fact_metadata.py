@@ -52,6 +52,8 @@ class AuthoritativeFactMetadata:
             or len(self.supersedes) > 160
         ):
             raise MemoryReplicationError("supersedes metadata is invalid")
+        if self.supersedes is not None and not (self.entities or self.decision):
+            raise MemoryReplicationError("supersedes metadata requires an indexed claim")
         if type(self.provenance) is not tuple or len(self.provenance) > 16 or any(
             not isinstance(item, str) or not item.strip() or len(item) > 256
             for item in self.provenance

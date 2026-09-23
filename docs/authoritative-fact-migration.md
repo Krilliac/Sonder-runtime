@@ -3,6 +3,9 @@
 Live authoritative fact composition fails closed when a project contains a
 fact without matching source state and journal evidence.  Existing facts are
 adopted only by an operator running the bounded, explicit migration command.
+The activation marker is not published when this gate fails, so a rejected
+startup remains restartable and cannot advertise unjournaled rows as
+authoritative.
 The database must already have the current Sonder memory schema. The dry run
 opens it read-only and refuses an older schema without initializing or
 migrating it. Back up and upgrade an older schema through its separate
