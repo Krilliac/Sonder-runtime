@@ -12,7 +12,10 @@ that policy.
 """
 from __future__ import annotations
 
-from sonder_runtime.platform.runtime_threads import ThreadPoolExecutor as owned_runtime_pool
+from sonder_runtime.platform.runtime_threads import (
+    ThreadPoolExecutor as owned_runtime_pool,
+    run_bounded,
+)
 
 import base64
 import hashlib
@@ -446,6 +449,7 @@ class _WorkerState:
     capabilities: WorkerCapabilities | None = None
     compatibility_error: str = ""
     capability_probe_failed: bool = False
+    capability_probe_inflight: bool = False
     capability_probe_generation: int = 0
     trips: int = 0
     known_models: frozenset[str] | None = None
@@ -517,6 +521,24 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
     return probe
 
 
+def _bounded_capability_probe(prober, origin, timeout, on_complete):
+    """Run one probe without allowing an uncooperative callable to hold the pool.
+
+    The transport prober has its own socket timeout, but injected probers and
+    broken transports can still fail to return.  A daemon boundary lets the
+    pool classify that case as a timeout and keep its owned executor
+    cancellable.  Late results are intentionally discarded by the caller;
+    ``on_complete`` only releases the in-flight marker.
+    """
+    value, error, _completed = run_bounded(
+        lambda: prober(origin),
+        max(0.001, float(timeout)),
+        on_complete=on_complete,
+        name="sonder-ollama-capability-probe",
+    )
+    return value, error
+
+
 class OllamaWorkerPool:
     """Thread-safe, model-aware scheduler for independent Ollama hosts."""
 
@@ -536,6 +558,7 @@ class OllamaWorkerPool:
         max_workers: int = _DEFAULT_MAX_WORKERS,
         capability_probe_parallelism: int = _DEFAULT_CAPABILITY_PROBE_PARALLELISM,
         capability_probe_batch_size: int = _DEFAULT_CAPABILITY_PROBE_BATCH_SIZE,
+        capability_probe_timeout_seconds: float = 2.0,
         status_page_size: int = _DEFAULT_STATUS_PAGE_SIZE,
         capability_prober: Callable[[str], object] | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -561,6 +584,8 @@ class OllamaWorkerPool:
             raise ValueError("capability probe parallelism must be within 1..8")
         if not 1 <= capability_probe_batch_size <= _MAX_CAPABILITY_PROBE_BATCH_SIZE:
             raise ValueError("capability probe batch size must be within 1..128")
+        if not 0 < capability_probe_timeout_seconds <= 30.0:
+            raise ValueError("capability probe timeout must be within (0, 30] seconds")
         if not 1 <= status_page_size <= _MAX_STATUS_PAGE_SIZE:
             raise ValueError("status page size must be within 1..128")
         all_origins = (primary_origin, *worker_origins)
@@ -614,6 +639,7 @@ class OllamaWorkerPool:
         self._max_workers = int(max_workers)
         self._probe_parallelism = int(capability_probe_parallelism)
         self._probe_batch_size = int(capability_probe_batch_size)
+        self._probe_timeout = float(capability_probe_timeout_seconds)
         self._status_page_size = int(status_page_size)
         self._capability_prober = capability_prober
         self._clock = time_fn or clock
@@ -737,6 +763,7 @@ class OllamaWorkerPool:
                               for worker in result.additions}
             retained = []
             existing = {}
+            unresolved_by_origin = {}
             for state in self._states:
                 if state.membership_state is None:
                     retained.append(state)
@@ -748,11 +775,20 @@ class OllamaWorkerPool:
                     existing[key] = state
                 else:
                     state.membership_state = "draining"
-                    if state.inflight:
+                    if state.inflight or state.capability_probe_inflight:
                         retained.append(state)
+                    if state.capability_probe_inflight:
+                        unresolved_by_origin[state.endpoint.origin] = state
             omitted = result.omitted_worker_count
             for key, member in desired.items():
                 state = existing.get(key)
+                if state is None:
+                    # A lease replacement may use a new member generation
+                    # while the prior incarnation still has an unresolved
+                    # probe. Reuse that state by origin so the old daemon
+                    # remains the single in-flight fence for this endpoint.
+                    state = unresolved_by_origin.get(member.advertisement.origin)
+                reused_unresolved = state is not None and state in retained
                 if state is None:
                     if len(retained) + len(existing) >= self._max_workers:
                         omitted += 1
@@ -761,16 +797,29 @@ class OllamaWorkerPool:
                     state = _WorkerState(WorkerEndpoint(worker.origin, worker.worker_id),
                                          advertisement=worker)
                 else:
-                    existing.pop(key)
+                    existing.pop(key, None)
+                    if reused_unresolved:
+                        worker = member.advertisement
+                        state.endpoint = WorkerEndpoint(worker.origin, worker.worker_id)
+                        state.advertisement = worker
                     if key in new_admissions:
                         # A lease renewed after expiry must obtain new evidence;
                         # a still-fresh capability cache predates this admission.
                         state.capabilities = None
                         state.known_models = None
+                        state.capability_checked_at = None
+                    elif reused_unresolved:
+                        # The old probe belongs to the previous lease. Keep
+                        # its in-flight fence, but never carry its cached
+                        # evidence into the replacement admission.
+                        state.capabilities = None
+                        state.known_models = None
+                        state.capability_checked_at = None
                 state.membership_state = member.lifecycle_state
                 state.membership_expires_at = result.roster.snapshot.expires_at
                 state.membership_evidence = member.evidence
-                retained.append(state)
+                if not reused_unresolved:
+                    retained.append(state)
             self._membership_roster_applied = result.roster is not None
             self._states = retained
             self._membership_omitted = omitted
@@ -787,7 +836,8 @@ class OllamaWorkerPool:
 
     def _prune_drained(self) -> None:
         remaining = [state for state in self._states
-                     if state.membership_state != "draining" or state.inflight]
+                     if (state.membership_state != "draining"
+                         or state.inflight or state.capability_probe_inflight)]
         if len(remaining) != len(self._states):
             self._states = remaining
             self._roster_generation += 1
@@ -1064,6 +1114,7 @@ class OllamaWorkerPool:
                         (force or self._capabilities_stale(state, now))
                         and (force or state.cooldown_until <= now)
                         and not state.half_open_inflight
+                        and not state.capability_probe_inflight
                     ):
                         continue
                     candidates.append(state)
@@ -1079,27 +1130,76 @@ class OllamaWorkerPool:
 
             def run(state: _WorkerState):
                 started = self._clock()
-                try:
-                    payload = self._capability_prober(state.endpoint.origin)
-                    elapsed_ms = max(0.0, (self._clock() - started) * 1000.0)
-                    return payload, elapsed_ms, None
-                except Exception as error:
-                    return None, 0.0, error
+                def clear_inflight():
+                    with self._condition:
+                        state.capability_probe_inflight = False
+                        self._condition.notify_all()
+
+                payload, error = _bounded_capability_probe(
+                    self._capability_prober,
+                    state.endpoint.origin,
+                    self._probe_timeout,
+                    clear_inflight,
+                )
+                elapsed_ms = max(0.0, (self._clock() - started) * 1000.0)
+                return payload, elapsed_ms, error
+
+            def probe_identity(state):
+                advertisement = state.advertisement
+                return (
+                    state.endpoint.origin,
+                    state.endpoint.worker_id,
+                    state.membership_state,
+                    advertisement.origin if advertisement is not None else None,
+                    advertisement.worker_id if advertisement is not None else None,
+                    advertisement.member_generation if advertisement is not None else None,
+                )
 
             logger.debug(
                 f"probing {len(candidates)} candidate workers: "
                 f"{[s.endpoint.worker_id for s in candidates]}"
             )
             logger.info(f"probing capabilities on {len(candidates)} worker(s)")
+            with self._condition:
+                for state in candidates:
+                    state.capability_probe_inflight = True
+                selected_identities = {
+                    id(state): probe_identity(state) for state in candidates
+                }
             workers = min(self._probe_parallelism, len(candidates))
-            with owned_runtime_pool(max_workers=workers) as executor:
-                futures = [executor.submit(run, state) for state in candidates]
-                outcomes = [future.result() for future in futures]
+            submitted = []
+            try:
+                with owned_runtime_pool(max_workers=workers) as executor:
+                    futures = []
+                    for state in candidates:
+                        futures.append(executor.submit(run, state))
+                        submitted.append(state)
+                    outcomes = [future.result() for future in futures]
+            except BaseException:
+                # A pool construction or submission failure happens before a
+                # probe callback can clear the marker.  Clear only states that
+                # were never submitted; submitted work owns its marker until
+                # its bounded daemon callback finishes.
+                with self._condition:
+                    for state in candidates:
+                        if state not in submitted:
+                            state.capability_probe_inflight = False
+                    self._condition.notify_all()
+                raise
 
             with self._condition:
                 for state, (payload, measured_ms, error) in zip(candidates, outcomes):
                     state.capability_probe_generation += 1
                     if state.membership_state == "draining" or not any(current is state for current in self._states):
+                        continue
+                    if probe_identity(state) != selected_identities[id(state)]:
+                        self._metrics["capability_probe_failures"] += 1
+                        state.capability_probe_failed = True
+                        state.last_error = "capability probe result discarded after membership change"
+                        logger.warning(
+                            "discarding capability probe result for %s after membership identity changed",
+                            state.endpoint.worker_id,
+                        )
                         continue
                     self._metrics["capability_probes"] += 1
                     if error is not None:
@@ -1606,7 +1706,7 @@ class OllamaWorkerPool:
             capabilities_stale=stale,
             cooldown_until=state.cooldown_until,
             trips=state.trips,
-            probing=state.half_open_inflight,
+            probing=state.half_open_inflight or state.capability_probe_inflight,
         )
 
     def _encode_status_cursor(self, offset: int, principal: str) -> str:
@@ -2021,6 +2121,7 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
         max_workers=max_workers,
         capability_probe_parallelism=probe_parallelism,
         capability_probe_batch_size=probe_batch_size,
+        capability_probe_timeout_seconds=probe_timeout_ms / 1000.0,
         status_page_size=status_page_size,
         max_inflight_per_worker=(
             typed_max_inflight if use_typed and typed_max_inflight is not None

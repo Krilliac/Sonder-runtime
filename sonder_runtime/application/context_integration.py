@@ -25,6 +25,7 @@ from .context_manifests import (
     LastGoodSnapshot,
     PrefixManifest,
     PrefixManifestCache,
+    PrefixCacheObservation,
     ReplayManifest,
     build_replay_manifest,
     deduplicate_context,
@@ -41,6 +42,7 @@ class ContextAssembly:
     sizing: ContextSizing | None = None
     prefix: PrefixManifest | None = None
     replay: ReplayManifest | None = None
+    prefix_observation: PrefixCacheObservation | None = None
 
     def __post_init__(self) -> None:
         selections = dict(self.selections)
@@ -51,7 +53,8 @@ class ContextAssembly:
     def __deepcopy__(self, memo: dict[int, object]) -> "ContextAssembly":
         """Keep immutable mapping proxies compatible with snapshot isolation."""
         copied = ContextAssembly(
-            self.plan, dict(self.selections), self.sizing, self.prefix, self.replay
+            self.plan, dict(self.selections), self.sizing, self.prefix, self.replay,
+            self.prefix_observation,
         )
         memo[id(self)] = copied
         return copied
@@ -172,22 +175,23 @@ class ContextPlanningFacade:
             project_policy is not None,
         ))
         should_resolve_prefix = bool(manifest_records or has_prefix_identity)
-        prefix = self._prefix_cache.resolve(
-            deduped,
-            version=prefix_version,
-            model=effective_model.model,
-            provider_id=provider_id,
-            tokenizer=tokenizer,
-            template=template,
-            system_prefix=system_prefix,
-            visible_tool_schemas=visible_tool_schemas,
-            tool_schemas=tool_schemas,
-            project_policy=project_policy,
-            # Accepted for callers that have the complete request at hand;
-            # these values are intentionally excluded from stable identity.
-            dynamic_memory=dynamic_memory,
-            retrieval=retrieval,
-        ) if should_resolve_prefix else None
+        prefix = prefix_observation = None
+        if should_resolve_prefix:
+            prefix, prefix_observation = self._prefix_cache.resolve_observed(
+                deduped,
+                version=prefix_version,
+                model=effective_model.model,
+                provider_id=provider_id,
+                tokenizer=tokenizer,
+                template=template,
+                system_prefix=system_prefix,
+                visible_tool_schemas=visible_tool_schemas,
+                tool_schemas=tool_schemas,
+                project_policy=project_policy,
+                # Dynamic inputs never contribute to reusable identity.
+                dynamic_memory=dynamic_memory,
+                retrieval=retrieval,
+            )
         replay = (
             build_replay_manifest(
                 request_id,
@@ -200,7 +204,10 @@ class ContextPlanningFacade:
             else None
         )
         result = self._assembly.assemble(effective_model, items, section_budgets)
-        result = ContextAssembly(result.plan, result.selections, sizing, prefix, replay)
+        result = ContextAssembly(
+            result.plan, result.selections, sizing, prefix, replay,
+            prefix_observation,
+        )
         if not any(selection.emergency_overflow for selection in result.selections.values()):
             self._last_good.publish(result)
         return result

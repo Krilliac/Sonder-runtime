@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from datetime import datetime, timezone
 
 import pytest
 
+import sonder_runtime.adapters.inference.ollama_pool as ollama_pool_module
 from sonder_runtime.adapters.inference.static_membership import StaticMembershipSource
 from sonder_runtime.application.inference_membership.controller import MembershipController
 from sonder_runtime.platform.config import OllamaConfig
@@ -30,6 +32,111 @@ def _roster(total: int) -> tuple[str, tuple[str, ...]]:
             for offset in range(total - 1)
         ),
     )
+
+
+def test_hanging_capability_prober_is_bounded_and_fails_closed():
+    entered, release = threading.Event(), threading.Event()
+
+    def stuck(_origin):
+        entered.set()
+        release.wait(5)
+        return {"models": ["code"]}
+
+    pool = OllamaWorkerPool(
+        "http://127.0.0.1:11434",
+        capability_prober=stuck,
+        capability_probe_timeout_seconds=0.05,
+    )
+    started = time.monotonic()
+    pool.refresh_capabilities()
+    elapsed = time.monotonic() - started
+
+    assert entered.wait(1)
+    assert elapsed < 1
+    snapshot = pool.snapshots()[0]
+    assert snapshot.capabilities_stale is True
+    assert snapshot.models == ()
+    assert snapshot.healthy is False
+    assert snapshot.probing is True
+
+    release.set()
+    deadline = time.monotonic() + 1
+    while pool.snapshots()[0].probing and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert pool.snapshots()[0].probing is False
+
+
+def test_capability_probe_submission_failure_clears_unsubmitted_marker(monkeypatch):
+    pool = OllamaWorkerPool(
+        "http://127.0.0.1:11434",
+        capability_prober=lambda _origin: {"models": ["code"]},
+    )
+
+    def fail_pool(**_kwargs):
+        raise RuntimeError("synthetic pool setup failure")
+
+    monkeypatch.setattr(ollama_pool_module, "owned_runtime_pool", fail_pool)
+    with pytest.raises(RuntimeError, match="synthetic pool setup failure"):
+        pool.refresh_capabilities()
+
+    assert pool.snapshots()[0].probing is False
+
+
+def test_draining_probe_state_is_retained_until_late_probe_finishes():
+    pool = OllamaWorkerPool(
+        "http://127.0.0.1:11434",
+        capability_prober=lambda _origin: {"models": ["code"]},
+    )
+    state = pool._states[0]
+    state.membership_state = "draining"
+    state.capability_probe_inflight = True
+
+    pool._prune_drained()
+    assert pool.origins == ("http://127.0.0.1:11434",)
+
+    state.capability_probe_inflight = False
+    pool._prune_drained()
+    assert pool.origins == ()
+
+
+def test_probe_result_is_discarded_after_lease_identity_changes():
+    entered, release = threading.Event(), threading.Event()
+
+    def probe(_origin):
+        entered.set()
+        release.wait(2)
+        return {"models": ["stale-model"]}
+
+    pool = OllamaWorkerPool(
+        "http://127.0.0.1:11434",
+        capability_prober=probe,
+        capability_probe_timeout_seconds=1,
+    )
+    state = pool._states[0]
+    state.advertisement = type(
+        "Advertisement", (), {
+            "origin": state.endpoint.origin,
+            "worker_id": "lease-old",
+            "member_generation": 1,
+        },
+    )()
+    refresh = threading.Thread(target=pool.refresh_capabilities)
+    refresh.start()
+    assert entered.wait(1)
+    state.advertisement = type(
+        "Advertisement", (), {
+            "origin": state.endpoint.origin,
+            "worker_id": "lease-new",
+            "member_generation": 2,
+        },
+    )()
+    release.set()
+    refresh.join(2)
+
+    assert not refresh.is_alive()
+    assert state.capabilities is None
+    assert state.capability_probe_failed is True
+    assert state.last_error == "capability probe result discarded after membership change"
 
 
 @pytest.mark.parametrize("maximum", [16, 64, 256])

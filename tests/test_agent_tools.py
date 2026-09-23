@@ -620,6 +620,31 @@ def test_agent_stops_repeating_identical_failed_tool_call(monkeypatch):
     assert "HOST NO-PROGRESS" in prompts[3]
 
 
+def test_agent_retry_guard_blocks_same_call_when_failure_text_changes(monkeypatch):
+    responses = [
+        '{"tool": "script_run", "args": {"path": "missing.py"}}',
+        '{"tool": "script_run", "args": {"path": "missing.py"}}',
+        '{"tool": "script_run", "args": {"path": "missing.py"}}',
+        '{"tool": "script_run", "args": {"path": "missing.py"}}',
+    ]
+    dispatches = []
+
+    monkeypatch.setattr(
+        server, "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+
+    def dispatch(*args, **kwargs):
+        dispatches.append(args)
+        return "ERROR: missing.py request=%d" % len(dispatches)
+
+    monkeypatch.setattr(server, "_agent_dispatch_observed", dispatch)
+    output = server._agent_impl("run the script", max_steps=4)
+
+    assert output.startswith("ERROR: agent repeated the same unsuccessful tool call 3 times")
+    assert len(dispatches) == 2
+
+
 def test_agent_stops_semantic_no_progress_across_distinct_failed_calls(monkeypatch):
     responses = [
         '{"tool":"script_run","args":{"path":"missing-1.py"}}',
