@@ -360,7 +360,9 @@ class SQLiteAuthoritativeFactSource:
             # the explicit bounded migration first; leaving the marker absent
             # keeps a failed activation restartable and avoids claiming that
             # unjournaled facts are authoritative.
-            self._require_scoped_facts_authoritative(connection)
+            self._require_scoped_facts_authoritative(
+                connection, verify_journal_evidence=True,
+            )
             self._activate_in_transaction(connection)
 
     def _activate_in_transaction(self, connection) -> None:
@@ -403,7 +405,9 @@ class SQLiteAuthoritativeFactSource:
                 "authoritative fact scope is already owned by another source"
             )
 
-    def _require_scoped_facts_authoritative(self, connection) -> None:
+    def _require_scoped_facts_authoritative(
+        self, connection, *, verify_journal_evidence: bool = False,
+    ) -> None:
         """Refuse activation over facts with no matching source evidence.
 
         Existing project facts need an explicit migration before a live writer
@@ -422,6 +426,8 @@ class SQLiteAuthoritativeFactSource:
             raise MemoryReplicationError(
                 "existing project facts require authoritative migration"
             )
+        if not verify_journal_evidence:
+            return
         missing_evidence = connection.execute(
             "SELECT 1 FROM facts AS fact "
             "JOIN memory_authoritative_fact_state AS state "
