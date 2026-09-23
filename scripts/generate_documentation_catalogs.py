@@ -59,8 +59,27 @@ def _source_hashes() -> dict[str, str]:
         PACKAGE / "platform" / "memory_replication_config.py",
         ROOT / "command_catalog.py",
         ROOT / "server.py",
+        PACKAGE / "domain" / "operational_capabilities.py",
+        PACKAGE / "interfaces" / "sdk" / "discovery.py",
     )
     return {path.relative_to(ROOT).as_posix(): _sha(path) for path in paths if path.is_file()}
+
+
+def _reference_shape(value: Any) -> Any:
+    """Return a bounded structural reference without publishing live values."""
+    if isinstance(value, dict):
+        return {str(key): _reference_shape(item) for key, item in sorted(value.items())}
+    if isinstance(value, (tuple, list)):
+        return [_reference_shape(item) for item in value[:1]]
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if value is None:
+        return "null"
+    return type(value).__name__
 
 
 def _runtime_reference() -> dict[str, Any]:
@@ -93,8 +112,8 @@ def _runtime_reference() -> dict[str, Any]:
         } for tool in server.mcp._tool_manager.list_tools()), key=lambda item: item["name"])
         result["tool_source"] = "server.mcp._tool_manager.list_tools"
     except Exception as exc:
-        result["tools"] = []
-        result["tool_source"] = {"unavailable": f"{type(exc).__name__}: {exc}"}
+        raise RuntimeError("runtime tool source unavailable") from exc
+    result["tool_source"] = "server.mcp._tool_manager.list_tools"
 
     events = importlib.import_module("sonder_runtime.domain.common.events")
     result["events"] = [{
@@ -135,7 +154,52 @@ def _runtime_reference() -> dict[str, Any]:
         "sonder_runtime.platform.config._SECTION_TYPES plus "
         "sonder_runtime.platform.memory_replication_config"
     )
-    result["counts"] = {name: len(result[name]) for name in ("commands", "tools", "events", "configuration")}
+    from sonder_runtime.application.ports.tool_registry import InMemoryToolRegistry, ToolDescriptor
+    from sonder_runtime.application.tools.generated_catalogs import CatalogLimits, GeneratedCatalogs
+    from sonder_runtime.interfaces.sdk.discovery import CapabilitySnapshot
+    from sonder_runtime.domain.operational_capabilities import build_operational_capabilities
+
+    descriptors = tuple(
+        ToolDescriptor(item["name"], item["description"], item["parameters"])
+        for item in result["tools"]
+    )
+    catalogs = GeneratedCatalogs.generate(
+        InMemoryToolRegistry(descriptors),
+        commands=result["commands"],
+        event_kinds=events.EventKind,
+        limits=CatalogLimits(
+            max_tools=max(256, len(result["tools"])),
+            max_events=max(128, len(result["events"])),
+            max_commands=max(512, len(result["commands"])),
+            max_bytes=2_000_000,
+        ),
+    )
+    result["schemas"] = {
+        "schema": "sonder-runtime-schema-reference-v1",
+        "catalog_digest": catalogs.digest,
+        "mcp": catalogs.mcp,
+        "openai": catalogs.openai,
+        "client": catalogs.client,
+        "events": catalogs.client["events"],
+    }
+    capability_snapshot = CapabilitySnapshot.from_catalogs(
+        catalogs, runtime_version="source-reference",
+    )
+    result["capabilities"] = {
+        "schema": "sonder-runtime-capability-reference-v1",
+        "catalog_digest": catalogs.digest,
+        "sdk": capability_snapshot.as_dict(),
+        "operational": _reference_shape(
+            build_operational_capabilities(config=None)
+        ),
+    }
+    result["counts"] = {
+        name: len(result[name])
+        for name in ("commands", "tools", "events", "configuration")
+    } | {
+        "schemas": 4,
+        "capabilities": len(result["capabilities"]["sdk"]["tools"]),
+    }
     canonical = json.dumps(result, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     result["digest"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return result
@@ -195,6 +259,8 @@ def _markdown_reference(reference: dict[str, Any]) -> str:
         f"| Commands | {reference['counts']['commands']} | `command_catalog.catalog()` |",
         f"| Events | {reference['counts']['events']} | `EventKind` and `payload_schema()` |",
         f"| Configuration fields | {reference['counts']['configuration']} | `{reference['configuration_source']}` |",
+        f"| Schemas | {reference['counts']['schemas']} projections | `GeneratedCatalogs` |",
+        f"| Capabilities | {reference['counts']['capabilities']} tools plus operational shape | `CapabilitySnapshot` and `build_operational_capabilities` |",
         "", "## Tools", "", "| Name | Description |", "|---|---|",
     ]
     for item in reference["tools"]:
@@ -209,6 +275,13 @@ def _markdown_reference(reference: dict[str, Any]) -> str:
     lines += ["", "## Configuration", "", "| Section | Field | Type | Default |", "|---|---|---|---|"]
     for item in reference["configuration"]:
         lines.append(f"| `{item['section']}` | `{item['field']}` | `{item['type']}` | `{item['default']}` |")
+    lines += ["", "## Schemas", "", "Generated schema projections share the catalog digest:", "",
+              f"- Catalog digest: `{reference['schemas']['catalog_digest']}`",
+              "- MCP tool schema, OpenAI function schema, client schema, and event schema are generated from the typed catalog.",
+              "", "## Capabilities", "",
+              f"- Catalog digest: `{reference['capabilities']['catalog_digest']}`",
+              "- SDK capabilities are typed tool descriptors and are descriptive; authorization remains runtime-evaluated.",
+              "- Operational capability fields are represented structurally from the typed operational capability projection."]
     return "\n".join(lines) + "\n"
 
 

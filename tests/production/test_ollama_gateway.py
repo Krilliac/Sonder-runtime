@@ -320,6 +320,34 @@ def test_generate_preserves_backend_measured_phases(monkeypatch):
     assert response.telemetry.load_state is None
 
 
+def test_real_transport_factory_forwards_provider_cached_prompt_count(monkeypatch):
+    """Exercise the transport-to-gateway metadata seam, not a fabricated gen."""
+    monkeypatch.setattr(
+        server, "_chat_request",
+        lambda *_args, **_kwargs: (
+            {
+                "prompt_eval_count": 20,
+                "prompt_eval_cached_count": 12,
+                "eval_count": 1,
+                "message": {"content": "done"},
+            },
+            "done",
+        ),
+    )
+    gateway = OllamaGateway(
+        target_resolver=lambda _tier, _strict=False: ModelTarget(
+            "sonder:latest", False, "code", provider_id="ollama",
+            tokenizer="tokenizer-v1", template="chat-v1",
+        ),
+        generate_factory=server._make_generate,
+    )
+    response = gateway.generate(ModelRequest("hello", "code"), _context())
+    assert response.telemetry is not None
+    assert response.telemetry.prompt_tokens == 20
+    assert response.telemetry.prompt_cached_tokens == 12
+    assert response.telemetry.prompt_uncached_tokens == 8
+
+
 def test_cloud_tier_requires_context_consent(monkeypatch):
     _fake_target(monkeypatch, cloud=True, tier_label="cloud")
     _fake_gen(monkeypatch)

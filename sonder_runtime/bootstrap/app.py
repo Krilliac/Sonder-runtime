@@ -852,6 +852,7 @@ def build_application(
                 effect_journal=SQLiteEffectJournal(
                     state_path("agent-effects.db", "SONDER_AGENT_EFFECTS_DB")
                 ),
+                compaction_service=get_compaction_service(),
             )
         return interactive_lanes
 
