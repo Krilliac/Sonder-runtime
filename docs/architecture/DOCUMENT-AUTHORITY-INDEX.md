@@ -7,8 +7,8 @@ file listing: a document is authoritative only for the scope named here.
 ## Authority order
 
 1. `SONDER-MASTER-IMPLEMENTATION-SPEC.md` is authoritative for the unfinished
-   requirement list and checkbox state. This pass intentionally leaves all
-   formal checkboxes unchanged.
+   requirement list and checkbox state. A checkbox changes only in the same
+   change that adds its verified ledger revision and evidence (DOC-006).
 2. The focused contract documents below are authoritative for current product
    boundaries, subject to the master specification where the two conflict.
 3. Requirement evidence and generated status projections are authoritative for
@@ -132,4 +132,6 @@ DOC-001 through DOC-003 are checked with separate verified authority,
 historical-label, and ADR-namespace evidence. DOC-005 is checked with
 generated references for all six named families, a direct CI freshness gate,
 and linked exact-head and post-merge evidence. DOC-006 is checked with its
-separate verified ledger revision. DOC-004 and DOC-007 remain open.
+separate verified ledger revision. DOC-004 is checked with the focused-contract
+linkage and status-table gate, and DOC-007 with the product-document status
+vocabulary gate; both link separate evidence records.

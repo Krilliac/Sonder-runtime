@@ -188,10 +188,8 @@ def test_stale_promise_inventory_tracks_verified_and_open_checkboxes():
     spec = _read("docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md")
     assert re.search(r"- \[x\] \*\*DOC-006 —", spec, re.IGNORECASE)
     assert re.search(r"- \[x\] \*\*DOC-005 —", spec, re.IGNORECASE)
-    for requirement in ("DOC-001", "DOC-002", "DOC-003"):
+    for requirement in ("DOC-001", "DOC-002", "DOC-003", "DOC-004", "DOC-007"):
         assert re.search(rf"- \[x\] \*\*{requirement} —", spec)
-    for requirement in ("DOC-004", "DOC-007"):
-        assert re.search(rf"- \[ \] \*\*{requirement} —", spec)
 
 
 def test_product_documents_satisfy_focus_and_status_vocabulary():
