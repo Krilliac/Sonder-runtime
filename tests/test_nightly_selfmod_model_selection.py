@@ -534,6 +534,20 @@ def test_ast_splice_accepts_the_selected_existing_function():
     assert "def selected(value):\n    return value + 1\n" in edited
 
 
+def test_rewrite_prompt_binds_selected_function_objective_target_and_source():
+    prompt = nightly_selfmod._rewrite_prompt(
+        "Guard the empty input.",
+        "pull_community.py",
+        "load_source",
+        "def load_source(src):\n    return src\n",
+    )
+
+    assert "the objective in the selected function `load_source`" in prompt
+    assert "Guard the empty input." in prompt
+    assert "=== pull_community.py (selected function: load_source) ===" in prompt
+    assert prompt.endswith("def load_source(src):\n    return src\n")
+
+
 def test_ast_splice_rejects_malformed_or_contract_changing_replies():
     original = "def sample(value):\n    return value\n"
 
