@@ -192,18 +192,32 @@ def _ask(server, prompt, num_predict=1200, model="", num_ctx=0):
     # An explicit model is a catalog selector, not a temporary tier mutation.
     # The server refreshes its persisted runtime policy at every request, so
     # changing ``server.TIERS['code']`` in a caller is overwritten before the
-    # request is resolved.  Passing the exact installed model through the
-    # normal ensemble surface keeps this worker isolated from the live REPL's
-    # policy and makes --model effective.
+    # request is resolved.  An exact installed model goes through the local
+    # generation factory; the unpinned path retains the configured code tier.
     selected = str(model or "").strip()
-    kwargs = {
-        "tiers": selected or "code",
-        "num_predict": num_predict,
-        "mode": "code",
-    }
-    if int(num_ctx or 0) > 0:
-        kwargs["num_ctx"] = int(num_ctx)
-    reply = server.ensemble_answer(prompt, **kwargs)
+    if selected:
+        is_cloud = getattr(server, "_is_cloud_model_name", lambda value: False)
+        if is_cloud(selected):
+            raise RuntimeError("model unavailable: explicit selfmod model is cloud-backed")
+        resolved = getattr(server, "resolve_discovered_model", lambda value: None)(selected)
+        if not resolved or str(resolved).casefold() != selected.casefold():
+            raise RuntimeError("model unavailable: explicit local model is not installed")
+        factory = getattr(server, "_make_generate", None)
+        if not callable(factory):
+            raise RuntimeError("model unavailable: local model gateway is unavailable")
+        reply = factory(
+            resolved, "", 0.2, num_predict, num_ctx,
+            cloud=False, timeout=60,
+        )(prompt)
+    else:
+        kwargs = {
+            "tiers": "code",
+            "num_predict": num_predict,
+            "mode": "code",
+        }
+        if int(num_ctx or 0) > 0:
+            kwargs["num_ctx"] = int(num_ctx)
+        reply = server.ensemble_answer(prompt, **kwargs)
     text = (reply or "").strip()
     # ensemble_answer reports failure by RETURNING prose rather than raising.
     # Splicing that into a source file is how a dead backend becomes a code

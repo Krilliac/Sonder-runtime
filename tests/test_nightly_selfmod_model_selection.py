@@ -20,6 +20,19 @@ class _FakeServer:
         self.calls.append(call)
         return "def sample():\n    return 1\n"
 
+    @staticmethod
+    def _is_cloud_model_name(model):
+        return str(model).endswith(":cloud")
+
+    @staticmethod
+    def resolve_discovered_model(model):
+        return model if model == "qwen2.5-coder:14b" else None
+
+    def _make_generate(self, model, _system, _temperature, num_predict, num_ctx, **kwargs):
+        self.calls.append({"gateway_model": model, "gateway_num_predict": num_predict,
+                           "gateway_num_ctx": num_ctx, **kwargs})
+        return lambda prompt: "def sample():\n    return 1\n"
+
 
 def test_selfmod_model_pin_is_passed_as_an_explicit_catalog_selector():
     server = _FakeServer()
@@ -33,11 +46,28 @@ def test_selfmod_model_pin_is_passed_as_an_explicit_catalog_selector():
 
     assert reply.startswith("def sample")
     assert server.calls == [{
-        "prompt": "rewrite one function",
-        "tiers": "qwen2.5-coder:14b",
-        "num_predict": 64,
-        "mode": "code",
+        "gateway_model": "qwen2.5-coder:14b",
+        "gateway_num_predict": 64,
+        "gateway_num_ctx": 0,
+        "cloud": False,
+        "timeout": 60,
     }]
+
+
+def test_selfmod_refuses_unknown_or_cloud_explicit_models():
+    server = _FakeServer()
+    try:
+        nightly_selfmod._ask(server, "inspect", model="missing:latest")
+    except RuntimeError as exc:
+        assert "not installed" in str(exc)
+    else:
+        raise AssertionError("unknown model must be refused")
+    try:
+        nightly_selfmod._ask(server, "inspect", model="qwen:cloud")
+    except RuntimeError as exc:
+        assert "cloud-backed" in str(exc)
+    else:
+        raise AssertionError("cloud model must be refused")
 
 
 def test_selfmod_without_model_pin_keeps_using_code_tier():
