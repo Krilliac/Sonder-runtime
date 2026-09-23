@@ -173,9 +173,9 @@
     },
     {
       "checked": false,
-      "claim": "Child agents expose continuable durable state.",
+      "claim": "A matching terminal child session is reused from the authoritative durable continuation repository before any new worker admission or runner spawn, including after service restart; mismatched scope is rejected and recovery-required terminals still require explicit resume.",
       "requirement_id": "AGENT-006",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "1fe6654f7d733de4a7d0902778656323c462f95fa9dcf3c865be619d44ab9fd9",
+    "ledger_sha256": "0bdbeed0dc4ee1b7ac9efbe0e7e7a249e0ffa0e2836a082143530d6e163776a5",
     "spec_sha256": "4797da92d2d1845ce944b2dc32353d52fe7a6e48dfa92593753ca727761ca714"
   }
 }
