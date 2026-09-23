@@ -422,6 +422,24 @@ class SQLiteAuthoritativeFactSource:
             raise MemoryReplicationError(
                 "existing project facts require authoritative migration"
             )
+        missing_evidence = connection.execute(
+            "SELECT 1 FROM facts AS fact "
+            "JOIN memory_authoritative_fact_state AS state "
+            "ON state.project=fact.project AND state.fact_id=fact.id "
+            "WHERE fact.project=? AND state.source_id=? AND state.tombstoned=0 "
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM memory_replication_log AS journal "
+            "WHERE journal.source_id=state.source_id "
+            "AND journal.project=fact.project AND journal.entity_kind='fact' "
+            "AND journal.entity_id=fact.id AND journal.version=state.version "
+            "AND journal.operation='upsert'"
+            ") LIMIT 1",
+            (self.project_scope, self.source_id),
+        ).fetchone()
+        if missing_evidence is not None:
+            raise MemoryReplicationError(
+                "existing project facts require authoritative journal evidence"
+            )
 
     def _record(
         self,

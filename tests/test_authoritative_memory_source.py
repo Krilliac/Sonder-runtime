@@ -298,6 +298,30 @@ def test_direct_activation_fails_closed_without_publishing_marker(tmp_path):
         connection.close()
 
 
+def test_activation_rejects_state_without_matching_journal_evidence(tmp_path):
+    path = tmp_path / "missing-journal.db"
+    connection = connect(path)
+    try:
+        connection.execute(
+            "INSERT INTO facts(id,project,text,embedding) VALUES(?,?,?,?)",
+            ("fact-1", "repo-a", "state without journal", None),
+        )
+        connection.execute(
+            "INSERT INTO memory_authoritative_fact_state"
+            "(project,fact_id,source_id,version,tombstoned) VALUES(?,?,?,?,?)",
+            ("repo-a", "fact-1", "node-a", 1, 0),
+        )
+        connection.commit()
+        source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+        with pytest.raises(MemoryReplicationError, match="journal evidence"):
+            source.activate(connection)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM memory_authoritative_fact_activation"
+        ).fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
 def test_live_source_and_fact_rollback_together_when_journal_fails(tmp_path, monkeypatch):
     from sonder_runtime.adapters.persistence.sqlite import authoritative_memory
 
