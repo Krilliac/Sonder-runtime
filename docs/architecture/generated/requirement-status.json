@@ -607,9 +607,9 @@
     },
     {
       "checked": false,
-      "claim": "Generated references are reproducible from typed runtime sources.",
+      "claim": "The generated runtime reference now includes tools, commands, events, configuration, four typed schema projections, and typed SDK plus operational capability references, all bound to source hashes and a fail-closed freshness check.",
       "requirement_id": "DOC-005",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "1fe6654f7d733de4a7d0902778656323c462f95fa9dcf3c865be619d44ab9fd9",
+    "ledger_sha256": "9fe3f18c75add44b372672a2254fe947da021ad7c8bd2a1ec6e8d2af91002058",
     "spec_sha256": "4797da92d2d1845ce944b2dc32353d52fe7a6e48dfa92593753ca727761ca714"
   }
 }

@@ -50,6 +50,8 @@ jobs:
         run: python scripts/check_history_privacy.py --json
       - name: Check operator/developer doc links
         run: python scripts/check_doc_links.py
+      - name: Freshness-gate generated runtime references
+        run: python scripts/check_documentation_authority.py
       # The golden evaluation lane is a gate, not a report: exit 1 is a
       # baseline violation (a graded regression or infrastructure trouble
       # in the fixtures), exit 2 a harness error. Both are offline -- the
