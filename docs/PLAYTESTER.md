@@ -18,7 +18,8 @@ outside the tested repository.
 Run a structural check:
 
 ```powershell
-python scripts/playtester.py --name import-check --claim 'module imports' --command python -c 'import sonder_runtime'
+$command = @('python', '-c', 'import sonder_runtime') | ConvertTo-Json -Compress
+python scripts/playtester.py --name import-check --claim 'module imports' --command-json $command
 ```
 
 Use a catalog for several bounded scenarios:
