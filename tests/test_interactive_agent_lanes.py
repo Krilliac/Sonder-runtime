@@ -510,14 +510,14 @@ def test_tool_request_uses_scoped_typed_gateway_and_records_artifact(env):
     )
     from sonder_runtime.domain.tools.descriptors import ToolEffect
 
-    service, _, _, model, context, root = env
+    service, _, sessions, model, context, root = env
     observed = []
 
     class Executor:
         def execute(self, descriptor, call, ctx, execution_class):
             observed.append((call, ctx))
             return ToolExecutionResult(
-                tool_name=descriptor.name, success=True, output="created"
+                tool_name=descriptor.name, success=True, output="created " * 500
             )
 
     descriptor = ToolDescriptor(
@@ -556,6 +556,160 @@ def test_tool_request_uses_scoped_typed_gateway_and_records_artifact(env):
     assert service.reports("parent", context)["reports"][0]["artifacts"] == [
         str(root / "child" / "result.txt")
     ]
+    service._history(service.store.read_lane(lane))
+    archive_events = [
+        event for event in sessions.read_range(
+            service.store.read_lane(lane)["session_id"], limit=100
+        ) if event.event_type == "context.archive.created"
+    ]
+    assert len(archive_events) == 1
+    assert archive_events[0].payload["source_kind"] == "agent_lane"
+    assert archive_events[0].payload["project_id"] == str((root / "child").resolve())
+    assert "created" not in str(archive_events[0].payload)
+    recovered = service.retrieve_archived_tool(
+        lane, archive_events[0].payload["archive_id"], context
+    )
+    assert recovered["payload"]["output"] == "created " * 500
+
+
+def test_lane_history_rejects_archive_reference_from_another_project(env):
+    service, _, sessions, _, context, root = env
+    lane = spawn(env)["lane"]
+    sessions.append(
+        lane["session_id"],
+        "context.archive.created",
+        {
+            "archive_id": "archive-other",
+            "project_id": str((root / "other").resolve()),
+            "source_kind": "agent_lane",
+            "source_lane_id": lane["id"],
+            "source_event_id": "event-other",
+            "source_sequence": 1,
+            "source_event_type": "tool.result",
+            "sha256": "0" * 64,
+            "byte_count": 1,
+        },
+    )
+
+    assert all("archive-other" not in item["content"] for item in service._history(lane))
+
+
+def test_archive_projection_failure_does_not_rerun_committed_tool(env, monkeypatch):
+    service, _, _, _, context, _ = env
+    lane_id = spawn(env)["lane"]["id"]
+    lane = service.store.read_lane(lane_id)
+    with service.store.transaction() as tx:
+        tx.emit(
+            lane, "tool.result",
+                {"name": "read_file", "output": "already committed " * 500, "call_id": "c1"},
+        )
+    monkeypatch.setattr(
+        service._archive, "archive_external_tool_output",
+        lambda **kwargs: (_ for _ in ()).throw(OSError("archive unavailable")),
+    )
+
+    with pytest.raises(OSError, match="archive unavailable"):
+        service._history(lane)
+    events, _ = service.store.events(lane_id, 0, 100)
+    assert any(event["event_type"] == "tool.result" for event in events)
+
+
+def test_small_lane_tool_result_stays_inline_without_archive_reference(env):
+    service, _, sessions, _, context, _ = env
+    lane_id = spawn(env)["lane"]["id"]
+    lane = service.store.read_lane(lane_id)
+    with service.store.transaction() as tx:
+        tx.emit(lane, "tool.result", {"name": "read_file", "output": "small", "call_id": "c1"})
+
+    history = service._history(lane)
+
+    assert any("small" in item["content"] for item in history)
+    assert sessions.search(
+        session_id=lane["session_id"], event_type="context.archive.created", limit=10
+    ) == ()
+
+
+def test_recent_tool_context_cap_applies_to_matched_completed_calls(env):
+    service, _, sessions, _, context, _ = env
+    lane_id = spawn(env)["lane"]["id"]
+    lane = service.store.read_lane(lane_id)
+    with service.store.transaction() as tx:
+        for index in range(10):
+            tx.emit(lane, "tool.result", {
+                "name": "read_file", "output": f"result-{index}",
+                "call_id": f"c{index}",
+            })
+    for index in range(10):
+        sessions.append(
+            lane["session_id"], "tool.completed", {"call_id": f"c{index}"},
+            event_id=f"completed-{index}",
+        )
+
+    history = service._history(lane)
+    tool_content = [item["content"] for item in history if "Tool result (data)" in item["content"]]
+    assert len(tool_content) == 8
+    assert "result-2" in tool_content[0]
+    assert "result-9" in tool_content[-1]
+
+
+def test_tool_result_without_completion_keeps_request_order(env):
+    service, _, sessions, _, context, _ = env
+    lane_id = spawn(env)["lane"]["id"]
+    lane = service.store.read_lane(lane_id)
+    sessions.append(lane["session_id"], "tool.requested", {"call_id": "c1"})
+    with service.store.transaction() as tx:
+        tx.emit(lane, "tool.result", {
+            "name": "read_file", "output": "committed output", "call_id": "c1",
+        })
+    sessions.append(lane["session_id"], "model.response", {"content": "later reply"})
+
+    history = service._history(lane)
+
+    assert next(i for i, item in enumerate(history)
+                if "committed output" in item["content"]) < next(
+                    i for i, item in enumerate(history)
+                    if item["content"] == "later reply")
+
+
+def test_recent_lane_tool_context_is_capped_ordered_and_survives_canonical_prefix(
+    env,
+):
+    service, _, sessions, _, context, _ = env
+    lane_id = spawn(env)["lane"]["id"]
+    lane = service.store.read_lane(lane_id)
+    for index in range(1_050):
+        sessions.append(
+            lane["session_id"], "model.response",
+            {"content": f"historical-{index}"}, event_id=f"history-{index}",
+        )
+    with service.store.transaction() as tx:
+        for index in range(10):
+            tx.emit(
+                lane, "tool.result",
+                {"name": "read_file", "output": "payload-" + ("x" * 3_000),
+                 "call_id": f"c{index}"},
+            )
+
+    history = service._history(lane)
+    pointers = [
+        item["content"] for item in history if "retrieve by reference" in item["content"]
+    ]
+
+    assert len(pointers) == 8
+    archive_events = sessions.search(
+        session_id=lane["session_id"], event_type="context.archive.created", limit=32
+    )
+    expected = [
+        "retrieve by reference " + event.payload["archive_id"]
+        for event in sorted(archive_events, key=lambda event: event.payload["source_sequence"])[-8:]
+    ]
+    assert [pointer.split("Tool result archived for this project; ", 1)[1].rstrip(".") for pointer in pointers] == expected
+    assert len(archive_events) == 10
+    assert any(item["content"] == "historical-1049" for item in history)
+    assert any(
+        event.payload.get("content") == "historical-0"
+        for event in sessions.read_range(lane["session_id"], limit=16)
+    )
 
 
 def test_model_tool_cannot_address_parent_workspace(env):

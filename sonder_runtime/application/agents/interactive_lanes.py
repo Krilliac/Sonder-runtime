@@ -26,6 +26,7 @@ from ..loop_event_classification import DurableSessionFact
 from ..loop_steering import SteeringCommand
 from ..ports.model_gateway import ModelRequest, require_model_text
 from ..session.capture import CapturedRequest, SessionCaptureService, _snapshot_payload
+from ..session.archive import ArchiveReference, SessionContextArchiveService
 from ..tools.gateway_contract import ToolGatewayRequest, ToolScope, ToolPermission
 
 _LANE_TOOLS = frozenset(
@@ -48,6 +49,7 @@ _WAIT_LOCK = threading.Lock()
 _WAIT_OWNERS = {}
 
 _ACTIVE = frozenset({"queued", "running", "interrupt_requested", "cancel_requested"})
+_LANE_INLINE_TOOL_RESULT_BYTES = 2 * 1024
 _HIDDEN = frozenset(
     {
         "principal_id",
@@ -202,6 +204,7 @@ class AgentLaneService:
         self._deferred_verification = {}
         self._condition = threading.Condition()
         self._capture = SessionCaptureService(sessions)
+        self._archive = SessionContextArchiveService(sessions)
         if loop is not None and loop_factory is not None:
             raise ValueError("loop and loop_factory are mutually exclusive")
         if loop is not None and not callable(getattr(loop, "admit_turn", None)):
@@ -1106,14 +1109,59 @@ class AgentLaneService:
                 self._condition.wait(min(0.25, max(0, end - time.monotonic())))
 
     def _history(self, lane):
+        events = self.store.tail_events(lane["id"], limit=256)
+        recent_tool_context = []
+        for event in events:
+            if event["event_type"] != "tool.result":
+                continue
+            encoded = json.dumps(event["payload"], ensure_ascii=False, sort_keys=True)
+            if len(encoded.encode("utf-8")) <= _LANE_INLINE_TOOL_RESULT_BYTES:
+                recent_tool_context.append((
+                    event["sequence"],
+                    event["payload"].get("call_id"),
+                    {"role": "user", "content": "Tool result (data): " + encoded},
+                ))
+                continue
+            reference = self._archive.archive_external_tool_output(
+                session_id=lane["session_id"], project_id=lane["workspace_root"],
+                source_kind="agent_lane", source_lane_id=lane["id"],
+                source_event_id=event["event_id"], source_sequence=event["sequence"],
+                source_payload=event["payload"],
+            )
+            recent_tool_context.append((
+                event["sequence"],
+                event["payload"].get("call_id"),
+                {
+                    "role": "user",
+                    "content": (
+                        "Tool result archived for this project; retrieve by "
+                        f"reference {reference.archive_id}."
+                    ),
+                },
+            ))
+        recent_tool_context = recent_tool_context[-8:]
         with self.store.transaction() as tx:
             handled = {
                 m["id"]
                 for m in tx.messages(lane["id"])
                 if m["delivery_state"] == "handled"
             }
-        events = self.sessions.read_range(lane["session_id"], limit=1000)
+        read_tail = getattr(self.sessions, "read_tail", None)
+        if not callable(read_tail):
+            raise RuntimeError("canonical session repository lacks bounded tail reads")
+        try:
+            events = read_tail(
+                lane["session_id"],
+                limit=min(256, getattr(self.sessions, "_max_read_limit", 256)),
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise RuntimeError("canonical session tail is unavailable") from exc
         history = []
+        matched_tool_context = set()
+        completed_calls = {
+            event.payload.get("call_id") for event in events
+            if event.event_type in {"tool.completed", "tool.failed"}
+        }
         for event in events:
             if (
                 event.event_type == "lane.message"
@@ -1132,15 +1180,63 @@ class AgentLaneService:
                 history.append(
                     {"role": "assistant", "content": str(event.payload["content"])}
                 )
-            elif event.event_type == "tool.result":
-                history.append(
-                    {
-                        "role": "user",
-                        "content": "Tool result (data): "
-                        + json.dumps(dict(event.payload)),
-                    }
-                )
+            elif (event.event_type in {"tool.completed", "tool.failed"}
+                  or (event.event_type == "tool.requested"
+                      and event.payload.get("call_id") not in completed_calls)):
+                call_id = event.payload.get("call_id")
+                if not isinstance(call_id, str) or not call_id:
+                    continue
+                for sequence, source_call_id, item in recent_tool_context:
+                    if source_call_id == call_id and sequence not in matched_tool_context:
+                        history.append(item)
+                        matched_tool_context.add(sequence)
+                        break
+        unmatched = [
+            item for sequence, _, item in recent_tool_context
+            if sequence not in matched_tool_context
+        ]
+        history.extend(unmatched[-max(0, 8 - len(matched_tool_context)):])
         return tuple(history[-40:])
+
+    def retrieve_archived_tool(self, lane_id, archive_id, context):
+        """Resolve a lane archive pointer through the existing lane surface."""
+        lane = self.inspect(lane_id, context)["lane"]
+        if (not isinstance(archive_id, str) or not archive_id.strip()
+                or len(archive_id) > 160):
+            raise ValueError("archive_id must be bounded non-empty text")
+        matches = self.sessions.search(
+            session_id=lane["session_id"],
+            event_type="context.archive.created",
+            text=archive_id,
+            limit=4,
+        )
+        match = next(
+            (event for event in matches
+             if event.payload.get("archive_id") == archive_id
+             and event.payload.get("source_lane_id") == lane_id
+             and event.payload.get("project_id") == lane["workspace_root"]),
+            None,
+        )
+        if match is None:
+            raise ValueError("archive reference is unavailable for this lane")
+        payload = match.payload
+        reference = ArchiveReference(
+            str(payload["archive_id"]), lane["session_id"],
+            str(payload["source_event_id"]), int(payload["source_sequence"]),
+            str(payload.get("source_event_type", "tool.result")),
+            str(payload["sha256"]), int(payload["byte_count"]),
+            str(payload["source_kind"]), str(payload["source_lane_id"]),
+            str(payload["project_id"]),
+        )
+        return {
+            "archive_id": archive_id,
+            "project_id": lane["workspace_root"],
+            "payload": SessionContextArchiveService.retrieve_external(
+                reference,
+                lambda source_lane, sequence: self.store.event(source_lane, sequence),
+                project_id=lane["workspace_root"],
+            ),
+        }
 
     def _request(self, lane, messages):
         prompt = "\n\n".join("[" + m["author"] + "] " + m["content"] for m in messages)

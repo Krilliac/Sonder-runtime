@@ -83,6 +83,32 @@ def test_native_lane_scope_denial_has_stable_error(monkeypatch, tmp_path):
     assert result['result']['error'] == 'FORBIDDEN'
 
 
+def test_native_retrieve_archive_is_allowlisted_and_parent_bound(monkeypatch, tmp_path):
+    captured = []
+
+    def dispatch(service, action, payload, context, parent_session_id, parent_lane_id=None, **authority):
+        captured.append((action, payload, parent_session_id, authority))
+        if parent_session_id != authority["bound_parent_session_id"]:
+            raise PermissionError("parent mismatch")
+        return {"archive_id": payload["archive_id"]}
+
+    monkeypatch.setitem(
+        sys.modules, "sonder_runtime.interfaces.agent_lanes",
+        SimpleNamespace(dispatch_agent_lane_tool=dispatch),
+    )
+    monkeypatch.setattr(permission_policy, "decide_for_caller", lambda *a, **k: SimpleNamespace(action="allow"))
+    result = invoke(app(tmp_path), {
+        "action": "retrieve_archive",
+        "payload": {"lane_id": "lane-1", "archive_id": "archive-1"},
+        "parent_session_id": "minted-root",
+        "parent_token": app(tmp_path).agent_lanes().token,
+    })
+
+    assert result["result"]["isError"] is False
+    assert captured[0][0] == "retrieve_archive"
+    assert captured[0][1]["archive_id"] == "archive-1"
+
+
 def test_legacy_mcp_exposes_same_lane_service_without_cloud_consent(monkeypatch, tmp_path):
     import server
     captured = []

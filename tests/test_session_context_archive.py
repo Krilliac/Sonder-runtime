@@ -6,6 +6,7 @@ import pytest
 from sonder_runtime.adapters.persistence.session_repository import SQLiteSessionRepository
 from sonder_runtime.application.session.archive import SessionContextArchiveService
 from sonder_runtime.application.compaction import SessionCompactionService
+from sonder_runtime.domain.common.errors import IntegrityFailure, InvalidInput
 
 
 def _history(repo):
@@ -145,3 +146,62 @@ def test_repeated_prepare_binds_placeholder_to_persisted_reference(tmp_path):
     assert first.placeholders[0]["archive_id"] == persisted[0].payload["archive_id"]
     assert second.placeholders[0]["archive_id"] == persisted[0].payload["archive_id"]
     assert persisted[0].payload["archive_id"] in second.placeholders[0]["content"]
+
+
+def test_external_lane_reference_reuses_id_and_verifies_source_payload(tmp_path):
+    repo = SQLiteSessionRepository(tmp_path / "sessions.db")
+    service = SessionContextArchiveService(repo, event_id_factory=lambda: "archive-lane")
+    source = {
+        "event_id": "lane-event-1", "sequence": 7, "event_type": "tool.result",
+        "payload": {"output": "lane output", "project_id": "project-root"},
+    }
+    first = service.archive_external_tool_output(
+        session_id="s1", project_id="project-root", source_kind="agent_lane",
+        source_lane_id="lane-1", source_event_id=source["event_id"],
+        source_sequence=source["sequence"], source_payload=source["payload"],
+    )
+    second = service.archive_external_tool_output(
+        session_id="s1", project_id="project-root", source_kind="agent_lane",
+        source_lane_id="lane-1", source_event_id=source["event_id"],
+        source_sequence=source["sequence"], source_payload=source["payload"],
+    )
+
+    assert second == first
+    assert SessionContextArchiveService.retrieve_external(
+        first, lambda lane, sequence: source, project_id="project-root"
+    ) == source["payload"]
+    assert len(repo.search(session_id="s1", event_type="context.archive.created", limit=10)) == 1
+    with pytest.raises(IntegrityFailure, match="unavailable"):
+        SessionContextArchiveService.retrieve_external(
+            first, lambda lane, sequence: None, project_id="project-root"
+        )
+    with pytest.raises(IntegrityFailure, match="project scope"):
+        SessionContextArchiveService.retrieve_external(
+            first, lambda lane, sequence: source, project_id="other-project"
+        )
+
+
+def test_archive_rejects_unbounded_event_source_after_one_extra_item(tmp_path):
+    repo = SQLiteSessionRepository(tmp_path / "sessions.db")
+    event = repo.append("s1", "tool.result", {"content": "x"}, event_id="source")
+    service = SessionContextArchiveService(repo, max_items=2)
+    consumed = 0
+
+    def source():
+        nonlocal consumed
+        while True:
+            consumed += 1
+            yield event
+
+    with pytest.raises(InvalidInput, match="event count exceeds"):
+        service.prepare_context("s1", source(), budget_bytes=1)
+    assert consumed == 3
+
+
+def test_session_tail_reads_recent_events_with_a_small_adapter_limit(tmp_path):
+    repo = SQLiteSessionRepository(tmp_path / "sessions.db", max_read_limit=2)
+    for index in range(4):
+        repo.append("s1", "model.response", {"content": str(index)}, event_id=f"e{index}")
+
+    assert [event.event_id for event in repo.read_tail("s1", limit=2)] == ["e2", "e3"]
+    assert [event.event_id for event in repo.read_range("s1", limit=2)] == ["e0", "e1"]
