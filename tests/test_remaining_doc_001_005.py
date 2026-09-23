@@ -33,6 +33,12 @@ def test_generated_runtime_reference_covers_available_metadata():
     config_keys = {(row["section"], row["field"]) for row in reference["configuration"]}
     assert {("root", "schema_version"), ("secrets", "api_key"), ("server", "host")} <= config_keys
     assert len(reference["digest"]) == 64
+    assert reference["counts"]["schemas"] == 4
+    assert reference["counts"]["capabilities"] == reference["counts"]["tools"]
+    assert reference["schemas"]["catalog_digest"] == reference["capabilities"]["catalog_digest"]
+    assert {"mcp", "openai", "client", "events"} <= set(reference["schemas"])
+    assert reference["capabilities"]["sdk"]["authorization"] == "runtime-evaluated"
+    assert "operational" in reference["capabilities"]
 
 
 def test_generated_runtime_reference_covers_specialized_memory_replication_contract():
@@ -68,6 +74,23 @@ def test_public_generator_freshness_check_passes():
         cwd=ROOT, text=True, capture_output=True, check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_runtime_reference_fails_closed_when_tool_source_is_unavailable(monkeypatch):
+    original = catalogs.importlib.import_module
+
+    def unavailable(name):
+        if name == "server":
+            raise ImportError("synthetic server import failure")
+        return original(name)
+
+    monkeypatch.setattr(catalogs.importlib, "import_module", unavailable)
+    try:
+        catalogs._runtime_reference()
+    except RuntimeError as exc:
+        assert str(exc) == "runtime tool source unavailable"
+    else:
+        raise AssertionError("unavailable tool source must fail closed")
 
 
 def test_adr_namespace_accepts_historical_series_and_requires_date_prefix_for_new_adrs():

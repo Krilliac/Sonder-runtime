@@ -10,6 +10,7 @@ from __future__ import annotations
 from sonder_runtime.application.ports.runtime_threads import ThreadPoolExecutor as owned_runtime_pool
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext, contextmanager
+from collections.abc import Mapping
 from dataclasses import replace
 from functools import wraps
 import hashlib
@@ -29,6 +30,7 @@ from ..ports.model_gateway import ModelRequest, require_model_text
 from ..ports.model_target import ResolvedModelRoute
 from ..session.capture import CapturedRequest, SessionCaptureService, _snapshot_payload
 from ..session.archive import ArchiveReference, SessionContextArchiveService
+from ..compaction import SessionCompactionError, SessionCompactionService
 from ..tools.gateway_contract import ToolGatewayRequest, ToolScope, ToolPermission
 from ..execution.effect_journal import JournalBinding, bound as bound_effect_journal
 from ..ports.tool_registry import ToolSchemaSelection
@@ -59,6 +61,14 @@ _WAIT_OWNERS = {}
 
 _ACTIVE = frozenset({"queued", "running", "interrupt_requested", "cancel_requested"})
 _LANE_INLINE_TOOL_RESULT_BYTES = 2 * 1024
+# Canonical session history is input to every live lane request. Keep this
+# archive pass bounded independently of the provider token budget.
+_LANE_CANONICAL_HISTORY_BYTES = 32 * 1024
+_LANE_HISTORY_MESSAGES = 40
+_PROTECTED_HISTORY_TYPES = frozenset({
+    "lane.message", "goal.created", "goal.updated", "goal.completed",
+    "model.failed", "tool.failed", "lane.control",
+})
 _LOG = logging.getLogger(__name__)
 _HIDDEN = frozenset(
     {
@@ -158,6 +168,10 @@ class _ReplayReceipt(Exception):
         self.receipt = receipt
 
 
+class ContextHistoryOverflowError(SessionCompactionError):
+    """Recoverable live-request overflow with protected facts intact."""
+
+
 def _recover_committed_command(method):
     @wraps(method)
     def invoke(self, *args, **kwargs):
@@ -192,6 +206,7 @@ class AgentLaneService:
         context_planning: ContextPlanningFacade | None = None,
         live_context: LiveAgentContextProducer | None = None,
         effect_journal=None,
+        compaction_service: SessionCompactionService | None = None,
     ):
         self.store, self.sessions, self.gateway, self.tools = (
             store,
@@ -229,6 +244,9 @@ class AgentLaneService:
         self._capacity_waiters = {}
         self._capture = SessionCaptureService(sessions)
         self._archive = SessionContextArchiveService(sessions)
+        self._compaction = compaction_service or SessionCompactionService(
+            sessions, max_events=256, archive_service=self._archive,
+        )
         if loop is not None and loop_factory is not None:
             raise ValueError("loop and loop_factory are mutually exclusive")
         if loop is not None and not callable(getattr(loop, "admit_turn", None)):
@@ -1081,6 +1099,7 @@ class AgentLaneService:
                     "completed",
                     "interrupted",
                     "failed",
+                    "awaiting_input",
                     "queued",
                 }:
                     raise ValueError(
@@ -1245,6 +1264,60 @@ class AgentLaneService:
             with self._condition:
                 self._condition.wait(min(0.25, max(0, end - time.monotonic())))
 
+    def _validated_compaction_replacements(self, lane, events):
+        """Return validated summary views and the exact covered sequences."""
+        candidates = [
+            event for event in events
+            if event.event_type == "compaction.completed"
+        ]
+        if not candidates:
+            return {}, set()
+        by_sequence = {event.sequence: event for event in events}
+        replacements = {}
+        covered = set()
+        ranges = []
+        for event in candidates:
+            payload = event.payload
+            source = payload.get("source_range")
+            if not isinstance(source, Mapping):
+                raise SessionCompactionError("persisted compaction source range is malformed")
+            start = source.get("start_sequence")
+            end = source.get("end_sequence")
+            if (
+                isinstance(start, bool) or isinstance(end, bool)
+                or not isinstance(start, int) or not isinstance(end, int)
+                or start < events[0].sequence or end > events[-1].sequence
+            ):
+                raise SessionCompactionError("persisted compaction range is outside the live tail")
+            if any(start <= prior_end and end >= prior_start for prior_start, prior_end in ranges):
+                raise SessionCompactionError("persisted compaction ranges overlap")
+            source_events = tuple(by_sequence.get(sequence) for sequence in range(start, end + 1))
+            if any(item is None for item in source_events):
+                raise SessionCompactionError("persisted compaction source range is incomplete")
+            summary = self._compaction.validate_persisted_event(event, source_events)
+            lines = ["Compacted session history (validated append-only summary):"]
+            for label, values in (
+                ("Facts", summary.facts),
+                ("Decisions", summary.decisions),
+                ("Unresolved tasks", summary.unresolved_tasks),
+                ("Artifacts", summary.artifacts),
+                ("Tool outcomes", summary.tool_outcomes),
+            ):
+                if values:
+                    lines.append(label + ": " + " | ".join(values))
+            for modality in summary.modalities:
+                lines.append(
+                    "Modality " + modality.event_type + ": "
+                    + json.dumps(dict(modality.payload), ensure_ascii=False, sort_keys=True)
+                )
+            replacements[start] = {
+                "role": "user",
+                "content": "\n".join(lines),
+            }
+            ranges.append((start, end))
+            covered.update(range(start, end + 1))
+        return replacements, covered
+
     def _history(self, lane):
         events = self.store.tail_events(lane["id"], limit=256)
         recent_tool_context = []
@@ -1293,47 +1366,176 @@ class AgentLaneService:
             )
         except (AttributeError, TypeError, ValueError) as exc:
             raise RuntimeError("canonical session tail is unavailable") from exc
-        history = []
+        if events and events[0].sequence > 1:
+            # A bounded tail cannot prove whether an omitted earlier event
+            # carried a user constraint, decision, or failure. Stop before
+            # presenting an apparently complete continuation to the model.
+            raise ContextHistoryOverflowError(
+                "canonical session tail omits earlier events; "
+                "resume after operator-led compaction"
+            )
+        # Use the durable compaction seam immediately before provider request
+        # assembly. Only tool results are eligible for eviction; model/user
+        # events, including decisions and failures, stay in the source range.
+        try:
+            archived = self._compaction.archive_context(
+                lane["session_id"],
+                start_sequence=events[0].sequence,
+                end_sequence=events[-1].sequence,
+                budget_bytes=_LANE_CANONICAL_HISTORY_BYTES,
+            ) if events else None
+        except SessionCompactionError:
+            # A truncated or unverifiable source must not become an apparently
+            # valid provider history after restart.
+            raise
+        canonical_events = (
+            archived.retained_events if archived is not None else tuple(events)
+        )
+        replacements, covered_sequences = self._validated_compaction_replacements(
+            lane, events,
+        )
+        canonical_events = tuple(
+            event for event in canonical_events
+            if event.event_type != "compaction.completed"
+            and event.sequence not in covered_sequences
+        )
+        placeholders = {
+            reference.source_event_id: placeholder
+            for reference, placeholder in zip(
+                archived.references if archived is not None else (),
+                archived.placeholders if archived is not None else (),
+            )
+        }
+        canonical_tool_calls = {
+            event.payload.get("call_id")
+            for event in canonical_events
+            if event.event_type == "tool.result"
+            and isinstance(event.payload.get("call_id"), str)
+        }
+        timeline = []
+        protected = []
+
+        def add_history(sequence, item, *, is_protected=False):
+            if is_protected:
+                protected.append(item)
+            timeline.append((sequence, len(timeline), item, is_protected))
+
+        for sequence, item in replacements.items():
+            add_history(sequence, item, is_protected=True)
+
         matched_tool_context = set()
         completed_calls = {
-            event.payload.get("call_id") for event in events
+            event.payload.get("call_id") for event in canonical_events
             if event.event_type in {"tool.completed", "tool.failed"}
         }
-        for event in events:
+        for event in canonical_events:
             if (
                 event.event_type == "lane.message"
                 and event.payload.get("message_id") in handled
             ):
-                history.append(
+                add_history(
+                    event.sequence,
                     {
                         "role": "user",
                         "content": "["
                         + str(event.payload["author"])
                         + "] "
                         + str(event.payload["content"]),
-                    }
+                    },
+                    is_protected=event.event_type in _PROTECTED_HISTORY_TYPES,
                 )
             elif event.event_type == "model.response":
-                history.append(
-                    {"role": "assistant", "content": str(event.payload["content"])}
+                add_history(
+                    event.sequence,
+                    {"role": "assistant", "content": str(event.payload["content"])},
+                    is_protected=True,
                 )
+            elif event.event_type in {
+                "goal.created", "goal.updated", "goal.completed",
+                "model.failed", "tool.failed", "lane.control",
+            }:
+                # These are protected facts. Keep their bounded JSON visible
+                # even when neighbouring tool output is replaced by a pointer.
+                add_history(
+                    event.sequence,
+                    {
+                        "role": "user",
+                        "content": "Durable session fact (" + event.event_type + "): "
+                        + json.dumps(event.payload, ensure_ascii=False, sort_keys=True),
+                    },
+                    is_protected=True,
+                )
+            elif event.event_type == "tool.result":
+                call_id = event.payload.get("call_id")
+                if not isinstance(call_id, str) or not call_id:
+                    continue
+                placeholder = placeholders.get(event.event_id)
+                if placeholder is not None:
+                    content = str(placeholder["content"])
+                else:
+                    encoded = json.dumps(
+                        event.payload, ensure_ascii=False, sort_keys=True,
+                    )
+                    content = "Tool result (data): " + encoded
+                add_history(event.sequence, {"role": "user", "content": content})
             elif (event.event_type in {"tool.completed", "tool.failed"}
                   or (event.event_type == "tool.requested"
                       and event.payload.get("call_id") not in completed_calls)):
                 call_id = event.payload.get("call_id")
                 if not isinstance(call_id, str) or not call_id:
                     continue
+                if call_id in canonical_tool_calls:
+                    # The canonical tool.result is already represented at its
+                    # source sequence; avoid duplicating it on completion.
+                    continue
                 for sequence, source_call_id, item in recent_tool_context:
                     if source_call_id == call_id and sequence not in matched_tool_context:
-                        history.append(item)
+                        add_history(event.sequence, item)
                         matched_tool_context.add(sequence)
                         break
+        retained_ids = {event.event_id for event in canonical_events}
+        for source_event_id, placeholder in sorted(
+            ((event_id, item) for event_id, item in placeholders.items()
+             if event_id not in retained_ids
+             and int(item["source_sequence"]) not in covered_sequences),
+            key=lambda pair: int(pair[1]["source_sequence"]),
+        ):
+            del source_event_id
+            add_history(
+                int(placeholder["source_sequence"]),
+                {"role": "user", "content": str(placeholder["content"])},
+            )
         unmatched = [
             item for sequence, _, item in recent_tool_context
             if sequence not in matched_tool_context
         ]
-        history.extend(unmatched[-max(0, 8 - len(matched_tool_context)):])
-        return tuple(history[-40:])
+        for index, item in enumerate(unmatched[-max(0, 8 - len(matched_tool_context)):]):
+            add_history((canonical_events[-1].sequence + index + 1) if canonical_events else index + 1, item)
+
+        protected_bytes = sum(
+            len(str(item.get("content", "")).encode("utf-8")) for item in protected
+        )
+        if len(protected) > _LANE_HISTORY_MESSAGES:
+            raise ContextHistoryOverflowError(
+                "protected session history exceeds the live message budget; "
+                "resume after operator-led compaction"
+            )
+        if protected_bytes > _LANE_CANONICAL_HISTORY_BYTES:
+            raise ContextHistoryOverflowError(
+                "protected session history exceeds the live byte budget; "
+                "resume after operator-led compaction"
+            )
+        if len(timeline) > _LANE_HISTORY_MESSAGES:
+            # Keep every protected fact, then the newest ordinary context. The
+            # final sort restores source order, including archive pointers.
+            slots = _LANE_HISTORY_MESSAGES - len(protected)
+            ordinary = [entry for entry in timeline if not entry[3]]
+            selected_ordinary = ordinary[-max(0, slots):]
+            selected = [entry for entry in timeline if entry[3]] + selected_ordinary
+            timeline = sorted(selected, key=lambda entry: (entry[0], entry[1]))
+        else:
+            timeline.sort(key=lambda entry: (entry[0], entry[1]))
+        return tuple(item for _, _, item, _ in timeline)
 
     def retrieve_archived_tool(self, lane_id, archive_id, context):
         """Resolve a lane archive pointer through the existing lane surface."""
@@ -1350,8 +1552,13 @@ class AgentLaneService:
         match = next(
             (event for event in matches
              if event.payload.get("archive_id") == archive_id
-             and event.payload.get("source_lane_id") == lane_id
-             and event.payload.get("project_id") == lane["workspace_root"]),
+             and (
+                 event.payload.get("source_kind") == "session"
+                 or (
+                     event.payload.get("source_lane_id") == lane_id
+                     and event.payload.get("project_id") == lane["workspace_root"]
+                 )
+             )),
             None,
         )
         if match is None:
@@ -1362,17 +1569,25 @@ class AgentLaneService:
             str(payload["source_event_id"]), int(payload["source_sequence"]),
             str(payload.get("source_event_type", "tool.result")),
             str(payload["sha256"]), int(payload["byte_count"]),
-            str(payload["source_kind"]), str(payload["source_lane_id"]),
-            str(payload["project_id"]),
+            str(payload.get("source_kind", "session")),
+            (str(payload["source_lane_id"])
+             if payload.get("source_lane_id") is not None else None),
+            (str(payload["project_id"])
+             if payload.get("project_id") is not None else None),
+        )
+        recovered = (
+            self._archive.retrieve(reference)
+            if reference.source_kind == "session"
+            else SessionContextArchiveService.retrieve_external(
+                reference,
+                lambda source_lane, sequence: self.store.event(source_lane, sequence),
+                project_id=lane["workspace_root"],
+            )
         )
         return {
             "archive_id": archive_id,
             "project_id": lane["workspace_root"],
-            "payload": SessionContextArchiveService.retrieve_external(
-                reference,
-                lambda source_lane, sequence: self.store.event(source_lane, sequence),
-                project_id=lane["workspace_root"],
-            ),
+            "payload": recovered,
         }
 
     def _request(self, lane, messages, *, request_id=None, context=None):
@@ -1405,6 +1620,9 @@ class AgentLaneService:
         selection = self._tool_schema_selection(
             lane, turn_number=lane["used_steps"] + 1
         )
+        prefix_manifest = None
+        replay_manifest = None
+        prefix_cache_observation = None
         if selection is not None and self.tools is not None:
             visible_schemas = getattr(self.tools, "visible_tool_schemas", None)
             if callable(visible_schemas):
@@ -1495,6 +1713,9 @@ class AgentLaneService:
                     ):
                         system += "\nLive stable context exceeded the bounded prefix budget"
                     else:
+                        prefix_manifest = assembly.prefix
+                        replay_manifest = assembly.replay
+                        prefix_cache_observation = assembly.prefix_observation
                         system += "\nAuthoritative project context:\n" + "\n\n".join(
                             record.content for record in live.records
                         )
@@ -1510,6 +1731,9 @@ class AgentLaneService:
             history=self._history(lane),
             options=request_options,
             _resolved_route=route,
+            prefix_manifest=prefix_manifest,
+            replay_manifest=replay_manifest,
+            prefix_cache_observation=prefix_cache_observation,
         )
 
     def _tool_schema_selection(self, lane, *, turn_number=None):
@@ -1766,18 +1990,20 @@ class AgentLaneService:
                 lane = tx.lane(lane_id)
                 if lane["owner"] == self.owner:
                     # Persist uncertainty; no automatic retry of possibly executed effects.
+                    overflow = isinstance(exc, ContextHistoryOverflowError)
+                    if overflow:
+                        lane_error = "CONTEXT_HISTORY_OVERFLOW"
+                    elif isinstance(exc, PermissionError):
+                        lane_error = "AUTHORITY_DENIED"
+                    elif isinstance(exc, TimeoutError):
+                        lane_error = "BUDGET_EXHAUSTED"
+                    else:
+                        lane_error = "LANE_ATTEMPT_FAILED"
                     lane.update(
-                        status="awaiting_input" if lane["pending_effect"] else "failed",
+                        status=("awaiting_input"
+                                if lane["pending_effect"] or overflow else "failed"),
                         owner="",
-                        error=(
-                            "AUTHORITY_DENIED"
-                            if isinstance(exc, PermissionError)
-                            else (
-                                "BUDGET_EXHAUSTED"
-                                if isinstance(exc, TimeoutError)
-                                else "LANE_ATTEMPT_FAILED"
-                            )
-                        ),
+                        error=lane_error,
                         used_wall=lane["used_wall"] + time.monotonic() - started,
                     )
                     tx.emit(

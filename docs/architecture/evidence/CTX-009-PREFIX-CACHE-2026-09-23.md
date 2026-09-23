@@ -36,6 +36,30 @@ python scripts/check_architecture.py
 passed
 ```
 
+The live request builder now carries the immutable `PrefixManifest`, the
+per-request in-process manifest-cache decision (`PrefixCacheObservation`), and
+the `ReplayManifest` through `ModelRequest` into the selected provider
+boundary. This decision does not measure provider KV-cache reuse. Session
+capture persists bounded section identities and content digests without
+copying section text, and replay reconstructs that evidence. Focused provider
+boundary and session-capture tests exercise this path; the provider double
+supplies synthetic prompt-cache counts to verify telemetry shape only.
+The real `server._make_generate` transport factory now forwards Ollama's
+`prompt_eval_cached_count` scalar into the gateway's `InferenceTelemetry`.
+`tests/production/test_ollama_gateway.py` exercises that transport-to-gateway
+seam with a stubbed HTTP result, so the count is no longer lost before the
+provider boundary. The test does not replace a live generated-prefix request.
+
+On the current implementation branch (`01ed36043a47d8adaa28d0f322eb0e880da55696`
+plus this change), the focused boundary and durability checks reported:
+
+```text
+python -m pytest -q tests/test_live_agent_context.py tests/test_wp4_ctx004_006_009_010.py tests/test_session_split_capture.py tests/test_session_replay.py tests/test_remaining_session_durable_replay.py
+48 passed
+python -m compileall -q <affected modules>
+passed
+```
+
 A bounded loopback probe used Ollama `0.34.2`, endpoint
 `http://127.0.0.1:11434/api/generate`, model `sonder:latest`, and the public
 fixed prompt `Reply with the single word cache.`. Response text was omitted.
@@ -57,7 +81,8 @@ passes the resulting request through `ProviderDispatchGateway`; the dispatch
 wrapper verifies that the route was issued by the selected provider before
 generation. `tests/test_live_agent_context.py::test_live_prefix_request_crosses_provider_dispatch_with_sealed_route`
 covers this boundary and verifies that the generated request contains both
-scoped sections while the prefix cache records a write.
+scoped sections, exact replay/prefix evidence, and the in-process manifest
+cache decision while the provider double returns synthetic prompt-cache counts.
 
 The test uses a deterministic provider double. The raw Ollama probe therefore
 does not prove that a real production Ollama request consumes this cache or
@@ -65,3 +90,22 @@ that provider-reported KV reuse is present for these exact stable sections.
 Other providers and cross-process cache coordination remain unverified. CTX-
 009 remains `implemented_unverified` until a live provider invocation and
 end-to-end telemetry evidence cover the full requirement.
+
+## Model-tag replacement guard
+
+`server._model_prompt_identity` now requires a single loopback Ollama origin,
+an exact 64-hex digest and revision from `/api/tags`, and a matching
+`modified_at` from `/api/show`. It reads `/api/tags` again after `/api/show`
+and refuses a positive prompt identity if the tag digest or revision changes.
+The returned template identity includes both the template digest and the
+selected model artifact digest. Missing, malformed, or mismatched metadata
+therefore disables reusable-prefix identity instead of reusing a key for a
+replaced model tag. Tests cover same-template changed-digest, missing metadata,
+revision mismatch, tag changes during probing, multi-worker locality refusal,
+and the absence of positive caching. Test fixtures contain no prompt content.
+
+The two tag reads establish a versioned snapshot during request assembly, not
+an atomic lease on Ollama's mutable model tag. A concurrent replacement after
+the second read and before generation remains possible. Binding generation to
+an immutable artifact digest or an operator-controlled model update boundary
+is still required for a complete replacement guarantee; CTX-009 remains open.

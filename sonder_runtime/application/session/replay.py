@@ -88,6 +88,9 @@ def reconstruct_model_request(
             history=tuple(history),
             options=MappingProxyType(dict(options)),
             stream=payload.get("stream", False) is True,
+            prefix_manifest=payload.get("prefix_manifest"),
+            replay_manifest=payload.get("replay_manifest"),
+            prefix_cache_observation=payload.get("prefix_cache_observation"),
         )
     return request
 

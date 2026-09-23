@@ -465,6 +465,7 @@ from sonder_runtime.interfaces.http.serve_policy import (
     serve_temperature as _serve_temperature,
 )
 from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool
+from sonder_runtime.domain import ollama_policy
 from sonder_runtime.domain.runtime_model_configuration import (
     RuntimeModelConfiguration,
 )
@@ -1546,6 +1547,98 @@ _MODEL_CONTEXT_CACHE_TTL = 300.0
 # not undersize a large model's window for the full positive TTL.
 _MODEL_CONTEXT_CACHE_NEGATIVE_TTL = 30.0
 
+_MODEL_PROMPT_IDENTITY_CACHE = {}
+_MODEL_PROMPT_IDENTITY_CACHE_LOCK = threading.Lock()
+
+
+def _ollama_model_tag_metadata(model):
+    """Return the selected tag's digest/revision, or ``None`` if unproven."""
+    payload = _get("/api/tags")
+    rows = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return None
+    wanted = str(model or "").strip().casefold()
+    match = None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or row.get("model") or "").strip()
+        if name.casefold() != wanted:
+            continue
+        digest = row.get("digest")
+        modified_at = row.get("modified_at")
+        if (
+            match is not None
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-fA-F]{64}", digest.strip()) is None
+            or not isinstance(modified_at, str)
+            or not modified_at.strip()
+        ):
+            return None
+        match = digest.strip().lower(), modified_at.strip()
+    return match
+
+
+def _model_prompt_identity(model):
+    """Return stable local prompt identities proven by Ollama model metadata.
+
+    Ollama's ``/api/show`` exposes the tokenizer family and chat template, but
+    not a portable tokenizer object, so the template identity is a digest of
+    the provider template. Positive identities are never cached: an operator
+    may replace a model tag in place while retaining its name, and stale
+    identity would make a reusable prefix unsound. Missing metadata is cached
+    briefly to avoid hammering an unavailable provider and remains fail-closed.
+    """
+    key = str(model or "").strip().casefold()
+    if not key or _is_cloud_model_name(model):
+        return None, None
+    # A metadata lookup can land on a different configured worker than the
+    # subsequent generation request.  Until worker-bound route receipts exist,
+    # only the single configured loopback origin is safe for reusable prefixes.
+    try:
+        primary = ollama_policy.normalize(BASE).rstrip("/")
+        if (
+            not ollama_endpoint.is_loopback(BASE)
+            or tuple(OLLAMA_POOL.configured_origins) != (primary,)
+        ):
+            return None, None
+    except Exception:
+        return None, None
+    now = time.monotonic()
+    with _MODEL_PROMPT_IDENTITY_CACHE_LOCK:
+        cached = _MODEL_PROMPT_IDENTITY_CACHE.get(key)
+        if cached and not (cached[1] and cached[2]):
+            if now - cached[0] < _MODEL_CONTEXT_CACHE_NEGATIVE_TTL:
+                return cached[1], cached[2]
+    tokenizer = template_identity = None
+    try:
+        before = _ollama_model_tag_metadata(model)
+        if before is None:
+            raise ValueError("selected Ollama tag lacks a stable digest/revision")
+        details = _post("/api/show", {"name": model}, timeout=30)
+        info = details.get("model_info") if isinstance(details, dict) else {}
+        info = info if isinstance(info, dict) else {}
+        tokenizer_value = info.get("tokenizer.ggml.model")
+        template_value = details.get("template") if isinstance(details, dict) else None
+        show_modified_at = details.get("modified_at") if isinstance(details, dict) else None
+        if not isinstance(show_modified_at, str) or show_modified_at.strip() != before[1]:
+            raise ValueError("Ollama tag/show revision mismatch")
+        after = _ollama_model_tag_metadata(model)
+        if after != before:
+            raise ValueError("Ollama tag changed during prompt identity probe")
+        if isinstance(tokenizer_value, str) and tokenizer_value.strip():
+            tokenizer = tokenizer_value.strip()
+        if isinstance(template_value, str) and template_value.strip():
+            template_identity = "ollama-template-sha256:" + hashlib.sha256(
+                template_value.encode("utf-8")
+            ).hexdigest() + ";ollama-model-sha256:" + before[0]
+    except Exception:
+        tokenizer = template_identity = None
+    if not (tokenizer and template_identity):
+        with _MODEL_PROMPT_IDENTITY_CACHE_LOCK:
+            _MODEL_PROMPT_IDENTITY_CACHE[key] = (now, tokenizer, template_identity)
+    return tokenizer, template_identity
+
 
 def _model_context_metadata(model):
     """Read and briefly cache Ollama's context/parameter metadata for a model."""
@@ -1742,7 +1835,8 @@ def _make_generate(
                     key: out.get(key)
                     for key in (
                         "total_duration", "load_duration",
-                        "prompt_eval_count", "prompt_eval_duration",
+                        "prompt_eval_count", "prompt_eval_cached_count",
+                        "prompt_eval_duration",
                         "eval_count", "eval_duration",
                         "load_state", "cold_start",
                         "reasoning_segments",

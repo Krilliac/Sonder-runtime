@@ -7,6 +7,7 @@ from sonder_runtime.adapters.embeddings import from_blob, to_blob
 from sonder_runtime.adapters.memory_store import connect, facts_for_project
 from sonder_runtime.adapters.unit_of_work import UnitOfWorkAdapter
 from sonder_runtime.adapters.persistence.sqlite.authoritative_memory import (
+    AuthoritativeFactMetadata,
     SQLiteAuthoritativeFactSource,
 )
 from sonder_runtime.adapters.persistence.sqlite.memory_replication import (
@@ -94,6 +95,41 @@ def test_live_application_composes_authoritative_fact_write_and_restart(tmp_path
         ]
     finally:
         journal.close()
+
+
+def test_live_composition_preserves_scoped_supersession_after_restart(tmp_path, monkeypatch):
+    path = tmp_path / "memory.db"
+    monkeypatch.setenv("SONDER_DB", str(path))
+    config = _live_replication_config()
+    application = build_application(config=config)
+    try:
+        with application.unit_of_work() as scope:
+            scope.memory.add_fact("old", "repo-a", "old policy", metadata=AuthoritativeFactMetadata(
+                entities=("parser",), valid_from="2026-01-01T00:00:00Z",
+                provenance=("review:old",),
+            ))
+            scope.memory.add_fact("new", "repo-a", "new policy", metadata=AuthoritativeFactMetadata(
+                entities=("parser",), supersedes="old",
+                valid_from="2026-02-01T00:00:00Z", provenance=("review:new",),
+            ))
+    finally:
+        application.close_providers()
+
+    restarted = build_application(config=config)
+    try:
+        with restarted.unit_of_work() as scope:
+            january = scope.memory.entities_for_project("repo-a", now="2026-01-15T00:00:00Z")
+            february = scope.memory.entities_for_project("repo-a", now="2026-02-15T00:00:00Z")
+            assert [row["fact_id"] for row in january] == ["old"]
+            assert [row["fact_id"] for row in february] == ["new"]
+            with pytest.raises(MemoryReplicationError, match="scope"):
+                scope.memory.entities_for_project("repo-b")
+            assert scope.memory.rebuild_authoritative_indexes(project="repo-a") == 2
+            assert [row["fact_id"] for row in scope.memory.entities_for_project(
+                "repo-a", now="2026-02-15T00:00:00Z",
+            )] == ["new"]
+    finally:
+        restarted.close_providers()
 
 
 def test_live_authority_fences_legacy_fact_helpers_for_the_active_scope(tmp_path):
@@ -257,7 +293,68 @@ def test_live_activation_refuses_existing_unjournaled_scoped_facts(tmp_path):
     try:
         assert [row["id"] for row in facts_for_project(connection, "repo-a")] == ["legacy"]
         assert connection.execute("SELECT COUNT(*) FROM memory_replication_log").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM memory_authoritative_fact_activation"
+        ).fetchone()[0] == 0
     finally:
+        connection.close()
+
+
+def test_direct_activation_fails_closed_without_publishing_marker(tmp_path):
+    path = tmp_path / "activation-gate.db"
+    connection = connect(path)
+    try:
+        from sonder_runtime.adapters import memory_store
+        memory_store.add_fact(connection, "legacy", "repo-a", "requires migration")
+        source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+        with pytest.raises(MemoryReplicationError, match="authoritative migration"):
+            source.activate(connection)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM memory_authoritative_fact_activation"
+        ).fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_activation_rejects_state_without_matching_journal_evidence(tmp_path):
+    path = tmp_path / "missing-journal.db"
+    connection = connect(path)
+    try:
+        connection.execute(
+            "INSERT INTO facts(id,project,text,embedding) VALUES(?,?,?,?)",
+            ("fact-1", "repo-a", "state without journal", None),
+        )
+        connection.execute(
+            "INSERT INTO memory_authoritative_fact_state"
+            "(project,fact_id,source_id,version,tombstoned) VALUES(?,?,?,?,?)",
+            ("repo-a", "fact-1", "node-a", 1, 0),
+        )
+        connection.commit()
+        source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+        with pytest.raises(MemoryReplicationError, match="journal evidence"):
+            source.activate(connection)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM memory_authoritative_fact_activation"
+        ).fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_authoritative_write_does_not_rescan_all_journal_evidence(tmp_path):
+    connection = connect(tmp_path / "incremental-write.db")
+    statements = []
+    connection.set_trace_callback(statements.append)
+    try:
+        source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+        source.add_fact(connection, "fact-1", "repo-a", "incremental write")
+        assert not any(
+            statement.casefold().startswith("select")
+            and "not exists" in statement.casefold()
+            and "memory_replication_log" in statement.casefold()
+            for statement in statements
+        )
+    finally:
+        connection.set_trace_callback(None)
         connection.close()
 
 
