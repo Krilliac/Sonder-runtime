@@ -40,15 +40,16 @@ def _evidence(*, principal="worker-a", run_id="run-1", outcome="passed", receipt
     return ManagedHostFinalEvidence(FinalizedHostResult(output, link), facts)
 
 
-def _eligibility(evidence, *, worker_id="lane-worker-a", eligible=True, phase="certified", bundle_digest="bundle-shared"):
+def _eligibility(evidence, *, worker_id="lane-worker-a", eligible=True, phase="certified", subject_digest="a" * 64):
     identity = PendingVerificationIdentity(
         "continuation-1", "verification-1", "parent-1", 1, 1,
-        bundle_digest, "command-1", "a" * 64, 1,
+        "b" * 64, "command-1", "a" * 64, 1,
     )
     return ManagedTerminalEligibility(
         evidence, eligible, phase, "CERTIFIED" if eligible else "FINAL_CERTIFICATE_MISMATCH",
         pending_identity=identity if eligible else None,
         authenticated_worker_id=worker_id if eligible else None,
+        verified_subject_digest=subject_digest if eligible else None,
     )
 
 
@@ -86,10 +87,10 @@ def test_distinct_authenticated_workers_can_reach_fact_but_contradiction_demotes
 
 def test_unrelated_verified_subjects_never_aggregate():
     first = ReceiptObservationProducer.from_terminal_eligibility(
-        _eligibility(_evidence(principal="owner", run_id="run-1"), worker_id="lane-worker-a", bundle_digest="bundle-a")
+        _eligibility(_evidence(principal="owner", run_id="run-1"), worker_id="lane-worker-a", subject_digest="a" * 64)
     )[1]
     second = ReceiptObservationProducer.from_terminal_eligibility(
-        _eligibility(_evidence(principal="owner", run_id="run-2"), worker_id="lane-worker-b", bundle_digest="bundle-b")
+        _eligibility(_evidence(principal="owner", run_id="run-2"), worker_id="lane-worker-b", subject_digest="b" * 64)
     )[1]
     decisions = LearningLadder().evaluate((first, second))
     assert len(decisions) == 2
