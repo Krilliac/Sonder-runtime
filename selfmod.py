@@ -760,9 +760,20 @@ def begin_testing(run_id):
     return _phase(run_id, {"editing", "interrupted"}, "testing", "testing", "host-controlled validation started")
 
 
-def _record_command(run, kind, command, cwd_path, seconds, expect_failure=False, receipt=None):
+def _record_command(run, kind, command, cwd_path, seconds, expect_failure=False, receipt=None, protected_paths=()):
     run_id = run["id"]
-    code, output, duration = _run(command, cwd_path, seconds)
+    if os.environ.get("SELFMOD_LOW_INTEGRITY") == "1" and os.name == "nt":
+        from selfmod_low_integrity import run_isolated
+        started = time.monotonic()
+        isolated = run_isolated(
+            command, cwd=cwd_path, timeout=seconds,
+            protected_paths=protected_paths,
+        )
+        code = int(isolated["exit_code"])
+        output = str(isolated.get("output") or "")
+        duration = int((time.monotonic() - started) * 1000)
+    else:
+        code, output, duration = _run(command, cwd_path, seconds)
     passed = code != 0 if expect_failure else code == 0
     if receipt is not None and passed and receipt not in output:
         # "It exited 0" is not "it did the thing". The receipt is computed by
@@ -794,14 +805,14 @@ def record_reproducer_before(run_id, command, timeout=None):
     return _record_command(run, "reproducer_before", command, Path(run["repository_root"]), seconds, expect_failure=True)
 
 
-def record_test(run_id, kind, command, *, cwd=None, timeout=None):
+def record_test(run_id, kind, command, *, cwd=None, timeout=None, protected_paths=()):
     run = get_run(run_id)
     if run["phase"] != "testing":
         raise RuntimeError("tests may run only in testing phase")
     workspace = candidate_path(run_id)
     cwd_path = workspace if cwd is None else (workspace / _rel(workspace, cwd)).parent
     seconds = min(int(timeout or run["budgets"]["max_test_seconds"]), run["budgets"]["max_test_seconds"])
-    return _record_command(run, kind, command, cwd_path, seconds)
+    return _record_command(run, kind, command, cwd_path, seconds, protected_paths=protected_paths)
 
 
 SMOKE_RECEIPT_PREFIX = "SELFMOD-SMOKE-RECEIPT"

@@ -44,6 +44,7 @@ import ast
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -59,6 +60,12 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 import selfmod  # noqa: E402
+
+# Every unattended candidate check runs below the Windows low-integrity
+# supervisor.  The supervisor is deliberately opt-in here so human-driven
+# selfmod runs retain their existing lifecycle and diagnostics.
+if os.name == "nt":
+    os.environ["SELFMOD_LOW_INTEGRITY"] = "1"
 
 _HELD_OUT_MAX_FILES = 2048
 _HELD_OUT_MAX_BYTES = 32 * 1024 * 1024
@@ -435,7 +442,11 @@ def _prepare_held_out(target: str, workspace: Path, timeout: int):
         "timeout": max(1, min(int(timeout), 900)),
     }
     command = [_test_python(), "-c", _HELD_OUT_RUNNER, json.dumps(payload, sort_keys=True)]
-    return {"command": command, "source_paths": tuple(selected_source_paths), "cleanup": snapshot}
+    return {
+        "command": command, "source_paths": tuple(selected_source_paths),
+        "protected_paths": tuple(item["path"] for item in copied),
+        "cleanup": snapshot,
+    }
 
 
 def _module_name_for_target(target: str) -> str | None:
@@ -1053,7 +1064,9 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
             # workspace, which keeps imports and pytest collection grounded in
             # the isolated checkout.
             outcome = selfmod.record_test(
-                run_id, kind, command, timeout=test_timeout)
+                run_id, kind, command, timeout=test_timeout,
+                protected_paths=held_out.get("protected_paths", ()) if kind == "held_out" else (),
+            )
             passed = bool(outcome.get("passed")) if isinstance(outcome, dict) else bool(outcome)
             results.append((kind, passed))
             log("  %s: %s" % (kind, "pass" if passed else "FAIL"))
