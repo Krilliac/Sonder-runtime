@@ -147,6 +147,88 @@ def test_nightly_stage_records_critical_failure():
     assert "FAILED" in messages[0]
 
 
+def test_backend_attestation_is_disabled_without_explicit_opt_in(monkeypatch):
+    monkeypatch.delenv("SONDER_NIGHTLY_BACKEND_ATTEST", raising=False)
+    assert not nightly_self_improve._backend_attestation_enabled(
+        types.SimpleNamespace(backend_attest=False)
+    )
+    assert nightly_self_improve._backend_attestation_enabled(
+        types.SimpleNamespace(backend_attest=True)
+    )
+
+
+def test_backend_attestation_config_opt_in_is_explicit(monkeypatch):
+    monkeypatch.setenv("SONDER_NIGHTLY_BACKEND_ATTEST", "yes")
+    assert nightly_self_improve._backend_attestation_enabled(
+        types.SimpleNamespace(backend_attest=False)
+    )
+    monkeypatch.setenv("SONDER_NIGHTLY_BACKEND_ATTEST", "0")
+    assert not nightly_self_improve._backend_attestation_enabled(
+        types.SimpleNamespace(backend_attest=False)
+    )
+
+
+@pytest.mark.parametrize("endpoint", [
+    "https://example.invalid/api",
+    "http://10.0.0.2:8080",
+    "http://127.0.0.1:8080?secret=1",
+])
+def test_backend_attestation_rejects_non_loopback_or_ambiguous_endpoint(
+    monkeypatch, tmp_path, endpoint,
+):
+    monkeypatch.setenv("SONDER_OPENAI_MODEL", "fixture")
+    args = types.SimpleNamespace(
+        backend_attest_base_url=endpoint,
+        backend_attest_model="",
+        backend_attest_timeout=5,
+        backend_attest_evidence="",
+    )
+    paths = types.SimpleNamespace(state_path=lambda name: str(tmp_path / name))
+    with pytest.raises(RuntimeError, match="loopback"):
+        nightly_self_improve._run_backend_attestation(args, paths)
+
+
+def test_backend_attestation_uses_typed_result_and_never_allows_cloud(
+    monkeypatch, tmp_path,
+):
+    import scripts.backend_attest as backend_attest
+
+    calls = []
+
+    def fake_attest(gateway, **kwargs):
+        calls.append((gateway, kwargs))
+        return {"passed": ["chat", "cancellation"], "failed": [], "reasons": {}}
+
+    monkeypatch.setattr(backend_attest, "attest", fake_attest)
+    args = types.SimpleNamespace(
+        backend_attest_base_url="http://127.0.0.1:11434",
+        backend_attest_model="fixture",
+        backend_attest_timeout=7,
+        backend_attest_evidence="",
+    )
+    paths = types.SimpleNamespace(state_path=lambda name: str(tmp_path / name))
+    result = nightly_self_improve._run_backend_attestation(args, paths)
+
+    assert result.startswith("local model=fixture passed=chat,cancellation")
+    assert calls[0][1]["cloud_allowed"] is False
+    assert calls[0][1]["timeout_seconds"] == 7
+    assert calls[0][1]["evidence_path"] == str(tmp_path / "backend-capabilities.json")
+
+
+def test_backend_attestation_failure_is_a_nightly_failure_but_does_not_raise():
+    failures = []
+    messages = []
+    result = nightly_self_improve._stage(
+        messages.append,
+        "backend-attestation",
+        lambda: (_ for _ in ()).throw(RuntimeError("structured_json_invalid")),
+        failures,
+    )
+    assert result is None
+    assert failures == ["backend-attestation"]
+    assert "structured_json_invalid" in messages[0]
+
+
 def test_nightly_lock_fails_closed_when_path_is_inaccessible(tmp_path):
     messages = []
     path = tmp_path / "missing" / "nightly.lock"
