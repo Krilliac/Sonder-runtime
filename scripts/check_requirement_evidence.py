@@ -54,29 +54,37 @@ def _parse_ledger(text: str) -> dict[str, list[dict[str, object]]]:
     return records
 
 
-def _git_text(base_ref: str, path: str) -> tuple[str | None, str | None]:
-    """Read one tracked file from a trusted, already-fetched Git ref."""
+def _resolve_base_ref(base_ref: str) -> tuple[str | None, str | None]:
+    """Resolve a trusted, already-fetched Git ref to an immutable commit."""
     resolved = subprocess.run(
         ["git", "rev-parse", "--verify", f"{base_ref}^{{commit}}"],
         cwd=ROOT, text=True, capture_output=True, check=False,
     )
     if resolved.returncode:
         return None, f"base-ref: cannot resolve {base_ref!r}"
+    return resolved.stdout.strip(), None
+
+
+def _git_text(base_sha: str, path: str) -> tuple[str | None, str | None]:
+    """Read one tracked file from an immutable base commit."""
     result = subprocess.run(
-        ["git", "show", f"{base_ref}:{path}"],
+        ["git", "show", f"{base_sha}:{path}"],
         cwd=ROOT, text=True, capture_output=True, check=False,
     )
     if result.returncode:
-        return None, f"base-ref: cannot read {path} from {base_ref!r}"
+        return None, f"base-ref: cannot read {path} from {base_sha!r}"
     return result.stdout, None
 
 
 def _base_diff_problems(base_ref: str) -> list[str]:
     """Require each newly checked ID to add a verified ledger revision."""
-    base_spec, problem = _git_text(base_ref, str(SPEC.relative_to(ROOT)).replace("\\", "/"))
+    base_sha, problem = _resolve_base_ref(base_ref)
     if problem:
         return [problem]
-    base_ledger, problem = _git_text(base_ref, str(LEDGER.relative_to(ROOT)).replace("\\", "/"))
+    base_spec, problem = _git_text(base_sha, str(SPEC.relative_to(ROOT)).replace("\\", "/"))
+    if problem:
+        return [problem]
+    base_ledger, problem = _git_text(base_sha, str(LEDGER.relative_to(ROOT)).replace("\\", "/"))
     if problem:
         return [problem]
     base_checked = _parse_spec(base_spec or "")
@@ -97,7 +105,7 @@ def _base_diff_problems(base_ref: str) -> list[str]:
         for requirement_id, rows in base_records.items()
     }
     diff = subprocess.run(
-        ["git", "diff", "--no-ext-diff", "--unified=0", base_ref, "--", str(LEDGER.relative_to(ROOT))],
+        ["git", "diff", "--no-ext-diff", "--unified=0", base_sha, "--", str(LEDGER.relative_to(ROOT))],
         cwd=ROOT, text=True, capture_output=True, check=False,
     )
     if diff.returncode:
@@ -230,7 +238,7 @@ def validate(base_ref: str | None = None) -> list[str]:
                             f"ledger: verified {requirement_id} evidence path is missing: {path}"
                         )
 
-    if base_ref:
+    if base_ref is not None:
         problems.extend(_base_diff_problems(base_ref))
     return problems
 

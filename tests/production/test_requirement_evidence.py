@@ -194,3 +194,8 @@ def test_base_diff_rejects_unresolvable_ref(tmp_path):
     assert module.validate("missing-base") == [
         "base-ref: cannot resolve 'missing-base'"
     ]
+
+
+def test_base_diff_rejects_empty_ref(tmp_path):
+    module, _ = _base_diff_fixture(tmp_path, revise=True)
+    assert module.validate("") == ["base-ref: cannot resolve ''"]
