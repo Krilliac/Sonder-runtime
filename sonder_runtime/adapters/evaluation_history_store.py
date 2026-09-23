@@ -256,36 +256,12 @@ def record_result(path=None, **fields):
     return record
 
 
-def record_result_idempotent(path=None, **fields):
-    """Append an aggregate once, atomically under the history lock.
-
-    The replay key is the exact identity plus aggregate result and source. It
-    deliberately does not include ``recorded_at`` so retrying a completed
-    evaluation returns the original record instead of adding a duplicate.
-    """
-    target = Path(path) if path is not None else default_path()
-    candidate = make_record(**fields)
-    with _history_lock(target):
-        loaded = load_history(target)
-        for record in loaded["records"]:
-            if (
-                record["identity_key"] == candidate["identity_key"]
-                and record["result"] == candidate["result"]
-                and record["source"] == candidate["source"]
-            ):
-                return record
-        line = json.dumps(
-            candidate, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-        )
-        _atomic_append(target, line)
-    return candidate
-
-
 def record_result_pair_idempotent(path=None, records=()):
     """Atomically append an idempotent pair of aggregate records.
 
-    A retry returns the existing pair when both exact records are present and
-    refuses a partial pair, so callers cannot silently create half a run.
+    A retry in the bounded history read window returns the existing pair when
+    both exact records are present. A partial pair fails closed. Very old runs
+    outside that window may be appended again; this is not a durable run index.
     """
     if not isinstance(records, (list, tuple)) or len(records) != 2:
         raise HistoryError("evaluation history pair must contain two records")
