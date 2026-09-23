@@ -1014,10 +1014,11 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
         "Rewrite ONE function from this Python module so that it accomplishes\n"
         "exactly this objective, and nothing else:\n\n    %s\n\n"
         "Rules:\n"
-        "- Output ONLY that single function, complete, from its `def` line to\n"
-        "  its last line. Nothing before it, nothing after it, no fence.\n"
+        "- If the function already meets the objective, output exactly NONE.\n"
+        "  Otherwise output ONLY that single function, complete, from its\n"
+        "  `def` line to its last line. No preface, suffix, or fence.\n"
         "- Keep its name, signature and indentation exactly as they are.\n"
-        "- Add a brief comment where you changed something, saying WHY.\n\n"
+        "- Change executable behavior; a comment-only edit is invalid.\n\n"
         "=== %s ===\n%s" % (objective, target, original)
     ), num_predict=2000, model=model, num_ctx=num_ctx)
 
