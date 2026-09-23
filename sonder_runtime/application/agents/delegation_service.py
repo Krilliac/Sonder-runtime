@@ -89,6 +89,10 @@ class DelegationService:
                 ("allowed_tools", "|".join(request.preset.capabilities)),
                 ("owner_id", context.principal_id),
                 ("worker_id", child_request.child_id or request.delegation_id),
+                ("context_workspace_roots", "|".join(map(str, context.workspace_roots))),
+                ("context_cloud_allowed", str(context.cloud_allowed)),
+                ("context_remote_ollama_allowed", str(context.remote_ollama_allowed)),
+                ("context_session_id", str(context.session_id)),
                 ("retry_max_attempts", "1"),
             )
             owner_nonce = getattr(self._worker_registry, "owner_nonce", "")
@@ -124,7 +128,7 @@ class DelegationService:
             canonical_launch = getattr(admitted, "launch", worker_launch)
             child_request = SubagentRequest(
                 child_request.parent_id, child_request.prompt, child_request.budget,
-                child_request.child_id, canonical_launch.metadata,
+                canonical_launch.worker_id, canonical_launch.metadata,
                 child_request.resume_key, child_request.idempotency_key,
             )
         logger.debug(f"DelegationService.dispatch: spawning child_id={request.lineage.child_id!r}, parent_id={request.lineage.parent_id!r}")
