@@ -230,7 +230,7 @@ class SQLiteEffectJournal:
                 )
             else:
                 connection.execute(
-                    "UPDATE effect_owner SET owner_epoch=?,recovery_required=0 WHERE run_id=? AND worker_id=?",
+                    "UPDATE effect_owner SET owner_epoch=? WHERE run_id=? AND worker_id=?",
                     (owner_epoch, run_id, worker_id),
                 )
 

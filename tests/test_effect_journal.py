@@ -377,3 +377,32 @@ def test_recovery_refusal_blocks_new_effect_before_invocation(tmp_path):
             invoke=lambda: invoked.append(True), receipt_key="receipt-op-2",
         )
     assert invoked == []
+
+
+def test_epoch_advance_cannot_clear_recovery_fence(tmp_path):
+    from sonder_runtime.application.execution.worker_bindings import (
+        AuthenticatedWorkerBinding, journaled_effect,
+    )
+
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    epoch_one = AuthenticatedWorkerBinding(journal, "run", "worker", 1, "/workspace")
+    intent = epoch_one.binding().begin_request(
+        operation_id="op-1", idempotency_key="op-1", request_digest="a" * 64,
+    )
+    epoch_one.binding().mark_uncertain(intent, detail="crash after effect")
+    epoch_two = AuthenticatedWorkerBinding(journal, "run", "worker", 2, "/workspace")
+    with pytest.raises(EffectJournalError, match="uncertain effects"):
+        epoch_two.recover_before_restart()
+
+    # Advancing the durable owner epoch is not reconciliation and must not
+    # reopen admission for a newer worker.
+    journal.claim_owner("run", "worker", 3)
+    invoked = []
+    epoch_three = AuthenticatedWorkerBinding(journal, "run", "worker", 3, "/workspace")
+    with pytest.raises(EffectJournalError, match="reconciliation"):
+        journaled_effect(
+            epoch_three, operation_id="op-2", idempotency_key="op-2",
+            request={"value": "must-not-run"},
+            invoke=lambda: invoked.append(True), receipt_key="receipt-op-2",
+        )
+    assert invoked == []

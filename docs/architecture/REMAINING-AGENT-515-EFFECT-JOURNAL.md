@@ -33,7 +33,9 @@ cannot treat a partially published worker result as a safe replay point. The
 same database durably records each `(run, worker, owner_epoch)` fence; restart
 claims the newer epoch before recovery, and older bindings cannot admit new
 effects afterward. A recovery-required fence also blocks every new operation
-until the unresolved effect is explicitly reconciled.
+until the unresolved effect is explicitly reconciled. Advancing the owner
+epoch does not clear that fence; this slice has no automatic reconciliation
+clear path and therefore remains fail-closed.
 
 The process adapter is exercised at its real worker boundary. A test starts a
 real child process that performs one filesystem mutation, injects a crash after
