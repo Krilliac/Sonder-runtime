@@ -380,7 +380,7 @@ schema, cancellation, cleanup-to-quiescence contract, and conformance tests.
   skill catalog, tool catalog, runtime version, hardware, and environment.
 - [ ] **EVAL-005 — Trajectory replay.** Replay recorded sessions with alternate models,
   prompts, skills, routers, or compaction while safely substituting recorded side effects.
-- [ ] **EVAL-006 — Divergence.** Identify the earliest meaningful decision divergence and
+- [x] **EVAL-006 — Divergence.** Identify the earliest meaningful decision divergence and
   retain minimized reproducible failures.
 - [ ] **EVAL-007 — Promotion gates.** Define thresholds and confidence requirements for
   runtime, prompt, skill, route, model, memory, and selfmod promotion.

@@ -84,3 +84,14 @@ Local verification: the 11 new tests, the 69 pre-existing evaluation tests,
 - The service is not yet composed in the bootstrap graph (see EVAL-001 in the
   audit), so retention is available to callers of the application service,
   not yet from an operator command.
+
+## Hosted verification
+
+The pull request's exact-head CI run
+[`35933879745`](https://github.com/Krilliac/Sonder-runtime/actions/runs/35933879745)
+completed successfully for head `54b54207a4c2e29b86a5ec67da43b0fefba9a0da`:
+the architecture, ledger, base-diff evidence, doc-link, generated-reference,
+and evaluation-lane steps passed, and the full test suite reported 16483
+passed, 104 skipped. The ledger's `verified_sha` identifies that tested
+implementation; this section, the revision 4 ledger record, and the EVAL-006
+checkbox are added in the subsequent change, following the DOC-006 pattern.
