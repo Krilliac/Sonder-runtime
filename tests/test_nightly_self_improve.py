@@ -294,6 +294,25 @@ def test_nightly_campaign_uses_one_worker():
     assert captured["max_workers"] == 1
 
 
+def test_nightly_campaign_surfaces_bounded_pitfall_error():
+    class FakeServer:
+        @staticmethod
+        def campaign_generate_compile_execute_record(**_kwargs):
+            return (
+                "campaign generate/compile/execute/record: 21/24 passed\n"
+                "by language: python=4/5\n"
+                "first pitfall error: distillation store unavailable " + "x" * 500
+            )
+
+    logged = []
+    args = types.SimpleNamespace(campaign_total=24)
+    result = nightly_self_improve._run_campaign(FakeServer(), args, logged.append)
+
+    assert result == "campaign generate/compile/execute/record: 21/24 passed"
+    assert logged[0].startswith("[campaign] first pitfall error:")
+    assert len(logged[0]) <= len("[campaign] ") + 300
+
+
 def test_nightly_skips_all_model_stages_after_prewarm_failure():
     class FakeServer:
         TIERS = {"code": "local-code"}

@@ -202,12 +202,17 @@ def _prewarm_code_model(server, timeout_seconds: int = 60) -> str:
     )
 
 
-def _run_campaign(server, args):
+def _run_campaign(server, args, log=None):
     """Run the campaign with one model request worker during nightly cold load."""
     out = server.campaign_generate_compile_execute_record(
         total=max(1, args.campaign_total), max_workers=1, repair_rounds=1,
         timeout=12, record_failures=True,
     )
+    if log is not None:
+        for line in str(out or "").splitlines()[1:8]:
+            if line.startswith("first pitfall error:"):
+                log("[campaign] " + line[:300])
+                break
     return _first_line(out)
 
 
@@ -221,7 +226,7 @@ def _run_code_model_stages(server, args, log, failures) -> bool:
         log("[campaign] SKIPPED: configured code model is not ready")
         log("[repo-repair] SKIPPED: configured code model is not ready")
         return False
-    _stage(log, "campaign", lambda: _run_campaign(server, args), failures)
+    _stage(log, "campaign", lambda: _run_campaign(server, args, log), failures)
 
     def repair():
         out = server.campaign_repo_repair(
