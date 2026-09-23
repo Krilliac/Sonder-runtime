@@ -912,6 +912,36 @@ def test_wait_admission_shared_across_graphs_and_released(env):
     assert other.wait(lane, context, timeout_seconds=0)["lane"]["id"] == lane
 
 
+def test_schedule_deduplicates_pressure_and_releases_after_worker_finishes(env):
+    service, _, _, _, context, _ = env
+    lane = spawn(env)["lane"]["id"]
+    submitted = []
+
+    class Pool:
+        def submit(self, fn, *args):
+            submitted.append((fn, args))
+
+    service._pool = Pool()
+    calls = []
+    service.run_pending = lambda lane_id, worker_context: calls.append(
+        (lane_id, worker_context)
+    )
+
+    service._schedule(lane, context)
+    service._schedule(lane, context)
+    assert len(submitted) == 1
+    assert lane in service._scheduled_lanes
+
+    fn, args = submitted.pop()
+    fn(*args)
+    assert calls and lane not in service._scheduled_lanes
+
+    # A later resume/notification can schedule the lane again after the
+    # original worker has released its admission marker.
+    service._schedule(lane, context)
+    assert len(submitted) == 1
+
+
 def test_oversized_provider_body_is_not_persisted_even_with_small_usage(env):
     service, _, sessions, model, context, _ = env
     lane = spawn(env)["lane"]["id"]
