@@ -1,11 +1,20 @@
 """Durable session compaction application service."""
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+import hashlib
 from typing import Any
 from uuid import uuid4
 
-from .legacy import CompactionApplicationService
+from .legacy import CompactionApplicationService, canonical_summary
+from ..compaction_retention import (
+    REFERENCE_KEYS,
+    SUMMARY_SCHEMA_VERSION,
+    canonical_bytes,
+    critical_retention_problems,
+    is_critical,
+)
 from ..ports.compaction import (
     CompactionEvent,
     CompactionEngine,
@@ -23,6 +32,17 @@ from ..session.archive import ArchivedContext, SessionContextArchiveService
 
 class SessionCompactionError(ValueError):
     """Raised when durable session history cannot satisfy a compaction request."""
+
+
+@dataclass(frozen=True, slots=True)
+class CompactedMatch:
+    """A raw source event found by search, with the summary covering it."""
+
+    event: SessionEvent
+    compaction_event_id: str | None
+
+
+_RECALLED_FIELDS = ("decisions", "facts", "unresolved_tasks", "artifacts", "tool_outcomes")
 
 
 def _json_value(value: Any) -> Any:
@@ -165,7 +185,16 @@ class SessionCompactionService:
         if not validation.valid:
             raise SessionCompactionError(validation.detail)
         summary = result.summary
+        # Independent deterministic gate: whatever engine produced the
+        # summary, it may not drop a failure, constraint, requirement, or
+        # structured value from the range it replaces in live context.
+        problems = critical_retention_problems(request.history, summary)
+        if problems:
+            raise SessionCompactionError(
+                "compaction summary omits critical history: " + "; ".join(problems[:8])
+            )
         payload = {
+            "summary_schema": SUMMARY_SCHEMA_VERSION,
             "source_range": {
                 "session_id": source.session_id,
                 "start_sequence": source.start_sequence,
@@ -293,7 +322,10 @@ class SessionCompactionService:
                 raise SessionCompactionError(
                     "persisted compaction requires the deterministic engine"
                 )
-            canonical = CompactionApplicationService().compact(request).summary
+            schema = payload.get("summary_schema", 1)
+            if isinstance(schema, bool) or schema not in (1, SUMMARY_SCHEMA_VERSION):
+                raise SessionCompactionError("persisted compaction summary schema is unsupported")
+            canonical = canonical_summary(request, schema=schema)
 
             def projection(value: CompactionSummary):
                 return (
@@ -318,6 +350,15 @@ class SessionCompactionService:
                 CompactionEvent(event.event_id, event.session_id, source_range, summary),
                 CompactionValidation(True),
             )
+            problems = critical_retention_problems(request.history, summary)
+            if problems:
+                # Typically a summary written before critical retention that
+                # collapsed a constrained message.  Fail closed rather than
+                # replay a lossy view; the source range remains the authority.
+                raise SessionCompactionError(
+                    "persisted compaction summary omits critical history; "
+                    "re-compact from original events: " + "; ".join(problems[:8])
+                )
             validation = self._engine.validate(request, candidate)
             if not validation.valid:
                 raise SessionCompactionError(validation.detail or "persisted compaction failed validation")
@@ -343,6 +384,135 @@ class SessionCompactionService:
         except (CompactionValidationError, TypeError, ValueError, KeyError) as exc:
             raise SessionCompactionError("persisted compaction event is malformed") from exc
 
+    def _read_bound(self) -> int:
+        adapter_limit = getattr(self._repository, "_max_read_limit", self._max_events)
+        if isinstance(adapter_limit, bool) or not isinstance(adapter_limit, int):
+            return self._max_events
+        return max(1, min(self._max_events, adapter_limit))
+
+    def _compaction_event(self, session_id: str, compaction_event_id: str) -> SessionEvent:
+        if not isinstance(compaction_event_id, str) or not compaction_event_id.strip():
+            raise SessionCompactionError("compaction event id is required")
+        # Event identities are row metadata, not payload text, so scan the
+        # bounded set of summaries rather than a payload text match.
+        for candidate in self._repository.search(
+            session_id=session_id, event_type="compaction.completed",
+            limit=self._read_bound(),
+        ):
+            if candidate.event_id == compaction_event_id:
+                return candidate
+        raise SessionCompactionError("compaction event is unavailable")
+
+    def recover_source(
+        self, session_id: str, compaction_event_id: str,
+    ) -> tuple[SessionEvent, ...]:
+        """Return the exact, validated original events a summary replaced.
+
+        This is the lossless side of compaction: after a restart the covered
+        range is re-read from the append-only log and the persisted summary is
+        re-validated against it before anything is returned.
+        """
+        event = self._compaction_event(session_id, compaction_event_id)
+        source = event.payload.get("source_range")
+        if not isinstance(source, Mapping):
+            raise SessionCompactionError("persisted compaction source range is malformed")
+        start, end = source.get("start_sequence"), source.get("end_sequence")
+        if (
+            isinstance(start, bool) or isinstance(end, bool)
+            or not isinstance(start, int) or not isinstance(end, int)
+            or start < 1 or end < start or end - start + 1 > self._max_events
+        ):
+            raise SessionCompactionError("persisted compaction source range is invalid")
+        events = self._repository.read_range(
+            session_id, start_sequence=start, end_sequence=end, limit=end - start + 1,
+        )
+        self.validate_persisted_event(event, events)
+        return tuple(events)
+
+    def recall_critical(
+        self, session_id: str, compaction_event_id: str,
+    ) -> tuple[SessionEvent, ...]:
+        """Decisions, failures, constraints, and facts under one summary.
+
+        Every returned event is an original, re-validated source event, so its
+        identity and sequence are the provenance of the recalled item.
+        """
+        return tuple(
+            event for event in self.recover_source(session_id, compaction_event_id)
+            if is_critical(self._history_event(event))
+            or any(event.payload.get(field) for field in _RECALLED_FIELDS)
+        )
+
+    def retrieve_reference(
+        self, session_id: str, reference: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        """Recover a bulky payload a summary replaced by a digest reference.
+
+        ``reference`` is the retained modality payload (its ``reference_*``
+        keys); the original event is re-read and its identity and digest are
+        verified before the payload is returned.
+        """
+        if not isinstance(reference, Mapping) or any(key not in reference for key in REFERENCE_KEYS):
+            raise SessionCompactionError("compaction reference is malformed")
+        sequence = reference["reference_sequence"]
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
+            raise SessionCompactionError("compaction reference sequence is invalid")
+        events = self._repository.read_range(
+            session_id, start_sequence=sequence, end_sequence=sequence, limit=1,
+        )
+        if len(events) != 1:
+            raise SessionCompactionError("referenced source event is unavailable")
+        event = events[0]
+        encoded = canonical_bytes(_json_value(event.payload))
+        if (
+            event.event_id != reference["reference_event_id"]
+            or event.event_type != reference["reference_event_type"]
+            or len(encoded) != reference["reference_byte_count"]
+            or hashlib.sha256(encoded).hexdigest() != reference["reference_sha256"]
+        ):
+            raise SessionCompactionError("referenced source event identity or digest changed")
+        return dict(event.payload)
+
+    def search_compacted(
+        self, session_id: str, query: str, *, limit: int = 20,
+    ) -> tuple[CompactedMatch, ...]:
+        """Search raw history, marking which summary (if any) covers a match.
+
+        Compaction never removes source events, so summarized or evicted
+        material stays searchable by its original text.
+        """
+        if not isinstance(query, str) or not query.strip():
+            raise SessionCompactionError("query must be non-empty")
+        bound = self._read_bound()
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= bound:
+            raise SessionCompactionError("limit is out of bounds")
+        ranges = []
+        for event in self._repository.search(
+            session_id=session_id, event_type="compaction.completed", limit=bound,
+        ):
+            source = event.payload.get("source_range")
+            if isinstance(source, Mapping):
+                start, end = source.get("start_sequence"), source.get("end_sequence")
+                if (
+                    isinstance(start, int) and isinstance(end, int)
+                    and not isinstance(start, bool) and not isinstance(end, bool)
+                ):
+                    ranges.append((start, end, event.event_id))
+        matches = []
+        for event in self._repository.search(
+            session_id=session_id, text=query.strip(), limit=bound,
+        ):
+            if event.event_type in {"compaction.completed", "context.archive.created"}:
+                continue
+            covering = next(
+                (event_id for start, end, event_id in ranges if start <= event.sequence <= end),
+                None,
+            )
+            matches.append(CompactedMatch(event, covering))
+            if len(matches) == limit:
+                break
+        return tuple(matches)
+
     @staticmethod
     def _history_event(event: SessionEvent) -> SessionHistoryEvent:
         payload = dict(event.payload)
@@ -359,4 +529,4 @@ class SessionCompactionService:
         )
 
 
-__all__ = ["SessionCompactionError", "SessionCompactionService"]
+__all__ = ["CompactedMatch", "SessionCompactionError", "SessionCompactionService"]
