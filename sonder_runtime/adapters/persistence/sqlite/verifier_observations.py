@@ -1,0 +1,105 @@
+"""Append-only SQLite persistence for host-authenticated verifier observations."""
+from __future__ import annotations
+
+import json
+import sqlite3
+
+from ....application.memory.learning_ladder import LearningObservation
+from ....application.memory.receipt_observation import VerifierReceipt
+
+
+_DDL = """
+CREATE TABLE IF NOT EXISTS verifier_learning_observations (
+    observation_id TEXT PRIMARY KEY,
+    receipt_id TEXT NOT NULL UNIQUE,
+    receipt_json TEXT NOT NULL,
+    observation_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TRIGGER IF NOT EXISTS verifier_learning_observations_immutable_update
+BEFORE UPDATE ON verifier_learning_observations BEGIN
+    SELECT RAISE(ABORT, 'verifier learning observations are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS verifier_learning_observations_immutable_delete
+BEFORE DELETE ON verifier_learning_observations BEGIN
+    SELECT RAISE(ABORT, 'verifier learning observations are immutable');
+END;
+"""
+
+
+def _json(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+
+
+def _receipt_payload(receipt: VerifierReceipt) -> dict:
+    return {name: getattr(receipt, name) for name in receipt.__dataclass_fields__}
+
+
+def _observation_payload(observation: LearningObservation) -> dict:
+    value = {name: getattr(observation, name) for name in observation.__dataclass_fields__}
+    value["observed_at"] = observation.observed_at.isoformat()
+    value["provenance"] = list(observation.provenance)
+    return value
+
+
+def _observation(value: dict) -> LearningObservation:
+    from datetime import datetime
+    value = dict(value)
+    value["observed_at"] = datetime.fromisoformat(value["observed_at"])
+    value["provenance"] = tuple(value["provenance"])
+    return LearningObservation(**value)
+
+
+class SQLiteVerifierObservationRepository:
+    """Persist and replay receipt/observation pairs on one caller-owned connection."""
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+        self._connection.executescript(_DDL)
+
+    def append(self, receipt: VerifierReceipt, observation: LearningObservation) -> LearningObservation:
+        receipt_payload = _json(_receipt_payload(receipt))
+        observation_payload = _json(_observation_payload(observation))
+        row = self._connection.execute(
+            "SELECT observation_id, receipt_id, receipt_json, observation_json "
+            "FROM verifier_learning_observations WHERE observation_id=? OR receipt_id=?",
+            (observation.observation_id, receipt.receipt_id),
+        ).fetchone()
+        if row is not None:
+            if row[0] != observation.observation_id or row[1] != receipt.receipt_id:
+                raise ValueError("receipt or observation identity is already bound")
+            if row[2] != receipt_payload or row[3] != observation_payload:
+                raise ValueError("conflicting verifier receipt replay")
+            return _observation(json.loads(row[3]))
+        try:
+            self._connection.execute(
+                "INSERT INTO verifier_learning_observations"
+                "(observation_id, receipt_id, receipt_json, observation_json) VALUES (?,?,?,?)",
+                (observation.observation_id, receipt.receipt_id, receipt_payload, observation_payload),
+            )
+            self._connection.commit()
+        except sqlite3.IntegrityError as exc:
+            self._connection.rollback()
+            raise ValueError("conflicting verifier receipt replay") from exc
+        return observation
+
+    def get(self, observation_id: str) -> tuple[VerifierReceipt, LearningObservation] | None:
+        row = self._connection.execute(
+            "SELECT receipt_json, observation_json FROM verifier_learning_observations WHERE observation_id=?",
+            (observation_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return VerifierReceipt(**json.loads(row[0])), _observation(json.loads(row[1]))
+
+    def list(self, *, limit: int = 256) -> tuple[LearningObservation, ...]:
+        if type(limit) is not int or not 1 <= limit <= 10_000:
+            raise ValueError("limit must be between 1 and 10000")
+        rows = self._connection.execute(
+            "SELECT observation_json FROM verifier_learning_observations ORDER BY rowid LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return tuple(_observation(json.loads(row[0])) for row in rows)
+
+
+__all__ = ["SQLiteVerifierObservationRepository"]
