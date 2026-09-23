@@ -774,7 +774,7 @@ class OllamaWorkerPool:
                     existing[key] = state
                 else:
                     state.membership_state = "draining"
-                    if state.inflight:
+                    if state.inflight or state.capability_probe_inflight:
                         retained.append(state)
             omitted = result.omitted_worker_count
             for key, member in desired.items():
@@ -813,7 +813,8 @@ class OllamaWorkerPool:
 
     def _prune_drained(self) -> None:
         remaining = [state for state in self._states
-                     if state.membership_state != "draining" or state.inflight]
+                     if (state.membership_state != "draining"
+                         or state.inflight or state.capability_probe_inflight)]
         if len(remaining) != len(self._states):
             self._states = remaining
             self._roster_generation += 1
@@ -1129,9 +1130,25 @@ class OllamaWorkerPool:
                 for state in candidates:
                     state.capability_probe_inflight = True
             workers = min(self._probe_parallelism, len(candidates))
-            with owned_runtime_pool(max_workers=workers) as executor:
-                futures = [executor.submit(run, state) for state in candidates]
-                outcomes = [future.result() for future in futures]
+            submitted = []
+            try:
+                with owned_runtime_pool(max_workers=workers) as executor:
+                    futures = []
+                    for state in candidates:
+                        futures.append(executor.submit(run, state))
+                        submitted.append(state)
+                    outcomes = [future.result() for future in futures]
+            except BaseException:
+                # A pool construction or submission failure happens before a
+                # probe callback can clear the marker.  Clear only states that
+                # were never submitted; submitted work owns its marker until
+                # its bounded daemon callback finishes.
+                with self._condition:
+                    for state in candidates:
+                        if state not in submitted:
+                            state.capability_probe_inflight = False
+                    self._condition.notify_all()
+                raise
 
             with self._condition:
                 for state, (payload, measured_ms, error) in zip(candidates, outcomes):
