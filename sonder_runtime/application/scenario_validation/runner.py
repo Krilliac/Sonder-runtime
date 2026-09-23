@@ -1,4 +1,4 @@
-"""Run bounded playtest adapters and emit stable, reviewable evidence."""
+"""Run bounded scenario validation adapters and emit stable, reviewable evidence."""
 
 from __future__ import annotations
 
@@ -12,13 +12,13 @@ from pathlib import Path
 from typing import Iterable, Mapping, Protocol, Sequence
 
 
-class PlaytestAdapter(Protocol):
+class ScenarioAdapter(Protocol):
     def run(self, command: tuple[str, ...], *, cwd: Path, timeout_seconds: float): ...
 
 
 class EvidenceClass(str, Enum):
-    NATURAL = "natural"
-    GM_ACCELERATED = "GM-accelerated"
+    NORMAL_FLOW = "normal flow"
+    OPERATOR_ASSISTED = "operator assisted"
     SEEDED = "seeded"
     STRUCTURAL_ONLY = "structural only"
 
@@ -69,7 +69,7 @@ class Scenario:
 
 
 @dataclass(frozen=True)
-class PlaytestReport:
+class ScenarioReport:
     scenario: str
     claim: str
     evidence_class: str
@@ -160,11 +160,11 @@ def _safe_artifact_ref(value: str) -> str:
 
 def stable_marker(scenario: str, commit_sha: str) -> str:
     digest = hashlib.sha256(f"{scenario}\0{commit_sha}".encode()).hexdigest()[:16]
-    return f"sonder-playtester:{digest}"
+    return f"sonder-scenario-validation:{digest}"
 
 
-class PlaytestRunner:
-    def __init__(self, adapter: PlaytestAdapter, *, cwd: str | Path = ".", max_steps: int = 1, max_failures: int = 2):
+class ScenarioValidationRunner:
+    def __init__(self, adapter: ScenarioAdapter, *, cwd: str | Path = ".", max_steps: int = 1, max_failures: int = 2):
         if not isinstance(max_steps, int) or isinstance(max_steps, bool) or not 1 <= max_steps <= 1000 or not isinstance(max_failures, int) or isinstance(max_failures, bool) or not 1 <= max_failures <= 100:
             raise ValueError("max_steps and max_failures must be positive")
         self.adapter = adapter
@@ -172,8 +172,8 @@ class PlaytestRunner:
         self.max_steps = max_steps
         self.max_failures = max_failures
 
-    def run(self, scenarios: Iterable[Scenario], *, repository: str = "", commit_sha: str = "") -> list[PlaytestReport]:
-        reports: list[PlaytestReport] = []
+    def run(self, scenarios: Iterable[Scenario], *, repository: str = "", commit_sha: str = "") -> list[ScenarioReport]:
+        reports: list[ScenarioReport] = []
         failures = 0
         for index, scenario in enumerate(scenarios):
             if index >= self.max_steps:
@@ -186,7 +186,7 @@ class PlaytestRunner:
                     break
         return reports
 
-    def _run_one(self, scenario: Scenario, *, repository: str, commit_sha: str) -> PlaytestReport:
+    def _run_one(self, scenario: Scenario, *, repository: str, commit_sha: str) -> ScenarioReport:
         errors: list[str] = []
         completed = self.adapter.run(scenario.command, cwd=self.cwd, timeout_seconds=scenario.timeout_seconds)
         if completed.timed_out:
@@ -202,7 +202,7 @@ class PlaytestRunner:
                 errors.append(f"command exited with status {completed.returncode}")
             exit_code = completed.returncode
         stdout, stderr = completed.stdout, completed.stderr
-        return PlaytestReport(
+        return ScenarioReport(
             scenario=scenario.name,
             claim=scenario.claim,
             evidence_class=scenario.evidence_class.value,
@@ -221,6 +221,6 @@ class PlaytestRunner:
         )
 
 
-def write_reports(path: str | Path, reports: Sequence[PlaytestReport]) -> None:
+def write_reports(path: str | Path, reports: Sequence[ScenarioReport]) -> None:
     payload = {"reports": [report.as_dict() for report in reports]}
     Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
