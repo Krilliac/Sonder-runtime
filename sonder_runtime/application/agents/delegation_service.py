@@ -46,13 +46,17 @@ class DelegationService:
         """Spawn one child only when its assignment fits the parent context."""
         logger.debug(f"DelegationService.dispatch: delegation_id={request.delegation_id!r}, preset={request.preset.name!r}, role={request.preset.role.value!r}")
         assignment = request.workspace.guard()
-        if (
-            request.execution_contract.success_criteria
-            or request.execution_contract.verification_commands
-        ) and self._worker_registry is None:
+        if request.execution_contract.requested and self._worker_registry is None:
             raise IntegrationError(
                 "execution contract requires a durable worker registry"
             )
+        for owned in request.execution_contract.owned_files:
+            # Owned files are exclusive mutation targets, so each must be an
+            # absolute path the child's write assignment actually permits.
+            if not Path(owned).is_absolute():
+                raise IntegrationError("owned files must be absolute paths inside a write root")
+            if not assignment.permits(owned, write=True):
+                raise IntegrationError(f"owned file is outside the write assignment: {owned}")
         if context.workspace_roots:
             parent_roots = tuple(root.resolve(strict=False) for root in context.workspace_roots)
             if not all(any(_inside(Path(root).resolve(strict=False), parent) for parent in parent_roots)
@@ -166,10 +170,7 @@ class DelegationService:
         logger.debug(f"DelegationService.integrate: delegation_id={request.delegation_id!r}, result.status={result.status.value!r}, child_id={result.child_id!r}")
         if result.child_id != request.lineage.child_id or result.parent_id != request.lineage.parent_id:
             raise IntegrationError("provider result does not match delegation lineage")
-        contract_requested = bool(
-            request.execution_contract.success_criteria
-            or request.execution_contract.verification_commands
-        )
+        contract_requested = request.execution_contract.requested
         if contract_requested and self._worker_registry is None:
             raise IntegrationError(
                 "execution contract requires a durable worker registry"
@@ -224,6 +225,14 @@ class DelegationService:
                         "verification": evidence.verification,
                         "success_criteria": record.launch.execution_contract.success_criteria,
                         "verification_commands": record.launch.execution_contract.verification_commands,
+                        "context_policy": record.launch.execution_contract.context_policy.value,
+                        "context_inputs": tuple(
+                            (item.reference, item.sha256)
+                            for item in record.launch.execution_contract.context_inputs
+                        ),
+                        "inherited_context_sha256": record.launch.execution_contract.inherited_context_sha256,
+                        "owned_files": record.launch.execution_contract.owned_files,
+                        "task_scope": record.launch.execution_contract.task_scope,
                         "artifacts": evidence.artifacts,
                     },
                     expected_revision=record.revision,
