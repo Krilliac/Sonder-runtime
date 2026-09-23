@@ -958,6 +958,24 @@ def _discard_workspace(run_id) -> None:
         pass
 
 
+def _cancel_and_discard(run_id) -> bool:
+    """Cancel one failed plan and report whether cleanup left residue."""
+    cleanup_failed = False
+    try:
+        selfmod.cancel(run_id)
+    except BaseException:
+        cleanup_failed = True
+    try:
+        _discard_workspace(run_id)
+    except BaseException:
+        cleanup_failed = True
+    try:
+        cleanup_failed = bool(selfmod.candidate_path(run_id).exists()) or cleanup_failed
+    except BaseException:
+        cleanup_failed = True
+    return cleanup_failed
+
+
 def propose_objective(
     server, log, model="", num_ctx=0, *, deadline=None, return_function=False,
 ) -> tuple[str, str] | tuple[str, str, str] | None:
@@ -1088,11 +1106,18 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     workspace = selfmod.candidate_path(run_id)
     original = (workspace / target).read_text(encoding="utf-8", errors="replace")
 
-    edited = _ask(
-        server,
-        _rewrite_prompt(objective, target, function_name, original),
-        num_predict=2000, model=model, num_ctx=num_ctx,
-    )
+    try:
+        edited = _ask(
+            server,
+            _rewrite_prompt(objective, target, function_name, original),
+            num_predict=2000, model=model, num_ctx=num_ctx,
+        )
+    except Exception as error:
+        cleanup_failed = _cancel_and_discard(run_id)
+        suffix = "; cleanup failed" if cleanup_failed else ""
+        return "candidate rejected: rewrite request failed (%s)%s" % (
+            type(error).__name__, suffix,
+        )
 
     # Splice one function back rather than accepting a whole-file rewrite.
     #
