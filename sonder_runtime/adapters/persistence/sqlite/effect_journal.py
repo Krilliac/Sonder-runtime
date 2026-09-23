@@ -13,6 +13,8 @@ from threading import Lock
 from types import MappingProxyType
 from typing import Mapping
 
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+
 from sonder_runtime.adapters.persistence.owned_sqlite import transaction as owned_sqlite_transaction
 from sonder_runtime.application.execution.effect_journal import (
     EffectIntent, EffectJournalError, EffectOutcome, EffectState,
@@ -297,7 +299,7 @@ class SQLiteEffectJournal:
             finally:
                 _VERIFIER_SLOTS.release()
 
-        verifier_thread = threading.Thread(
+        verifier_thread = owned_runtime_thread(
             target=run_verifier, name="sonder-effect-verifier", daemon=True,
         )
         verifier_thread.start()
