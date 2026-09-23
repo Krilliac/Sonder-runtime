@@ -356,6 +356,13 @@ class SQLiteAuthoritativeFactSource:
         marker to refuse a journal-bypassing write for this exact project.
         """
         with self._transaction(connection):
+            # Do not publish the fence over legacy rows.  An operator must run
+            # the explicit bounded migration first; leaving the marker absent
+            # keeps a failed activation restartable and avoids claiming that
+            # unjournaled facts are authoritative.
+            self._require_scoped_facts_authoritative(
+                connection, verify_journal_evidence=True,
+            )
             self._activate_in_transaction(connection)
 
     def _activate_in_transaction(self, connection) -> None:
@@ -398,7 +405,9 @@ class SQLiteAuthoritativeFactSource:
                 "authoritative fact scope is already owned by another source"
             )
 
-    def _require_scoped_facts_authoritative(self, connection) -> None:
+    def _require_scoped_facts_authoritative(
+        self, connection, *, verify_journal_evidence: bool = False,
+    ) -> None:
         """Refuse activation over facts with no matching source evidence.
 
         Existing project facts need an explicit migration before a live writer
@@ -416,6 +425,26 @@ class SQLiteAuthoritativeFactSource:
         if legacy is not None:
             raise MemoryReplicationError(
                 "existing project facts require authoritative migration"
+            )
+        if not verify_journal_evidence:
+            return
+        missing_evidence = connection.execute(
+            "SELECT 1 FROM facts AS fact "
+            "JOIN memory_authoritative_fact_state AS state "
+            "ON state.project=fact.project AND state.fact_id=fact.id "
+            "WHERE fact.project=? AND state.source_id=? AND state.tombstoned=0 "
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM memory_replication_log AS journal "
+            "WHERE journal.source_id=state.source_id "
+            "AND journal.project=fact.project AND journal.entity_kind='fact' "
+            "AND journal.entity_id=fact.id AND journal.version=state.version "
+            "AND journal.operation='upsert'"
+            ") LIMIT 1",
+            (self.project_scope, self.source_id),
+        ).fetchone()
+        if missing_evidence is not None:
+            raise MemoryReplicationError(
+                "existing project facts require authoritative journal evidence"
             )
 
     def _record(
