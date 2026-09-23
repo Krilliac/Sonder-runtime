@@ -465,6 +465,7 @@ from sonder_runtime.interfaces.http.serve_policy import (
     serve_temperature as _serve_temperature,
 )
 from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool
+from sonder_runtime.domain import ollama_policy
 from sonder_runtime.domain.runtime_model_configuration import (
     RuntimeModelConfiguration,
 )
@@ -1562,6 +1563,18 @@ def _model_prompt_identity(model):
     """
     key = str(model or "").strip().casefold()
     if not key or _is_cloud_model_name(model):
+        return None, None
+    # A metadata lookup can land on a different configured worker than the
+    # subsequent generation request.  Until worker-bound route receipts exist,
+    # only the single configured loopback origin is safe for reusable prefixes.
+    try:
+        primary = ollama_policy.normalize(BASE).rstrip("/")
+        if (
+            not ollama_endpoint.is_loopback(BASE)
+            or tuple(OLLAMA_POOL.configured_origins) != (primary,)
+        ):
+            return None, None
+    except Exception:
         return None, None
     now = time.monotonic()
     with _MODEL_PROMPT_IDENTITY_CACHE_LOCK:
