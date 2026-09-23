@@ -2,7 +2,14 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import datetime, timezone
+
+from sonder_runtime.domain.memory.replication import MemoryMutation, MemoryReplicationError
+from sonder_runtime.domain.memory.authoritative_fact_metadata import AuthoritativeFactMetadata
+
+
+_MAX_REBUILD_ROWS = 100_000
 
 
 AUTHORITATIVE_INDEX_DDL = """
@@ -49,20 +56,9 @@ def _metadata(record):
     metadata = payload.get("metadata", {}) if hasattr(payload, "get") else {}
     if not isinstance(metadata, dict):
         raise ValueError("authoritative metadata must be an object")
-    entities = metadata.get("entities", ())
-    if not isinstance(entities, (list, tuple)) or any(
-        not isinstance(item, str) or not item.strip() or len(item) > 160
-        for item in entities
-    ) or len(set(entities)) != len(entities):
-        raise ValueError("authoritative entity metadata is invalid")
-    decision = metadata.get("decision")
-    if decision is not None and (
-        not isinstance(decision, dict)
-        or set(decision) != {"id", "value"}
-        or any(not isinstance(item, str) or not item.strip() or len(item) > 2048 for item in decision.values())
-    ):
-        raise ValueError("authoritative decision metadata is invalid")
-    return metadata
+    if not metadata:
+        return {}
+    return AuthoritativeFactMetadata.from_payload(metadata).as_payload()
 
 
 def _provenance(value):
@@ -124,27 +120,72 @@ def materialize_authoritative_fact_index(connection, record) -> None:
         )
 
 
+@contextmanager
+def _rebuild_transaction(connection):
+    nested = bool(connection.in_transaction)
+    if nested:
+        connection.execute("SAVEPOINT sonder_fact_index_rebuild")
+    else:
+        connection.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+    except Exception:
+        if nested:
+            connection.execute("ROLLBACK TO SAVEPOINT sonder_fact_index_rebuild")
+            connection.execute("RELEASE SAVEPOINT sonder_fact_index_rebuild")
+        else:
+            connection.rollback()
+        raise
+    else:
+        if nested:
+            connection.execute("RELEASE SAVEPOINT sonder_fact_index_rebuild")
+        else:
+            connection.commit()
+
+
 def rebuild_authoritative_fact_indexes(connection, *, project: str | None = None) -> int:
-    """Clear and replay only durable journal rows into both derived indexes."""
-    connection.execute("DELETE FROM memory_authoritative_entity_index" + (" WHERE project=?" if project else ""), ((project,) if project else ()))
-    connection.execute("DELETE FROM memory_authoritative_decision_index" + (" WHERE project=?" if project else ""), ((project,) if project else ()))
-    rows = connection.execute(
-        "SELECT source_id,source_epoch,sequence,entity_kind,entity_id,version,"
-        "operation,project,payload_json,recorded_at FROM memory_replication_log "
-        + ("WHERE project=? " if project else "")
-        + "ORDER BY source_id,sequence",
-        (project,) if project else (),
-    ).fetchall()
-    for row in rows:
-        record = type("JournalRecord", (), {
-            "source_id": row[0], "source_epoch": row[1], "sequence": row[2],
-            "entity_kind": row[3], "entity_id": row[4], "version": row[5],
-            "operation": row[6], "project": row[7],
-            "payload": json.loads(row[8]), "recorded_at": row[9],
-        })()
-        if record.entity_kind == "fact":
-            materialize_authoritative_fact_index(connection, record)
-    return len(rows)
+    """Atomically replay a bounded, digest-validated source journal."""
+    if project is not None and (type(project) is not str or not project):
+        raise ValueError("project must be an exact non-empty scope")
+    where = "WHERE project=? " if project else ""
+    args = (project,) if project else ()
+    with _rebuild_transaction(connection):
+        count = connection.execute(
+            "SELECT COUNT(*) FROM memory_replication_log " + where, args,
+        ).fetchone()[0]
+        if count > _MAX_REBUILD_ROWS:
+            raise MemoryReplicationError("fact index rebuild exceeds journal row bound")
+        conflict = connection.execute(
+            "SELECT 1 FROM memory_replication_log WHERE entity_kind='fact' "
+            + ("AND project=? " if project else "")
+            + "GROUP BY project,entity_id HAVING COUNT(DISTINCT source_id)>1 LIMIT 1",
+            args,
+        ).fetchone()
+        if conflict is not None:
+            raise MemoryReplicationError("fact index rebuild found conflicting sources")
+        connection.execute(
+            "DELETE FROM memory_authoritative_entity_index" + (" WHERE project=?" if project else ""), args,
+        )
+        connection.execute(
+            "DELETE FROM memory_authoritative_decision_index" + (" WHERE project=?" if project else ""), args,
+        )
+        cursor = connection.execute(
+            "SELECT source_id,source_epoch,sequence,entity_kind,entity_id,version,"
+            "operation,project,payload_json,recorded_at,digest "
+            "FROM memory_replication_log " + where + "ORDER BY source_id,sequence", args,
+        )
+        for row in cursor:
+            record = MemoryMutation(
+                source_id=row[0], source_epoch=row[1], sequence=row[2],
+                entity_kind=row[3], entity_id=row[4], version=row[5],
+                operation=row[6], project=row[7], payload=json.loads(row[8]),
+                recorded_at=row[9],
+            )
+            if record.digest != row[10]:
+                raise MemoryReplicationError("fact index rebuild found a changed journal record")
+            if record.entity_kind == "fact":
+                materialize_authoritative_fact_index(connection, record)
+    return count
 
 
 def _valid_clause(now: str):

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from array import array
 from contextlib import contextmanager
-from dataclasses import dataclass
 from datetime import datetime, timezone
 import math
 
@@ -21,51 +20,12 @@ from sonder_runtime.domain.memory.replication import (
     MemoryMutation,
     MemoryReplicationError,
 )
+from sonder_runtime.domain.memory.authoritative_fact_metadata import AuthoritativeFactMetadata
 from .authoritative_indexes import materialize_authoritative_fact_index
 
 
 _MAX_EMBEDDING = 16_384
 _SAVEPOINT = "sonder_authoritative_fact_write"
-
-
-@dataclass(frozen=True)
-class AuthoritativeFactMetadata:
-    """Explicit caller-supplied entity/decision metadata; never text-inferred."""
-
-    entities: tuple[str, ...] = ()
-    decision: dict[str, str] | None = None
-    valid_from: str | None = None
-    valid_until: str | None = None
-    supersedes: str | None = None
-    provenance: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        if any(not isinstance(item, str) or not item.strip() or len(item) > 160 for item in self.entities):
-            raise MemoryReplicationError("entity metadata must be bounded explicit identifiers")
-        if len(set(self.entities)) != len(self.entities):
-            raise MemoryReplicationError("entity metadata identifiers must be unique")
-        if self.decision is not None:
-            if set(self.decision) != {"id", "value"} or any(
-                not isinstance(value, str) or not value.strip() or len(value) > 2048
-                for value in self.decision.values()
-            ):
-                raise MemoryReplicationError("decision metadata must contain bounded id and value")
-        for name in ("valid_from", "valid_until", "supersedes"):
-            value = getattr(self, name)
-            if value is not None and (not isinstance(value, str) or not value.strip() or len(value) > 64):
-                raise MemoryReplicationError(f"{name} metadata is invalid")
-        if any(not isinstance(item, str) or not item.strip() or len(item) > 256 for item in self.provenance):
-            raise MemoryReplicationError("provenance metadata is invalid")
-
-    def as_payload(self) -> dict[str, object]:
-        return {
-            "entities": self.entities,
-            "decision": self.decision,
-            "valid_from": self.valid_from,
-            "valid_until": self.valid_until,
-            "supersedes": self.supersedes,
-            "provenance": self.provenance,
-        }
 
 
 def _recorded_at() -> str:
