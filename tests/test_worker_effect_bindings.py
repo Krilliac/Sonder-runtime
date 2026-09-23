@@ -71,6 +71,9 @@ def test_process_provider_journals_launch_before_return(tmp_path):
     assert stored.owner_epoch == 4
     assert stored.receipt_key.startswith("journaled-process:")
     assert started.process_id > 0
+    checkpoint = journal.restore_checkpoint("process-run")
+    assert checkpoint is not None
+    assert checkpoint["state"]["effect"]["receipt_key"] == stored.receipt_key
     provider.wait("journaled-process")
 
 

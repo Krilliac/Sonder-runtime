@@ -298,3 +298,56 @@ def test_worker_checkpoint_rejects_effect_admitted_after_last_checkpoint(tmp_pat
         AuthenticatedWorkerBinding(
             journal, "worker-run", "worker", 2, "/workspace",
         ).recover_before_restart()
+
+
+def test_recovered_owner_epoch_fences_old_binding_before_new_intent(tmp_path):
+    from sonder_runtime.application.execution.worker_bindings import (
+        AuthenticatedWorkerBinding, journaled_effect,
+    )
+
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    old = AuthenticatedWorkerBinding(journal, "run", "worker", 1, "/workspace")
+    journaled_effect(
+        old, operation_id="first", idempotency_key="first", request={"n": 1},
+        invoke=lambda: {"ok": 1}, receipt_key="receipt-first",
+    )
+    old.binding().begin_request(
+        operation_id="pending", idempotency_key="pending", request_digest="c" * 64,
+    )
+    current = AuthenticatedWorkerBinding(journal, "run", "worker", 2, "/workspace")
+    with pytest.raises(EffectJournalError, match="uncertain"):
+        current.recover_before_restart()
+    called = []
+    with pytest.raises(EffectJournalError, match="stale worker owner epoch"):
+        journaled_effect(
+            old, operation_id="old-after-recovery", idempotency_key="old-after-recovery",
+            request={"n": 2}, invoke=lambda: called.append(True), receipt_key="late",
+        )
+    assert called == []
+
+
+def test_outcome_and_checkpoint_roll_back_together_at_checkpoint_cut(tmp_path, monkeypatch):
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    binding = JournalBinding(journal, "run", "worker", 1, "/workspace")
+    intent = binding.begin_request(
+        operation_id="atomic", idempotency_key="atomic", request_digest="a" * 64,
+    )
+    outcome = EffectOutcome(
+        intent.intent_id, EffectState.COMPLETED, "b" * 64, "receipt",
+        worker_id="worker", owner_epoch=1,
+    )
+    original = journal._append_checkpoint_in_transaction
+
+    def fail_checkpoint(*args, **kwargs):
+        raise RuntimeError("injected checkpoint crash")
+
+    monkeypatch.setattr(journal, "_append_checkpoint_in_transaction", fail_checkpoint)
+    with pytest.raises(RuntimeError, match="checkpoint crash"):
+        journal.outcome_and_checkpoint(outcome, {"worker": {"step": 1}})
+    assert journal.get(intent.intent_id).state is EffectState.INTENT
+    assert journal.restore_checkpoint("run") is None
+    monkeypatch.setattr(journal, "_append_checkpoint_in_transaction", original)
+    journal.outcome_and_checkpoint(outcome, {"worker": {"step": 1}})
+    restored = journal.restore_checkpoint("run")
+    assert restored is not None
+    assert restored["state"] == {"worker": {"step": 1}}

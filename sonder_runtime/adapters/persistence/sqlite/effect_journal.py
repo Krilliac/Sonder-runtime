@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import hashlib
+import json
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -41,10 +43,17 @@ CREATE TABLE IF NOT EXISTS effect_checkpoint (
     generation INTEGER NOT NULL,
     effect_high_water INTEGER NOT NULL,
     state_digest TEXT NOT NULL,
+    state_json TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (run_id, generation)
 );
 CREATE INDEX IF NOT EXISTS ix_effect_checkpoint_latest
     ON effect_checkpoint(run_id, generation DESC);
+CREATE TABLE IF NOT EXISTS effect_owner (
+    run_id TEXT NOT NULL,
+    worker_id TEXT NOT NULL,
+    owner_epoch INTEGER NOT NULL,
+    PRIMARY KEY (run_id, worker_id)
+);
 """
 
 
@@ -60,6 +69,15 @@ class SQLiteEffectJournal:
         self._lock = Lock()
         with self._connect() as connection:
             connection.executescript(_DDL)
+            columns = {
+                str(row[1]) for row in connection.execute(
+                    "PRAGMA table_info(effect_checkpoint)"
+                ).fetchall()
+            }
+            if "state_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE effect_checkpoint ADD COLUMN state_json TEXT NOT NULL DEFAULT ''"
+                )
 
     @property
     def database_path(self) -> Path:
@@ -86,6 +104,9 @@ class SQLiteEffectJournal:
             raise TypeError("intent must be an EffectIntent")
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self._ensure_owner_in_transaction(
+                connection, intent.run_id, intent.worker_id, intent.owner_epoch,
+            )
             existing = self._row(connection.execute(
                 "SELECT intent_id,run_id,worker_id,operation_id,scope,owner_epoch,"
                 "idempotency_key,request_digest,reconciliation,sequence,state,"
@@ -142,6 +163,61 @@ class SQLiteEffectJournal:
                 raise EffectJournalError("intent identity conflicts with durable record")
             return replace(existing, replayed=True)
 
+    @staticmethod
+    def _ensure_owner_in_transaction(connection, run_id: str, worker_id: str, owner_epoch: int) -> None:
+        row = connection.execute(
+            "SELECT owner_epoch FROM effect_owner WHERE run_id=? AND worker_id=?",
+            (run_id, worker_id),
+        ).fetchone()
+        if row is None:
+            connection.execute(
+                "INSERT INTO effect_owner(run_id,worker_id,owner_epoch) VALUES(?,?,?)",
+                (run_id, worker_id, owner_epoch),
+            )
+            return
+        current_epoch = int(row[0])
+        if current_epoch > owner_epoch:
+            raise EffectJournalError("stale worker owner epoch")
+        if current_epoch == owner_epoch:
+            return
+        unresolved = connection.execute(
+            "SELECT 1 FROM effect_journal WHERE run_id=? AND state IN (?,?) LIMIT 1",
+            (run_id, EffectState.INTENT.value, EffectState.UNCERTAIN.value),
+        ).fetchone()
+        if unresolved is not None:
+            raise EffectJournalError("worker owner recovery is required before new effects")
+        connection.execute(
+            "UPDATE effect_owner SET owner_epoch=? WHERE run_id=? AND worker_id=?",
+            (owner_epoch, run_id, worker_id),
+        )
+
+    def claim_owner(self, run_id: str, worker_id: str, owner_epoch: int) -> None:
+        """Durably advance the current owner before restart recovery runs."""
+        if not all(isinstance(value, str) and value.strip() for value in (run_id, worker_id)):
+            raise EffectJournalError("owner identity is required")
+        if type(owner_epoch) is not int or owner_epoch < 1:
+            raise EffectJournalError("owner epoch must be positive")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT owner_epoch FROM effect_owner WHERE run_id=? AND worker_id=?",
+                (run_id, worker_id),
+            ).fetchone()
+            if row is not None:
+                current_epoch = int(row[0])
+                if owner_epoch < current_epoch:
+                    raise EffectJournalError("stale worker owner epoch")
+            if row is None:
+                connection.execute(
+                    "INSERT INTO effect_owner(run_id,worker_id,owner_epoch) VALUES(?,?,?)",
+                    (run_id, worker_id, owner_epoch),
+                )
+            else:
+                connection.execute(
+                    "UPDATE effect_owner SET owner_epoch=? WHERE run_id=? AND worker_id=?",
+                    (owner_epoch, run_id, worker_id),
+                )
+
     def get(self, intent_id: str) -> EffectIntent | None:
         with self._connect() as connection:
             return self._row(connection.execute(
@@ -192,6 +268,42 @@ class SQLiteEffectJournal:
                 (outcome.intent_id,),
             ).fetchone())
 
+    def _apply_outcome_in_transaction(self, connection, outcome: EffectOutcome) -> EffectIntent:
+        current = self._row(connection.execute(
+            "SELECT intent_id,run_id,worker_id,operation_id,scope,owner_epoch,"
+            "idempotency_key,request_digest,reconciliation,sequence,state,"
+            "outcome_digest,receipt_key,detail FROM effect_journal WHERE intent_id=?",
+            (outcome.intent_id,),
+        ).fetchone())
+        if current is None:
+            raise KeyError(outcome.intent_id)
+        if (current.worker_id, current.owner_epoch) != (
+            outcome.worker_id, outcome.owner_epoch
+        ):
+            raise EffectJournalError("outcome owner does not match admitted intent")
+        if current.state in {EffectState.COMPLETED, EffectState.FAILED}:
+            if (current.state, current.outcome_digest, current.receipt_key) != (
+                outcome.state, outcome.outcome_digest, outcome.receipt_key
+            ):
+                raise EffectJournalError("terminal effect outcome conflict")
+            return current
+        if current.state is EffectState.UNCERTAIN:
+            raise EffectJournalError(
+                "uncertain effect requires explicit reconciliation; late receipt refused"
+            )
+        connection.execute(
+            "UPDATE effect_journal SET state=?,outcome_digest=?,receipt_key=?,detail=? "
+            "WHERE intent_id=? AND state=?",
+            (outcome.state.value, outcome.outcome_digest, outcome.receipt_key,
+             outcome.detail[:self._max_detail], outcome.intent_id, current.state.value),
+        )
+        return self._row(connection.execute(
+            "SELECT intent_id,run_id,worker_id,operation_id,scope,owner_epoch,"
+            "idempotency_key,request_digest,reconciliation,sequence,state,"
+            "outcome_digest,receipt_key,detail FROM effect_journal WHERE intent_id=?",
+            (outcome.intent_id,),
+        ).fetchone())
+
     def uncertain(self, intent_id: str, *, detail: str) -> EffectIntent:
         if not detail.strip():
             raise EffectJournalError("uncertain effect requires detail")
@@ -225,7 +337,70 @@ class SQLiteEffectJournal:
                 (run_id,),
             ).fetchone()[0])
 
-    def append_checkpoint(self, run_id: str, state_digest: str) -> dict[str, object]:
+    @staticmethod
+    def _encode_state(state: object) -> tuple[str, str]:
+        try:
+            encoded = json.dumps(
+                state, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=True, allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise EffectJournalError("checkpoint state must be JSON serializable") from exc
+        if len(encoded.encode("utf-8")) > 1 << 20:
+            raise EffectJournalError("checkpoint state exceeds 1 MiB")
+        return encoded, hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    def _append_checkpoint_in_transaction(
+        self, connection, run_id: str, state: object,
+    ) -> dict[str, object]:
+        state_json, state_digest = self._encode_state(state)
+        latest = connection.execute(
+            "SELECT generation FROM effect_checkpoint WHERE run_id=? "
+            "ORDER BY generation DESC LIMIT 1", (run_id,),
+        ).fetchone()
+        generation = -1 if latest is None else int(latest[0])
+        high_water = int(connection.execute(
+            "SELECT COALESCE(MAX(sequence),0) FROM effect_journal WHERE run_id=?",
+            (run_id,),
+        ).fetchone()[0])
+        unresolved = connection.execute(
+            "SELECT 1 FROM effect_journal WHERE run_id=? AND state IN (?,?) LIMIT 1",
+            (run_id, EffectState.INTENT.value, EffectState.UNCERTAIN.value),
+        ).fetchone()
+        if unresolved is not None:
+            raise EffectJournalError(
+                "checkpoint has an admitted effect without a definitive outcome"
+            )
+        generation += 1
+        connection.execute(
+            "INSERT INTO effect_checkpoint(run_id,generation,effect_high_water,state_digest,state_json) "
+            "VALUES(?,?,?,?,?)",
+            (run_id, generation, high_water, state_digest, state_json),
+        )
+        return {
+            "run_id": run_id,
+            "generation": generation,
+            "effect_high_water": high_water,
+            "state_digest": state_digest,
+            "state": state,
+        }
+
+    def outcome_and_checkpoint(
+        self, outcome: EffectOutcome, state: object,
+    ) -> dict[str, object]:
+        """Commit a terminal outcome and serialized worker state together."""
+        if not isinstance(outcome, EffectOutcome):
+            raise TypeError("outcome must be an EffectOutcome")
+        if len(outcome.detail) > self._max_detail:
+            raise EffectJournalError("outcome detail exceeds bound")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            stored = self._apply_outcome_in_transaction(connection, outcome)
+            return self._append_checkpoint_in_transaction(
+                connection, stored.run_id, state,
+            )
+
+    def append_checkpoint(self, run_id: str, state: object) -> dict[str, object]:
         """Persist a worker checkpoint atomically with its journal high-water.
 
         The generation is allocated by the host-owned SQLite transaction.  A
@@ -235,41 +410,9 @@ class SQLiteEffectJournal:
         """
         if not isinstance(run_id, str) or not run_id.strip():
             raise EffectJournalError("checkpoint run_id is required")
-        if not isinstance(state_digest, str) or not state_digest.strip():
-            raise EffectJournalError("checkpoint state digest is required")
-        if len(state_digest) > 256:
-            raise EffectJournalError("checkpoint state digest exceeds bound")
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            latest = connection.execute(
-                "SELECT generation FROM effect_checkpoint WHERE run_id=? "
-                "ORDER BY generation DESC LIMIT 1", (run_id,),
-            ).fetchone()
-            generation = -1 if latest is None else int(latest[0])
-            high_water = int(connection.execute(
-                "SELECT COALESCE(MAX(sequence),0) FROM effect_journal WHERE run_id=?",
-                (run_id,),
-            ).fetchone()[0])
-            unresolved = connection.execute(
-                "SELECT 1 FROM effect_journal WHERE run_id=? AND state IN (?,?) LIMIT 1",
-                (run_id, EffectState.INTENT.value, EffectState.UNCERTAIN.value),
-            ).fetchone()
-            if unresolved is not None:
-                raise EffectJournalError(
-                    "checkpoint has an admitted effect without a definitive outcome"
-                )
-            generation += 1
-            connection.execute(
-                "INSERT INTO effect_checkpoint(run_id,generation,effect_high_water,state_digest) "
-                "VALUES(?,?,?,?)",
-                (run_id, generation, high_water, state_digest),
-            )
-            return {
-                "run_id": run_id,
-                "generation": generation,
-                "effect_high_water": high_water,
-                "state_digest": state_digest,
-            }
+            return self._append_checkpoint_in_transaction(connection, run_id, state)
 
     def restore_checkpoint(self, run_id: str) -> dict[str, object] | None:
         """Return the latest checkpoint only when its journal view is current."""
@@ -278,7 +421,7 @@ class SQLiteEffectJournal:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN")
             row = connection.execute(
-                "SELECT generation,effect_high_water,state_digest FROM effect_checkpoint "
+                "SELECT generation,effect_high_water,state_digest,state_json FROM effect_checkpoint "
                 "WHERE run_id=? ORDER BY generation DESC LIMIT 1", (run_id,),
             ).fetchone()
             if row is None:
@@ -305,6 +448,7 @@ class SQLiteEffectJournal:
                 "generation": int(row[0]),
                 "effect_high_water": int(row[1]),
                 "state_digest": str(row[2]),
+                "state": json.loads(str(row[3])) if str(row[3]) else None,
             }
 
     def validate_checkpoint(self, run_id: str, high_water: int) -> None:

@@ -27,9 +27,12 @@ authorize replay across an unrecorded effect.
 This slice extends the same guarantee to direct host-owned worker adapters.
 After a terminal receipt, `journaled_effect` appends a checkpoint in the
 worker-effects database. The host allocates the generation and captures the
-journal high-water in one transaction. Restore rejects a stale high-water or
-an unresolved intent, so a restart cannot treat a partially published worker
-result as a safe replay point.
+state as canonical JSON, generation, and journal high-water in one transaction.
+Restore rejects a stale high-water or an unresolved intent, so a restart
+cannot treat a partially published worker result as a safe replay point. The
+same database durably records each `(run, worker, owner_epoch)` fence; restart
+claims the newer epoch before recovery, and older bindings cannot admit new
+effects afterward.
 
 The process adapter is exercised at its real worker boundary. A test starts a
 real child process that performs one filesystem mutation, injects a crash after
@@ -48,7 +51,7 @@ Evidence:
 
 Focused verification:
 
-- `python -m pytest -q tests/test_effect_journal.py tests/test_worker_effect_bindings.py` — 20 passed.
+- `python -m pytest -q tests/test_effect_journal.py tests/test_worker_effect_bindings.py` — 22 passed.
 - `python -m compileall -q sonder_runtime/application/execution/worker_bindings.py sonder_runtime/adapters/persistence/sqlite/effect_journal.py` — passed.
 - `git diff --check` — passed.
 
