@@ -1,6 +1,7 @@
 import sonder_runtime.adapters.embeddings as embeddings
 import memory_store as ms
 from sonder_runtime.adapters import recall
+from datetime import datetime, timezone
 import sqlite3
 import time
 import pytest
@@ -138,6 +139,43 @@ def test_recall_is_project_scoped_unless_global_override_is_explicit():
         project="project-b", include_all_projects="false",
     )
     assert string_false == ["same task -> project B solution"]
+
+
+def test_specialized_exact_mode_uses_stored_task_text_after_sqlite_scope():
+    c = _conn()
+    _store_good(c, "exact", "retry the bounded worker", "exact result", [1.0, 0.0], project="p")
+    _store_good(c, "near", "worker retry", "near result", [1.0, 0.0], project="p")
+
+    out = recall.recall(
+        c, "bounded worker", k=2, qv=[1.0, 0.0], min_sim=0.0,
+        project="p", mode="exact",
+    )
+
+    assert out[0] == "retry the bounded worker -> exact result"
+    assert len(out) == 2
+
+
+def test_temporal_mode_uses_creation_timestamp_and_excludes_future_rows():
+    c = _conn()
+    _store_good(c, "old", "temporal policy", "old result", [1.0, 0.0])
+    _store_good(c, "future", "temporal policy", "future result", [1.0, 0.0])
+    c.execute("UPDATE interactions SET ts=? WHERE id=?", ("2026-09-20T00:00:00+00:00", "old"))
+    c.execute("UPDATE interactions SET ts=? WHERE id=?", ("2026-09-24T00:00:00+00:00", "future"))
+    c.commit()
+
+    out = recall.recall(
+        c, "temporal policy", k=2, qv=[1.0, 0.0], min_sim=0.0,
+        mode="temporal", at=datetime(2026, 9, 23, tzinfo=timezone.utc),
+    )
+
+    assert out == ["temporal policy -> old result"]
+
+
+def test_specialized_recall_rejects_unsupported_metadata_lanes():
+    c = _conn()
+    _store_good(c, "one", "task", "result", [1.0, 0.0])
+    with pytest.raises(Exception, match="supported modes"):
+        recall.recall(c, "task", qv=[1.0, 0.0], min_sim=0.0, mode="entity")
 
 
 def test_recall_quarantines_ambiguous_migrated_session_project():

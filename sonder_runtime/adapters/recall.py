@@ -17,6 +17,7 @@ from sonder_runtime.application.memory.hybrid_retrieval import (
 from sonder_runtime.application.memory.memory_policy import (
     MemoryClass, PrivacyClass,
 )
+from sonder_runtime.application.memory.memory_policy import TemporalTruth
 
 
 DEFAULT_MIN_SIM = _rules.DEFAULT_RECALL_MIN_SIM
@@ -155,7 +156,21 @@ def _format(task, response, max_len=MAX_RESP_CHARS):
     return line
 
 
-def _hybrid_order(task, scored, *, project, include_all_projects, limit):
+_RECALL_MODES = frozenset(("hybrid", "exact", "temporal"))
+
+
+def _parse_timestamp(value):
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _hybrid_order(task, scored, *, project, include_all_projects, limit,
+                  mode="hybrid", at=None):
     """Apply the typed hybrid ranking to already scope-filtered rows.
 
     SQLite remains responsible for project/session/outcome eligibility. This
@@ -169,7 +184,7 @@ def _hybrid_order(task, scored, *, project, include_all_projects, limit):
         return scored[:limit]
     candidates = []
     rows_by_id = {}
-    now = datetime.now(timezone.utc)
+    now = at or datetime.now(timezone.utc)
     query_project = None if include_all_projects else project
     scope = "project" if query_project is not None else "global"
     for similarity, rank, row in scored:
@@ -179,14 +194,8 @@ def _hybrid_order(task, scored, *, project, include_all_projects, limit):
             continue
         if not isinstance(task_text, str) or not task_text:
             continue
-        timestamp = row.get("ts")
-        try:
-            created = datetime.fromisoformat(
-                str(timestamp).replace("Z", "+00:00")
-            )
-            if created.tzinfo is None:
-                created = created.replace(tzinfo=timezone.utc)
-        except (TypeError, ValueError, OverflowError):
+        created = _parse_timestamp(row.get("ts"))
+        if created is None:
             # A malformed stored timestamp must not gain a fabricated
             # recency advantage over well-formed recall candidates. Preserve
             # legacy ordering-key rows as recallable evidence.
@@ -203,18 +212,29 @@ def _hybrid_order(task, scored, *, project, include_all_projects, limit):
         candidates.append(MemoryCandidate(
             memory_id=interaction_id,
             text=task_text,
-            memory_class=MemoryClass.PROJECT if memory_project else MemoryClass.SEMANTIC,
+            memory_class=(
+                MemoryClass.FAILURE if outcome == "failed"
+                else MemoryClass.PROJECT if memory_project else MemoryClass.SEMANTIC
+            ),
             created_at=created,
             confidence=_bounded_confidence(row.get("outcome_reward")) or 0.0,
             project=memory_project if not include_all_projects else None,
             privacy=PrivacyClass.PROJECT if memory_project else PrivacyClass.PUBLIC,
             semantic_score=float(similarity),
             provenance=provenance,
+            temporal=(
+                TemporalTruth(valid_from=created, confidence=1.0,
+                              last_revalidated_at=created)
+                if _parse_timestamp(row.get("ts")) is not None else None
+            ),
         ))
         rows_by_id[interaction_id] = (similarity, rank, row)
     ranked = HybridMemoryRetriever().retrieve(
         candidates,
-        RetrievalQuery(task, mode="hybrid", limit=limit, scope=scope, project=query_project),
+        RetrievalQuery(
+            task, mode=mode, limit=limit, scope=scope, project=query_project,
+            at=now,
+        ),
     )
     return [rows_by_id[item.candidate.memory_id] for item in ranked]
 
@@ -222,7 +242,8 @@ def _hybrid_order(task, scored, *, project, include_all_projects, limit):
 def recall_page(conn, task, k=2, embed_fn=None, min_sim=None,
                 qv=None, exclude_session=None, project=None,
                 include_all_projects=False, embedding_model=None,
-                embedding_revision=None, candidate_cursor=None):
+                embedding_revision=None, candidate_cursor=None,
+                mode="hybrid", at=None):
     """Return bounded recall results with truthful enumeration evidence."""
     include_all_projects = include_all_projects is True
     if min_sim is None:
@@ -233,6 +254,17 @@ def recall_page(conn, task, k=2, embed_fn=None, min_sim=None,
         except (TypeError, ValueError) as exc:
             raise InvalidInput("recall similarity threshold is invalid") from exc
     validate_recall_request(task, k, min_sim)
+    if not isinstance(mode, str) or mode not in _RECALL_MODES:
+        raise InvalidInput(
+            "recall mode is unavailable; supported modes are hybrid, exact, "
+            "and temporal"
+        )
+    if mode != "hybrid" and (not isinstance(task, str) or not task.strip()):
+        raise InvalidInput("specialized recall modes require a non-empty query")
+    if at is not None:
+        at = _parse_timestamp(at)
+        if at is None:
+            raise InvalidInput("temporal recall point must be an ISO timestamp")
     runtime_default = embed_fn is None
     embed_fn = embed_fn or embeddings.embed
     if qv is None:
@@ -298,7 +330,8 @@ def recall_page(conn, task, k=2, embed_fn=None, min_sim=None,
     scored.sort(key=lambda item: (-item[0], item[1]))
     ordered = _hybrid_order(
         task, scored, project=project,
-        include_all_projects=include_all_projects, limit=k,
+        include_all_projects=include_all_projects, limit=k, mode=mode,
+        at=at,
     )
     selected = ordered[:k]
     formatted = tuple(
@@ -333,13 +366,13 @@ def recall_page(conn, task, k=2, embed_fn=None, min_sim=None,
 def recall(conn, task, k=2, embed_fn=None, min_sim=None,
            qv=None, exclude_session=None, project=None,
            include_all_projects=False, embedding_model=None,
-           embedding_revision=None):
+           embedding_revision=None, mode="hybrid", at=None):
     """Compatibility list API over the bounded semantic-recall page."""
     page = recall_page(
         conn, task, k=k, embed_fn=embed_fn, min_sim=min_sim, qv=qv,
         exclude_session=exclude_session, project=project,
         include_all_projects=include_all_projects,
         embedding_model=embedding_model,
-        embedding_revision=embedding_revision,
+        embedding_revision=embedding_revision, mode=mode, at=at,
     )
     return list(page.results)
