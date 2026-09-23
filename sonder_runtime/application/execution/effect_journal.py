@@ -87,6 +87,44 @@ class EffectOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class ReconciliationProof:
+    """Host-verifier result bound to the exact external effect identity.
+
+    The journal accepts this value only from a verifier registered by trusted
+    host composition.  Free-form caller text is deliberately absent: the
+    verifier must return the operation, receipt, and outcome digest it
+    obtained from the external system.
+    """
+
+    intent_id: str
+    operation_id: str
+    receipt_key: str
+    outcome_digest: str
+    state: EffectState
+    verifier_id: str
+    external_reference: str
+
+    def __post_init__(self) -> None:
+        if self.state not in {EffectState.COMPLETED, EffectState.FAILED}:
+            raise EffectJournalError("reconciliation proof must be definitive")
+        for name in (
+            "intent_id", "operation_id", "receipt_key", "outcome_digest",
+            "verifier_id", "external_reference",
+        ):
+            if not isinstance(getattr(self, name), str) or not getattr(self, name).strip():
+                raise EffectJournalError(f"reconciliation proof {name} is required")
+
+
+class EffectReconciliationVerifier(Protocol):
+    """Host-owned verifier for one explicitly supported operation family."""
+
+    verifier_id: str
+    operation_ids: frozenset[str]
+
+    def verify(self, intent: EffectIntent) -> ReconciliationProof | None: ...
+
+
+@dataclass(frozen=True, slots=True)
 class RecoveryDecision:
     run_id: str
     action: str
@@ -106,6 +144,7 @@ class EffectJournal(Protocol):
     def restore_checkpoint(self, run_id: str) -> Mapping[str, object] | None: ...
     def claim_owner(self, run_id: str, worker_id: str, owner_epoch: int) -> None: ...
     def outcome_and_checkpoint(self, outcome: EffectOutcome, state: object) -> Mapping[str, object]: ...
+    def reconcile(self, intent_id: str, *, owner_epoch: int) -> EffectIntent: ...
 
 
 @dataclass
@@ -165,4 +204,5 @@ def bound(binding: JournalBinding) -> Iterator[JournalBinding]:
 
 
 __all__ = ["EffectIntent", "EffectJournal", "EffectJournalError", "EffectOutcome",
-           "EffectState", "JournalBinding", "RecoveryDecision", "bound", "current"]
+           "EffectReconciliationVerifier", "EffectState", "JournalBinding",
+           "ReconciliationProof", "RecoveryDecision", "bound", "current"]

@@ -37,7 +37,14 @@ claims the newer epoch before recovery, and older bindings cannot admit new
 effects afterward. A recovery-required fence also blocks every new operation
 until the unresolved effect is explicitly reconciled. Advancing the owner
 epoch does not clear that fence; this slice has no automatic reconciliation
-clear path and therefore remains fail-closed.
+clear path and therefore remains fail-closed. Trusted host composition can
+register an operation-family verifier and call `reconcile` with the current
+owner epoch. The verifier must return a typed `ReconciliationProof` containing
+the exact intent, operation, external receipt, outcome digest, verifier id,
+and external reference. The journal applies that proof and clears the fence in
+one epoch-checked transaction only when no unresolved effects remain. Unknown
+operation families, stale epochs, malformed or conflicting proofs remain
+fenced; there is no caller-controlled clear switch.
 
 The process adapter is exercised at its real worker boundary. A test starts a
 real child process that performs one filesystem mutation, injects a crash after
@@ -56,7 +63,7 @@ Evidence:
 
 Focused verification:
 
-- `python -m pytest -q tests/test_effect_journal.py tests/test_worker_effect_bindings.py` — 23 passed.
+- `python -m pytest -q tests/test_effect_journal.py tests/test_worker_effect_bindings.py tests/test_worker_capacity.py` — 50 passed, including verifier reconciliation, restart, stale epoch, replay, conflicting proof, and concurrent reconciler coverage.
 - `python -m compileall -q sonder_runtime/application/execution/worker_bindings.py sonder_runtime/adapters/persistence/sqlite/effect_journal.py` — passed.
 - `git diff --check` — passed.
 
