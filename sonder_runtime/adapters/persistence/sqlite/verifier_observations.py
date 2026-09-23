@@ -113,6 +113,20 @@ class SQLiteVerifierObservationRepository:
             return None
         return VerifierReceipt(**json.loads(row[0])), _observation(json.loads(row[1]))
 
+    def list_pairs(self, *, limit: int = 10_001) -> tuple[tuple[VerifierReceipt, LearningObservation], ...]:
+        """Read a bounded complete snapshot, or let callers fail closed."""
+        if type(limit) is not int or not 1 <= limit <= 10_001:
+            raise ValueError("limit must be between 1 and 10001")
+        rows = self._connection.execute(
+            "SELECT receipt_json, observation_json "
+            "FROM verifier_learning_observations ORDER BY rowid LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return tuple(
+            (VerifierReceipt(**json.loads(row[0])), _observation(json.loads(row[1])))
+            for row in rows
+        )
+
     def list(self, *, limit: int = 256) -> tuple[LearningObservation, ...]:
         if type(limit) is not int or not 1 <= limit <= 10_000:
             raise ValueError("limit must be between 1 and 10000")
