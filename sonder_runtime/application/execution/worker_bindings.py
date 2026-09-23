@@ -141,9 +141,45 @@ def journaled_effect(
     except BaseException as exc:
         binding.mark_uncertain(intent, detail=f"worker raised {type(exc).__name__}")
         raise
+    try:
+        _publish_outcome(
+            context, binding, intent, result,
+            receipt_key=receipt_key, success=success,
+            checkpoint_state=checkpoint_state,
+        )
+    except BaseException as exc:
+        # The external effect has already run.  If its receipt or checkpoint
+        # cannot be published, the admitted intent must not remain a bare
+        # INTENT: recovery may reattach a bare intent to a live owner, which
+        # could invoke the effect a second time.  Mark it uncertain so only
+        # explicit reconciliation can resolve it.  If the journal cannot record
+        # that either, the intent stays unresolved and restart recovery still
+        # treats it as orphaned; the original failure is what the caller sees.
+        try:
+            binding.mark_uncertain(
+                intent,
+                # Type name only: exception text may quote worker output.
+                detail=f"effect ran but receipt publication failed: {type(exc).__name__}",
+            )
+        except Exception:
+            pass
+        raise
+    return result
+
+
+def _publish_outcome(
+    context: AuthenticatedWorkerBinding,
+    binding: JournalBinding,
+    intent: Any,
+    result: Any,
+    *,
+    receipt_key: Callable[[Any], str] | str,
+    success: Callable[[Any], bool] | bool,
+    checkpoint_state: Callable[[Any], Any] | Any | None,
+) -> None:
+    """Publish the receipt and checkpoint of an effect that already ran."""
     key = receipt_key(result) if callable(receipt_key) else receipt_key
     if not isinstance(key, str) or not key.strip():
-        binding.mark_uncertain(intent, detail="worker returned no durable receipt key")
         raise EffectJournalError("worker mutation returned no durable receipt key")
     is_success = success(result) if callable(success) else success
     outcome = EffectOutcome(
@@ -178,7 +214,6 @@ def journaled_effect(
         append_checkpoint = getattr(context.journal, "append_checkpoint", None)
         if callable(append_checkpoint):
             append_checkpoint(context.run_id, state)
-    return result
 
 
 __all__ = ["AuthenticatedWorkerBinding", "journaled_effect"]
