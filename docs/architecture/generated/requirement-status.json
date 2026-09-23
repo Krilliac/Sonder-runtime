@@ -180,9 +180,9 @@
     },
     {
       "checked": false,
-      "claim": "Agent budgets are admitted and enforced at the application boundary.",
+      "claim": "The live delegated-fleet dispatcher enforces its static worker-slot ceiling through an ownership-aware adaptive lane scheduler: overlapping write claims are serialized while readers and independent lanes stay parallel, and retry storms, target churn, or host memory pressure shrink the live concurrency cap with hysteresis before it regrows on sustained healthy outcomes.",
       "requirement_id": "AGENT-007",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "6de57af4e57d8869d863a0c1357735c752390c27eafe4156d681cea84665f496",
+    "ledger_sha256": "f2637b4885ff21102baf444616a8451c5c88d3b4a82880c01ebf95ddeb73679f",
     "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
   }
 }

@@ -14,12 +14,13 @@ import threading
 import time
 import urllib.request
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import timedelta
 
 import sonder_runtime.adapters.execution.effect_fence as effect_fence
 import sonder_runtime.adapters.persistence.fleet_store as fleet_store
+import sonder_runtime.domain.adaptive_concurrency as adaptive_concurrency
 import sonder_runtime.domain.events as events
 import sonder_runtime.domain.fleet_pressure as fleet_pressure
 from sonder_runtime.application.artifacts import ArtifactReadiness, ArtifactReadinessBarrier
@@ -1288,7 +1289,15 @@ def _run_worker(
     master_task_digest: str = "",
     delegated_task_digest: str = "",
     run_id: str = "",
+    outcome_sink=None,
 ):
+    def report(outcome) -> None:
+        # Content-free outcome for the adaptive lane scheduler; reporting must
+        # never change the worker's own result.
+        if outcome_sink is not None:
+            with contextlib.suppress(Exception):
+                outcome_sink(outcome)
+
     pre_call_metrics = None
     if objectives:
         if not _start_agent(agent_id, "validating delegated task provenance"):
@@ -1308,6 +1317,7 @@ def _run_worker(
                 task_drift=True,
                 drift_metrics=metrics,
             )
+            report(adaptive_concurrency.Outcome.CHURN)
             return _WORKER_FAILED
         pre_call_metrics = metrics
         if not _begin_model_call(
@@ -1349,9 +1359,15 @@ def _run_worker(
                         "transient %s failure; retrying model call (attempt %d/%d)"
                         % (failure_class, attempt + 1, attempts_allowed),
                     )
+                    report(adaptive_concurrency.Outcome.TRANSIENT_RETRY)
                     continue
                 final = _finish(
                     agent_id, error="[%s] %s" % (failure_class, exc),
+                )
+                report(
+                    adaptive_concurrency.Outcome.TRANSIENT_RETRY
+                    if failure_class in TRANSIENT_FAILURE_CLASSES
+                    else adaptive_concurrency.Outcome.FAILED
                 )
                 return final if final in ABORT_MARKERS else _WORKER_FAILED
     stored_output = (
@@ -1376,6 +1392,7 @@ def _run_worker(
                 task_drift=True,
                 drift_metrics=post_call,
             )
+            report(adaptive_concurrency.Outcome.CHURN)
             return _WORKER_FAILED
         metrics = fleet_provenance.validate_result(
             stored_output, objectives, project=project_scope,
@@ -1387,10 +1404,12 @@ def _run_worker(
                 task_drift=True,
                 drift_metrics=metrics,
             )
+            report(adaptive_concurrency.Outcome.FAILED)
             return _WORKER_FAILED
     final = _finish(agent_id, output=stored_output)
     if final in ABORT_MARKERS:
         return final
+    report(adaptive_concurrency.Outcome.SUCCEEDED)
     completed = output if isinstance(output, RepositoryWorkerResult) else final
     if not run_id:
         return completed
@@ -1590,6 +1609,194 @@ def _objective_assignments(objectives, count: int):
     return tuple(tuple(bucket) for bucket in buckets)
 
 
+def adaptive_concurrency_enabled() -> bool:
+    """Operator rollback switch; ``SONDER_FLEET_ADAPTIVE_CONCURRENCY=0`` pins the cap."""
+    raw = os.environ.get("SONDER_FLEET_ADAPTIVE_CONCURRENCY", "").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def concurrency_resources() -> adaptive_concurrency.ResourceSnapshot:
+    """Measure host memory headroom for the adaptive lane scheduler.
+
+    The fleet's own pressure band is deliberately NOT used here: it is the
+    fleet's utilization of its own slots, so a healthy run at full width would
+    read as "critical" and throttle itself.  Unknown memory is reported as
+    unknown, never as pressure or as headroom.
+    """
+    total, available = physical_memory_bytes()
+    if total <= 0 or available <= 0:
+        return adaptive_concurrency.ResourceSnapshot()
+    return adaptive_concurrency.ResourceSnapshot(
+        memory_available_fraction=min(1.0, available / total),
+    )
+
+
+def delegated_lane_claims(child_ids, assignments) -> list:
+    """Ownership claims for delegated fleet lanes.
+
+    Delegated fleet workers only receive guarded read-only file tools (see
+    :func:`_subtask_prompts`), so their objective files are READ claims:
+    readers never serialize each other and independent read fan-out keeps its
+    full width.  A write-capable lane would pass WRITE claims to
+    :class:`AdaptiveLaneScheduler` and be serialized against overlapping lanes.
+    """
+    claims = []
+    for agent_id, assigned in zip(child_ids, assignments or [()] * len(child_ids)):
+        paths = frozenset(
+            str(objective.path) for objective in assigned if str(objective.path).strip()
+        )
+        try:
+            claim = adaptive_concurrency.LaneClaim(
+                agent_id, paths, adaptive_concurrency.LaneAccess.READ,
+            )
+        except ValueError:
+            claim = adaptive_concurrency.LaneClaim(agent_id)
+        claims.append(claim)
+    return claims
+
+
+class AdaptiveLaneScheduler:
+    """Dispatcher-side owner of the pure adaptive-concurrency policy.
+
+    ``admit``/``complete``/``summary`` are called only by the dispatching
+    thread.  Worker threads report outcomes through :meth:`sink`, which only
+    appends to a locked inbox; the inbox is folded into the policy state on
+    the dispatcher thread at the next completion.
+    """
+
+    def __init__(
+        self,
+        claims,
+        ceiling: int,
+        *,
+        adaptive: bool = True,
+        resources=None,
+        policy: adaptive_concurrency.ConcurrencyPolicy | None = None,
+        on_decision=None,
+    ) -> None:
+        ceiling = max(1, int(ceiling))
+        self.policy = policy or adaptive_concurrency.ConcurrencyPolicy(ceiling=ceiling)
+        self.state = adaptive_concurrency.initial_state(self.policy)
+        self.adaptive = bool(adaptive)
+        claims = list(claims)
+        self.graph = adaptive_concurrency.conflict_graph(claims)
+        self._pending = [claim.lane_id for claim in claims]
+        self._running: set[str] = set()
+        self._resources = resources or concurrency_resources
+        self._on_decision = on_decision
+        self._inbox: list = []
+        self._inbox_lock = threading.Lock()
+        self.decisions: list[dict] = []
+        self.peak_running = 0
+        self.serialized_waits = 0
+
+    @property
+    def cap(self) -> int:
+        return int(self.state.cap)
+
+    @property
+    def pending(self) -> tuple:
+        return tuple(self._pending)
+
+    @property
+    def running(self) -> frozenset:
+        return frozenset(self._running)
+
+    def sink(self, lane_id: str):
+        def record(outcome) -> None:
+            with self._inbox_lock:
+                self._inbox.append((lane_id, outcome))
+        return record
+
+    def admit(self) -> tuple:
+        admitted = adaptive_concurrency.admissible_lanes(
+            self._pending, self._running, self.cap, self.graph,
+        )
+        if len(admitted) < len(self._pending) and (
+            len(self._running) + len(admitted) < self.cap
+        ):
+            # A slot stayed free only because an ownership conflict blocked
+            # every remaining lane: that is the serialization at work.
+            self.serialized_waits += 1
+        for lane_id in admitted:
+            self._pending.remove(lane_id)
+            self._running.add(lane_id)
+        self.peak_running = max(self.peak_running, len(self._running))
+        return admitted
+
+    def complete(self, lane_id: str) -> None:
+        self._running.discard(lane_id)
+        with self._inbox_lock:
+            inbox, self._inbox = self._inbox, []
+        if not self.adaptive:
+            return
+        if not inbox:
+            # Cancelled lanes report nothing; still sample resource pressure.
+            inbox = [(lane_id, adaptive_concurrency.Outcome.SAMPLE)]
+        try:
+            resources = self._resources()
+        except Exception:
+            resources = adaptive_concurrency.ResourceSnapshot()
+        for index, (source, outcome) in enumerate(inbox):
+            self.state, decision = adaptive_concurrency.observe(
+                self.state,
+                outcome,
+                self.policy,
+                resources if index == len(inbox) - 1 else None,
+            )
+            if decision.action != "hold" or decision.reasons:
+                record = decision.to_dict()
+                record["lane"] = source
+                self.decisions.append(record)
+                if self._on_decision is not None:
+                    with contextlib.suppress(Exception):
+                        self._on_decision(record)
+
+    def summary(self) -> dict:
+        return {
+            "adaptive": self.adaptive,
+            "ceiling": int(self.policy.ceiling),
+            "final_cap": self.cap,
+            "peak_running": int(self.peak_running),
+            "coupled_lanes": adaptive_concurrency.coupled_lane_count(self.graph),
+            "serialized_waits": int(self.serialized_waits),
+            "decisions": list(self.decisions),
+        }
+
+
+def dispatch_lanes(scheduler, max_workers: int, run_lane, collect, on_error) -> None:
+    """Run every scheduled lane, admitting only what ``scheduler`` allows.
+
+    ``run_lane(lane_id, sink)`` runs on a pool thread and may report
+    :class:`adaptive_concurrency.Outcome` values through ``sink``.
+    ``collect(lane_id, result)`` and ``on_error(lane_id, exc)`` run on this
+    dispatcher thread.  ``max_workers`` is the static ceiling; the pool only
+    ever holds admitted lanes, so the scheduler's live cap and ownership
+    conflicts decide actual concurrency.
+    """
+    with ThreadPoolExecutor(max_workers=max(1, int(max_workers))) as pool:
+        futures = {}
+
+        def submit_admitted() -> None:
+            for lane_id in scheduler.admit():
+                futures[pool.submit(run_lane, lane_id, scheduler.sink(lane_id))] = lane_id
+
+        submit_admitted()
+        while futures:
+            done, _pending = wait(tuple(futures), return_when=FIRST_COMPLETED)
+            for future in done:
+                lane_id = futures.pop(future)
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    scheduler.sink(lane_id)(adaptive_concurrency.Outcome.FAILED)
+                    on_error(lane_id, exc)
+                else:
+                    collect(lane_id, result)
+                scheduler.complete(lane_id)
+            submit_admitted()
+
+
 def run_delegated(
     task: str, worker_fn, audit_fn, agents: int = 3,
     metadata: dict | None = None, _on_started=None, project: str = "",
@@ -1711,35 +1918,61 @@ def run_delegated(
     outputs = []
     readiness_by_producer = {}
     fanout_started = time.monotonic()
-    with ThreadPoolExecutor(max_workers=worker_slots) as pool:
-        futures = {
-            pool.submit(
-                _run_worker,
-                agent_id,
-                prompt,
-                worker_fn,
-                project_scope,
-                task,
-                assigned,
-                master_digest,
-                fleet_provenance.task_digest(prompt),
-                master_id,
-            ): agent_id
-            for agent_id, prompt, assigned in zip(
-                child_ids, prompts, assignments or [()] * len(prompts)
-            )
-        }
-        for future in as_completed(futures):
-            agent_id = futures[future]
-            try:
-                output = future.result()
-                if output not in ABORT_MARKERS and output is not _WORKER_FAILED:
-                    if isinstance(output, ReadyWorkerOutput):
-                        readiness_by_producer[agent_id] = output.readiness
-                        output = output.output
-                    outputs.append((agent_id, output))
-            except Exception as exc:
-                _finish(agent_id, error=str(exc))
+    lane_inputs = {
+        agent_id: (prompt, assigned)
+        for agent_id, prompt, assigned in zip(
+            child_ids, prompts, assignments or [()] * len(prompts)
+        )
+    }
+
+    def _concurrency_event(record: dict) -> None:
+        _event(
+            master_id,
+            "adaptive concurrency %s: cap %d -> %d (%s)" % (
+                record["action"], record["previous_cap"], record["cap"],
+                ",".join(record["reasons"]) or "none",
+            ),
+        )
+
+    # worker_slots is the static ceiling (hardware, operator, per-run cap).
+    # Inside it the adaptive scheduler admits only ownership-compatible lanes
+    # and shrinks/regrows the live cap on retry storms, churn, and memory
+    # pressure (issue #510 section 3).  The pool never holds more than the
+    # admitted lanes, so a shrunk cap takes effect at the next admission.
+    scheduler = AdaptiveLaneScheduler(
+        delegated_lane_claims(child_ids, assignments),
+        worker_slots,
+        adaptive=adaptive_concurrency_enabled(),
+        on_decision=_concurrency_event,
+    )
+
+    def _run_lane(agent_id: str, sink):
+        prompt, assigned = lane_inputs[agent_id]
+        return _run_worker(
+            agent_id,
+            prompt,
+            worker_fn,
+            project_scope,
+            task,
+            assigned,
+            master_digest,
+            fleet_provenance.task_digest(prompt),
+            master_id,
+            outcome_sink=sink,
+        )
+
+    def _collect(agent_id: str, output) -> None:
+        if output not in ABORT_MARKERS and output is not _WORKER_FAILED:
+            if isinstance(output, ReadyWorkerOutput):
+                readiness_by_producer[agent_id] = output.readiness
+                output = output.output
+            outputs.append((agent_id, output))
+
+    def _lane_error(agent_id: str, exc: BaseException) -> None:
+        _finish(agent_id, error=str(exc))
+
+    dispatch_lanes(scheduler, worker_slots, _run_lane, _collect, _lane_error)
+    concurrency_report = scheduler.summary()
     if cancel_requested(master_id):
         final = _finish(master_id)
         return {
@@ -1997,6 +2230,7 @@ def run_delegated(
         "worker_slots": worker_slots,
         "outputs": _public_outputs(outputs),
         "output": final,
+        "concurrency": concurrency_report,
     }
 
 
