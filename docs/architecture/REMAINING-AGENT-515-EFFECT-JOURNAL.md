@@ -37,17 +37,21 @@ claims the newer epoch before recovery, and older bindings cannot admit new
 effects afterward. A recovery-required fence also blocks every new operation
 until the unresolved effect is explicitly reconciled. Advancing the owner
 epoch does not clear that fence; this slice has no automatic reconciliation
-clear path and therefore remains fail-closed. Trusted host composition receives
-an opaque sealed capability during bootstrap, registers an operation-family
-verifier, and calls `reconcile` with the current owner epoch. Ordinary journal
-callers cannot mint that capability. The verifier runs outside the journal
-write transaction under a bounded timeout and must return a typed
+clear path and therefore remains fail-closed. The journal accepts an immutable
+operation-family verifier registry only during trusted bootstrap construction;
+there is no post-construction registration method. Production bootstrap
+currently supplies no verifier, so its fences cannot be positively cleared
+until a real provider composition exists. A configured verifier runs outside
+the journal write transaction under a bounded timeout and must return a typed
 `ReconciliationProof` containing
 the exact intent, operation, external receipt, outcome digest, verifier id,
 and external reference. The journal applies that proof and clears the fence in
 one epoch-checked transaction only when no unresolved effects remain. Unknown
 operation families, stale epochs, malformed or conflicting proofs remain
-fenced; there is no caller-controlled clear switch.
+fenced; there is no caller-controlled clear switch. Verifier admission is
+bounded process-wide, and a timed-out provider retains its slot until its
+thread actually exits. This bounds resource use while preserving fail-closed
+behavior when a provider hangs.
 
 The process adapter is exercised at its real worker boundary. A test starts a
 real child process that performs one filesystem mutation, injects a crash after

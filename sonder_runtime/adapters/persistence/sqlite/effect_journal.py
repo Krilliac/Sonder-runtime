@@ -10,6 +10,7 @@ import threading
 from dataclasses import replace
 from pathlib import Path
 from threading import Lock
+from types import MappingProxyType
 from typing import Mapping
 
 from sonder_runtime.adapters.persistence.owned_sqlite import transaction as owned_sqlite_transaction
@@ -60,21 +61,7 @@ CREATE TABLE IF NOT EXISTS effect_owner (
 );
 """
 
-_HOST_CAPABILITY_TOKEN = object()
-
-
-class HostReconciliationCapability:
-    """Opaque capability issued only by trusted host composition."""
-
-    __slots__ = ()
-
-    def __init__(self, token) -> None:
-        if token is not _HOST_CAPABILITY_TOKEN:
-            raise TypeError("host reconciliation capability is sealed")
-
-
-def _new_host_reconciliation_capability() -> HostReconciliationCapability:
-    return HostReconciliationCapability(_HOST_CAPABILITY_TOKEN)
+_VERIFIER_SLOTS = threading.BoundedSemaphore(4)
 
 
 class SQLiteEffectJournal:
@@ -82,7 +69,7 @@ class SQLiteEffectJournal:
 
     def __init__(
         self, db_path: str | Path, *, max_detail: int = 4096,
-        host_capability: HostReconciliationCapability | None = None,
+        reconciliation_verifiers: Mapping[str, object] | None = None,
     ) -> None:
         if type(max_detail) is not int or not 1 <= max_detail <= 1 << 20:
             raise ValueError("max_detail must be within 1..1048576")
@@ -90,8 +77,16 @@ class SQLiteEffectJournal:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._max_detail = max_detail
         self._lock = Lock()
-        self._reconciliation_verifiers = {}
-        self._reconciliation_capability = host_capability
+        # This registry is immutable after construction. Production bootstrap
+        # intentionally supplies none until a real provider verifier exists.
+        self._reconciliation_verifiers = MappingProxyType(dict(reconciliation_verifiers or {}))
+        for operation_id, verifier in self._reconciliation_verifiers.items():
+            if (
+                type(operation_id) is not str or not operation_id.strip()
+                or getattr(verifier, "verifier_id", None) is None
+                or not callable(getattr(verifier, "verify", None))
+            ):
+                raise EffectJournalError("invalid immutable reconciliation verifier registry")
         with self._connect() as connection:
             connection.executescript(_DDL)
             columns = {
@@ -258,38 +253,6 @@ class SQLiteEffectJournal:
                     (owner_epoch, run_id, worker_id),
                 )
 
-    def register_reconciliation_verifier(self, capability, verifier) -> None:
-        """Register a host-owned verifier for its declared operation family.
-
-        The journal never accepts a proof supplied directly by a worker or
-        caller.  A verifier must be registered by trusted composition before
-        reconciliation, and each operation id can have only one owner.
-        """
-        if (
-            type(capability) is not HostReconciliationCapability
-            or capability is not self._reconciliation_capability
-        ):
-            raise EffectJournalError("host reconciliation capability is required")
-        verifier_id = getattr(verifier, "verifier_id", None)
-        operation_ids = getattr(verifier, "operation_ids", None)
-        verify = getattr(verifier, "verify", None)
-        if (
-            type(verifier_id) is not str or not verifier_id.strip()
-            or not isinstance(operation_ids, frozenset) or not operation_ids
-            or not callable(verify)
-            or any(type(operation_id) is not str or not operation_id.strip()
-                   for operation_id in operation_ids)
-        ):
-            raise EffectJournalError("invalid host reconciliation verifier")
-        with self._lock:
-            for operation_id in operation_ids:
-                if operation_id in self._reconciliation_verifiers:
-                    raise EffectJournalError(
-                        f"reconciliation verifier already registered for {operation_id}"
-                    )
-            for operation_id in operation_ids:
-                self._reconciliation_verifiers[operation_id] = verifier
-
     def reconcile(self, intent_id: str, *, owner_epoch: int, timeout_seconds: float = 2.0) -> EffectIntent:
         """Apply one registered verifier result and clear the fence atomically.
 
@@ -322,6 +285,8 @@ class SQLiteEffectJournal:
                 raise EffectJournalError(
                     f"no trusted reconciliation verifier for {snapshot.operation_id}"
                 )
+        if not _VERIFIER_SLOTS.acquire(blocking=False):
+            raise EffectJournalError("host reconciliation verifier capacity exhausted")
         result_queue = queue.Queue(maxsize=1)
 
         def run_verifier() -> None:
@@ -329,6 +294,8 @@ class SQLiteEffectJournal:
                 result_queue.put((True, verifier.verify(snapshot)))
             except BaseException as exc:  # transport/provider failures are fenced
                 result_queue.put((False, exc))
+            finally:
+                _VERIFIER_SLOTS.release()
 
         verifier_thread = threading.Thread(
             target=run_verifier, name="sonder-effect-verifier", daemon=True,

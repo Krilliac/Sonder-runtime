@@ -405,14 +405,11 @@ def build_application(
         """Return the single durable journal shared by direct worker adapters."""
         nonlocal worker_effect_journal
         if worker_effect_journal is None:
-            from ..adapters.persistence.sqlite.effect_journal import (
-                SQLiteEffectJournal, _new_host_reconciliation_capability,
-            )
+            from ..adapters.persistence.sqlite.effect_journal import SQLiteEffectJournal
             from ..platform.paths import state_path
 
             worker_effect_journal = SQLiteEffectJournal(
-                state_path("worker-effects.db", "SONDER_WORKER_EFFECTS_DB"),
-                host_capability=_new_host_reconciliation_capability(),
+                state_path("worker-effects.db", "SONDER_WORKER_EFFECTS_DB")
             )
         return worker_effect_journal
 
@@ -816,9 +813,7 @@ def build_application(
         if interactive_lanes is None:
             from ..adapters.persistence.agent_lanes import SQLiteAgentLaneStore
             from ..adapters.persistence.fleet_store import database_path
-            from ..adapters.persistence.sqlite.effect_journal import (
-                SQLiteEffectJournal, _new_host_reconciliation_capability,
-            )
+            from ..adapters.persistence.sqlite.effect_journal import SQLiteEffectJournal
             from ..platform.paths import state_path
             from ..application.agents.interactive_lanes import AgentLaneService
             from ..application.live_context import LiveAgentContextProducer
@@ -851,8 +846,7 @@ def build_application(
                 context_planning=context_planning,
                 live_context=LiveAgentContextProducer.from_config(effective_config),
                 effect_journal=SQLiteEffectJournal(
-                    state_path("agent-effects.db", "SONDER_AGENT_EFFECTS_DB"),
-                    host_capability=_new_host_reconciliation_capability(),
+                    state_path("agent-effects.db", "SONDER_AGENT_EFFECTS_DB")
                 ),
             )
         return interactive_lanes
