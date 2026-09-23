@@ -3300,6 +3300,11 @@ def good_interaction_candidate_page(
     else:
         # A metadata-only page must not accidentally apply embedding-space
         # filters supplied by a vector caller.
+        sql = sql.replace(
+            "i.task_embedding, CAST(i.session_id AS BLOB)",
+            "NULL AS task_embedding, CAST(i.session_id AS BLOB)",
+            1,
+        )
         embedding_model = None
         embedding_revision = None
         embedding_dim = None
