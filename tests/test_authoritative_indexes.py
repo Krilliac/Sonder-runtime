@@ -169,3 +169,79 @@ def test_scoped_index_retrieval_pages_without_silent_loss(tmp_path):
     with pytest.raises(ValueError, match="offset"):
         entities_for_project(conn, "repo-a", offset=-1)
     conn.close()
+
+
+def test_superseding_decision_hides_stale_entity_and_decision_at_valid_time(tmp_path):
+    conn = connect(tmp_path / "memory.db")
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    source.add_fact(conn, "old", "repo-a", "old policy", metadata=AuthoritativeFactMetadata(
+        entities=("parser",), decision={"id": "parser-policy", "value": "old"},
+        valid_from="2026-01-01T00:00:00Z", provenance=("review:old",),
+    ))
+    source.add_fact(conn, "new", "repo-a", "new policy", metadata=AuthoritativeFactMetadata(
+        decision={"id": "parser-policy", "value": "new"}, supersedes="old",
+        valid_from="2026-02-01T00:00:00Z", provenance=("review:new",),
+    ))
+    january = "2026-01-15T00:00:00Z"
+    february = "2026-02-15T00:00:00Z"
+    assert [row["fact_id"] for row in entities_for_project(conn, "repo-a", now=january)] == ["old"]
+    assert [row["fact_id"] for row in decisions_for_project(conn, "repo-a", now=january)] == ["old"]
+    assert entities_for_project(conn, "repo-a", now=february) == []
+    assert [row["fact_id"] for row in decisions_for_project(conn, "repo-a", now=february)] == ["new"]
+
+    assert rebuild_authoritative_fact_indexes(conn, project="repo-a") == 2
+    assert entities_for_project(conn, "repo-a", now=february) == []
+    assert [row["fact_id"] for row in decisions_for_project(conn, "repo-a", now=february)] == ["new"]
+    assert source.delete_fact(conn, "new", "repo-a") is True
+    assert entities_for_project(conn, "repo-a", now=february) == []
+    assert decisions_for_project(conn, "repo-a", now=february) == []
+    conn.close()
+
+
+def test_supersession_does_not_cross_project_scope(tmp_path):
+    conn = connect(tmp_path / "memory.db")
+    first = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    second = SQLiteAuthoritativeFactSource("node-b", project_scope="repo-b")
+    first.add_fact(conn, "old", "repo-a", "repo a policy", metadata=AuthoritativeFactMetadata(
+        entities=("parser",), provenance=("review:a",),
+    ))
+    with pytest.raises(MemoryReplicationError, match="same source and project"):
+        second.add_fact(conn, "new", "repo-b", "repo b policy", metadata=AuthoritativeFactMetadata(
+            entities=("parser",), supersedes="old", provenance=("review:b",),
+        ))
+    assert [row["fact_id"] for row in entities_for_project(conn, "repo-a")] == ["old"]
+    assert entities_for_project(conn, "repo-b") == []
+    assert conn.execute("SELECT COUNT(*) FROM memory_replication_log WHERE project='repo-b'").fetchone()[0] == 0
+    conn.close()
+
+
+def test_supersession_requires_an_indexed_claim_and_acyclic_owned_target(tmp_path):
+    with pytest.raises(MemoryReplicationError, match="indexed claim"):
+        AuthoritativeFactMetadata(supersedes="missing")
+    conn = connect(tmp_path / "memory.db")
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    source.add_fact(conn, "first", "repo-a", "first", metadata=AuthoritativeFactMetadata(
+        entities=("parser",), provenance=("review:first",),
+    ))
+    with pytest.raises(MemoryReplicationError, match="same source and project"):
+        source.add_fact(conn, "orphan", "repo-a", "orphan", metadata=AuthoritativeFactMetadata(
+            entities=("parser",), supersedes="missing", provenance=("review:orphan",),
+        ))
+    with pytest.raises(MemoryReplicationError, match="cannot supersede itself"):
+        source.upsert_fact(conn, "first", "repo-a", "self", metadata=AuthoritativeFactMetadata(
+            entities=("parser",), supersedes="first", provenance=("review:self",),
+        ))
+    source.add_fact(conn, "second", "repo-a", "second", metadata=AuthoritativeFactMetadata(
+        entities=("parser",), supersedes="first", provenance=("review:second",),
+    ))
+    with pytest.raises(MemoryReplicationError, match="silently withdrawn"):
+        source.upsert_fact(conn, "second", "repo-a", "forget link", metadata=AuthoritativeFactMetadata(
+            entities=("parser",), provenance=("review:second-update",),
+        ))
+    with pytest.raises(MemoryReplicationError, match="cycle"):
+        source.upsert_fact(conn, "first", "repo-a", "cycle", metadata=AuthoritativeFactMetadata(
+            entities=("parser",), supersedes="second", provenance=("review:cycle",),
+        ))
+    assert [row["fact_id"] for row in entities_for_project(conn, "repo-a")] == ["second"]
+    assert conn.execute("SELECT COUNT(*) FROM memory_replication_log").fetchone()[0] == 2
+    conn.close()
