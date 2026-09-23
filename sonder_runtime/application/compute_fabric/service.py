@@ -324,6 +324,8 @@ class ComputeFabricService:
                 if request.local_only
                 or not request.allow_remote
                 or request.placement_policy is PlacementPolicy.LOCAL_ONLY
+                or request.placement_policy is PlacementPolicy.RANK_ALL
+                or request.allow_local_fallback
                 else "eligible remote node"
             )
             raise DependencyUnavailable(f"no {scope} is available for this workload")
