@@ -17,6 +17,7 @@ from .memory_policy import MemoryClass, PrivacyClass, TemporalTruth, evaluate_re
 
 MAX_CANDIDATES = 10_000
 MAX_LIMIT = 100
+MAX_QUERY_CHARS = 64_000
 
 
 def _tokens(value: str) -> frozenset[str]:
@@ -55,7 +56,7 @@ class RetrievalQuery:
     include_stale: bool = False
 
     def __post_init__(self) -> None:
-        if not isinstance(self.text, str) or not self.text.strip() or len(self.text) > 4096:
+        if not isinstance(self.text, str) or not self.text.strip() or len(self.text) > MAX_QUERY_CHARS:
             raise ValueError("retrieval query text must be bounded and non-empty")
         if self.mode not in {"hybrid", "exact", "temporal", "decision", "failure", "entity"}:
             raise ValueError("unknown retrieval mode")

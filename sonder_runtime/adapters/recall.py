@@ -11,6 +11,12 @@ import sonder_runtime.adapters.memory_store as memory_store
 from sonder_runtime.application.ports.recall import validate_recall_request
 from sonder_runtime.domain.common.errors import InvalidInput
 from sonder_runtime.domain.memory import rules as _rules
+from sonder_runtime.application.memory.hybrid_retrieval import (
+    HybridMemoryRetriever, MemoryCandidate, RetrievalQuery,
+)
+from sonder_runtime.application.memory.memory_policy import (
+    MemoryClass, PrivacyClass,
+)
 
 
 DEFAULT_MIN_SIM = _rules.DEFAULT_RECALL_MIN_SIM
@@ -149,6 +155,70 @@ def _format(task, response, max_len=MAX_RESP_CHARS):
     return line
 
 
+def _hybrid_order(task, scored, *, project, include_all_projects, limit):
+    """Apply the typed hybrid ranking to already scope-filtered rows.
+
+    SQLite remains responsible for project/session/outcome eligibility. This
+    adapter adds the explainable deterministic ordering without widening that
+    privacy boundary or re-reading unscoped rows.
+    """
+    # The legacy recall port permits an empty query when the caller supplied
+    # its vector. Keep that established ordering rather than making the new
+    # lexical reranker reject a request that already passed port validation.
+    if not task.strip():
+        return scored[:limit]
+    candidates = []
+    rows_by_id = {}
+    now = datetime.now(timezone.utc)
+    query_project = None if include_all_projects else project
+    scope = "project" if query_project is not None else "global"
+    for similarity, rank, row in scored:
+        interaction_id = row.get("id")
+        task_text = row.get("task")
+        if not isinstance(interaction_id, str) or not interaction_id:
+            continue
+        if not isinstance(task_text, str) or not task_text:
+            continue
+        timestamp = row.get("ts")
+        try:
+            created = datetime.fromisoformat(
+                str(timestamp).replace("Z", "+00:00")
+            )
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError, OverflowError):
+            # A malformed stored timestamp must not gain a fabricated
+            # recency advantage over well-formed recall candidates. Preserve
+            # legacy ordering-key rows as recallable evidence.
+            created = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        outcome = row.get("outcome_signal")
+        source = row.get("outcome_source")
+        provenance = tuple(
+            value for value in (
+                f"interaction:{interaction_id}",
+                f"outcome:{outcome}:{source}" if isinstance(outcome, str) and isinstance(source, str) else "",
+            ) if value
+        )
+        memory_project = row.get("project")
+        candidates.append(MemoryCandidate(
+            memory_id=interaction_id,
+            text=task_text,
+            memory_class=MemoryClass.PROJECT if memory_project else MemoryClass.SEMANTIC,
+            created_at=created,
+            confidence=_bounded_confidence(row.get("outcome_reward")) or 0.0,
+            project=memory_project if not include_all_projects else None,
+            privacy=PrivacyClass.PROJECT if memory_project else PrivacyClass.PUBLIC,
+            semantic_score=float(similarity),
+            provenance=provenance,
+        ))
+        rows_by_id[interaction_id] = (similarity, rank, row)
+    ranked = HybridMemoryRetriever().retrieve(
+        candidates,
+        RetrievalQuery(task, mode="hybrid", limit=limit, scope=scope, project=query_project),
+    )
+    return [rows_by_id[item.candidate.memory_id] for item in ranked]
+
+
 def recall_page(conn, task, k=2, embed_fn=None, min_sim=None,
                 qv=None, exclude_session=None, project=None,
                 include_all_projects=False, embedding_model=None,
@@ -226,7 +296,11 @@ def recall_page(conn, task, k=2, embed_fn=None, min_sim=None,
         if _rules.passes_similarity(sim, min_sim):
             scored.append((sim, candidate_rank, row))
     scored.sort(key=lambda item: (-item[0], item[1]))
-    selected = scored[:k]
+    ordered = _hybrid_order(
+        task, scored, project=project,
+        include_all_projects=include_all_projects, limit=k,
+    )
+    selected = ordered[:k]
     formatted = tuple(
         _format(row["task"], row["response"])
         for _, _, row in selected
