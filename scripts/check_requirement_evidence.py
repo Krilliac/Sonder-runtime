@@ -92,10 +92,30 @@ def validate() -> list[str]:
         latest = rows[-1]
         if spec_rows[requirement_id] and latest.get("status") != "verified":
             problems.append(f"spec: checked requirement {requirement_id} is not verified")
+        if not spec_rows[requirement_id] and latest.get("status") == "verified":
+            problems.append(f"spec: verified requirement {requirement_id} is not checked")
         if latest.get("status") == "verified":
             for key in ("baseline_sha", "verified_sha", "evidence"):
                 if not latest.get(key):
                     problems.append(f"ledger: verified {requirement_id} lacks {key}")
+            evidence = latest.get("evidence")
+            if not isinstance(evidence, list):
+                problems.append(
+                    f"ledger: verified {requirement_id} has invalid evidence path"
+                )
+            else:
+                for item in evidence:
+                    path = item if isinstance(item, str) else (
+                        item.get("path") if isinstance(item, dict) else None
+                    )
+                    if not isinstance(path, str) or not path:
+                        problems.append(
+                            f"ledger: verified {requirement_id} has invalid evidence path"
+                        )
+                    elif not (ROOT / path).is_file():
+                        problems.append(
+                            f"ledger: verified {requirement_id} evidence path is missing: {path}"
+                        )
 
     return problems
 
