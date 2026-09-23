@@ -866,9 +866,9 @@
     },
     {
       "checked": false,
-      "claim": "Default direct-worker checkpoint projections persist only content-free effect metadata; raw worker output and request prompts are excluded from the SQLite journal unless an explicit trusted projection is supplied.",
+      "claim": "The production process-start worker family has a host-composed reconciliation verifier that reads terminal success/failure and revision from the durable process job registry, derives a bounded outcome digest, and leaves pending or unknown registry state fenced after restart.",
       "requirement_id": "LOOP-008",
-      "revision": 8,
+      "revision": 9,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "f8b785bf8a0781546baac769c144dad9e3258df77c877d2f806e065239c81ed6",
+    "ledger_sha256": "526b8a5d3e3a9cdc69d6d48d019258f78310c43053c4c922e25c518a3b17904d",
     "spec_sha256": "4797da92d2d1845ce944b2dc32353d52fe7a6e48dfa92593753ca727761ca714"
   }
 }

@@ -4,6 +4,8 @@ from __future__ import annotations
 from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 
 import os
+import hashlib
+import json
 import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
@@ -12,6 +14,9 @@ from typing import Any, Callable
 
 from ...application.capabilities.jobs import JobCancellationResult, JobRegistryService
 from ...application.execution.process_jobs import ProcessJobRequest, ProcessJobStart, ProcessJobWait
+from ...application.execution.effect_journal import (
+    EffectIntent, EffectState, ReconciliationProof,
+)
 from ...application.execution.worker_bindings import AuthenticatedWorkerBinding, journaled_effect
 from ...application.jobs.durable_registry import ProcessTreeCleanupContract
 from ...application.jobs.session_lifecycle import JobRegistryLifecycleAdapter
@@ -24,6 +29,61 @@ from ..extensions.memory_limits import (
     PreparedProcessContainment,
     ProcessContainmentResult,
 )
+
+
+class DurableProcessEffectVerifier:
+    """Host-composed verifier for process-start effects.
+
+    It reads only the durable job registry. Process output, caller text, and
+    an in-memory process handle are never accepted as reconciliation evidence.
+    """
+
+    verifier_id = "durable-process-job-registry-v1"
+    operation_ids = frozenset({"process-start"})
+
+    def __init__(self, registry_getter: Callable[[], Any]) -> None:
+        if not callable(registry_getter):
+            raise TypeError("registry_getter must be callable")
+        self._registry_getter = registry_getter
+
+    def verify(self, intent: EffectIntent) -> ReconciliationProof | None:
+        prefix, separator, job_id = intent.operation_id.partition(":")
+        if prefix != "process-start" or not separator or not job_id.strip():
+            return None
+        registry = self._registry_getter()
+        record = getattr(registry, "poll", lambda _job_id: None)(job_id)
+        identity = getattr(record, "identity", None)
+        status = getattr(getattr(record, "status", None), "value", None)
+        revision = getattr(record, "revision", None)
+        if (
+            identity is None or getattr(identity, "job_id", None) != job_id
+            or status not in {"succeeded", "failed", "cancelled"}
+            or type(revision) is not int or revision < 1
+        ):
+            return None
+        canonical = {
+            "job_id": job_id,
+            "kind": getattr(identity, "kind", ""),
+            "operation_id": getattr(identity, "operation_id", ""),
+            "idempotency_key": getattr(identity, "idempotency_key", ""),
+            "status": status,
+            "revision": revision,
+        }
+        outcome_digest = hashlib.sha256(
+            json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return ReconciliationProof(
+            intent_id=intent.intent_id,
+            operation_id=intent.operation_id,
+            receipt_key=f"process-job:{job_id}:{revision}",
+            outcome_digest=outcome_digest,
+            state=(
+                EffectState.COMPLETED
+                if status == "succeeded" else EffectState.FAILED
+            ),
+            verifier_id=self.verifier_id,
+            external_reference=f"job-registry:{job_id}:{revision}",
+        )
 
 
 class _ProcessSlotLease:
@@ -1087,4 +1147,4 @@ class SubprocessJobProvider:
         return isinstance(exit_code, int) and not isinstance(exit_code, bool)
 
 
-__all__ = ["SubprocessJobProvider"]
+__all__ = ["DurableProcessEffectVerifier", "SubprocessJobProvider"]

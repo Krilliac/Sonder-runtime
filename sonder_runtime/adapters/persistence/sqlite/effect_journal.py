@@ -284,6 +284,11 @@ class SQLiteEffectJournal:
                 return snapshot
             verifier = self._reconciliation_verifiers.get(snapshot.operation_id)
             if verifier is None:
+                for family, candidate in self._reconciliation_verifiers.items():
+                    if snapshot.operation_id.startswith(family + ":"):
+                        verifier = candidate
+                        break
+            if verifier is None:
                 raise EffectJournalError(
                     f"no trusted reconciliation verifier for {snapshot.operation_id}"
                 )
