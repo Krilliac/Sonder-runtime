@@ -9,6 +9,7 @@ import pytest
 
 from sonder_runtime.adapters.memory_store import connect, facts_for_project
 from sonder_runtime.adapters.persistence.sqlite.authoritative_memory import (
+    SQLiteAuthoritativeFactSource,
     migrate_legacy_facts,
     plan_legacy_fact_migration,
 )
@@ -232,6 +233,35 @@ def test_migration_rejects_foreign_tombstone_without_a_fact_row(tmp_path):
     )
     connection.commit()
     with pytest.raises(MemoryReplicationError, match="conflicting authoritative ownership"):
+        plan_legacy_fact_migration(
+            connection, source_id="node-a", project_scope="repo-a",
+        )
+    connection.close()
+
+
+def test_migration_accepts_same_source_tombstone_with_delete_evidence(tmp_path):
+    connection = connect(tmp_path / "same-source-tombstone.db")
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    source.activate(connection)
+    source.add_fact(connection, "gone", "repo-a", "temporary")
+    assert source.delete_fact(connection, "gone", "repo-a") is True
+
+    plan = plan_legacy_fact_migration(
+        connection, source_id="node-a", project_scope="repo-a",
+    )
+    assert plan.rows == ()
+    connection.close()
+
+
+def test_migration_rejects_same_source_tombstone_without_delete_evidence(tmp_path):
+    connection = connect(tmp_path / "missing-delete-evidence.db")
+    connection.execute(
+        "INSERT INTO memory_authoritative_fact_state"
+        "(project,fact_id,source_id,version,tombstoned) VALUES(?,?,?,?,?)",
+        ("repo-a", "gone", "node-a", 2, 1),
+    )
+    connection.commit()
+    with pytest.raises(MemoryReplicationError, match="missing authoritative journal evidence"):
         plan_legacy_fact_migration(
             connection, source_id="node-a", project_scope="repo-a",
         )

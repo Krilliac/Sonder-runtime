@@ -459,6 +459,7 @@ def test_authoritative_fact_source_commits_fact_and_journal_record_together(tmp_
     )
     connection.close()
 
+
     journal = SQLiteMemoryReplicationJournal(
         path,
         source_id="node-a",
@@ -468,6 +469,39 @@ def test_authoritative_fact_source_commits_fact_and_journal_record_together(tmp_
         assert journal.export().records == (record,)
     finally:
         journal.close()
+
+
+def test_interrupted_authoritative_write_rolls_back_and_releases_connection(
+    tmp_path, monkeypatch,
+):
+    from sonder_runtime.adapters.persistence.sqlite import authoritative_memory
+
+    connection = connect(tmp_path / "interrupted-write.db")
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    original_append = authoritative_memory.append_memory_mutations_in_transaction
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt("simulated authoritative interruption")
+
+    monkeypatch.setattr(
+        authoritative_memory, "append_memory_mutations_in_transaction", interrupt,
+    )
+    with pytest.raises(KeyboardInterrupt, match="simulated"):
+        source.add_fact(connection, "fact-1", "repo-a", "must roll back")
+
+    assert connection.in_transaction is False
+    assert facts_for_project(connection, "repo-a") == []
+    assert connection.execute(
+        "SELECT COUNT(*) FROM memory_authoritative_fact_state"
+    ).fetchone()[0] == 0
+
+    monkeypatch.setattr(
+        authoritative_memory, "append_memory_mutations_in_transaction", original_append,
+    )
+    source.add_fact(connection, "fact-1", "repo-a", "retry succeeds")
+    assert connection.in_transaction is False
+    assert facts_for_project(connection, "repo-a")[0]["text"] == "retry succeeds"
+    connection.close()
 
 
 def test_authoritative_fact_source_advances_entity_version_on_explicit_upsert(tmp_path):
