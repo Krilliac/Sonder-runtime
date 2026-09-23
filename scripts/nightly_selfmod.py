@@ -206,6 +206,21 @@ from collections import deque
 payload = json.loads(sys.argv[1])
 root = Path(payload["root"]).resolve()
 
+# Do not let the base process's checkout or user-site imports become part of
+# the held-out truth source. The candidate root and the worker environment are
+# the only project paths allowed into the evaluator interpreter.
+for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE"):
+    os.environ.pop(name, None)
+prefixes = tuple(Path(item).resolve() for item in {sys.prefix, sys.base_prefix})
+sys.path[:] = [
+    str(root),
+    *[
+        item for item in sys.path
+        if item and any(Path(item).resolve() == prefix or prefix in Path(item).resolve().parents
+                        for prefix in prefixes)
+    ],
+]
+
 def digest(path):
     stream = hashlib.sha256()
     with path.open("rb") as handle:
@@ -241,7 +256,11 @@ if target_module:
         raise SystemExit(2)
 environment = os.environ.copy()
 candidate = str(root)
-environment["PYTHONPATH"] = candidate + os.pathsep + environment.get("PYTHONPATH", "")
+environment.pop("PYTHONHOME", None)
+environment.pop("PYTHONUSERBASE", None)
+environment["PYTHONPATH"] = candidate
+environment["PYTHONNOUSERSITE"] = "1"
+environment["PYTHONSAFEPATH"] = "1"
 tail = deque(maxlen=12000)
 captured = [0]
 def drain(stream):
@@ -253,6 +272,22 @@ def drain(stream):
         tail.extend(chunk.decode("utf-8", "replace")[-12000:])
 def output():
     return "".join(tail)
+
+def terminate_tree(pid):
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=10, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+    else:
+        try:
+            os.killpg(pid, 9)
+        except (OSError, AttributeError):
+            pass
 try:
     process = subprocess.Popen(
         [sys.executable, "-m", "pytest", "-q", "-s", "--rootdir", str(suite_root),
@@ -269,6 +304,7 @@ reader.start()
 deadline = time.monotonic() + int(payload["timeout"])
 while process.poll() is None:
     if time.monotonic() >= deadline:
+        terminate_tree(process.pid)
         process.kill()
         process.wait()
         reader.join(timeout=2)
@@ -339,8 +375,12 @@ def _prepare_held_out(target: str, workspace: Path, timeout: int):
         }
     snapshot = tempfile.TemporaryDirectory(prefix="sonder-heldout-")
     suite_root = Path(snapshot.name).resolve()
-    for relative in suites:
-        source = REPO / relative
+    # Snapshot the whole test tree, including fixtures and data files that a
+    # selected suite may import indirectly. Only the selected paths are run;
+    # the complete snapshot prevents accidental fallback to the base checkout.
+    for source in (path for path in (REPO / "tests").rglob("*")
+                   if path.is_file() and "__pycache__" not in path.parts):
+        relative = source.relative_to(REPO).as_posix()
         destination = suite_root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
@@ -348,18 +388,6 @@ def _prepare_held_out(target: str, workspace: Path, timeout: int):
         digest = hashlib.sha256(destination.read_bytes()).hexdigest()
         copied.append({"path": str(destination), "sha256": digest})
         source_paths.append(relative)
-    # The test's own conftest is part of the evaluator input and is checked too.
-    # It is outside the candidate and cannot be in the edit set.
-    conftest = REPO / "tests" / "conftest.py"
-    if conftest.is_file():
-        destination = suite_root / "tests" / "conftest.py"
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(conftest, destination)
-        destination.chmod(0o444)
-        copied.append({
-            "path": str(destination),
-            "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
-        })
     for directory in sorted(
         (path for path in suite_root.rglob("*") if path.is_dir()),
         key=lambda path: len(path.parts), reverse=True,
