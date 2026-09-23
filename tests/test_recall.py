@@ -194,6 +194,23 @@ def test_exact_and_temporal_modes_are_vector_independent():
     ) == ["metadata lane task -> result"]
 
 
+def test_metadata_mode_does_not_load_large_embedding_blob():
+    c = _conn()
+    c.execute(
+        "INSERT INTO interactions"
+        "(id,task,retrieved_ctx,response,tier,task_embedding,task_embedding_dim) "
+        "VALUES(?,?,?,?,?,?,?)",
+        ("huge-vector", "bounded metadata task", "", "result", "sonder", b"x" * (8 * 1024 * 1024), 2_000_000),
+    )
+    ms.record_outcome_row(c, "huge-vector", "tests_passed", 1.0, source="caller")
+
+    assert recall.recall(
+        c, "metadata task", embed_fn=lambda _task: (_ for _ in ()).throw(
+            AssertionError("metadata retrieval must not embed")
+        ), min_sim=0.0, mode="exact",
+    ) == ["bounded metadata task -> result"]
+
+
 def test_recall_quarantines_ambiguous_migrated_session_project():
     c = _conn()
     ms.touch_session(c, "legacy-session", project="project-a")
