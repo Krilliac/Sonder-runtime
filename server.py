@@ -13729,8 +13729,77 @@ def sonder_sessions(limit: int = 20) -> str:
     return "\n".join(lines)
 
 
+def _surface_fact_metadata(
+    entities_json: str = "",
+    decision_json: str = "",
+    valid_from: str = "",
+    valid_until: str = "",
+    supersedes: str = "",
+    provenance_json: str = "",
+):
+    """Decode explicit metadata without inferring policy from fact text."""
+    from sonder_runtime.adapters.persistence.sqlite.authoritative_memory import AuthoritativeFactMetadata
+
+    fields = {
+        "entities_json": entities_json,
+        "decision_json": decision_json,
+        "valid_from": valid_from,
+        "valid_until": valid_until,
+        "supersedes": supersedes,
+        "provenance_json": provenance_json,
+    }
+    if any(not isinstance(value, str) for value in fields.values()):
+        raise ValueError("authoritative metadata inputs must be strings")
+    if not any((entities_json, decision_json, valid_from, valid_until, supersedes, provenance_json)):
+        return None
+
+    def bounded_json(value, label, expected):
+        if not value:
+            return expected()
+        if not isinstance(value, str) or len(value) > 8192:
+            raise ValueError(label + " exceeds the input bound")
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(label + " must be valid JSON") from exc
+        return parsed
+
+    entities = bounded_json(entities_json, "entities_json", list)
+    if not isinstance(entities, list) or len(entities) > 32 or any(
+        not isinstance(item, str) or not item.strip() or len(item) > 160
+        for item in entities
+    ):
+        raise ValueError("entities_json must be a bounded list of identifiers")
+    decision = bounded_json(decision_json, "decision_json", lambda: None)
+    if decision is not None and (
+        not isinstance(decision, dict) or set(decision) != {"id", "value"}
+        or any(not isinstance(item, str) or not item.strip() or len(item) > 2048
+               for item in decision.values())
+    ):
+        raise ValueError("decision_json must contain only bounded id and value")
+    provenance = bounded_json(provenance_json, "provenance_json", list)
+    if not isinstance(provenance, list) or len(provenance) > 32 or any(
+        not isinstance(item, str) or not item.strip() or len(item) > 256
+        for item in provenance
+    ):
+        raise ValueError("provenance_json must be a bounded list of strings")
+    values = {"valid_from": valid_from, "valid_until": valid_until, "supersedes": supersedes}
+    for label, value in values.items():
+        if value and (not isinstance(value, str) or len(value) > 64):
+            raise ValueError(label + " exceeds the input bound")
+    return AuthoritativeFactMetadata(
+        entities=tuple(entities), decision=decision,
+        valid_from=valid_from or None, valid_until=valid_until or None,
+        supersedes=supersedes or None, provenance=tuple(provenance),
+    )
+
+
 @mcp.tool()
-def sonder_remember_fact(text: str, project: str = "") -> str:
+def sonder_remember_fact(
+    text: str, project: str = "", entities_json: str = "",
+    decision_json: str = "", valid_from: str = "", valid_until: str = "",
+    supersedes: str = "", provenance_json: str = "",
+) -> str:
     """Store a durable fact sonder should ALWAYS know for a project.
 
     Unlike lessons (earned from good outcomes), facts are asserted directly and are
@@ -13743,6 +13812,13 @@ def sonder_remember_fact(text: str, project: str = "") -> str:
     text = (text or "").strip()
     if not text:
         return "ERROR: empty fact."
+    try:
+        metadata = _surface_fact_metadata(
+            entities_json, decision_json, valid_from, valid_until,
+            supersedes, provenance_json,
+        )
+    except ValueError as exc:
+        return "ERROR: " + str(exc)
     project_id = _resolve_project(project) or DEFAULT_PROJECT
     emb = embeddings.embed(text)
     if not embeddings.valid_vector(emb):
@@ -13767,9 +13843,41 @@ def sonder_remember_fact(text: str, project: str = "") -> str:
                 "same statement. Use sonder_forget_fact first if it should be "
                 "replaced." % (project_id, n, duplicate.get("id"))
             )
-        uow.memory.add_fact(fact_id, project_id, text, blob)
+        try:
+            uow.memory.add_fact(fact_id, project_id, text, blob, metadata=metadata)
+        except ValueError as exc:
+            # A configured authoritative source owns one exact project scope.
+            # Keep the external tool boundary stable while refusing a scope
+            # widening attempt; do not fall back to the legacy store.
+            return "ERROR: " + str(exc)
         n = uow.memory.count_facts(project_id)
     return "Remembered fact for project '%s' (%d total). id=%s" % (project_id, n, fact_id)
+
+
+@mcp.tool()
+def sonder_authoritative_indexes(
+    project: str = "", entity_id: str = "", decision_id: str = "", now: str = "",
+) -> str:
+    """Retrieve committed, scoped explicit entity/decision fact indexes."""
+    _maybe_live_reload()
+    project_id = _resolve_project(project) or DEFAULT_PROJECT
+    if any(not isinstance(value, str) or len(value) > 160 for value in (entity_id, decision_id, now)):
+        return "ERROR: index selector exceeds the input bound."
+    facade = getattr(_application(), "memory", None)
+    if facade is None:
+        return "ERROR: memory facade is unavailable."
+    try:
+        return json.dumps({
+            "project": project_id,
+            "entities": facade.authoritative_entities(
+                project_id, entity_id=entity_id or None, now=now or None,
+            ),
+            "decisions": facade.authoritative_decisions(
+                project_id, decision_id=decision_id or None, now=now or None,
+            ),
+        }, sort_keys=True, ensure_ascii=True)
+    except (TypeError, ValueError) as exc:
+        return "ERROR: " + str(exc)
 
 
 @mcp.tool()
