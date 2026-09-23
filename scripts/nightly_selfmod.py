@@ -529,6 +529,23 @@ def _objective_target_function(objective: str, rationale: str, source: str) -> s
     return matches[0].name if len(matches) == 1 else None
 
 
+def _proposal_function_inventory(source: str) -> str:
+    """Return compact top-level function names for the proposal prompt.
+
+    Proposal failures were often caused by asking a small local model to find
+    a target in a large module without giving it a stable target vocabulary.
+    This is only guidance: the existing source-grounding and splice checks
+    remain authoritative.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return "(module has no parseable top-level functions)"
+    names = [node.name for node in tree.body
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    return ", ".join(names) or "(module has no top-level functions)"
+
+
 def _objective_is_grounded(objective: str, rationale: str, source: str) -> bool:
     """Compatibility predicate for callers that only need a yes/no answer."""
     return _objective_target_function(objective, rationale, source) is not None
@@ -1024,6 +1041,7 @@ def propose_objective(
         source = path.read_text(encoding="utf-8", errors="replace")
         if len(source) > 60_000:
             continue
+        visible_source = source[:60_000]
         answer = _ask(server, (
             "Here is one Python module from a local AI runtime.\n\n"
             "Find ONE small, concrete defect or clear improvement in it. Good\n"
@@ -1031,11 +1049,15 @@ def propose_objective(
             "is reported as a total when it is really a bounded window, a\n"
             "a missing edge case. Do not propose docstrings, comments, formatting,\n"
             "imports, or style-only changes; the proposal must alter executable behavior.\n\n"
-            "Reply with exactly two lines and nothing else:\n"
+            "The replaceable top-level functions are:\n"
+            "%s\n"
+            "Choose one function from that list and mention its exact name in\n"
+            "the OBJECTIVE or WHY line. Reply with exactly two lines and\n"
+            "nothing else:\n"
             "OBJECTIVE: <one sentence, imperative>\n"
             "WHY: <one sentence naming the concrete wrong behaviour>\n\n"
             "If the module has no such defect, reply exactly: NONE\n\n"
-            "=== %s ===\n%s" % (name, source[:60_000])
+            "=== %s ===\n%s" % (name, _proposal_function_inventory(visible_source), visible_source)
         ), num_predict=300, model=model, num_ctx=num_ctx,
             timeout=min(60, max(1, int(remaining))) if remaining is not None else 60)
         if answer.strip().upper().startswith("NONE"):
