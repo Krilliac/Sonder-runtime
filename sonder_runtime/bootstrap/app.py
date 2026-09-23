@@ -757,6 +757,7 @@ def build_application(
             from ..adapters.persistence.agent_lanes import SQLiteAgentLaneStore
             from ..adapters.persistence.fleet_store import database_path
             from ..application.agents.interactive_lanes import AgentLaneService
+            from ..application.live_context import LiveAgentContextProducer
             sessions = get_session_repository()
             lane_tools = tools
             lane_test_catalog = None
@@ -783,6 +784,8 @@ def build_application(
                 SQLiteAgentLaneStore(database_path(), sessions), sessions, gateway, lane_tools,
                 authorize_grant=authorize_lane_grant,
                 allowed_tools=tuple(item.name for item in lane_tools.graph.registry.list_all()),
+                context_planning=context_planning,
+                live_context=LiveAgentContextProducer(),
             )
         return interactive_lanes
 

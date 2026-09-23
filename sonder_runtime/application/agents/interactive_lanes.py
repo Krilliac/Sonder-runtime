@@ -30,6 +30,11 @@ from ..session.capture import CapturedRequest, SessionCaptureService, _snapshot_
 from ..session.archive import ArchiveReference, SessionContextArchiveService
 from ..tools.gateway_contract import ToolGatewayRequest, ToolScope, ToolPermission
 from ..ports.tool_registry import ToolSchemaSelection
+from ..context_integration import ContextPlanningFacade
+from ..context_planner import CONTEXT_SECTIONS, ModelContext
+from ..context_manifests import ContextRecord
+from ..live_context import LiveAgentContextProducer
+from ...domain.context.priority import ContextItem
 
 _LANE_TOOLS = frozenset(
     {
@@ -182,6 +187,8 @@ class AgentLaneService:
         allowed_tools=None,
         loop=None,
         loop_factory=None,
+        context_planning: ContextPlanningFacade | None = None,
+        live_context: LiveAgentContextProducer | None = None,
     ):
         self.store, self.sessions, self.gateway, self.tools = (
             store,
@@ -234,6 +241,8 @@ class AgentLaneService:
         self._loop_bindings = {}
         self._loop_lock = threading.RLock()
         self._loop_steering_sequence = {}
+        self._context_planning = context_planning
+        self._live_context = live_context
 
     @property
     def loop(self):
@@ -1362,7 +1371,7 @@ class AgentLaneService:
             ),
         }
 
-    def _request(self, lane, messages):
+    def _request(self, lane, messages, *, request_id=None):
         prompt = "\n\n".join("[" + m["author"] + "] " + m["content"] for m in messages)
         if not prompt:
             prompt = "Continue from the recorded tool result."
@@ -1401,6 +1410,67 @@ class AgentLaneService:
                 + "\nVisible tool schemas (only these tools may be requested): "
                 + rendered
             )
+        if self._context_planning is not None and self._live_context is not None:
+            live = self._live_context.refresh(Path(lane["workspace_root"]))
+            if not live.complete:
+                # Keep the failure visible to the model and operators, while
+                # refusing to claim a reusable prefix for incomplete inputs.
+                system += "\nLive stable context unavailable: " + live.reason
+            else:
+                base = ContextRecord(
+                    "agent-system", "stable_instructions", system,
+                    "agent-lane-system", ordinal=0, stable=True,
+                )
+                records = (base,) + tuple(
+                    ContextRecord(
+                        record.item_id, record.section, record.content,
+                        record.source, ordinal=index + 1, stable=True,
+                    )
+                    for index, record in enumerate(live.records)
+                )
+                items = {section: [] for section in CONTEXT_SECTIONS}
+                for record in records:
+                    section = record.section if record.section in items else "policy"
+                    items[section].append(ContextItem(
+                        record.item_id, section,
+                        max(1, (len(record.content.encode("utf-8")) + 3) // 4),
+                        100, record.source, protected=True, ordinal=record.ordinal,
+                    ))
+                budgets = {section: 8192 for section in CONTEXT_SECTIONS}
+                try:
+                    assembly = self._context_planning.assemble(
+                        ModelContext(lane["tier"], 32768, min(
+                            max(1, lane["max_output_tokens"]), 32767
+                        )),
+                        items, budgets, records=records,
+                        prefix_version="agent-lane-v1",
+                        tokenizer="provider-default",
+                        template="agent-lane-system-v1",
+                        system_prefix=system,
+                        visible_tool_schemas=(schemas if selection is not None else ()),
+                        project_policy={
+                            "workspace_root": lane["workspace_root"],
+                            "allowed_tools": tuple(sorted(lane["allowed_tools"])),
+                        },
+                        request_id=request_id or "pending-agent-request",
+                        replay_metadata={
+                            "workspace_root": lane["workspace_root"],
+                            "producer": "live-agent-context",
+                            "producer_status": live.reason,
+                            "producer_digest": live.digest,
+                        },
+                    )
+                    if assembly.prefix is None or any(
+                        selection.emergency_overflow
+                        for selection in assembly.selections.values()
+                    ):
+                        system += "\nLive stable context exceeded the bounded prefix budget"
+                    else:
+                        system += "\nAuthoritative project context:\n" + "\n\n".join(
+                            record.content for record in live.records
+                        )
+                except (TypeError, ValueError) as exc:
+                    system += "\nLive stable context unavailable: " + type(exc).__name__
         return ModelRequest(
             prompt,
             tier=lane["tier"],
@@ -1578,8 +1648,8 @@ class AgentLaneService:
                     if self._consume_response(lane_id, run_context, started):
                         break
                     continue
-                request = self._request(lane, messages)
                 request_id = "request-" + uuid.uuid4().hex
+                request = self._request(lane, messages, request_id=request_id)
                 turn_id = lane["attempt_id"] + "-" + str(lane["used_steps"] + 1)
                 with self._transaction(run_context, lane_id=lane_id) as tx:
                     fresh = tx.lane(lane_id)
