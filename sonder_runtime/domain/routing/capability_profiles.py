@@ -40,6 +40,7 @@ class CapabilityProfile:
     latency_ms: int = 0
     context_tokens: int = 1
     escalation_rank: int = 0
+    backend: str = "local"
 
     def __post_init__(self) -> None:
         if not self.model.strip():
@@ -48,6 +49,8 @@ class CapabilityProfile:
             raise ValueError("quality must be between 0 and 1")
         if self.latency_ms < 0 or self.context_tokens <= 0 or self.escalation_rank < 0:
             raise ValueError("profile bounds are invalid")
+        if not isinstance(self.backend, str) or not self.backend.strip():
+            raise ValueError("backend must be non-empty")
         object.__setattr__(self, "capabilities", frozenset(self.capabilities))
 
     def supports(self, required: frozenset[Capability]) -> bool:
@@ -67,6 +70,7 @@ class CapabilityProfile:
             "latency_ms": self.latency_ms,
             "context_tokens": self.context_tokens,
             "escalation_rank": self.escalation_rank,
+            "backend": self.backend,
         }
 
     def digest(self) -> str:
@@ -95,6 +99,7 @@ class CapabilityProfile:
             latency_ms=value.get("latency_ms", 0),
             context_tokens=value.get("context_tokens", 1),
             escalation_rank=value.get("escalation_rank", 0),
+            backend=value.get("backend", "local"),
         )
 
 

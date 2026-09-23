@@ -240,6 +240,7 @@ def test_generate_preserves_backend_measured_phases(monkeypatch):
             "total_duration": 4_000_000_000,
             "load_duration": 500_000_000,
             "prompt_eval_count": 20,
+            "prompt_eval_cached_count": 12,
             "prompt_eval_duration": 2_000_000_000,
             "eval_count": 10,
             "eval_duration": 1_000_000_000,
@@ -252,6 +253,9 @@ def test_generate_preserves_backend_measured_phases(monkeypatch):
     assert response.telemetry.backend_total_ms == 4000.0
     assert response.telemetry.load_ms == 500.0
     assert response.telemetry.prompt_tokens_per_second == 10.0
+    assert response.telemetry.prompt_tokens == 20
+    assert response.telemetry.prompt_cached_tokens == 12
+    assert response.telemetry.prompt_uncached_tokens == 8
     assert response.telemetry.output_tokens_per_second == 10.0
     # A load duration is evidence of elapsed work, not a standardized cold flag.
     assert response.telemetry.load_state is None

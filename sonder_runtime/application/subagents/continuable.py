@@ -164,7 +164,7 @@ class ContinuableSubagentService:
 
     def spawn(self, request: SubagentRequest, context: OperationContext, runner: Runner) -> SubagentHandle:
         child_id = request.child_id or f"child-{uuid4().hex}"
-        request = SubagentRequest(request.parent_id, request.prompt, request.budget, child_id, request.metadata)
+        request = SubagentRequest(request.parent_id, request.prompt, request.budget, child_id, request.metadata, request.resume_key, request.idempotency_key)
         record = self._repository.create(ContinuableRecord(request))
         control = _Cancellation()
         with self._lock:

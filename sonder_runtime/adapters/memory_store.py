@@ -3177,9 +3177,12 @@ def _decode_recall_cursor(value):
 def good_interaction_candidate_page(
     conn, exclude_session=None, project=None, include_all_projects=False,
     *, embedding_model=None, embedding_revision=None, embedding_dim=None,
+    require_embedding=True,
+    max_created_at=None,
     cursor=None, row_limit=RECALL_CANDIDATE_ROW_LIMIT,
     byte_limit=RECALL_CANDIDATE_BYTE_LIMIT,
     time_limit_s=RECALL_CANDIDATE_TIME_LIMIT_S, cancel_check=None,
+    _outcome_kind="good",
 ):
     """Return a bounded deterministic recall-candidate page.
 
@@ -3187,13 +3190,17 @@ def good_interaction_candidate_page(
     are most likely to match the current code, model revision, and operational
     constraints. Older windows remain reachable with the exclusive opaque
     timestamp/id cursor. Project/session/outcome/embedding-space filters run in SQLite
-    *before* the window, so unrelated rows cannot consume its budget.
+    *before* the window, so unrelated rows cannot consume its budget. Metadata
+    lanes may set ``require_embedding=False``; that keeps the same bounded
+    project/session/outcome query while allowing rows without vectors.
 
     ``incomplete`` is explicit whenever rows, decoded bytes, or elapsed time
     stop enumeration. The query uses recall/project and outcome indexes; no
     content or embedding backfill is required.
     """
     include_all_projects = include_all_projects is True
+    if _outcome_kind not in {"good", "failure"}:
+        raise ValueError("recall candidate outcome kind is invalid")
     if isinstance(row_limit, bool) or not isinstance(row_limit, int):
         raise ValueError("recall candidate row limit must be an integer")
     if isinstance(byte_limit, bool) or not isinstance(byte_limit, int):
@@ -3203,6 +3210,12 @@ def good_interaction_candidate_page(
     row_limit = max(1, min(RECALL_CANDIDATE_ROW_LIMIT, row_limit))
     byte_limit = max(1, min(RECALL_CANDIDATE_BYTE_LIMIT, byte_limit))
     time_limit_s = max(0.0, min(RECALL_CANDIDATE_TIME_LIMIT_S, float(time_limit_s)))
+    if not isinstance(require_embedding, bool):
+        raise ValueError("require_embedding must be boolean")
+    if max_created_at is not None and (
+        not isinstance(max_created_at, str) or not max_created_at.strip()
+    ):
+        raise ValueError("max_created_at must be a non-empty timestamp")
     cursor_boundary = _decode_recall_cursor(cursor) if cursor is not None else None
 
     good_signals = tuple(sorted(
@@ -3217,6 +3230,54 @@ def good_interaction_candidate_page(
         for signal in good_signals
         for value in (signal, memory_rules.reward_score(signal))
     )
+    if _outcome_kind == "failure":
+        outcome_select = (
+            "(SELECT CAST(failed.signal AS BLOB) FROM outcomes failed "
+            "WHERE failed.interaction_id=i.id AND failed.signal='failed' "
+            "ORDER BY failed.rowid ASC LIMIT 1) AS outcome_signal, "
+            "(SELECT CAST(failed.source AS BLOB) FROM outcomes failed "
+            "WHERE failed.interaction_id=i.id AND failed.signal='failed' "
+            "ORDER BY failed.rowid ASC LIMIT 1) AS outcome_source, "
+            "(SELECT failed.reward FROM outcomes failed "
+            "WHERE failed.interaction_id=i.id AND failed.signal='failed' "
+            "ORDER BY failed.rowid ASC LIMIT 1) AS outcome_reward "
+        )
+        outcome_filter = (
+            "AND EXISTS (SELECT 1 FROM outcomes failed "
+            "WHERE failed.interaction_id=i.id AND failed.signal='failed' "
+            "AND typeof(failed.reward) IN ('integer','real') "
+            "AND failed.reward=?) "
+        )
+        outcome_params = [memory_rules.reward_score("failed")]
+    else:
+        outcome_select = (
+            "(SELECT CAST(good.signal AS BLOB) FROM outcomes good "
+            "WHERE good.interaction_id=i.id ORDER BY good.rowid ASC LIMIT 1) "
+            "AS outcome_signal, "
+            "(SELECT CAST(good.source AS BLOB) FROM outcomes good "
+            "WHERE good.interaction_id=i.id ORDER BY good.rowid ASC LIMIT 1) "
+            "AS outcome_source, "
+            "(SELECT good.reward FROM outcomes good "
+            "WHERE good.interaction_id=i.id ORDER BY good.rowid ASC LIMIT 1) "
+            "AS outcome_reward "
+        )
+        outcome_filter = (
+            "AND EXISTS (SELECT 1 FROM outcomes good "
+            "WHERE good.interaction_id=i.id AND good.signal IN (%s) "
+            "AND typeof(good.reward) IN ('integer','real') "
+            "AND good.reward=CASE good.signal %s END) "
+            "AND NOT EXISTS (SELECT 1 FROM outcomes bad "
+            "WHERE bad.interaction_id=i.id AND "
+            "(bad.signal NOT IN (%s) OR bad.signal IS NULL "
+            "OR typeof(bad.reward) NOT IN ('integer','real') "
+            "OR bad.reward!=CASE bad.signal %s END OR bad.reward<?))"
+            % (placeholders, reward_case, placeholders, reward_case)
+        )
+        outcome_params = [
+            *good_signals, *canonical_rewards,
+            *good_signals, *canonical_rewards,
+            memory_rules.GOOD_THRESHOLD,
+        ]
     sql = (
         "SELECT CAST(i.ts AS BLOB) AS candidate_ts, "
         "CAST(i.id AS BLOB) AS candidate_cursor_id, "
@@ -3231,16 +3292,8 @@ def good_interaction_candidate_page(
         "CAST(i.task_embedding_revision AS BLOB) AS task_embedding_revision, "
         "i.task_embedding_dim, CASE WHEN NULLIF(i.project,'') IS NULL "
         "THEN NULL ELSE CAST(i.project AS BLOB) END AS project, "
-        "(SELECT CAST(good.signal AS BLOB) FROM outcomes good "
-        "WHERE good.interaction_id=i.id ORDER BY good.rowid ASC LIMIT 1) "
-        "AS outcome_signal, "
-        "(SELECT CAST(good.source AS BLOB) FROM outcomes good "
-        "WHERE good.interaction_id=i.id ORDER BY good.rowid ASC LIMIT 1) "
-        "AS outcome_source, "
-        "(SELECT good.reward FROM outcomes good "
-        "WHERE good.interaction_id=i.id ORDER BY good.rowid ASC LIMIT 1) "
-        "AS outcome_reward "
-        "FROM interactions i WHERE i.task_embedding IS NOT NULL "
+        + outcome_select
+        + "FROM interactions i WHERE 1=1 "
         "AND typeof(i.id)='text' AND length(i.id) BETWEEN 1 AND 256 "
         "AND typeof(i.ts)='text' AND length(i.ts) BETWEEN 1 AND 64 "
         "AND typeof(i.task)='text' AND length(i.task)<=? "
@@ -3255,32 +3308,36 @@ def good_interaction_candidate_page(
         "AND (i.task_embedding_revision IS NULL OR "
         "(typeof(i.task_embedding_revision)='text' "
         "AND length(i.task_embedding_revision)<=256)) "
-        "AND typeof(i.task_embedding)='blob' "
-        "AND length(i.task_embedding) BETWEEN 4 AND ? "
-        "AND typeof(i.task_embedding_dim)='integer' "
-        "AND i.task_embedding_dim>0 "
-        "AND length(i.task_embedding)=i.task_embedding_dim*4 "
-        "AND EXISTS (SELECT 1 FROM outcomes good "
-        "WHERE good.interaction_id=i.id AND good.signal IN (%s) "
-        "AND typeof(good.reward) IN ('integer','real') "
-        "AND good.reward=CASE good.signal %s END) "
-        "AND NOT EXISTS (SELECT 1 FROM outcomes bad "
-        "WHERE bad.interaction_id=i.id AND "
-        "(bad.signal NOT IN (%s) OR bad.signal IS NULL "
-        "OR typeof(bad.reward) NOT IN ('integer','real') "
-        "OR bad.reward!=CASE bad.signal %s END OR bad.reward<?))"
-        % (placeholders, reward_case, placeholders, reward_case)
+        + outcome_filter
     )
     params = [
         RECALL_RESPONSE_PREFIX_CHARS,
         RECALL_MAX_STORED_TASK_CHARS,
-        RECALL_MAX_EMBEDDING_BYTES,
-        *good_signals,
-        *canonical_rewards,
-        *good_signals,
-        *canonical_rewards,
-        memory_rules.GOOD_THRESHOLD,
+        *outcome_params,
     ]
+    if require_embedding:
+        sql = sql.replace(
+            "FROM interactions i WHERE 1=1 ",
+            "FROM interactions i WHERE i.task_embedding IS NOT NULL "
+            "AND typeof(i.task_embedding)='blob' "
+            "AND length(i.task_embedding) BETWEEN 4 AND ? "
+            "AND typeof(i.task_embedding_dim)='integer' "
+            "AND i.task_embedding_dim>0 "
+            "AND length(i.task_embedding)=i.task_embedding_dim*4 ",
+            1,
+        )
+        params.insert(2, RECALL_MAX_EMBEDDING_BYTES)
+    else:
+        # A metadata-only page must not accidentally apply embedding-space
+        # filters supplied by a vector caller.
+        sql = sql.replace(
+            "i.task_embedding, CAST(i.session_id AS BLOB)",
+            "NULL AS task_embedding, CAST(i.session_id AS BLOB)",
+            1,
+        )
+        embedding_model = None
+        embedding_revision = None
+        embedding_dim = None
     if exclude_session:
         sql += " AND (i.session_id IS NULL OR i.session_id != ?)"
         params.append(exclude_session)
@@ -3294,7 +3351,9 @@ def good_interaction_candidate_page(
             if project == "":
                 sql += " AND 0"
             else:
-                sql += " AND i.project=?"
+                # A migrated row may carry a plausible project string without
+                # proof that the interaction originally belonged to it.
+                sql += " AND i.project=? AND i.project_explicit=1"
                 params.append(project)
     if embedding_model:
         sql += " AND i.task_embedding_model=?"
@@ -3305,6 +3364,9 @@ def good_interaction_candidate_page(
     if embedding_dim is not None:
         sql += " AND i.task_embedding_dim=?"
         params.append(embedding_dim)
+    if max_created_at is not None:
+        sql += " AND datetime(i.ts) IS NOT NULL AND datetime(i.ts)<=datetime(?)"
+        params.append(max_created_at)
     if cursor_boundary is not None:
         sql += " AND (i.ts<? OR (i.ts=? AND i.id<?))"
         params.extend((
@@ -3415,6 +3477,33 @@ def good_interaction_candidate_page(
         termination=termination,
         rows_examined=examined,
         bytes_loaded=loaded_bytes,
+    )
+
+
+def failed_interaction_candidate_page(
+    conn, exclude_session=None, project=None, include_all_projects=False,
+    *, embedding_model=None, embedding_revision=None, embedding_dim=None,
+    require_embedding=False, max_created_at=None, cursor=None,
+    row_limit=RECALL_CANDIDATE_ROW_LIMIT,
+    byte_limit=RECALL_CANDIDATE_BYTE_LIMIT,
+    time_limit_s=RECALL_CANDIDATE_TIME_LIMIT_S, cancel_check=None,
+):
+    """Return bounded project/session-scoped interactions with failed evidence.
+
+    Failure history is deliberately metadata-only: it does not load or filter
+    on embeddings, and a row remains eligible when it also has a later good
+    signal. Callers must label these rows as failure evidence; this adapter
+    never promotes them into successful-solution candidates.
+    """
+    if require_embedding is not False:
+        raise ValueError("failure recall cannot require embeddings")
+    return good_interaction_candidate_page(
+        conn, exclude_session, project=project,
+        include_all_projects=include_all_projects,
+        require_embedding=False, max_created_at=max_created_at,
+        cursor=cursor, row_limit=row_limit, byte_limit=byte_limit,
+        time_limit_s=time_limit_s, cancel_check=cancel_check,
+        _outcome_kind="failure",
     )
 
 def good_interactions_with_embeddings(

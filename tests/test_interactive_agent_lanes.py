@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from threading import Event, Thread
+import json
 import pytest
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelResponse
@@ -510,14 +511,14 @@ def test_tool_request_uses_scoped_typed_gateway_and_records_artifact(env):
     )
     from sonder_runtime.domain.tools.descriptors import ToolEffect
 
-    service, _, _, model, context, root = env
+    service, _, sessions, model, context, root = env
     observed = []
 
     class Executor:
         def execute(self, descriptor, call, ctx, execution_class):
             observed.append((call, ctx))
             return ToolExecutionResult(
-                tool_name=descriptor.name, success=True, output="created"
+                tool_name=descriptor.name, success=True, output="created " * 500
             )
 
     descriptor = ToolDescriptor(
@@ -534,6 +535,14 @@ def test_tool_request_uses_scoped_typed_gateway_and_records_artifact(env):
         Executor(),
         policy=ResourcePolicy([PolicyRule("allow", Decision.ALLOW, tool="write_file")]),
     )
+    gateway_requests = []
+    execute = service.tools.execute
+
+    def capture_gateway_request(request):
+        gateway_requests.append(request)
+        return execute(request)
+
+    service.tools.execute = capture_gateway_request
     lane = spawn(env)["lane"]["id"]
     replies = iter(
         [
@@ -548,6 +557,18 @@ def test_tool_request_uses_scoped_typed_gateway_and_records_artifact(env):
 
     model.generate = generate
     service.run_pending(lane, context)
+    first_request = model.requests[0][0]
+    assert "Visible tool schemas" in first_request.system
+    assert '"name": "write_file"' in first_request.system
+    assert '"path"' in first_request.system
+    assert len(gateway_requests) == 1
+    visible_selection_id = next(
+        line.split(": ", 1)[1]
+        for line in first_request.system.splitlines()
+        if line.startswith("Tool schema selection id: ")
+    )
+    assert gateway_requests[0].schema_selection.selection_id == visible_selection_id
+    assert gateway_requests[0].schema_selection.visible_names == frozenset({"write_file"})
     assert len(observed) == 1
     assert observed[0][0].arguments["path"] == str(
         (root / "child" / "result.txt").resolve()
@@ -556,6 +577,160 @@ def test_tool_request_uses_scoped_typed_gateway_and_records_artifact(env):
     assert service.reports("parent", context)["reports"][0]["artifacts"] == [
         str(root / "child" / "result.txt")
     ]
+    service._history(service.store.read_lane(lane))
+    archive_events = [
+        event for event in sessions.read_range(
+            service.store.read_lane(lane)["session_id"], limit=100
+        ) if event.event_type == "context.archive.created"
+    ]
+    assert len(archive_events) == 1
+    assert archive_events[0].payload["source_kind"] == "agent_lane"
+    assert archive_events[0].payload["project_id"] == str((root / "child").resolve())
+    assert "created" not in str(archive_events[0].payload)
+    recovered = service.retrieve_archived_tool(
+        lane, archive_events[0].payload["archive_id"], context
+    )
+    assert recovered["payload"]["output"] == "created " * 500
+
+
+def test_lane_history_rejects_archive_reference_from_another_project(env):
+    service, _, sessions, _, context, root = env
+    lane = spawn(env)["lane"]
+    sessions.append(
+        lane["session_id"],
+        "context.archive.created",
+        {
+            "archive_id": "archive-other",
+            "project_id": str((root / "other").resolve()),
+            "source_kind": "agent_lane",
+            "source_lane_id": lane["id"],
+            "source_event_id": "event-other",
+            "source_sequence": 1,
+            "source_event_type": "tool.result",
+            "sha256": "0" * 64,
+            "byte_count": 1,
+        },
+    )
+
+    assert all("archive-other" not in item["content"] for item in service._history(lane))
+
+
+def test_archive_projection_failure_does_not_rerun_committed_tool(env, monkeypatch):
+    service, _, _, _, context, _ = env
+    lane_id = spawn(env)["lane"]["id"]
+    lane = service.store.read_lane(lane_id)
+    with service.store.transaction() as tx:
+        tx.emit(
+            lane, "tool.result",
+                {"name": "read_file", "output": "already committed " * 500, "call_id": "c1"},
+        )
+    monkeypatch.setattr(
+        service._archive, "archive_external_tool_output",
+        lambda **kwargs: (_ for _ in ()).throw(OSError("archive unavailable")),
+    )
+
+    with pytest.raises(OSError, match="archive unavailable"):
+        service._history(lane)
+    events, _ = service.store.events(lane_id, 0, 100)
+    assert any(event["event_type"] == "tool.result" for event in events)
+
+
+def test_small_lane_tool_result_stays_inline_without_archive_reference(env):
+    service, _, sessions, _, context, _ = env
+    lane_id = spawn(env)["lane"]["id"]
+    lane = service.store.read_lane(lane_id)
+    with service.store.transaction() as tx:
+        tx.emit(lane, "tool.result", {"name": "read_file", "output": "small", "call_id": "c1"})
+
+    history = service._history(lane)
+
+    assert any("small" in item["content"] for item in history)
+    assert sessions.search(
+        session_id=lane["session_id"], event_type="context.archive.created", limit=10
+    ) == ()
+
+
+def test_recent_tool_context_cap_applies_to_matched_completed_calls(env):
+    service, _, sessions, _, context, _ = env
+    lane_id = spawn(env)["lane"]["id"]
+    lane = service.store.read_lane(lane_id)
+    with service.store.transaction() as tx:
+        for index in range(10):
+            tx.emit(lane, "tool.result", {
+                "name": "read_file", "output": f"result-{index}",
+                "call_id": f"c{index}",
+            })
+    for index in range(10):
+        sessions.append(
+            lane["session_id"], "tool.completed", {"call_id": f"c{index}"},
+            event_id=f"completed-{index}",
+        )
+
+    history = service._history(lane)
+    tool_content = [item["content"] for item in history if "Tool result (data)" in item["content"]]
+    assert len(tool_content) == 8
+    assert "result-2" in tool_content[0]
+    assert "result-9" in tool_content[-1]
+
+
+def test_tool_result_without_completion_keeps_request_order(env):
+    service, _, sessions, _, context, _ = env
+    lane_id = spawn(env)["lane"]["id"]
+    lane = service.store.read_lane(lane_id)
+    sessions.append(lane["session_id"], "tool.requested", {"call_id": "c1"})
+    with service.store.transaction() as tx:
+        tx.emit(lane, "tool.result", {
+            "name": "read_file", "output": "committed output", "call_id": "c1",
+        })
+    sessions.append(lane["session_id"], "model.response", {"content": "later reply"})
+
+    history = service._history(lane)
+
+    assert next(i for i, item in enumerate(history)
+                if "committed output" in item["content"]) < next(
+                    i for i, item in enumerate(history)
+                    if item["content"] == "later reply")
+
+
+def test_recent_lane_tool_context_is_capped_ordered_and_survives_canonical_prefix(
+    env,
+):
+    service, _, sessions, _, context, _ = env
+    lane_id = spawn(env)["lane"]["id"]
+    lane = service.store.read_lane(lane_id)
+    for index in range(1_050):
+        sessions.append(
+            lane["session_id"], "model.response",
+            {"content": f"historical-{index}"}, event_id=f"history-{index}",
+        )
+    with service.store.transaction() as tx:
+        for index in range(10):
+            tx.emit(
+                lane, "tool.result",
+                {"name": "read_file", "output": "payload-" + ("x" * 3_000),
+                 "call_id": f"c{index}"},
+            )
+
+    history = service._history(lane)
+    pointers = [
+        item["content"] for item in history if "retrieve by reference" in item["content"]
+    ]
+
+    assert len(pointers) == 8
+    archive_events = sessions.search(
+        session_id=lane["session_id"], event_type="context.archive.created", limit=32
+    )
+    expected = [
+        "retrieve by reference " + event.payload["archive_id"]
+        for event in sorted(archive_events, key=lambda event: event.payload["source_sequence"])[-8:]
+    ]
+    assert [pointer.split("Tool result archived for this project; ", 1)[1].rstrip(".") for pointer in pointers] == expected
+    assert len(archive_events) == 10
+    assert any(item["content"] == "historical-1049" for item in history)
+    assert any(
+        event.payload.get("content") == "historical-0"
+        for event in sessions.read_range(lane["session_id"], limit=16)
+    )
 
 
 def test_model_tool_cannot_address_parent_workspace(env):
@@ -756,6 +931,217 @@ def test_wait_admission_shared_across_graphs_and_released(env):
     for thread in threads:
         thread.join(5)
     assert other.wait(lane, context, timeout_seconds=0)["lane"]["id"] == lane
+
+
+def test_schedule_deduplicates_pressure_and_releases_after_worker_finishes(env):
+    service, _, _, _, context, _ = env
+    lane = spawn(env)["lane"]["id"]
+    submitted = []
+
+    class Pool:
+        def submit(self, fn, *args):
+            submitted.append((fn, args))
+
+    service._pool = Pool()
+    calls = []
+    service.run_pending = lambda lane_id, worker_context: calls.append(
+        (lane_id, worker_context)
+    )
+
+    service._schedule(lane, context)
+    service._schedule(lane, context)
+    assert len(submitted) == 1
+    assert lane in service._scheduled_lanes
+
+    fn, args = submitted.pop()
+    fn(*args)
+    assert calls and lane not in service._scheduled_lanes
+
+    # A later resume/notification can schedule the lane again after the
+    # original worker has released its admission marker.
+    service._schedule(lane, context)
+    assert len(submitted) == 1
+
+
+def test_schedule_replays_wakeup_during_worker_terminal_boundary(env):
+    service, _, _, _, context, _ = env
+    lane = spawn(env)["lane"]["id"]
+    submitted = []
+
+    class Pool:
+        def submit(self, fn, *args):
+            submitted.append((fn, args))
+
+    service._pool = Pool()
+    entered = Event()
+    release = Event()
+
+    def active_worker(lane_id, worker_context):
+        entered.set()
+        assert release.wait(5)
+
+    service.run_pending = active_worker
+    service._schedule(lane, context)
+    first, args = submitted.pop()
+    worker = Thread(target=first, args=args)
+    worker.start()
+    assert entered.wait(5)
+
+    # This is the notification that used to be lost while the worker was
+    # completing its current turn.
+    fresh_context = replace(context, correlation_id="fresh-notification")
+    service._schedule(lane, fresh_context)
+    assert not submitted
+    release.set()
+    worker.join(5)
+    assert not worker.is_alive()
+    assert len(submitted) == 1
+
+    follow_up, follow_up_args = submitted.pop()
+    assert follow_up_args[1].correlation_id == "fresh-notification"
+    follow_up(*follow_up_args)
+    assert not service._scheduled_lanes
+    assert not service._scheduled_dirty
+
+
+def test_failed_wakeup_submission_keeps_latest_context_for_recovery(env):
+    service, _, _, _, context, _ = env
+    lane = spawn(env)["lane"]["id"]
+    fresh = replace(context, correlation_id="newer-admission")
+    submitted = []
+
+    class FailingPool:
+        def submit(self, fn, *args):
+            if submitted:
+                raise OSError("pool temporarily unavailable")
+            submitted.append((fn, args))
+
+    service._pool = FailingPool()
+    service.run_pending = lambda lane_id, worker_context: service._schedule(
+        lane_id, fresh
+    )
+    service._schedule(lane, context)
+    fn, args = submitted[0]
+    fn(*args)
+
+    assert service._capacity_waiters[lane].correlation_id == "newer-admission"
+    assert lane not in service._scheduled_dirty
+
+    recovered = []
+
+    class WorkingPool:
+        def submit(self, fn, *args):
+            recovered.append((fn, args))
+
+    service._pool = WorkingPool()
+    service._done()
+    assert len(recovered) == 1
+    assert recovered[0][1][1].correlation_id == "newer-admission"
+
+
+def test_old_replay_cannot_replace_newer_scheduled_notification(env):
+    service, _, _, _, context, _ = env
+    lane = spawn(env)["lane"]["id"]
+    newer = replace(context, correlation_id="newer-admission")
+    submitted = []
+
+    class Pool:
+        def submit(self, fn, *args):
+            submitted.append((fn, args))
+
+    service._pool = Pool()
+    service._schedule(lane, newer)
+    # The previous worker's replay arrives after the external notification
+    # reserved this lane but before that newer worker starts.
+    service._schedule(lane, context, replay=True)
+
+    assert len(submitted) == 1
+    assert service._scheduled_contexts[lane] is newer
+    assert lane not in service._scheduled_dirty
+
+
+def test_capacity_blocked_lane_is_retried_when_active_slot_releases(env):
+    service, store, _, _, context, root = env
+    lanes = []
+    for index in range(5):
+        workspace = root / f"capacity-{index}"
+        workspace.mkdir()
+        lanes.append(
+            service.spawn(
+                command_id=f"capacity-{index}",
+                parent_session_id="parent",
+                task="capacity probe",
+                workspace_root=str(workspace),
+                context=context,
+            )["lane"]["id"]
+        )
+    with store.transaction() as tx:
+        for lane_id in lanes[:4]:
+            lane = tx.lane(lane_id)
+            lane.update(status="running", owner="busy")
+            tx.save(lane)
+
+    submitted = []
+
+    class Pool:
+        def submit(self, fn, *args):
+            submitted.append((fn, args))
+
+    service._pool = Pool()
+    service._schedule(lanes[4], context)
+    fn, args = submitted.pop()
+    fn(*args)
+    assert lanes[4] in service._capacity_waiters
+
+    with store.transaction() as tx:
+        lane = tx.lane(lanes[0])
+        lane.update(status="completed", owner="")
+        tx.save(lane)
+    service._done()
+    assert len(submitted) == 1
+
+
+def test_capacity_waiter_cleans_stale_context_without_poisoning_done(env):
+    service, _, _, _, context, _ = env
+    lane = spawn(env)["lane"]["id"]
+    service._capacity_waiters[lane] = replace(context, deadline_monotonic=0.0)
+
+    service._done()
+
+    assert lane not in service._capacity_waiters
+
+
+def test_active_lane_count_covers_history_beyond_first_page(env):
+    _, store, _, _, context, _ = env
+    with store.transaction() as tx:
+        for index in range(260):
+            tx.conn.execute(
+                "INSERT INTO agent_lanes(id,principal,parent_session,data) "
+                "VALUES(?,?,?,?)",
+                (f"historical-{index}", context.principal_id, "parent",
+                 json.dumps({"owner": "busy" if index >= 256 else ""})),
+            )
+        assert tx.active_count(context.principal_id) == 4
+        assert sum(bool(row["owner"]) for _, row in tx.lanes(
+            context.principal_id, limit=256,
+        )) == 0
+
+
+def test_capacity_admission_refusal_does_not_fail_another_committed_event(env):
+    service, _, sessions, _, context, _ = env
+    lane = spawn(env)["lane"]["id"]
+    service._capacity_waiters[lane] = context
+    original_schedule = service._schedule
+    service._schedule = lambda *args, **kwargs: (_ for _ in ()).throw(
+        PermissionError("expired managed proof")
+    )
+    sessions.append("other-session", "model.response", {"content": "committed"})
+
+    service._done()
+
+    assert lane not in service._capacity_waiters
+    assert sessions.read_tail("other-session", limit=1)[0].payload["content"] == "committed"
+    service._schedule = original_schedule
 
 
 def test_oversized_provider_body_is_not_persisted_even_with_small_usage(env):

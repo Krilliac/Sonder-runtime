@@ -36,9 +36,9 @@
       "verified": 0
     },
     "DOC": {
-      "checked": 0,
+      "checked": 1,
       "total": 7,
-      "verified": 0
+      "verified": 1
     },
     "EVAL": {
       "checked": 0,
@@ -96,9 +96,9 @@
       "verified": 0
     },
     "SELFMOD": {
-      "checked": 0,
+      "checked": 1,
       "total": 6,
-      "verified": 0
+      "verified": 1
     },
     "SESSION": {
       "checked": 0,
@@ -127,12 +127,13 @@
     }
   },
   "overall": {
-    "checked": 0,
+    "checked": 2,
     "statuses": {
-      "implemented_unverified": 204
+      "implemented_unverified": 202,
+      "verified": 2
     },
     "total": 204,
-    "verified": 0
+    "verified": 2
   },
   "requirements": [
     {
@@ -515,9 +516,9 @@
     },
     {
       "checked": false,
-      "claim": "Stable prefix manifests and cache keys are composed from canonical retained context records.",
+      "claim": "The provider-neutral prefix manifest/cache contract and local Ollama telemetry are implemented, but live Sonder consumption is not proved.",
       "requirement_id": "CTX-009",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -612,11 +613,11 @@
       "status": "implemented_unverified"
     },
     {
-      "checked": false,
-      "claim": "Requirement status and evidence are generated from the append-only ledger.",
+      "checked": true,
+      "claim": "A checked requirement is accepted only when the same change adds or links concrete, reachable evidence and regenerates the derived requirement status.",
       "requirement_id": "DOC-006",
-      "revision": 2,
-      "status": "implemented_unverified"
+      "revision": 3,
+      "status": "verified"
     },
     {
       "checked": false,
@@ -1298,11 +1299,11 @@
       "status": "implemented_unverified"
     },
     {
-      "checked": false,
-      "claim": "The live typed selfmod bridge refuses automatic or remote push requests before invoking legacy deployment; approved deployment intent remains local-only.",
+      "checked": true,
+      "claim": "Guarded selfmod permits a local descriptive commit from a clean starting checkout and never performs an automatic remote push.",
       "requirement_id": "SELFMOD-006",
-      "revision": 2,
-      "status": "implemented_unverified"
+      "revision": 3,
+      "status": "verified"
     },
     {
       "checked": false,
@@ -1566,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "b2bef7e4ecb2e0574d28a0f30c7392774c18a5b2639e97dbdc5ba0ee9ed0aa6e",
-    "spec_sha256": "6c15145add472ed9944b5777e7b46fe8c76d7b80d487ac1d2536f5165d3ce790"
+    "ledger_sha256": "f62f7471b8e411c9dbc8f618c70450fc93d3a581ec1079d916b2f624b08d6275",
+    "spec_sha256": "4797da92d2d1845ce944b2dc32353d52fe7a6e48dfa92593753ca727761ca714"
   }
 }

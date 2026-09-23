@@ -620,6 +620,56 @@ def test_agent_stops_repeating_identical_failed_tool_call(monkeypatch):
     assert "HOST NO-PROGRESS" in prompts[3]
 
 
+def test_agent_stops_semantic_no_progress_across_distinct_failed_calls(monkeypatch):
+    responses = [
+        '{"tool":"script_run","args":{"path":"missing-1.py"}}',
+        '{"tool":"script_run","args":{"path":"missing-2.py"}}',
+        '{"tool":"script_run","args":{"path":"missing-3.py"}}',
+        '{"tool":"script_run","args":{"path":"missing-4.py"}}',
+        '{"tool":"script_run","args":{"path":"missing-5.py"}}',
+    ]
+    dispatches = []
+    monkeypatch.setattr(
+        server, "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+    monkeypatch.setattr(
+        server, "_agent_dispatch_observed",
+        lambda tool, args, **kwargs:
+            dispatches.append((tool, args)) or "ERROR: script does not exist",
+    )
+
+    output = server._agent_impl("run the script", max_steps=5)
+
+    assert output.startswith("ERROR: agent made no semantic progress")
+    assert len(dispatches) == 4
+
+
+def test_agent_semantic_no_progress_allows_distinct_nonempty_evidence(monkeypatch):
+    responses = [
+        '{"tool":"file_read","args":{"path":"one.txt"}}',
+        '{"tool":"file_read","args":{"path":"two.txt"}}',
+        '{"tool":"file_read","args":{"path":"three.txt"}}',
+        '{"final":"summarized the evidence"}',
+    ]
+    dispatches = []
+    monkeypatch.setattr(
+        server, "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+    monkeypatch.setattr(
+        server, "_agent_dispatch_observed",
+        lambda tool, args, **kwargs:
+            dispatches.append((tool, args)) or "file evidence: distinct content",
+    )
+
+    output = server._agent_impl("read the files", max_steps=3)
+
+    assert "summarized the evidence" in output
+    assert "agent made no semantic progress" not in output
+    assert len(dispatches) == 3
+
+
 def test_agent_gets_final_only_pass_after_tool_step_budget(monkeypatch, without_standing):
     responses = [
         '{"tool": "memory_search", "args": {"query": "one"}}',

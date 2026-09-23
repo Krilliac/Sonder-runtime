@@ -10,7 +10,7 @@ from typing import Any, Mapping
 from ...domain.common.errors import Forbidden
 from ...domain.security import redaction as _redaction
 from ..ports.tool_execution import ToolExecutionResult, ToolExecutor
-from ..ports.tool_registry import ToolRegistry
+from ..ports.tool_registry import ToolRegistry, ToolSchemaSelection
 from .gateway_contract import (
     ApprovalGate,
     OutputRedactor,
@@ -208,6 +208,35 @@ class ToolApplicationFacade:
     def receipts(self) -> tuple[ToolReceipt, ...]:
         return self._graph.receipts.items
 
+    def schema_selection(
+        self,
+        visible_names: Any,
+        *,
+        selection_id: str = "",
+    ) -> ToolSchemaSelection:
+        """Build the immutable visibility value used by one model turn.
+
+        The registry remains the executable authority.  Rejecting names that
+        are absent from this graph prevents a caller from presenting a model
+        schema that the same graph cannot execute.
+        """
+        selection = ToolSchemaSelection(
+            frozenset(visible_names), selection_id=selection_id
+        )
+        registered = {descriptor.name for descriptor in self._graph.registry.list_all()}
+        unknown = sorted(selection.visible_names - registered)
+        if unknown:
+            raise ValueError("tool schema selection contains unknown tools: %s" % ", ".join(unknown))
+        return selection
+
+    def visible_tool_schemas(
+        self, selection: ToolSchemaSelection
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Return the bounded schemas visible for a single model turn."""
+        if not isinstance(selection, ToolSchemaSelection):
+            raise TypeError("selection must be a ToolSchemaSelection")
+        return tuple(self.catalogs_for(selection).client.get("tools", ()))
+
     def execute(self, request: ToolGatewayRequest) -> ToolReceipt:
         return self._graph.gateway.execute(request)
 
@@ -253,6 +282,15 @@ class ToolApplicationFacade:
         )
         catalogs = GeneratedCatalogs.generate(registry, commands=commands)
         return cls(ToolGraph(registry, policy, gateway, catalogs, receipts))
+
+    def catalogs_for(self, selection: ToolSchemaSelection) -> CatalogBundle:
+        """Generate a selected projection without changing the base catalog."""
+        if not isinstance(selection, ToolSchemaSelection):
+            raise TypeError("selection must be a ToolSchemaSelection")
+        return GeneratedCatalogs.generate(
+            self._graph.registry,
+            selection=selection,
+        )
 
 
 class _FailClosedTypedPolicy:

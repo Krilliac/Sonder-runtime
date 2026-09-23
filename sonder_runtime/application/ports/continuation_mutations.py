@@ -95,6 +95,8 @@ def prepare_call(kind, *args, operation_id=None, **kwargs):
             "usage",
             "result",
             "recovery_required",
+            "metadata",
+            "verification",
         },
         "claim_resume": {"expected_revision"},
         "request_cancel": {"reason"},

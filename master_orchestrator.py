@@ -16,11 +16,13 @@ import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import timedelta
 
 import sonder_runtime.adapters.execution.effect_fence as effect_fence
 import sonder_runtime.adapters.persistence.fleet_store as fleet_store
 import sonder_runtime.domain.events as events
 import sonder_runtime.domain.fleet_pressure as fleet_pressure
+from sonder_runtime.application.artifacts import ArtifactReadiness, ArtifactReadinessBarrier
 import fleet_provenance
 
 
@@ -125,6 +127,14 @@ class RepositoryWorkerResult:
     output: str
     project: str
     tools: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ReadyWorkerOutput:
+    """Producer-owned output plus its finalized readiness evidence."""
+
+    output: object
+    readiness: ArtifactReadiness
 
 EVIDENCE_REQUIRED = (
     "EVIDENCE_REQUIRED: guarded source evidence was unavailable. Authorize the "
@@ -1277,6 +1287,7 @@ def _run_worker(
     objectives=(),
     master_task_digest: str = "",
     delegated_task_digest: str = "",
+    run_id: str = "",
 ):
     pre_call_metrics = None
     if objectives:
@@ -1380,7 +1391,13 @@ def _run_worker(
     final = _finish(agent_id, output=stored_output)
     if final in ABORT_MARKERS:
         return final
-    return output if isinstance(output, RepositoryWorkerResult) else final
+    completed = output if isinstance(output, RepositoryWorkerResult) else final
+    if not run_id:
+        return completed
+    return ReadyWorkerOutput(
+        output=completed,
+        readiness=ArtifactReadiness.from_content(agent_id, run_id, stored_output),
+    )
 
 
 def run_inline(
@@ -1692,6 +1709,8 @@ def run_delegated(
             "output": "RUNNING",
         })
     outputs = []
+    readiness_by_producer = {}
+    fanout_started = time.monotonic()
     with ThreadPoolExecutor(max_workers=worker_slots) as pool:
         futures = {
             pool.submit(
@@ -1704,6 +1723,7 @@ def run_delegated(
                 assigned,
                 master_digest,
                 fleet_provenance.task_digest(prompt),
+                master_id,
             ): agent_id
             for agent_id, prompt, assigned in zip(
                 child_ids, prompts, assignments or [()] * len(prompts)
@@ -1714,6 +1734,9 @@ def run_delegated(
             try:
                 output = future.result()
                 if output not in ABORT_MARKERS and output is not _WORKER_FAILED:
+                    if isinstance(output, ReadyWorkerOutput):
+                        readiness_by_producer[agent_id] = output.readiness
+                        output = output.output
                     outputs.append((agent_id, output))
             except Exception as exc:
                 _finish(agent_id, error=str(exc))
@@ -1766,6 +1789,51 @@ def run_delegated(
             "agents": child_ids,
             "worker_slots": worker_slots,
             "outputs": [],
+            "output": final if final in ABORT_MARKERS else "ERROR: %s" % error,
+        }
+    # Fan-in is an evidence boundary: every successful child must publish a
+    # complete, digest-bound readiness record for this exact master run before
+    # provenance aggregation or the audit model can consume its output. Failed
+    # children have already been handled above and do not publish an artifact.
+    rendered_outputs = {
+        agent_id: (
+            _render_repository_result(output)
+            if isinstance(output, RepositoryWorkerResult) else str(output or "")
+        )
+        for agent_id, output in outputs
+    }
+    # Allow a child that completed early to wait for a long sibling, while
+    # retaining a bounded 24-hour ceiling for stale evidence.
+    readiness_age_seconds = min(
+        24 * 60 * 60,
+        max(15 * 60, time.monotonic() - fanout_started + 5 * 60),
+    )
+    readiness = ArtifactReadinessBarrier(
+        max_age=timedelta(seconds=readiness_age_seconds),
+    )
+    try:
+        if set(readiness_by_producer) != set(rendered_outputs):
+            raise ValueError("fan-in is missing producer readiness evidence")
+        if any(not isinstance(item, ArtifactReadiness) for item in readiness_by_producer.values()):
+            raise ValueError("fan-in contains invalid producer readiness evidence")
+        readiness.join(
+            (
+                readiness_by_producer[agent_id]
+                for agent_id in rendered_outputs
+            ),
+            run_id=master_id,
+            expected_producers=rendered_outputs,
+            content_by_producer=rendered_outputs,
+        )
+    except ValueError as exc:
+        error = "artifact readiness barrier rejected fan-in: %s" % exc
+        final = _finish(master_id, error=error)
+        return {
+            "mode": "delegated",
+            "master_id": master_id,
+            "agents": child_ids,
+            "worker_slots": worker_slots,
+            "outputs": _public_outputs(outputs),
             "output": final if final in ABORT_MARKERS else "ERROR: %s" % error,
         }
     if repository_task and any(

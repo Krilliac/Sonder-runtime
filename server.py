@@ -16433,7 +16433,7 @@ def access_request_preview(path: str, mode: str = "read") -> str:
 
 
 AGENT_TOOL_HELP = """Available tools:
-- agent_lane: {"action": "spawn|list|inspect|send_message|wait|interrupt|resume|cancel|reports|ack", "payload": {}} -- parent authority is inherited from this run. Spawn payload: command_id, task, workspace_root (within the configured project grant), optional title/tier/max_steps/max_output_tokens/max_wall_seconds. Other actions use lane_id; send_message uses command_id/content; controls use command_id; ack uses report_id/command_id. Never supply parent identity or tokens.
+- agent_lane: {"action": "spawn|list|inspect|send_message|wait|interrupt|resume|cancel|reports|ack|retrieve_archive", "payload": {}} -- parent authority is inherited from this run. Spawn payload: command_id, task, workspace_root (within the configured project grant), optional title/tier/max_steps/max_output_tokens/max_wall_seconds. Other actions use lane_id; send_message uses command_id/content; controls use command_id; ack uses report_id/command_id; retrieve_archive uses lane_id/archive_id. Never supply parent identity or tokens.
 - run_code: {"code": "...", "language": "python|js|powershell|cpp|csharp", "stdin": "", "timeout": 10} -- source snippet only; never pass a shell command such as `cargo --version`
 - run_project: {"files_json": {"files": {"src/main.cpp": "..."}}, "commands_json": [{"cmd": ["g++", "src/main.cpp", "-o", "app"]}], "stdin": "", "timeout": 60}
 - artifact_generate: {"name": "brand-kit", "brief": "fiery logo, DOCX report, AVI video, MIDI score, captions, textured humanoid 3D mascot with full morph frames and sequenced Idle Walk Run clips", "kinds": "auto|all|icon,vector,diagram,document,docx,data,spreadsheet,presentation,animation,video,music,midi,captions,timeline,web,model,rigged_model", "dimension": "auto|2d|2.5d|3d", "theme": "auto|ember|verdant|arcane|frost"}
@@ -19801,6 +19801,11 @@ def _agent_turn(
     successful_inspection_results = {}
     repeated_inspection_counts = {}
     failed_call_counts = {}
+    # Exact call signatures catch literal retries, but a model can evade that
+    # fence by changing an otherwise irrelevant path/query on every attempt.
+    # Keep only a small window of host-known failed/empty outcomes so those
+    # semantic retries cannot consume the whole agent budget.
+    semantic_no_progress = collections.deque(maxlen=6)
     # A later unrelated success must not turn a failed required/evidence call
     # into a host-approved completion. Key by the canonical call signature so
     # only a successful retry of that exact host observation can recover it.
@@ -20854,6 +20859,35 @@ def _agent_turn(
                         if validation_covered else "did not validate changed paths",
                     ),
                 )
+        # A successful mutation or a validator that covers the current change
+        # is real progress; discard earlier failed/empty streaks. Classify
+        # only the structured host outcome (failure or empty), never by
+        # parsing model-controlled error prose.
+        semantic_stall = None
+        evidence_progress = (
+            tool_dispatched and tool_ok
+            and tool_name in _AGENT_FILE_EVIDENCE_TOOLS
+            and bool(str(observation).strip())
+        )
+        if mutation_happened or evidence_progress or (
+            tool_name in _WORK_VALIDATION_TOOLS and validation_covered
+        ):
+            semantic_no_progress.clear()
+        else:
+            outcome_class = (
+                "failed" if not tool_ok
+                else "empty" if not str(observation).strip()
+                else ""
+            )
+            if tool_dispatched and outcome_class:
+                semantic_no_progress.append((tool_name, outcome_class, call_signature))
+                matching = [
+                    item for item in semantic_no_progress
+                    if item[0] == tool_name and item[1] == outcome_class
+                ]
+                distinct_signatures = {item[2] for item in matching}
+                if len(matching) >= 4 and len(distinct_signatures) >= 3:
+                    semantic_stall = (tool_name, outcome_class, len(distinct_signatures))
         if host_controller is not None:
             host_controller.observe_host_tool(
                 tool=tool_name, arguments=policy_tool_args,
@@ -20875,6 +20909,14 @@ def _agent_turn(
                 observation_text[:6000],
             )
         )
+        if semantic_stall is not None:
+            stalled_tool, outcome_class, distinct_count = semantic_stall
+            return _early_exit(
+                "ERROR: agent made no semantic progress: %s produced %s outcomes "
+                "across %d distinct calls. Change the recovery strategy or make "
+                "a state-changing call."
+                % (stalled_tool, outcome_class, distinct_count)
+            )
         if abort_observation is not None:
             return _early_exit(
                 "ERROR: required %s failed; no answer was produced from "

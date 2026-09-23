@@ -68,6 +68,10 @@ def dispatch_agent_lane_tool(
         raise ValueError("lane_id required")
     if action == "inspect":
         return service.inspect(lane_id, context, **args)
+    if action == "retrieve_archive":
+        return service.retrieve_archived_tool(
+            lane_id, args.pop("archive_id", None), context
+        )
     if action == "send_message":
         return service.send_message(lane_id, author="parent", context=context, **args)
     if action == "wait":

@@ -12,7 +12,7 @@ from pathlib import Path
 import time
 from typing import Any
 
-from ...domain.common.errors import InvalidInput
+from ...domain.common.errors import InvalidInput, NotFound
 from ...application.context import OperationContext
 from ...application.ports.tool_execution import (
     ToolExecutionResult,
@@ -23,6 +23,7 @@ from ...application.ports.tool_registry import (
     ToolCall,
     ToolDescriptor,
     ToolRegistry,
+    ToolSchemaSelection,
     validate_tool_call,
 )
 
@@ -78,10 +79,19 @@ class RegistrySchemaValidator:
     def __init__(self, registry: ToolRegistry) -> None:
         self._registry = registry
 
-    def validate(self, tool_name: str, arguments: Mapping[str, Any]) -> None:
-        descriptor = self._registry.get(tool_name)
-        if descriptor is None:
-            raise InvalidInput(f"unknown tool {tool_name!r}")
+    def validate(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        selection: ToolSchemaSelection | None = None,
+    ) -> None:
+        try:
+            descriptor = self._registry.admit(tool_name, selection)
+        except NotFound as exc:
+            # The typed gateway exposes malformed/unknown calls as one input
+            # contract. Registry-specific lookup errors must not leak through
+            # this application boundary.
+            raise InvalidInput(str(exc)) from exc
         validate_tool_call(
             descriptor,
             ToolCall(tool_name=tool_name, arguments=dict(arguments)),
@@ -105,9 +115,13 @@ class PortBackedToolInvoker:
         self._context_factory = context_factory
 
     def invoke(self, request: Any) -> PortInvocationOutput:
-        descriptor = self._registry.get(request.tool_name)
-        if descriptor is None:
-            raise InvalidInput(f"unknown tool {request.tool_name!r}")
+        selection = getattr(request, "schema_selection", None)
+        if selection is not None and not isinstance(selection, ToolSchemaSelection):
+            raise InvalidInput("schema_selection must be a ToolSchemaSelection")
+        try:
+            descriptor = self._registry.admit(request.tool_name, selection)
+        except NotFound as exc:
+            raise InvalidInput(str(exc)) from exc
         call = ToolCall(
             tool_name=request.tool_name,
             arguments=dict(request.arguments),

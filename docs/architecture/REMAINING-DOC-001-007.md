@@ -1,9 +1,8 @@
 # REMAINING-DOC-001-007 — Documentation authority closure
 
 This record implements the documentation authority/catalog foundation for
-DOC-001 through DOC-005. It does not edit the master-spec checkboxes or the
-append-only evidence ledger. DOC-006 and DOC-007 remain process/source-review
-work beyond this focused slice.
+DOC-001 through DOC-005. DOC-006 now has a separate verified evidence slice;
+DOC-007 remains process/source-review work beyond this focused slice.
 
 ## Contract coverage
 
@@ -14,7 +13,7 @@ work beyond this focused slice.
 | DOC-003 | Unique ADR namespace | `adr/README.md` and namespace test | implemented foundation |
 | DOC-004 | Focused contracts | focused current-contract map | implemented foundation |
 | DOC-005 | Generated references | generated runtime reference, architecture map, and freshness checker | implemented foundation where runtime metadata permits |
-| DOC-006 | Status evidence discipline | explicit no-checkbox/no-ledger-change rule and evidence hierarchy | process documented; formal verification remains open |
+| DOC-006 | Status evidence discipline | explicit evidence coupling, ledger revision, generated status, and CI base-diff gate | verified repository evidence wiring; semantic and privileged-bypass limits remain |
 | DOC-007 | No stale promises | inventory below and authority tests | implemented inventory; source prose still requires ordinary review |
 
 ## Stale-promise inventory
@@ -47,8 +46,9 @@ recorded as an explicit source error. The freshness gate is
 
 The focused test is `tests/test_document_authority.py`. It verifies path
 existence, classifications, the unique new-ADR naming rule, the focused map,
-and generated-catalog references. The test does not mark formal requirements
-complete, mutate documentation, or rewrite historical documents.
+generated-catalog references, and the current DOC-006/DOC-007 checkbox state.
+The test does not judge semantic evidence quality or privileged repository
+administrative actions.
 
-Formal DOC-001 through DOC-007 checkboxes remain unchecked by design in this
-change.
+DOC-001 through DOC-005 and DOC-007 remain unchecked; DOC-006 is checked only
+with its linked verified ledger revision and evidence document.

@@ -13,6 +13,8 @@ from sonder_runtime.application.ports.runtime_threads import Thread as owned_run
 from collections.abc import Callable, Mapping
 from threading import Event, Lock, Thread
 from time import monotonic, sleep
+import os
+import platform
 from typing import Protocol
 from uuid import uuid4
 from ..ports.continuation_mutations import (
@@ -28,6 +30,7 @@ from ..ports.subagents import (
 )
 from .continuable import ContinuableCheckpoint
 from sonder_runtime.domain.agents.roles import AgentRole, role_budget
+from sonder_runtime.application.owner_process import recorded_owner_is_dead
 
 
 from ..ports.continuation_records import ChildSessionLineage, DurableChildSession
@@ -45,10 +48,12 @@ class DurableContinuationRepository(Protocol):
 
     def create(self, session: DurableChildSession) -> DurableChildSession: ...
     def get(self, child_id: str) -> DurableChildSession | None: ...
+    def get_active_by_key(self, parent_id: str, key: str, namespace: str) -> DurableChildSession | None: ...
     def save_checkpoint(self, checkpoint: ContinuableCheckpoint, *, expected_sequence: int) -> DurableChildSession | None: ...
     def update(self, child_id: str, *, status: SubagentStatus, expected_revision: int | None = None,
                usage: SubagentUsage | None = None, result: SubagentResult | None = None,
-               recovery_required: bool | None = None) -> DurableChildSession | None: ...
+               recovery_required: bool | None = None, metadata: tuple[tuple[str, str], ...] | None = None,
+               verification: Mapping[str, object] | None = None) -> DurableChildSession | None: ...
     def claim_resume(self, child_id: str, *, expected_revision: int) -> DurableChildSession | None:
         """Atomically claim eligible recovery as RUNNING, clearing its old result."""
         ...
@@ -105,8 +110,28 @@ class DurableContinuationService:
         self._controls: dict[str, DurableCancellation] = {}
         self._threads: dict[str, Thread] = {}
         self._lock = Lock()
+        self._spawn_lock = Lock()
+        self._contexts: dict[str, OperationContext] = {}
         self._admitted_roots: dict[str, int] = {}
         self._storage_failures: dict[str, ContinuationStorageFailure] = {}
+        # A reservation is consumable only by the provider instance that
+        # created it.  This is deliberately process-scoped; restart recovery
+        # remains an explicit path and never happens from ``spawn``.
+        self._owner_nonce = uuid4().hex
+        self._owner_pid = os.getpid()
+        self._owner_host = platform.node()
+
+    @property
+    def owner_nonce(self) -> str:
+        return self._owner_nonce
+
+    @property
+    def owner_pid(self) -> int:
+        return self._owner_pid
+
+    @property
+    def owner_host(self) -> str:
+        return self._owner_host
 
     def _write(self, method, *args, _settlement_timeout=0.0, **kwargs):
         value = args[0]
@@ -166,27 +191,90 @@ class DurableContinuationService:
 
     def spawn(self, request: SubagentRequest, context: OperationContext, runner: Runner) -> SubagentHandle:
         child_id = request.child_id or f"child-{uuid4().hex}"
-        request = SubagentRequest(request.parent_id, request.prompt, request.budget, child_id, request.metadata)
-        parent = self._repository.get(request.parent_id)
-        # A provider root is an admission anchor whose own id is already the
-        # requested parent; it must not be duplicated in a child's ancestors.
-        # Ordinary parents contribute their completed chain unchanged.
-        parent_is_root = parent is not None and dict(parent.request.metadata).get("provider_root") == "true"
-        lineage = ChildSessionLineage(
-            request.parent_id,
-            () if parent_is_root else (parent.lineage.chain if parent else ()),
-        )
-        self._admit(request, lineage, parent)
-        try:
-            self._write("create", DurableChildSession(request, lineage))
-        except Exception:
-            self._release(lineage.chain[0])
-            raise
-        try:
-            return self._start(child_id, context, runner)
-        except Exception:
-            self._release(lineage.chain[0])
-            raise
+        request = SubagentRequest(request.parent_id, request.prompt, request.budget, child_id, request.metadata, request.resume_key, request.idempotency_key)
+        with self._spawn_lock:
+            existing = self._repository.get(child_id)
+            if existing is None:
+                lookup = getattr(self._repository, "get_active_by_key", None)
+                if callable(lookup):
+                    for key, namespace in ((request.resume_key, "resume"), (request.idempotency_key, "idempotency")):
+                        if key:
+                            existing = lookup(request.parent_id, key, namespace)
+                            if existing is not None:
+                                break
+            if existing is not None and existing.status in {SubagentStatus.CREATED, SubagentStatus.QUEUED, SubagentStatus.RUNNING}:
+                same_scope = (
+                    existing.request.parent_id == request.parent_id
+                    and existing.request.prompt == request.prompt
+                    and existing.request.budget == request.budget
+                    and existing.request.metadata == request.metadata
+                    and existing.request.resume_key == request.resume_key
+                    and existing.request.idempotency_key == request.idempotency_key
+                )
+                if (not request.resume_key or not request.idempotency_key or not same_scope):
+                    raise InvalidSubagentRequest("active child identity or scope does not match requested delegation")
+                existing_child_id = existing.request.child_id
+                existing_metadata = self._metadata(existing.request)
+                # A continuation-backed worker registry may have durably
+                # reserved this exact child before the provider thread was
+                # created.  Consume that reservation only for the same
+                # authenticated owner; another process must use explicit
+                # recovery rather than silently taking over a live worker.
+                if (
+                    existing.status is SubagentStatus.CREATED
+                    and existing_metadata.get("worker_registry_admitted") == "true"
+                ):
+                    owner_nonce = existing_metadata.get("owner_nonce")
+                    owner_dead = (
+                        owner_nonce
+                        and owner_nonce != self._owner_nonce
+                        and recorded_owner_is_dead(existing_metadata)
+                    )
+                    if (
+                        owner_nonce
+                        and owner_nonce != self._owner_nonce
+                        and not owner_dead
+                    ) or (
+                        not owner_nonce
+                        and existing_metadata.get("owner_id") != context.principal_id
+                    ):
+                        raise InvalidSubagentRequest("worker reservation belongs to another owner")
+                    parent = self._repository.get(request.parent_id)
+                    self._admit(
+                        request,
+                        existing.lineage,
+                        parent,
+                        exclude_child_id=existing_child_id,
+                    )
+                    return self._start(existing_child_id, context, runner)
+                with self._lock:
+                    thread = self._threads.get(existing_child_id)
+                if thread is not None and thread.is_alive():
+                    with self._lock:
+                        original_context = self._contexts.get(existing_child_id)
+                    if original_context is None or not self._compatible_context(original_context, context):
+                        raise InvalidSubagentRequest("active child operation scope is incompatible")
+                    return _Handle(self, existing_child_id, request.parent_id)
+                raise InvalidSubagentRequest("active child requires recover/resume after restart")
+            parent = self._repository.get(request.parent_id)
+            # A provider root is an admission anchor whose own id is already the
+            # requested parent; it must not be duplicated in a child's ancestors.
+            parent_is_root = parent is not None and dict(parent.request.metadata).get("provider_root") == "true"
+            lineage = ChildSessionLineage(
+                request.parent_id,
+                () if parent_is_root else (parent.lineage.chain if parent else ()),
+            )
+            self._admit(request, lineage, parent)
+            try:
+                self._write("create", DurableChildSession(request, lineage))
+            except Exception:
+                self._release(lineage.chain[0])
+                raise
+            try:
+                return self._start(child_id, context, runner)
+            except Exception:
+                self._release(lineage.chain[0])
+                raise
 
     def register_root(self, root_id: str, budget: SubagentBudget) -> DurableChildSession:
         """Publish the provider-owned parent required for local children.
@@ -222,7 +310,7 @@ class DurableContinuationService:
         return values
 
     def _admit(self, request: SubagentRequest, lineage: ChildSessionLineage,
-               parent: DurableChildSession | None) -> None:
+               parent: DurableChildSession | None, *, exclude_child_id: str | None = None) -> None:
         budget = request.budget
         metadata = self._metadata(request)
         role_name = metadata.get("role")
@@ -248,12 +336,21 @@ class DurableContinuationService:
             from ..ports.subagents import validate_child_budget
             validate_child_budget(budget, parent.request.budget)
             children = self._repository.list_all(limit=10_000)
-            direct = sum(1 for item in children if item.request.parent_id == request.parent_id)
+            direct = sum(
+                1
+                for item in children
+                if item.request.parent_id == request.parent_id
+                and item.request.child_id != exclude_child_id
+            )
             if budget.max_children is not None and direct >= budget.max_children:
                 raise InvalidSubagentRequest("subagent child-count budget exhausted")
         with self._lock:
-            active = sum(1 for item in self._repository.list_active()
-                         if item.lineage.chain[0] == root_id)
+            active = sum(
+                1
+                for item in self._repository.list_active()
+                if item.lineage.chain[0] == root_id
+                and item.request.child_id != exclude_child_id
+            )
             active += self._admitted_roots.get(root_id, 0)
             if budget.max_concurrency is not None and active >= budget.max_concurrency:
                 raise InvalidSubagentRequest("subagent concurrency budget exhausted")
@@ -304,8 +401,26 @@ class DurableContinuationService:
             self._controls[child_id] = control
             thread = owned_runtime_thread(target=self._run, args=(child_id, context, runner, control, record.lineage.chain[0]), daemon=True)
             self._threads[child_id] = thread
+        with self._lock:
+            self._contexts[child_id] = context
         thread.start()
         return _Handle(self, child_id, record.request.parent_id)
+
+    @staticmethod
+    def _compatible_context(original: OperationContext, current: OperationContext) -> bool:
+        if (current.expired or original.expired
+                or getattr(current.cancellation, "cancelled", False)
+                or getattr(original.cancellation, "cancelled", False)):
+            return False
+        for name in ("principal_id", "auth_level", "source", "cloud_allowed", "remote_ollama_allowed", "session_id"):
+            if getattr(original, name, None) != getattr(current, name, None):
+                return False
+        if tuple(original.workspace_roots) != tuple(current.workspace_roots):
+            return False
+        old_deadline, new_deadline = original.deadline_monotonic, current.deadline_monotonic
+        if old_deadline is None:
+            return new_deadline is None
+        return new_deadline is None or new_deadline >= old_deadline
 
     def _run(self, child_id, context, runner, control, root_id):
         try:
@@ -315,6 +430,8 @@ class DurableContinuationService:
             control._event.set()
         finally:
             self._release(root_id)
+            with self._lock:
+                self._contexts.pop(child_id, None)
 
     def _run_body(self, child_id: str, context: OperationContext, runner: Runner, control: DurableCancellation) -> None:
         record = self._require(child_id)

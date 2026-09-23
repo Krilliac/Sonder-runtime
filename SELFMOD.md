@@ -179,8 +179,12 @@ nightly/background job should call.
 
 It is deliberately more conservative than the interactive lifecycle: every
 pass proposes one change, isolates it in a **Git worktree**, runs Ruff (if
-installed) and the **whole** test suite there, and on a green result commits
-the result to its own `selfmod/<run-id>` branch instead of deploying it. The
+installed), runs the ordinary regression suite in that worktree, and runs the
+selected held-out tests from a bounded snapshot of the base test tree. A
+missing held-out suite rejects the candidate. The snapshot is checked for
+changes before and after execution; this is best-effort tamper evidence, not a
+same-user security boundary. On a green result, the loop commits the result
+to its own `selfmod/<run-id>` branch instead of deploying it. The
 main working tree is never written and no commit lands on the branch you have
 checked out, so a live session keeps its checkout and its uncommitted work
 exactly as it was. Review or discard a result like any other branch:

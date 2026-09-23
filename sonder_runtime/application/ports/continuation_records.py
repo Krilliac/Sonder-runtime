@@ -1,6 +1,7 @@
 """Canonical durable child records shared by storage ports and supervision."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any, Mapping
 from .subagents import (
     InvalidSubagentRequest,
     SubagentRequest,
@@ -43,3 +44,7 @@ class DurableChildSession:
     recovery_required: bool = False
     cancellation_requested: bool = False
     cancellation_reason: str | None = None
+    # Verification is host-owned terminal evidence attached after the
+    # provider has durably recorded the child result.  It is deliberately
+    # separate from model output and optional for legacy rows.
+    terminal_verification: Mapping[str, Any] = field(default_factory=dict)

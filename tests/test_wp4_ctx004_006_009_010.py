@@ -40,12 +40,69 @@ def test_last_good_snapshot_rejects_incomplete_refresh_and_isolated_mutation():
 
 def test_prefix_manifest_and_cache_key_are_stable_with_hit_write_metrics():
     cache = PrefixManifestCache()
-    rows = [record("rules", "rules", ordinal=4, stable=True), record("schema", "schema", ordinal=1, stable=True)]
-    first = cache.resolve(rows, version="v2")
-    second = cache.resolve(list(reversed(rows)), version="v2")
+    rows = [
+        record("rules", "rules", ordinal=4, stable=True, section="project_rules"),
+        record("schema", "schema", ordinal=1, stable=True, section="tool_schemas"),
+        record("skill", "skill", ordinal=2, stable=True, section="skill_catalog"),
+    ]
+    identity = {
+        "model": "model-a",
+        "tokenizer": "tok-1",
+        "template": "chat-v2",
+        "system_prefix": "system",
+        "visible_tool_schemas": {"read": {"type": "object"}},
+        "project_policy": {"network": "deny"},
+    }
+    first = cache.resolve(rows, version="v2", **identity)
+    second = cache.resolve(list(reversed(rows)), version="v2", **identity)
     assert first.cache_key == second.cache_key
-    assert [item.item_id for item in first.sections] == ["rules", "schema"]
+    assert [item.section for item in first.sections] == [
+        "project_rules", "skill_catalog", "tool_schemas"
+    ]
     assert (cache.writes, cache.hits) == (1, 1)
+
+
+def test_prefix_identity_hits_and_dynamic_memory_does_not_bust():
+    cache = PrefixManifestCache()
+    rows = [record("rules", "rules", stable=True)]
+    first = cache.resolve(
+        rows, model="model-a", tokenizer="tok-1", template="chat-v2",
+        system_prefix="system", visible_tool_schemas={"read": {"type": "object"}},
+        project_policy={"network": "deny"}, dynamic_memory=["turn-1"],
+    )
+    second = cache.resolve(
+        rows, model="model-a", tokenizer="tok-1", template="chat-v2",
+        system_prefix="system", visible_tool_schemas={"read": {"type": "object"}},
+        project_policy={"network": "deny"}, dynamic_memory=["turn-2"], retrieval={"query": "new"},
+    )
+    assert first.cache_key == second.cache_key
+    assert cache.telemetry.last_reason == "hit"
+    assert cache.telemetry.hits == 1
+
+
+def test_prefix_identity_misses_for_model_schema_and_policy_changes():
+    cache = PrefixManifestCache()
+    rows = [record("rules", "rules", stable=True)]
+    common = {"tokenizer": "tok", "template": "chat", "system_prefix": "sys"}
+    cache.resolve(rows, model="a", visible_tool_schemas={"read": 1}, project_policy={"x": 1}, **common)
+    cache.resolve(rows, model="b", visible_tool_schemas={"read": 1}, project_policy={"x": 1}, **common)
+    assert cache.telemetry.last_reason == "identity_changed"
+    cache.resolve(rows, model="b", visible_tool_schemas={"write": 1}, project_policy={"x": 1}, **common)
+    cache.resolve(rows, model="b", visible_tool_schemas={"write": 1}, project_policy={"x": 2}, **common)
+    assert cache.telemetry.misses == 4
+    assert cache.telemetry.reasons["identity_changed"] == 3
+
+
+def test_prefix_cache_is_bounded_and_miss_reason_uses_last_resolution():
+    cache = PrefixManifestCache(max_entries=2)
+    rows = [record("rules", "rules", stable=True)]
+    cache.resolve(rows, model="a")
+    cache.resolve(rows, model="b")
+    cache.resolve([record("other", "other", stable=True)], model="b")
+    assert len(cache._values) == 2
+    assert cache.telemetry.last_reason == "prefix_changed"
+    cache.resolve(rows, model="a")
+    assert cache.telemetry.last_reason == "identity_changed"
 
 
 def test_replay_manifest_preserves_order_and_is_immutable():

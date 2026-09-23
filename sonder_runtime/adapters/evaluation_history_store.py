@@ -256,6 +256,46 @@ def record_result(path=None, **fields):
     return record
 
 
+def record_result_pair_idempotent(path=None, records=()):
+    """Atomically append an idempotent pair of aggregate records.
+
+    A retry in the bounded history read window returns the existing pair when
+    both exact records are present. A partial pair fails closed. Very old runs
+    outside that window may be appended again; this is not a durable run index.
+    """
+    if not isinstance(records, (list, tuple)) or len(records) != 2:
+        raise HistoryError("evaluation history pair must contain two records")
+    target = Path(path) if path is not None else default_path()
+    candidates = [make_record(**fields) for fields in records]
+    with _history_lock(target):
+        loaded = load_history(target)
+        matches = []
+        for candidate in candidates:
+            matches.append(next((record for record in loaded["records"]
+                                 if record["identity_key"] == candidate["identity_key"]
+                                 and record["result"] == candidate["result"]
+                                 and record["source"] == candidate["source"]),
+                                None))
+        if all(matches):
+            return matches
+        if any(matches):
+            raise HistoryError("evaluation history pair is incomplete")
+        if any(any(record["source"] == candidate["source"]
+                   for record in loaded["records"])
+               for candidate in candidates):
+            raise HistoryError("evaluation history pair conflicts with existing run")
+        lines = [json.dumps(
+            record, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ) for record in candidates]
+        encoded = "\n".join(lines)
+        # Validate the combined append against the same record and history
+        # ceilings before replacing the file once.
+        if any(len(line.encode("utf-8")) > MAX_RECORD_BYTES for line in lines):
+            raise HistoryError("evaluation history record exceeds byte ceiling")
+        _atomic_append(target, encoded)
+    return candidates
+
+
 def load_history(path=None, *, max_records=DEFAULT_MAX_RECORDS,
                  max_bytes=DEFAULT_READ_BYTES):
     """Load a bounded valid window; malformed/truncated JSONL is counted."""

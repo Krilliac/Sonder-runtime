@@ -198,6 +198,17 @@ class SQLiteSessionRepository:
             ).fetchall()
         return tuple(self._row_to_event(row) for row in rows)
 
+    def read_tail(self, session_id: str, *, limit: int = 1_000) -> tuple[SessionEvent, ...]:
+        """Read the newest bounded events in ascending sequence order."""
+        _validate_bounds(1, None, limit, self._max_read_limit)
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT session_id, sequence, event_id, event_type, occurred_at_utc, payload_json, previous_hash, event_hash "
+                "FROM session_event WHERE session_id = ? ORDER BY sequence DESC LIMIT ?",
+                (session_id, limit),
+            ).fetchall()
+        return tuple(self._row_to_event(row) for row in reversed(rows))
+
     def search(self, *, session_id: str | None = None, event_type: str | None = None,
                text: str | None = None, limit: int | None = None) -> tuple[SessionEvent, ...]:
         limit = self._max_read_limit if limit is None else limit

@@ -38,7 +38,7 @@ def test_service_forwards_the_complete_typed_contract_without_reformatting():
         connection, "task", k=3, embed_fn=embed, min_sim=0.9,
         qv=[1.0, 0.0], exclude_session="session", project="project",
         include_all_projects=True, embedding_model="embed-v2",
-        embedding_revision="revision",
+        embedding_revision="revision", mode="exact", at="2026-09-23T00:00:00Z",
     )
 
     assert result == ["task -> exact result"]
@@ -46,7 +46,8 @@ def test_service_forwards_the_complete_typed_contract_without_reformatting():
         "k": 3, "embed_fn": embed, "min_sim": 0.9, "qv": [1.0, 0.0],
         "exclude_session": "session", "project": "project",
         "include_all_projects": True, "embedding_model": "embed-v2",
-        "embedding_revision": "revision",
+        "embedding_revision": "revision", "mode": "exact",
+        "at": "2026-09-23T00:00:00Z",
     })]
 
 
@@ -60,6 +61,7 @@ def test_service_exposes_explained_recall_as_an_additive_contract():
         "exclude_session": None, "project": None,
         "include_all_projects": False, "embedding_model": None,
         "embedding_revision": None, "candidate_cursor": None,
+        "mode": "hybrid", "at": None,
     })]
 
 
