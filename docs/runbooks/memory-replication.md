@@ -8,11 +8,15 @@ ownership, or high-availability feature.
 ## Implemented scope
 
 Only an **explicitly journaled, project-scoped `fact` mutation** can enter the
-source stream. The supported source is `SQLiteAuthoritativeFactSource`, used
-through an injected unit of work; it writes the materialized fact, source
-state, and journal mutation in one SQLite transaction. A normal legacy fact
-write that did not use that source is not retrospectively discovered or
-copied.
+source stream. When a typed application graph has enabled
+`[memory_replication]`, its live unit-of-work fact writes use
+`SQLiteAuthoritativeFactSource` for the configured project. The fact row,
+source state, and journal mutation share one SQLite transaction. Writes for
+another project are refused at this boundary. Existing scoped facts without
+matching source evidence make new authoritative writes fail closed; they are
+not retrospectively discovered or copied. Migrate or remove those facts with
+an explicit operator-controlled procedure before activation. The legacy
+unconfigured graph retains its existing unjournaled fact path.
 
 The receiving host applies a validated page to its local replication journal
 and normal fact projection before it creates its durable receipt. A receipt
@@ -265,9 +269,9 @@ REPL, CLI, MCP, or HTTP interface.
    not turn a failed configuration into an exception list.
 
 4. Prove peer-key rotation rejection in the acceptance environment. First
-   write one fresh disposable `fact` through `SQLiteAuthoritativeFactSource`
-   in the exact configured project scope; do not use an ordinary legacy fact
-   write. Change only node A's peer bearer, restart its local owner, and use the trusted
+   write one fresh disposable `fact` through the configured application's
+   unit of work in the exact configured project scope. Inspect its local
+   source journal before sending. Change only node A's peer bearer, restart its local owner, and use the trusted
    deployment-owned operator harness to call the already-owned service's
    `replicate_once()` exactly once. The result must be `pending`, node A's
    cursor must not advance, and node B must have no new projected fact. The
@@ -281,8 +285,8 @@ REPL, CLI, MCP, or HTTP interface.
    coordinated key restoration in the prior step, call `replicate_once()` once
    on the node A application-owned service for the retained page. If the
    key-rejection step was deliberately omitted, first write one fresh
-   disposable `fact` through `SQLiteAuthoritativeFactSource` in the exact
-   configured project scope; do not use an ordinary legacy fact write. Retain
+   disposable `fact` through the configured application's unit of work in the
+   exact configured project scope. Retain
    only the result status, source cursor, configured peer ID, receipt peer
    ID/cursor, and a hash of the test fact ID. Expect `replicated` only when
    every configured peer has a matching durable receipt. Then use node B's

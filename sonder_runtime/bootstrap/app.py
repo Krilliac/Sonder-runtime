@@ -1081,8 +1081,24 @@ def build_application(
             "running_count": sum(1 for item in experiments if item.state == "running"),
         },)
 
+    memory_unit_of_work = UnitOfWorkAdapter
+    if effective_config.memory_replication.enabled:
+        from ..adapters.persistence.sqlite.authoritative_memory import (
+            SQLiteAuthoritativeFactSource,
+        )
+
+        fact_source = SQLiteAuthoritativeFactSource(
+            effective_config.memory_replication.local_node_id,
+            project_scope=effective_config.memory_replication.project_scope,
+        )
+
+        def memory_unit_of_work(db_path=None):
+            return UnitOfWorkAdapter(
+                db_path, authoritative_fact_source=fact_source,
+            )
+
     memory_facade = MemoryLearningFacade(
-        UnitOfWorkAdapter,
+        memory_unit_of_work,
         recall_service=RecallService(LegacyRecallGateway()),
     )
 
@@ -1277,7 +1293,7 @@ def build_application(
         automation=AutopilotRepository(),
         # A UnitOfWork is per-transaction, so the graph exposes a factory, not
         # a singleton; each call opens and owns its own connection scope.
-        unit_of_work=UnitOfWorkAdapter,
+        unit_of_work=memory_unit_of_work,
         tool_executor=ToolExecutorAdapter(),
         tools=tools,
         process_probe=ProcessProbeAdapter(),
