@@ -188,6 +188,30 @@ def _eligible_candidate_files() -> tuple[str, ...]:
     )
 
 
+def _local_catalog_model(server, selected: str) -> str | None:
+    """Resolve an exact model name from the loopback Ollama catalog only."""
+    base = str(getattr(server, "BASE", "")).rstrip("/")
+    endpoint = getattr(server, "ollama_endpoint", None)
+    if not base or endpoint is None or not endpoint.is_loopback(base):
+        return None
+    from urllib.request import Request
+    request = Request(base + "/api/tags")
+    with endpoint.open_url(request, timeout=10, allow_remote=False) as response:
+        raw = response.read(1_048_577)
+    if len(raw) > 1_048_576:
+        raise RuntimeError("model catalog exceeded 1 MiB")
+    payload = json.loads(raw.decode("utf-8"))
+    rows = payload.get("models", []) if isinstance(payload, dict) else []
+    wanted = selected.casefold()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or row.get("model") or "").strip()
+        if name.casefold() == wanted:
+            return name
+    return None
+
+
 def _ask(server, prompt, num_predict=1200, model="", num_ctx=0):
     # An explicit model is a catalog selector, not a temporary tier mutation.
     # The server refreshes its persisted runtime policy at every request, so
@@ -199,7 +223,10 @@ def _ask(server, prompt, num_predict=1200, model="", num_ctx=0):
         is_cloud = getattr(server, "_is_cloud_model_name", lambda value: False)
         if is_cloud(selected):
             raise RuntimeError("model unavailable: explicit selfmod model is cloud-backed")
-        resolved = getattr(server, "resolve_discovered_model", lambda value: None)(selected)
+        try:
+            resolved = _local_catalog_model(server, selected)
+        except Exception as exc:
+            raise RuntimeError("model unavailable: local catalog probe failed: %s" % str(exc)[:160]) from exc
         if not resolved or str(resolved).casefold() != selected.casefold():
             raise RuntimeError("model unavailable: explicit local model is not installed")
         factory = getattr(server, "_make_generate", None)
