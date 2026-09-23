@@ -7,7 +7,7 @@ ports, while the existing typed evaluation modules enforce the invariants.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from ..ports.evaluation import (
     EvaluationCorpusPort,
@@ -16,6 +16,25 @@ from ..ports.evaluation import (
     TrajectoryEvaluator,
 )
 from .corpus_inventory import EvaluationCorpusInventory, build_inventory
+from .divergence import (
+    DivergencePolicy,
+    EvaluatorFactory,
+    InMemoryMinimizedFailureStore,
+    MeaningfulDivergence,
+    MinimizedFailure,
+    MinimizedFailureStore,
+    minimize_failure,
+    replay_divergence,
+    reproduce,
+)
+from .promotion_gates import (
+    DEFAULT_PROMOTION_GATE_POLICIES,
+    PromotionGateDecision,
+    PromotionGatePolicy,
+    PromotionKind,
+    evaluate_promotion_gate,
+    validate_policy_table,
+)
 from .proposal_lifecycle import (
     EvaluationResult,
     EvaluationSuite,
@@ -53,10 +72,14 @@ class EvaluationApplicationService:
         corpus: EvaluationCorpusPort,
         lifecycle: EvaluationLifecyclePort,
         suites: EvaluationSuiteCatalog | None = None,
+        failures: MinimizedFailureStore | None = None,
+        gate_policies: Mapping[PromotionKind, PromotionGatePolicy] | None = None,
     ) -> None:
         self._corpus = corpus
         self._lifecycle = lifecycle
         self._suites = suites or InMemoryEvaluationSuiteCatalog()
+        self._failures = failures or InMemoryMinimizedFailureStore()
+        self._gate_policies = validate_policy_table(gate_policies or DEFAULT_PROMOTION_GATE_POLICIES)
 
     def register_suite(self, suite: EvaluationSuite) -> EvaluationSuite:
         return self._suites.register(suite)
@@ -71,6 +94,83 @@ class EvaluationApplicationService:
     @staticmethod
     def replay(expected: TrajectoryRecord, evaluator: TrajectoryEvaluator) -> ReplayReport:
         return replay_trajectory(expected, evaluator)
+
+    @staticmethod
+    def earliest_divergence(
+        expected: TrajectoryRecord,
+        evaluator_factory: EvaluatorFactory,
+        policy: DivergencePolicy | None = None,
+    ) -> MeaningfulDivergence | None:
+        """Replay through a fresh evaluator and return the first decision divergence."""
+        return replay_divergence(expected, evaluator_factory, policy)
+
+    def minimize_and_retain_failure(
+        self,
+        expected: TrajectoryRecord,
+        evaluator_factory: EvaluatorFactory,
+        policy: DivergencePolicy | None = None,
+        *,
+        baseline_factory: EvaluatorFactory | None = None,
+        max_evaluations: int = 256,
+    ) -> MinimizedFailure:
+        """Minimize a divergent replay, prove it reproduces, and retain it."""
+        failure = minimize_failure(
+            expected, evaluator_factory, policy,
+            baseline_factory=baseline_factory, max_evaluations=max_evaluations,
+        )
+        self._failures.retain(failure)
+        return failure
+
+    def retained_failures(self) -> tuple[str, ...]:
+        return self._failures.digests()
+
+    def reproduce_retained_failure(
+        self, failure_digest: str, evaluator_factory: EvaluatorFactory,
+    ) -> MeaningfulDivergence | None:
+        """Replay a retained failure; ``None`` means the candidate no longer diverges."""
+        return reproduce(self._failures.load(failure_digest), evaluator_factory)
+
+    def gate_policy(self, kind: PromotionKind) -> PromotionGatePolicy:
+        return self._gate_policies[kind]
+
+    def evaluate_promotion_gate(
+        self,
+        kind: PromotionKind,
+        *,
+        results: Sequence[EvaluationResult],
+        baseline_pass_rate: float | None = None,
+        case_regressions: int = 0,
+        shadow: ShadowCanaryObservation | None = None,
+        canary: ShadowCanaryObservation | None = None,
+    ) -> PromotionGateDecision:
+        return evaluate_promotion_gate(
+            self._gate_policies[kind], results=results, baseline_pass_rate=baseline_pass_rate,
+            case_regressions=case_regressions, shadow=shadow, canary=canary,
+        )
+
+    def gated_promotion_evidence(
+        self,
+        proposal_id: str,
+        decision: PromotionGateDecision,
+        *,
+        holdout_passed: bool,
+        rollback_reference: str,
+        provenance: tuple[str, ...],
+    ) -> PromotionEvidence:
+        """Build promotion evidence whose gates are exactly a mechanical decision.
+
+        The decision's named sub-gates become the evidence ``gate_results`` and
+        its digest is appended to provenance, so any failed sub-gate makes the
+        evidence unacceptable and ``approve`` refuses it.
+        """
+        return self.promotion_evidence(
+            proposal_id,
+            gate_results=decision.gate_results,
+            replay_equivalent=decision.replay_equivalent,
+            holdout_passed=holdout_passed,
+            rollback_reference=rollback_reference,
+            provenance=tuple(provenance) + (f"promotion-gate:{decision.kind.value}:{decision.digest}",),
+        )
 
     def create_proposal(self, proposal_id: str, candidate: str, baseline: str, suite: EvaluationSuite) -> Proposal:
         return self._lifecycle.create(proposal_id, candidate, baseline, suite)
