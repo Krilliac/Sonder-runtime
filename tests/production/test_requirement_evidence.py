@@ -275,3 +275,26 @@ def test_base_diff_rejects_ambiguous_duplicate_loss(tmp_path):
     assert module._base_diff_problems("HEAD") == [
         "base-diff: evidence ledger removed or rewrote pre-existing record at base line 2"
     ]
+
+
+def test_base_diff_rejects_oversized_base_before_reading_blob(tmp_path):
+    module = _append_only_fixture(tmp_path, [
+        '{"schema":"sonder-requirement-evidence-v1","requirement_id":"TEST-001","revision":1,"status":"implemented_unverified","claim":"Claim."}',
+        '{"schema":"sonder-requirement-evidence-v1","requirement_id":"TEST-002","revision":1,"status":"planned","claim":"Second."}',
+    ])
+    module.MAX_LEDGER_BYTES = 10
+    assert module._base_diff_problems("HEAD") == [
+        "base-ref: docs/architecture/evidence/requirements.jsonl exceeds byte ceiling"
+    ]
+
+
+def test_base_diff_rejects_oversized_current_before_reading_file(tmp_path):
+    module = _append_only_fixture(tmp_path, [
+        '{"schema":"sonder-requirement-evidence-v1","requirement_id":"TEST-001","revision":1,"status":"implemented_unverified","claim":"Claim."}',
+        '{"schema":"sonder-requirement-evidence-v1","requirement_id":"TEST-002","revision":1,"status":"planned","claim":"Second."}',
+        '{"schema":"sonder-requirement-evidence-v1","requirement_id":"TEST-003","revision":1,"status":"planned","claim":"' + "x" * 1000 + '"}',
+    ])
+    module.MAX_LEDGER_BYTES = module.LEDGER.stat().st_size - 1
+    assert module._base_diff_problems("HEAD") == [
+        "base-diff: current evidence ledger exceeds byte ceiling"
+    ]

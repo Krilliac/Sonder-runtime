@@ -31,6 +31,7 @@ ALLOWED = REQUIRED | {
 }
 MAX_LEDGER_LINES = 10_000
 MAX_LEDGER_LINE_LENGTH = 16_384
+MAX_LEDGER_BYTES = 16 * 1024 * 1024
 
 
 def _parse_spec(text: str) -> dict[str, bool]:
@@ -69,9 +70,18 @@ def _resolve_base_ref(base_ref: str) -> tuple[str | None, str | None]:
 
 def _git_text(base_sha: str, path: str) -> tuple[str | None, str | None]:
     """Read one tracked file from an immutable base commit."""
+    limit = MAX_LEDGER_BYTES if path.endswith("/requirements.jsonl") else 2 * 1024 * 1024
+    size = subprocess.run(
+        ["git", "cat-file", "-s", f"{base_sha}:{path}"],
+        cwd=ROOT, text=True, capture_output=True, check=False, timeout=15,
+    )
+    if size.returncode or not size.stdout.strip().isdigit():
+        return None, f"base-ref: cannot size {path} from {base_sha!r}"
+    if int(size.stdout.strip()) > limit:
+        return None, f"base-ref: {path} exceeds byte ceiling"
     result = subprocess.run(
         ["git", "show", f"{base_sha}:{path}"],
-        cwd=ROOT, text=True, capture_output=True, check=False,
+        cwd=ROOT, text=True, capture_output=True, check=False, timeout=15,
     )
     if result.returncode:
         return None, f"base-ref: cannot read {path} from {base_sha!r}"
@@ -115,9 +125,9 @@ def _base_diff_problems(base_ref: str) -> list[str]:
     base_ledger, problem = _git_text(base_sha, str(LEDGER.relative_to(ROOT)).replace("\\", "/"))
     if problem:
         return [problem]
-    problems = _append_only_problems(
-        base_ledger or "", LEDGER.read_text(encoding="utf-8")
-    )
+    if LEDGER.stat().st_size > MAX_LEDGER_BYTES:
+        return ["base-diff: current evidence ledger exceeds byte ceiling"]
+    problems = _append_only_problems(base_ledger or "", LEDGER.read_text(encoding="utf-8"))
     base_checked = _parse_spec(base_spec or "")
     current_checked = _parse_spec(SPEC.read_text(encoding="utf-8"))
     newly_checked = sorted(
