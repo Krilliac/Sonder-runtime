@@ -565,8 +565,31 @@ def test_execution_contract_normalizes_context_and_ownership(tmp_path):
     assert contract.task_scope == "issue-510 contract"
     assert contract.requested
     assert not WorkerExecutionContract().requested
-    assert owned_paths_overlap("src/pkg", "SRC/pkg/mod.py")
-    assert not owned_paths_overlap("src/pkg", "src/pkg2")
+    assert owned_paths_overlap("/r/pkg", "/r/pkg/mod.py")
+    assert not owned_paths_overlap("/r/pkg", "/r/pkg2")
+
+
+def test_owned_paths_overlap_compares_canonical_strings_exactly():
+    # Case folding belongs to canonicalization (os.path.normcase), not to the
+    # overlap comparison; distinct canonical strings are distinct paths.
+    assert not owned_paths_overlap("/r/A.py", "/r/a.py")
+    assert not owned_paths_overlap("/r/Pkg", "/r/pkg/mod.py")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX filesystems are case-sensitive; Windows normcase folds case")
+def test_posix_case_distinct_owned_files_do_not_conflict(tmp_path):
+    upper = WorkerExecutionContract(owned_files=(str(tmp_path / "A.py"),))
+    lower = WorkerExecutionContract(owned_files=(str(tmp_path / "a.py"),))
+    assert upper.owned_files != lower.owned_files
+    assert upper.conflicts_with(lower) == ""
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-only: normcase folds case on case-insensitive filesystems")
+def test_windows_case_variant_owned_files_still_conflict(tmp_path):
+    upper = WorkerExecutionContract(owned_files=(str(tmp_path / "A.py").upper(),))
+    lower = WorkerExecutionContract(owned_files=(str(tmp_path / "a.py"),))
+    assert upper.owned_files == lower.owned_files
+    assert "overlaps" in upper.conflicts_with(lower)
 
 
 def test_full_contract_survives_restart_and_is_recorded_with_terminal_verification(tmp_path):
