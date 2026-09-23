@@ -6,4 +6,7 @@ verification, or limitation heading and verifies that each referenced focused
 test exists. The checker is intentionally independent of the requirement
 ledger: ledger entries remain `planned` until end-to-end verification exists.
 
-Focused coverage is in `tests/test_evidence_document_consistency.py`.
+Focused coverage is in `tests/test_evidence_document_consistency.py`. DOC-006
+is verified by the same-change evidence gate documented in
+`evidence/DOC-006-STATUS-EVIDENCE-2026-09-23.md`; DOC-007 remains
+implemented-unverified because semantic stale-promise review is still required.

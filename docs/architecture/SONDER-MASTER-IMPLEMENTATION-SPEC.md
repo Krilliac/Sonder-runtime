@@ -550,7 +550,7 @@ schema, cancellation, cleanup-to-quiescence contract, and conformance tests.
   current behavior and link their unfinished implementation work here.
 - [ ] **DOC-005 — Generated references.** Generate tool, command, event, configuration,
   schema, and capability references from source and freshness-gate them.
-- [ ] **DOC-006 — Status evidence.** Check off an item only in the same change that adds
+- [x] **DOC-006 — Status evidence.** Check off an item only in the same change that adds
   or links its verifiable evidence.
 - [ ] **DOC-007 — No stale promises.** Product documentation distinguishes implemented,
   experimental, proposed, degraded, and unsupported behavior.

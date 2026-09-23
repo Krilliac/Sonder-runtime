@@ -87,10 +87,11 @@ def test_generated_catalog_freshness_contract_is_discoverable_and_deterministic(
     assert first.client["digest"] == first.digest
 
 
-def test_stale_promise_inventory_is_explicit_and_formal_checkboxes_untouched():
+def test_stale_promise_inventory_is_explicit_and_unverified_checkboxes_remain_open():
     inventory = _read("docs/architecture/REMAINING-DOC-001-007.md")
     for category in ("Current", "Implemented foundation", "Planned/open", "Historical", "Limitation"):
         assert f"| {category} |" in inventory
     spec = _read("docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md")
-    for requirement in ("DOC-001", "DOC-002", "DOC-003", "DOC-004", "DOC-005", "DOC-006", "DOC-007"):
+    assert re.search(r"- \[x\] \*\*DOC-006 —", spec, re.IGNORECASE)
+    for requirement in ("DOC-001", "DOC-002", "DOC-003", "DOC-004", "DOC-005", "DOC-007"):
         assert re.search(rf"- \[ \] \*\*{requirement} —", spec)

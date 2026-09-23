@@ -36,9 +36,9 @@
       "verified": 0
     },
     "DOC": {
-      "checked": 0,
+      "checked": 1,
       "total": 7,
-      "verified": 0
+      "verified": 1
     },
     "EVAL": {
       "checked": 0,
@@ -127,13 +127,13 @@
     }
   },
   "overall": {
-    "checked": 1,
+    "checked": 2,
     "statuses": {
-      "implemented_unverified": 203,
-      "verified": 1
+      "implemented_unverified": 202,
+      "verified": 2
     },
     "total": 204,
-    "verified": 1
+    "verified": 2
   },
   "requirements": [
     {
@@ -613,11 +613,11 @@
       "status": "implemented_unverified"
     },
     {
-      "checked": false,
-      "claim": "Requirement status and evidence are generated from the append-only ledger.",
+      "checked": true,
+      "claim": "A checked requirement is accepted only when the same change adds or links concrete, reachable evidence and regenerates the derived requirement status.",
       "requirement_id": "DOC-006",
-      "revision": 2,
-      "status": "implemented_unverified"
+      "revision": 3,
+      "status": "verified"
     },
     {
       "checked": false,
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "c48dd2fcf0714c2a656be564c2f9dd52de576a81c273da36fa8de97a401d32dc",
-    "spec_sha256": "1aaaccdccb6f4884941c478905df25ef32f849d750e939f528be7db16554bf3c"
+    "ledger_sha256": "f62f7471b8e411c9dbc8f618c70450fc93d3a581ec1079d916b2f624b08d6275",
+    "spec_sha256": "4797da92d2d1845ce944b2dc32353d52fe7a6e48dfa92593753ca727761ca714"
   }
 }
