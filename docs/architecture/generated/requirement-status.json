@@ -579,9 +579,9 @@
     },
     {
       "checked": false,
-      "claim": "A documentation authority index identifies current sources of truth.",
+      "claim": "docs/architecture/README.md directly maps the six authoritative current contracts and three historical or superseded program documents, with the detailed authority index retained as its companion.",
       "requirement_id": "DOC-001",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "de994aa39953d2bad8c025f4b2e7b85f9eb945c5a2cca7ba750aa76f5d3ac24a",
+    "ledger_sha256": "aef04d9f7c6c6673ee98d92dae0a79d26ab858c6d5ec9b049986d1951e76a662",
     "spec_sha256": "61faa94ce65d66c87613361fa79a5afbd4053660e10f6801c6dc8be62c0c92d8"
   }
 }
