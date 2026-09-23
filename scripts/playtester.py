@@ -78,9 +78,21 @@ def _validate_real_pr_state(cwd: str, repository: str, branch: str, expected_sha
         raise RuntimeError("remote branch SHA does not match tested SHA")
 
 
+def _validate_issue_state(cwd: str, repository: str, expected_sha: str) -> None:
+    """Prevent publishing failure evidence after the tested checkout changed."""
+    head_code, head = _git(cwd, "rev-parse", "HEAD")
+    status_code, status = _git(cwd, "status", "--porcelain")
+    origin_code, origin = _git(cwd, "remote", "get-url", "origin")
+    if head_code or status_code or origin_code or head != expected_sha or status:
+        raise RuntimeError("working tree changed during playtest or is not clean")
+    if _remote_repo(origin).casefold() != repository.casefold():
+        raise RuntimeError("origin repository does not match publication repository")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--catalog", help="JSON array of scenarios")
+    parser.add_argument("--trusted-local", action="store_true", help="allow commands from a local, operator-trusted catalog")
     parser.add_argument("--name", default="explicit-playtest")
     parser.add_argument("--claim", default="The adapter command completes successfully")
     parser.add_argument("--evidence-class", default="structural only", choices=[e.value for e in EvidenceClass])
@@ -106,6 +118,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--pr requires --publish-repo")
     if args.pr and not args.branch:
         parser.error("--pr requires --branch")
+    if args.catalog and not args.trusted_local:
+        parser.error("--catalog requires --trusted-local; catalog commands execute with local user privileges")
     if not args.catalog and not args.command and not args.command_json:
         parser.error("--command or --command-json is required unless --catalog is supplied")
     scenarios = _scenarios(args)
@@ -133,8 +147,10 @@ def main(argv: list[str] | None = None) -> int:
             clean = not bool(status) and not output_inside_worktree
             if args.pr and final_branch != args.branch:
                 raise RuntimeError("PR branch changed during playtest")
-            if args.publish and args.pr:
-                _validate_real_pr_state(args.cwd, args.publish_repo, final_branch, report.commit_sha)
+            if args.publish:
+                _validate_issue_state(args.cwd, args.publish_repo, report.commit_sha)
+                if args.pr:
+                    _validate_real_pr_state(args.cwd, args.publish_repo, final_branch, report.commit_sha)
             plan = build_publish_plan(report, repository=args.publish_repo, branch=final_branch, base=args.base, request_pr=create_pr, clean=clean, head_sha=final_sha)
             publications.append(GitHubPublisher(dry_run=not args.publish, adapter=GhCliAdapter() if args.publish else None).publish(plan, create_issue=create_issue, create_pr=create_pr))
         output["publications"] = publications

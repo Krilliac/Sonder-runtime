@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 import re
+import tempfile
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from .runner import PlaytestReport, _redact
@@ -22,6 +27,49 @@ class PublishPlan:
     issue_command: tuple[str, ...]
     pr_command: tuple[str, ...] | None
     warnings: tuple[str, ...] = ()
+
+
+class _PublicationLock:
+    """Small cross-process lock for marker lookup plus publication."""
+
+    def __init__(self, plan: PublishPlan):
+        key = hashlib.sha256((plan.issue_command[plan.issue_command.index("--repo") + 1] + "\0" + plan.marker).encode()).hexdigest()
+        self.path = Path(tempfile.gettempdir()) / ("sonder-playtester-" + key + ".lock")
+        self.handle = None
+
+    def __enter__(self):
+        self.path.touch(exist_ok=True)
+        self.handle = self.path.open("r+b")
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    self.handle.seek(0)
+                    msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except (OSError, BlockingIOError):
+                if time.monotonic() >= deadline:
+                    self.handle.close()
+                    raise RuntimeError("timed out waiting for playtest publication lock")
+                time.sleep(0.05)
+
+    def __exit__(self, *_):
+        if self.handle is None:
+            return
+        try:
+            if os.name == "nt":
+                import msvcrt
+                self.handle.seek(0)
+                msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self.handle.close()
 
 
 def _body(report: PlaytestReport) -> str:
@@ -86,19 +134,20 @@ class GitHubPublisher:
             return {"dry_run": True, "operations": ["issue" if command == plan.issue_command else "pr" for command in commands], "title": plan.issue_title, "marker": plan.marker}
         if self.adapter is None:
             raise RuntimeError("a GitHub adapter is required for non-dry-run publication")
-        results = []
-        existing = self._existing_issue(plan) if create_issue else []
-        existing_pr = self._existing_pr(plan) if create_pr else []
-        if existing:
-            commands = [command for command in commands if command != plan.issue_command]
-        if existing_pr and plan.pr_command:
-            commands = [command for command in commands if command != plan.pr_command]
-        for command in commands:
-            completed = self.adapter.run(command)
-            results.append({"command": list(command[:4]), "returncode": completed.returncode, "stdout": _redact(completed.stdout[-2000:]), "stderr": _redact(completed.stderr[-2000:])})
-            if completed.returncode:
-                raise RuntimeError(f"gh command failed with status {completed.returncode}")
-        return {"dry_run": False, "results": results, "marker": plan.marker, "deduplicated_issue": bool(existing), "deduplicated_pr": bool(existing_pr)}
+        with _PublicationLock(plan):
+            results = []
+            existing = self._existing_issue(plan) if create_issue else []
+            existing_pr = self._existing_pr(plan) if create_pr else []
+            if existing:
+                commands = [command for command in commands if command != plan.issue_command]
+            if existing_pr and plan.pr_command:
+                commands = [command for command in commands if command != plan.pr_command]
+            for command in commands:
+                completed = self.adapter.run(command)
+                results.append({"command": list(command[:4]), "returncode": completed.returncode, "stdout": _redact(completed.stdout[-2000:]), "stderr": _redact(completed.stderr[-2000:])})
+                if completed.returncode:
+                    raise RuntimeError(f"gh command failed with status {completed.returncode}")
+            return {"dry_run": False, "results": results, "marker": plan.marker, "deduplicated_issue": bool(existing), "deduplicated_pr": bool(existing_pr)}
 
     def _existing_issue(self, plan: PublishPlan) -> list[object]:
         try:
