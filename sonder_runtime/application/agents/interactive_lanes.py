@@ -1381,7 +1381,18 @@ class AgentLaneService:
             lane, turn_number=lane["used_steps"] + 1
         )
         if selection is not None and self.tools is not None:
-            schemas = self.tools.visible_tool_schemas(selection)
+            visible_schemas = getattr(self.tools, "visible_tool_schemas", None)
+            if callable(visible_schemas):
+                schemas = visible_schemas(selection)
+            else:
+                # Legacy host/test facades expose the same registry without
+                # the selected-catalog helper. Resolve only granted names;
+                # unknown descriptors still fail before the model call.
+                schemas = tuple(
+                    {"name": name,
+                     "input_schema": self.tools.graph.registry.get(name).input_schema}
+                    for name in sorted(selection.visible_names)
+                )
             rendered = json.dumps(schemas, ensure_ascii=False, sort_keys=True)
             if len(rendered.encode("utf-8")) > 65536:
                 raise ValueError("visible tool schemas exceed lane system payload ceiling")
