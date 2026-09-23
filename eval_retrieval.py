@@ -15,6 +15,13 @@ chunk of HELDOUT. Safe to import from tests without a GPU.
 Usage (chunk-resumable, so the controller can run it in <10-min foreground pieces):
     python eval_retrieval.py [start] [count]
 
+Optional aggregate history (no prompts, checks, or responses stored):
+    python eval_retrieval.py START COUNT --record-history --run-id RUN_ID
+Use one RUN_ID across chunks of the same evaluation; reuse it to retry a
+chunk, and choose a new ID for a later independent run. Retry deduplication is
+limited to the bounded history read window. Recording requires the exact local
+Ollama manifest digest and fails closed if the model changes.
+
 Prints one PASS/FAIL line per task, then a summary line:
     EVAL chunk: retrieval P/N, baseline Q/N
 """
