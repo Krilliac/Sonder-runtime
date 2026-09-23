@@ -14,6 +14,7 @@ from sonder_runtime.application.ports.host_turn_links import (
     FinalizedHostResult, ManagedHostFinalEvidence, ManagedHostTerminalLink,
     ManagedHostTurnLink,
 )
+from sonder_runtime.application.ports.lane_continuation import PendingVerificationIdentity
 from sonder_runtime.application.ports.terminal_eligibility import ManagedTerminalEligibility
 from sonder_runtime.bootstrap.managed_standalone import ManagedStandaloneSession
 
@@ -39,9 +40,14 @@ def _evidence(*, principal="worker-a", run_id="run-1", outcome="passed", receipt
     return ManagedHostFinalEvidence(FinalizedHostResult(output, link), facts)
 
 
-def _eligibility(evidence, *, worker_id="lane-worker-a", eligible=True, phase="certified"):
+def _eligibility(evidence, *, worker_id="lane-worker-a", eligible=True, phase="certified", bundle_digest="bundle-shared"):
+    identity = PendingVerificationIdentity(
+        "continuation-1", "verification-1", "parent-1", 1, 1,
+        bundle_digest, "command-1", "a" * 64, 1,
+    )
     return ManagedTerminalEligibility(
         evidence, eligible, phase, "CERTIFIED" if eligible else "FINAL_CERTIFICATE_MISMATCH",
+        pending_identity=identity if eligible else None,
         authenticated_worker_id=worker_id if eligible else None,
     )
 
@@ -70,12 +76,24 @@ def test_distinct_authenticated_workers_can_reach_fact_but_contradiction_demotes
     first = ReceiptObservationProducer.from_terminal_eligibility(_eligibility(_evidence(principal="owner"), worker_id="lane-worker-a"))[1]
     second = ReceiptObservationProducer.from_terminal_eligibility(_eligibility(_evidence(principal="owner", run_id="run-2"), worker_id="lane-worker-b"))[1]
     assert LearningLadder().evaluate((first, second))[0].stage == LearningStage.FACT
-    negative = ReceiptObservationProducer.from_terminal_eligibility(
-        _eligibility(_evidence(principal="owner", run_id="run-3", outcome="failed"), worker_id="lane-worker-b")
+    negative = _eligibility(
+        _evidence(principal="owner", run_id="run-3", outcome="failed"),
+        worker_id="lane-worker-b",
+    )
+    with pytest.raises(PermissionError, match="negative evidence"):
+        ReceiptObservationProducer.from_terminal_eligibility(negative)
+
+
+def test_unrelated_verified_subjects_never_aggregate():
+    first = ReceiptObservationProducer.from_terminal_eligibility(
+        _eligibility(_evidence(principal="owner", run_id="run-1"), worker_id="lane-worker-a", bundle_digest="bundle-a")
     )[1]
-    decision = LearningLadder().evaluate((first, second, negative))[0]
-    assert decision.stage == LearningStage.CANDIDATE
-    assert decision.contradiction_count == 1
+    second = ReceiptObservationProducer.from_terminal_eligibility(
+        _eligibility(_evidence(principal="owner", run_id="run-2"), worker_id="lane-worker-b", bundle_digest="bundle-b")
+    )[1]
+    decisions = LearningLadder().evaluate((first, second))
+    assert len(decisions) == 2
+    assert all(decision.stage == LearningStage.CANDIDATE for decision in decisions)
 
 
 def test_uncertain_receipt_cannot_mint_positive_trusted_observation():
