@@ -17,6 +17,7 @@ import math
 import os
 from pathlib import Path
 import sqlite3
+import tempfile
 
 from sonder_runtime.adapters.persistence.sqlite.memory_replication import (
     append_memory_mutations_in_transaction,
@@ -33,6 +34,7 @@ from .authoritative_indexes import materialize_authoritative_fact_index
 _MAX_EMBEDDING = 16_384
 _SAVEPOINT = "sonder_authoritative_fact_write"
 _MAX_MIGRATION_ROWS = 1024
+_MAX_MIGRATION_BYTES = 32 * 1024 * 1024
 
 
 def _recorded_at() -> str:
@@ -108,6 +110,19 @@ def plan_legacy_fact_migration(connection, *, source_id: str, project_scope: str
         raise MemoryReplicationError("authoritative fact scope is required")
     if type(source_id) is not str or not source_id:
         raise MemoryReplicationError("authoritative fact source is required")
+    # Reject malformed identities before showing an operator an approvable
+    # digest or creating any backup in the apply path.
+    SQLiteAuthoritativeFactSource(source_id, project_scope=project_scope)
+    total_bytes = connection.execute(
+        "SELECT COALESCE(SUM(length(CAST(fact.text AS BLOB)) + "
+        "COALESCE(length(fact.embedding), 0)), 0) "
+        "FROM facts AS fact LEFT JOIN memory_authoritative_fact_state AS state "
+        "ON state.project=fact.project AND state.fact_id=fact.id "
+        "WHERE fact.project=? AND state.fact_id IS NULL",
+        (project_scope,),
+    ).fetchone()[0]
+    if total_bytes > _MAX_MIGRATION_BYTES:
+        raise MemoryReplicationError("legacy fact migration exceeds the byte limit")
     rows = connection.execute(
         "SELECT fact.id,fact.project,fact.text,fact.embedding "
         "FROM facts AS fact LEFT JOIN memory_authoritative_fact_state AS state "
@@ -121,6 +136,16 @@ def plan_legacy_fact_migration(connection, *, source_id: str, project_scope: str
         (str(row[0]), str(row[1]), str(row[2]), bytes(row[3]) if row[3] is not None else None)
         for row in rows
     )
+    if sum(len(text.encode("utf-8")) + len(embedding or b"") for _, _, text, embedding in normalized) > _MAX_MIGRATION_BYTES:
+        raise MemoryReplicationError("legacy fact migration exceeds the byte limit")
+    for fact_id, project, text, embedding in normalized:
+        MemoryMutation(
+            source_id=source_id, source_epoch=1, sequence=1,
+            entity_kind="fact", entity_id=fact_id, version=1,
+            operation="upsert", project=project,
+            payload=_fact_payload(text, embedding, None),
+            recorded_at=_recorded_at(),
+        )
     digest = _migration_digest(source_id, project_scope, normalized)
     return LegacyFactMigrationPlan(source_id, project_scope, normalized, digest)
 
@@ -144,35 +169,43 @@ def migrate_legacy_facts(
         raise TypeError("a LegacyFactMigrationPlan is required")
     if connection.in_transaction:
         raise MemoryReplicationError("legacy fact migration requires an idle connection")
-    if backup_path is not None:
-        backup = Path(backup_path).expanduser()
-        backup.parent.mkdir(parents=True, exist_ok=True)
+    if len(plan.rows) > _MAX_MIGRATION_ROWS or plan.digest != _migration_digest(
+        plan.source_id, plan.project_scope, plan.rows,
+    ):
+        raise MemoryReplicationError("legacy fact migration plan is stale")
+    SQLiteAuthoritativeFactSource(plan.source_id, project_scope=plan.project_scope)
+    if backup_path is None:
+        raise MemoryReplicationError("legacy fact migration requires a new backup path")
+    backup = Path(backup_path).expanduser()
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    if backup.exists() or backup.is_symlink():
+        raise MemoryReplicationError("migration backup already exists")
+    # Write the SQLite snapshot under an unpredictable same-directory name,
+    # then publish it with a no-clobber hard link. No caller can swap the
+    # requested path while SQLite is writing the backup bytes.
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=".sonder-fact-backup-", suffix=".sqlite", dir=backup.parent,
+    )
+    os.close(fd)
+    temporary = Path(temporary_name)
+    try:
+        target = sqlite3.connect(str(temporary))
         try:
-            fd = os.open(str(backup), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            connection.backup(target)
+            target.commit()
+            integrity = target.execute("PRAGMA integrity_check").fetchone()
+            if integrity != ("ok",):
+                raise MemoryReplicationError("migration backup failed integrity verification")
+        finally:
+            target.close()
+        try:
+            os.link(temporary, backup)
         except FileExistsError as exc:
             raise MemoryReplicationError("migration backup already exists") from exc
-        os.close(fd)
-        if backup.is_symlink() or not backup.is_file():
-            raise MemoryReplicationError("migration backup is not a regular file")
-        try:
-            target = sqlite3.connect(str(backup))
-            try:
-                connection.backup(target)
-                target.commit()
-                integrity = target.execute("PRAGMA integrity_check").fetchone()
-                if integrity != ("ok",):
-                    raise MemoryReplicationError("migration backup failed integrity verification")
-            finally:
-                target.close()
-        except Exception:
-            # The path was created exclusively by this invocation.  Do not
-            # leave an operator-facing partial backup that could be mistaken
-            # for a verified recovery point.
-            try:
-                backup.unlink()
-            except FileNotFoundError:
-                pass
-            raise
+        except OSError as exc:
+            raise MemoryReplicationError("atomic migration backup publication unavailable") from exc
+    finally:
+        temporary.unlink(missing_ok=True)
     connection.execute("BEGIN IMMEDIATE")
     try:
         # This check is deliberately inside the write transaction.  It is the

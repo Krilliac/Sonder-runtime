@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import replace
+import sys
 
 import pytest
 
@@ -53,7 +54,7 @@ def test_legacy_migration_rejects_stale_plan_without_mutation(tmp_path):
     connection.execute("UPDATE facts SET text=? WHERE id=?", ("changed", "legacy"))
     connection.commit()
     with pytest.raises(MemoryReplicationError, match="stale"):
-        migrate_legacy_facts(connection, plan)
+        migrate_legacy_facts(connection, plan, backup_path=tmp_path / "stale-backup.db")
     assert connection.execute("SELECT COUNT(*) FROM memory_replication_log").fetchone()[0] == 0
     connection.close()
 
@@ -74,7 +75,7 @@ def test_legacy_migration_rolls_back_fact_state_journal_and_indexes(tmp_path, mo
 
     monkeypatch.setattr(authoritative_memory, "append_memory_mutations_in_transaction", fail_append)
     with pytest.raises(RuntimeError, match="injected"):
-        migrate_legacy_facts(connection, plan)
+        migrate_legacy_facts(connection, plan, backup_path=tmp_path / "failure-backup.db")
     assert connection.execute(
         "SELECT COUNT(*) FROM memory_authoritative_fact_state"
     ).fetchone()[0] == 0
@@ -94,10 +95,10 @@ def test_migration_replay_is_idempotent_only_after_plan_is_empty(tmp_path):
     )
     connection.commit()
     plan = plan_legacy_fact_migration(connection, source_id="node-a", project_scope="repo-a")
-    migrate_legacy_facts(connection, plan)
+    migrate_legacy_facts(connection, plan, backup_path=tmp_path / "first-backup.db")
     empty = plan_legacy_fact_migration(connection, source_id="node-a", project_scope="repo-a")
     assert empty.rows == ()
-    assert migrate_legacy_facts(connection, empty) == 0
+    assert migrate_legacy_facts(connection, empty, backup_path=tmp_path / "empty-backup.db") == 0
     connection.close()
 
 
@@ -109,7 +110,7 @@ def test_migration_keeps_tombstones_and_conflicting_ownership_fail_closed(tmp_pa
     )
     connection.commit()
     first = plan_legacy_fact_migration(connection, source_id="node-a", project_scope="repo-a")
-    migrate_legacy_facts(connection, first)
+    migrate_legacy_facts(connection, first, backup_path=tmp_path / "tombstone-backup.db")
     source = SQLiteMemoryReplicationJournal(path=tmp_path / "memory.db", source_id="node-a", project_scope="repo-a")
     source.close()
     connection.execute(
@@ -192,3 +193,58 @@ def test_migration_rechecks_after_backup_race(tmp_path):
     assert connection.execute("SELECT COUNT(*) FROM memory_replication_log").fetchone()[0] == 0
     racer.close()
     connection.close()
+
+
+def test_plan_rejects_invalid_identity_and_oversized_legacy_bytes(tmp_path):
+    connection = connect(tmp_path / "memory.db")
+    with pytest.raises(MemoryReplicationError):
+        plan_legacy_fact_migration(
+            connection, source_id="bad source", project_scope="repo-a",
+        )
+    connection.execute(
+        "INSERT INTO facts(id,project,text,embedding) VALUES(?,?,?,zeroblob(?))",
+        ("large", "repo-a", "legacy", 32 * 1024 * 1024 + 1),
+    )
+    connection.commit()
+    with pytest.raises(MemoryReplicationError, match="byte limit"):
+        plan_legacy_fact_migration(
+            connection, source_id="node-a", project_scope="repo-a",
+        )
+    connection.close()
+
+
+def test_apply_requires_backup_and_never_clobbers_existing_path(tmp_path):
+    connection = connect(tmp_path / "memory.db")
+    connection.execute(
+        "INSERT INTO facts(id,project,text,embedding) VALUES(?,?,?,?)",
+        ("legacy", "repo-a", "old fact", None),
+    )
+    connection.commit()
+    plan = plan_legacy_fact_migration(
+        connection, source_id="node-a", project_scope="repo-a",
+    )
+    with pytest.raises(MemoryReplicationError, match="backup path"):
+        migrate_legacy_facts(connection, plan)
+    backup = tmp_path / "backup.db"
+    backup.write_text("do not overwrite", encoding="utf-8")
+    with pytest.raises(MemoryReplicationError, match="already exists"):
+        migrate_legacy_facts(connection, plan, backup_path=backup)
+    assert backup.read_text(encoding="utf-8") == "do not overwrite"
+    assert connection.execute(
+        "SELECT COUNT(*) FROM memory_replication_log"
+    ).fetchone()[0] == 0
+    connection.close()
+
+
+def test_operator_command_does_not_create_a_missing_database(tmp_path, monkeypatch):
+    from scripts import migrate_authoritative_facts as command
+
+    missing = tmp_path / "missing.db"
+    monkeypatch.setattr(sys, "argv", [
+        "migrate_authoritative_facts.py", "--database", str(missing),
+        "--source-id", "node-a", "--project", "repo-a",
+    ])
+    with pytest.raises(SystemExit) as stopped:
+        command.main()
+    assert stopped.value.code == 2
+    assert not missing.exists()

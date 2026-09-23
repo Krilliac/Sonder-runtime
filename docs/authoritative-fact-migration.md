@@ -17,11 +17,15 @@ backup path to apply the plan:
 python scripts/migrate_authoritative_facts.py --database ABSOLUTE_DB --source-id node-a --project repo-a --apply --digest DIGEST --backup ABSOLUTE_BACKUP_DB
 ```
 
-The command adopts at most 1024 unjournaled facts per plan.  It refuses a
+The command adopts at most 1024 unjournaled facts and 32 MiB of text/embedding
+bytes per plan. It refuses a
 changed plan, an existing backup, or a missing explicit backup.  The migration
 requires an idle connection and treats the operator as responsible for
-quiescing other writers.  The backup path is created exclusively, integrity
-checked, and removed if backup creation fails.  The plan digest binds the
+quiescing other writers. A backup is required for every apply. The snapshot is
+written to a private temporary file in the requested directory, integrity
+checked, and published with a no-clobber hard link; a filesystem without
+same-directory hard-link support fails closed. Failed temporary backups are
+removed. The plan digest binds the
 source id, project scope, and exact row contents.  The command then acquires
 `BEGIN IMMEDIATE` and re-reads the plan inside that write lock; a writer that
 raced backup creation therefore causes a stale-plan refusal before any

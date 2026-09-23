@@ -30,6 +30,16 @@ def main() -> int:
     parser.add_argument("--digest", help="exact dry-run digest required with --apply")
     parser.add_argument("--backup", type=Path, help="new SQLite backup path required for --apply")
     args = parser.parse_args()
+    if (
+        not args.database.is_absolute()
+        or args.database.is_symlink()
+        or not args.database.is_file()
+    ):
+        parser.error("--database must name an existing absolute regular SQLite file")
+    if args.apply and (
+        args.backup is None or not args.backup.is_absolute()
+    ):
+        parser.error("--apply requires an absolute new --backup path")
     connection = connect(args.database)
     try:
         plan = plan_legacy_fact_migration(
@@ -41,8 +51,6 @@ def main() -> int:
             return 0
         if args.digest != plan.digest:
             parser.error("--apply requires the exact digest from the dry-run plan")
-        if args.backup is None:
-            parser.error("--apply requires --backup")
         migrated = migrate_legacy_facts(connection, plan, backup_path=args.backup)
         print(json.dumps({**summary, "migrated": migrated}, sort_keys=True))
         return 0
