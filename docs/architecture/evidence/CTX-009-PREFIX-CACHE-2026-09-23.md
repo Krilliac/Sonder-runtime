@@ -44,6 +44,11 @@ capture persists bounded section identities and content digests without
 copying section text, and replay reconstructs that evidence. Focused provider
 boundary and session-capture tests exercise this path; the provider double
 supplies synthetic prompt-cache counts to verify telemetry shape only.
+The real `server._make_generate` transport factory now forwards Ollama's
+`prompt_eval_cached_count` scalar into the gateway's `InferenceTelemetry`.
+`tests/production/test_ollama_gateway.py` exercises that transport-to-gateway
+seam with a stubbed HTTP result, so the count is no longer lost before the
+provider boundary. The test does not replace a live generated-prefix request.
 
 On the current implementation branch (`01ed36043a47d8adaa28d0f322eb0e880da55696`
 plus this change), the focused boundary and durability checks reported:
