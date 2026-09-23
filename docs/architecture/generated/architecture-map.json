@@ -739,7 +739,7 @@
       ]
     },
     {
-      "file_count": 186,
+      "file_count": 187,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -843,6 +843,7 @@
         "sonder_runtime/domain/master_timeout.py",
         "sonder_runtime/domain/mcp_runtime_formatting.py",
         "sonder_runtime/domain/memory/__init__.py",
+        "sonder_runtime/domain/memory/authoritative_fact_metadata.py",
         "sonder_runtime/domain/memory/governance.py",
         "sonder_runtime/domain/memory/replication.py",
         "sonder_runtime/domain/memory/retention_gate.py",

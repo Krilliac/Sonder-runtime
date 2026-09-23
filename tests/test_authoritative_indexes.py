@@ -149,3 +149,24 @@ def test_indexed_fact_rejects_unscoped_or_invalid_temporal_claims():
     with pytest.raises(MemoryReplicationError, match="explicit provenance"):
         AuthoritativeFactMetadata(entities=("parser",))
 
+
+def test_scoped_index_retrieval_pages_without_silent_loss(tmp_path):
+    conn = connect(tmp_path / "memory.db")
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    for index in range(17):
+        source.add_fact(
+            conn, f"fact-{index:02d}", "repo-a", f"fact {index}",
+            metadata=AuthoritativeFactMetadata(
+                entities=("parser",), provenance=("host:receipt",),
+            ),
+        )
+    first = entities_for_project(conn, "repo-a", entity_id="parser")
+    second = entities_for_project(conn, "repo-a", entity_id="parser", offset=16)
+    assert len(first) == 16 and len(second) == 1
+    assert {row["fact_id"] for row in first + second} == {
+        f"fact-{index:02d}" for index in range(17)
+    }
+    with pytest.raises(ValueError, match="offset"):
+        entities_for_project(conn, "repo-a", offset=-1)
+    conn.close()
+

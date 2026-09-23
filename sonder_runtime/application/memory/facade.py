@@ -64,15 +64,15 @@ class MemoryLearningFacade:
                 interaction_id, signal, source=source,
             )
 
-    def authoritative_entities(self, project: str, *, entity_id: str | None = None, now: str | None = None):
+    def authoritative_entities(self, project: str, *, entity_id: str | None = None, now: str | None = None, offset: int = 0):
         """Read only committed, scoped entity materializations."""
         with self._unit_of_work() as scope:
-            return scope.memory.entities_for_project(project, entity_id=entity_id, now=now)
+            return scope.memory.entities_for_project(project, entity_id=entity_id, now=now, offset=offset)
 
-    def authoritative_decisions(self, project: str, *, decision_id: str | None = None, now: str | None = None):
+    def authoritative_decisions(self, project: str, *, decision_id: str | None = None, now: str | None = None, offset: int = 0):
         """Read only committed, scoped decision materializations."""
         with self._unit_of_work() as scope:
-            return scope.memory.decisions_for_project(project, decision_id=decision_id, now=now)
+            return scope.memory.decisions_for_project(project, decision_id=decision_id, now=now, offset=offset)
 
     # Explicit alias used by HTTP/MCP/CLI outcome handlers.
     record_outcome = record

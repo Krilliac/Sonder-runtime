@@ -7312,6 +7312,12 @@
           "name": "now",
           "required": false,
           "type": "str"
+        },
+        {
+          "default": 0,
+          "name": "offset",
+          "required": false,
+          "type": "int"
         }
       ],
       "risk": "ask",
@@ -10295,7 +10301,7 @@
     "events": 43,
     "tools": 214
   },
-  "digest": "4a282d59b23398036891a599d5870a66e4bdac5e9e3d43056d713dc7bb4cc9cb",
+  "digest": "b250bd66616e79e6ad7012efc9ca32263d73550e526d2411dc8ba630f3b2fc90",
   "events": [
     {
       "name": "session.started",
@@ -10766,7 +10772,7 @@
   "schema": "sonder-runtime-document-reference-v1",
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "81e8cfa13b3b02bf405c0153e0525596b22636889ab9e895ba7ce634c66996f0",
+    "server.py": "96f1f0a3b7c04242f505f221afa69190e9776b9e984832ddcd4a5e1b4f6bb3c5",
     "sonder_runtime/application/tools/generated_catalogs.py": "57a490ddd581e3e7a5d4b7b73379d205048f1db6de8e7e73c71f1124c6d84900",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/platform/config.py": "4f0a7ce76709cdf1b12a729abb56f9e4933f7def5789ef8b23c3ba6f22bd4e2c",
@@ -16358,6 +16364,11 @@
             "default": "",
             "title": "Now",
             "type": "string"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
           },
           "project": {
             "default": "",
