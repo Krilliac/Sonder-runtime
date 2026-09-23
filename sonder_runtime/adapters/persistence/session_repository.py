@@ -228,6 +228,8 @@ class SQLiteSessionRepository:
                 session_id, start_sequence=next_sequence, limit=page_size,
             )
             events.extend(page)
+            if len(events) > max_events:
+                raise ValueError("session history exceeds recovery bound")
             if len(page) < page_size:
                 break
             if len(events) >= max_events:
