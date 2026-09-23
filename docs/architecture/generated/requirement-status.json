@@ -516,9 +516,9 @@
     },
     {
       "checked": false,
-      "claim": "The provider-neutral prefix manifest/cache contract and local Ollama telemetry are implemented, but live Sonder consumption is not proved.",
+      "claim": "Live agent-lane requests now consume deterministic scoped project-rule and skill-catalog records through the context planner, with explicit empty catalogs, selected tool schemas, prefix telemetry, and stale-refresh refusal.",
       "requirement_id": "CTX-009",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -866,9 +866,9 @@
     },
     {
       "checked": false,
-      "claim": "Retry execution and durable facts retain explicit operation identity for idempotent behavior.",
+      "claim": "Live agent-lane mutating tool calls now journal exact effect intents and outcomes, reject duplicate invocation, validate owner epochs, and bind checkpoint generations to an atomic SQLite high-water mark.",
       "requirement_id": "LOOP-008",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -887,23 +887,23 @@
     },
     {
       "checked": false,
-      "claim": "The facade preserves evidence-backed typed memory and procedural-promotion candidates without fabricating support.",
+      "claim": "Host-current certified verifier results can produce immutable project-scoped observations bound to a source manifest, check catalog, authenticated child worker, and durable receipt.",
       "requirement_id": "MEM-003",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Outcome recording uses the existing typed source and interaction identity boundary for temporal learning truth.",
+      "claim": "Explicit journaled fact metadata now validates timezone-aware validity intervals, supersession, source version, tombstones, and scoped provenance before materializing derived indexes.",
       "requirement_id": "MEM-004",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Recall remains behind the application facade and bounded recall service instead of transport handlers reaching into storage.",
+      "claim": "Configured project-scoped facts expose bounded entity and decision index pages with source/version/provenance and validity filtering through the application facade and MCP surface.",
       "requirement_id": "MEM-005",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "f62f7471b8e411c9dbc8f618c70450fc93d3a581ec1079d916b2f624b08d6275",
+    "ledger_sha256": "97875eec1bc29171cf190d9964863242b2536d7b96df8ef8b390dfb06530b49c",
     "spec_sha256": "4797da92d2d1845ce944b2dc32353d52fe7a6e48dfa92593753ca727761ca714"
   }
 }
