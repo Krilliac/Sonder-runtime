@@ -57,6 +57,38 @@ def test_facade_exposes_bounded_overflow_recovery_and_last_good_fallback():
     assert result.candidate == [0, 1, 2]
 
 
+def test_facade_prefix_identity_telemetry_and_last_good_restore_after_compaction():
+    facade = ContextPlanningFacade()
+    baseline = facade.assemble(
+        ModelContext("model-a", 20_000, 2_000), {}, _budgets(20),
+        records=(ContextRecord("rules", "stable_instructions", "safe", "policy", stable=True),),
+        tokenizer="tok", template="chat", system_prefix="sys",
+        visible_tool_schemas={"read": {"type": "object"}}, project_policy={"network": "deny"},
+    )
+    restored = facade.assemble(
+        ModelContext("model-a", 20_000, 2_000), {}, _budgets(20),
+        records=(ContextRecord("rules", "stable_instructions", "safe", "policy", stable=True),),
+        tokenizer="tok", template="chat", system_prefix="sys",
+        visible_tool_schemas={"read": {"type": "object"}}, project_policy={"network": "deny"},
+        dynamic_memory=["post-compaction"], retrieval={"query": "new"},
+    )
+    assert baseline.prefix is not None and restored.prefix is not None
+    assert baseline.prefix.cache_key == restored.prefix.cache_key
+    assert facade.prefix_cache_telemetry.last_reason == "hit"
+    assert facade.prefix_cache_telemetry.hits == 1
+    assert facade.last_good() is not None
+
+
+def test_facade_builds_identity_prefix_without_stable_records():
+    result = ContextPlanningFacade().assemble(
+        ModelContext("model-a", 20_000, 2_000), {}, _budgets(20),
+        system_prefix="system", visible_tool_schemas={"read": {"type": "object"}},
+        project_policy={"network": "deny"},
+    )
+    assert result.prefix is not None
+    assert result.prefix.sections == ()
+
+
 def test_runtime_adapter_exposes_the_same_facade_boundary():
     adapter = RuntimeContextPlanningAdapter()
     assert isinstance(adapter.facade, ContextPlanningFacade)
