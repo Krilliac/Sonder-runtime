@@ -107,3 +107,32 @@ def test_selfmod_deploy_journals_the_legacy_mutation_boundary(tmp_path):
     assert stored.owner_epoch == 7
     assert stored.state.value == "completed"
     assert [name for name, _ in legacy.calls] == ["deploy"]
+
+
+def test_composition_root_supplies_host_owned_bindings(tmp_path):
+    from sonder_runtime.bootstrap.app import build_application
+    from sonder_runtime.platform.config import SonderConfig, StateConfig
+
+    application = build_application(
+        config=SonderConfig(state=StateConfig(home=str(tmp_path)))
+    )
+
+    process = application.process_job_provider()
+    process_binding = process._effect_binding
+    assert process_binding is not None
+    assert process_binding.worker_id.startswith("process:")
+    assert process_binding.scope == "process-jobs"
+    assert process_binding.run_id == "runtime:process-jobs"
+
+    compute = application.compute_job_worker()
+    compute_binding = compute._effect_binding
+    assert compute_binding is not None
+    assert compute_binding.worker_id.startswith("compute:")
+    assert compute_binding.scope == "compute-jobs"
+    assert compute_binding.run_id == "runtime:compute-jobs"
+
+    selfmod = application.selfmod_service()
+    selfmod_binding = selfmod._effect_binding_factory("run-1")
+    assert selfmod_binding.worker_id.startswith("selfmod:")
+    assert selfmod_binding.scope == "selfmod-mutation"
+    assert selfmod_binding.run_id == "selfmod:run-1"
