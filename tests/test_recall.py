@@ -79,10 +79,10 @@ def test_recall_respects_min_sim_threshold():
     assert recall.recall(c, "q", embed_fn=lambda t: [0.0, 1.0], min_sim=0.5) == []
 
 
-def test_recall_soft_fails_when_no_embeddings():
+def test_recall_falls_back_to_lexical_when_no_embeddings():
     c = _conn()
     _store_good(c, "i1", "task", "resp", [1.0, 0.0])
-    assert recall.recall(c, "q", embed_fn=lambda t: None) == []
+    assert recall.recall(c, "task", embed_fn=lambda t: None) == ["task -> resp"]
 
 
 def test_recall_excludes_current_session():
@@ -209,6 +209,19 @@ def test_metadata_mode_does_not_load_large_embedding_blob():
             AssertionError("metadata retrieval must not embed")
         ), min_sim=0.0, mode="exact",
     ) == ["bounded metadata task -> result"]
+
+
+def test_hybrid_falls_back_to_bounded_lexical_recall_without_embedding():
+    c = _conn()
+    ms.log_interaction(c, "lexical-only", "lexical fallback task", "", "result", "sonder")
+    ms.record_outcome_row(c, "lexical-only", "tests_passed", 1.0, source="caller")
+
+    page = recall.recall_page(
+        c, "lexical fallback", embed_fn=lambda _task: None, min_sim=0.9,
+    )
+
+    assert page.results == ("lexical fallback task -> result",)
+    assert page.degradation_reasons == ("embedding_unavailable_lexical_fallback",)
 
 
 def test_recall_quarantines_ambiguous_migrated_session_project():

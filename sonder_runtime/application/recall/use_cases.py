@@ -20,6 +20,8 @@ class RecallService:
         project: str | None = None, include_all_projects: bool = False,
         embedding_model: str | None = None,
         embedding_revision: str | None = None,
+        mode: str = "hybrid",
+        at=None,
     ) -> list[str]:
         validate_recall_request(task, k, min_sim)
         return self._gateway.recall(
@@ -28,6 +30,8 @@ class RecallService:
             include_all_projects=include_all_projects,
             embedding_model=embedding_model,
             embedding_revision=embedding_revision,
+            mode=mode,
+            at=at,
         )
 
     def retrieve_page(
@@ -38,6 +42,8 @@ class RecallService:
         embedding_model: str | None = None,
         embedding_revision: str | None = None,
         candidate_cursor: str | None = None,
+        mode: str = "hybrid",
+        at=None,
     ):
         """Return the additive explained-recall page contract.
 
@@ -56,4 +62,6 @@ class RecallService:
             embedding_model=embedding_model,
             embedding_revision=embedding_revision,
             candidate_cursor=candidate_cursor,
+            mode=mode,
+            at=at,
         )
