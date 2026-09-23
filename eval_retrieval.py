@@ -24,6 +24,7 @@ import json
 import sys
 
 import grounding
+import promotion_eval
 import server
 import training_tasks
 
@@ -86,25 +87,29 @@ HELDOUT = [
 HISTORY_SUITE_VERSION = "1"
 
 
-def _suite_digest():
+class ModelConsistencyError(RuntimeError):
+    """The pinned model changed while an opted-in evaluation was running."""
+
+
+def _suite_digest(chunk, start, count):
     """Digest the held-out definitions without persisting their text."""
     encoded = json.dumps(
-        HELDOUT, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        {"start": start, "count": count, "tasks": chunk},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _record_history(results, history_path):
+def _record_history(results, history_path, *, model, model_digest, suite_digest):
     """Record the two bounded condition aggregates, with local deduplication.
 
     The history store only receives model/suite identity and pass counts.  The
     task prompts, checks, model responses, and failure details stay out of the
-    durable record.  Re-running the same chunk is idempotent by record id.
+    durable record. Re-running the same chunk is idempotent by exact identity,
+    aggregate result, and source under the store lock.
     """
     from sonder_runtime.adapters import evaluation_history_store as store
 
-    model = server.resolve_sonder_model(False)
-    model_digest = hashlib.sha256(model.encode("utf-8")).hexdigest()
     total = len(results)
     if total <= 0:
         raise ValueError("cannot record an empty retrieval evaluation")
@@ -116,27 +121,18 @@ def _record_history(results, history_path):
             model_digest=model_digest,
             suite="eval-retrieval:" + condition,
             suite_version=HISTORY_SUITE_VERSION,
-            suite_digest=_suite_digest(),
+            suite_digest=suite_digest,
             passed=passed,
             total=total,
             source="eval_retrieval",
         )
-        candidate = store.make_record(**fields)
-        existing = store.load_history(history_path)
-        match = next(
-            (record for record in existing["records"]
-             if record["identity_key"] == candidate["identity_key"]
-             and record["result"] == candidate["result"]
-             and record["source"] == candidate["source"]),
-            None,
-        )
-        records.append(match or store.record_result(history_path, **fields))
+        records.append(store.record_result_idempotent(history_path, **fields))
     return records
 
 
-def baseline_generate(prompt):
+def baseline_generate(prompt, model=None):
     """Same model selected by Sonder Runtime, but NO lesson injection and NO capture."""
-    model = server.resolve_sonder_model(False)
+    model = model or server.resolve_sonder_model(False)
     gen = server._make_generate(model, "", 0.2, 1024, 4096)
     return gen(prompt)
 
@@ -159,13 +155,28 @@ def _run_condition(prompt, check, generate_fn):
     return ok, out
 
 
-def run_task(task):
+def run_task(task, model=None, digest_probe=None, expected_digest=None):
     """Run one held-out task under both conditions. Never raises."""
     name, prompt, check = task["name"], task["prompt"], task["check"]
+    def prove_model():
+        if digest_probe is None:
+            return
+        try:
+            observed = digest_probe(model)
+        except Exception as exc:
+            raise ModelConsistencyError(
+                "model digest probe failed: %s" % exc
+            ) from exc
+        if observed != expected_digest:
+            raise ModelConsistencyError("model digest changed during evaluation")
+
+    prove_model()
     retrieval_ok, retrieval_detail = _run_condition(
-        prompt, check, lambda p: server.sonder(p))
+        prompt, check, lambda p: server.sonder(p, model_override=model))
+    prove_model()
     baseline_ok, baseline_detail = _run_condition(
-        prompt, check, baseline_generate)
+        prompt, check, lambda p: baseline_generate(p, model))
+    prove_model()
     return {
         "name": name,
         "retrieval": retrieval_ok,
@@ -197,12 +208,29 @@ def main(argv):
               (start, start + count, len(HELDOUT)))
         return 0
 
+    model = server.resolve_sonder_model(False)
+    model_digest = None
+    if args.record_history:
+        try:
+            model_digest = promotion_eval.local_model_digest(model)
+        except Exception as exc:
+            print("history: NOT recorded (model digest unavailable: %s)" % exc)
+            return 2
+
     retrieval_pass = 0
     baseline_pass = 0
     results = []
     for task in chunk:
         try:
-            result = run_task(task)
+            result = run_task(
+                task, model=(model if args.record_history else None),
+                digest_probe=(promotion_eval.local_model_digest
+                              if args.record_history else None),
+                expected_digest=model_digest,
+            )
+        except ModelConsistencyError as exc:
+            print("history: NOT recorded (%s)" % exc)
+            return 2
         except Exception as e:
             # Defense in depth: run_task itself shouldn't raise, but one bad task
             # must never kill the rest of the chunk.
@@ -228,7 +256,11 @@ def main(argv):
     print("EVAL chunk: retrieval %d/%d, baseline %d/%d" % (retrieval_pass, n, baseline_pass, n))
     if args.record_history:
         try:
-            _record_history(results, args.history_path)
+            _record_history(
+                results, args.history_path, model=model,
+                model_digest=model_digest,
+                suite_digest=_suite_digest(chunk, start, count),
+            )
         except Exception as exc:
             print("history: NOT recorded (%s)" % exc)
             return 2

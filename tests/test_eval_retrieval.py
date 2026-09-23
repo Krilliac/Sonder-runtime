@@ -35,7 +35,9 @@ def test_history_is_opt_in_and_stores_only_bounded_aggregates(tmp_path, monkeypa
     ])
     monkeypatch.setattr(eval_retrieval.server, "resolve_sonder_model",
                         lambda _allow_cloud: "mock-model")
-    monkeypatch.setattr(eval_retrieval, "run_task", lambda task: {
+    monkeypatch.setattr(eval_retrieval.promotion_eval, "local_model_digest",
+                        lambda model: "a" * 64)
+    monkeypatch.setattr(eval_retrieval, "run_task", lambda task, **kwargs: {
         "name": task["name"], "retrieval": task["name"] == "one",
         "baseline": False, "retrieval_detail": "secret response",
         "baseline_detail": "secret response 2",
@@ -65,8 +67,14 @@ def test_history_recording_is_idempotent(tmp_path, monkeypatch):
                         lambda _allow_cloud: "mock-model")
     results = [{"retrieval": True, "baseline": False}]
     history = tmp_path / "history.jsonl"
-    first = eval_retrieval._record_history(results, history)
-    second = eval_retrieval._record_history(results, history)
+    first = eval_retrieval._record_history(
+        results, history, model="mock-model", model_digest="a" * 64,
+        suite_digest="b" * 64,
+    )
+    second = eval_retrieval._record_history(
+        results, history, model="mock-model", model_digest="a" * 64,
+        suite_digest="b" * 64,
+    )
     assert [r["record_id"] for r in first] == [r["record_id"] for r in second]
     assert len(evaluation_history_store.load_history(history)["records"]) == 2
 
@@ -77,14 +85,33 @@ def test_history_failure_is_reported_as_nonzero(tmp_path, monkeypatch):
     ])
     monkeypatch.setattr(eval_retrieval.server, "resolve_sonder_model",
                         lambda _allow_cloud: "mock-model")
-    monkeypatch.setattr(eval_retrieval, "run_task", lambda task: {
+    monkeypatch.setattr(eval_retrieval.promotion_eval, "local_model_digest",
+                        lambda model: "a" * 64)
+    monkeypatch.setattr(eval_retrieval, "run_task", lambda task, **kwargs: {
         "name": task["name"], "retrieval": True, "baseline": True,
         "retrieval_detail": "", "baseline_detail": "",
     })
-    monkeypatch.setattr(evaluation_history_store, "record_result",
+    monkeypatch.setattr(evaluation_history_store, "record_result_idempotent",
                         lambda *args, **kwargs: (_ for _ in ()).throw(
                             OSError("disk full")))
     assert eval_retrieval.main([
         "eval_retrieval.py", "--record-history", "--history-path",
         str(tmp_path / "history.jsonl"),
     ]) == 2
+
+
+def test_model_digest_change_aborts_without_recording(tmp_path, monkeypatch):
+    monkeypatch.setattr(eval_retrieval, "HELDOUT", [
+        {"name": "one", "prompt": "p", "check": "c"},
+    ])
+    monkeypatch.setattr(eval_retrieval.server, "resolve_sonder_model",
+                        lambda _allow_cloud: "mock-model")
+    digests = iter(["a" * 64, "b" * 64])
+    monkeypatch.setattr(eval_retrieval.promotion_eval, "local_model_digest",
+                        lambda model: next(digests))
+    monkeypatch.setattr(eval_retrieval, "run_task", eval_retrieval.run_task)
+    history = tmp_path / "history.jsonl"
+    assert eval_retrieval.main([
+        "eval_retrieval.py", "--record-history", "--history-path", str(history),
+    ]) == 2
+    assert not history.exists()
