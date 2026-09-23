@@ -43,8 +43,9 @@ class FailedToolRetryGuard:
 
     State is intentionally per agent run.  A successful call clears the same
     call identity, and a changed call identity starts a fresh allowance.  The
-    failed outcome participates in the recorded fingerprint, so changed host
-    errors are distinguishable and can reset the bounded recovery window.
+    failed outcome participates in the recorded fingerprint for diagnostics,
+    but never resets the attempt count: a flaky or timestamped error must not
+    evade the unchanged-call bound by changing only its text.
     """
 
     def __init__(self, *, max_retries: int = 2) -> None:
@@ -74,7 +75,10 @@ class FailedToolRetryGuard:
             arguments=arguments, outcome=outcome,
         )
         previous = self._failures.get(identity)
-        attempts = previous[0] + 1 if previous and previous[1] == fingerprint else 1
+        # Count the canonical call identity regardless of diagnostic text.
+        # Otherwise a tool that emits a changing error (timestamps, request
+        # IDs, transient details) could run forever without changing recovery.
+        attempts = previous[0] + 1 if previous else 1
         self._failures[identity] = (
             attempts,
             fingerprint,

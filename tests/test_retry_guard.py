@@ -48,3 +48,17 @@ def test_guard_canary_blocks_unchanged_failure_and_allows_changed_recovery():
     guard.record_success(identity)
     assert guard.decision(identity).allowed
 
+
+def test_changed_failure_text_does_not_reset_attempt_budget():
+    guard = FailedToolRetryGuard(max_retries=2)
+    identity = "script_run|C:/repo|missing.py"
+    call = dict(
+        tool="script_run",
+        resource="C:/repo/missing.py",
+        scope="C:/repo",
+        arguments={"path": "C:/repo/missing.py"},
+    )
+    assert guard.record_failure(identity, **call, outcome="ERROR: missing (request=a)") == 1
+    assert guard.record_failure(identity, **call, outcome="ERROR: missing (request=b)") == 2
+    assert not guard.decision(identity).allowed
+
