@@ -1,8 +1,10 @@
 """Durable worker launch and terminal evidence contract."""
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping, Protocol
 
@@ -75,15 +77,30 @@ def _sha256_hex(value: str, name: str) -> str:
 
 
 def _owned_path(value: str) -> str:
-    text = _text(value, "owned file").replace("\\", "/")
+    """Canonicalize one owned path so every spelling of a file compares equal.
+
+    Owned files must be absolute.  The path is resolved (symlinks and, on
+    Windows, 8.3 short names of existing components) and case-normalized with
+    ``os.path.normcase``; separators are stored as ``/``.  Resolving an already
+    canonical path is idempotent, so a persisted value restores unchanged
+    unless the filesystem layout itself changed.
+    """
+    text = _text(value, "owned file")
     if len(text) > 512:
         raise WorkerRegistryError("owned file exceeds its bound")
-    parts = [part for part in text.split("/") if part not in ("", ".")]
-    if ".." in parts:
+    if ".." in text.replace("\\", "/").split("/"):
         raise WorkerRegistryError("owned file must not traverse with '..'")
-    if not parts:
-        raise WorkerRegistryError("owned file must name a path")
-    return ("/" if text.startswith("/") else "") + "/".join(parts)
+    path = Path(text)
+    if not path.is_absolute():
+        raise WorkerRegistryError("owned file must be an absolute path")
+    try:
+        resolved = path.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise WorkerRegistryError("owned file cannot be resolved") from exc
+    canonical = os.path.normcase(str(resolved)).replace("\\", "/")
+    if len(canonical) > 1024:
+        raise WorkerRegistryError("owned file exceeds its bound")
+    return canonical
 
 
 def owned_paths_overlap(left: str, right: str) -> bool:

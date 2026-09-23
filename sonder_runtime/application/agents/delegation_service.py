@@ -188,11 +188,14 @@ class DelegationService:
             contract = record.launch.execution_contract
             if contract_requested and contract != request.execution_contract:
                 raise IntegrationError("persisted worker execution contract does not match request")
-            missing = tuple(item for item in contract.success_criteria if item not in verification_values)
-            if missing:
-                raise IntegrationError("worker execution criteria were not verified: " + ", ".join(missing))
-            if contract.verification_commands != command_values:
-                raise IntegrationError("worker verification commands do not match its execution contract")
+            # Criteria and command proof certify success only.  A failed or
+            # interrupted worker must still publish its failure evidence.
+            if succeeded:
+                missing = tuple(item for item in contract.success_criteria if item not in verification_values)
+                if missing:
+                    raise IntegrationError("worker execution criteria were not verified: " + ", ".join(missing))
+                if contract.verification_commands != command_values:
+                    raise IntegrationError("worker verification commands do not match its execution contract")
         if not succeeded:
             logger.error(f"delegation failed: delegation_id={request.delegation_id!r}, child_id={result.child_id!r}, status={result.status.value!r}")
             logger.warning(f"delegation failed: delegation_id={request.delegation_id!r}, child_id={result.child_id!r}, status={result.status.value!r}")

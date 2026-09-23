@@ -19,10 +19,14 @@ The contract now also carries:
   explicit `WorkerContextInput(reference, sha256)` values; `clean` forbids both;
   `unspecified` (the legacy default) forbids both. A reference pinned to two
   different digests is rejected.
-- `owned_files`: normalized paths the worker exclusively mutates (no `..`,
-  `\` folded to `/`, de-duplicated). `DelegationService.dispatch` requires each
-  owned file to be absolute and permitted by the child's write assignment
-  before registry admission or provider spawn.
+- `owned_files`: paths the worker exclusively mutates. The contract itself
+  rejects relative paths and `..` segments, resolves each path
+  (`Path.resolve`, which follows symlinks and expands Windows short names for
+  existing components), applies `os.path.normcase`, and stores `/`
+  separators, so a launch admitted directly through the registry cannot bypass
+  canonicalization. `DelegationService.dispatch` additionally requires each
+  owned file to be permitted by the child's write assignment before registry
+  admission or provider spawn.
 - `task_scope`: the logical task the worker owns, distinct from owned files and
   from `WorkerLaunch.scope` (the readable workspace roots).
 - `speculative_lane`: an explicit opt-in that lets two active workers share a
@@ -36,9 +40,11 @@ contract fields persist as canonical `execution_*` metadata in the single
 `durable_child_session` row; rows written by the first slice (criteria and
 commands only) restore with `unspecified` policy, and any malformed field fails
 closed with `WorkerRegistryError`. Terminal verification records the policy,
-input digests, inherited digest, owned files, and task scope. Integration also
+input digests, inherited digest, owned files, and task scope. Integration always
 rejects a request whose contract (including the inherited-context digest)
-differs from the persisted one.
+differs from the persisted one; the success-criteria and command-match gate
+applies only to a succeeded result, so a failed or interrupted worker with a
+contract still records its failure status and output digest.
 
 Evidence:
 
@@ -46,15 +52,21 @@ Evidence:
 - `sonder_runtime/application/agents/lineage_delegation.py`
 - `sonder_runtime/application/agents/delegation_service.py`
 - `sonder_runtime/application/worker_registry/continuation.py`
-- `tests/test_continuation_worker_registry.py` (41 tests, including 10
+- `tests/test_continuation_worker_registry.py` (45 tests, including 11
   validation cases, restart round-trip, inherited-digest drift, owned-file
   write-assignment gate, owned-file overlap, task-scope/speculative lanes,
-  legacy rows, and 7 malformed-metadata cases)
+  legacy rows, 7 malformed-metadata cases, failed-worker-with-contract,
+  relative-path registry bypass, and symlinked spellings)
 - `python -m pytest -p no:cacheprovider -q tests/test_worker_registry.py tests/test_remaining_agent_004_008_009.py tests/test_continuation_worker_registry.py tests/test_delegated_verification.py tests/test_remaining_agent_010.py tests/test_workflows.py`
-  (`97 passed`)
+  (`101 passed`)
 - Load-bearing check: disabling the active-session scan in
   `_reject_ownership_conflict` fails the overlap and task-scope tests; removing
-  the dispatch owned-file checks fails both write-assignment cases.
+  the dispatch write-assignment check fails the write-assignment cases.
+- Review regressions (fail before the fix at 15cf5e2e): a FAILED result with
+  `success_criteria` raised `worker execution criteria were not verified`
+  instead of recording failure; `WorkerExecutionContract(owned_files=("src/a.py",))`
+  was accepted; a symlinked spelling of an owned file did not compare equal to
+  its target.
 
 ## Atomic launch/start/checkpoint/finish
 
@@ -100,6 +112,10 @@ Limitations:
 - Context inputs and the inherited-context digest are declared and durably
   bound, but this slice does not compute or re-hash the parent context or input
   contents; the caller supplies the digests.
+- Owned-path canonicalization reflects the filesystem when the contract is
+  built or restored; a symlink created or retargeted later can change the
+  canonical form, and a restored contract would then fail the equality gate
+  closed rather than silently match.
 - Owned-file and task-scope exclusivity is serialized by a process-wide lock
   around the active-session scan and create. Stable-key uniqueness remains an
   atomic SQLite check, but ownership exclusivity is not a database constraint,

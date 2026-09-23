@@ -13,7 +13,7 @@ from sonder_runtime.application.agents.presets import resolve_preset
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.continuation_records import ChildSessionLineage, DurableChildSession
 from sonder_runtime.application.ports.subagents import (
-    InvalidSubagentRequest, SubagentBudget, SubagentRequest,
+    InvalidSubagentRequest, SubagentBudget, SubagentError, SubagentRequest,
     SubagentResult, SubagentStatus, SubagentUsage,
 )
 from sonder_runtime.application.ports.worker_registry import DuplicateWorkerError, WorkerLaunch, WorkerRegistryError, WorkerStatus
@@ -533,7 +533,8 @@ _DIGEST_B = "b" * 64
             "conflicting digests",
         ),
         ({"owned_files": ("src/../secrets.txt",)}, r"'\.\.'"),
-        ({"owned_files": ("src/a.py",), "speculative_lane": True}, "speculative lanes"),
+        ({"owned_files": (os.path.abspath("src/a.py"),), "speculative_lane": True}, "speculative lanes"),
+        ({"owned_files": ("src/a.py",)}, "absolute"),
     ],
 )
 def test_execution_contract_context_and_ownership_validation(kwargs, match):
@@ -541,15 +542,26 @@ def test_execution_contract_context_and_ownership_validation(kwargs, match):
         WorkerExecutionContract(**kwargs)
 
 
-def test_execution_contract_normalizes_context_and_ownership():
+def test_execution_contract_normalizes_context_and_ownership(tmp_path):
     contract = WorkerExecutionContract(
         context_policy=WorkerContextPolicy.SCOPED,
         context_inputs=(WorkerContextInput("b.md", _DIGEST_B), WorkerContextInput("a.md", _DIGEST_A)),
-        owned_files=("src\\pkg\\mod.py", "./src/pkg/mod.py", "docs/"),
+        owned_files=(
+            str(tmp_path / "src" / "pkg" / "mod.py"),
+            str(tmp_path / "src" / "." / "pkg" / "mod.py"),
+            str(tmp_path / "docs") + os.sep,
+        ),
         task_scope="  issue-510 contract  ",
     )
     assert [item.reference for item in contract.context_inputs] == ["a.md", "b.md"]
-    assert contract.owned_files == ("docs", "src/pkg/mod.py")
+    canonical = os.path.normcase(str(tmp_path.resolve())).replace("\\", "/")
+    assert contract.owned_files == (canonical + "/docs", canonical + "/src/pkg/mod.py")
+    assert contract == WorkerExecutionContract(
+        context_policy=WorkerContextPolicy.SCOPED,
+        context_inputs=contract.context_inputs,
+        owned_files=contract.owned_files,
+        task_scope=contract.task_scope,
+    )
     assert contract.task_scope == "issue-510 contract"
     assert contract.requested
     assert not WorkerExecutionContract().requested
@@ -593,7 +605,8 @@ def test_full_contract_survives_restart_and_is_recorded_with_terminal_verificati
     terminal = reopened_registry.get("child-1").terminal_verification
     assert terminal["context_policy"] == "scoped"
     assert terminal["context_inputs"] == (("docs/spec.md", _DIGEST_A),)
-    assert terminal["owned_files"] == (owned,)
+    assert terminal["owned_files"] == contract.owned_files
+    assert len(contract.owned_files) == 1 and contract.owned_files[0].endswith("/write/module.py")
     assert terminal["task_scope"] == "issue-510/contract"
 
 
@@ -622,11 +635,11 @@ def test_inherit_contract_mismatch_cannot_certify_result(tmp_path):
     service.integrate(request, result)
 
 
-@pytest.mark.parametrize("owned", ["relative/module.py", "OUTSIDE"])
-def test_owned_files_must_be_inside_write_assignment(tmp_path, owned):
+@pytest.mark.parametrize("where", ["elsewhere", "repo"])
+def test_owned_files_must_be_inside_write_assignment(tmp_path, where):
     root = tmp_path / "repo"
-    if owned == "OUTSIDE":
-        owned = (tmp_path / "elsewhere" / "module.py").as_posix()
+    # "repo" is readable but not inside the "repo/write" write root.
+    owned = str(tmp_path / where / "module.py")
     preset = resolve_preset("researcher")
     workspace = WorkspaceAssignment((str(root),), (str(root / "write"),))
     contract = WorkerExecutionContract(owned_files=(owned,))
@@ -656,16 +669,16 @@ def _owned_launch(root, worker_id, key, contract):
 def test_active_owned_file_overlap_rejects_second_worker_until_first_is_terminal(tmp_path):
     repository = _root_repository(tmp_path / "owned.sqlite")
     registry = ContinuationWorkerRegistry(repository)
-    first = _owned_launch(tmp_path / "repo", "child-1", "task-1", WorkerExecutionContract(owned_files=("/repo/src/pkg",)))
+    first = _owned_launch(tmp_path / "repo", "child-1", "task-1", WorkerExecutionContract(owned_files=(str(tmp_path / "repo" / "src" / "pkg"),)))
     registry.admit(first)
     overlapping = _owned_launch(
-        tmp_path / "repo", "child-2", "task-2", WorkerExecutionContract(owned_files=("/repo/src/pkg/mod.py",))
+        tmp_path / "repo", "child-2", "task-2", WorkerExecutionContract(owned_files=(str(tmp_path / "repo" / "src" / "pkg" / "mod.py"),))
     )
     with pytest.raises(DuplicateWorkerError, match="overlaps"):
         registry.admit(overlapping)
     assert repository.get("child-2") is None
     disjoint = _owned_launch(
-        tmp_path / "repo", "child-3", "task-3", WorkerExecutionContract(owned_files=("/repo/src/pkg2/mod.py",))
+        tmp_path / "repo", "child-3", "task-3", WorkerExecutionContract(owned_files=(str(tmp_path / "repo" / "src" / "pkg2" / "mod.py"),))
     )
     assert registry.admit(disjoint).status is WorkerStatus.QUEUED
 
@@ -739,3 +752,64 @@ def test_malformed_persisted_context_contract_fails_closed(tmp_path, key, value)
     repository.create(DurableChildSession(child, ChildSessionLineage("root-1")))
     with pytest.raises(WorkerRegistryError, match="execution contract"):
         ContinuationWorkerRegistry(repository).get("child-1")
+
+
+def test_failed_worker_with_contract_records_failure_instead_of_raising(tmp_path):
+    database = tmp_path / "failed-contract.sqlite"
+    root = tmp_path / "repo"
+    preset = resolve_preset("researcher")
+    workspace = WorkspaceAssignment((str(root),), ())
+    contract = WorkerExecutionContract(("tests pass",), (("pytest", "-q"),))
+    lineage = LineageRecord("line-1", "root-1", "root-1", "child-1", 1, preset.name, preset.role, workspace)
+    request = DelegationRequest("delegation-1", lineage, "implement", preset, workspace, execution_contract=contract)
+    repository = _root_repository(database)
+
+    def failing_runner(state, save, cancellation):
+        raise RuntimeError("worker crashed")
+
+    provider = RunnerBoundSubagentProvider(DurableContinuationService(repository), failing_runner)
+    service = DelegationService(provider, worker_registry=ContinuationWorkerRegistry(repository))
+    context = local_owner_context(correlation_id="delegation-1", workspace_roots=(root,))
+    handle = service.dispatch(request, context)
+    assert handle.result(timeout=5).status is not SubagentStatus.SUCCEEDED
+    failed = SubagentResult(
+        "child-1", "root-1", SubagentStatus.FAILED,
+        error=SubagentError("runner_failed", "worker crashed"), usage=SubagentUsage(steps=1),
+    )
+    drifted = replace(request, execution_contract=WorkerExecutionContract(("other",)))
+    with pytest.raises(IntegrationError, match="does not match request"):
+        service.integrate(drifted, failed)
+    delegated = service.integrate(request, failed)
+    assert delegated.evidence.status.value == "failed"
+    terminal = ContinuationWorkerRegistry(SQLiteDurableContinuationRepository(database)).get("child-1").terminal_verification
+    assert terminal["status"] == "failed"
+    assert terminal["output_digest"] == delegated.evidence.output_digest
+    assert terminal["success_criteria"] == ("tests pass",)
+
+
+def test_registry_contract_rejects_relative_owned_files_bypass(tmp_path):
+    with pytest.raises(WorkerRegistryError, match="absolute"):
+        WorkerExecutionContract(owned_files=("src/a.py",))
+    repository = _root_repository(tmp_path / "bypass.sqlite")
+    registry = ContinuationWorkerRegistry(repository)
+    absolute = tmp_path / "repo" / "src" / "a.py"
+    registry.admit(_owned_launch(tmp_path / "repo", "child-1", "task-1", WorkerExecutionContract(owned_files=(str(absolute),))))
+    respelled = str(tmp_path / "repo" / "src" / "." / "a.py")
+    if os.name == "nt":
+        respelled = respelled.upper()
+    with pytest.raises(DuplicateWorkerError, match="overlaps"):
+        registry.admit(_owned_launch(tmp_path / "repo", "child-2", "task-2", WorkerExecutionContract(owned_files=(respelled,))))
+
+
+def test_owned_files_resolve_symlinked_spellings(tmp_path):
+    real = tmp_path / "real"
+    (real / "src").mkdir(parents=True)
+    link = tmp_path / "link"
+    try:
+        os.symlink(real, link, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
+    via_link = WorkerExecutionContract(owned_files=(str(link / "src" / "a.py"),))
+    via_real = WorkerExecutionContract(owned_files=(str(real / "src" / "a.py"),))
+    assert via_link.owned_files == via_real.owned_files
+    assert via_link.conflicts_with(via_real)
