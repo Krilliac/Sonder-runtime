@@ -10,6 +10,8 @@ from sonder_runtime.domain.memory.authoritative_fact_metadata import Authoritati
 
 
 _MAX_REBUILD_ROWS = 100_000
+MAX_INDEX_RESULTS = 16
+_MAX_INDEX_OFFSET = 100_000
 
 
 AUTHORITATIVE_INDEX_DDL = """
@@ -188,42 +190,60 @@ def rebuild_authoritative_fact_indexes(connection, *, project: str | None = None
     return count
 
 
-def _valid_clause(now: str):
+def _valid_clause(now: str | None):
+    if now is None:
+        observed = datetime.now(timezone.utc)
+    else:
+        if not isinstance(now, str) or not now.strip() or len(now) > 64:
+            raise ValueError("index time must be a bounded timestamp")
+        try:
+            observed = datetime.fromisoformat(now.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("index time must be an ISO timestamp") from exc
+        if observed.tzinfo is None:
+            raise ValueError("index time requires a timezone")
+    now = observed.astimezone(timezone.utc).isoformat()
     return (
         " AND (valid_from IS NULL OR valid_from<=?)"
         " AND (valid_until IS NULL OR valid_until>?)", (now, now)
     )
 
 
-def entities_for_project(connection, project: str, *, entity_id: str | None = None, now: str | None = None):
-    now = now or datetime.now(timezone.utc).isoformat()
+def _index_offset(offset: int) -> int:
+    if type(offset) is not int or not 0 <= offset <= _MAX_INDEX_OFFSET:
+        raise ValueError("index offset must be within 0..100000")
+    return offset
+
+
+def entities_for_project(connection, project: str, *, entity_id: str | None = None, now: str | None = None, offset: int = 0):
     clause, args = _valid_clause(now)
+    offset = _index_offset(offset)
     extra = " AND entity_id=?" if entity_id is not None else ""
     values = connection.execute(
         "SELECT project,entity_id,fact_id,source_id,source_epoch,sequence,version,"
         "valid_from,valid_until,supersedes,provenance_json FROM "
         "memory_authoritative_entity_index WHERE project=? AND tombstoned=0"
-        + extra + clause + " ORDER BY entity_id,fact_id",
-        (project, *((entity_id,) if entity_id is not None else ()), *args),
+        + extra + clause + " ORDER BY entity_id,fact_id LIMIT ? OFFSET ?",
+        (project, *((entity_id,) if entity_id is not None else ()), *args, MAX_INDEX_RESULTS, offset),
     ).fetchall()
     return [dict(row) for row in values]
 
 
-def decisions_for_project(connection, project: str, *, decision_id: str | None = None, now: str | None = None):
-    now = now or datetime.now(timezone.utc).isoformat()
+def decisions_for_project(connection, project: str, *, decision_id: str | None = None, now: str | None = None, offset: int = 0):
     clause, args = _valid_clause(now)
+    offset = _index_offset(offset)
     extra = " AND decision_id=?" if decision_id is not None else ""
     values = connection.execute(
         "SELECT project,decision_id,fact_id,source_id,source_epoch,sequence,version,"
         "decision_json,valid_from,valid_until,supersedes,provenance_json FROM "
         "memory_authoritative_decision_index WHERE project=? AND tombstoned=0"
-        + extra + clause + " ORDER BY decision_id,fact_id",
-        (project, *((decision_id,) if decision_id is not None else ()), *args),
+        + extra + clause + " ORDER BY decision_id,fact_id LIMIT ? OFFSET ?",
+        (project, *((decision_id,) if decision_id is not None else ()), *args, MAX_INDEX_RESULTS, offset),
     ).fetchall()
     return [dict(row) for row in values]
 
 
 __all__ = [
-    "AUTHORITATIVE_INDEX_DDL", "materialize_authoritative_fact_index",
+    "AUTHORITATIVE_INDEX_DDL", "MAX_INDEX_RESULTS", "materialize_authoritative_fact_index",
     "rebuild_authoritative_fact_indexes", "entities_for_project", "decisions_for_project",
 ]

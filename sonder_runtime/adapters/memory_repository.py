@@ -73,13 +73,13 @@ class MemoryRepositoryAdapter:
 
         return memory_store.count_facts(self._conn, project)
 
-    def entities_for_project(self, project: str, *, entity_id: str | None = None, now: str | None = None) -> list[dict]:
+    def entities_for_project(self, project: str, *, entity_id: str | None = None, now: str | None = None, offset: int = 0) -> list[dict]:
         from .persistence.sqlite.authoritative_indexes import entities_for_project
-        return entities_for_project(self._conn, project, entity_id=entity_id, now=now)
+        return entities_for_project(self._conn, project, entity_id=entity_id, now=now, offset=offset)
 
-    def decisions_for_project(self, project: str, *, decision_id: str | None = None, now: str | None = None) -> list[dict]:
+    def decisions_for_project(self, project: str, *, decision_id: str | None = None, now: str | None = None, offset: int = 0) -> list[dict]:
         from .persistence.sqlite.authoritative_indexes import decisions_for_project
-        return decisions_for_project(self._conn, project, decision_id=decision_id, now=now)
+        return decisions_for_project(self._conn, project, decision_id=decision_id, now=now, offset=offset)
 
     def rebuild_authoritative_indexes(self, project: str | None = None) -> int:
         from .persistence.sqlite.authoritative_indexes import rebuild_authoritative_fact_indexes

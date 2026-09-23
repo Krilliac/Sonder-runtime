@@ -79,3 +79,12 @@ def test_surface_rejects_non_string_metadata_inputs(authoritative_surface):
     )
     assert result.startswith("ERROR:")
 
+
+def test_index_surface_rejects_ambiguous_or_malformed_time(authoritative_surface):
+    assert server.sonder_authoritative_indexes(
+        project="repo-a", now="2026-01-01T00:00:00"
+    ).startswith("ERROR:")
+    assert server.sonder_authoritative_indexes(
+        project="repo-a", now="not-a-date"
+    ).startswith("ERROR:")
+
