@@ -231,8 +231,9 @@ class SQLiteSessionRepository:
         events: list[SessionEvent] = []
         recovered_payload_bytes = 0
         next_sequence = 1
-        while len(events) <= max_events:
-            with self._connect() as conn:
+        with self._connect() as conn:
+            conn.execute("BEGIN")
+            while len(events) <= max_events:
                 row = conn.execute(
                     "SELECT COUNT(*), COALESCE(SUM(payload_bytes), 0) FROM ("
                     "SELECT length(CAST(payload_json AS BLOB)) AS payload_bytes "
@@ -240,21 +241,28 @@ class SQLiteSessionRepository:
                     "ORDER BY sequence LIMIT ?) ",
                     (session_id, next_sequence, page_size),
                 ).fetchone()
-            page_count, page_bytes = int(row[0]), int(row[1])
-            if page_count == 0:
-                break
-            if len(events) + page_count > max_events:
-                raise ValueError("session history exceeds recovery bound")
-            if recovered_payload_bytes + page_bytes > _MAX_COMPLETE_PAYLOAD_BYTES:
-                raise ValueError("session history payload bytes exceed recovery bound")
-            page = self.read_range(
-                session_id, start_sequence=next_sequence, limit=page_size,
-            )
-            events.extend(page)
-            recovered_payload_bytes += page_bytes
-            if len(page) < page_size:
-                break
-            next_sequence += len(page)
+                page_count, page_bytes = int(row[0]), int(row[1])
+                if page_count == 0:
+                    break
+                if len(events) + page_count > max_events:
+                    raise ValueError("session history exceeds recovery bound")
+                if recovered_payload_bytes + page_bytes > _MAX_COMPLETE_PAYLOAD_BYTES:
+                    raise ValueError("session history payload bytes exceed recovery bound")
+                rows = conn.execute(
+                    "SELECT session_id, sequence, event_id, event_type, occurred_at_utc, "
+                    "payload_json, previous_hash, event_hash "
+                    "FROM session_event WHERE session_id = ? AND sequence >= ? "
+                    "ORDER BY sequence LIMIT ?",
+                    (session_id, next_sequence, page_size),
+                ).fetchall()
+                if len(rows) != page_count:
+                    raise ValueError("session history changed during recovery")
+                page = tuple(self._row_to_event(item) for item in rows)
+                events.extend(page)
+                recovered_payload_bytes += page_bytes
+                if len(page) < page_size:
+                    break
+                next_sequence += len(page)
         expected = 1
         previous_hash = None
         for event in events:
