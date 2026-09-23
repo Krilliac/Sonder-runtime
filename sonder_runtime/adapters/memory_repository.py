@@ -7,6 +7,15 @@ root explicit while the underlying memory-store implementation is migrated.
 from __future__ import annotations
 
 
+def _require_authoritative_project(source, project: str) -> None:
+    if project != source.project_scope:
+        from sonder_runtime.domain.memory.replication import MemoryReplicationError
+
+        raise MemoryReplicationError(
+            "authoritative memory reads cannot widen the configured project scope"
+        )
+
+
 class MemoryRepositoryAdapter:
     """Implement ``MemoryRepository`` over one UnitOfWork connection.
 
@@ -64,20 +73,28 @@ class MemoryRepositoryAdapter:
         return memory_store.delete_fact(self._conn, fact_id, project)
 
     def facts_for_project(self, project: str) -> list:
+        if self._authoritative_fact_source is not None:
+            _require_authoritative_project(self._authoritative_fact_source, project)
         import sonder_runtime.adapters.memory_store as memory_store
 
         return memory_store.facts_for_project(self._conn, project)
 
     def count_facts(self, project: str) -> int:
+        if self._authoritative_fact_source is not None:
+            _require_authoritative_project(self._authoritative_fact_source, project)
         import sonder_runtime.adapters.memory_store as memory_store
 
         return memory_store.count_facts(self._conn, project)
 
     def entities_for_project(self, project: str, *, entity_id: str | None = None, now: str | None = None, offset: int = 0) -> list[dict]:
+        if self._authoritative_fact_source is not None:
+            _require_authoritative_project(self._authoritative_fact_source, project)
         from .persistence.sqlite.authoritative_indexes import entities_for_project
         return entities_for_project(self._conn, project, entity_id=entity_id, now=now, offset=offset)
 
     def decisions_for_project(self, project: str, *, decision_id: str | None = None, now: str | None = None, offset: int = 0) -> list[dict]:
+        if self._authoritative_fact_source is not None:
+            _require_authoritative_project(self._authoritative_fact_source, project)
         from .persistence.sqlite.authoritative_indexes import decisions_for_project
         return decisions_for_project(self._conn, project, decision_id=decision_id, now=now, offset=offset)
 
