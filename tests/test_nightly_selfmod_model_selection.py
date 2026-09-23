@@ -5,6 +5,8 @@ import sys
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from scripts import nightly_selfmod
 
 
@@ -248,6 +250,25 @@ def test_held_out_snapshot_rejects_bounded_file_overflow(tmp_path, monkeypatch):
     (tmp_path / "tests" / "fixture.txt").write_text("overflow", encoding="utf-8")
     prepared = nightly_selfmod._prepare_held_out("reflection.py", tmp_path / "candidate", 60)
     assert "snapshot exceeds file limit" in prepared["command"][2]
+    assert prepared["cleanup"] is None
+
+
+def test_held_out_snapshot_rejects_symlink_outside_test_tree(tmp_path, monkeypatch):
+    monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_reflection.py").write_text(
+        "def test_answer():\n    assert True\n", encoding="utf-8"
+    )
+    secret = tmp_path / "outside.txt"
+    secret.write_text("outside", encoding="utf-8")
+    link = tests / "outside-link.txt"
+    try:
+        link.symlink_to(secret)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+    prepared = nightly_selfmod._prepare_held_out("reflection.py", tmp_path / "candidate", 60)
+    assert "snapshot contains a symlink" in prepared["command"][2]
     assert prepared["cleanup"] is None
 
 
