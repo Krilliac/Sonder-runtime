@@ -178,6 +178,22 @@ def test_specialized_recall_rejects_unsupported_metadata_lanes():
         recall.recall(c, "task", qv=[1.0, 0.0], min_sim=0.0, mode="entity")
 
 
+def test_exact_and_temporal_modes_are_vector_independent():
+    c = _conn()
+    ms.log_interaction(c, "metadata-only", "metadata lane task", "", "result", "sonder")
+    ms.record_outcome_row(c, "metadata-only", "tests_passed", 1.0, source="caller")
+
+    def fail_embed(_task):
+        raise AssertionError("metadata retrieval must not request an embedding")
+
+    assert recall.recall(
+        c, "metadata lane", embed_fn=fail_embed, min_sim=0.0, mode="exact",
+    ) == ["metadata lane task -> result"]
+    assert recall.recall(
+        c, "metadata lane", embed_fn=fail_embed, min_sim=0.0, mode="temporal",
+    ) == ["metadata lane task -> result"]
+
+
 def test_recall_quarantines_ambiguous_migrated_session_project():
     c = _conn()
     ms.touch_session(c, "legacy-session", project="project-a")

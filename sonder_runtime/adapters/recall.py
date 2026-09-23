@@ -265,20 +265,25 @@ def recall_page(conn, task, k=2, embed_fn=None, min_sim=None,
         at = _parse_timestamp(at)
         if at is None:
             raise InvalidInput("temporal recall point must be an ISO timestamp")
+    elif mode == "temporal":
+        at = datetime.now(timezone.utc)
+    specialized = mode != "hybrid"
     runtime_default = embed_fn is None
-    embed_fn = embed_fn or embeddings.embed
-    if qv is None:
-        qv = embed_fn(task)
-    if qv is None or not embeddings.valid_vector(qv):
-        return RecallPage(
-            (), False, None, "no_query_embedding", 0, 0,
-            degradation_reasons=("no_query_embedding",),
-        )
-    query_provenance = embeddings.trusted_provenance(qv, embed_fn, runtime_default)
-    if embedding_model is None:
-        embedding_model = query_provenance.get("model")
-    if embedding_revision is None:
-        embedding_revision = query_provenance.get("revision")
+    query_provenance = {}
+    if not specialized:
+        embed_fn = embed_fn or embeddings.embed
+        if qv is None:
+            qv = embed_fn(task)
+        if qv is None or not embeddings.valid_vector(qv):
+            return RecallPage(
+                (), False, None, "no_query_embedding", 0, 0,
+                degradation_reasons=("no_query_embedding",),
+            )
+        query_provenance = embeddings.trusted_provenance(qv, embed_fn, runtime_default)
+        if embedding_model is None:
+            embedding_model = query_provenance.get("model")
+        if embedding_revision is None:
+            embedding_revision = query_provenance.get("revision")
 
     candidates = memory_store.good_interaction_candidate_page(
         conn,
@@ -287,17 +292,25 @@ def recall_page(conn, task, k=2, embed_fn=None, min_sim=None,
         include_all_projects=include_all_projects,
         embedding_model=embedding_model,
         embedding_revision=embedding_revision,
-        embedding_dim=len(qv),
+        require_embedding=not specialized,
+        max_created_at=(at.isoformat() if mode == "temporal" else None),
+        embedding_dim=(len(qv) if qv is not None else None),
         cursor=candidate_cursor,
     )
     scored = []
     scored_count = 0
     for candidate_rank, row in enumerate(candidates.rows):
-        emb = row.get("task_embedding")
-        if not emb or not isinstance(row.get("task"), str):
+        if not isinstance(row.get("task"), str):
             continue
         response = row.get("response")
         if response is not None and not isinstance(response, str):
+            continue
+        if specialized:
+            scored_count += 1
+            scored.append((0.0, candidate_rank, row))
+            continue
+        emb = row.get("task_embedding")
+        if not emb:
             continue
         try:
             stored = embeddings.from_blob(emb)
