@@ -22,7 +22,26 @@ class LegacyModelBootstrapAdapter:
 
     def resolve_target(self, tier: str, strict: bool = False) -> ModelTarget:
         model, cloud, augment, tier_label = self.runtime._serve_target(tier, strict)
-        return ModelTarget(model, cloud, tier_label, augment)
+        tokenizer = template = None
+        identity = getattr(self.runtime, "_model_prompt_identity", None)
+        if callable(identity) and isinstance(model, str) and model.strip() and not cloud:
+            try:
+                candidate = identity(model)
+            except Exception:
+                candidate = None
+            if isinstance(candidate, tuple) and len(candidate) == 2:
+                candidate_tokenizer, candidate_template = candidate
+                if (
+                    isinstance(candidate_tokenizer, str)
+                    and candidate_tokenizer.strip()
+                    and isinstance(candidate_template, str)
+                    and candidate_template.strip()
+                ):
+                    tokenizer, template = candidate_tokenizer, candidate_template
+        return ModelTarget(
+            model, cloud, tier_label, augment,
+            tokenizer=tokenizer, template=template,
+        )
 
     def make_generate(
         self,

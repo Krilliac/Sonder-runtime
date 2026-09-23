@@ -50,6 +50,32 @@ def test_adapter_preserves_legacy_target_and_generator_contract():
     ]
 
 
+def test_adapter_carries_proven_prompt_identity_when_legacy_runtime_can_supply_it():
+    runtime = SimpleNamespace(
+        _serve_target=lambda tier, strict: ("model-x", False, True, tier),
+        _make_generate=lambda *args, **kwargs: lambda prompt, history=None: prompt,
+        _model_prompt_identity=lambda model: ("qwen", "ollama-template-sha256:abc"),
+    )
+
+    target = LegacyModelBootstrapAdapter(runtime).resolve_target("code")
+
+    assert target.tokenizer == "qwen"
+    assert target.template == "ollama-template-sha256:abc"
+
+
+def test_adapter_discards_partial_or_invalid_prompt_identity():
+    runtime = SimpleNamespace(
+        _serve_target=lambda tier, strict: ("model-x", False, True, tier),
+        _make_generate=lambda *args, **kwargs: lambda prompt, history=None: prompt,
+        _model_prompt_identity=lambda model: ("qwen", ""),
+    )
+
+    target = LegacyModelBootstrapAdapter(runtime).resolve_target("code")
+
+    assert target.tokenizer is None
+    assert target.template is None
+
+
 def test_lazy_factories_accept_an_injected_provider_without_loading_legacy_root(monkeypatch):
     calls: list[tuple[object, ...]] = []
 

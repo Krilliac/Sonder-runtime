@@ -1405,6 +1405,9 @@ class AgentLaneService:
         selection = self._tool_schema_selection(
             lane, turn_number=lane["used_steps"] + 1
         )
+        prefix_manifest = None
+        replay_manifest = None
+        prefix_cache_observation = None
         if selection is not None and self.tools is not None:
             visible_schemas = getattr(self.tools, "visible_tool_schemas", None)
             if callable(visible_schemas):
@@ -1495,6 +1498,9 @@ class AgentLaneService:
                     ):
                         system += "\nLive stable context exceeded the bounded prefix budget"
                     else:
+                        prefix_manifest = assembly.prefix
+                        replay_manifest = assembly.replay
+                        prefix_cache_observation = assembly.prefix_observation
                         system += "\nAuthoritative project context:\n" + "\n\n".join(
                             record.content for record in live.records
                         )
@@ -1510,6 +1516,9 @@ class AgentLaneService:
             history=self._history(lane),
             options=request_options,
             _resolved_route=route,
+            prefix_manifest=prefix_manifest,
+            replay_manifest=replay_manifest,
+            prefix_cache_observation=prefix_cache_observation,
         )
 
     def _tool_schema_selection(self, lane, *, turn_number=None):
