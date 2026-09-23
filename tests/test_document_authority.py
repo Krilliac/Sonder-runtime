@@ -144,6 +144,29 @@ def test_adr_namespace_rejects_missing_historical_record(tmp_path, monkeypatch):
     assert f"docs/adr/{missing}: historical ADR is missing" in checker._check_adr_namespace()
 
 
+def test_adr_namespace_rejects_nested_records_and_directories(tmp_path, monkeypatch):
+    canonical = tmp_path / "docs" / "adr"
+    historical = tmp_path / "docs" / "architecture" / "adr"
+    canonical.mkdir(parents=True)
+    historical.mkdir(parents=True)
+    for name in checker.LEGACY_CANONICAL_ADRS:
+        (canonical / name).touch()
+    for name in checker.LEGACY_ARCHITECTURE_ADRS:
+        (historical / name).touch()
+    (canonical / "nested").mkdir()
+    (canonical / "nested" / "ADR-2026-99-99-invalid-date.md").touch()
+    (historical / "new-series").mkdir()
+    (historical / "new-series" / "ADR-010-hidden.md").touch()
+    (canonical / "figure.png").touch()
+    monkeypatch.setattr(checker, "CANONICAL_ADR", canonical)
+    monkeypatch.setattr(checker, "HISTORICAL_ADR", historical)
+
+    problems = checker._check_adr_namespace()
+    assert "docs/adr/nested: nested ADR directories are not permitted" in problems
+    assert "docs/architecture/adr/new-series: nested ADR directories are not permitted" in problems
+    assert not any("figure.png" in problem for problem in problems)
+
+
 def test_generated_catalog_freshness_contract_is_discoverable_and_deterministic():
     index = _read("docs/architecture/DOCUMENT-AUTHORITY-INDEX.md")
     source = ROOT / "sonder_runtime" / "application" / "tools" / "generated_catalogs.py"
