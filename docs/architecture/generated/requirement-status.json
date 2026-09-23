@@ -866,9 +866,9 @@
     },
     {
       "checked": false,
-      "claim": "The production process-start:<job_id> worker family has a host-composed reconciliation verifier that requires exact durable process kind and idempotency identity plus a non-empty supported operation, reads terminal success/failure and revision from the process job registry, derives a bounded outcome digest, and leaves pending or mismatched registry state fenced after restart.",
+      "claim": "The production process-start:<job_id> worker family has a host-composed reconciliation verifier that requires exact durable process kind, idempotency identity, and canonical request digest plus a non-empty supported operation, reads terminal success/failure and revision from the process job registry, derives a bounded outcome digest, and leaves pending, legacy, or mismatched registry state fenced after restart.",
       "requirement_id": "LOOP-008",
-      "revision": 11,
+      "revision": 12,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "d6dc037c15a12c091f1dda831327c02b66447768f43beb362cbe955481802196",
+    "ledger_sha256": "a9fb61f006ed379973248d4567489c8bf2023bd6ec39603a2e47010d4e1b6d7e",
     "spec_sha256": "4797da92d2d1845ce944b2dc32353d52fe7a6e48dfa92593753ca727761ca714"
   }
 }

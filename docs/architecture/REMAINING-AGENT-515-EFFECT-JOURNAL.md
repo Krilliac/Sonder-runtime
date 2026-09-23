@@ -59,6 +59,9 @@ terminal record and derives a bounded outcome digest from the job identity,
 kind, operation, idempotency key, status, and revision. The durable kind and
 idempotency key must exactly match the journaled identity, and the durable
 operation must be non-empty under the supported process contract.
+The process adapter also persists a SHA-256 canonical request digest in the
+existing bounded job metadata extension; the verifier requires that digest to
+match the journal intent. Legacy rows without the digest remain fenced.
 `succeeded` produces a completed proof; `failed` or
 `cancelled` produces a failed proof. Pending, missing, malformed, or otherwise
 unknown registry state produces no proof and leaves the fence set. The
