@@ -136,6 +136,26 @@ class SQLiteAuthoritativeFactSource:
             raise MemoryReplicationError("fact is owned by another source")
         return state
 
+    def _require_scoped_facts_authoritative(self, connection) -> None:
+        """Refuse activation over facts with no matching source evidence.
+
+        Existing project facts need an explicit migration before a live writer
+        can claim this project is an authoritative replication source.
+        """
+        legacy = connection.execute(
+            "SELECT 1 FROM facts AS fact LEFT JOIN "
+            "memory_authoritative_fact_state AS state "
+            "ON state.project=fact.project AND state.fact_id=fact.id "
+            "WHERE fact.project=? AND "
+            "(state.fact_id IS NULL OR state.source_id<>? OR state.tombstoned<>0) "
+            "LIMIT 1",
+            (self.project_scope, self.source_id),
+        ).fetchone()
+        if legacy is not None:
+            raise MemoryReplicationError(
+                "existing project facts require authoritative migration"
+            )
+
     def _record(
         self,
         connection,
@@ -196,6 +216,7 @@ class SQLiteAuthoritativeFactSource:
                 operation="upsert",
                 payload=payload,
             )
+            self._require_scoped_facts_authoritative(connection)
             existing = connection.execute(
                 "SELECT project FROM facts WHERE id=?", (fact_id,)
             ).fetchone()
@@ -271,6 +292,7 @@ class SQLiteAuthoritativeFactSource:
                 operation="delete",
                 payload={},
             )
+            self._require_scoped_facts_authoritative(connection)
             deleted = connection.execute(
                 "DELETE FROM facts WHERE id=? AND project=?",
                 (fact_id, self.project_scope),
