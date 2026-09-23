@@ -1553,7 +1553,7 @@ _MODEL_PROMPT_IDENTITY_CACHE_LOCK = threading.Lock()
 
 def _ollama_model_tag_metadata(model, *, timeout=30):
     """Return the selected tag's digest/revision, or ``None`` if unproven."""
-    payload = _post("/api/tags", {}, timeout=timeout)
+    payload = _get("/api/tags")
     rows = payload.get("models") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
         return None

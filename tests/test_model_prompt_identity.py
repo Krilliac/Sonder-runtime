@@ -17,7 +17,7 @@ def test_prompt_identity_fails_closed_for_multiple_configured_workers(monkeypatc
     )
     monkeypatch.setattr(
         server,
-        "_post",
+        "_get",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("multi-worker identity must not probe metadata")
         ),
@@ -41,10 +41,15 @@ def test_prompt_identity_does_not_cache_positive_metadata(monkeypatch):
         "modified_at": "rev-1",
     }
 
+    def get(*_args, **_kwargs):
+        calls.append(1)
+        return tag
+
     def post(*_args, **_kwargs):
         calls.append(1)
-        return (tag if len(calls) % 3 in (1, 0) else show)
+        return show
 
+    monkeypatch.setattr(server, "_get", get)
     monkeypatch.setattr(server, "_post", post)
     first = server._model_prompt_identity("model-x")
     second = server._model_prompt_identity("model-x")
@@ -61,11 +66,13 @@ def test_prompt_identity_changes_when_same_template_tag_digest_changes(monkeypat
     )
     digest = ["a" * 64, "a" * 64, "b" * 64, "b" * 64]
 
-    def post(path, *_args, **_kwargs):
-        if path == "/api/tags":
-            return {"models": [{"name": "model-x", "digest": digest.pop(0), "modified_at": "rev"}]}
+    def get(*_args, **_kwargs):
+        return {"models": [{"name": "model-x", "digest": digest.pop(0), "modified_at": "rev"}]}
+
+    def post(*_args, **_kwargs):
         return {"model_info": {"tokenizer.ggml.model": "qwen"}, "template": "same", "modified_at": "rev"}
 
+    monkeypatch.setattr(server, "_get", get)
     monkeypatch.setattr(server, "_post", post)
     first = server._model_prompt_identity("model-x")
     second = server._model_prompt_identity("model-x")
@@ -79,15 +86,23 @@ def test_prompt_identity_fails_closed_for_missing_or_mismatched_revision(monkeyp
     monkeypatch.setattr(
         server, "OLLAMA_POOL", SimpleNamespace(configured_origins=("http://127.0.0.1:11434",))
     )
-    responses = [
+    tag_responses = [
         {"models": [{"name": "model-x", "modified_at": "rev"}]},
         {"models": [{"name": "model-x", "digest": "a" * 64, "modified_at": "rev"}]},
-        {"model_info": {"tokenizer.ggml.model": "qwen"}, "template": "same", "modified_at": "other"},
     ]
 
-    def post(*_args, **_kwargs):
-        return responses.pop(0)
+    def get(*_args, **_kwargs):
+        return tag_responses.pop(0)
 
-    monkeypatch.setattr(server, "_post", post)
+    monkeypatch.setattr(server, "_get", get)
+    monkeypatch.setattr(
+        server, "_post",
+        lambda *_args, **_kwargs: {
+            "model_info": {"tokenizer.ggml.model": "qwen"},
+            "template": "same",
+            "modified_at": "other",
+        },
+    )
+
     assert server._model_prompt_identity("model-x") == (None, None)
     assert server._model_prompt_identity("model-x") == (None, None)
