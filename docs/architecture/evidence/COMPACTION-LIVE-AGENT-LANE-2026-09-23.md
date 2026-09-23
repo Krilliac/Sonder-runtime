@@ -18,7 +18,7 @@ service restart.
 
 ```text
 python -m pytest -q tests/test_interactive_agent_lanes.py tests/test_session_context_archive.py --basetemp .pytest-compact-live-full
-66 passed in 13.90s
+67 passed in 9.04s
 ```
 
 The canary

@@ -289,6 +289,30 @@ class SessionCompactionService:
                 tuple(self._history_event(item) for item in values),
                 source_range,
             )
+            if type(self._engine) is not CompactionApplicationService:
+                raise SessionCompactionError(
+                    "persisted compaction requires the deterministic engine"
+                )
+            canonical = CompactionApplicationService().compact(request).summary
+
+            def projection(value: CompactionSummary):
+                return (
+                    tuple(value.facts), tuple(value.decisions),
+                    tuple(value.unresolved_tasks), tuple(value.artifacts),
+                    tuple(value.tool_outcomes), value.confidence,
+                    tuple(
+                        (
+                            item.event_id, item.event_type, item.modality,
+                            dict(item.payload),
+                        )
+                        for item in value.modalities
+                    ),
+                )
+
+            if projection(summary) != projection(canonical):
+                raise SessionCompactionError(
+                    "persisted compaction summary differs from canonical source summary"
+                )
             candidate = CompactionResult(
                 event.session_id, source_range, summary,
                 CompactionEvent(event.event_id, event.session_id, source_range, summary),

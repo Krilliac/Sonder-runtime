@@ -824,7 +824,7 @@ def test_live_request_fails_recoverably_when_protected_history_exceeds_budget(en
 def test_live_request_rejects_malformed_or_overlapping_compaction_summaries(env):
     from sonder_runtime.application.compaction import SessionCompactionError
 
-    service, _, sessions, _, _, _ = env
+    service, _, sessions, _, context, root = env
     lane_id = spawn(env, command="compact-invalid")['lane']['id']
     lane = service.store.read_lane(lane_id)
     source = [
@@ -851,6 +851,90 @@ def test_live_request_rejects_malformed_or_overlapping_compaction_summaries(env)
     )
     assert malformed.event_type == "compaction.completed"
     with pytest.raises(SessionCompactionError):
+        service._history(lane)
+
+
+def test_live_request_rejects_forged_extra_summary_fields_and_tampered_modalities(env):
+    from sonder_runtime.application.compaction import SessionCompactionError
+
+    service, _, sessions, _, context, root = env
+
+    def append_forged(lane, source, summary, event_id):
+        sessions.append(
+            lane["session_id"], "compaction.completed",
+            {
+                "source_range": {
+                    "session_id": lane["session_id"],
+                    "start_sequence": source.sequence,
+                    "end_sequence": source.sequence,
+                    "start_event_id": source.event_id,
+                    "end_event_id": source.event_id,
+                },
+                "summary": summary,
+            },
+            event_id=event_id,
+        )
+
+    extra_root = root / "child-extra"
+    extra_root.mkdir()
+    lane = service.store.read_lane(
+        service.spawn(
+            command_id="compact-forged-extra", parent_session_id="parent",
+            task="implement parser", workspace_root=str(extra_root), context=context,
+        )["lane"]["id"]
+    )
+    source = sessions.append(
+        lane["session_id"], "model.response",
+        {"content": "original", "decisions": ["real decision"]},
+        event_id="forged-source-extra",
+    )
+    modality = {
+        "event_id": source.event_id,
+        "event_type": "model.response",
+        "modality": "text",
+        "payload": dict(source.payload),
+    }
+    append_forged(
+        lane, source,
+        {
+            "facts": [], "decisions": ["real decision", "FABRICATED DECISION"],
+            "unresolved_tasks": [], "artifacts": [], "tool_outcomes": [],
+            "confidence": None, "modalities": [modality],
+        },
+        "forged-extra-summary",
+    )
+    with pytest.raises(SessionCompactionError, match="canonical"):
+        service._history(lane)
+
+    modality_root = root / "child-modality"
+    modality_root.mkdir()
+    lane = service.store.read_lane(
+        service.spawn(
+            command_id="compact-forged-modality", parent_session_id="parent",
+            task="implement parser", workspace_root=str(modality_root), context=context,
+        )["lane"]["id"]
+    )
+    source = sessions.append(
+        lane["session_id"], "model.response",
+        {"content": "original", "decisions": ["real decision"]},
+        event_id="forged-source-modality",
+    )
+    tampered = {
+        "event_id": source.event_id,
+        "event_type": "model.response",
+        "modality": "text",
+        "payload": {"content": "tampered", "decisions": ["real decision"]},
+    }
+    append_forged(
+        lane, source,
+        {
+            "facts": [], "decisions": ["real decision"],
+            "unresolved_tasks": [], "artifacts": [], "tool_outcomes": [],
+            "confidence": None, "modalities": [tampered],
+        },
+        "forged-modality-summary",
+    )
+    with pytest.raises(SessionCompactionError, match="canonical"):
         service._history(lane)
 
 
