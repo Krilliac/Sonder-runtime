@@ -99,6 +99,46 @@ def test_draining_probe_state_is_retained_until_late_probe_finishes():
     assert pool.origins == ()
 
 
+def test_probe_result_is_discarded_after_lease_identity_changes():
+    entered, release = threading.Event(), threading.Event()
+
+    def probe(_origin):
+        entered.set()
+        release.wait(2)
+        return {"models": ["stale-model"]}
+
+    pool = OllamaWorkerPool(
+        "http://127.0.0.1:11434",
+        capability_prober=probe,
+        capability_probe_timeout_seconds=1,
+    )
+    state = pool._states[0]
+    state.advertisement = type(
+        "Advertisement", (), {
+            "origin": state.endpoint.origin,
+            "worker_id": "lease-old",
+            "member_generation": 1,
+        },
+    )()
+    refresh = threading.Thread(target=pool.refresh_capabilities)
+    refresh.start()
+    assert entered.wait(1)
+    state.advertisement = type(
+        "Advertisement", (), {
+            "origin": state.endpoint.origin,
+            "worker_id": "lease-new",
+            "member_generation": 2,
+        },
+    )()
+    release.set()
+    refresh.join(2)
+
+    assert not refresh.is_alive()
+    assert state.capabilities is None
+    assert state.capability_probe_failed is True
+    assert state.last_error == "capability probe result discarded after membership change"
+
+
 @pytest.mark.parametrize("maximum", [16, 64, 256])
 def test_constructor_uses_its_configured_primary_inclusive_roster_limit(maximum):
     primary, workers = _roster(maximum)
