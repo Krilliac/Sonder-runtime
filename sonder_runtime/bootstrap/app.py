@@ -801,6 +801,11 @@ def build_application(
                         raise TypeError("child repository factory requires trusted host composition")
                     continuation_repository = child_repository_factory(config or SonderConfig())
                 continuation_service = DurableContinuationService(continuation_repository)
+                from ..application.worker_registry.continuation import ContinuationWorkerRegistry
+                worker_registry = ContinuationWorkerRegistry(
+                    continuation_repository,
+                    owner_nonce=continuation_service.owner_nonce,
+                )
                 from ..adapters.conversational_subagents import conversational_runner_factory
                 subagent_provider = LocalSubagentProvider(
                     continuation_service,
@@ -808,7 +813,7 @@ def build_application(
                         gateway, get_session_repository(), get_session_capture_service(),
                     ),
                 )
-                delegation = DelegationService(subagent_provider, events)
+                delegation = DelegationService(subagent_provider, events, worker_registry)
                 logger.info("delegation service initialized")
             return delegation
 

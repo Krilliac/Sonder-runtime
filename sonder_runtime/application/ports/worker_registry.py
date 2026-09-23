@@ -64,12 +64,34 @@ class WorkerLaunch:
     retry_policy: Mapping[str, Any]
     resume_key: str
     idempotency_key: str
+    # The prompt is retained only by the single authoritative child-session
+    # store when this contract is composed over that store.  The standalone
+    # registry keeps it optional for backwards compatibility with its original
+    # metadata-only callers.
+    prompt: str = ""
+    owner_id: str = ""
+    metadata: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         for name in ("worker_id", "parent_id", "role", "model", "backend", "effort", "resume_key", "idempotency_key"):
             object.__setattr__(self, name, _text(getattr(self, name), name))
             if len(getattr(self, name)) > 256:
                 raise WorkerRegistryError(f"{name} exceeds its bound")
+        for name in ("prompt", "owner_id"):
+            value = getattr(self, name)
+            if not isinstance(value, str):
+                raise WorkerRegistryError(f"{name} must be text")
+            if len(value) > 16 * 1024:
+                raise WorkerRegistryError(f"{name} exceeds its bound")
+        metadata = tuple(self.metadata)
+        if any(
+            not isinstance(item, tuple) or len(item) != 2
+            or not isinstance(item[0], str) or not item[0].strip()
+            or not isinstance(item[1], str)
+            for item in metadata
+        ) or len(dict(metadata)) != len(metadata):
+            raise WorkerRegistryError("metadata must contain unique string pairs")
+        object.__setattr__(self, "metadata", metadata)
         for name in ("scope", "allowed_tools"):
             values = tuple(getattr(self, name))
             if any(not isinstance(value, str) or not value.strip() for value in values):
