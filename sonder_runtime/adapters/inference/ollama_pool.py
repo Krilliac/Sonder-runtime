@@ -763,6 +763,7 @@ class OllamaWorkerPool:
                               for worker in result.additions}
             retained = []
             existing = {}
+            unresolved_by_origin = {}
             for state in self._states:
                 if state.membership_state is None:
                     retained.append(state)
@@ -776,9 +777,18 @@ class OllamaWorkerPool:
                     state.membership_state = "draining"
                     if state.inflight or state.capability_probe_inflight:
                         retained.append(state)
+                    if state.capability_probe_inflight:
+                        unresolved_by_origin[state.endpoint.origin] = state
             omitted = result.omitted_worker_count
             for key, member in desired.items():
                 state = existing.get(key)
+                if state is None:
+                    # A lease replacement may use a new member generation
+                    # while the prior incarnation still has an unresolved
+                    # probe. Reuse that state by origin so the old daemon
+                    # remains the single in-flight fence for this endpoint.
+                    state = unresolved_by_origin.get(member.advertisement.origin)
+                reused_unresolved = state is not None and state in retained
                 if state is None:
                     if len(retained) + len(existing) >= self._max_workers:
                         omitted += 1
@@ -787,7 +797,11 @@ class OllamaWorkerPool:
                     state = _WorkerState(WorkerEndpoint(worker.origin, worker.worker_id),
                                          advertisement=worker)
                 else:
-                    existing.pop(key)
+                    existing.pop(key, None)
+                    if reused_unresolved:
+                        worker = member.advertisement
+                        state.endpoint = WorkerEndpoint(worker.origin, worker.worker_id)
+                        state.advertisement = worker
                     if key in new_admissions:
                         # A lease renewed after expiry must obtain new evidence;
                         # a still-fresh capability cache predates this admission.
@@ -796,7 +810,8 @@ class OllamaWorkerPool:
                 state.membership_state = member.lifecycle_state
                 state.membership_expires_at = result.roster.snapshot.expires_at
                 state.membership_evidence = member.evidence
-                retained.append(state)
+                if not reused_unresolved:
+                    retained.append(state)
             self._membership_roster_applied = result.roster is not None
             self._states = retained
             self._membership_omitted = omitted

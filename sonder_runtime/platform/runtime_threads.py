@@ -49,7 +49,14 @@ def run_bounded(
                 finished.set()
 
     worker = _NativeThread(target=invoke, name=name, daemon=True)
-    worker.start()
+    try:
+        worker.start()
+    except BaseException:
+        # Startup failed before ``invoke`` could run its finally block.  The
+        # owner must not retain a marker for work that never became live.
+        if on_complete is not None:
+            on_complete()
+        raise
     if not finished.wait(float(timeout)):
         return None, TimeoutError("bounded call timed out after %.3fs" % float(timeout)), False
     return result.get("value"), result.get("error"), True
