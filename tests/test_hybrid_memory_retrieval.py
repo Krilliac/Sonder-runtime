@@ -4,6 +4,7 @@ from sonder_runtime.application.memory.hybrid_retrieval import (
     HybridMemoryRetriever, MemoryCandidate, RetrievalQuery,
 )
 from sonder_runtime.application.memory.memory_policy import MemoryClass, TemporalTruth
+from sonder_runtime.adapters import embeddings, memory_store, recall
 
 
 NOW = datetime(2026, 9, 22, tzinfo=timezone.utc)
@@ -72,4 +73,37 @@ def test_project_scoped_memory_requires_exact_project_even_for_semantic_lookup()
     assert len(retriever.retrieve(
         [scoped], RetrievalQuery("deployment", scope="project", project="project-a")
     )) == 1
+
+
+def test_live_recall_uses_hybrid_exact_order_with_project_sqlite_scope():
+    conn = memory_store.connect(":memory:")
+    for identifier, task, response, project in (
+        ("a", "bounded timeout handling", "project A", "project-a"),
+        ("b", "generic network handling", "project B", "project-a"),
+        ("c", "bounded timeout handling", "other project", "project-b"),
+    ):
+        memory_store.log_interaction(
+            conn, identifier, task, "", response, "code", project=project,
+            task_embedding=embeddings.to_blob([1.0, 0.0]),
+            task_embedding_model=embeddings.EMBED_IDENTITY,
+            task_embedding_revision=embeddings.EMBED_REVISION,
+            task_embedding_dim=2,
+        )
+        memory_store.record_outcome_row(conn, identifier, "tests_passed", 1.0, source="caller")
+
+    scoped = recall.recall(
+        conn, "bounded timeout", k=2, qv=[1.0, 0.0], min_sim=0.0,
+        project="project-a",
+    )
+
+    assert scoped[0] == "bounded timeout handling -> project A"
+    assert all("other project" not in item for item in scoped)
+    assert len(recall.recall(
+        conn, "", k=2, qv=[1.0, 0.0], min_sim=0.0,
+        project="project-a",
+    )) == 2
+    assert recall.recall(
+        conn, "bounded " * 800, k=1, qv=[1.0, 0.0], min_sim=0.0,
+        project="project-a",
+    )
 
