@@ -47,6 +47,14 @@ class RouteDecision:
     can_escalate: bool
 
 
+class CapabilityRoutingError(ValueError):
+    """A route was refused with a machine-readable admission reason."""
+
+    def __init__(self, reason_code: str, message: str):
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
 class CapabilityRouter:
     """Select a measured profile without model, network, or persistence I/O."""
 
@@ -57,6 +65,8 @@ class CapabilityRouter:
         role_routes: dict[AgentRole, RoleRoute] | None = None,
         max_escalations: int = 2,
         uncertainty_threshold: float = 0.65,
+        recent_evidence=None,
+        evidence_clock=None,
     ) -> None:
         if max_escalations < 0 or not 0.0 <= uncertainty_threshold <= 1.0:
             raise ValueError("invalid escalation policy")
@@ -66,6 +76,8 @@ class CapabilityRouter:
         self._roles = dict(role_routes or default_role_routes())
         self._max_escalations = max_escalations
         self._uncertainty_threshold = uncertainty_threshold
+        self._recent_evidence = recent_evidence
+        self._evidence_clock = evidence_clock
 
     def route(self, request: RoutingRequest) -> RouteDecision:
         try:
@@ -77,6 +89,30 @@ class CapabilityRouter:
         candidates = [p for p in self._profiles if p.supports(required)]
         if not candidates:
             raise ValueError("no profile satisfies requested capabilities")
+        if self._recent_evidence is not None:
+            eligible = []
+            refusals = []
+            for profile in candidates:
+                if self._evidence_clock is None:
+                    allowed, reason_code = self._recent_evidence.check(
+                        profile.model, required, backend=getattr(profile, "backend", "local")
+                    )
+                else:
+                    allowed, reason_code = self._recent_evidence.check(
+                        profile.model, required, backend=getattr(profile, "backend", "local"),
+                        now=self._evidence_clock()
+                    )
+                if allowed:
+                    eligible.append(profile)
+                else:
+                    refusals.append(reason_code)
+            if not eligible:
+                reason_code = refusals[0] if refusals else "recent_capability_evidence_missing"
+                raise CapabilityRoutingError(
+                    reason_code,
+                    "no profile has recent passing backend capability evidence (%s)" % reason_code,
+                )
+            candidates = eligible
         candidates.sort(key=lambda p: (p.escalation_rank, -p.quality, p.latency_ms, p.model))
         index = min(request.escalation_count, len(candidates) - 1)
         trigger = self._trigger(request)
@@ -123,4 +159,4 @@ class CapabilityRouter:
         return None
 
 
-__all__ = ["CapabilityRouter", "RouteDecision", "RoutingRequest"]
+__all__ = ["CapabilityRouter", "CapabilityRoutingError", "RouteDecision", "RoutingRequest"]
