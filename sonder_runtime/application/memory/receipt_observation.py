@@ -254,4 +254,64 @@ class ReceiptObservationProducer:
         ), observation
 
 
-__all__ = ["ReceiptObservationProducer", "VerifierReceipt"]
+class VerifiedSubjectFactPromotion:
+    """Promote only canonical verifier subjects through the live fact source.
+
+    The request names observation IDs, never semantic fact text.  The fact
+    content is derived from the persisted producer observation, and the
+    authoritative source is supplied by the application composition root.
+    """
+
+    def __init__(self, *, ladder=None) -> None:
+        from .learning_ladder import LearningLadder
+        self._ladder = ladder or LearningLadder()
+
+    def apply(self, *, project, fact_id, observation_ids, repository, fact_source, connection):
+        if not isinstance(project, str) or not project.strip():
+            raise ValueError("fact project is required")
+        if not isinstance(fact_id, str) or not fact_id.strip():
+            raise ValueError("fact identity is required")
+        if type(observation_ids) is not tuple or not 1 <= len(observation_ids) <= 16:
+            raise ValueError("observation identities are required")
+        if len(set(observation_ids)) != len(observation_ids):
+            raise ValueError("observation identities must be unique")
+        if not callable(getattr(repository, "get", None)):
+            raise TypeError("verifier observation repository is required")
+        if not callable(getattr(fact_source, "upsert_fact", None)) or not callable(
+            getattr(fact_source, "delete_fact", None)
+        ):
+            raise TypeError("authoritative fact source is required")
+        pairs = tuple(repository.get(item) for item in observation_ids)
+        if any(pair is None for pair in pairs):
+            raise PermissionError("authenticated observation is unavailable")
+        observations = tuple(pair[1] for pair in pairs)
+        if any(
+            receipt.project_scope != project
+            or receipt.workspace_scope != project
+            or receipt.verifier_outcome not in {"passed", "failed"}
+            or observation.source != ReceiptObservationProducer.SOURCE
+            or observation.trusted_source is not True
+            or not observation.content.startswith("verified-subject:")
+            for receipt, observation in pairs
+        ):
+            raise PermissionError("only scoped authenticated verifier observations may promote")
+        content_keys = {observation.content_key for observation in observations}
+        if len(content_keys) != 1:
+            raise PermissionError("observations must describe one verified subject")
+        decisions = self._ladder.evaluate(observations)
+        if len(decisions) != 1:
+            raise PermissionError("observations must describe one verified subject")
+        decision = decisions[0]
+        content = observations[0].content
+        if any(not observation.positive for observation in observations):
+            mutation = fact_source.delete_fact(connection, fact_id, project)
+            return "demoted" if mutation else "unchanged", decision
+        if not decision.promotable:
+            return "candidate", decision
+        mutation = fact_source.upsert_fact(
+            connection, fact_id, project, content,
+        )
+        return "promoted", decision
+
+
+__all__ = ["ReceiptObservationProducer", "VerifierReceipt", "VerifiedSubjectFactPromotion"]

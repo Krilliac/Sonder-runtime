@@ -357,6 +357,22 @@ class ManagedStandaloneSession:
         repository.append(receipt, observation)
         return observation
 
+    def persist_learning_observation_durable(self, expected_turn, *, verifier_factory):
+        """Run the real host producer against the application-owned UoW."""
+        unit_of_work = getattr(self._application, "unit_of_work", None)
+        if not callable(unit_of_work):
+            raise RuntimeError("application persistence composition is unavailable")
+        from ..adapters.persistence.sqlite.verifier_observations import (
+            SQLiteVerifierObservationRepository,
+        )
+
+        with unit_of_work() as scope:
+            return self.persist_learning_observation(
+                expected_turn,
+                verifier_factory=verifier_factory,
+                repository=SQLiteVerifierObservationRepository(scope.connection),
+            )
+
     def recovery_verification(self, *, verifier_factory):
         self._compose_verifier(verifier_factory)
         identity = self._bound.pending_verification()
