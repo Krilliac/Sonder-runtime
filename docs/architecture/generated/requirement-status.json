@@ -1272,9 +1272,9 @@
     },
     {
       "checked": false,
-      "claim": "Isolated candidate execution is wired through the live typed selfmod bridge and rejects a candidate workspace that resolves to the live repository.",
+      "claim": "Unattended nightly regression and held-out checks run under a Windows low-integrity token inside a kill-on-close Job Object with an allowlisted environment; the full low-integrity baseline has been run and every failure classified.",
       "requirement_id": "SELFMOD-002",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "6de57af4e57d8869d863a0c1357735c752390c27eafe4156d681cea84665f496",
+    "ledger_sha256": "f51cfc48345705f3f4cc0149f34f6cbb999aa24fe835ea71b3d9c902840c3866",
     "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
   }
 }
