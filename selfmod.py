@@ -762,19 +762,27 @@ def begin_testing(run_id):
 
 def _record_command(run, kind, command, cwd_path, seconds, expect_failure=False, receipt=None, protected_paths=()):
     run_id = run["id"]
+    isolation_failed = False
     if os.environ.get("SELFMOD_LOW_INTEGRITY") == "1" and os.name == "nt":
-        from selfmod_low_integrity import run_isolated
+        from scripts.selfmod_low_integrity import run_isolated
         started = time.monotonic()
-        isolated = run_isolated(
-            command, cwd=cwd_path, timeout=seconds,
-            protected_paths=protected_paths,
-        )
-        code = int(isolated["exit_code"])
-        output = str(isolated.get("output") or "")
+        try:
+            isolated = run_isolated(
+                command, cwd=cwd_path, timeout=seconds,
+                protected_paths=protected_paths,
+            )
+            code = int(isolated["exit_code"])
+            output = str(isolated.get("output") or "")
+        except Exception as exc:
+            # A missing token/ACL/Job capability rejects this check.  It
+            # cannot accidentally count as a successful negative reproducer.
+            code = 125
+            output = "low-integrity isolation unavailable: %s" % type(exc).__name__
+            isolation_failed = True
         duration = int((time.monotonic() - started) * 1000)
     else:
         code, output, duration = _run(command, cwd_path, seconds)
-    passed = code != 0 if expect_failure else code == 0
+    passed = (code not in (0, 124, 125) if expect_failure else code == 0) and not isolation_failed
     if receipt is not None and passed and receipt not in output:
         # "It exited 0" is not "it did the thing". The receipt is computed by
         # this process from the candidate on disk and is deliberately never
