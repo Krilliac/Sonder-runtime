@@ -5,8 +5,8 @@ Generated from the authoritative specification and evidence ledger.
 | Metric | Value |
 |---|---:|
 | Requirements | 204 |
-| Checked | 0 |
-| Verified evidence | 0 |
+| Checked | 1 |
+| Verified evidence | 1 |
 
 | Family | Total | Checked | Verified |
 |---|---:|---:|---:|
@@ -29,7 +29,7 @@ Generated from the authoritative specification and evidence ledger.
 | REPO | 7 | 0 | 0 |
 | SEAM | 16 | 0 | 0 |
 | SEC | 9 | 0 | 0 |
-| SELFMOD | 6 | 0 | 0 |
+| SELFMOD | 6 | 1 | 1 |
 | SESSION | 10 | 0 | 0 |
 | SKILL | 6 | 0 | 0 |
 | TOOL | 7 | 0 | 0 |
