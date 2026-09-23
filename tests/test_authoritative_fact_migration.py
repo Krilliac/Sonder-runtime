@@ -167,7 +167,8 @@ def test_migration_keeps_tombstones_and_conflicting_ownership_fail_closed(tmp_pa
         "DELETE FROM facts WHERE id=?", ("legacy",)
     )
     connection.commit()
-    assert plan_legacy_fact_migration(connection, source_id="node-a", project_scope="repo-a").rows == ()
+    with pytest.raises(MemoryReplicationError, match="missing authoritative journal evidence"):
+        plan_legacy_fact_migration(connection, source_id="node-a", project_scope="repo-a")
     connection.close()
 
 
@@ -219,6 +220,21 @@ def test_migration_rejects_existing_state_without_matching_authority_evidence(
     assert connection.execute(
         "SELECT COUNT(*) FROM memory_replication_log"
     ).fetchone()[0] == 0
+    connection.close()
+
+
+def test_migration_rejects_foreign_tombstone_without_a_fact_row(tmp_path):
+    connection = connect(tmp_path / "foreign-tombstone.db")
+    connection.execute(
+        "INSERT INTO memory_authoritative_fact_state"
+        "(project,fact_id,source_id,version,tombstoned) VALUES(?,?,?,?,?)",
+        ("repo-a", "gone", "node-b", 2, 1),
+    )
+    connection.commit()
+    with pytest.raises(MemoryReplicationError, match="conflicting authoritative ownership"):
+        plan_legacy_fact_migration(
+            connection, source_id="node-a", project_scope="repo-a",
+        )
     connection.close()
 
 
