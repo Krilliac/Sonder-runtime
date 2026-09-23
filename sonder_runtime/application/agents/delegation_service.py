@@ -62,6 +62,10 @@ class DelegationService:
                 ("workspace_read_roots", "|".join(request.workspace.read_roots)),
                 ("workspace_write_roots", "|".join(request.workspace.write_roots)),
             ),
+            # delegation_id is the durable task identity; the repository
+            # scopes these keys by parent_id before rejecting active duplicates.
+            resume_key=request.delegation_id,
+            idempotency_key=request.delegation_id,
         )
         logger.debug(f"DelegationService.dispatch: spawning child_id={request.lineage.child_id!r}, parent_id={request.lineage.parent_id!r}")
         handle = self._provider.spawn(child_request, context)
