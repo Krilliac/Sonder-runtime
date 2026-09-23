@@ -106,4 +106,3 @@ def test_live_recall_uses_hybrid_exact_order_with_project_sqlite_scope():
         conn, "bounded " * 800, k=1, qv=[1.0, 0.0], min_sim=0.0,
         project="project-a",
     )
-

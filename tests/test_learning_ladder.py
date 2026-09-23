@@ -59,4 +59,3 @@ def test_empty_and_invalid_observations_fail_closed():
         pass
     else:
         raise AssertionError("empty observations must be rejected")
-
