@@ -661,3 +661,31 @@ def test_production_process_registry_verifier_reconciles_after_restart(tmp_path)
         current_two.recover_before_restart()
     with pytest.raises(EffectJournalError, match="host verifier returned no trusted proof"):
         journal.reconcile(pending.intent_id, owner_epoch=2)
+
+
+def test_process_verifier_rejects_durable_identity_mismatch(tmp_path):
+    class Registry:
+        def poll(self, job_id):
+            return JobRecord(
+                JobIdentity(job_id, "unrelated-kind", "different-operation", "other-idempotency"),
+                JobStatus.SUCCEEDED, revision=3,
+            )
+
+    journal = SQLiteEffectJournal(
+        tmp_path / "effects.db",
+        reconciliation_verifiers={
+            "process-start": DurableProcessEffectVerifier(lambda: Registry()),
+        },
+    )
+    old = AuthenticatedWorkerBinding(journal, "run", "process", 1, "/workspace")
+    intent = old.binding().begin_request(
+        operation_id="process-start:job-1", idempotency_key="expected",
+        request_digest="a" * 64, reconciliation="idempotent",
+    )
+    old.binding().mark_uncertain(intent, detail="crash after process launch")
+    current = AuthenticatedWorkerBinding(journal, "run", "process", 2, "/workspace")
+    with pytest.raises(EffectJournalError, match="explicit reconciliation"):
+        current.recover_before_restart()
+    with pytest.raises(EffectJournalError, match="host verifier returned no trusted proof"):
+        journal.reconcile(intent.intent_id, owner_epoch=2)
+    assert journal.get(intent.intent_id).state is EffectState.UNCERTAIN

@@ -57,6 +57,10 @@ class DurableProcessEffectVerifier:
         revision = getattr(record, "revision", None)
         if (
             identity is None or getattr(identity, "job_id", None) != job_id
+            or getattr(identity, "kind", None) != "process"
+            or not isinstance(getattr(identity, "operation_id", None), str)
+            or not getattr(identity, "operation_id", "").strip()
+            or getattr(identity, "idempotency_key", None) != intent.idempotency_key
             or status not in {"succeeded", "failed", "cancelled"}
             or type(revision) is not int or revision < 1
         ):
