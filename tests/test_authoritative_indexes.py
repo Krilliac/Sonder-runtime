@@ -86,3 +86,66 @@ def test_metadata_is_typed_and_legacy_path_cannot_silently_drop_it(tmp_path):
             conn, "fact-1", "repo-a", "bad", metadata={"entities": ("x",)}
         )
 
+
+def test_rebuild_keeps_existing_indexes_when_source_journal_is_changed(tmp_path):
+    path = tmp_path / "memory.db"
+    conn = connect(path)
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    source.add_fact(conn, "fact-1", "repo-a", "original", metadata=_metadata())
+    before = entities_for_project(conn, "repo-a")
+    conn.execute(
+        "UPDATE memory_replication_log SET payload_json=? WHERE source_id=? AND sequence=?",
+        ('{"text":"changed","embedding":null}', "node-a", 1),
+    )
+    conn.commit()
+    with pytest.raises(MemoryReplicationError, match="changed journal"):
+        rebuild_authoritative_fact_indexes(conn, project="repo-a")
+    assert entities_for_project(conn, "repo-a") == before
+    conn.close()
+
+
+def test_rebuild_row_bound_refuses_before_clearing_indexes(tmp_path, monkeypatch):
+    from sonder_runtime.adapters.persistence.sqlite import authoritative_indexes
+
+    conn = connect(tmp_path / "memory.db")
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    source.add_fact(conn, "fact-1", "repo-a", "original", metadata=_metadata())
+    before = entities_for_project(conn, "repo-a")
+    monkeypatch.setattr(authoritative_indexes, "_MAX_REBUILD_ROWS", 0)
+    with pytest.raises(MemoryReplicationError, match="row bound"):
+        rebuild_authoritative_fact_indexes(conn, project="repo-a")
+    assert entities_for_project(conn, "repo-a") == before
+    conn.close()
+
+
+def test_indexed_fact_metadata_normalizes_time_and_snapshots_decision(tmp_path):
+    decision = {"id": "rule", "value": "first"}
+    metadata = AuthoritativeFactMetadata(
+        entities=("parser",), decision=decision,
+        valid_from="2026-01-01T05:00:00+05:00",
+        provenance=("host:receipt-1",),
+    )
+    conn = connect(tmp_path / "memory.db")
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    source.add_fact(conn, "fact-1", "repo-a", "bounded parser", metadata=metadata)
+    decision["value"] = "changed after commit"
+    row = decisions_for_project(conn, "repo-a", now="2026-01-01T00:00:00+00:00")[0]
+    assert row["valid_from"] == "2026-01-01T00:00:00+00:00"
+    assert '"value":"first"' in row["decision_json"]
+    conn.close()
+
+
+def test_indexed_fact_rejects_unscoped_or_invalid_temporal_claims():
+    with pytest.raises(MemoryReplicationError, match="timezone"):
+        AuthoritativeFactMetadata(
+            entities=("parser",), valid_from="2026-01-01T00:00:00",
+            provenance=("host:receipt-1",),
+        )
+    with pytest.raises(MemoryReplicationError, match="must follow"):
+        AuthoritativeFactMetadata(
+            entities=("parser",), valid_from="2026-01-02T00:00:00Z",
+            valid_until="2026-01-01T00:00:00Z", provenance=("host:receipt-1",),
+        )
+    with pytest.raises(MemoryReplicationError, match="explicit provenance"):
+        AuthoritativeFactMetadata(entities=("parser",))
+
