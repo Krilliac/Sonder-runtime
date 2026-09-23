@@ -894,9 +894,9 @@
     },
     {
       "checked": false,
-      "claim": "Explicit journaled fact metadata now validates timezone-aware validity intervals, supersession, source version, tombstones, and scoped provenance before materializing derived indexes.",
+      "claim": "An explicit operator command can plan and atomically adopt bounded legacy facts into one project-scoped authoritative source with a verified no-clobber SQLite backup, exact source/scope/row digest, and final in-transaction stale-plan refusal.",
       "requirement_id": "MEM-004",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "6192a3db73c5cc9e1d3eeaf48e1e88439974a7435081df2e80a1bf8fb9d56a7d",
+    "ledger_sha256": "b375dc60620060afb2cbe9812b241ec0b5d79f1f3802e530249ad25c94fa87e6",
     "spec_sha256": "4797da92d2d1845ce944b2dc32353d52fe7a6e48dfa92593753ca727761ca714"
   }
 }
