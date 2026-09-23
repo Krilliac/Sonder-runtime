@@ -3177,6 +3177,8 @@ def _decode_recall_cursor(value):
 def good_interaction_candidate_page(
     conn, exclude_session=None, project=None, include_all_projects=False,
     *, embedding_model=None, embedding_revision=None, embedding_dim=None,
+    require_embedding=True,
+    max_created_at=None,
     cursor=None, row_limit=RECALL_CANDIDATE_ROW_LIMIT,
     byte_limit=RECALL_CANDIDATE_BYTE_LIMIT,
     time_limit_s=RECALL_CANDIDATE_TIME_LIMIT_S, cancel_check=None,
@@ -3187,7 +3189,9 @@ def good_interaction_candidate_page(
     are most likely to match the current code, model revision, and operational
     constraints. Older windows remain reachable with the exclusive opaque
     timestamp/id cursor. Project/session/outcome/embedding-space filters run in SQLite
-    *before* the window, so unrelated rows cannot consume its budget.
+    *before* the window, so unrelated rows cannot consume its budget. Metadata
+    lanes may set ``require_embedding=False``; that keeps the same bounded
+    project/session/outcome query while allowing rows without vectors.
 
     ``incomplete`` is explicit whenever rows, decoded bytes, or elapsed time
     stop enumeration. The query uses recall/project and outcome indexes; no
@@ -3203,6 +3207,12 @@ def good_interaction_candidate_page(
     row_limit = max(1, min(RECALL_CANDIDATE_ROW_LIMIT, row_limit))
     byte_limit = max(1, min(RECALL_CANDIDATE_BYTE_LIMIT, byte_limit))
     time_limit_s = max(0.0, min(RECALL_CANDIDATE_TIME_LIMIT_S, float(time_limit_s)))
+    if not isinstance(require_embedding, bool):
+        raise ValueError("require_embedding must be boolean")
+    if max_created_at is not None and (
+        not isinstance(max_created_at, str) or not max_created_at.strip()
+    ):
+        raise ValueError("max_created_at must be a non-empty timestamp")
     cursor_boundary = _decode_recall_cursor(cursor) if cursor is not None else None
 
     good_signals = tuple(sorted(
@@ -3240,7 +3250,7 @@ def good_interaction_candidate_page(
         "(SELECT good.reward FROM outcomes good "
         "WHERE good.interaction_id=i.id ORDER BY good.rowid ASC LIMIT 1) "
         "AS outcome_reward "
-        "FROM interactions i WHERE i.task_embedding IS NOT NULL "
+        "FROM interactions i WHERE 1=1 "
         "AND typeof(i.id)='text' AND length(i.id) BETWEEN 1 AND 256 "
         "AND typeof(i.ts)='text' AND length(i.ts) BETWEEN 1 AND 64 "
         "AND typeof(i.task)='text' AND length(i.task)<=? "
@@ -3255,11 +3265,6 @@ def good_interaction_candidate_page(
         "AND (i.task_embedding_revision IS NULL OR "
         "(typeof(i.task_embedding_revision)='text' "
         "AND length(i.task_embedding_revision)<=256)) "
-        "AND typeof(i.task_embedding)='blob' "
-        "AND length(i.task_embedding) BETWEEN 4 AND ? "
-        "AND typeof(i.task_embedding_dim)='integer' "
-        "AND i.task_embedding_dim>0 "
-        "AND length(i.task_embedding)=i.task_embedding_dim*4 "
         "AND EXISTS (SELECT 1 FROM outcomes good "
         "WHERE good.interaction_id=i.id AND good.signal IN (%s) "
         "AND typeof(good.reward) IN ('integer','real') "
@@ -3274,13 +3279,30 @@ def good_interaction_candidate_page(
     params = [
         RECALL_RESPONSE_PREFIX_CHARS,
         RECALL_MAX_STORED_TASK_CHARS,
-        RECALL_MAX_EMBEDDING_BYTES,
         *good_signals,
         *canonical_rewards,
         *good_signals,
         *canonical_rewards,
         memory_rules.GOOD_THRESHOLD,
     ]
+    if require_embedding:
+        sql = sql.replace(
+            "FROM interactions i WHERE 1=1 ",
+            "FROM interactions i WHERE i.task_embedding IS NOT NULL "
+            "AND typeof(i.task_embedding)='blob' "
+            "AND length(i.task_embedding) BETWEEN 4 AND ? "
+            "AND typeof(i.task_embedding_dim)='integer' "
+            "AND i.task_embedding_dim>0 "
+            "AND length(i.task_embedding)=i.task_embedding_dim*4 ",
+            1,
+        )
+        params.insert(2, RECALL_MAX_EMBEDDING_BYTES)
+    else:
+        # A metadata-only page must not accidentally apply embedding-space
+        # filters supplied by a vector caller.
+        embedding_model = None
+        embedding_revision = None
+        embedding_dim = None
     if exclude_session:
         sql += " AND (i.session_id IS NULL OR i.session_id != ?)"
         params.append(exclude_session)
@@ -3305,6 +3327,9 @@ def good_interaction_candidate_page(
     if embedding_dim is not None:
         sql += " AND i.task_embedding_dim=?"
         params.append(embedding_dim)
+    if max_created_at is not None:
+        sql += " AND datetime(i.ts) IS NOT NULL AND datetime(i.ts)<=datetime(?)"
+        params.append(max_created_at)
     if cursor_boundary is not None:
         sql += " AND (i.ts<? OR (i.ts=? AND i.id<?))"
         params.extend((
