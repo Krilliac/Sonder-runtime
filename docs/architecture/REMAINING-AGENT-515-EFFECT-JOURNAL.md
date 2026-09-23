@@ -34,7 +34,10 @@ python -m pytest -q tests/test_crosscutting_tool_gateway.py tests/test_seam002_t
 ```
 
 Production agent lanes bind a persistent journal around the real tool gateway.
-Other worker families, including generic process jobs, compute, and self-mod,
-still need their own durable bindings. Foreground callers without a worker
-binding retain their existing behavior, and direct legacy effects outside the
-typed gateway are not covered by this journal.
+Focused bindings now cover process launch, compute submission and cancellation,
+local subagent execution, and self-mod deployment and rollback when trusted
+composition supplies an `AuthenticatedWorkerBinding`. The binding contract is
+exercised by `tests/test_worker_effect_bindings.py`. Root composition still
+needs to provide those bindings to every worker family. Legacy self-mod
+backup, preparation, tests, review, and approval remain outside the journal.
+Foreground callers without a worker binding retain their existing behavior.
