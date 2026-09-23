@@ -38,6 +38,9 @@ def test_legacy_migration_plan_is_dry_run_and_atomic(tmp_path):
         assert tuple(reopened.execute(
             "SELECT source_id,version,tombstoned FROM memory_authoritative_fact_state"
         ).fetchone()) == ("node-a", 1, 0)
+        assert tuple(reopened.execute(
+            "SELECT source_id,project_scope FROM memory_authoritative_fact_activation"
+        ).fetchone()) == ("node-a", "repo-a")
         assert reopened.execute("SELECT COUNT(*) FROM memory_replication_log").fetchone()[0] == 1
     finally:
         reopened.close()

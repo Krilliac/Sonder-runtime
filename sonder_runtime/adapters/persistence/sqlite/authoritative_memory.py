@@ -37,6 +37,25 @@ _MAX_MIGRATION_ROWS = 1024
 _MAX_MIGRATION_BYTES = 32 * 1024 * 1024
 
 
+def _insert_fact_row(connection, fact_id: str, project: str, text: str, embedding) -> None:
+    """Materialize the source-owned fact row at a patchable transaction stage."""
+    connection.execute(
+        "INSERT INTO facts(id,project,text,embedding) VALUES(?,?,?,?)",
+        (fact_id, project, text, embedding),
+    )
+
+
+def _upsert_fact_row(connection, fact_id: str, project: str, text: str, embedding) -> None:
+    """Replace a source-owned fact row at a patchable transaction stage."""
+    connection.execute(
+        "INSERT INTO facts(id,project,text,embedding) VALUES(?,?,?,?) "
+        "ON CONFLICT(id) DO UPDATE SET "
+        "project=excluded.project,text=excluded.text,"
+        "embedding=excluded.embedding",
+        (fact_id, project, text, embedding),
+    )
+
+
 def _recorded_at() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -231,6 +250,7 @@ def migrate_legacy_facts(
         if current.digest != plan.digest or current.rows != plan.rows:
             raise MemoryReplicationError("legacy fact migration plan is stale")
         source = SQLiteAuthoritativeFactSource(plan.source_id, project_scope=plan.project_scope)
+        source._activate_in_transaction(connection)
         epoch, sequence = source._source_cursor(connection)
         records = []
         for fact_id, project, text, embedding in plan.rows:
@@ -327,6 +347,34 @@ class SQLiteAuthoritativeFactSource:
                 "authoritative fact scope conflicts with persisted source scope"
             )
         return epoch, sequence
+
+    def activate(self, connection) -> None:
+        """Persist this source/scope as the active fact-write authority.
+
+        The marker is deliberately created by the real composition root before
+        exposing its repository.  The legacy memory-store helpers use the same
+        marker to refuse a journal-bypassing write for this exact project.
+        """
+        with self._transaction(connection):
+            self._activate_in_transaction(connection)
+
+    def _activate_in_transaction(self, connection) -> None:
+        existing = connection.execute(
+            "SELECT source_id FROM memory_authoritative_fact_activation "
+            "WHERE project_scope=?",
+            (self.project_scope,),
+        ).fetchone()
+        if existing is not None and existing[0] != self.source_id:
+            raise MemoryReplicationError(
+                "authoritative fact scope is already owned by another source"
+            )
+        connection.execute(
+            "INSERT INTO memory_authoritative_fact_activation"
+            "(project_scope,source_id) VALUES(?,?) ON CONFLICT(project_scope) "
+            "DO UPDATE SET source_id=excluded.source_id",
+            (self.project_scope, self.source_id),
+        )
+        self._source_cursor(connection)
 
     def _existing_state(self, connection, fact_id: str):
         state = connection.execute(
@@ -428,19 +476,14 @@ class SQLiteAuthoritativeFactSource:
                     "fact identity is already bound to another project"
                 )
             if replace:
-                connection.execute(
-                    "INSERT INTO facts(id,project,text,embedding) VALUES(?,?,?,?) "
-                    "ON CONFLICT(id) DO UPDATE SET "
-                    "project=excluded.project,text=excluded.text,"
-                    "embedding=excluded.embedding",
-                    (fact_id, self.project_scope, text, embedding),
+                _upsert_fact_row(
+                    connection, fact_id, self.project_scope, text, embedding,
                 )
             else:
                 # Preserve the legacy add operation's duplicate rejection when
                 # this source is injected through MemoryRepositoryAdapter.
-                connection.execute(
-                    "INSERT INTO facts(id,project,text,embedding) VALUES(?,?,?,?)",
-                    (fact_id, self.project_scope, text, embedding),
+                _insert_fact_row(
+                    connection, fact_id, self.project_scope, text, embedding,
                 )
             self._store_state(connection, record)
             append_memory_mutations_in_transaction(
