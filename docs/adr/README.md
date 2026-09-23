@@ -3,7 +3,9 @@
 New architecture decisions belong in this directory. Name each new record
 `ADR-YYYY-MM-DD-<slug>.md`, using a real calendar date and a unique lowercase
 slug. The documentation-authority check rejects new numeric IDs and new records
-in `docs/architecture/adr/`.
+in `docs/architecture/adr/`. ADRs stay directly in these directories; nested
+directories and symlinks cannot create a second namespace. Non-Markdown
+supporting files may sit beside the records.
 
 The six existing `ADR-001` through `ADR-006` records here are the historical
 SPEC-5 series. The nine numbered records in `docs/architecture/adr/` are the
