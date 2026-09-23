@@ -275,7 +275,68 @@ def test_live_activation_refuses_existing_unjournaled_scoped_facts(tmp_path):
     try:
         assert [row["id"] for row in facts_for_project(connection, "repo-a")] == ["legacy"]
         assert connection.execute("SELECT COUNT(*) FROM memory_replication_log").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM memory_authoritative_fact_activation"
+        ).fetchone()[0] == 0
     finally:
+        connection.close()
+
+
+def test_direct_activation_fails_closed_without_publishing_marker(tmp_path):
+    path = tmp_path / "activation-gate.db"
+    connection = connect(path)
+    try:
+        from sonder_runtime.adapters import memory_store
+        memory_store.add_fact(connection, "legacy", "repo-a", "requires migration")
+        source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+        with pytest.raises(MemoryReplicationError, match="authoritative migration"):
+            source.activate(connection)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM memory_authoritative_fact_activation"
+        ).fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_activation_rejects_state_without_matching_journal_evidence(tmp_path):
+    path = tmp_path / "missing-journal.db"
+    connection = connect(path)
+    try:
+        connection.execute(
+            "INSERT INTO facts(id,project,text,embedding) VALUES(?,?,?,?)",
+            ("fact-1", "repo-a", "state without journal", None),
+        )
+        connection.execute(
+            "INSERT INTO memory_authoritative_fact_state"
+            "(project,fact_id,source_id,version,tombstoned) VALUES(?,?,?,?,?)",
+            ("repo-a", "fact-1", "node-a", 1, 0),
+        )
+        connection.commit()
+        source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+        with pytest.raises(MemoryReplicationError, match="journal evidence"):
+            source.activate(connection)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM memory_authoritative_fact_activation"
+        ).fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_authoritative_write_does_not_rescan_all_journal_evidence(tmp_path):
+    connection = connect(tmp_path / "incremental-write.db")
+    statements = []
+    connection.set_trace_callback(statements.append)
+    try:
+        source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+        source.add_fact(connection, "fact-1", "repo-a", "incremental write")
+        assert not any(
+            statement.casefold().startswith("select")
+            and "not exists" in statement.casefold()
+            and "memory_replication_log" in statement.casefold()
+            for statement in statements
+        )
+    finally:
+        connection.set_trace_callback(None)
         connection.close()
 
 
