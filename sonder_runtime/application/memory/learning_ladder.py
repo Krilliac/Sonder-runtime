@@ -30,7 +30,7 @@ class LearningObservation:
     positive: bool = True
     explicit_confirmation: bool = False
     evaluation_passed: bool = False
-    trusted_source: bool = True
+    trusted_source: bool = False
 
     def __post_init__(self) -> None:
         for name in ("observation_id", "content", "source", "independent_key"):

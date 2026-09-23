@@ -51,6 +51,21 @@ def test_untrusted_evidence_cannot_promote_and_contradiction_demotes():
     assert "demotes" in contradiction.reason
 
 
+def test_omitted_trust_is_not_promotable():
+    observations = [
+        LearningObservation(
+            f"untrusted-{index}", "a candidate claim", f"source-{index}",
+            f"source-{index}", provenance=(f"trace-{index}",),
+            confidence=0.9, observed_at=NOW,
+        )
+        for index in range(2)
+    ]
+    decision = LearningLadder().evaluate(observations)[0]
+    assert decision.stage is LearningStage.CANDIDATE
+    assert decision.independent_sources == ()
+    assert decision.untrusted_count == 2
+
+
 def test_empty_and_invalid_observations_fail_closed():
     assert LearningLadder().evaluate([]) == ()
     try:
