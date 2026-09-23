@@ -304,6 +304,12 @@ class VerifiedSubjectFactPromotion:
         expected_fact_id = self.fact_id_for_subject(content)
         if fact_id != expected_fact_id:
             raise PermissionError("fact identity is reserved for the verified subject")
+        existing = connection.execute(
+            "SELECT project, text FROM facts WHERE id=?",
+            (fact_id,),
+        ).fetchone()
+        if existing is not None and (existing[0] != project or existing[1] != content):
+            raise PermissionError("reserved verifier subject fact identity is occupied")
         list_pairs = getattr(repository, "list_pairs", None)
         if not callable(list_pairs):
             raise TypeError("complete verifier observation snapshot is required")

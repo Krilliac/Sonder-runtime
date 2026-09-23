@@ -425,3 +425,30 @@ def test_application_promotion_demotes_on_persisted_verified_negative(tmp_path):
     )
     assert status == "demoted"
     assert decision.contradiction_count == 1
+
+
+def test_reserved_subject_fact_collision_fails_closed(tmp_path):
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    db_path = str(tmp_path / "memory.db")
+    application = MemoryLearningFacade(
+        lambda: UnitOfWorkAdapter(db_path, authoritative_fact_source=source)
+    )
+    produced = []
+    for worker, run_id in (("lane-a", "run-a"), ("lane-b", "run-b")):
+        pair = ReceiptObservationProducer.from_terminal_eligibility(
+            _eligibility(
+                _evidence(principal="owner", run_id=run_id, project="repo-a"),
+                worker_id=worker,
+            )
+        )
+        with UnitOfWorkAdapter(db_path, authoritative_fact_source=source) as scope:
+            SQLiteVerifierObservationRepository(scope.connection).append(*pair)
+        produced.append(pair[1].observation_id)
+    fact_id = "verified-subject-fact-" + "a" * 64
+    with UnitOfWorkAdapter(db_path, authoritative_fact_source=source) as scope:
+        source.add_fact(scope.connection, fact_id, "repo-a", "unrelated text")
+    with pytest.raises(PermissionError, match="occupied"):
+        application.promote_verified_subject("repo-a", fact_id, tuple(produced))
+    with UnitOfWorkAdapter(db_path, authoritative_fact_source=source) as scope:
+        facts = scope.memory.facts_for_project("repo-a")
+    assert [fact["text"] for fact in facts if fact["id"] == fact_id] == ["unrelated text"]
