@@ -36,9 +36,9 @@
       "verified": 0
     },
     "DOC": {
-      "checked": 2,
+      "checked": 5,
       "total": 7,
-      "verified": 2
+      "verified": 5
     },
     "EVAL": {
       "checked": 0,
@@ -127,13 +127,13 @@
     }
   },
   "overall": {
-    "checked": 3,
+    "checked": 6,
     "statuses": {
-      "implemented_unverified": 201,
-      "verified": 3
+      "implemented_unverified": 198,
+      "verified": 6
     },
     "total": 204,
-    "verified": 3
+    "verified": 6
   },
   "requirements": [
     {
@@ -578,25 +578,25 @@
       "status": "implemented_unverified"
     },
     {
-      "checked": false,
-      "claim": "docs/architecture/README.md directly maps the six authoritative current contracts and three historical or superseded program documents, with the detailed authority index retained as its companion.",
+      "checked": true,
+      "claim": "The architecture README directly maps the authoritative master specification, all six focused current contracts, and the three historical program documents with checked classifications and links.",
       "requirement_id": "DOC-001",
-      "revision": 3,
-      "status": "implemented_unverified"
+      "revision": 4,
+      "status": "verified"
     },
     {
-      "checked": false,
-      "claim": "Historical architecture and program documents are explicitly labeled.",
+      "checked": true,
+      "claim": "SPEC-5 architecture and migration documents are labeled superseded, and the former program status is labeled historical, while all three records and decision history remain linked and intact.",
       "requirement_id": "DOC-002",
-      "revision": 2,
-      "status": "implemented_unverified"
+      "revision": 3,
+      "status": "verified"
     },
     {
-      "checked": false,
-      "claim": "The canonical docs/adr namespace now rejects newly numbered ADRs, invalid calendar dates, and writes to the frozen historical directory while retaining both existing numeric series.",
+      "checked": true,
+      "claim": "New ADR records are constrained to one canonical docs/adr directory and valid date-prefixed unique IDs; the two exact historical numeric series remain preserved and frozen.",
       "requirement_id": "DOC-003",
-      "revision": 3,
-      "status": "implemented_unverified"
+      "revision": 4,
+      "status": "verified"
     },
     {
       "checked": false,
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "b7a86de797ca327edad19d8b9415010004071e20cf89fd391d56f40aba1a8a97",
-    "spec_sha256": "61faa94ce65d66c87613361fa79a5afbd4053660e10f6801c6dc8be62c0c92d8"
+    "ledger_sha256": "6de57af4e57d8869d863a0c1357735c752390c27eafe4156d681cea84665f496",
+    "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
   }
 }
