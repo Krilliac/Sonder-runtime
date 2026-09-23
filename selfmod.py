@@ -762,7 +762,7 @@ def begin_testing(run_id):
 
 def _record_command(
     run, kind, command, cwd_path, seconds, expect_failure=False, receipt=None,
-    protected_paths=(), low_integrity=None,
+    protected_paths=(), low_integrity=None, isolation=None,
 ):
     run_id = run["id"]
     isolation_failed = False
@@ -780,10 +780,16 @@ def _record_command(
         try:
             isolated = run_isolated(
                 command, cwd=cwd_path, timeout=seconds,
-                protected_paths=protected_paths,
+                protected_paths=protected_paths, **dict(isolation or {}),
             )
             code = int(isolated["exit_code"])
             output = str(isolated.get("output") or "")
+            job = isolated.get("job")
+            if job:
+                # Record which boundary actually ran and how close the Job
+                # came to its limits, so a medium gate or a limit hit is
+                # visible in the ledger rather than inferred.
+                output = (output + "\nSELFMOD ISOLATION: %s\n" % _json(job))[-100_000:]
         except Exception as exc:
             # A missing token/ACL/Job capability rejects this check.  It
             # cannot accidentally count as a successful negative reproducer.
@@ -826,7 +832,7 @@ def record_reproducer_before(run_id, command, timeout=None):
 
 def record_test(
     run_id, kind, command, *, cwd=None, timeout=None, protected_paths=(),
-    low_integrity=None,
+    low_integrity=None, isolation=None,
 ):
     run = get_run(run_id)
     if run["phase"] != "testing":
@@ -837,6 +843,7 @@ def record_test(
     return _record_command(
         run, kind, command, cwd_path, seconds,
         protected_paths=protected_paths, low_integrity=low_integrity,
+        isolation=isolation,
     )
 
 

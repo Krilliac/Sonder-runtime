@@ -140,6 +140,20 @@ def _low_token():
     return restricted
 
 
+def _medium_restricted_token():
+    """Privilege-stripped token that keeps the caller's medium integrity."""
+    import win32api
+    import win32con
+    import win32security
+
+    current = win32security.OpenProcessToken(
+        win32api.GetCurrentProcess(), win32con.TOKEN_ALL_ACCESS
+    )
+    return win32security.CreateRestrictedToken(
+        current, win32security.DISABLE_MAX_PRIVILEGE, [], [], []
+    )
+
+
 def _child(spec_path: Path) -> int:
     """Run the actual check. This process and all descendants are low."""
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
@@ -242,11 +256,50 @@ def _low_environment(work: Path, low_home: Path) -> dict[str, str]:
     return env
 
 
+_MIB = 1024 ** 2
+DEFAULT_PROCESS_MEMORY_MB = 2048
+DEFAULT_JOB_MEMORY_MB = 4096
+DEFAULT_ACTIVE_PROCESSES = 32
+# Hard ceilings keep a misconfigured caller from turning the Job into an
+# unbounded one; they are well below the host's commit limit.
+_MAX_PROCESS_MEMORY_MB = 16384
+_MAX_JOB_MEMORY_MB = 24576
+_MAX_ACTIVE_PROCESSES = 128
+
+
+def _bounded(value, default: int, ceiling: int, name: str) -> int:
+    number = default if value is None else int(value)
+    if number < 1 or number > ceiling:
+        raise ValueError("%s must be between 1 and %d" % (name, ceiling))
+    return number
+
+
 def run_isolated(
     command: Sequence[str], *, cwd: str | os.PathLike[str], timeout: int,
     protected_paths: Sequence[str | os.PathLike[str]] = (),
+    process_memory_mb: int | None = None, job_memory_mb: int | None = None,
+    active_processes: int | None = None, integrity: str = "low",
 ) -> dict[str, object]:
-    """Run ``command`` below low MIC and return a selfmod-compatible result."""
+    """Run ``command`` below low MIC and return a selfmod-compatible result.
+
+    The Job limits default to the historical 2 GiB/process, 4 GiB/job and 32
+    processes. Callers that knowingly run heavier workloads (parallel pytest
+    workers, an ML-stack import) pass explicit, bounded values; the result
+    reports the configured limits and the observed peaks so a limit hit is
+    diagnosable instead of looking like a candidate regression.
+
+    ``integrity="medium"`` exists only for checks that cannot start below
+    medium integrity (Git for Windows' MSYS2 runtime). It keeps the Job,
+    privilege stripping, environment allowlist and protected-file digests,
+    but it does NOT provide the low-integrity write boundary: code in that
+    process can write anything the user can. Callers must report it as a
+    separate, non-isolated gate.
+    """
+    if integrity not in ("low", "medium"):
+        raise ValueError("integrity must be 'low' or 'medium'")
+    process_memory_mb = _bounded(process_memory_mb, DEFAULT_PROCESS_MEMORY_MB, _MAX_PROCESS_MEMORY_MB, "process_memory_mb")
+    job_memory_mb = _bounded(job_memory_mb, DEFAULT_JOB_MEMORY_MB, _MAX_JOB_MEMORY_MB, "job_memory_mb")
+    active_processes = _bounded(active_processes, DEFAULT_ACTIVE_PROCESSES, _MAX_ACTIVE_PROCESSES, "active_processes")
     if os.name != "nt":
         raise RuntimeError("low-integrity selfmod isolation requires Windows")
     try:
@@ -283,7 +336,7 @@ def run_isolated(
         manifest = work / "truth-manifest.json"
         manifest.write_text(json.dumps(before, sort_keys=True), encoding="utf-8")
         _label(manifest, "WinMediumLabelSid", win32security.SYSTEM_MANDATORY_LABEL_NO_READ_UP | win32security.SYSTEM_MANDATORY_LABEL_NO_WRITE_UP)
-        token = _low_token()
+        token = _low_token() if integrity == "low" else _medium_restricted_token()
         job = process_handle = thread_handle = None
         try:
             # pywin32 requires a name; a fresh unshared random name prevents
@@ -296,15 +349,15 @@ def run_isolated(
             # Four pytest workers and their short-lived test subprocesses can
             # overlap. Keep a finite ceiling without misclassifying routine
             # test setup as a candidate regression.
-            basic["ActiveProcessLimit"] = 32
+            basic["ActiveProcessLimit"] = active_processes
             basic["LimitFlags"] |= (
                 win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
                 | win32job.JOB_OBJECT_LIMIT_ACTIVE_PROCESS
                 | win32job.JOB_OBJECT_LIMIT_PROCESS_MEMORY
                 | win32job.JOB_OBJECT_LIMIT_JOB_MEMORY
             )
-            limits["ProcessMemoryLimit"] = 2 * 1024 ** 3
-            limits["JobMemoryLimit"] = 4 * 1024 ** 3
+            limits["ProcessMemoryLimit"] = process_memory_mb * _MIB
+            limits["JobMemoryLimit"] = job_memory_mb * _MIB
             win32job.SetInformationJobObject(job, win32job.JobObjectExtendedLimitInformation, limits)
             startup = win32process.STARTUPINFO()
             flags = win32con.CREATE_NO_WINDOW | win32con.CREATE_UNICODE_ENVIRONMENT | win32con.CREATE_SUSPENDED
@@ -331,6 +384,14 @@ def run_isolated(
             if timed_out:
                 win32process.TerminateProcess(process_handle, 124)
             code = win32process.GetExitCodeProcess(process_handle)
+            try:
+                used = win32job.QueryInformationJobObject(job, win32job.JobObjectExtendedLimitInformation)
+                peaks = {
+                    "peak_process_memory_mb": int(used.get("PeakProcessMemoryUsed", 0)) // _MIB,
+                    "peak_job_memory_mb": int(used.get("PeakJobMemoryUsed", 0)) // _MIB,
+                }
+            except Exception:
+                peaks = {}
         finally:
             for handle in (thread_handle, process_handle, job, token):
                 if handle is not None:
@@ -344,12 +405,18 @@ def run_isolated(
             with output.open("rb") as stream:
                 stream.seek(max(0, output.stat().st_size - 120000))
                 output_text = stream.read(120000).decode("utf-8", "replace")
+        job_report = {
+            "integrity": integrity,
+            "limits": {"process_memory_mb": process_memory_mb, "job_memory_mb": job_memory_mb,
+                       "active_processes": active_processes},
+            **peaks,
+        }
         after = {str(path): _digest(path) for path in protected if path.is_file()}
         if before != after:
-            return {"exit_code": 2, "output": output_text + "\nSELFMOD EVALUATOR CANARY FAILED: protected truth changed\n", "passed": False}
+            return {"exit_code": 2, "output": output_text + "\nSELFMOD EVALUATOR CANARY FAILED: protected truth changed\n", "passed": False, "job": job_report}
         if timed_out:
             code = 124
-        return {"exit_code": int(code), "output": output_text, "passed": int(code) == 0}
+        return {"exit_code": int(code), "output": output_text, "passed": int(code) == 0, "job": job_report}
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

@@ -169,37 +169,76 @@ def test_selfmod_uses_worker_interpreter_when_worktree_has_no_venv(tmp_path, mon
     assert nightly_selfmod._test_python() == sys.executable
 
 
-def test_regression_command_uses_bounded_four_worker_xdist(monkeypatch):
+_LOW_MARKS = "not requires_medium_integrity and not heavy_memory"
+_BASE = ["python", "-m", "pytest", "-vv", "--maxfail=1", "-p", "no:cacheprovider"]
+
+
+def _xdist(monkeypatch, available):
     monkeypatch.setattr(nightly_selfmod.subprocess, "run", lambda *args, **kwargs: type(
-        "Result", (), {"returncode": 0}
+        "Result", (), {"returncode": 0 if available else 1}
     )())
-    assert nightly_selfmod._regression_command("python") == [
-        "python", "-m", "pytest", "-vv", "--maxfail=1", "-n", "4", "--dist", "load",
+
+
+def test_regression_command_uses_bounded_xdist_workers(monkeypatch):
+    _xdist(monkeypatch, True)
+    assert nightly_selfmod._regression_command("python", workers=4) == [
+        *_BASE, "-m", _LOW_MARKS, "-n", "4", "--dist", "load",
         "--ignore", "tests/test_selfmod_low_integrity.py",
     ]
 
 
 def test_regression_command_falls_back_to_serial_without_xdist(monkeypatch):
-    monkeypatch.setattr(nightly_selfmod.subprocess, "run", lambda *args, **kwargs: type(
-        "Result", (), {"returncode": 1}
-    )())
-    assert nightly_selfmod._regression_command("python") == [
-        "python", "-m", "pytest", "-vv", "--maxfail=1",
+    _xdist(monkeypatch, False)
+    assert nightly_selfmod._regression_command("python", workers=4) == [
+        *_BASE, "-m", _LOW_MARKS,
         "--ignore", "tests/test_selfmod_low_integrity.py",
     ]
 
 
 def test_regression_excludes_the_separate_held_out_suite(monkeypatch):
-    monkeypatch.setattr(nightly_selfmod.subprocess, "run", lambda *args, **kwargs: type(
-        "Result", (), {"returncode": 1}
-    )())
+    _xdist(monkeypatch, False)
     assert nightly_selfmod._regression_command(
         "python", ignore_paths=("tests/test_reflection.py",)
     ) == [
-        "python", "-m", "pytest", "-vv", "--maxfail=1",
+        *_BASE, "-m", _LOW_MARKS,
         "--ignore", "tests/test_selfmod_low_integrity.py",
         "--ignore", "tests/test_reflection.py",
     ]
+
+
+def test_regression_partitions_cover_every_test_exactly_once():
+    kinds = dict(nightly_selfmod._REGRESSION_PARTITIONS)
+    assert set(kinds) == {"regression", "regression_heavy", "regression_medium"}
+    for medium in (False, True):
+        for heavy in (False, True):
+            env = {"requires_medium_integrity": medium, "heavy_memory": heavy}
+            selected = [k for k, expr in kinds.items() if eval(expr, {}, env)]
+            assert len(selected) == 1, (env, selected)
+
+
+def test_only_the_low_partition_runs_xdist(monkeypatch):
+    _xdist(monkeypatch, True)
+    for kind in ("regression_heavy", "regression_medium"):
+        command = nightly_selfmod._regression_command("python", kind=kind, workers=8)
+        assert "-n" not in command
+        assert command[command.index("-m", 3) + 1] == dict(
+            nightly_selfmod._REGRESSION_PARTITIONS)[kind]
+
+
+def test_regression_isolation_is_explicit_per_partition():
+    low = nightly_selfmod._regression_isolation("regression", 6)
+    assert "integrity" not in low and low["job_memory_mb"] >= 2048 * 6
+    heavy = nightly_selfmod._regression_isolation("regression_heavy", 6)
+    assert "integrity" not in heavy and heavy["process_memory_mb"] > 2048
+    assert nightly_selfmod._regression_isolation("regression_medium", 6) == {
+        "integrity": "medium"}
+
+
+def test_regression_workers_are_bounded(monkeypatch):
+    monkeypatch.setenv("SONDER_SELFMOD_REGRESSION_WORKERS", "64")
+    assert nightly_selfmod._regression_workers() == 12
+    monkeypatch.setenv("SONDER_SELFMOD_REGRESSION_WORKERS", "3")
+    assert nightly_selfmod._regression_workers() == 3
 
 
 def test_protected_and_missing_modules_are_not_eligible_candidates(tmp_path, monkeypatch):

@@ -315,6 +315,7 @@ def test_git_tools_are_advertised_and_allowed_for_read_only_agents():
     assert "repo_status/repo_diff" in manifest
 
 
+@pytest.mark.requires_medium_integrity
 def test_runtime_update_status_reports_ahead_behind_and_commit_times(tmp_path):
     remote = tmp_path / "remote.git"
     _git(tmp_path, "init", "--bare", str(remote))
@@ -367,6 +368,7 @@ def test_runtime_checkout_commit_reads_only_the_current_head(tmp_path):
     assert git_tools.runtime_checkout_commit(repo) == _git(repo, "rev-parse", "HEAD").strip()
 
 
+@pytest.mark.requires_medium_integrity
 def test_runtime_update_refuses_untrusted_or_dirty_checkout(tmp_path):
     remote = tmp_path / "remote.git"
     _git(tmp_path, "init", "--bare", str(remote))

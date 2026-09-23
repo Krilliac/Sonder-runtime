@@ -290,3 +290,52 @@ def test_low_child_resolves_executables_through_pathext(tmp_path):
     ]
     result = run_isolated(command, cwd=tmp_path, timeout=30)
     assert result["passed"] is True, result.get("output")
+
+
+def test_job_memory_limits_are_configurable_bounded_and_reported(tmp_path):
+    from scripts.selfmod_low_integrity import run_isolated
+
+    allocate = [sys.executable, "-c", "b = bytearray(400 * 1024 * 1024); print(len(b))"]
+    small = run_isolated(allocate, cwd=tmp_path, timeout=60, process_memory_mb=128)
+    assert small["passed"] is False
+    assert small["job"]["limits"]["process_memory_mb"] == 128
+    roomy = run_isolated(allocate, cwd=tmp_path, timeout=60, process_memory_mb=1024)
+    assert roomy["passed"] is True, roomy.get("output")
+    assert roomy["job"]["peak_process_memory_mb"] >= 400
+    with pytest.raises(ValueError):
+        run_isolated(allocate, cwd=tmp_path, timeout=5, process_memory_mb=10 ** 6)
+    with pytest.raises(ValueError):
+        run_isolated(allocate, cwd=tmp_path, timeout=5, active_processes=0)
+
+
+def test_medium_integrity_option_is_reported_and_not_write_isolated(tmp_path):
+    """The medium gate is a documented tradeoff: it can write the medium tree."""
+    from scripts.selfmod_low_integrity import run_isolated
+
+    target = tmp_path / "medium-write.txt"
+    command = [sys.executable, "-c",
+               "from pathlib import Path; Path(%r).write_text('x')" % str(target)]
+    low = run_isolated(command, cwd=tmp_path, timeout=30)
+    assert low["passed"] is False and not target.exists()
+    assert low["job"]["integrity"] == "low"
+    medium = run_isolated(command, cwd=tmp_path, timeout=30, integrity="medium")
+    assert medium["passed"] is True, medium.get("output")
+    assert target.exists()
+    assert medium["job"]["integrity"] == "medium"
+    with pytest.raises(ValueError):
+        run_isolated(command, cwd=tmp_path, timeout=5, integrity="system")
+
+
+def test_git_bash_needs_medium_integrity(tmp_path):
+    """Pins the OS boundary behind the requires_medium_integrity partition."""
+    from scripts.selfmod_low_integrity import run_isolated
+
+    sh = Path(r"C:\Program Files\Git\usr\bin\sh.exe")
+    if not sh.is_file():
+        pytest.skip("Git for Windows sh.exe not installed")
+    command = [str(sh), "-c", "echo MSYS_OK"]
+    low = run_isolated(command, cwd=tmp_path, timeout=30)
+    assert low["passed"] is False
+    assert "0xC0000022" in str(low["output"])
+    medium = run_isolated(command, cwd=tmp_path, timeout=30, integrity="medium")
+    assert medium["passed"] is True and "MSYS_OK" in str(medium["output"])
