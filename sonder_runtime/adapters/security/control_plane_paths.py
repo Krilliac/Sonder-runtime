@@ -27,6 +27,7 @@ STATE_DATABASES = (
     ("updates.db", "SONDER_UPDATES_DB"),
     ("embed-cache.db", "SONDER_EMBED_CACHE_DB"),
     ("agent-effects.db", "SONDER_AGENT_EFFECTS_DB"),
+    ("worker-effects.db", "SONDER_WORKER_EFFECTS_DB"),
 )
 
 _WINDOWS_FORBIDDEN_COMPONENT_CHARS = frozenset('<>:"/\\|?*')
