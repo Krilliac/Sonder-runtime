@@ -64,6 +64,10 @@ import selfmod  # noqa: E402
 
 _HELD_OUT_MAX_FILES = 2048
 _HELD_OUT_MAX_BYTES = 32 * 1024 * 1024
+# This suite is the medium-integrity supervisor's own boundary test. Running
+# it inside the low-integrity candidate would recursively ask a low process to
+# create a medium-integrity evaluator manifest, which Windows correctly denies.
+_LOW_SUPERVISOR_TESTS = ("tests/test_selfmod_low_integrity.py",)
 
 # Files the nightly stage may propose changes to. Every entry is a module
 # with its own test file, small enough that one function is a meaningful
@@ -192,7 +196,11 @@ def _regression_command(py: str, *, ignore_paths=()) -> list[str]:
     command = [py, "-m", "pytest", "-q", "--maxfail=1"]
     if probe.returncode == 0:
         command.extend(["-n", "4", "--dist", "load"])
+    ignored = list(_LOW_SUPERVISOR_TESTS)
     for path in ignore_paths:
+        if str(path) not in ignored:
+            ignored.append(str(path))
+    for path in ignored:
         command.extend(["--ignore", str(path)])
     return command
 
