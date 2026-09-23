@@ -1,0 +1,245 @@
+"""EVAL-006: earliest meaningful divergence and minimized reproducible failures.
+
+All evaluators here are deterministic in-process fakes; no model is invoked.
+"""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from sonder_runtime.adapters.evaluation_corpus import BoundedEvaluationCorpusScanner
+from sonder_runtime.adapters.evaluation_failure_corpus import JsonMinimizedFailureStore
+from sonder_runtime.application.evaluation.divergence import (
+    DivergenceError,
+    DivergencePolicy,
+    InMemoryMinimizedFailureStore,
+    STRATEGY_DIFFERENTIAL,
+    STRATEGY_PREFIX,
+    MinimizedFailure,
+    earliest_divergence,
+    minimize_failure,
+    replay_divergence,
+    reproduce,
+)
+from sonder_runtime.application.evaluation.proposal_lifecycle import ProposalLifecycle
+from sonder_runtime.application.evaluation.service import EvaluationApplicationService
+from sonder_runtime.application.evaluation.trajectory_replay import TrajectoryRecord, TrajectoryStep
+
+
+class _KeyValueSession:
+    """Stateful fake session: ``truncate`` models a candidate regression."""
+
+    def __init__(self, *, truncate: bool) -> None:
+        self._truncate = truncate
+        self._compress = False
+        self._store: dict[str, str] = {}
+
+    def __call__(self, request):
+        op = request["op"]
+        if op == "put":
+            self._store[request["k"]] = request["v"]
+            return {"ok": True}
+        if op == "mode":
+            self._compress = bool(request["compress"])
+            return {"ok": True}
+        value = self._store.get(request["k"])
+        if self._truncate and self._compress and isinstance(value, str) and len(value) > 3:
+            value = value[:3]
+        return {"value": value}
+
+
+_SESSION = (
+    {"op": "put", "k": "a", "v": "hello"},
+    {"op": "put", "k": "b", "v": "hi"},
+    {"op": "get", "k": "b"},
+    {"op": "mode", "compress": True},
+    {"op": "put", "k": "c", "v": "x"},
+    {"op": "get", "k": "b"},
+    {"op": "get", "k": "a"},
+    {"op": "get", "k": "c"},
+    {"op": "put", "k": "d", "v": "long-value"},
+    {"op": "get", "k": "d"},
+)
+
+
+def _recorded_session() -> TrajectoryRecord:
+    reference = _KeyValueSession(truncate=False)
+    steps = tuple(TrajectoryStep(index, request, reference(request)) for index, request in enumerate(_SESSION))
+    return TrajectoryRecord.from_steps("kv-session", steps, metadata={"route": "baseline"})
+
+
+def _candidate():
+    return _KeyValueSession(truncate=True)
+
+
+def _fixed_candidate():
+    return _KeyValueSession(truncate=False)
+
+
+def _noisy_trajectory() -> TrajectoryRecord:
+    steps = tuple(
+        TrajectoryStep(index, {"x": index}, {"y": index * 2, "latency_ms": 10 + index})
+        for index in range(10)
+    )
+    return TrajectoryRecord.from_steps("noisy", steps)
+
+
+def _noisy_candidate():
+    def evaluate(request):
+        x = request["x"]
+        return {"y": -1 if x == 7 else x * 2, "latency_ms": 999}
+    return evaluate
+
+
+def test_policy_filters_incidental_noise_to_find_the_decision_divergence() -> None:
+    expected = _noisy_trajectory()
+    raw = replay_divergence(expected, _noisy_candidate)
+    assert raw is not None and raw.index == 0 and raw.changed_paths == ("latency_ms",)
+
+    policy = DivergencePolicy(ignored_paths=("latency_ms",))
+    meaningful = replay_divergence(expected, _noisy_candidate, policy)
+    assert meaningful is not None
+    assert (meaningful.index, meaningful.field, meaningful.changed_paths) == (7, "output", ("y",))
+
+    decisions_only = DivergencePolicy(decision_paths=("y",))
+    assert replay_divergence(expected, _noisy_candidate, decisions_only).index == 7
+
+
+def test_matching_decisions_report_no_divergence_and_length_changes_do() -> None:
+    expected = _noisy_trajectory()
+    policy = DivergencePolicy(ignored_paths=("latency_ms",))
+    assert replay_divergence(expected, lambda: (lambda request: {"y": request["x"] * 2}), policy) is None
+
+    shorter = TrajectoryRecord.from_steps("noisy", expected.steps[:4])
+    divergence = earliest_divergence(expected, shorter, policy)
+    assert divergence is not None and (divergence.index, divergence.field) == (4, "step_count")
+
+
+def test_stateful_session_minimizes_to_a_one_minimal_reproducing_replay() -> None:
+    expected = _recorded_session()
+    first = replay_divergence(expected, _candidate)
+    assert first is not None and first.index == 6
+
+    failure = minimize_failure(expected, _candidate, baseline_factory=_fixed_candidate)
+    assert failure.strategy == STRATEGY_DIFFERENTIAL
+    assert failure.source_indexes == (0, 3, 6)
+    assert [step.input["op"] for step in failure.steps] == ["put", "mode", "get"]
+    assert failure.one_minimal
+    assert (failure.divergence.index, failure.divergence.field, failure.divergence.changed_paths) == (2, "output", ("value",))
+    assert failure.source_digest == expected.digest
+    for position in range(len(failure.steps)):
+        # Independent differential check: without any one retained step, a
+        # fresh baseline and a fresh candidate agree on every decision.
+        subset = failure.steps[:position] + failure.steps[position + 1:]
+        baseline, candidate = _fixed_candidate(), _candidate()
+        assert all(baseline(step.input) == candidate(step.input) for step in subset), (
+            "every retained step must be necessary"
+        )
+
+    assert reproduce(failure, _candidate) == failure.divergence
+    assert reproduce(failure, _fixed_candidate) is None
+
+
+def test_prefix_strategy_without_a_baseline_never_trusts_out_of_context_outputs() -> None:
+    expected = _recorded_session()
+    failure = minimize_failure(expected, _candidate)
+    assert failure.strategy == STRATEGY_PREFIX and not failure.one_minimal
+    assert failure.source_indexes == tuple(range(7))
+    assert failure.divergence.index == 6
+    assert reproduce(failure, _candidate) == failure.divergence
+    assert reproduce(failure, _fixed_candidate) is None
+
+
+def test_differential_minimization_refuses_an_unfaithful_baseline() -> None:
+    with pytest.raises(DivergenceError, match="baseline does not reproduce"):
+        minimize_failure(_recorded_session(), _candidate, baseline_factory=_candidate)
+
+
+def test_minimized_failure_round_trips_and_rejects_tampering() -> None:
+    failure = minimize_failure(_recorded_session(), _candidate, baseline_factory=_fixed_candidate)
+    payload = json.loads(json.dumps(failure.as_dict()))
+    restored = MinimizedFailure.from_dict(payload)
+    assert restored == failure and restored.digest == failure.digest
+
+    tampered = json.loads(json.dumps(payload))
+    tampered["source_indexes"] = [0, 3, 5]
+    with pytest.raises(DivergenceError):
+        MinimizedFailure.from_dict(tampered)
+    tampered = json.loads(json.dumps(payload))
+    tampered["trajectory"]["steps"][2]["output"] = {"value": "hel"}
+    with pytest.raises(ValueError):
+        MinimizedFailure.from_dict(tampered)
+
+
+def test_budget_exhaustion_is_reported_and_nondeterminism_is_refused() -> None:
+    expected = _recorded_session()
+    partial = minimize_failure(expected, _candidate, baseline_factory=_fixed_candidate, max_evaluations=2)
+    assert not partial.one_minimal and partial.strategy == STRATEGY_DIFFERENTIAL
+    assert reproduce(partial, _candidate) is not None
+
+    calls = {"count": 0}
+
+    def flaky_factory():
+        calls["count"] += 1
+        return _KeyValueSession(truncate=calls["count"] % 2 == 1)
+
+    with pytest.raises(DivergenceError, match="deterministically|does not diverge"):
+        minimize_failure(expected, flaky_factory, baseline_factory=_fixed_candidate)
+    with pytest.raises(DivergenceError, match="does not diverge"):
+        minimize_failure(expected, _fixed_candidate)
+
+
+def test_policy_validation_fails_closed() -> None:
+    with pytest.raises(DivergenceError):
+        DivergencePolicy(fields=("input",))
+    with pytest.raises(DivergenceError):
+        DivergencePolicy(ignored_paths=("a..b",))
+    with pytest.raises(DivergenceError):
+        DivergencePolicy(decision_paths=("y", "y"))
+    policy = DivergencePolicy(fields=("output", "state"), ignored_paths=("meta.ts",))
+    assert DivergencePolicy.from_dict(policy.as_dict()) == policy
+
+
+def test_json_store_retains_reloads_and_refuses_tampered_records(tmp_path) -> None:
+    store = JsonMinimizedFailureStore(tmp_path / "failures", max_failures=1)
+    failure = minimize_failure(_recorded_session(), _candidate, baseline_factory=_fixed_candidate)
+    digest = store.retain(failure)
+    assert store.retain(failure) == digest
+    assert store.digests() == (digest,)
+    reopened = JsonMinimizedFailureStore(tmp_path / "failures")
+    assert reopened.load(digest) == failure
+
+    other = minimize_failure(_noisy_trajectory(), _noisy_candidate, DivergencePolicy(ignored_paths=("latency_ms",)))
+    with pytest.raises(DivergenceError, match="full"):
+        store.retain(other)
+
+    path = tmp_path / "failures" / f"{digest}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["evaluations"] += 1
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(DivergenceError, match="digest"):
+        reopened.load(digest)
+    with pytest.raises(DivergenceError):
+        reopened.load("../escape")
+
+
+def test_in_memory_store_is_bounded() -> None:
+    store = InMemoryMinimizedFailureStore(max_failures=1)
+    store.retain(minimize_failure(_recorded_session(), _candidate))
+    with pytest.raises(DivergenceError, match="full"):
+        store.retain(minimize_failure(_noisy_trajectory(), _noisy_candidate))
+
+
+def test_service_minimizes_retains_and_replays_regressions(tmp_path) -> None:
+    service = EvaluationApplicationService(
+        corpus=BoundedEvaluationCorpusScanner([]), lifecycle=ProposalLifecycle(),
+        failures=JsonMinimizedFailureStore(tmp_path),
+    )
+    expected = _recorded_session()
+    assert service.earliest_divergence(expected, _candidate).index == 6
+    failure = service.minimize_and_retain_failure(expected, _candidate, baseline_factory=_fixed_candidate)
+    assert failure.source_indexes == (0, 3, 6)
+    assert service.retained_failures() == (failure.digest,)
+    assert service.reproduce_retained_failure(failure.digest, _candidate) == failure.divergence
+    assert service.reproduce_retained_failure(failure.digest, _fixed_candidate) is None

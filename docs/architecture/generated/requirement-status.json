@@ -129,7 +129,8 @@
   "overall": {
     "checked": 6,
     "statuses": {
-      "implemented_unverified": 198,
+      "implemented_unverified": 197,
+      "in_progress": 1,
       "verified": 6
     },
     "total": 204,
@@ -628,65 +629,65 @@
     },
     {
       "checked": false,
-      "claim": "Evaluation is exposed as a provider-neutral application service rather than a transport or evaluator implementation.",
+      "claim": "The evaluation domain owns application services, ports, adapters, and immutable digest-verified run, matrix, trajectory, result, and minimized-failure records.",
       "requirement_id": "EVAL-001",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "The evaluation service accepts bounded repository/tool/memory corpus coverage through the typed inventory port.",
+      "claim": "Fixed-task, tool-use, and permission-attack suites run offline in CI against a baseline ratchet, and the corpus inventory requires repository, tool, and memory source classes.",
       "requirement_id": "EVAL-002",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Evaluation suite and result metrics remain typed and provider-neutral at the application boundary.",
+      "claim": "Evaluation records measure correctness, regressions, latency, and input/output tokens, with pass, timeout, and error rates derived per run.",
       "requirement_id": "EVAL-003",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Versioned evaluation dimensions and suite identity are composed through an immutable catalog boundary.",
+      "claim": "Evaluation results bind provider, model, revision, provider digest, and scenario-fixture digest; the remaining required dimensions are not yet bound.",
       "requirement_id": "EVAL-004",
-      "revision": 2,
-      "status": "implemented_unverified"
+      "revision": 3,
+      "status": "in_progress"
     },
     {
       "checked": false,
-      "claim": "The application evaluation service exposes deterministic trajectory replay through an injected evaluator.",
+      "claim": "Recorded trajectories replay deterministically through alternate evaluators, and the harness replays provider responses from a digest-bound cassette where a miss is an infrastructure outcome.",
       "requirement_id": "EVAL-005",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Replay and proposal result contracts preserve divergence and provenance evidence at the application boundary.",
+      "claim": "Replay identifies the earliest decision divergence under an explicit decision/noise policy, and divergent replays are minimized (reproducing prefix, or 1-minimal differential ddmin against a supplied baseline), proven deterministic, and retained as digest-verified records in a bounded durable store.",
       "requirement_id": "EVAL-006",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Promotion evidence requires explicit gates, replay equivalence, holdout success, rollback reference, and provenance before attended promotion.",
+      "claim": "Every promotion kind (runtime, prompt, skill, route, model, memory, selfmod) has a digest-bound gate policy with sample, point pass-rate, one-sided Wilson confidence, regression, replay, and shadow/canary requirements, and the evaluation service binds the mechanical decision into promotion evidence so approval refuses a failed gate.",
       "requirement_id": "EVAL-007",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "The evaluation service composes explicit shadow and canary observation transitions before promotion.",
+      "claim": "Shadow (zero traffic) and canary (positive traffic) observations are typed, a healthy shadow is required before canary, and promotion evidence requires both to be healthy.",
       "requirement_id": "EVAL-008",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Proposal creation, submission, evaluation, approval, promotion, rejection, withdrawal, and attended rollback are exposed through one typed service.",
+      "claim": "Proposals move through an explicit, durable, hash-chained state machine with attended promotion and rollback.",
       "requirement_id": "EVAL-009",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1568,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "6de57af4e57d8869d863a0c1357735c752390c27eafe4156d681cea84665f496",
+    "ledger_sha256": "e25b234aeab3b565cb3a3528032dd769cb502627325fb63363b2d4bae07d8912",
     "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
   }
 }

@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Callable, Mapping, Protocol, Sequence
 
 from ..evaluation.corpus_inventory import CorpusSourceReport
+from ..evaluation.divergence import MinimizedFailureStore
 from ..evaluation.proposal_lifecycle import (
     EvaluationResult,
     EvaluationSuite,
@@ -68,6 +69,7 @@ __all__ = [
     "EvaluationCorpusPort",
     "EvaluationLifecyclePort",
     "EvaluationSuiteCatalog",
+    "MinimizedFailureStore",
     "TrajectoryEvaluator",
     "TrajectoryReplayPort",
 ]
