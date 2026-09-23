@@ -453,6 +453,11 @@ def test_grounding_accepts_concrete_duplicate_claim_with_one_rewrite_target():
         "The '/foo' entry appears twice.",
         source,
     )
+    assert nightly_selfmod._objective_target_function(
+        "Remove duplicate '/foo' command entries.",
+        "The '/foo' entry appears twice.",
+        source,
+    ) == "remove_duplicate_commands"
 
 
 def test_grounding_rejects_false_duplicate_and_declarative_targets():
@@ -496,6 +501,37 @@ def test_ast_splice_preserves_contract_and_sibling_code():
     compile(edited, "candidate.py", "exec")
     assert "def sibling():\n    return 2\n" in edited
     assert "if value < 0" in edited
+
+
+def test_ast_splice_rejects_a_different_existing_function_than_selected():
+    original = (
+        "def selected(value):\n"
+        "    return value\n\n"
+        "def other(value):\n"
+        "    return value + 1\n"
+    )
+    reply = "def other(value):\n    return value + 2\n"
+
+    assert nightly_selfmod._splice_function(
+        original, reply, expected_name="selected",
+    ) is None
+
+
+def test_ast_splice_accepts_the_selected_existing_function():
+    original = (
+        "def selected(value):\n"
+        "    return value\n\n"
+        "def other(value):\n"
+        "    return value + 1\n"
+    )
+    reply = "def selected(value):\n    return value + 1\n"
+
+    edited = nightly_selfmod._splice_function(
+        original, reply, expected_name="selected",
+    )
+
+    assert edited is not None
+    assert "def selected(value):\n    return value + 1\n" in edited
 
 
 def test_ast_splice_rejects_malformed_or_contract_changing_replies():
