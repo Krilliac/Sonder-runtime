@@ -18,9 +18,9 @@ from typing import Mapping
 
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
-# Project scopes may be stable identifiers or canonical workspace paths.  The
-# latter use backslashes on Windows and are already bounded by the same shape
-# and length checks as slash separated scopes.
+# Project scopes are opaque, exact identities.  They may contain a bounded
+# Windows workspace spelling, but this grammar does not normalize or equate
+# slash and backslash variants.
 _PROJECT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:\\/\\-]{0,255}\Z")
 _KINDS = frozenset({"fact", "interaction", "outcome", "preference", "lesson_decision"})
 _OPERATIONS = frozenset({"upsert", "delete"})
