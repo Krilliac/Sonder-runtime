@@ -52,6 +52,12 @@ def test_parse_task_none_on_malformed_json():
     assert self_curriculum.parse_task(text) is None
 
 
+def test_malformed_prompt_is_rejected_without_crashing_task_validation():
+    task = dict(VALID_TASK, prompt=None)
+    parsed = self_curriculum.parse_task(json.dumps(task))
+    assert self_curriculum.is_valid(parsed, run_code_fn=_stub_ok) is False
+
+
 # ---------- is_valid ----------
 
 def test_is_valid_true_with_assert_and_passing_reference():
