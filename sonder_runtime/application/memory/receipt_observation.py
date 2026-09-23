@@ -76,7 +76,15 @@ class ReceiptObservationProducer:
     def from_terminal_eligibility(cls, eligibility: ManagedTerminalEligibility) -> tuple[VerifierReceipt, LearningObservation]:
         if type(eligibility) is not ManagedTerminalEligibility:
             raise TypeError("verified terminal eligibility is required")
-        if not eligibility.eligible or eligibility.phase not in {"certified", "certified_after_return"}:
+        if eligibility.phase in {"certified", "certified_after_return"}:
+            if eligibility.eligible is not True:
+                raise PermissionError("current certified terminal eligibility is required")
+        elif eligibility.phase == "failed":
+            # A verified failed check is learning evidence, never permission
+            # to publish a successful outward terminal response.
+            if eligibility.eligible is not False:
+                raise PermissionError("failed verification cannot complete the host turn")
+        else:
             raise PermissionError("current certified terminal eligibility is required")
         if not eligibility.authenticated_worker_id:
             raise PermissionError("unambiguous authenticated worker attribution is required")
@@ -86,22 +94,54 @@ class ReceiptObservationProducer:
         turn = link.turn
         if facts.delegated_work is not True:
             raise ValueError("verifier observation requires delegated host work")
-        if not facts.certificate_id or facts.certificate_generation < 1:
-            raise ValueError("authenticated verifier certificate is required")
-        if not facts.certificate_code:
-            raise ValueError("verifier certificate code is required")
-        if facts.validation_passed is not True or facts.terminal_class != "NORMAL":
+        failure = eligibility.verified_failure_receipt
+        if eligibility.phase == "failed":
+            if not isinstance(failure, dict) or failure.get("schema") != "delegated-verification-failure-v1":
+                raise PermissionError("immutable verifier failure receipt is required")
+            unsigned = dict(failure)
+            supplied_digest = unsigned.pop("receipt_digest", None)
+            manifest_digest = failure.get("before_manifest_digest")
+            failed_proof = failure.get("failed_proof")
+            if (
+                not isinstance(supplied_digest, str)
+                or supplied_digest != _digest(unsigned)
+                or failure.get("after_manifest_digest") != manifest_digest
+                or not isinstance(manifest_digest, str)
+                or len(manifest_digest) != 64
+                or any(char not in "0123456789abcdef" for char in manifest_digest)
+                or not isinstance(failure.get("failed_check"), dict)
+                or not isinstance(failed_proof, dict)
+                or failed_proof.get("status") != "failed"
+                or type(failed_proof.get("exit_code")) is not int
+                or failed_proof.get("exit_code") == 0
+            ):
+                raise PermissionError("immutable verifier failure receipt is invalid")
+            outcome = "failed"
+        else:
+            if not facts.certificate_id or facts.certificate_generation < 1:
+                raise ValueError("authenticated verifier certificate is required")
+            if not facts.certificate_code:
+                raise ValueError("verifier certificate code is required")
+            if facts.validation_passed is not True or facts.terminal_class != "NORMAL":
+                raise PermissionError(
+                    "independently verified negative evidence is not available at this boundary"
+                )
+            outcome = "passed"
+        if eligibility.phase == "failed" and (
+            failure.get("failed_check") is None
+            or failure.get("failed_proof", {}).get("status") == "succeeded"
+            or failure.get("failed_proof", {}).get("exit_code") == 0
+        ):
             raise PermissionError(
-                "independently verified negative evidence is not available at this boundary"
+                "specific failed check proof is required"
             )
         claim, subject_digest = cls._subject(eligibility, facts)
-        outcome = "passed"
         authority_scope = _digest({
             "worker_id": eligibility.authenticated_worker_id,
             "workspace_scope": facts.project_scope,
         })
         receipt = VerifierReceipt(
-            receipt_id=link.receipt_digest,
+            receipt_id=(failure["receipt_digest"] if outcome == "failed" else link.receipt_digest),
             interaction_id=turn.host_conversation_id,
             run_id=turn.run_id,
             principal_id=turn.principal_id,
@@ -110,7 +150,7 @@ class ReceiptObservationProducer:
             verifier_outcome=outcome,
             content_digest=link.output_digest,
             subject_digest=subject_digest,
-            receipt_digest=link.receipt_digest,
+            receipt_digest=(failure["receipt_digest"] if outcome == "failed" else link.receipt_digest),
             authority_scope=authority_scope,
         )
         # The subject digest is bound to the verified check bundle and scope.
@@ -129,6 +169,10 @@ class ReceiptObservationProducer:
                 "content_digest:" + receipt.content_digest,
                 "subject:" + subject_digest,
                 "run:" + receipt.run_id,
+                *(() if outcome == "passed" else (
+                    "failed_check:" + _digest(failure["failed_check"]),
+                    "failure_manifest:" + failure["before_manifest_digest"],
+                )),
             ),
             confidence=1.0 if outcome in {"passed", "failed"} else 0.0,
             positive=outcome == "passed",

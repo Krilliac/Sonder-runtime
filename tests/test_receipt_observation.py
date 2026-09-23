@@ -8,7 +8,7 @@ from sonder_runtime.adapters.persistence.sqlite.verifier_observations import (
     SQLiteVerifierObservationRepository,
 )
 from sonder_runtime.application.memory.learning_ladder import LearningLadder, LearningStage
-from sonder_runtime.application.memory.receipt_observation import ReceiptObservationProducer
+from sonder_runtime.application.memory.receipt_observation import ReceiptObservationProducer, _digest
 from sonder_runtime.application.ports.host_final import HostFinalFacts
 from sonder_runtime.application.ports.host_turn_links import (
     FinalizedHostResult, ManagedHostFinalEvidence, ManagedHostTerminalLink,
@@ -77,12 +77,52 @@ def test_distinct_authenticated_workers_can_reach_fact_but_contradiction_demotes
     first = ReceiptObservationProducer.from_terminal_eligibility(_eligibility(_evidence(principal="owner"), worker_id="lane-worker-a"))[1]
     second = ReceiptObservationProducer.from_terminal_eligibility(_eligibility(_evidence(principal="owner", run_id="run-2"), worker_id="lane-worker-b"))[1]
     assert LearningLadder().evaluate((first, second))[0].stage == LearningStage.FACT
-    negative = _eligibility(
-        _evidence(principal="owner", run_id="run-3", outcome="failed"),
-        worker_id="lane-worker-b",
+    failure = {
+        "schema": "delegated-verification-failure-v1",
+        "failed_check": {"target": "unit"},
+        "failed_proof": {"status": "failed", "exit_code": 7},
+        "before_manifest_digest": "d" * 64,
+        "after_manifest_digest": "d" * 64,
+    }
+    failure["receipt_digest"] = _digest(failure)
+    negative = replace(
+        _eligibility(
+            _evidence(principal="owner", run_id="run-3", outcome="failed"),
+            worker_id="lane-worker-b",
+        ),
+        phase="failed",
+        eligible=False,
+        code="CHECK_FAILED",
+        verified_failure_receipt=failure,
     )
-    with pytest.raises(PermissionError, match="negative evidence"):
-        ReceiptObservationProducer.from_terminal_eligibility(negative)
+    receipt, negative_observation = ReceiptObservationProducer.from_terminal_eligibility(negative)
+    assert receipt.verifier_outcome == "failed"
+    assert negative_observation.positive is False
+    assert negative_observation.trusted_source is True
+    decisions = LearningLadder().evaluate((first, second, negative_observation))
+    assert decisions[0].stage == LearningStage.CANDIDATE
+    assert decisions[0].contradiction_count == 1
+
+
+def test_negative_receipt_requires_specific_immutable_failed_check_proof():
+    eligibility = replace(
+        _eligibility(_evidence(principal="owner", run_id="run-negative")),
+        phase="failed",
+        eligible=False,
+        code="CHECK_FAILED",
+        verified_failure_receipt={
+            "schema": "delegated-verification-failure-v1",
+            "failed_check": {"target": "unit"},
+            "failed_proof": {"status": "succeeded", "exit_code": 0},
+            "before_manifest_digest": "f" * 64,
+            "after_manifest_digest": "f" * 64,
+        },
+    )
+    bad = dict(eligibility.verified_failure_receipt)
+    bad["receipt_digest"] = _digest({k: v for k, v in bad.items() if k != "receipt_digest"})
+    eligibility = replace(eligibility, verified_failure_receipt=bad)
+    with pytest.raises(PermissionError, match="immutable verifier failure receipt is invalid"):
+        ReceiptObservationProducer.from_terminal_eligibility(eligibility)
 
 
 def test_unrelated_verified_subjects_never_aggregate():

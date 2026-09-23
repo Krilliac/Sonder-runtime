@@ -887,9 +887,9 @@
     },
     {
       "checked": false,
-      "claim": "Host-current certified verifier results can produce immutable project-scoped observations bound to a source manifest, check catalog, authenticated child worker, and durable receipt.",
+      "claim": "Host-current delegated verifier results can produce immutable project-scoped positive or verified-negative observations bound to an exact check, unchanged source manifest, cleanup proofs, authenticated child worker, and durable receipt.",
       "requirement_id": "MEM-003",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "97875eec1bc29171cf190d9964863242b2536d7b96df8ef8b390dfb06530b49c",
+    "ledger_sha256": "d7dae8ab633ab3875f7de6c2a939a090bac558d3d4d6fc6e139fa0de0b86363e",
     "spec_sha256": "4797da92d2d1845ce944b2dc32353d52fe7a6e48dfa92593753ca727761ca714"
   }
 }
