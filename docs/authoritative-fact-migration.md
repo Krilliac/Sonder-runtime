@@ -39,7 +39,10 @@ source id, project scope, and exact row contents.  The command then acquires
 raced backup creation therefore causes a stale-plan refusal before any
 mutation. Existing state rows, including tombstone-only rows, are rejected
 before a migration plan or backup is approved when ownership differs or the
-exact versioned journal upsert/delete evidence is missing. If the process is
+exact versioned journal upsert/delete evidence is missing. The canonical
+journal digest and upsert text/embedding payload must also match the current
+fact row; tombstones must have an empty payload. If the process is
+interrupted after the write lock is
 interrupted after the write lock is
 acquired, the transaction is rolled back and the connection is left idle so
 a fresh dry run can safely resume the operation. Each adopted fact gets a
