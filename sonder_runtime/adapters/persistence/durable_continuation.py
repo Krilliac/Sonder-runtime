@@ -5,6 +5,7 @@ from __future__ import annotations
 from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
 
 from dataclasses import asdict
+from collections.abc import Mapping
 from contextlib import contextmanager
 from functools import wraps
 from ...application.ports.continuation_mutations import (
@@ -51,7 +52,8 @@ CREATE TABLE IF NOT EXISTS durable_child_session (
     checkpoint_cursor TEXT, revision INTEGER NOT NULL, usage_json TEXT NOT NULL,
     result_json TEXT, recovery_required INTEGER NOT NULL,
     cancellation_requested INTEGER NOT NULL, cancellation_reason TEXT,
-    resume_key TEXT NOT NULL DEFAULT '', idempotency_key TEXT NOT NULL DEFAULT ''
+    resume_key TEXT NOT NULL DEFAULT '', idempotency_key TEXT NOT NULL DEFAULT '',
+    terminal_verification_json TEXT NOT NULL DEFAULT '{}'
 );
 """
 
@@ -180,6 +182,8 @@ class SQLiteDurableContinuationRepository:
                 connection.execute("ALTER TABLE durable_child_session ADD COLUMN resume_key TEXT NOT NULL DEFAULT ''")
             if "idempotency_key" not in columns:
                 connection.execute("ALTER TABLE durable_child_session ADD COLUMN idempotency_key TEXT NOT NULL DEFAULT ''")
+            if "terminal_verification_json" not in columns:
+                connection.execute("ALTER TABLE durable_child_session ADD COLUMN terminal_verification_json TEXT NOT NULL DEFAULT '{}'")
             connection.execute("CREATE INDEX IF NOT EXISTS ix_child_resume_key ON durable_child_session(parent_id,resume_key,status)")
             connection.execute("CREATE INDEX IF NOT EXISTS ix_child_idempotency_key ON durable_child_session(parent_id,idempotency_key,status)")
 
@@ -253,6 +257,7 @@ class SQLiteDurableContinuationRepository:
             reason,
             resume_key,
             idempotency_key,
+            terminal_verification,
         ) = row
         request = SubagentRequest(
             parent_id,
@@ -279,6 +284,7 @@ class SQLiteDurableContinuationRepository:
             bool(recovery),
             bool(cancelling),
             reason,
+            json.loads(terminal_verification or "{}"),
         )
 
     def _select(
@@ -287,7 +293,8 @@ class SQLiteDurableContinuationRepository:
         row = connection.execute(
             "SELECT child_id,parent_id,ancestors_json,prompt,budget_json,metadata_json,status,"
             "checkpoint_sequence,checkpoint_state_json,checkpoint_cursor,revision,usage_json,result_json,"
-            "recovery_required,cancellation_requested,cancellation_reason,resume_key,idempotency_key FROM durable_child_session WHERE child_id=?",
+            "recovery_required,cancellation_requested,cancellation_reason,resume_key,idempotency_key,"
+            "terminal_verification_json FROM durable_child_session WHERE child_id=?",
             (child_id,),
         ).fetchone()
         return self._row(row) if row else None
@@ -315,7 +322,7 @@ class SQLiteDurableContinuationRepository:
                 raise InvalidSubagentRequest("active child idempotency key already exists for parent")
         try:
             connection.execute(
-                "INSERT INTO durable_child_session VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO durable_child_session VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     child_id,
                     session.request.parent_id,
@@ -339,6 +346,7 @@ class SQLiteDurableContinuationRepository:
                     session.cancellation_reason,
                     session.request.resume_key,
                     session.request.idempotency_key,
+                    json.dumps(session.terminal_verification, sort_keys=True, separators=(",", ":")),
                 ),
             )
             if connection.execute(
@@ -386,6 +394,7 @@ class SQLiteDurableContinuationRepository:
                 "SELECT child_id,parent_id,ancestors_json,prompt,budget_json,metadata_json,status,"
                 "checkpoint_sequence,checkpoint_state_json,checkpoint_cursor,revision,usage_json,result_json,"
                 "recovery_required,cancellation_requested,cancellation_reason,resume_key,idempotency_key "
+                ",terminal_verification_json "
                 f"FROM durable_child_session WHERE parent_id=? AND {column}=? "
                 "AND status IN (?,?,?) ORDER BY child_id LIMIT 1",
                 (parent_id, key, SubagentStatus.CREATED.value, SubagentStatus.QUEUED.value, SubagentStatus.RUNNING.value),
@@ -606,6 +615,7 @@ class SQLiteDurableContinuationRepository:
         usage=None,
         result=None,
         recovery_required=None,
+        verification=None,
     ):
         return self.mutate(
             prepare_call(
@@ -616,6 +626,7 @@ class SQLiteDurableContinuationRepository:
                 usage=usage,
                 result=result,
                 recovery_required=recovery_required,
+                verification=verification,
             )
         ).value
 
@@ -679,6 +690,7 @@ class SQLiteDurableContinuationRepository:
         usage: SubagentUsage | None = None,
         result: SubagentResult | None = None,
         recovery_required: bool | None = None,
+        verification: Mapping[str, object] | None = None,
     ) -> DurableChildSession | None:
         current = self._select(connection, child_id)
         if current is None or (
@@ -692,7 +704,7 @@ class SQLiteDurableContinuationRepository:
             return None
         connection.execute(
             "UPDATE durable_child_session SET status=?,revision=revision+1,usage_json=?,result_json=?,"
-            "recovery_required=? WHERE child_id=? AND revision=?",
+            "recovery_required=?,terminal_verification_json=? WHERE child_id=? AND revision=?",
             (
                 status.value,
                 _usage_json(usage or current.usage),
@@ -701,6 +713,11 @@ class SQLiteDurableContinuationRepository:
                     current.recovery_required
                     if recovery_required is None
                     else recovery_required
+                ),
+                json.dumps(
+                    current.terminal_verification if verification is None else verification,
+                    sort_keys=True,
+                    separators=(",", ":"),
                 ),
                 child_id,
                 current.revision,
@@ -753,7 +770,7 @@ class SQLiteDurableContinuationRepository:
             rows = connection.execute(
                 "SELECT child_id,parent_id,ancestors_json,prompt,budget_json,metadata_json,status,"
                 "checkpoint_sequence,checkpoint_state_json,checkpoint_cursor,revision,usage_json,result_json,"
-                "recovery_required,cancellation_requested,cancellation_reason,resume_key,idempotency_key FROM durable_child_session "
+                "recovery_required,cancellation_requested,cancellation_reason,resume_key,idempotency_key,terminal_verification_json FROM durable_child_session "
                 "WHERE status NOT IN (?,?,?,?) ORDER BY child_id",
                 tuple(status.value for status in TERMINAL_SUBAGENT_STATUSES),
             ).fetchall()
@@ -768,7 +785,7 @@ class SQLiteDurableContinuationRepository:
             rows = connection.execute(
                 "SELECT child_id,parent_id,ancestors_json,prompt,budget_json,metadata_json,status,"
                 "checkpoint_sequence,checkpoint_state_json,checkpoint_cursor,revision,usage_json,result_json,"
-                "recovery_required,cancellation_requested,cancellation_reason,resume_key,idempotency_key FROM durable_child_session "
+                "recovery_required,cancellation_requested,cancellation_reason,resume_key,idempotency_key,terminal_verification_json FROM durable_child_session "
                 "ORDER BY rowid LIMIT ?",
                 (limit,),
             ).fetchall()

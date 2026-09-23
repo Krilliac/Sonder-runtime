@@ -805,6 +805,8 @@ def build_application(
                 worker_registry = ContinuationWorkerRegistry(
                     continuation_repository,
                     owner_nonce=continuation_service.owner_nonce,
+                    owner_pid=continuation_service.owner_pid,
+                    owner_host=continuation_service.owner_host,
                 )
                 from ..adapters.conversational_subagents import conversational_runner_factory
                 subagent_provider = LocalSubagentProvider(

@@ -94,6 +94,8 @@ class DelegationService:
             owner_nonce = getattr(self._worker_registry, "owner_nonce", "")
             if owner_nonce:
                 reservation_metadata += (("owner_nonce", owner_nonce),)
+                reservation_metadata += (("owner_pid", str(getattr(self._worker_registry, "owner_pid", ""))),)
+                reservation_metadata += (("owner_host", str(getattr(self._worker_registry, "owner_host", ""))),)
             worker_launch = WorkerLaunch(
                 worker_id=child_request.child_id or request.delegation_id,
                 parent_id=child_request.parent_id,
@@ -118,12 +120,13 @@ class DelegationService:
             # The provider receives the exact metadata retained by the
             # continuation reservation, so the CAS admission cannot be
             # confused with a caller that merely reused the same key.
+            admitted = self._worker_registry.admit(worker_launch)
+            canonical_launch = getattr(admitted, "launch", worker_launch)
             child_request = SubagentRequest(
                 child_request.parent_id, child_request.prompt, child_request.budget,
-                child_request.child_id, worker_launch.metadata,
+                child_request.child_id, canonical_launch.metadata,
                 child_request.resume_key, child_request.idempotency_key,
             )
-            self._worker_registry.admit(worker_launch)
         logger.debug(f"DelegationService.dispatch: spawning child_id={request.lineage.child_id!r}, parent_id={request.lineage.parent_id!r}")
         handle = self._provider.spawn(child_request, context)
         logger.info(f"agent delegated: delegation_id={request.delegation_id!r}, preset={request.preset.name!r}, role={request.preset.role.value!r}, child_id={handle.child_id!r}")
@@ -166,6 +169,25 @@ class DelegationService:
             None if succeeded else output,
             usage_steps=result.usage.steps,
         )
+        if self._worker_registry is not None:
+            get_record = getattr(self._worker_registry, "get", None)
+            record_verification = getattr(self._worker_registry, "record_verification", None)
+            if callable(get_record) and callable(record_verification):
+                record = get_record(result.child_id)
+                if record is None:
+                    raise IntegrationError("worker registry record disappeared before verification")
+                persisted = record_verification(
+                    result.child_id,
+                    {
+                        "status": evidence.status.value,
+                        "output_digest": evidence.output_digest,
+                        "verification": evidence.verification,
+                        "artifacts": evidence.artifacts,
+                    },
+                    expected_revision=record.revision,
+                )
+                if persisted is None:
+                    raise IntegrationError("worker registry verification compare-and-set failed")
         logger.info(f"delegation integrated: delegation_id={request.delegation_id!r}, status={evidence.status.value!r}, child_id={result.child_id!r}, usage_steps={evidence.usage_steps}")
         logger.debug(f"DelegationService.integrate: evidence_status={evidence.status.value!r}, usage_steps={evidence.usage_steps}")
         return DelegatedResult(delegation_digest(request), result, evidence)
