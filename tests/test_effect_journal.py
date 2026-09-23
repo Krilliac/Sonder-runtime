@@ -406,3 +406,21 @@ def test_epoch_advance_cannot_clear_recovery_fence(tmp_path):
             invoke=lambda: invoked.append(True), receipt_key="receipt-op-2",
         )
     assert invoked == []
+
+
+def test_default_worker_checkpoint_projection_is_content_free(tmp_path):
+    from sonder_runtime.application.execution.worker_bindings import (
+        AuthenticatedWorkerBinding, journaled_effect,
+    )
+
+    private_output = "PRIVATE_OUTPUT_CANARY_872193"
+    private_prompt = "PRIVATE_PROMPT_CANARY_872193"
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    journaled_effect(
+        AuthenticatedWorkerBinding(journal, "run", "worker", 1, "/workspace"),
+        operation_id="op", idempotency_key="op", request={"prompt": private_prompt},
+        invoke=lambda: private_output, receipt_key="receipt",
+    )
+    raw = (tmp_path / "effects.db").read_bytes()
+    assert private_output.encode() not in raw
+    assert private_prompt.encode() not in raw

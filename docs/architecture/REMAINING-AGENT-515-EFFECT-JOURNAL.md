@@ -27,7 +27,9 @@ authorize replay across an unrecorded effect.
 This slice extends the same guarantee to direct host-owned worker adapters.
 After a terminal receipt, `journaled_effect` appends a checkpoint in the
 worker-effects database. The host allocates the generation and captures the
-state as canonical JSON, generation, and journal high-water in one transaction.
+an explicit trusted state projection as canonical JSON, generation, and journal
+high-water in one transaction. The default projection is content-free metadata
+only, so worker output and prompts are not copied into the journal.
 Restore rejects a stale high-water or an unresolved intent, so a restart
 cannot treat a partially published worker result as a safe replay point. The
 same database durably records each `(run, worker, owner_epoch)` fence; restart

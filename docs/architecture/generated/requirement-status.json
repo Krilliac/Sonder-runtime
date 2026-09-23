@@ -866,9 +866,9 @@
     },
     {
       "checked": false,
-      "claim": "After restart recovery marks a run reconciliation-required, the journal rejects every new effect at admission before invocation, including bindings at the current owner epoch.",
+      "claim": "Default direct-worker checkpoint projections persist only content-free effect metadata; raw worker output and request prompts are excluded from the SQLite journal unless an explicit trusted projection is supplied.",
       "requirement_id": "LOOP-008",
-      "revision": 7,
+      "revision": 8,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "a6a2b44a19964620956354cc1d15c60f4f719b5393372bbfd579b034884fdd87",
+    "ledger_sha256": "6de4a1822d0f80d6411d52fd2ac9217a7385d754ddfeb682d95c4180350d679c",
     "spec_sha256": "4797da92d2d1845ce944b2dc32353d52fe7a6e48dfa92593753ca727761ca714"
   }
 }
