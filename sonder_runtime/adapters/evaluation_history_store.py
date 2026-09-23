@@ -256,6 +256,31 @@ def record_result(path=None, **fields):
     return record
 
 
+def record_result_idempotent(path=None, **fields):
+    """Append an aggregate once, atomically under the history lock.
+
+    The replay key is the exact identity plus aggregate result and source. It
+    deliberately does not include ``recorded_at`` so retrying a completed
+    evaluation returns the original record instead of adding a duplicate.
+    """
+    target = Path(path) if path is not None else default_path()
+    candidate = make_record(**fields)
+    with _history_lock(target):
+        loaded = load_history(target)
+        for record in loaded["records"]:
+            if (
+                record["identity_key"] == candidate["identity_key"]
+                and record["result"] == candidate["result"]
+                and record["source"] == candidate["source"]
+            ):
+                return record
+        line = json.dumps(
+            candidate, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        )
+        _atomic_append(target, line)
+    return candidate
+
+
 def load_history(path=None, *, max_records=DEFAULT_MAX_RECORDS,
                  max_bytes=DEFAULT_READ_BYTES):
     """Load a bounded valid window; malformed/truncated JSONL is counted."""
