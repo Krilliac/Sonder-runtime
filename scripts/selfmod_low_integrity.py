@@ -71,6 +71,32 @@ def _drain_output(stream, output_path: Path, state: dict[str, object]) -> None:
         stream.close()
 
 
+def _timeout_diagnostic(tail: bytes) -> str:
+    """Return content-free phase metadata for a timed-out child.
+
+    The bounded tail remains available for ordinary diagnostics. This marker
+    gives the medium-integrity supervisor useful information when a quiet
+    command reaches its deadline without persisting test names or prompts.
+    """
+    text = tail.decode("utf-8", "replace")
+    if not text.strip():
+        phase = "unknown"
+    else:
+        phase = "child-output"
+        for line in reversed(text.splitlines()):
+            lowered = line.casefold()
+            if "collecting" in lowered or "test session starts" in lowered:
+                phase = "collection-or-startup"
+                break
+            if any(token in lowered for token in (" passed", " failed", " skipped", " error")):
+                phase = "test-progress"
+                break
+    return (
+        "\nSELFMOD LOW TIMEOUT DIAGNOSTIC: phase=%s; output_tail_bytes=%d\n"
+        % (phase, len(tail))
+    )
+
+
 def _digest(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as stream:
@@ -153,6 +179,11 @@ def _child(spec_path: Path) -> int:
         elif state.get("drain_error"):
             result = {"returncode": 125, "timed_out": False,
                       "error": "output drain failed: " + str(state["drain_error"])}
+        if result.get("timed_out"):
+            tail = bytes(state.get("output_tail") or b"")
+            marker = _timeout_diagnostic(tail).encode("utf-8")
+            output_path.write_bytes((tail + marker)[-_OUTPUT_TAIL_BYTES:])
+            result["diagnostic"] = _timeout_diagnostic(tail).strip()
     except BaseException as exc:  # preserve a bounded diagnostic for parent
         if process is not None and process.poll() is None:
             process.kill()
