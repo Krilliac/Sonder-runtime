@@ -442,6 +442,27 @@ def test_non_executable_objectives_are_filtered_before_a_run():
     assert nightly_selfmod._objective_is_actionable("Guard the empty input before indexing it")
 
 
+def test_proposal_function_inventory_is_compact_and_top_level_only():
+    source = (
+        "def first(value):\n"
+        "    def nested():\n"
+        "        return value\n"
+        "    return nested()\n\n"
+        "async def second():\n"
+        "    return 2\n"
+    )
+    assert nightly_selfmod._proposal_function_inventory(source) == "first, second"
+
+
+def test_proposal_inventory_can_be_bounded_to_the_visible_source_slice():
+    source = "def visible():\n    return 1\n" + ("# filler\n" * 20_000) + (
+        "\ndef hidden():\n    return 2\n"
+    )
+    visible = source[:60_000]
+    assert "visible" in nightly_selfmod._proposal_function_inventory(visible)
+    assert "hidden" not in nightly_selfmod._proposal_function_inventory(visible)
+
+
 def test_grounding_accepts_concrete_duplicate_claim_with_one_rewrite_target():
     source = (
         "COMMANDS = ['/foo', '/foo']\n\n"
