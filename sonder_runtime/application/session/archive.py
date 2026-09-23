@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+from itertools import islice
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 from uuid import uuid4
@@ -47,6 +48,9 @@ class ArchiveReference:
     source_event_type: str
     sha256: str
     byte_count: int
+    source_kind: str = "session"
+    source_lane_id: str | None = None
+    project_id: str | None = None
 
     def as_payload(self) -> dict[str, object]:
         return {
@@ -56,6 +60,9 @@ class ArchiveReference:
             "source_event_type": self.source_event_type,
             "sha256": self.sha256,
             "byte_count": self.byte_count,
+            "source_kind": self.source_kind,
+            **({"source_lane_id": self.source_lane_id} if self.source_lane_id else {}),
+            **({"project_id": self.project_id} if self.project_id else {}),
         }
 
 
@@ -170,8 +177,113 @@ class SessionContextArchiveService:
                 source_event_type=event.event_type,
                 sha256=digest,
                 byte_count=len(encoded),
+                source_kind=str(payload.get("source_kind") or "session"),
+                source_lane_id=(
+                    str(payload["source_lane_id"])
+                    if payload.get("source_lane_id") is not None else None
+                ),
+                project_id=(
+                    str(payload["project_id"])
+                    if payload.get("project_id") is not None else None
+                ),
             )
         return None
+
+    def archive_external_tool_output(
+        self,
+        *,
+        session_id: str,
+        project_id: str,
+        source_kind: str,
+        source_lane_id: str,
+        source_event_id: str,
+        source_sequence: int,
+        source_payload: Mapping[str, object],
+        event_id_factory: Callable[[], str] | None = None,
+    ) -> ArchiveReference:
+        """Record a reference to an external durable tool event.
+
+        The lane store is the source for retrieval. This reference event holds
+        only identity, scope, size, and digest; lane outbox projection is a
+        separate path and can retain the original tool event.
+        """
+        for value, name in ((session_id, "session_id"), (project_id, "project_id"),
+                            (source_kind, "source_kind"), (source_lane_id, "source_lane_id"),
+                            (source_event_id, "source_event_id")):
+            if not isinstance(value, str) or not value.strip():
+                raise InvalidInput(f"{name} must be non-empty")
+        if source_kind != "agent_lane":
+            raise InvalidInput("unsupported external archive source")
+        if isinstance(source_sequence, bool) or not isinstance(source_sequence, int) or source_sequence < 1:
+            raise InvalidInput("source_sequence must be positive")
+        if not isinstance(source_payload, Mapping):
+            raise InvalidInput("source_payload must be an object")
+        encoded = _canonical(dict(source_payload))
+        if len(encoded) > 1_048_576:
+            raise InvalidInput("external source payload exceeds archive bound")
+        digest = hashlib.sha256(encoded).hexdigest()
+        matches = self._repository.search(
+            session_id=session_id, event_type="context.archive.created",
+            text=source_event_id,
+            limit=min(self._max_items, getattr(self._repository, "_max_read_limit", self._max_items)),
+        )
+        for candidate in matches:
+            payload = candidate.payload
+            if (payload.get("source_kind") == source_kind
+                    and payload.get("source_lane_id") == source_lane_id
+                    and payload.get("source_event_id") == source_event_id
+                    and payload.get("source_sequence") == source_sequence
+                    and payload.get("sha256") == digest
+                    and payload.get("byte_count") == len(encoded)
+                    and payload.get("project_id") == project_id):
+                return ArchiveReference(
+                    str(payload["archive_id"]), session_id, source_event_id,
+                    source_sequence, "tool.result", digest, len(encoded),
+                    source_kind, source_lane_id,
+                    project_id,
+                )
+        archive_id = (event_id_factory or self._event_id_factory)()
+        reference = ArchiveReference(
+            archive_id, session_id, source_event_id, source_sequence,
+            "tool.result", digest, len(encoded), source_kind, source_lane_id,
+            project_id,
+        )
+        payload = reference.as_payload()
+        payload["project_id"] = project_id
+        if len(_canonical(payload)) > _MAX_REFERENCE_BYTES:
+            raise InvalidInput("external archive reference exceeds its size bound")
+        self._repository.append(
+            session_id, "context.archive.created", payload, event_id=archive_id,
+        )
+        return reference
+
+    @staticmethod
+    def retrieve_external(
+        reference: ArchiveReference,
+        reader: Callable[[str, int], Mapping[str, object]],
+        *,
+        project_id: str,
+    ) -> Mapping[str, object]:
+        """Read an external source event and verify its identity and digest."""
+        if reference.source_kind == "session":
+            raise InvalidInput("external retrieval requires an external reference")
+        if reference.project_id != project_id:
+            raise IntegrityFailure("external archive project scope changed")
+        event = reader(reference.source_lane_id or "", reference.source_sequence)
+        if not isinstance(event, Mapping):
+            raise IntegrityFailure("external archive source is unavailable")
+        if (event.get("event_id") != reference.source_event_id
+                or event.get("sequence") != reference.source_sequence
+                or event.get("event_type") != reference.source_event_type):
+            raise IntegrityFailure("external archive source identity changed")
+        payload = event.get("payload")
+        if not isinstance(payload, Mapping):
+            raise IntegrityFailure("external archive source payload is invalid")
+        encoded = _canonical(dict(payload))
+        if (len(encoded) != reference.byte_count
+                or hashlib.sha256(encoded).hexdigest() != reference.sha256):
+            raise IntegrityFailure("external archive source digest changed")
+        return dict(payload)
 
     def prepare_context(
         self,
@@ -190,7 +302,9 @@ class SessionContextArchiveService:
             raise InvalidInput("session_id must be non-empty")
         if isinstance(budget_bytes, bool) or not isinstance(budget_bytes, int) or budget_bytes < 0:
             raise InvalidInput("budget_bytes must be a non-negative integer")
-        values = tuple(events)
+        # Stop at the first item beyond the bound. Materializing an arbitrary
+        # generator before checking its length could exhaust the host.
+        values = tuple(islice(iter(events), self._max_items + 1))
         if len(values) > self._max_items:
             raise InvalidInput("context event count exceeds archive bound")
         if any(event.session_id != session_id for event in values):

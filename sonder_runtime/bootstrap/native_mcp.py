@@ -445,6 +445,7 @@ _AGENT_LANE_TOOL = ToolDescriptor(
         "action": {"type": "string", "enum": [
             "open_parent", "rotate_parent", "revoke_parent", "spawn", "list", "inspect",
             "send_message", "wait", "interrupt", "resume", "cancel", "reports", "ack",
+            "retrieve_archive",
         ]},
         "payload": {"type": "object", "maxProperties": 32},
         "parent_session_id": {"type": "string", "maxLength": 128},

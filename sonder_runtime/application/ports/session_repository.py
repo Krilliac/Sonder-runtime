@@ -58,6 +58,10 @@ class SessionRepository(Protocol):
         limit: int = 1_000,
     ) -> tuple[SessionEvent, ...]: ...
 
+    def read_tail(
+        self, session_id: str, *, limit: int = 1_000
+    ) -> tuple[SessionEvent, ...]: ...
+
     def search(
         self,
         *,
