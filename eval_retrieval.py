@@ -18,6 +18,9 @@ Usage (chunk-resumable, so the controller can run it in <10-min foreground piece
 Prints one PASS/FAIL line per task, then a summary line:
     EVAL chunk: retrieval P/N, baseline Q/N
 """
+import argparse
+import hashlib
+import json
 import sys
 
 import grounding
@@ -80,6 +83,56 @@ HELDOUT = [
      "check": "assert remove_vowels('Hello World') == 'Hll Wrld'\nassert remove_vowels('') == ''\nassert remove_vowels('AEIOUaeiou') == ''"},
 ]
 
+HISTORY_SUITE_VERSION = "1"
+
+
+def _suite_digest():
+    """Digest the held-out definitions without persisting their text."""
+    encoded = json.dumps(
+        HELDOUT, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _record_history(results, history_path):
+    """Record the two bounded condition aggregates, with local deduplication.
+
+    The history store only receives model/suite identity and pass counts.  The
+    task prompts, checks, model responses, and failure details stay out of the
+    durable record.  Re-running the same chunk is idempotent by record id.
+    """
+    from sonder_runtime.adapters import evaluation_history_store as store
+
+    model = server.resolve_sonder_model(False)
+    model_digest = hashlib.sha256(model.encode("utf-8")).hexdigest()
+    total = len(results)
+    if total <= 0:
+        raise ValueError("cannot record an empty retrieval evaluation")
+    records = []
+    for condition in ("retrieval", "baseline"):
+        passed = sum(1 for result in results if result[condition])
+        fields = dict(
+            model=model,
+            model_digest=model_digest,
+            suite="eval-retrieval:" + condition,
+            suite_version=HISTORY_SUITE_VERSION,
+            suite_digest=_suite_digest(),
+            passed=passed,
+            total=total,
+            source="eval_retrieval",
+        )
+        candidate = store.make_record(**fields)
+        existing = store.load_history(history_path)
+        match = next(
+            (record for record in existing["records"]
+             if record["identity_key"] == candidate["identity_key"]
+             and record["result"] == candidate["result"]
+             and record["source"] == candidate["source"]),
+            None,
+        )
+        records.append(match or store.record_result(history_path, **fields))
+    return records
+
 
 def baseline_generate(prompt):
     """Same model selected by Sonder Runtime, but NO lesson injection and NO capture."""
@@ -122,18 +175,31 @@ def run_task(task):
     }
 
 
+def _parse_args(argv):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("start", nargs="?", type=int, default=0)
+    parser.add_argument("count", nargs="?", type=int, default=len(HELDOUT))
+    parser.add_argument(
+        "--record-history", action="store_true",
+        help="explicitly append aggregate results to evaluation history",
+    )
+    parser.add_argument("--history-path", help="history JSONL path")
+    return parser.parse_args(argv[1:])
+
+
 def main(argv):
-    start = int(argv[1]) if len(argv) > 1 else 0
-    count = int(argv[2]) if len(argv) > 2 else len(HELDOUT)
+    args = _parse_args(argv)
+    start, count = args.start, args.count
     chunk = HELDOUT[start:start + count]
 
     if not chunk:
         print("EVAL chunk: no tasks in range [%d:%d) (pool size %d)" %
               (start, start + count, len(HELDOUT)))
-        return
+        return 0
 
     retrieval_pass = 0
     baseline_pass = 0
+    results = []
     for task in chunk:
         try:
             result = run_task(task)
@@ -141,6 +207,7 @@ def main(argv):
             # Defense in depth: run_task itself shouldn't raise, but one bad task
             # must never kill the rest of the chunk.
             print("%s: retrieval=FAIL baseline=FAIL (harness error: %r)" % (task["name"], e))
+            results.append({"retrieval": False, "baseline": False})
             continue
 
         r_status = "PASS" if result["retrieval"] else "FAIL"
@@ -155,9 +222,18 @@ def main(argv):
             retrieval_pass += 1
         if result["baseline"]:
             baseline_pass += 1
+        results.append(result)
 
     n = len(chunk)
     print("EVAL chunk: retrieval %d/%d, baseline %d/%d" % (retrieval_pass, n, baseline_pass, n))
+    if args.record_history:
+        try:
+            _record_history(results, args.history_path)
+        except Exception as exc:
+            print("history: NOT recorded (%s)" % exc)
+            return 2
+        print("history: recorded retrieval and baseline aggregates")
+    return 0
 
 
 if __name__ == "__main__":
@@ -167,4 +243,4 @@ if __name__ == "__main__":
     if _overlap:
         print("ERROR: HELDOUT overlaps training_tasks.TASKS: %s" % sorted(_overlap))
         sys.exit(1)
-    main(sys.argv)
+    sys.exit(main(sys.argv))
