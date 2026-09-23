@@ -88,16 +88,79 @@ def _bind_workspace_config_paths(root: Path | None = None) -> tuple[str, ...]:
     return tuple(rebound)
 
 
-def _stage(log, name, fn):
+def _bind_ollama_pool_from_config(config_path: Path | None = None) -> tuple[str, ...]:
+    """Export configured Ollama workers before ``server`` builds its pool."""
+    if os.environ.get("SONDER_OLLAMA_WORKERS", "").strip():
+        return ()
+    from sonder_runtime.platform import config as sonder_config
+    from sonder_runtime.platform import paths as runtime_paths
+
+    if config_path is not None:
+        configured = Path(config_path).expanduser()
+    else:
+        raw = os.environ.get("SONDER_CONFIG", "").strip()
+        configured = (
+            Path(raw).expanduser() if raw else runtime_paths.default_home() / "sonder.toml"
+        )
+    if not configured.is_absolute():
+        configured = (_REPO_ROOT / configured).resolve()
+    if not configured.is_file():
+        return ()
+    cfg = sonder_config.load_config(configured)
+    bound: list[str] = []
+    if cfg.ollama.workers:
+        os.environ["SONDER_OLLAMA_WORKERS"] = ",".join(cfg.ollama.workers)
+        bound.append("SONDER_OLLAMA_WORKERS")
+    if "SONDER_ALLOW_REMOTE_OLLAMA" not in os.environ:
+        os.environ["SONDER_ALLOW_REMOTE_OLLAMA"] = (
+            "1" if cfg.ollama.allow_remote else "0"
+        )
+        bound.append("SONDER_ALLOW_REMOTE_OLLAMA")
+    if cfg.ollama.trusted_origins and not os.environ.get("SONDER_TRUSTED_ORIGINS", "").strip():
+        os.environ["SONDER_TRUSTED_ORIGINS"] = ",".join(cfg.ollama.trusted_origins)
+        bound.append("SONDER_TRUSTED_ORIGINS")
+    return tuple(bound)
+
+
+def _preflight(root: Path | None = None) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Validate and bind nightly checkout settings without opening runtime state."""
+    rebound = _bind_workspace_config_paths(root or _REPO_ROOT)
+    workers_bound = _bind_ollama_pool_from_config()
+    return rebound, workers_bound
+
+
+def _blocking_result(name, result) -> str | None:
+    """Return a bounded failure reason for known fail-soft blocking results."""
+    text = str(result or "").strip()
+    if name in {"campaign", "repo-repair"} and text.startswith("ERROR:"):
+        return "returned ERROR"
+    if name == "selfmod":
+        if text.startswith("working tree dirty ("):
+            return "working tree dirty"
+        if text.startswith("ERROR: model unavailable") or text.startswith("model unavailable:"):
+            return "model unavailable"
+    return None
+
+
+def _stage(log, name, fn, failures=None):
     started = time.time()
     try:
         result = fn()
+        blocking = _blocking_result(name, result)
+        if blocking:
+            if failures is not None:
+                failures.append(name)
+            log("[%s] FAILED after %.0fs: %s" % (
+                name, time.time() - started, blocking))
+            return result
         log("[%s] ok in %.0fs%s" % (
             name, time.time() - started,
             (": %s" % result) if isinstance(result, str) and result else "",
         ))
         return result
     except Exception as exc:
+        if failures is not None:
+            failures.append(name)
         log("[%s] FAILED after %.0fs: %s" % (
             name, time.time() - started, str(exc)[:300]))
         return None
@@ -162,7 +225,21 @@ def main() -> int:
     parser.add_argument("--rounds", type=int, default=1,
                         help="repeat the exercise-and-groom cycle N times")
     parser.add_argument("--skip-campaign", action="store_true")
+    parser.add_argument("--preflight", action="store_true",
+                        help="validate checkout and provider binding without touching state")
     args = parser.parse_args()
+
+    if args.preflight:
+        try:
+            rebound, workers_bound = _preflight()
+        except Exception as exc:
+            print("nightly preflight FAILED: %s" % str(exc)[:300])
+            return 1
+        print("nightly preflight ok%s%s" % (
+            ("; workspace paths rehomed: " + ", ".join(rebound)) if rebound else "",
+            ("; Ollama env bound: " + ", ".join(workers_bound)) if workers_bound else "",
+        ))
+        return 0
 
     import sonder_paths
 
@@ -184,9 +261,9 @@ def main() -> int:
 
     log("=== nightly self-improvement start ===")
     try:
-        rebound = _bind_workspace_config_paths(_REPO_ROOT)
-    except ValueError:
-        log("workspace config binding failed; aborting nightly run")
+        rebound, workers_bound = _preflight()
+    except Exception as exc:
+        log("nightly config binding failed (%s); aborting nightly run" % str(exc)[:120])
         try:
             lock.unlink(missing_ok=True)
         except OSError:
@@ -196,10 +273,13 @@ def main() -> int:
         return 1
     if rebound:
         log("workspace config paths rehomed: %s" % ", ".join(rebound))
+    if workers_bound:
+        log("ollama pool env bound: %s" % ", ".join(workers_bound))
     import server
     import lesson_pruner
     import sonder_runtime.adapters.memory_store as memory_store
 
+    critical_failures = []
     rounds = max(1, min(int(args.rounds or 1), 12))
     for round_index in range(rounds):
         if rounds > 1:
@@ -212,7 +292,7 @@ def main() -> int:
                     timeout=12, record_failures=True,
                 )
                 return _first_line(out)
-            _stage(log, "campaign", campaign)
+            _stage(log, "campaign", campaign, critical_failures)
 
             def repair():
                 out = server.campaign_repo_repair(
@@ -220,7 +300,7 @@ def main() -> int:
                     repair_rounds=2, timeout=45,
                 )
                 return _first_line(out)
-            _stage(log, "repo-repair", repair)
+            _stage(log, "repo-repair", repair, critical_failures)
 
     def drain():
         result = server._drain_deferred_distillations(limit=32)
@@ -278,13 +358,15 @@ def main() -> int:
 
     _stage(log, "winml-vitisai-check", lambda: _winml_vitisai_check(log))
 
+    if critical_failures:
+        log("critical stage failures: %s" % ", ".join(critical_failures))
     log("=== nightly self-improvement done ===")
     try:
         lock.unlink(missing_ok=True)
     except OSError:
         pass
     sink.close()
-    return 0
+    return 1 if critical_failures else 0
 
 
 if __name__ == "__main__":
