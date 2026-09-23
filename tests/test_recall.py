@@ -215,9 +215,11 @@ def test_hybrid_falls_back_to_bounded_lexical_recall_without_embedding():
     c = _conn()
     ms.log_interaction(c, "lexical-only", "lexical fallback task", "", "result", "sonder")
     ms.record_outcome_row(c, "lexical-only", "tests_passed", 1.0, source="caller")
+    ms.log_interaction(c, "newer-noise", "unrelated recent operation", "", "noise", "sonder")
+    ms.record_outcome_row(c, "newer-noise", "tests_passed", 1.0, source="caller")
 
     page = recall.recall_page(
-        c, "lexical fallback", embed_fn=lambda _task: None, min_sim=0.9,
+        c, "lexical fallback task", embed_fn=lambda _task: None, min_sim=0.9,
     )
 
     assert page.results == ("lexical fallback task -> result",)
