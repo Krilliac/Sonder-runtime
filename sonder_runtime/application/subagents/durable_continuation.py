@@ -49,6 +49,7 @@ class DurableContinuationRepository(Protocol):
     def create(self, session: DurableChildSession) -> DurableChildSession: ...
     def get(self, child_id: str) -> DurableChildSession | None: ...
     def get_active_by_key(self, parent_id: str, key: str, namespace: str) -> DurableChildSession | None: ...
+    def get_by_key(self, parent_id: str, key: str, namespace: str) -> DurableChildSession | None: ...
     def save_checkpoint(self, checkpoint: ContinuableCheckpoint, *, expected_sequence: int) -> DurableChildSession | None: ...
     def update(self, child_id: str, *, status: SubagentStatus, expected_revision: int | None = None,
                usage: SubagentUsage | None = None, result: SubagentResult | None = None,
@@ -202,6 +203,14 @@ class DurableContinuationService:
                             existing = lookup(request.parent_id, key, namespace)
                             if existing is not None:
                                 break
+            if existing is None:
+                lookup = getattr(self._repository, "get_by_key", None)
+                if callable(lookup):
+                    for key, namespace in ((request.resume_key, "resume"), (request.idempotency_key, "idempotency")):
+                        if key:
+                            existing = lookup(request.parent_id, key, namespace)
+                            if existing is not None:
+                                break
             if existing is not None and existing.status in {SubagentStatus.CREATED, SubagentStatus.QUEUED, SubagentStatus.RUNNING}:
                 same_scope = (
                     existing.request.parent_id == request.parent_id
@@ -256,6 +265,29 @@ class DurableContinuationService:
                         raise InvalidSubagentRequest("active child operation scope is incompatible")
                     return _Handle(self, existing_child_id, request.parent_id)
                 raise InvalidSubagentRequest("active child requires recover/resume after restart")
+            if existing is not None and existing.status in TERMINAL_SUBAGENT_STATUSES:
+                same_scope = (
+                    existing.request.parent_id == request.parent_id
+                    and existing.request.prompt == request.prompt
+                    and existing.request.budget == request.budget
+                    and existing.request.metadata == request.metadata
+                    and existing.request.resume_key == request.resume_key
+                    and existing.request.idempotency_key == request.idempotency_key
+                )
+                if not same_scope:
+                    raise InvalidSubagentRequest(
+                        "terminal child identity or scope does not match requested delegation"
+                    )
+                if not self._terminal_context_compatible(existing.request, context):
+                    raise InvalidSubagentRequest("terminal child operation scope cannot be proven")
+                if existing.recovery_required:
+                    raise InvalidSubagentRequest(
+                        "terminal child requires explicit resume after recovery"
+                    )
+                # The durable terminal result is the authoritative reuse
+                # value. Return a handle backed by the repository and do not
+                # admit a second worker or invoke the runner again.
+                return _Handle(self, existing.request.child_id, request.parent_id)
             parent = self._repository.get(request.parent_id)
             # A provider root is an admission anchor whose own id is already the
             # requested parent; it must not be duplicated in a child's ancestors.
@@ -421,6 +453,22 @@ class DurableContinuationService:
         if old_deadline is None:
             return new_deadline is None
         return new_deadline is None or new_deadline >= old_deadline
+
+    @staticmethod
+    def _terminal_context_compatible(request: SubagentRequest, context: OperationContext) -> bool:
+        metadata = dict(request.metadata)
+        if metadata.get("owner_id") != getattr(context, "principal_id", ""):
+            return False
+        stored_roots = tuple(filter(None, metadata.get("context_workspace_roots", "").split("|")))
+        current_roots = tuple(getattr(context, "workspace_roots", ()))
+        if not stored_roots or tuple(map(str, current_roots)) != stored_roots:
+            return False
+        for name in ("cloud_allowed", "remote_ollama_allowed", "session_id"):
+            if metadata.get("context_" + name, "") != str(getattr(context, name, "")):
+                return False
+        return not getattr(context, "expired", False) and not getattr(
+            getattr(context, "cancellation", None), "cancelled", False
+        )
 
     def _run(self, child_id, context, runner, control, root_id):
         try:

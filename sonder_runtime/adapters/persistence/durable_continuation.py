@@ -401,6 +401,26 @@ class SQLiteDurableContinuationRepository:
             ).fetchone()
         return self._row(row) if row else None
 
+    @_storage_read
+    def get_by_key(self, parent_id: str, key: str, namespace: str) -> DurableChildSession | None:
+        if not isinstance(parent_id, str) or not parent_id.strip() or not isinstance(key, str) or not key.strip():
+            raise InvalidSubagentRequest("parent_id and key are required")
+        column = {"resume": "resume_key", "idempotency": "idempotency_key"}.get(namespace)
+        if column is None:
+            raise InvalidSubagentRequest("key namespace must be resume or idempotency")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT child_id,parent_id,ancestors_json,prompt,budget_json,metadata_json,status,"
+                "checkpoint_sequence,checkpoint_state_json,checkpoint_cursor,revision,usage_json,result_json,"
+                "recovery_required,cancellation_requested,cancellation_reason,resume_key,idempotency_key,"
+                "terminal_verification_json FROM durable_child_session "
+                f"WHERE parent_id=? AND {column}=? ORDER BY child_id LIMIT 2",
+                (parent_id, key),
+            ).fetchall()
+        if len(rows) > 1:
+            raise InvalidSubagentRequest("ambiguous durable worker key requires explicit recovery")
+        return self._row(rows[0]) if rows else None
+
     def _capacity(self, connection, extra=0):
         count, size = connection.execute(
             "SELECT COUNT(*),COALESCE(SUM(length(payload)),0) FROM continuation_intent"
