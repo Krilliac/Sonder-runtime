@@ -186,7 +186,10 @@ def _regression_command(py: str, *, ignore_paths=()) -> list[str]:
         capture_output=True, stdin=subprocess.DEVNULL, check=False,
         timeout=10,
     )
-    command = [py, "-m", "pytest", "-q"]
+    # A single failing regression is enough to reject this candidate. Stop
+    # promptly instead of spending the entire nightly budget collecting the
+    # same infrastructure failure thousands of times.
+    command = [py, "-m", "pytest", "-q", "--maxfail=1"]
     if probe.returncode == 0:
         command.extend(["-n", "4", "--dist", "load"])
     for path in ignore_paths:
