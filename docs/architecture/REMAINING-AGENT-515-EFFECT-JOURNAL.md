@@ -84,6 +84,61 @@ launch and before the adapter returns a receipt, then reopens the journal.
 The effect is `uncertain`, restart requires explicit reconciliation, and the
 mutation remains exactly once in the fixture.
 
+## Hard-crash cut coverage for every direct worker family
+
+`tests/test_worker_effect_crash_injection.py` drives each direct mutating
+worker family through its real adapter: `SubprocessJobProvider.start`
+(`process-start`), `ComputeJobWorker.submit` (`compute-submit`),
+`ComputeJobWorker.cancel` (`compute-cancel`), `LocalSubagentProvider.spawn`
+(`subagent-run`), and `GuardedLegacySelfmodService.deploy`
+(`selfmod-deploy`). Each case runs in a child interpreter against a
+file-backed `SQLiteEffectJournal` and is killed with `os._exit` at one cut, so
+no `except` or `finally` handler runs. The external effect appends to a marker
+file, so duplicate execution is counted rather than inferred. The child's exit
+status is asserted first; a case whose crash hook did not fire fails.
+
+| Cut | What is on disk after the crash | Restart behavior |
+|---|---|---|
+| after intent, before the effect | intent, no receipt, no covering checkpoint; effect count 0 | restart refuses; the intent becomes `uncertain`; a late receipt from epoch 1 is refused |
+| during the effect | as above; effect count 1 | same |
+| after the effect, before the receipt | as above; effect count 1 | same |
+| receipt applied inside the transaction, before checkpoint and `COMMIT` | SQLite rolls back the receipt: bare intent, no checkpoint | same; this shows the receipt and checkpoint are atomic |
+| after the receipt+checkpoint `COMMIT` | `completed`; checkpoint high-water equals the intent sequence | restart resumes; restored checkpoint names the stored receipt |
+
+For every family and cut, a restarted worker at a newer epoch retries the same
+operation. The effect journal refuses it: the restart fence for unresolved
+cuts, or intent-identity conflict or duplicate-intent refusal for the
+committed cut. The marker count does not change. For `subagent-run`, the
+refusal surfaces as a non-succeeded child, because the child runs on a worker
+thread. That gives 25 hard-crash cases (5 families x 5 cuts).
+
+A mutation check confirmed that the harness is not vacuous. Temporarily
+committing the receipt before the checkpoint insert made all five
+`in_receipt_txn` cases fail. The source was restored afterward. Removing only the
+duplicate-intent refusal in `JournalBinding.begin_request` did not make the
+`after_commit` cases fail, because the owner-epoch identity check in
+`SQLiteEffectJournal.begin` also refuses the retry. The retry is therefore
+defended at two layers. The single-layer duplicate refusal is covered by
+existing same-epoch replay tests in `tests/test_effect_journal.py`.
+
+### Defect fixed: post-invoke publication failure left a reattachable intent
+
+Before this change, `journaled_effect` marked an intent `uncertain` only when
+the worker invocation itself raised. Suppose the effect ran and then receipt
+publication failed: a `success` predicate or `checkpoint_state` projection
+raised, the state was not serializable, or the atomic outcome+checkpoint
+transaction was refused. The intent stayed a bare `intent`. `recover()`
+reattaches a bare intent to a live owner at the same epoch. This happens when
+composition passes an authenticated liveness map. In that case, an effect that
+had already run could be invoked a second time. `journaled_effect` now marks
+every post-invoke publication failure `uncertain`. The detail records only the
+exception type name. If the journal cannot record that, the original error still
+propagates, and restart recovery treats the bare intent as orphaned. RED
+evidence: `test_post_invoke_publication_failure_is_uncertain_not_reattachable`
+and `test_success_predicate_failure_after_effect_is_uncertain` failed before
+the fix (`state=intent`, `recover(...).action == "reattach"` path) and pass
+after it.
+
 Evidence:
 
 - `sonder_runtime/adapters/persistence/sqlite/effect_journal.py`
@@ -92,14 +147,46 @@ Evidence:
 - `sonder_runtime/adapters/execution/process_jobs.py`
 - `tests/test_effect_journal.py`
 - `tests/test_worker_effect_bindings.py`
+- `tests/test_worker_effect_crash_injection.py`
 
 Focused verification:
+
+- `python -m pytest -p no:cacheprovider -q tests/test_worker_effect_crash_injection.py`: 27 passed (25 hard-crash cases and 2 post-invoke regression tests).
+- The 23 test files that import the effect journal, worker bindings, process jobs, compute jobs, subagent adapter, or self-mod service: 410 passed, 2 skipped (one needs a container runtime, one needs `/proc`).
+
+Earlier verification of this slice:
 
 - `python -m pytest -q tests/test_effect_journal.py tests/test_worker_effect_bindings.py tests/test_worker_capacity.py` — 50 passed, including verifier reconciliation, restart, stale epoch, replay, conflicting proof, and concurrent reconciler coverage.
 - `python -m compileall -q sonder_runtime/application/execution/worker_bindings.py sonder_runtime/adapters/persistence/sqlite/effect_journal.py` — passed.
 - `git diff --check` — passed.
 
-Remaining limits: this does not claim fault-injection coverage for every
-worker family, and legacy self-mod preparation, backup, testing, review, and
-approval remain outside the journal. A full hosted regression and deployment
-receipt are also required before promoting LOOP-008 to `verified`.
+Remaining limits:
+
+- Hard-crash coverage now includes every direct worker family that calls
+  `journaled_effect`. The typed tool gateway journal path
+  (`gateway_contract.execute`) and interactive lanes are not part of this
+  child-process crash matrix. Their existing tests cover exception-path
+  uncertainty only.
+- Crash cases use deterministic in-process effect doubles for the process
+  launcher, compute provider, subagent runner, and legacy self-mod adapter. The
+  earlier real child-process test covers only the process family's real OS
+  launch.
+- Legacy self-mod stages other than deploy and rollback still run outside the
+  journal: `create_backup`, `prepare_workspace`, `record_reproducer_before`,
+  `begin_testing`, `record_test`, `review`, and `approve`. This change is
+  described here but not made. `_mutating_call` hardcodes a deploy-shaped
+  success predicate and one `"{operation}:{run_id}"` operation ID per run. Each
+  stage would need its own success predicate. Repeatable stages such as
+  `record_test` also need a per-attempt operation identity, so that a
+  legitimate retry is not refused as a duplicate. Without that identity, the
+  journal would fence every retried test. This work belongs in
+  `selfmod_service.py`, not in the #519 low-integrity nightly harness files.
+- `compute-cancel` uses one operation ID per job. A second cancel of the same
+  job is refused as a duplicate intent, even after a
+  `cancellation_requested` receipt whose cleanup was pending. This was
+  confirmed by a direct run. Retrying cancellation needs a per-attempt identity
+  or a query-based reconciliation strategy.
+- Compute, subagent, and self-mod operation families still have no provider
+  verifier, so their fences can be cleared only by future trusted composition.
+- A full hosted regression and deployment receipt are still required before
+  LOOP-008 can be promoted to `verified`.
