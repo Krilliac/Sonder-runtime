@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS durable_child_session (
     status TEXT NOT NULL, checkpoint_sequence INTEGER, checkpoint_state_json TEXT,
     checkpoint_cursor TEXT, revision INTEGER NOT NULL, usage_json TEXT NOT NULL,
     result_json TEXT, recovery_required INTEGER NOT NULL,
-    cancellation_requested INTEGER NOT NULL, cancellation_reason TEXT
+    cancellation_requested INTEGER NOT NULL, cancellation_reason TEXT,
+    resume_key TEXT NOT NULL DEFAULT '', idempotency_key TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -174,6 +175,13 @@ class SQLiteDurableContinuationRepository:
         self._admissions_stopped = False
         with self._connect() as connection:
             connection.executescript(_DDL)
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(durable_child_session)")}
+            if "resume_key" not in columns:
+                connection.execute("ALTER TABLE durable_child_session ADD COLUMN resume_key TEXT NOT NULL DEFAULT ''")
+            if "idempotency_key" not in columns:
+                connection.execute("ALTER TABLE durable_child_session ADD COLUMN idempotency_key TEXT NOT NULL DEFAULT ''")
+            connection.execute("CREATE INDEX IF NOT EXISTS ix_child_resume_key ON durable_child_session(parent_id,resume_key,status)")
+            connection.execute("CREATE INDEX IF NOT EXISTS ix_child_idempotency_key ON durable_child_session(parent_id,idempotency_key,status)")
 
     @contextmanager
     def _connect(self):
@@ -243,6 +251,8 @@ class SQLiteDurableContinuationRepository:
             recovery,
             cancelling,
             reason,
+            resume_key,
+            idempotency_key,
         ) = row
         request = SubagentRequest(
             parent_id,
@@ -250,6 +260,8 @@ class SQLiteDurableContinuationRepository:
             SubagentBudget(**json.loads(budget)),
             child_id,
             tuple(tuple(item) for item in json.loads(metadata)),
+            resume_key or "",
+            idempotency_key or "",
         )
         checkpoint = (
             None
@@ -275,7 +287,7 @@ class SQLiteDurableContinuationRepository:
         row = connection.execute(
             "SELECT child_id,parent_id,ancestors_json,prompt,budget_json,metadata_json,status,"
             "checkpoint_sequence,checkpoint_state_json,checkpoint_cursor,revision,usage_json,result_json,"
-            "recovery_required,cancellation_requested,cancellation_reason FROM durable_child_session WHERE child_id=?",
+            "recovery_required,cancellation_requested,cancellation_reason,resume_key,idempotency_key FROM durable_child_session WHERE child_id=?",
             (child_id,),
         ).fetchone()
         return self._row(row) if row else None
@@ -286,9 +298,24 @@ class SQLiteDurableContinuationRepository:
         child_id = session.request.child_id
         if child_id is None:
             raise InvalidSubagentRequest("durable child sessions require a child_id")
+        active = (SubagentStatus.CREATED.value, SubagentStatus.QUEUED.value, SubagentStatus.RUNNING.value)
+        if session.request.resume_key:
+            duplicate = connection.execute(
+                "SELECT child_id FROM durable_child_session WHERE parent_id=? AND resume_key=? AND status IN (?,?,?) LIMIT 1",
+                (session.request.parent_id, session.request.resume_key, *active),
+            ).fetchone()
+            if duplicate is not None:
+                raise InvalidSubagentRequest("active child resume key already exists for parent")
+        if session.request.idempotency_key:
+            duplicate = connection.execute(
+                "SELECT child_id FROM durable_child_session WHERE parent_id=? AND idempotency_key=? AND status IN (?,?,?) LIMIT 1",
+                (session.request.parent_id, session.request.idempotency_key, *active),
+            ).fetchone()
+            if duplicate is not None:
+                raise InvalidSubagentRequest("active child idempotency key already exists for parent")
         try:
             connection.execute(
-                "INSERT INTO durable_child_session VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO durable_child_session VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     child_id,
                     session.request.parent_id,
@@ -310,6 +337,8 @@ class SQLiteDurableContinuationRepository:
                     int(session.recovery_required),
                     int(session.cancellation_requested),
                     session.cancellation_reason,
+                    session.request.resume_key,
+                    session.request.idempotency_key,
                 ),
             )
             if connection.execute(
@@ -706,7 +735,7 @@ class SQLiteDurableContinuationRepository:
             rows = connection.execute(
                 "SELECT child_id,parent_id,ancestors_json,prompt,budget_json,metadata_json,status,"
                 "checkpoint_sequence,checkpoint_state_json,checkpoint_cursor,revision,usage_json,result_json,"
-                "recovery_required,cancellation_requested,cancellation_reason FROM durable_child_session "
+                "recovery_required,cancellation_requested,cancellation_reason,resume_key,idempotency_key FROM durable_child_session "
                 "WHERE status NOT IN (?,?,?,?) ORDER BY child_id",
                 tuple(status.value for status in TERMINAL_SUBAGENT_STATUSES),
             ).fetchall()
@@ -721,7 +750,7 @@ class SQLiteDurableContinuationRepository:
             rows = connection.execute(
                 "SELECT child_id,parent_id,ancestors_json,prompt,budget_json,metadata_json,status,"
                 "checkpoint_sequence,checkpoint_state_json,checkpoint_cursor,revision,usage_json,result_json,"
-                "recovery_required,cancellation_requested,cancellation_reason FROM durable_child_session "
+                "recovery_required,cancellation_requested,cancellation_reason,resume_key,idempotency_key FROM durable_child_session "
                 "ORDER BY rowid LIMIT ?",
                 (limit,),
             ).fetchall()
