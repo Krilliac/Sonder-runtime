@@ -94,6 +94,6 @@ still exist.
 
 ## Formal requirement status
 
-DOC-001 through DOC-007 remain unchecked in the master specification after this
+DOC-001 through DOC-005 and DOC-007 remain unchecked in the master specification after this
 documentation change. The requested documentation contracts are present and
 tested, but no formal checkbox or evidence-ledger record is changed here.
