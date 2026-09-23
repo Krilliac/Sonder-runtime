@@ -37,9 +37,10 @@ removed. The plan digest binds the
 source id, project scope, and exact row contents.  The command then acquires
 `BEGIN IMMEDIATE` and re-reads the plan inside that write lock; a writer that
 raced backup creation therefore causes a stale-plan refusal before any
-mutation. Existing state rows with a different source owner, or without
-matching journal upsert evidence, are rejected before a migration plan or
-backup is approved. If the process is interrupted after the write lock is
+mutation. Existing state rows, including tombstone-only rows, are rejected
+before a migration plan or backup is approved when ownership differs or the
+exact versioned journal upsert/delete evidence is missing. If the process is
+interrupted after the write lock is
 acquired, the transaction is rolled back and the connection is left idle so
 a fresh dry run can safely resume the operation. Each adopted fact gets a
 version-one upsert record with empty
