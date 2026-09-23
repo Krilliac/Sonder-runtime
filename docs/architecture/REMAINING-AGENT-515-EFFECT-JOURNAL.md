@@ -56,7 +56,10 @@ behavior when a provider hangs.
 The production bootstrap now composes one concrete verifier for the
 `process-start:<job_id>` family. It reads the durable process job registry's
 terminal record and derives a bounded outcome digest from the job identity,
-status, and revision. `succeeded` produces a completed proof; `failed` or
+kind, operation, idempotency key, status, and revision. The durable kind and
+idempotency key must exactly match the journaled identity, and the durable
+operation must be non-empty under the supported process contract.
+`succeeded` produces a completed proof; `failed` or
 `cancelled` produces a failed proof. Pending, missing, malformed, or otherwise
 unknown registry state produces no proof and leaves the fence set. The
 verifier never uses process output, caller text, or an in-memory process handle
