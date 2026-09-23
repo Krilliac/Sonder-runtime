@@ -33,7 +33,7 @@ def _project(root: Path, *, name: str, rule: str) -> Path:
     skill = project / "play"
     skill.mkdir()
     (skill / "SKILL.md").write_text(
-        "---\nname: play\ndescription: Scoped playtest skill\n---\n",
+        "---\nname: play\ndescription: Scoped scenario validation skill\n---\n",
         encoding="utf-8",
     )
     return project
@@ -59,7 +59,7 @@ def test_live_agent_request_assembles_scoped_rules_skills_and_reuses_prefix(tmp_
     service.run_pending(lane, context)
     request = model.requests[0]
     assert "ALPHA RULE: keep changes bounded" in request.system
-    assert "play: Scoped playtest skill" in request.system
+    assert "play: Scoped scenario validation skill" in request.system
     assert planner.prefix_cache_telemetry.writes == 1
 
     # A changed dynamic turn does not change stable producer identity.
