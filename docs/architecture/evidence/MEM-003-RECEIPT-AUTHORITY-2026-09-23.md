@@ -45,7 +45,53 @@ Evidence:
 - `tests/test_receipt_observation.py`: production unit-of-work composition,
   independent subject promotion, and persisted negative demotion.
 
-The full acceptance target remains open until hosted CI and a real managed
-session exercise the composed production path. No semantic fact claim is
-accepted from `HostFinalFacts` in this slice; promotion is limited to the
-canonical verifier-subject token.
+## Live managed-work invocation (revision 5)
+
+`sonder_runtime/bootstrap/managed_learning.py` adds `ManagedLearningRecorder`,
+a bootstrap-owned recorder composed by `AppManagedWorkHttp` with the owned
+`Application` and the same private `runtime._standalone_verifier_factory`
+that decides terminal eligibility. It is wired into the two production
+points where a managed session reaches a terminal verifier outcome:
+
+- `AppManagedWorkDispatcher._run`, after the host-current eligibility
+  decision is recorded (certified terminal or verified failed check);
+- `AppWorkRecoveryAttempt.resume`, after recovered completion or a verified
+  failed check (composed by `app_work_recovery_http`).
+
+The recorder only acts on a `ManagedTerminalEligibility` carrying the exact
+`_HostVerifierAuthority` type in a certified/failed phase, and only for the
+exact `ManagedConversationLifetime`/`ManagedStandaloneSession` owner types.
+It calls `persist_learning_observation_durable`, which re-runs the current
+owner-bound eligibility and the receipt producer against the application
+unit of work; callers pass no receipt, worker, trust, or fact text, and no
+`HostFinalFacts` semantic claim is accepted. Failures are recorded as a
+bounded `refused` outcome and never change the work result. When the
+composed unit of work has an authoritative fact source whose project scope
+equals the receipt scope, the recorder then runs
+`MemoryLearningFacade.promote_verified_subject` for the canonical subject
+token; otherwise promotion reports `unconfigured` or `out_of_scope`.
+
+Evidence (local, Windows, `-p no:cacheprovider`):
+
+- `tests/test_managed_learning_composition.py::test_live_certified_managed_work_persists_authenticated_observation`:
+  real `AppManagedWorkDispatcher`, `server._application()`, an
+  `AppManagedAuthority`-bound `ManagedStandaloneSession`, the real delegated
+  verifier and approval bridge. The work reaches `terminal`/`certified`, and
+  exactly one `passed` observation is persisted in the application memory
+  database with the host principal, run, final receipt digest, and
+  worker-derived independence key. No eligibility value is constructed by
+  the test. RED check: disabling the dispatcher hook makes this test fail.
+- `tests/test_app_recovery_coordinator.py::test_real_pending_work_explicitly_reattaches_and_certifies_once`:
+  the live recovery hook runs for a `certified_after_return` completion and
+  fails closed (`refused`, `PERSIST_VALUEERROR`, no observation) because the
+  original outward final carried no certificate identity.
+
+Remaining gaps: `certified_after_return` recoveries are not yet learning
+evidence (the producer requires the original final to carry the
+certificate); live promotion runs only when replication composition supplies
+an authoritative fact source (owned by PR #538 / issue #514); the
+verified-failed dispatcher path is covered by unit tests, not a live
+failing-check run; and hosted CI has not yet run this revision.
+
+No semantic fact claim is accepted from `HostFinalFacts` in this slice;
+promotion is limited to the canonical verifier-subject token.

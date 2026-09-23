@@ -30,6 +30,7 @@ from .app_control_http import _principal
 from .app_managed_authority import AppManagedAuthority
 from .app_managed_work import AppManagedWorkDispatcher, dispatch_approval_arguments
 from .managed_conversation import ManagedConversationLifetime
+from .managed_learning import ManagedLearningRecorder
 from .managed_standalone import ManagedStandaloneSession
 from .prepared_workbench import PreparedWorkbenchAdapter
 
@@ -177,6 +178,14 @@ class AppManagedWorkHttpBinding:
         self.authority = AppManagedAuthority(control, self.lanes)
         self.permission_engine = permission_engine
         self.ledger = permission_engine.approval_ledger().pinned()
+        # Verifier learning is host-owned: the same private verifier factory
+        # that decides terminal eligibility re-derives every observation.
+        self.learning = ManagedLearningRecorder(
+            application,
+            verifier_factory=lambda *args: self.runtime._standalone_verifier_factory(
+                *args
+            ),
+        )
         self.dispatcher = AppManagedWorkDispatcher(
             self.authority,
             _AppWorkbench(self),
@@ -184,6 +193,7 @@ class AppManagedWorkHttpBinding:
             lifetime_factory=self._lifetime,
             authorize_dispatch=self._approve_work,
             terminal_eligibility=self._eligibility,
+            learning=self.learning,
         )
         registration = None
         try:

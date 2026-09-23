@@ -77,12 +77,15 @@ class AppManagedWorkDispatcher:
         max_workers=1,
         max_retained=32,
         application=None,
+        learning=None,
     ):
         if any(
             not callable(value)
             for value in (lifetime_factory, authorize_dispatch, terminal_eligibility)
         ):
             raise TypeError("trusted managed work callbacks required")
+        if learning is not None and not callable(learning):
+            raise TypeError("host-owned learning recorder must be callable")
         if (
             type(max_workers) is not int
             or not 1 <= max_workers <= 8
@@ -94,6 +97,9 @@ class AppManagedWorkDispatcher:
             raise TypeError("private authority and prepared workbench required")
         self.authority, self.workbench = authority, workbench
         self._application = application
+        # Bootstrap-owned verifier learning; None only for unowned legacy
+        # compositions.  It receives the exact lifetime, never request data.
+        self._learning = learning
         self._factory, self._authorize, self._eligibility = (
             lifetime_factory,
             authorize_dispatch,
@@ -436,6 +442,10 @@ class AppManagedWorkDispatcher:
                 )
             else:
                 self._unknown(entry.selection, entry.record, stage)
+            if self._learning is not None and eligibility.authority is not None:
+                # The recorder re-derives everything from the current durable
+                # host turn and never raises into the work outcome.
+                self._learning(lifetime, entry.record.host_turn, eligibility)
         except BaseException:
             self._unknown(entry.selection, entry.record, stage)
         finally:

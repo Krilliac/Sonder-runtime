@@ -54,7 +54,7 @@ from tests.test_app_work_dispatcher import dispatch, prepare
 
 
 def test_real_pending_work_explicitly_reattaches_and_certifies_once(
-    dispatch, managed, monkeypatch, tmp_path
+    dispatch, managed, monkeypatch, tmp_path, tmp_path_factory
 ):
     from dataclasses import replace
     from types import SimpleNamespace
@@ -190,6 +190,14 @@ def test_real_pending_work_explicitly_reattaches_and_certifies_once(
             approve_verification=approve,
         )
 
+    from sonder_runtime.bootstrap.managed_learning import ManagedLearningRecorder
+
+    monkeypatch.setenv(
+        "SONDER_DB", str(tmp_path_factory.mktemp("recovery-learning") / "memory.db")
+    )
+    learning = ManagedLearningRecorder(
+        application, verifier_factory=lambda *args: verified[0][0]
+    )
     attempt = AppWorkRecoveryAttempt(
         authority=authority,
         selection=selected,
@@ -200,6 +208,7 @@ def test_real_pending_work_explicitly_reattaches_and_certifies_once(
         approve_verification=approve,
         private_paths=private_paths,
         model_writable_roots=model_roots,
+        learning=learning,
     )
     try:
         with pytest.raises(PermissionError, match="exact private account recovery"):
@@ -245,6 +254,14 @@ def test_real_pending_work_explicitly_reattaches_and_certifies_once(
         assert result.work.terminal == original.verification_pending.original_terminal
         assert result.work.completion.phase == "certified_after_return"
         assert verified[0][1].calls == 1 and len(models) == 1
+        # The recovered certificate reaches the live learning hook, but the
+        # original outward final was UNVERIFIED, so the producer fails closed
+        # and no trusted observation is minted for certified_after_return.
+        outcomes = learning.recent()
+        assert [o.status for o in outcomes] == ["refused"], outcomes
+        # The producer refuses the blank original certificate identity.
+        assert outcomes[0].code == "PERSIST_VALUEERROR"
+        assert outcomes[0].observation_id is None
 
         def no_callbacks(*args, **kwargs):
             raise AssertionError("completed retry must be observational")
