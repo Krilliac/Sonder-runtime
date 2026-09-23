@@ -345,7 +345,7 @@
       ]
     },
     {
-      "file_count": 329,
+      "file_count": 330,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -429,6 +429,7 @@
         "sonder_runtime/application/execution/facade.py",
         "sonder_runtime/application/execution/process_jobs.py",
         "sonder_runtime/application/execution/tool_service.py",
+        "sonder_runtime/application/execution/worker_bindings.py",
         "sonder_runtime/application/execution/world_control.py",
         "sonder_runtime/application/execution/world_providers.py",
         "sonder_runtime/application/extensions/__init__.py",
