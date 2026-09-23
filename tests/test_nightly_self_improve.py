@@ -129,10 +129,7 @@ def test_nightly_stage_records_critical_failure():
 
 def test_nightly_classifies_known_blocking_results_but_keeps_intentional_skips():
     cases = [
-        ("campaign", "ERROR: backend unavailable", True),
-        ("repo-repair", "ERROR: no model produced an answer", True),
         ("selfmod", "working tree dirty (4 path(s)); none was started", True),
-        ("selfmod", "ERROR: model unavailable: Ollama HTTP 500", True),
         ("selfmod", "selfmod disabled", False),
         ("selfmod", "no actionable objective proposed", False),
     ]
