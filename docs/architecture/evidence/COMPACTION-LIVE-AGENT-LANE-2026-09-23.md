@@ -98,3 +98,48 @@ python -m pytest -p no:cacheprovider -q tests/test_session_complete_recovery_adv
 python -m pytest -p no:cacheprovider -q <76 session/compaction/replay/lane/control-plane/wp4 files>
 673 passed in 128.81s
 ```
+
+## Review follow-up: verified handoff and legacy payloads (2026-09-23)
+
+Independent review of head `c05d35ec` reported two P3 items; both are fixed.
+
+P3-a, unverified second read: the live lane verified history with
+`read_complete` but passed only its sequence range to `archive_context`,
+which re-read the range with an unverified `read_range`. The model-bound
+events therefore came from a second read, not the verified snapshot. The lane
+now calls `SessionCompactionService.archive_verified_context`, which archives
+the verified tuple as-is (after checking it starts at sequence 1 and is
+contiguous). The same change removes a related production defect: bootstrap
+wires `SessionCompactionService(repo)` with its default 1,000-event bound, so
+`archive_context` raised `source range exceeds the service bound` for any
+session between 1,001 and 10,000 events despite complete recovery succeeding.
+
+P3-b, append cap applied to verification: the 8 MiB per-event cap lived in
+`_canonical_payload`, which is also used to verify stored events, so a legacy
+event over 8 MiB made `inspect_integrity` raise instead of reporting and
+blocked continuation as an integrity failure. The cap now applies only on
+append (`_bounded_append_payload`); reads keep the 64 MiB total guard in
+`read_complete`.
+
+RED before the fixes (4 new tests):
+
+```text
+test_live_request_model_context_is_the_verified_snapshot_not_a_second_read
+  AssertionError: 'FORGED after verification' reached model history
+test_live_request_with_production_default_compaction_bound_recovers_long_history
+  SessionCompactionError: source range exceeds the service bound
+test_legacy_event_over_append_cap_remains_recoverable_and_reportable
+test_tampered_legacy_oversized_event_is_reported_not_raised
+  ValueError: payload exceeds the session event byte bound
+4 failed
+```
+
+GREEN after the fixes:
+
+```text
+python -m pytest -p no:cacheprovider -q <the 4 tests plus 2 name-matched neighbours>
+6 passed
+
+python -m pytest -p no:cacheprovider -q <76 session/compaction/replay/lane/control-plane/wp4 files>
+677 passed in 578.78s
+```
