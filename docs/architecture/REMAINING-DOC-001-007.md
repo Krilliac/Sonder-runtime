@@ -12,7 +12,7 @@ DOC-007 remains process/source-review work beyond this focused slice.
 | DOC-002 | Historical labeling | authority index historical table and README labels | implemented foundation |
 | DOC-003 | Unique ADR namespace | `adr/README.md` and namespace test | implemented foundation |
 | DOC-004 | Focused contracts | focused current-contract map | implemented foundation |
-| DOC-005 | Generated references | generated runtime reference, architecture map, and freshness checker | implemented foundation where runtime metadata permits |
+| DOC-005 | Generated references | generated runtime reference now covers tools, commands, events, configuration, MCP/OpenAI/client/event schemas, and SDK/operational capabilities with source hashes and a direct freshness gate | implemented-unverified foundation; hosted CI receipt pending |
 | DOC-006 | Status evidence discipline | explicit evidence coupling, ledger revision, generated status, and CI base-diff gate | verified repository evidence wiring; semantic and privileged-bypass limits remain |
 | DOC-007 | No stale promises | inventory below and authority tests | implemented inventory; source prose still requires ordinary review |
 
@@ -34,13 +34,14 @@ document and the master-spec checkbox/evidence state.
 ## Generated-reference freshness
 
 `scripts/generate_documentation_catalogs.py` projects command and MCP tool
-metadata, typed event payload fields, and typed configuration dataclass fields
-into deterministic JSON/Markdown references. `GeneratedCatalogs.generate`
-remains the application-level client/schema projection; this documentation
-adapter does not alter runtime behavior. Unavailable optional metadata is
-recorded as an explicit source error. The freshness gate is
-`scripts/check_documentation_authority.py` and its focused contract is
-`tests/test_remaining_doc_001_005.py`.
+metadata, typed event payload fields, typed configuration dataclass fields,
+four typed schema projections, and typed SDK/operational capability references
+into deterministic JSON/Markdown references. The generated projections share
+the `GeneratedCatalogs` digest and include source hashes. The documentation
+adapter does not alter runtime behavior and now fails closed when the runtime
+tool source cannot be imported. The freshness gate is
+`scripts/check_documentation_authority.py`, runs directly in CI, and is also
+covered by `tests/test_remaining_doc_001_005.py`.
 
 ## Verification boundary
 
