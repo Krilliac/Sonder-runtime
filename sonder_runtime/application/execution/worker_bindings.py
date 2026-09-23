@@ -159,8 +159,8 @@ def journaled_effect(
                 "intent_id": intent.intent_id,
                 "operation_id": intent.operation_id,
                 "receipt_key": key,
+                "outcome_digest": outcome.outcome_digest,
             },
-            "result": _json_safe(result),
         }
     else:
         state = _json_safe(state)
