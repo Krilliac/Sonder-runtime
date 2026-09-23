@@ -10,7 +10,12 @@ from __future__ import annotations
 from array import array
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from dataclasses import dataclass
+import hashlib
+import json
 import math
+from pathlib import Path
+import sqlite3
 
 from sonder_runtime.adapters.persistence.sqlite.memory_replication import (
     append_memory_mutations_in_transaction,
@@ -26,6 +31,7 @@ from .authoritative_indexes import materialize_authoritative_fact_index
 
 _MAX_EMBEDDING = 16_384
 _SAVEPOINT = "sonder_authoritative_fact_write"
+_MAX_MIGRATION_ROWS = 1024
 
 
 def _recorded_at() -> str:
@@ -62,6 +68,98 @@ def _fact_payload(text: object, embedding: object, metadata: AuthoritativeFactMe
         raise MemoryReplicationError("fact embedding is not projection-safe")
     payload["embedding"] = list(values)
     return payload
+
+
+@dataclass(frozen=True)
+class LegacyFactMigrationPlan:
+    """A content-addressed, operator-approved legacy fact adoption plan."""
+
+    source_id: str
+    project_scope: str
+    rows: tuple[tuple[str, str, str, bytes | None], ...]
+    digest: str
+
+
+def plan_legacy_fact_migration(connection, *, source_id: str, project_scope: str) -> LegacyFactMigrationPlan:
+    """Capture unjournaled facts for one scope without changing the database."""
+    if type(project_scope) is not str or not project_scope:
+        raise MemoryReplicationError("authoritative fact scope is required")
+    if type(source_id) is not str or not source_id:
+        raise MemoryReplicationError("authoritative fact source is required")
+    rows = connection.execute(
+        "SELECT fact.id,fact.project,fact.text,fact.embedding "
+        "FROM facts AS fact LEFT JOIN memory_authoritative_fact_state AS state "
+        "ON state.project=fact.project AND state.fact_id=fact.id "
+        "WHERE fact.project=? AND state.fact_id IS NULL ORDER BY fact.id LIMIT ?",
+        (project_scope, _MAX_MIGRATION_ROWS + 1),
+    ).fetchall()
+    if len(rows) > _MAX_MIGRATION_ROWS:
+        raise MemoryReplicationError("legacy fact migration exceeds the bounded plan size")
+    normalized = tuple(
+        (str(row[0]), str(row[1]), str(row[2]), bytes(row[3]) if row[3] is not None else None)
+        for row in rows
+    )
+    digest = hashlib.sha256(json.dumps(
+        [(fact_id, project, text, embedding.hex() if embedding is not None else None)
+         for fact_id, project, text, embedding in normalized],
+        ensure_ascii=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    return LegacyFactMigrationPlan(source_id, project_scope, normalized, digest)
+
+
+def migrate_legacy_facts(
+    connection,
+    plan: LegacyFactMigrationPlan,
+    *,
+    backup_path: str | Path | None = None,
+) -> int:
+    """Adopt exactly the planned rows, with an optional SQLite backup first.
+
+    The backup is made before the write transaction.  The fact rows, source
+    state, journal records, and derived indexes then share one commit.  A
+    changed database invalidates the plan and performs no writes.
+    """
+    current = plan_legacy_fact_migration(
+        connection, source_id=plan.source_id, project_scope=plan.project_scope,
+    )
+    if current.digest != plan.digest or current.rows != plan.rows:
+        raise MemoryReplicationError("legacy fact migration plan is stale")
+    if backup_path is not None:
+        backup = Path(backup_path)
+        if backup.exists():
+            raise MemoryReplicationError("migration backup already exists")
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        target = sqlite3.connect(str(backup))
+        try:
+            connection.backup(target)
+            target.commit()
+        finally:
+            target.close()
+    source = SQLiteAuthoritativeFactSource(plan.source_id, project_scope=plan.project_scope)
+    with source._transaction(connection):
+        epoch, sequence = source._source_cursor(connection)
+        records = []
+        for fact_id, project, text, embedding in plan.rows:
+            state = source._existing_state(connection, fact_id)
+            if state is not None:
+                raise MemoryReplicationError("legacy fact migration encountered an owned fact")
+            record = MemoryMutation(
+                source_id=plan.source_id, source_epoch=epoch, sequence=sequence,
+                entity_kind="fact", entity_id=fact_id, version=1,
+                operation="upsert", project=project,
+                payload=_fact_payload(text, embedding, None), recorded_at=_recorded_at(),
+            )
+            records.append(record)
+            sequence += 1
+        if records:
+            for record in records:
+                source._store_state(connection, record)
+                materialize_authoritative_fact_index(connection, record)
+            append_memory_mutations_in_transaction(
+                connection, tuple(records), source_id=plan.source_id,
+                project_scope=plan.project_scope,
+            )
+    return len(plan.rows)
 
 
 class SQLiteAuthoritativeFactSource:
@@ -351,4 +449,8 @@ class SQLiteAuthoritativeFactSource:
             )
 
 
-__all__ = ["AuthoritativeFactMetadata", "SQLiteAuthoritativeFactSource"]
+__all__ = [
+    "AuthoritativeFactMetadata", "LegacyFactMigrationPlan",
+    "SQLiteAuthoritativeFactSource", "migrate_legacy_facts",
+    "plan_legacy_fact_migration",
+]
