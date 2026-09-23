@@ -155,6 +155,14 @@ class MetricsRegistry:
                          1000, 2000, 5000, 10000, float("inf")),
                 registry=self._registry,
             )
+            self.model_prompt_tokens = Histogram(
+                "sonder_model_prompt_tokens",
+                "Provider-reported prompt token counts by cache state",
+                ["backend", "state"],
+                buckets=(0, 1, 8, 32, 128, 512, 2048, 8192, 32768, 131072,
+                         1_000_000, float("inf")),
+                registry=self._registry,
+            )
             self.model_load_states_total = Counter(
                 "sonder_model_load_states_total",
                 "Explicit backend load-state observations",
@@ -240,6 +248,7 @@ class MetricsRegistry:
                 "model_calls_total", "model_call_duration_seconds",
                 "model_backend_phase_duration_seconds",
                 "model_token_throughput_per_second", "model_load_states_total",
+                "model_prompt_tokens",
                 "sqlite_lock_wait_seconds", "task_states", "autopilot_runs_total",
                 "backup_age_seconds", "backup_runs_total", "disk_free_bytes",
                 "redaction_failures_total", "auth_failures_total",
@@ -275,6 +284,14 @@ class MetricsRegistry:
                 self.model_token_throughput_per_second.labels(
                     backend=backend, direction=direction
                 ).observe(rate)
+        prompt_counts = (
+            ("total", getattr(telemetry, "prompt_tokens", None)),
+            ("cached", getattr(telemetry, "prompt_cached_tokens", None)),
+            ("uncached", getattr(telemetry, "prompt_uncached_tokens", None)),
+        )
+        for state, count in prompt_counts:
+            if isinstance(count, int) and not isinstance(count, bool) and 0 <= count <= 1_000_000_000:
+                self.model_prompt_tokens.labels(backend=backend, state=state).observe(count)
         state = getattr(telemetry, "load_state", None)
         if state in ("cold", "warm"):
             self.model_load_states_total.labels(backend=backend, state=state).inc()
