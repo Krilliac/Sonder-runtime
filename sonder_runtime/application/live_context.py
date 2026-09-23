@@ -158,7 +158,7 @@ class LiveAgentContextProducer:
         except (InstructionDiscoveryError, OSError, UnicodeError, ValueError) as exc:
             if previous is not None:
                 return LiveContextResult(
-                    root, previous.records, True,
+                    root, previous.records, False,
                     "last_good:" + type(exc).__name__, previous.digest,
                 )
             return LiveContextResult(root, (), False, type(exc).__name__, "")

@@ -82,8 +82,33 @@ def test_live_agent_context_is_scoped_and_uses_last_good_on_partial_refresh(tmp_
 
     (project_a / "AGENTS.md").unlink()
     stale = producer.refresh(project_a)
-    assert stale.complete and stale.reason.startswith("last_good:")
+    assert not stale.complete and stale.reason.startswith("last_good:")
     assert "ALPHA" in "\n".join(record.content for record in stale.records)
+
+
+def test_stale_project_rules_are_retained_but_not_injected_as_authoritative(tmp_path):
+    project = _project(tmp_path, name="alpha", rule="ALPHA RULE")
+    sessions = SQLiteSessionRepository(tmp_path / "sessions.db")
+    store = SQLiteAgentLaneStore(tmp_path / "lanes.db", sessions)
+    producer = LiveAgentContextProducer()
+    planner = ContextPlanningFacade()
+    service = AgentLaneService(
+        store, sessions, _Model(), auto_start=False,
+        context_planning=planner, live_context=producer,
+    )
+    context = local_owner_context(correlation_id="stale", workspace_roots=(tmp_path,))
+    lane_id = service.spawn(
+        command_id="spawn-stale", parent_session_id="parent", task="inspect",
+        workspace_root=str(project), context=context,
+    )["lane"]["id"]
+    lane = store.read_lane(lane_id)
+    first = service._request(lane, (), request_id="before-removal")
+    assert "ALPHA RULE" in first.system
+    (project / "AGENTS.md").unlink()
+    stale = service._request(lane, (), request_id="after-removal")
+    assert "ALPHA RULE" not in stale.system
+    assert "Live stable context unavailable: last_good:" in stale.system
+    assert planner.prefix_cache_telemetry.writes == 1
 
 
 def test_live_agent_context_rejects_redirected_workspace_root(tmp_path):
