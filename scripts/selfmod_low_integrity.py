@@ -60,9 +60,14 @@ def _drain_output(stream, output_path: Path, state: dict[str, object]) -> None:
                     chunks.appendleft(removed[-keep:])
                     total += min(keep, len(removed))
             _write_output_tail(output_path, chunks, total)
+    except Exception as exc:
+        state["drain_error"] = type(exc).__name__
     finally:
         state["output_tail"] = b"".join(chunks)[-_OUTPUT_TAIL_BYTES:]
-        _write_output_tail(output_path, chunks, total)
+        try:
+            _write_output_tail(output_path, chunks, total)
+        except Exception as exc:
+            state["drain_error"] = type(exc).__name__
         stream.close()
 
 
@@ -145,6 +150,9 @@ def _child(spec_path: Path) -> int:
         if reader.is_alive():
             result = {"returncode": 125, "timed_out": False,
                       "error": "output drain did not terminate"}
+        elif state.get("drain_error"):
+            result = {"returncode": 125, "timed_out": False,
+                      "error": "output drain failed: " + str(state["drain_error"])}
     except BaseException as exc:  # preserve a bounded diagnostic for parent
         if process is not None and process.poll() is None:
             process.kill()

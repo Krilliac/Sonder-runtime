@@ -152,6 +152,23 @@ def test_low_child_timeout_keeps_interim_diagnostic(tmp_path):
     assert details["timed_out"] is True
 
 
+def test_low_child_refuses_success_when_output_drain_fails(tmp_path, monkeypatch):
+    from scripts import selfmod_low_integrity
+
+    spec, _output, result = _child_spec(
+        tmp_path, [sys.executable, "-c", "print('candidate passed')"],
+    )
+
+    def refuse_output(*_args):
+        raise OSError("output unavailable")
+
+    monkeypatch.setattr(selfmod_low_integrity, "_write_output_tail", refuse_output)
+    assert selfmod_low_integrity._child(spec) == 125
+    assert "output drain failed" in json.loads(
+        result.read_text(encoding="utf-8")
+    )["error"]
+
+
 def test_record_test_routes_regression_and_held_out_through_low_runner(tmp_path, monkeypatch):
     import selfmod
     from scripts import selfmod_low_integrity
