@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from typing import Sequence
 
 
@@ -125,9 +126,6 @@ def run_isolated(
             "TEMP": str(work), "TMP": str(work),
             "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONPYCACHEPREFIX": str(work / "pycache"),
-            "PYTHONPATH": os.pathsep.join(
-                item for item in (str(Path(__file__).resolve().parent), os.environ.get("PYTHONPATH", "")) if item
-            ),
         }
         spec_path.write_text(json.dumps({
             "command": list(command), "cwd": str(Path(cwd).resolve()),
@@ -143,17 +141,42 @@ def run_isolated(
         manifest.write_text(json.dumps(before, sort_keys=True), encoding="utf-8")
         _label(manifest, "WinMediumLabelSid", win32security.SYSTEM_MANDATORY_LABEL_NO_READ_UP | win32security.SYSTEM_MANDATORY_LABEL_NO_WRITE_UP)
         token = _low_token()
-        job = win32job.CreateJobObject(None, "SonderSelfmodLow")
-        limits = win32job.QueryInformationJobObject(job, win32job.JobObjectExtendedLimitInformation)
-        limits["BasicLimitInformation"]["LimitFlags"] |= win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        win32job.SetInformationJobObject(job, win32job.JobObjectExtendedLimitInformation, limits)
-        startup = win32process.STARTUPINFO()
-        flags = win32con.CREATE_NO_WINDOW | win32con.CREATE_UNICODE_ENVIRONMENT | win32con.CREATE_SUSPENDED
-        command_line = subprocess.list2cmdline([sys.executable, "-m", "selfmod_low_integrity", "--child", str(spec_path)])
-        info = win32process.CreateProcessAsUser(token, None, command_line, None, None, False, flags, env, str(Path(cwd).resolve()), startup)
-        process_handle, thread_handle, _pid, _tid = info
+        job = process_handle = thread_handle = None
         try:
-            win32job.AssignProcessToJobObject(job, process_handle)
+            # pywin32 requires a name; a fresh unshared random name prevents
+            # candidate code from reopening a predictable job. Limit total
+            # memory and descendants,
+            # in addition to the wall-clock deadline below.
+            job = win32job.CreateJobObject(None, "SonderSelfmod-" + uuid.uuid4().hex)
+            limits = win32job.QueryInformationJobObject(job, win32job.JobObjectExtendedLimitInformation)
+            basic = limits["BasicLimitInformation"]
+            basic["ActiveProcessLimit"] = 16
+            basic["LimitFlags"] |= (
+                win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                | win32job.JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+                | win32job.JOB_OBJECT_LIMIT_PROCESS_MEMORY
+                | win32job.JOB_OBJECT_LIMIT_JOB_MEMORY
+            )
+            limits["ProcessMemoryLimit"] = 2 * 1024 ** 3
+            limits["JobMemoryLimit"] = 4 * 1024 ** 3
+            win32job.SetInformationJobObject(job, win32job.JobObjectExtendedLimitInformation, limits)
+            startup = win32process.STARTUPINFO()
+            flags = win32con.CREATE_NO_WINDOW | win32con.CREATE_UNICODE_ENVIRONMENT | win32con.CREATE_SUSPENDED
+            # The candidate checkout is the current directory.  Execute this
+            # trusted file by absolute path with isolated Python startup so a
+            # candidate module cannot shadow the supervisor via ``python -m``.
+            command_line = subprocess.list2cmdline([
+                sys.executable, "-I", str(Path(__file__).resolve()), "--child", str(spec_path),
+            ])
+            process_handle, thread_handle, _pid, _tid = win32process.CreateProcessAsUser(
+                token, None, command_line, None, None, False, flags, env,
+                str(Path(cwd).resolve()), startup,
+            )
+            try:
+                win32job.AssignProcessToJobObject(job, process_handle)
+            except Exception:
+                win32process.TerminateProcess(process_handle, 125)
+                raise
             win32process.ResumeThread(thread_handle)
             deadline = time.monotonic() + max(1, int(timeout)) + 10
             while win32process.GetExitCodeProcess(process_handle) == win32con.STILL_ACTIVE and time.monotonic() < deadline:
@@ -163,12 +186,18 @@ def run_isolated(
                 win32process.TerminateProcess(process_handle, 124)
             code = win32process.GetExitCodeProcess(process_handle)
         finally:
-            win32api.CloseHandle(thread_handle)
-            win32api.CloseHandle(process_handle)
-            win32api.CloseHandle(job)
-            win32api.CloseHandle(token)
-        result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else {}
-        output_text = output.read_bytes()[-120000:].decode("utf-8", "replace") if output.exists() else ""
+            for handle in (thread_handle, process_handle, job, token):
+                if handle is not None:
+                    win32api.CloseHandle(handle)
+        # The low child controls these files.  Its result JSON is diagnostic
+        # only; the trusted process handle supplies the exit status.  Read a
+        # bounded tail without following a candidate-created reparse point or
+        # loading an arbitrarily large file into the medium supervisor.
+        output_text = ""
+        if output.exists() and not output.is_symlink() and output.is_file():
+            with output.open("rb") as stream:
+                stream.seek(max(0, output.stat().st_size - 120000))
+                output_text = stream.read(120000).decode("utf-8", "replace")
         after = {str(path): _digest(path) for path in protected if path.is_file()}
         if before != after:
             return {"exit_code": 2, "output": output_text + "\nSELFMOD EVALUATOR CANARY FAILED: protected truth changed\n", "passed": False}
