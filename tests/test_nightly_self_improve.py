@@ -1,4 +1,6 @@
 from pathlib import Path
+import sys
+import types
 
 import pytest
 
@@ -136,3 +138,20 @@ def test_nightly_classifies_known_blocking_results_but_keeps_intentional_skips()
     ]
     for name, result, expected in cases:
         assert bool(nightly_self_improve._blocking_result(name, result)) is expected
+
+
+@pytest.mark.parametrize("failure", [ImportError("server import failed"), RuntimeError("stage failed")])
+def test_nightly_cleans_lock_when_locked_run_raises(tmp_path, monkeypatch, failure):
+    state = tmp_path / "state"
+    state.mkdir()
+    fake_paths = types.SimpleNamespace(
+        state_path=lambda name: str(state / name),
+    )
+    monkeypatch.setitem(sys.modules, "sonder_paths", fake_paths)
+    monkeypatch.setattr(nightly_self_improve, "_run_locked", lambda *args: (_ for _ in ()).throw(failure))
+    monkeypatch.setattr(sys, "argv", ["nightly_self_improve.py"])
+
+    assert nightly_self_improve.main() == 1
+    assert not (state / "nightly.lock").exists()
+    log = next((state / "nightly-logs").glob("*.log")).read_text(encoding="utf-8")
+    assert "nightly run failed" in log
