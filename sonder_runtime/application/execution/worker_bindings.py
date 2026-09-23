@@ -11,12 +11,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import asdict, is_dataclass
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Mapping, TypeVar
 
 from .effect_journal import (
     EffectJournal,
     EffectJournalError,
+    EffectOutcome,
+    EffectState,
     JournalBinding,
     RecoveryDecision,
 )
@@ -31,6 +35,23 @@ def _digest(value: Any) -> str:
         ensure_ascii=True,
     ).encode("utf-8")
     ).hexdigest()
+
+
+def _json_safe(value: Any) -> Any:
+    """Convert a bounded worker receipt/state into deterministic JSON data."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if is_dataclass(value):
+        return _json_safe(asdict(value))
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_json_safe(item) for item in value]
+    raise EffectJournalError(
+        f"worker checkpoint state is not serializable: {type(value).__name__}"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +87,11 @@ class AuthenticatedWorkerBinding:
         max_records: int = 100,
     ) -> RecoveryDecision:
         """Refuse worker restart while an old owner needs reconciliation."""
+        claim_owner = getattr(self.journal, "claim_owner", None)
+        if callable(claim_owner):
+            # Advance the durable fence before inspecting old effects.  Even
+            # when recovery raises, an older binding can no longer admit work.
+            claim_owner(self.run_id, self.worker_id, self.owner_epoch)
         decision = self.journal.recover(
             self.run_id,
             # A constructed binding is not proof that an old worker is still
@@ -100,6 +126,7 @@ def journaled_effect(
     receipt_key: Callable[[T], str] | str,
     reconciliation: str = "manual",
     success: Callable[[T], bool] | bool = True,
+    checkpoint_state: Callable[[T], Any] | Any | None = None,
 ) -> T:
     """Record one direct worker mutation around its real invocation."""
     binding = context.binding()
@@ -119,18 +146,38 @@ def journaled_effect(
         binding.mark_uncertain(intent, detail="worker returned no durable receipt key")
         raise EffectJournalError("worker mutation returned no durable receipt key")
     is_success = success(result) if callable(success) else success
-    binding.complete(
-        intent,
-        outcome_digest=_digest(result),
-        receipt_key=key,
-        success=bool(is_success),
+    outcome = EffectOutcome(
+        intent.intent_id,
+        EffectState.COMPLETED if is_success else EffectState.FAILED,
+        _digest(result), key, worker_id=context.worker_id,
+        owner_epoch=context.owner_epoch,
     )
-    append_checkpoint = getattr(context.journal, "append_checkpoint", None)
-    if callable(append_checkpoint):
-        # The result is already sealed by the terminal journal outcome.  The
-        # worker checkpoint records that exact state and the journal's current
-        # high-water in one host-owned transaction.
-        append_checkpoint(context.run_id, _digest(result))
+    state = checkpoint_state(result) if callable(checkpoint_state) else checkpoint_state
+    if state is None:
+        state = {
+            "effect": {
+                "intent_id": intent.intent_id,
+                "operation_id": intent.operation_id,
+                "receipt_key": key,
+            },
+            "result": _json_safe(result),
+        }
+    else:
+        state = _json_safe(state)
+    outcome_and_checkpoint = getattr(context.journal, "outcome_and_checkpoint", None)
+    if callable(outcome_and_checkpoint):
+        # SQLiteEffectJournal commits both records under one BEGIN IMMEDIATE.
+        outcome_and_checkpoint(outcome, state)
+    else:
+        binding.complete(
+            intent,
+            outcome_digest=outcome.outcome_digest,
+            receipt_key=key,
+            success=bool(is_success),
+        )
+        append_checkpoint = getattr(context.journal, "append_checkpoint", None)
+        if callable(append_checkpoint):
+            append_checkpoint(context.run_id, state)
     return result
 
 
