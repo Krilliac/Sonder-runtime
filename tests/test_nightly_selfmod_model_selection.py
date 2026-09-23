@@ -548,6 +548,18 @@ def test_rewrite_prompt_binds_selected_function_objective_target_and_source():
     assert prompt.endswith("def load_source(src):\n    return src\n")
 
 
+def test_rewrite_reply_classifies_comment_only_and_none_as_no_change():
+    assert nightly_selfmod._rewrite_reply_objection("# add a guard\n# done") == (
+        "comment-only rewrite reply"
+    )
+    assert nightly_selfmod._rewrite_reply_objection("NONE") == (
+        "model reported no executable change"
+    )
+    assert nightly_selfmod._rewrite_reply_objection(
+        "def selected(value):\n    return value + 1\n"
+    ) is None
+
+
 def test_run_cleans_plan_when_rewrite_request_raises(tmp_path, monkeypatch):
     workspace = tmp_path / "candidate"
     workspace.mkdir()

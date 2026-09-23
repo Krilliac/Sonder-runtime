@@ -685,6 +685,29 @@ def _splice_function(original: str, reply: str, expected_name: str | None = None
     return "".join(lines[:first]) + body.rstrip() + "\n" + "".join(lines[last:])
 
 
+def _rewrite_reply_objection(reply: str) -> str | None:
+    """Classify non-executable rewrite replies before AST splicing.
+
+    A model can satisfy the rewrite prompt syntactically while returning only
+    comments or ``NONE``.  These are explicit no-change outcomes, never
+    candidate source.  Classifying them before workspace testing keeps the
+    rejection reason deterministic and prevents future parser changes from
+    treating commentary as an executable edit.
+    """
+    cleaned = _FENCE.sub("", str(reply or "")).strip()
+    if not cleaned:
+        return "empty rewrite reply"
+    if cleaned.casefold() == "none":
+        return "model reported no executable change"
+    code_lines = [
+        line for line in cleaned.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if not code_lines:
+        return "comment-only rewrite reply"
+    return None
+
+
 def _rewrite_prompt(objective: str, target: str, function_name: str, source: str) -> str:
     """Build the selected-function rewrite prompt without positional drift."""
     return (
@@ -1118,6 +1141,12 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
         return "candidate rejected: rewrite request failed (%s)%s" % (
             type(error).__name__, suffix,
         )
+
+    reply_objection = _rewrite_reply_objection(edited)
+    if reply_objection:
+        cleanup_failed = _cancel_and_discard(run_id)
+        suffix = "; cleanup failed" if cleanup_failed else ""
+        return "candidate rejected: %s%s" % (reply_objection, suffix)
 
     # Splice one function back rather than accepting a whole-file rewrite.
     #
