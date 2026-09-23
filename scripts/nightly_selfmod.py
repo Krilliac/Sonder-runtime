@@ -46,6 +46,10 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
+import time
+from collections import deque
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -183,11 +187,10 @@ def _regression_command(py: str, *, ignore_paths=()) -> list[str]:
     return command
 
 
-# The selfmod model sees only the candidate module.  These suites are selected
-# from the base checkout before the candidate is created.  The base worktree
-# is outside the candidate worktree and is run as a separate pytest invocation.
-# Its bytes are digest checked before and after pytest, so a candidate cannot
-# make its own oracle pass by editing a test or fixture during collection.
+# The selfmod model sees only the candidate module. These suites are selected
+# from the base checkout, copied into a read-only evaluator root outside the
+# candidate, and digest checked before and after pytest. Output is drained
+# continuously while retaining only a bounded tail.
 _HELD_OUT_RUNNER = r'''
 import hashlib
 import importlib.util
@@ -196,6 +199,9 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
+import time
+from collections import deque
 
 payload = json.loads(sys.argv[1])
 root = Path(payload["root"]).resolve()
@@ -217,7 +223,8 @@ def verify(label):
 
 if not verify("before"):
     raise SystemExit(2)
-if root in Path(payload["suite_root"]).resolve().parents:
+suite_root = Path(payload["suite_root"]).resolve()
+if root in suite_root.parents:
     print("SELFMOD HELD-OUT CANARY FAILED: evaluator is inside candidate root")
     raise SystemExit(2)
 target_module = payload.get("target_module")
@@ -235,28 +242,51 @@ if target_module:
 environment = os.environ.copy()
 candidate = str(root)
 environment["PYTHONPATH"] = candidate + os.pathsep + environment.get("PYTHONPATH", "")
+tail = deque(maxlen=12000)
+captured = [0]
+def drain(stream):
+    while True:
+        chunk = stream.read(8192)
+        if not chunk:
+            return
+        captured[0] += len(chunk)
+        tail.extend(chunk.decode("utf-8", "replace")[-12000:])
+def output():
+    return "".join(tail)
 try:
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "--rootdir", str(payload["suite_root"]),
+    process = subprocess.Popen(
+        [sys.executable, "-m", "pytest", "-q", "-s", "--rootdir", str(suite_root),
          *[item["path"] for item in payload["suites"]]],
-        cwd=candidate, env=environment, capture_output=True, text=True,
-        stdin=subprocess.DEVNULL, timeout=int(payload["timeout"]), check=False,
+        cwd=candidate, env=environment, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
-except subprocess.TimeoutExpired as exc:
-    output = (exc.stdout or "") + (exc.stderr or "")
-    print(output[-12000:])
-    print("SELFMOD HELD-OUT FAILED: evaluator timed out")
-    raise SystemExit(124)
-
-output = (result.stdout or "") + (result.stderr or "")
-print(output[-12000:])
-if "no tests ran" in output.lower():
+except OSError as exc:
+    print("SELFMOD HELD-OUT FAILED: evaluator could not start: %s" % exc)
+    raise SystemExit(2)
+reader = threading.Thread(target=drain, args=(process.stdout,), daemon=True)
+reader.start()
+deadline = time.monotonic() + int(payload["timeout"])
+while process.poll() is None:
+    if time.monotonic() >= deadline:
+        process.kill()
+        process.wait()
+        reader.join(timeout=2)
+        print(output())
+        print("SELFMOD HELD-OUT FAILED: evaluator timed out")
+        raise SystemExit(124)
+    time.sleep(0.05)
+reader.join(timeout=2)
+print(output())
+if captured[0] > len(output().encode("utf-8")):
+    print("SELFMOD HELD-OUT OUTPUT TRUNCATED: retained last 12000 characters")
+if "no tests ran" in output().lower():
     print("SELFMOD HELD-OUT FAILED: evaluator collected no tests")
     raise SystemExit(3)
 if not verify("after"):
     raise SystemExit(2)
-if result.returncode:
-    raise SystemExit(result.returncode)
+if process.returncode:
+    raise SystemExit(process.returncode)
 print("SELFMOD HELD-OUT CANARY PASSED: immutable suite and candidate-root imports")
 '''
 
@@ -297,8 +327,8 @@ def _prepare_held_out(target: str, workspace: Path, timeout: int):
             "source_paths": (),
             "cleanup": None,
         }
-    suite_root = REPO
-    if suite_root.resolve() == workspace.resolve():
+    base_root = REPO.resolve()
+    if base_root == workspace.resolve():
         return {
             "command": [
                 _test_python(), "-c",
@@ -307,29 +337,44 @@ def _prepare_held_out(target: str, workspace: Path, timeout: int):
             "source_paths": (),
             "cleanup": None,
         }
+    snapshot = tempfile.TemporaryDirectory(prefix="sonder-heldout-")
+    suite_root = Path(snapshot.name).resolve()
     for relative in suites:
         source = REPO / relative
-        digest = hashlib.sha256(source.read_bytes()).hexdigest()
-        copied.append({"path": str(source), "sha256": digest})
+        destination = suite_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        destination.chmod(0o444)
+        digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+        copied.append({"path": str(destination), "sha256": digest})
         source_paths.append(relative)
     # The test's own conftest is part of the evaluator input and is checked too.
     # It is outside the candidate and cannot be in the edit set.
     conftest = REPO / "tests" / "conftest.py"
     if conftest.is_file():
+        destination = suite_root / "tests" / "conftest.py"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(conftest, destination)
+        destination.chmod(0o444)
         copied.append({
-            "path": str(conftest),
-            "sha256": hashlib.sha256(conftest.read_bytes()).hexdigest(),
+            "path": str(destination),
+            "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
         })
+    for directory in sorted(
+        (path for path in suite_root.rglob("*") if path.is_dir()),
+        key=lambda path: len(path.parts), reverse=True,
+    ):
+        directory.chmod(0o555)
     payload = {
         "root": str(workspace),
         "suite_root": str(suite_root),
         "target_module": _module_name_for_target(target),
-        "suites": [{"path": str(REPO / item)} for item in suites],
+        "suites": [{"path": str(suite_root / item)} for item in suites],
         "files": copied,
         "timeout": max(1, min(int(timeout), 900)),
     }
     command = [_test_python(), "-c", _HELD_OUT_RUNNER, json.dumps(payload, sort_keys=True)]
-    return {"command": command, "source_paths": tuple(source_paths), "cleanup": None}
+    return {"command": command, "source_paths": tuple(source_paths), "cleanup": snapshot}
 
 
 def _module_name_for_target(target: str) -> str | None:

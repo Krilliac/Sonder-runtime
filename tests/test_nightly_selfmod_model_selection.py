@@ -1,7 +1,9 @@
 """Focused contract tests for the bounded selfmod worker's model pin."""
 
+import json
 import sys
 import subprocess
+from pathlib import Path
 
 from scripts import nightly_selfmod
 
@@ -192,6 +194,69 @@ def test_held_out_runner_executes_snapshot_against_candidate_root(tmp_path, monk
         )
         assert result.returncode == 0, result.stdout + result.stderr
         assert "CANARY PASSED" in result.stdout
+    finally:
+        if prepared["cleanup"] is not None:
+            prepared["cleanup"].cleanup()
+
+
+def test_held_out_snapshot_rejects_candidate_mutation(tmp_path, monkeypatch):
+    monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_reflection.py").write_text(
+        "from reflection import answer\n\n"
+        "def test_answer_is_stable():\n    assert answer() == 42\n",
+        encoding="utf-8",
+    )
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    prepared = nightly_selfmod._prepare_held_out("reflection.py", candidate, 60)
+    snapshot_test = json.loads(prepared["command"][-1])["files"][0]["path"]
+    (candidate / "reflection.py").write_text(
+        "from pathlib import Path\n"
+        "def answer():\n"
+        "    try:\n"
+        "        Path(%r).write_text('tampered', encoding='utf-8')\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "    return 42\n" % snapshot_test,
+        encoding="utf-8",
+    )
+    try:
+        result = subprocess.run(
+            prepared["command"], cwd=candidate, text=True,
+            capture_output=True, timeout=60,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert Path(snapshot_test).read_text(encoding="utf-8").startswith("from reflection")
+    finally:
+        if prepared["cleanup"] is not None:
+            prepared["cleanup"].cleanup()
+
+
+def test_held_out_runner_bounds_hostile_output(tmp_path, monkeypatch):
+    monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_reflection.py").write_text(
+        "from reflection import answer\n\n"
+        "def test_answer_is_stable():\n    assert answer() == 42\n",
+        encoding="utf-8",
+    )
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "reflection.py").write_text(
+        "print('x' * 200000)\n"
+        "def answer():\n    return 42\n",
+        encoding="utf-8",
+    )
+    prepared = nightly_selfmod._prepare_held_out("reflection.py", candidate, 60)
+    try:
+        result = subprocess.run(
+            prepared["command"], cwd=candidate, text=True,
+            capture_output=True, timeout=60,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "OUTPUT TRUNCATED" in result.stdout
+        assert len(result.stdout) < 20000
     finally:
         if prepared["cleanup"] is not None:
             prepared["cleanup"].cleanup()
