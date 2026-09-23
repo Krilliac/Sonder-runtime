@@ -24,6 +24,7 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Mapping, Protocol, Sequence
+from collections.abc import Callable
 
 from ...domain.selfmod.models import (
     InvalidPhaseTransition,
@@ -53,6 +54,7 @@ from .verification_lifecycle import (
     VerificationLifecycleRecord,
     VerificationRecord,
 )
+from ..execution.worker_bindings import AuthenticatedWorkerBinding, journaled_effect
 
 
 class SelfmodStore(Protocol):
@@ -200,9 +202,18 @@ class GuardedLegacySelfmodService:
         VerificationKind.SMOKE: "smoke",
     }
 
-    def __init__(self, legacy: LegacySelfmodPort, *, unrestricted: bool = False) -> None:
+    def __init__(
+        self,
+        legacy: LegacySelfmodPort,
+        *,
+        unrestricted: bool = False,
+        effect_binding_factory: Callable[[str], AuthenticatedWorkerBinding] | None = None,
+    ) -> None:
         self._legacy = legacy
         self._unrestricted = bool(unrestricted)
+        if effect_binding_factory is not None and not callable(effect_binding_factory):
+            raise TypeError("effect_binding_factory must be callable")
+        self._effect_binding_factory = effect_binding_factory
         self._governance = SelfmodGovernance()
         self._lifecycle = VerificationLifecycle()
         self._repository_roots: dict[str, str] = {}
@@ -358,7 +369,11 @@ class GuardedLegacySelfmodService:
         if automatic_push or remote_push:
             raise Forbidden("automatic remote push is forbidden; deployment is local only")
         if self._unrestricted:
-            run = self._legacy.deploy(run_id, health_command=health_command, commit=commit)
+            run = self._mutating_call(
+                run_id, "selfmod-deploy", {"health_command": health_command, "commit": commit},
+                lambda: self._legacy.deploy(run_id, health_command=health_command, commit=commit),
+                receipt_key=f"selfmod:{run_id}:deploy",
+            )
             return self._state(run_id, legacy_run=run)
         if health_command is None:
             raise Forbidden("guarded integration requires an explicit post-deployment health command")
@@ -368,7 +383,11 @@ class GuardedLegacySelfmodService:
             raise Forbidden("typed approval and backup evidence are required before deployment")
         governance = self._governance.deployment_intent(run_id)
         try:
-            run = self._legacy.deploy(run_id, health_command=health_command, commit=commit)
+            run = self._mutating_call(
+                run_id, "selfmod-deploy", {"health_command": health_command, "commit": commit},
+                lambda: self._legacy.deploy(run_id, health_command=health_command, commit=commit),
+                receipt_key=f"selfmod:{run_id}:deploy",
+            )
         except Exception:
             run = self._legacy.get_run(run_id)
             if str(run.get("phase")) == "restored":
@@ -393,8 +412,12 @@ class GuardedLegacySelfmodService:
             # still asked to restore because it may have changed bytes before
             # producing its malformed receipt.
             try:
-                rollback_run = self._legacy.rollback(
-                    run_id, reason="ambiguous deployment receipt; fail-closed rollback"
+                rollback_run = self._mutating_call(
+                    run_id, "selfmod-rollback", {"reason": "ambiguous deployment receipt"},
+                    lambda: self._legacy.rollback(
+                        run_id, reason="ambiguous deployment receipt; fail-closed rollback"
+                    ),
+                    receipt_key=f"selfmod:{run_id}:rollback",
                 )
             except Exception as exc:
                 raise Forbidden("ambiguous deployment receipt and rollback failed") from exc
@@ -410,6 +433,34 @@ class GuardedLegacySelfmodService:
             run_id, HealthRecord(f"{run_id}:health", True, _receipt_digest(run), "explicit post-deployment health passed"),
         )
         return SelfmodIntegrationState(run, governance, lifecycle)
+
+    def _mutating_call(
+        self,
+        run_id: str,
+        operation: str,
+        request: object,
+        invoke: Callable[[], Mapping[str, object]],
+        *,
+        receipt_key: str,
+    ) -> Mapping[str, object]:
+        if self._effect_binding_factory is None:
+            return invoke()
+        binding = self._effect_binding_factory(run_id)
+        if not isinstance(binding, AuthenticatedWorkerBinding):
+            raise TypeError("effect_binding_factory returned an invalid binding")
+        return journaled_effect(
+            binding,
+            operation_id=f"{operation}:{run_id}",
+            idempotency_key=receipt_key,
+            request=request,
+            invoke=invoke,
+            receipt_key=receipt_key,
+            reconciliation="manual",
+            success=lambda result: (
+                operation.endswith("rollback")
+                or str(result.get("phase", "")) == "deployed"
+            ),
+        )
 
     def get(self, run_id: str) -> SelfmodIntegrationState:
         return self._state(run_id)

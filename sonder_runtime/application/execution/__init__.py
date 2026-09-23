@@ -6,7 +6,9 @@ from .effect_journal import (
     EffectIntent, EffectJournalError, EffectOutcome, EffectState, JournalBinding,
     RecoveryDecision,
 )
+from .worker_bindings import AuthenticatedWorkerBinding, journaled_effect
 
 __all__ = ["EffectIntent", "EffectJournalError", "EffectOutcome", "EffectState",
            "ExecutionApplicationFacade", "ExecutionGraph", "JournalBinding",
-           "RecoveryDecision", "ToolCall", "ToolResult"]
+           "RecoveryDecision", "AuthenticatedWorkerBinding", "journaled_effect",
+           "ToolCall", "ToolResult"]
