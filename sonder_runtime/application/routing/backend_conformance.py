@@ -227,9 +227,19 @@ class RecentCapabilityEvidence:
         try:
             with self.path.open(encoding="utf-8") as stream:
                 payload = json.load(stream)
-            if payload.get("schema") != self.schema or not isinstance(payload.get("records"), dict):
+            if not isinstance(payload, dict) or payload.get("schema") != self.schema or not isinstance(payload.get("records"), dict):
                 return {}
-            return {str(key): value for key, value in payload["records"].items() if isinstance(value, dict)}
+            valid: dict[str, dict] = {}
+            for key, value in payload["records"].items():
+                if not isinstance(key, str) or not isinstance(value, dict):
+                    continue
+                try:
+                    record = BackendConformanceRecord.from_dict(value)
+                except (ValueError, TypeError):
+                    continue
+                if key == self._key(record.backend, record.model):
+                    valid[key] = value
+            return valid
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return {}
 

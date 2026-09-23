@@ -200,3 +200,29 @@ def test_nonfinite_conformance_window_and_clock_fail_closed(tmp_path):
     assert evidence.check("fixture", frozenset(), now=float("nan")) == (
         False, "recent_capability_evidence_missing",
     )
+
+
+def test_malformed_persisted_record_does_not_block_fresh_evidence(tmp_path):
+    path = tmp_path / "capabilities.json"
+    path.write_text(json.dumps({
+        "schema": 1,
+        "records": {
+            "local\u0000fixture": {
+                "backend": "local", "model": "fixture", "checked_at": float("nan"),
+                "results": [{"capability": "chat", "passed": True, "reason_code": "ok"}],
+            },
+            "local\u0000other": {
+                "backend": "local", "model": "fixture", "checked_at": 100,
+                "results": [{"capability": "chat", "passed": True, "reason_code": "ok"}],
+            },
+        },
+    }), encoding="utf-8")
+    evidence = RecentCapabilityEvidence(path)
+    assert evidence.load("local", "other") is None
+    evidence.save(run_smoke_probes(
+        DeterministicFakeProvider(), backend="local", model="fixture", now=100, synthetic=False,
+    ))
+    assert evidence.check("fixture", frozenset(), now=100) == (
+        True, "recent_capability_evidence_passed",
+    )
+    assert list(json.loads(path.read_text(encoding="utf-8"))["records"]) == ["local\u0000fixture"]
