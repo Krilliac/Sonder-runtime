@@ -5,8 +5,8 @@ Generated from the authoritative specification and evidence ledger.
 | Metric | Value |
 |---|---:|
 | Requirements | 204 |
-| Checked | 6 |
-| Verified evidence | 6 |
+| Checked | 7 |
+| Verified evidence | 7 |
 
 | Family | Total | Checked | Verified |
 |---|---:|---:|---:|
@@ -18,7 +18,7 @@ Generated from the authoritative specification and evidence ledger.
 | CTX | 10 | 0 | 0 |
 | DATA | 7 | 0 | 0 |
 | DOC | 7 | 5 | 5 |
-| EVAL | 9 | 0 | 0 |
+| EVAL | 9 | 1 | 1 |
 | EXEC | 6 | 0 | 0 |
 | EXT | 7 | 0 | 0 |
 | JOB | 5 | 0 | 0 |

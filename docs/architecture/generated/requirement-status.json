@@ -41,9 +41,9 @@
       "verified": 5
     },
     "EVAL": {
-      "checked": 0,
+      "checked": 1,
       "total": 9,
-      "verified": 0
+      "verified": 1
     },
     "EXEC": {
       "checked": 0,
@@ -127,13 +127,13 @@
     }
   },
   "overall": {
-    "checked": 6,
+    "checked": 7,
     "statuses": {
-      "implemented_unverified": 198,
-      "verified": 6
+      "implemented_unverified": 197,
+      "verified": 7
     },
     "total": 204,
-    "verified": 6
+    "verified": 7
   },
   "requirements": [
     {
@@ -662,11 +662,11 @@
       "status": "implemented_unverified"
     },
     {
-      "checked": false,
-      "claim": "Replay identifies the earliest decision divergence under an explicit decision/noise policy, and divergent replays are minimized (reproducing prefix, or 1-minimal differential ddmin against a supplied baseline), proven deterministic, and retained as digest-verified records in a bounded durable store.",
+      "checked": true,
+      "claim": "Replay identifies the earliest decision divergence under an explicit decision/noise policy, and divergent replays are minimized (reproducing prefix, or 1-minimal differential ddmin against a supplied baseline), proven to reproduce deterministically, and retained as digest-verified records in a bounded durable store.",
       "requirement_id": "EVAL-006",
-      "revision": 3,
-      "status": "implemented_unverified"
+      "revision": 4,
+      "status": "verified"
     },
     {
       "checked": false,
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "63e2d4fbf051f7769cdd651276f72acbce4bb9fdd1301fc56b9e04bd277246de",
-    "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
+    "ledger_sha256": "97ed6f58da4528711605569419affd3c995ebc585cb886bcc6cc0bc19c26c9bd",
+    "spec_sha256": "04948a94bb232b1e1749a43927b5ebaa32798bc739437b5832b29dec8fe9d66f"
   }
 }
