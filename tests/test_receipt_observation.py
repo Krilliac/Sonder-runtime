@@ -7,6 +7,11 @@ import pytest
 from sonder_runtime.adapters.persistence.sqlite.verifier_observations import (
     SQLiteVerifierObservationRepository,
 )
+from sonder_runtime.adapters.persistence.sqlite.authoritative_memory import (
+    SQLiteAuthoritativeFactSource,
+)
+from sonder_runtime.adapters.unit_of_work import UnitOfWorkAdapter
+from sonder_runtime.application.memory.facade import MemoryLearningFacade
 from sonder_runtime.application.memory.learning_ladder import LearningLadder, LearningStage
 from sonder_runtime.application.memory.receipt_observation import ReceiptObservationProducer, _digest
 from sonder_runtime.application.ports.host_final import HostFinalFacts
@@ -20,8 +25,7 @@ from sonder_runtime.application.ports.terminal_eligibility import _issue_host_ve
 from sonder_runtime.bootstrap.managed_standalone import ManagedStandaloneSession
 
 
-def _evidence(*, principal="worker-a", run_id="run-1", outcome="passed", receipt_id=None):
-    project = r"D:\owned\project"
+def _evidence(*, principal="worker-a", run_id="run-1", outcome="passed", receipt_id=None, project=r"D:\owned\project"):
     output = "host verifier certificate"
     output_digest = hashlib.sha256(output.encode()).hexdigest()
     receipt_digest = receipt_id or hashlib.sha256(
@@ -63,6 +67,30 @@ def _authorize(value):
         authority=authority,
     )
     return holder["value"]
+
+
+def _failed_eligibility(*, worker_id="lane-worker-a", run_id="run-failed", project="repo-a"):
+    failure = {
+        "schema": "delegated-verification-failure-v1",
+        "failed_check": {"target": "unit"},
+        "failed_proof": {"status": "failed", "exit_code": 7},
+        "before_manifest_digest": "d" * 64,
+        "after_manifest_digest": "d" * 64,
+    }
+    failure["receipt_digest"] = _digest(failure)
+    return _authorize(replace(
+        _eligibility(
+            _evidence(
+                principal="owner", run_id=run_id, outcome="failed",
+                project=project,
+            ),
+            worker_id=worker_id,
+        ),
+        phase="failed",
+        eligible=False,
+        code="CHECK_FAILED",
+        verified_failure_receipt=failure,
+    ))
 
 
 def test_real_typed_host_receipt_derives_trust_and_identity_without_spoofable_fields():
@@ -301,3 +329,92 @@ def test_host_session_persists_only_after_current_eligibility():
         object(), verifier_factory=object(), repository=repository
     )
     assert observed == repository.rows[0][1]
+
+
+def test_managed_session_durable_observation_uses_application_unit_of_work(tmp_path):
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    db_path = str(tmp_path / "memory.db")
+
+    class Application:
+        unit_of_work = staticmethod(
+            lambda: UnitOfWorkAdapter(db_path, authoritative_fact_source=source)
+        )
+
+    eligibility = _eligibility(
+        _evidence(project="repo-a"), worker_id="lane-a"
+    )
+    session = ManagedStandaloneSession.__new__(ManagedStandaloneSession)
+    session._application = Application()
+    session.terminal_eligibility = lambda expected_turn, verifier_factory: eligibility
+    observed = session.persist_learning_observation_durable(
+        object(), verifier_factory=object()
+    )
+    assert observed.observation_id
+    with UnitOfWorkAdapter(db_path, authoritative_fact_source=source) as scope:
+        stored = SQLiteVerifierObservationRepository(scope.connection).get(
+            observed.observation_id
+        )
+    assert stored is not None
+    assert stored[1] == observed
+
+
+def test_application_composition_persists_and_promotes_independent_subject_receipts(tmp_path):
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    db_path = str(tmp_path / "memory.db")
+    application = MemoryLearningFacade(
+        lambda: UnitOfWorkAdapter(db_path, authoritative_fact_source=source)
+    )
+    produced = []
+    for worker, run_id in (("lane-a", "run-a"), ("lane-b", "run-b")):
+        receipt, observation = ReceiptObservationProducer.from_terminal_eligibility(
+            _eligibility(
+                _evidence(principal="owner", run_id=run_id, project="repo-a"),
+                worker_id=worker,
+            )
+        )
+        with UnitOfWorkAdapter(db_path, authoritative_fact_source=source) as scope:
+            SQLiteVerifierObservationRepository(scope.connection).append(receipt, observation)
+        produced.append(observation.observation_id)
+
+    status, decision = application.promote_verified_subject(
+        "repo-a", "verified-subject-fact", tuple(produced)
+    )
+    assert status == "promoted"
+    assert decision.stage == LearningStage.FACT
+    with UnitOfWorkAdapter(db_path, authoritative_fact_source=source) as scope:
+        facts = scope.memory.facts_for_project("repo-a")
+    assert facts[0]["text"] == "verified-subject:" + "a" * 64
+
+
+def test_application_promotion_demotes_on_persisted_verified_negative(tmp_path):
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    db_path = str(tmp_path / "memory.db")
+    application = MemoryLearningFacade(
+        lambda: UnitOfWorkAdapter(db_path, authoritative_fact_source=source)
+    )
+    positive = []
+    for worker, run_id in (("lane-a", "run-a"), ("lane-b", "run-b")):
+        pair = ReceiptObservationProducer.from_terminal_eligibility(
+            _eligibility(
+                _evidence(principal="owner", run_id=run_id, project="repo-a"),
+                worker_id=worker,
+            )
+        )
+        with UnitOfWorkAdapter(db_path, authoritative_fact_source=source) as scope:
+            SQLiteVerifierObservationRepository(scope.connection).append(*pair)
+        positive.append(pair[1].observation_id)
+    status, _ = application.promote_verified_subject(
+        "repo-a", "verified-subject-fact", tuple(positive)
+    )
+    assert status == "promoted"
+
+    negative = ReceiptObservationProducer.from_terminal_eligibility(
+        _failed_eligibility(worker_id="lane-b", project="repo-a")
+    )
+    with UnitOfWorkAdapter(db_path, authoritative_fact_source=source) as scope:
+        SQLiteVerifierObservationRepository(scope.connection).append(*negative)
+    status, decision = application.promote_verified_subject(
+        "repo-a", "verified-subject-fact", (positive[0], positive[1], negative[1].observation_id)
+    )
+    assert status == "demoted"
+    assert decision.contradiction_count == 1
