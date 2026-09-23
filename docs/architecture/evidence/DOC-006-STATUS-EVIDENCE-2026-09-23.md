@@ -19,9 +19,10 @@ Evidence:
   [`35837919825`](https://github.com/Krilliac/Sonder-runtime/actions/runs/35837919825)
   completed the `Validate master-spec evidence ledger` and
   `Validate evidence changes against pull request base` steps successfully for
-  head `cffd62d9f27eb48f7e2571de962c91865dd3faf6`. The full CI job was still
-  running when this evidence was recorded, so this document does not claim
-  full CI completion.
+  head `cffd62d9f27eb48f7e2571de962c91865dd3faf6`. The full CI job later
+  completed successfully at that exact source SHA. The ledger's `verified_sha`
+  identifies this tested gate implementation; this evidence document and the
+  DOC-006 checkbox are added in the subsequent change.
 
 Local verification from the same worktree:
 
