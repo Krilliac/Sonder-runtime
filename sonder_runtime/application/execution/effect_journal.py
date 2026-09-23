@@ -12,7 +12,7 @@ import contextlib
 import contextvars
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Iterator, Protocol
+from typing import Any, Iterator, Mapping, Protocol
 
 
 class EffectJournalError(ValueError):
@@ -36,7 +36,7 @@ class EffectIntent:
     owner_epoch: int
     idempotency_key: str
     request_digest: str
-    reconciliation: str = "idempotent"
+    reconciliation: str = "manual"
     sequence: int = 0
     state: EffectState = EffectState.INTENT
     outcome_digest: str = ""
@@ -49,8 +49,8 @@ class EffectIntent:
                      "idempotency_key", "request_digest"):
             if not isinstance(getattr(self, name), str) or not getattr(self, name).strip():
                 raise EffectJournalError(f"{name} must be non-empty")
-        if type(self.owner_epoch) is not int or self.owner_epoch < 0:
-            raise EffectJournalError("owner_epoch must be non-negative")
+        if type(self.owner_epoch) is not int or self.owner_epoch < 1:
+            raise EffectJournalError("owner_epoch must be positive")
         if self.reconciliation not in {"idempotent", "query", "manual"}:
             raise EffectJournalError("unsupported reconciliation strategy")
         if type(self.sequence) is not int or self.sequence < 0:
@@ -79,8 +79,11 @@ class EffectOutcome:
             raise EffectJournalError("outcome identity and digest are required")
         if self.state is not EffectState.UNCERTAIN and not self.receipt_key.strip():
             raise EffectJournalError("definitive outcome requires receipt")
-        if self.worker_id and (self.owner_epoch is None or self.owner_epoch < 0):
-            raise EffectJournalError("outcome owner epoch is required with worker identity")
+        if (
+            not isinstance(self.worker_id, str) or not self.worker_id.strip()
+            or type(self.owner_epoch) is not int or self.owner_epoch < 1
+        ):
+            raise EffectJournalError("definitive outcome requires worker identity and epoch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +100,7 @@ class EffectJournal(Protocol):
     def outcome(self, outcome: EffectOutcome) -> EffectIntent: ...
     def uncertain(self, intent_id: str, *, detail: str) -> EffectIntent: ...
     def high_water(self, run_id: str) -> int: ...
-    def recover(self, run_id: str, *, live_workers: set[str], max_records: int = 100) -> RecoveryDecision: ...
+    def recover(self, run_id: str, *, live_workers: Mapping[str, int], max_records: int = 100) -> RecoveryDecision: ...
     def validate_checkpoint(self, run_id: str, high_water: int) -> None: ...
 
 
@@ -110,7 +113,7 @@ class JournalBinding:
     scope: str
 
     def begin_request(self, *, operation_id: str, idempotency_key: str,
-                      request_digest: str, reconciliation: str = "idempotent") -> EffectIntent:
+                      request_digest: str, reconciliation: str = "manual") -> EffectIntent:
         intent = EffectIntent(
             f"{self.run_id}:{operation_id}", self.run_id, self.worker_id,
             operation_id, self.scope, self.owner_epoch, idempotency_key,

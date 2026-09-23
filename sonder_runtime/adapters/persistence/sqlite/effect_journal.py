@@ -6,6 +6,7 @@ import sqlite3
 from dataclasses import replace
 from pathlib import Path
 from threading import Lock
+from typing import Mapping
 
 from sonder_runtime.adapters.persistence.owned_sqlite import transaction as owned_sqlite_transaction
 from sonder_runtime.application.execution.effect_journal import (
@@ -87,8 +88,16 @@ class SQLiteEffectJournal:
                     (intent.run_id, intent.idempotency_key),
                 ).fetchone())
                 if prior is not None:
-                    if prior.request_digest != intent.request_digest:
-                        raise EffectJournalError("idempotency key conflicts with request digest")
+                    if (
+                        prior.intent_id, prior.run_id, prior.worker_id,
+                        prior.operation_id, prior.scope, prior.owner_epoch,
+                        prior.idempotency_key, prior.request_digest, prior.reconciliation,
+                    ) != (
+                        intent.intent_id, intent.run_id, intent.worker_id,
+                        intent.operation_id, intent.scope, intent.owner_epoch,
+                        intent.idempotency_key, intent.request_digest, intent.reconciliation,
+                    ):
+                        raise EffectJournalError("idempotency key conflicts with admitted effect identity")
                     return replace(prior, replayed=True)
                 sequence = int(connection.execute(
                     "SELECT COALESCE(MAX(sequence),0)+1 FROM effect_journal WHERE run_id=?",
@@ -108,9 +117,15 @@ class SQLiteEffectJournal:
                     "outcome_digest,receipt_key,detail FROM effect_journal WHERE intent_id=?",
                     (intent.intent_id,),
                 ).fetchone())
-            if (existing.run_id, existing.worker_id, existing.operation_id,
-                existing.request_digest) != (intent.run_id, intent.worker_id,
-                                             intent.operation_id, intent.request_digest):
+            if (
+                existing.run_id, existing.worker_id, existing.operation_id,
+                existing.scope, existing.owner_epoch, existing.idempotency_key,
+                existing.request_digest, existing.reconciliation,
+            ) != (
+                intent.run_id, intent.worker_id, intent.operation_id,
+                intent.scope, intent.owner_epoch, intent.idempotency_key,
+                intent.request_digest, intent.reconciliation,
+            ):
                 raise EffectJournalError("intent identity conflicts with durable record")
             return replace(existing, replayed=True)
 
@@ -138,6 +153,10 @@ class SQLiteEffectJournal:
             ).fetchone())
             if current is None:
                 raise KeyError(outcome.intent_id)
+            if (current.worker_id, current.owner_epoch) != (
+                outcome.worker_id, outcome.owner_epoch
+            ):
+                raise EffectJournalError("outcome owner does not match admitted intent")
             if current.state in {EffectState.COMPLETED, EffectState.FAILED}:
                 if (current.state, current.outcome_digest, current.receipt_key) != (
                     outcome.state, outcome.outcome_digest, outcome.receipt_key):
@@ -147,9 +166,6 @@ class SQLiteEffectJournal:
                 raise EffectJournalError(
                     "uncertain effect requires explicit reconciliation; late receipt refused"
                 )
-            if outcome.worker_id and (current.worker_id != outcome.worker_id
-                                      or current.owner_epoch != outcome.owner_epoch):
-                raise EffectJournalError("outcome owner does not match the admitted intent")
             connection.execute(
                 "UPDATE effect_journal SET state=?,outcome_digest=?,receipt_key=?,detail=? "
                 "WHERE intent_id=? AND state=?",
@@ -210,21 +226,33 @@ class SQLiteEffectJournal:
         if unresolved is not None:
             raise EffectJournalError("checkpoint has an admitted effect without a definitive outcome")
 
-    def recover(self, run_id: str, *, live_workers: set[str], max_records: int = 100) -> RecoveryDecision:
+    def recover(self, run_id: str, *, live_workers: Mapping[str, int], max_records: int = 100) -> RecoveryDecision:
         if isinstance(max_records, bool) or not 1 <= max_records <= 10_000:
             raise ValueError("max_records must be within 1..10000")
-        if not isinstance(live_workers, set):
-            live_workers = set(live_workers)
+        if not isinstance(live_workers, Mapping) or any(
+            not isinstance(worker, str) or not worker
+            or type(epoch) is not int or epoch < 1
+            for worker, epoch in live_workers.items()
+        ):
+            raise ValueError("live worker epochs must be an authenticated mapping")
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
-                "SELECT intent_id,worker_id,state FROM effect_journal WHERE run_id=? "
+                "SELECT intent_id,worker_id,owner_epoch,state FROM effect_journal WHERE run_id=? "
                 "AND state IN (?,?) ORDER BY sequence LIMIT ?",
                 (run_id, EffectState.INTENT.value, EffectState.UNCERTAIN.value, max_records + 1),
             ).fetchall()
-            selected = rows[:max_records]
-            attached = tuple(str(row[0]) for row in selected if str(row[1]) in live_workers)
-            orphaned = tuple(str(row[0]) for row in selected if str(row[1]) not in live_workers)
+            if len(rows) > max_records:
+                raise EffectJournalError("effect recovery exceeds bounded page")
+            selected = rows
+            attached = tuple(
+                str(row[0]) for row in selected
+                if live_workers.get(str(row[1])) == int(row[2])
+            )
+            orphaned = tuple(
+                str(row[0]) for row in selected
+                if live_workers.get(str(row[1])) != int(row[2])
+            )
             for intent_id in orphaned:
                 connection.execute(
                     "UPDATE effect_journal SET state=?,detail=? WHERE intent_id=? "

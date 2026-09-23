@@ -127,6 +127,28 @@ def test_sqlite_repository_is_restart_replay_idempotent_and_immutable(tmp_path):
     second.close()
 
 
+def test_observation_append_respects_caller_transaction_and_conflict_savepoint(tmp_path):
+    path = tmp_path / "memory.db"
+    receipt, observation = ReceiptObservationProducer.from_terminal_eligibility(
+        _eligibility(_evidence())
+    )
+    connection = sqlite3.connect(path)
+    repository = SQLiteVerifierObservationRepository(connection)
+    connection.execute("CREATE TABLE caller_marker(value TEXT NOT NULL)")
+    connection.commit()
+
+    connection.execute("BEGIN IMMEDIATE")
+    connection.execute("INSERT INTO caller_marker(value) VALUES('retained')")
+    repository.append(receipt, observation)
+    with pytest.raises(ValueError, match="conflicting verifier receipt replay"):
+        repository.append(receipt, replace(observation, content="different"))
+    assert connection.execute("SELECT value FROM caller_marker").fetchone()[0] == "retained"
+    connection.rollback()
+    assert repository.get(observation.observation_id) is None
+    assert connection.execute("SELECT COUNT(*) FROM caller_marker").fetchone()[0] == 0
+    connection.close()
+
+
 def test_host_session_persists_only_after_current_eligibility():
     evidence = _evidence()
     eligibility = _eligibility(evidence, worker_id="lane-worker-a")

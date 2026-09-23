@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import pytest
 
 from sonder_runtime.adapters.persistence.sqlite.effect_journal import SQLiteEffectJournal
@@ -26,25 +27,38 @@ def test_intent_is_idempotent_and_conflicts_are_rejected(tmp_path):
     assert replay != first and replay.replayed and first.sequence == 1
     with pytest.raises(EffectJournalError):
         journal.begin(_intent(request_digest="b" * 64))
+    for altered in (
+        replace(_intent(), scope="/other"),
+        replace(_intent(), owner_epoch=3),
+        replace(_intent(), idempotency_key="different"),
+        replace(_intent(), reconciliation="query"),
+        replace(_intent(), intent_id="different"),
+    ):
+        with pytest.raises(EffectJournalError):
+            journal.begin(altered)
 
 
 def test_outcome_is_durable_and_replay_is_exact(tmp_path):
     journal = SQLiteEffectJournal(tmp_path / "effects.db")
     journal.begin(_intent())
-    done = journal.outcome(EffectOutcome("i-1", EffectState.COMPLETED, "b" * 64, "receipt-1"))
+    done = journal.outcome(EffectOutcome("i-1", EffectState.COMPLETED, "b" * 64, "receipt-1", worker_id="w-1", owner_epoch=2))
     assert done.state is EffectState.COMPLETED
     assert SQLiteEffectJournal(tmp_path / "effects.db").outcome(
-        EffectOutcome("i-1", EffectState.COMPLETED, "b" * 64, "receipt-1")
+        EffectOutcome("i-1", EffectState.COMPLETED, "b" * 64, "receipt-1", worker_id="w-1", owner_epoch=2)
     ).receipt_key == "receipt-1"
     with pytest.raises(EffectJournalError):
-        journal.outcome(EffectOutcome("i-1", EffectState.FAILED, "c" * 64, "receipt-2"))
+        journal.outcome(EffectOutcome("i-1", EffectState.FAILED, "c" * 64, "receipt-2", worker_id="w-1", owner_epoch=2))
+    with pytest.raises(EffectJournalError, match="worker identity"):
+        EffectOutcome("i-1", EffectState.COMPLETED, "b" * 64, "receipt-1")
+    with pytest.raises(EffectJournalError, match="owner"):
+        journal.outcome(EffectOutcome("i-1", EffectState.COMPLETED, "b" * 64, "receipt-1", worker_id="stale", owner_epoch=2))
 
 
 def test_recovery_reattaches_live_owner_and_marks_dead_owner_uncertain(tmp_path):
     journal = SQLiteEffectJournal(tmp_path / "effects.db")
     journal.begin(_intent("live", worker_id="w-live", key="live"))
     journal.begin(_intent("dead", worker_id="w-dead", key="dead"))
-    decision = journal.recover("run-1", live_workers={"w-live"})
+    decision = journal.recover("run-1", live_workers={"w-live": 2})
     assert decision.action == "reattach"
     assert decision.intent_ids == ("live", "dead")
     assert journal.get("dead").state is EffectState.UNCERTAIN
@@ -55,11 +69,24 @@ def test_recovery_reattaches_live_owner_and_marks_dead_owner_uncertain(tmp_path)
 def test_late_receipt_from_orphaned_owner_is_not_accepted(tmp_path):
     journal = SQLiteEffectJournal(tmp_path / "effects.db")
     journal.begin(_intent(worker_id="w-dead"))
-    journal.recover("run-1", live_workers=set())
+    journal.recover("run-1", live_workers={})
     with pytest.raises(EffectJournalError, match="late receipt"):
         journal.outcome(EffectOutcome(
             "i-1", EffectState.COMPLETED, "b" * 64, "receipt-1", worker_id="w-dead", owner_epoch=2,
         ))
+
+
+def test_recovery_requires_exact_live_owner_epoch_and_complete_page(tmp_path):
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    journal.begin(_intent("first", worker_id="worker", key="first"))
+    journal.begin(_intent("second", worker_id="worker", key="second"))
+    with pytest.raises(EffectJournalError, match="bounded page"):
+        journal.recover("run-1", live_workers={"worker": 2}, max_records=1)
+    assert journal.get("first").state is EffectState.INTENT
+    decision = journal.recover("run-1", live_workers={"worker": 3})
+    assert decision.action == "reconcile"
+    assert journal.get("first").state is EffectState.UNCERTAIN
+    assert journal.get("second").state is EffectState.UNCERTAIN
 
 
 def test_checkpoint_binds_effect_high_water_and_refuses_unresolved_replay(tmp_path):
@@ -70,7 +97,7 @@ def test_checkpoint_binds_effect_high_water_and_refuses_unresolved_replay(tmp_pa
     journal.begin(_intent())
     with pytest.raises(EffectJournalError):
         checkpoints.save(_checkpoint(), expected_generation=-1)
-    journal.outcome(EffectOutcome("i-1", EffectState.COMPLETED, "b" * 64, "receipt-1"))
+    journal.outcome(EffectOutcome("i-1", EffectState.COMPLETED, "b" * 64, "receipt-1", worker_id="w-1", owner_epoch=2))
     checkpoints.save(_checkpoint(), expected_generation=-1)
     assert checkpoints.restore("run-1").status is RestoreStatus.RESTORED
 
