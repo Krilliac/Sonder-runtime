@@ -27,16 +27,20 @@ WHAT IT WILL NOT DO
     it mutates source with no commit to review or revert to.
   - It never touches a protected path, never merges, and never pushes.
 
-WHY THE TEST COMMAND IS THE WHOLE SUITE
+WHY THERE ARE TWO TEST GATES
   Measured 2026-08-08: an agent lane produced four plausible fixes whose tests
   had never been executed, and running them revealed that one broke an
-  architecture rule. A candidate that changes source unattended has to clear the same bar
-  the humans do, and a targeted subset cannot show what a change broke
-  elsewhere.
+  architecture rule. The regression gate covers the repository suite except
+  for a target-specific held-out suite. The held-out gate runs that suite from
+  the base worktree, outside the candidate's editable files, so a candidate
+  cannot pass by changing the tests it is being judged against. If no matching
+  suite exists, the evaluator is unavailable and the candidate is rejected.
 """
 from __future__ import annotations
 
 import ast
+import hashlib
+import importlib.util
 import json
 import re
 import shutil
@@ -164,16 +168,176 @@ def _ruff_command(py: str) -> list[str] | None:
     return [py, "-m", "ruff"] if probe.returncode == 0 else None
 
 
-def _regression_command(py: str) -> list[str]:
+def _regression_command(py: str, *, ignore_paths=()) -> list[str]:
     """Use bounded xdist when installed; keep a portable serial fallback."""
     probe = subprocess.run(
         [py, "-c", "import xdist"],
         capture_output=True, stdin=subprocess.DEVNULL, check=False,
         timeout=10,
     )
+    command = [py, "-m", "pytest", "-q"]
     if probe.returncode == 0:
-        return [py, "-m", "pytest", "-q", "-n", "4", "--dist", "load"]
-    return [py, "-m", "pytest", "-q"]
+        command.extend(["-n", "4", "--dist", "load"])
+    for path in ignore_paths:
+        command.extend(["--ignore", str(path)])
+    return command
+
+
+# The selfmod model sees only the candidate module.  These suites are selected
+# from the base checkout before the candidate is created.  The base worktree
+# is outside the candidate worktree and is run as a separate pytest invocation.
+# Its bytes are digest checked before and after pytest, so a candidate cannot
+# make its own oracle pass by editing a test or fixture during collection.
+_HELD_OUT_RUNNER = r'''
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+payload = json.loads(sys.argv[1])
+root = Path(payload["root"]).resolve()
+
+def digest(path):
+    stream = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            stream.update(chunk)
+    return stream.hexdigest()
+
+def verify(label):
+    for item in payload["files"]:
+        path = Path(item["path"])
+        if not path.is_file() or digest(path) != item["sha256"]:
+            print("SELFMOD HELD-OUT CANARY FAILED: %s changed (%s)" % (label, path))
+            return False
+    return True
+
+if not verify("before"):
+    raise SystemExit(2)
+if root in Path(payload["suite_root"]).resolve().parents:
+    print("SELFMOD HELD-OUT CANARY FAILED: evaluator is inside candidate root")
+    raise SystemExit(2)
+target_module = payload.get("target_module")
+if target_module:
+    try:
+        sys.path.insert(0, str(root))
+        origin = importlib.util.find_spec(target_module).origin
+        resolved = Path(origin).resolve() if origin else None
+    except BaseException as exc:
+        print("SELFMOD HELD-OUT CANARY FAILED: target cannot be resolved: %s" % exc)
+        raise SystemExit(2)
+    if resolved is None or root not in resolved.parents:
+        print("SELFMOD HELD-OUT CANARY FAILED: target resolved outside candidate: %s" % resolved)
+        raise SystemExit(2)
+environment = os.environ.copy()
+candidate = str(root)
+environment["PYTHONPATH"] = candidate + os.pathsep + environment.get("PYTHONPATH", "")
+try:
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "--rootdir", str(payload["suite_root"]),
+         *[item["path"] for item in payload["suites"]]],
+        cwd=candidate, env=environment, capture_output=True, text=True,
+        stdin=subprocess.DEVNULL, timeout=int(payload["timeout"]), check=False,
+    )
+except subprocess.TimeoutExpired as exc:
+    output = (exc.stdout or "") + (exc.stderr or "")
+    print(output[-12000:])
+    print("SELFMOD HELD-OUT FAILED: evaluator timed out")
+    raise SystemExit(124)
+
+output = (result.stdout or "") + (result.stderr or "")
+print(output[-12000:])
+if "no tests ran" in output.lower():
+    print("SELFMOD HELD-OUT FAILED: evaluator collected no tests")
+    raise SystemExit(3)
+if not verify("after"):
+    raise SystemExit(2)
+if result.returncode:
+    raise SystemExit(result.returncode)
+print("SELFMOD HELD-OUT CANARY PASSED: immutable suite and candidate-root imports")
+'''
+
+
+def _held_out_suite_paths(target: str) -> tuple[str, ...]:
+    """Return a bounded, base-checkout suite for one candidate module.
+
+    A missing mapping is intentionally not replaced with a generic smoke
+    command.  A held-out gate that does not exercise a real suite is an
+    unavailable evaluator and must reject the candidate.
+    """
+    stem = Path(str(target).replace("\\", "/")).stem
+    test_root = REPO / "tests"
+    exact = test_root / ("test_%s.py" % stem)
+    candidates = [exact] if exact.is_file() else []
+    candidates.extend(sorted(test_root.glob("test_%s_*.py" % stem)))
+    selected = []
+    for path in candidates:
+        relative = path.relative_to(REPO).as_posix()
+        if relative not in selected:
+            selected.append(relative)
+        if len(selected) == 2:
+            break
+    return tuple(selected)
+
+
+def _prepare_held_out(target: str, workspace: Path, timeout: int):
+    """Snapshot and prepare the immutable held-out command for one run."""
+    suites = _held_out_suite_paths(target)
+    copied = []
+    source_paths = []
+    if not suites:
+        return {
+            "command": [
+                _test_python(), "-c",
+                "raise SystemExit('held-out evaluator unavailable for candidate')",
+            ],
+            "source_paths": (),
+            "cleanup": None,
+        }
+    suite_root = REPO
+    if suite_root.resolve() == workspace.resolve():
+        return {
+            "command": [
+                _test_python(), "-c",
+                "raise SystemExit('held-out evaluator must be outside candidate')",
+            ],
+            "source_paths": (),
+            "cleanup": None,
+        }
+    for relative in suites:
+        source = REPO / relative
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        copied.append({"path": str(source), "sha256": digest})
+        source_paths.append(relative)
+    # The test's own conftest is part of the evaluator input and is checked too.
+    # It is outside the candidate and cannot be in the edit set.
+    conftest = REPO / "tests" / "conftest.py"
+    if conftest.is_file():
+        copied.append({
+            "path": str(conftest),
+            "sha256": hashlib.sha256(conftest.read_bytes()).hexdigest(),
+        })
+    payload = {
+        "root": str(workspace),
+        "suite_root": str(suite_root),
+        "target_module": _module_name_for_target(target),
+        "suites": [{"path": str(REPO / item)} for item in suites],
+        "files": copied,
+        "timeout": max(1, min(int(timeout), 900)),
+    }
+    command = [_test_python(), "-c", _HELD_OUT_RUNNER, json.dumps(payload, sort_keys=True)]
+    return {"command": command, "source_paths": tuple(source_paths), "cleanup": None}
+
+
+def _module_name_for_target(target: str) -> str | None:
+    """Return the import name used by the held-out candidate-root canary."""
+    parts = tuple(Path(str(target).replace("\\", "/")).with_suffix("").parts)
+    if not parts or any(not item.isidentifier() for item in parts):
+        return None
+    return ".".join(parts)
 
 
 _NON_EXECUTABLE_OBJECTIVE = re.compile(
@@ -774,20 +938,27 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
         log("  lint: Ruff available")
     else:
         log("  lint: Ruff unavailable; Python compilation is the syntax gate")
-    checks.append(("regression", _regression_command(py)))
-    for kind, command in checks:
-        # cwd is deliberately NOT passed: the default is the candidate
-        # workspace, which keeps imports and pytest collection grounded in
-        # the isolated checkout.
-        outcome = selfmod.record_test(
-            run_id, kind, command, timeout=test_timeout)
-        passed = bool(outcome.get("passed")) if isinstance(outcome, dict) else bool(outcome)
-        results.append((kind, passed))
-        log("  %s: %s" % (kind, "pass" if passed else "FAIL"))
-        if not passed:
-            selfmod.reject(run_id, reason="%s failed" % kind)
-            _discard_workspace(run_id)
-            return "candidate rejected: %s failed (run %s kept for inspection)" % (kind, run_id)
+    held_out = _prepare_held_out(target, workspace, test_timeout)
+    checks.append(("regression", _regression_command(py, ignore_paths=held_out["source_paths"])))
+    checks.append(("held_out", held_out["command"]))
+    try:
+        for kind, command in checks:
+            # cwd is deliberately NOT passed: the default is the candidate
+            # workspace, which keeps imports and pytest collection grounded in
+            # the isolated checkout.
+            outcome = selfmod.record_test(
+                run_id, kind, command, timeout=test_timeout)
+            passed = bool(outcome.get("passed")) if isinstance(outcome, dict) else bool(outcome)
+            results.append((kind, passed))
+            log("  %s: %s" % (kind, "pass" if passed else "FAIL"))
+            if not passed:
+                selfmod.reject(run_id, reason="%s failed" % kind)
+                _discard_workspace(run_id)
+                return "candidate rejected: %s failed (run %s kept for inspection)" % (kind, run_id)
+    finally:
+        cleanup = held_out.get("cleanup")
+        if cleanup is not None:
+            cleanup.cleanup()
 
     # Only the kinds this stage actually records; the default set includes
     # reproducer/targeted/smoke phases that belong to a human-driven run.
@@ -800,7 +971,7 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     # were dead code for the branch deliverable. (They fired on nothing real
     # only because two of review's checks were also structurally unsatisfiable,
     # both fixed in selfmod.py alongside this.)
-    reviewed = selfmod.review(run_id, require_kinds={"syntax", "regression"})
+    reviewed = selfmod.review(run_id, require_kinds={"syntax", "regression", "held_out"})
     # A PASS lands on reviewing and may auto-advance to approved under
     # auto-low-risk; a FAIL lands on rejected/restored with last_error set.
     # Key on the failure states, not one success phase -- an earlier version
