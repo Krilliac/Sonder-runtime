@@ -40,15 +40,21 @@ LEGACY_ARCHITECTURE_ADRS = frozenset({
 def _check_adr_namespace() -> list[str]:
     """Freeze historical numeric IDs and require valid dated IDs for new ADRs."""
     problems = []
-    def records(directory):
-        return {
-            path.name for path in directory.iterdir()
-            if path.is_file() and path.name != "README.md"
-            and (path.suffix.lower() == ".md" or path.name.startswith("ADR-"))
-        }
+    def records(directory, relative):
+        names = set()
+        for path in directory.iterdir():
+            if path.is_symlink():
+                problems.append(f"{relative}/{path.name}: ADR namespace symlinks are not permitted")
+            elif path.is_dir():
+                problems.append(f"{relative}/{path.name}: nested ADR directories are not permitted")
+            elif path.is_file() and path.name != "README.md" and (
+                path.suffix.lower() == ".md" or path.name.startswith("ADR-")
+            ):
+                names.add(path.name)
+        return names
 
-    canonical_names = records(CANONICAL_ADR)
-    historical_names = records(HISTORICAL_ADR)
+    canonical_names = records(CANONICAL_ADR, "docs/adr")
+    historical_names = records(HISTORICAL_ADR, "docs/architecture/adr")
     for missing in sorted(LEGACY_CANONICAL_ADRS - canonical_names):
         problems.append(f"docs/adr/{missing}: historical ADR is missing")
     for missing in sorted(LEGACY_ARCHITECTURE_ADRS - historical_names):
