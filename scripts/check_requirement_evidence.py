@@ -112,6 +112,15 @@ def validate() -> list[str]:
                         problems.append(
                             f"ledger: verified {requirement_id} has invalid evidence path"
                         )
+                    elif (
+                        Path(path).is_absolute()
+                        or Path(path).drive
+                        or ".." in Path(path).parts
+                        or not (ROOT / path).resolve().is_relative_to(ROOT.resolve())
+                    ):
+                        problems.append(
+                            f"ledger: verified {requirement_id} has invalid evidence path"
+                        )
                     elif not (ROOT / path).is_file():
                         problems.append(
                             f"ledger: verified {requirement_id} evidence path is missing: {path}"
