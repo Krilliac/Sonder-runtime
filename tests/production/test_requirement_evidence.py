@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -128,4 +129,68 @@ def test_generated_status_rejects_stale_projection(tmp_path):
     assert module.generated_problems() == [
         "generated: requirement-status.json is missing or stale",
         "generated: requirement-status.md is missing or stale",
+    ]
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+
+
+def _base_diff_fixture(tmp_path: Path, *, revise: bool) -> tuple[object, Path]:
+    module = _checker()
+    module.ROOT = tmp_path
+    module.SPEC = tmp_path / "docs/architecture/spec.md"
+    module.LEDGER = tmp_path / "docs/architecture/evidence/requirements.jsonl"
+    module.SPEC.parent.mkdir(parents=True)
+    module.LEDGER.parent.mkdir(parents=True)
+    evidence = tmp_path / "proof.txt"
+    evidence.write_text("proof\n", encoding="utf-8")
+    module.SPEC.write_text("- [ ] **TEST-001 — Demonstration.** Claim.\n", encoding="utf-8")
+    module.LEDGER.write_text(
+        '{"schema":"sonder-requirement-evidence-v1","requirement_id":"TEST-001",'
+        '"revision":1,"status":"implemented_unverified","claim":"Claim."}\n',
+        encoding="utf-8",
+    )
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "test@example.invalid")
+    _git(tmp_path, "config", "user.name", "Evidence Test")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-qm", "base")
+    module.SPEC.write_text("- [x] **TEST-001 — Demonstration.** Claim.\n", encoding="utf-8")
+    if revise:
+        module.LEDGER.write_text(
+            '{"schema":"sonder-requirement-evidence-v1","requirement_id":"TEST-001",'
+            '"revision":2,"status":"verified","claim":"Claim.",'
+            '"baseline_sha":"abc","verified_sha":"def",'
+            '"evidence":[{"path":"proof.txt"}]}\n',
+            encoding="utf-8",
+        )
+    else:
+        module.LEDGER.write_text(
+            '{"schema":"sonder-requirement-evidence-v1","requirement_id":"TEST-001",'
+            '"revision":1,"status":"verified","claim":"Claim.",'
+            '"baseline_sha":"abc","verified_sha":"def",'
+            '"evidence":[{"path":"proof.txt"}]}\n',
+            encoding="utf-8",
+        )
+    return module, tmp_path
+
+
+def test_base_diff_accepts_new_checkbox_with_new_verified_revision(tmp_path):
+    module, _ = _base_diff_fixture(tmp_path, revise=True)
+    assert module.validate("HEAD") == []
+
+
+def test_base_diff_rejects_checkbox_without_new_verified_revision(tmp_path):
+    module, _ = _base_diff_fixture(tmp_path, revise=False)
+    assert module.validate("HEAD") == [
+        "base-diff: newly checked requirement TEST-001 lacks a newly added "
+        "verified ledger revision with evidence"
+    ]
+
+
+def test_base_diff_rejects_unresolvable_ref(tmp_path):
+    module, _ = _base_diff_fixture(tmp_path, revise=True)
+    assert module.validate("missing-base") == [
+        "base-ref: cannot resolve 'missing-base'"
     ]

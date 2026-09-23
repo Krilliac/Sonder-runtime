@@ -37,6 +37,13 @@ jobs:
         run: python scripts/check_architecture.py
       - name: Validate master-spec evidence ledger
         run: python scripts/check_requirement_evidence.py
+      - name: Validate evidence changes against pull request base
+        if: github.event_name == 'pull_request'
+        env:
+          REQUIREMENT_EVIDENCE_BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: >-
+          python scripts/check_requirement_evidence.py
+          --base-ref "$REQUIREMENT_EVIDENCE_BASE_REF"
       - name: Enforce legacy error-signal ratchet
         run: python scripts/check_error_signals.py
       - name: Prevent new Git-history privacy debt
