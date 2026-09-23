@@ -238,6 +238,19 @@ def test_held_out_snapshot_keeps_resources_without_ignoring_them(tmp_path, monke
             prepared["cleanup"].cleanup()
 
 
+def test_held_out_snapshot_rejects_bounded_file_overflow(tmp_path, monkeypatch):
+    monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
+    monkeypatch.setattr(nightly_selfmod, "_HELD_OUT_MAX_FILES", 1)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_reflection.py").write_text(
+        "def test_answer():\n    assert True\n", encoding="utf-8"
+    )
+    (tmp_path / "tests" / "fixture.txt").write_text("overflow", encoding="utf-8")
+    prepared = nightly_selfmod._prepare_held_out("reflection.py", tmp_path / "candidate", 60)
+    assert "snapshot exceeds file limit" in prepared["command"][2]
+    assert prepared["cleanup"] is None
+
+
 def test_held_out_snapshot_rejects_candidate_mutation(tmp_path, monkeypatch):
     monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
     (tmp_path / "tests").mkdir()

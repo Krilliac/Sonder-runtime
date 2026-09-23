@@ -31,10 +31,12 @@ WHY THERE ARE TWO TEST GATES
   Measured 2026-08-08: an agent lane produced four plausible fixes whose tests
   had never been executed, and running them revealed that one broke an
   architecture rule. The regression gate covers the repository suite except
-  for a target-specific held-out suite. The held-out gate runs that suite from
-  the base worktree, outside the candidate's editable files, so a candidate
-  cannot pass by changing the tests it is being judged against. If no matching
-  suite exists, the evaluator is unavailable and the candidate is rejected.
+  for a target-specific held-out suite. The held-out gate runs a best-effort,
+  tamper-evident snapshot outside the candidate's editable files. It is not a
+  privilege boundary: a same-user candidate may be able to alter and restore
+  the snapshot, so this gate cannot claim security-grade isolation. If no
+  matching suite exists, the evaluator is unavailable and the candidate is
+  rejected.
 """
 from __future__ import annotations
 
@@ -191,9 +193,11 @@ def _regression_command(py: str, *, ignore_paths=()) -> list[str]:
 
 
 # The selfmod model sees only the candidate module. These suites are selected
-# from the base checkout, copied into a read-only evaluator root outside the
-# candidate, and digest checked before and after pytest. Output is drained
-# continuously while retaining only a bounded tail.
+# from the base checkout, copied into a best-effort read-only evaluator root
+# outside the candidate, and digest checked before and after pytest. A same-user
+# candidate may still be able to alter and restore it, so this is tamper
+# evidence rather than a privilege boundary. Output is drained continuously
+# while retaining only a bounded tail.
 _HELD_OUT_RUNNER = r'''
 import hashlib
 import importlib.util
@@ -327,7 +331,7 @@ if not verify("after"):
     raise SystemExit(2)
 if process.returncode:
     raise SystemExit(process.returncode)
-print("SELFMOD HELD-OUT CANARY PASSED: immutable suite and candidate-root imports")
+print("SELFMOD HELD-OUT CANARY PASSED: tamper-evident snapshot and candidate-root imports")
 '''
 
 
@@ -354,7 +358,7 @@ def _held_out_suite_paths(target: str) -> tuple[str, ...]:
 
 
 def _prepare_held_out(target: str, workspace: Path, timeout: int):
-    """Snapshot and prepare the immutable held-out command for one run."""
+    """Snapshot and prepare the best-effort tamper-evident held-out command."""
     suites = _held_out_suite_paths(target)
     copied = []
     selected_source_paths = []
@@ -380,24 +384,27 @@ def _prepare_held_out(target: str, workspace: Path, timeout: int):
     snapshot = tempfile.TemporaryDirectory(prefix="sonder-heldout-")
     suite_root = Path(snapshot.name).resolve()
     # Snapshot the whole test tree, including fixtures and data files that a
-    # selected suite may import indirectly. Only the selected paths are run;
-    # the complete snapshot prevents accidental fallback to the base checkout.
-    snapshot_files = tuple(
-        path for path in (REPO / "tests").rglob("*")
-        if path.is_file() and "__pycache__" not in path.parts
-    )
-    if len(snapshot_files) > _HELD_OUT_MAX_FILES:
+    # selected suite may import indirectly. Stop discovery at the configured
+    # bounds so a pathological tree cannot consume memory before rejection.
+    snapshot_files = []
+    total_bytes = 0
+    limit_error = None
+    for path in (REPO / "tests").rglob("*"):
+        if not path.is_file() or "__pycache__" in path.parts:
+            continue
+        if len(snapshot_files) >= _HELD_OUT_MAX_FILES:
+            limit_error = "held-out evaluator snapshot exceeds file limit"
+            break
+        size = path.stat().st_size
+        if total_bytes + size > _HELD_OUT_MAX_BYTES:
+            limit_error = "held-out evaluator snapshot exceeds byte limit"
+            break
+        snapshot_files.append(path)
+        total_bytes += size
+    if limit_error:
         snapshot.cleanup()
         return {
-            "command": [_test_python(), "-c", "raise SystemExit('held-out evaluator snapshot exceeds file limit')"],
-            "source_paths": tuple(suites),
-            "cleanup": None,
-        }
-    total_bytes = sum(path.stat().st_size for path in snapshot_files)
-    if total_bytes > _HELD_OUT_MAX_BYTES:
-        snapshot.cleanup()
-        return {
-            "command": [_test_python(), "-c", "raise SystemExit('held-out evaluator snapshot exceeds byte limit')"],
+            "command": [_test_python(), "-c", "raise SystemExit(%r)" % limit_error],
             "source_paths": tuple(suites),
             "cleanup": None,
         }
