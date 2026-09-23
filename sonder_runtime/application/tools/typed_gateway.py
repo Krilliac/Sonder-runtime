@@ -12,7 +12,7 @@ from pathlib import Path
 import time
 from typing import Any
 
-from ...domain.common.errors import InvalidInput
+from ...domain.common.errors import InvalidInput, NotFound
 from ...application.context import OperationContext
 from ...application.ports.tool_execution import (
     ToolExecutionResult,
@@ -85,7 +85,13 @@ class RegistrySchemaValidator:
         arguments: Mapping[str, Any],
         selection: ToolSchemaSelection | None = None,
     ) -> None:
-        descriptor = self._registry.admit(tool_name, selection)
+        try:
+            descriptor = self._registry.admit(tool_name, selection)
+        except NotFound as exc:
+            # The typed gateway exposes malformed/unknown calls as one input
+            # contract. Registry-specific lookup errors must not leak through
+            # this application boundary.
+            raise InvalidInput(str(exc)) from exc
         validate_tool_call(
             descriptor,
             ToolCall(tool_name=tool_name, arguments=dict(arguments)),
@@ -112,7 +118,10 @@ class PortBackedToolInvoker:
         selection = getattr(request, "schema_selection", None)
         if selection is not None and not isinstance(selection, ToolSchemaSelection):
             raise InvalidInput("schema_selection must be a ToolSchemaSelection")
-        descriptor = self._registry.admit(request.tool_name, selection)
+        try:
+            descriptor = self._registry.admit(request.tool_name, selection)
+        except NotFound as exc:
+            raise InvalidInput(str(exc)) from exc
         call = ToolCall(
             tool_name=request.tool_name,
             arguments=dict(request.arguments),
