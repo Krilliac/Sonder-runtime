@@ -178,7 +178,10 @@ def test_held_out_runner_executes_snapshot_against_candidate_root(tmp_path, monk
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_reflection.py").write_text(
         "from reflection import answer\n\n"
-        "def test_answer_is_stable():\n    assert answer() == 42\n",
+        "import time\n\n"
+        "def test_answer_is_stable():\n"
+        "    assert answer() == 42\n"
+        "    time.sleep(30)\n",
         encoding="utf-8",
     )
     candidate = tmp_path / "candidate"
@@ -187,6 +190,10 @@ def test_held_out_runner_executes_snapshot_against_candidate_root(tmp_path, monk
         "def answer():\n    return 42\n", encoding="utf-8"
     )
     prepared = nightly_selfmod._prepare_held_out("reflection.py", candidate, 60)
+    assert prepared["source_paths"] == ("tests/test_reflection.py",)
+    assert nightly_selfmod._regression_command(
+        "python", ignore_paths=prepared["source_paths"]
+    )[-2:] == ["--ignore", "tests/test_reflection.py"]
     try:
         result = subprocess.run(
             prepared["command"], cwd=candidate, text=True,
@@ -194,6 +201,38 @@ def test_held_out_runner_executes_snapshot_against_candidate_root(tmp_path, monk
         )
         assert result.returncode == 0, result.stdout + result.stderr
         assert "CANARY PASSED" in result.stdout
+    finally:
+        if prepared["cleanup"] is not None:
+            prepared["cleanup"].cleanup()
+
+
+def test_held_out_snapshot_keeps_resources_without_ignoring_them(tmp_path, monkeypatch):
+    monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "fixture.txt").write_text("held-out resource", encoding="utf-8")
+    (tmp_path / "tests" / "test_reflection.py").write_text(
+        "from pathlib import Path\n"
+        "from reflection import answer\n\n"
+        "def test_answer_uses_resource():\n"
+        "    assert Path(__file__).with_name('fixture.txt').read_text() == 'held-out resource'\n"
+        "    assert answer() == 42\n",
+        encoding="utf-8",
+    )
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "reflection.py").write_text(
+        "def answer():\n    return 42\n", encoding="utf-8"
+    )
+    prepared = nightly_selfmod._prepare_held_out("reflection.py", candidate, 60)
+    assert prepared["source_paths"] == ("tests/test_reflection.py",)
+    payload = json.loads(prepared["command"][-1])
+    assert any(path["path"].endswith("fixture.txt") for path in payload["files"])
+    try:
+        result = subprocess.run(
+            prepared["command"], cwd=candidate, text=True,
+            capture_output=True, timeout=60,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
     finally:
         if prepared["cleanup"] is not None:
             prepared["cleanup"].cleanup()
@@ -257,6 +296,49 @@ def test_held_out_runner_bounds_hostile_output(tmp_path, monkeypatch):
         assert result.returncode == 0, result.stdout + result.stderr
         assert "OUTPUT TRUNCATED" in result.stdout
         assert len(result.stdout) < 20000
+    finally:
+        if prepared["cleanup"] is not None:
+            prepared["cleanup"].cleanup()
+
+
+def test_held_out_timeout_terminates_windows_descendants(tmp_path, monkeypatch):
+    if sys.platform != "win32":
+        return
+    monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_reflection.py").write_text(
+        "from reflection import answer\n\n"
+        "import time\n\n"
+        "def test_answer_is_stable():\n"
+        "    assert answer() == 42\n"
+        "    time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    marker = tmp_path / "child.pid"
+    (candidate / "reflection.py").write_text(
+        "import subprocess, sys\n"
+        "from pathlib import Path\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        "Path(%r).write_text(str(child.pid), encoding='ascii')\n"
+        "def answer():\n    return 42\n" % str(marker),
+        encoding="utf-8",
+    )
+    prepared = nightly_selfmod._prepare_held_out("reflection.py", candidate, 1)
+    try:
+        result = subprocess.run(
+            prepared["command"], cwd=candidate, text=True,
+            capture_output=True, timeout=20,
+        )
+        assert result.returncode == 124, result.stdout + result.stderr
+        if marker.is_file():
+            child_pid = marker.read_text(encoding="ascii")
+            tasklist = subprocess.run(
+                ["tasklist", "/FI", "PID eq %s" % child_pid],
+                capture_output=True, text=True, check=False,
+            )
+            assert child_pid not in tasklist.stdout
     finally:
         if prepared["cleanup"] is not None:
             prepared["cleanup"].cleanup()

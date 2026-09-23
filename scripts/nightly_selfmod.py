@@ -58,6 +58,9 @@ if str(REPO) not in sys.path:
 
 import selfmod  # noqa: E402
 
+_HELD_OUT_MAX_FILES = 2048
+_HELD_OUT_MAX_BYTES = 32 * 1024 * 1024
+
 # Files the nightly stage may propose changes to. Every entry is a module
 # with its own test file, small enough that one function is a meaningful
 # fraction of it, and none is a hot path every lane touches -- server.py is
@@ -295,6 +298,7 @@ try:
         cwd=candidate, env=environment, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        start_new_session=(os.name != "nt"),
     )
 except OSError as exc:
     print("SELFMOD HELD-OUT FAILED: evaluator could not start: %s" % exc)
@@ -353,7 +357,7 @@ def _prepare_held_out(target: str, workspace: Path, timeout: int):
     """Snapshot and prepare the immutable held-out command for one run."""
     suites = _held_out_suite_paths(target)
     copied = []
-    source_paths = []
+    selected_source_paths = []
     if not suites:
         return {
             "command": [
@@ -378,8 +382,26 @@ def _prepare_held_out(target: str, workspace: Path, timeout: int):
     # Snapshot the whole test tree, including fixtures and data files that a
     # selected suite may import indirectly. Only the selected paths are run;
     # the complete snapshot prevents accidental fallback to the base checkout.
-    for source in (path for path in (REPO / "tests").rglob("*")
-                   if path.is_file() and "__pycache__" not in path.parts):
+    snapshot_files = tuple(
+        path for path in (REPO / "tests").rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    )
+    if len(snapshot_files) > _HELD_OUT_MAX_FILES:
+        snapshot.cleanup()
+        return {
+            "command": [_test_python(), "-c", "raise SystemExit('held-out evaluator snapshot exceeds file limit')"],
+            "source_paths": tuple(suites),
+            "cleanup": None,
+        }
+    total_bytes = sum(path.stat().st_size for path in snapshot_files)
+    if total_bytes > _HELD_OUT_MAX_BYTES:
+        snapshot.cleanup()
+        return {
+            "command": [_test_python(), "-c", "raise SystemExit('held-out evaluator snapshot exceeds byte limit')"],
+            "source_paths": tuple(suites),
+            "cleanup": None,
+        }
+    for source in snapshot_files:
         relative = source.relative_to(REPO).as_posix()
         destination = suite_root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -387,7 +409,8 @@ def _prepare_held_out(target: str, workspace: Path, timeout: int):
         destination.chmod(0o444)
         digest = hashlib.sha256(destination.read_bytes()).hexdigest()
         copied.append({"path": str(destination), "sha256": digest})
-        source_paths.append(relative)
+        if relative in suites:
+            selected_source_paths.append(relative)
     for directory in sorted(
         (path for path in suite_root.rglob("*") if path.is_dir()),
         key=lambda path: len(path.parts), reverse=True,
@@ -402,7 +425,7 @@ def _prepare_held_out(target: str, workspace: Path, timeout: int):
         "timeout": max(1, min(int(timeout), 900)),
     }
     command = [_test_python(), "-c", _HELD_OUT_RUNNER, json.dumps(payload, sort_keys=True)]
-    return {"command": command, "source_paths": tuple(source_paths), "cleanup": snapshot}
+    return {"command": command, "source_paths": tuple(selected_source_paths), "cleanup": snapshot}
 
 
 def _module_name_for_target(target: str) -> str | None:
