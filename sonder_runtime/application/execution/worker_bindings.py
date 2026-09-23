@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Mapping, TypeVar
 
 from .effect_journal import (
     EffectJournal,
@@ -59,11 +59,20 @@ class AuthenticatedWorkerBinding:
             self.journal, self.run_id, self.worker_id, self.owner_epoch, self.scope,
         )
 
-    def recover_before_restart(self, *, max_records: int = 100) -> RecoveryDecision:
+    def recover_before_restart(
+        self,
+        *,
+        live_workers: Mapping[str, int] | None = None,
+        max_records: int = 100,
+    ) -> RecoveryDecision:
         """Refuse worker restart while an old owner needs reconciliation."""
         decision = self.journal.recover(
             self.run_id,
-            live_workers={self.worker_id: self.owner_epoch},
+            # A constructed binding is not proof that an old worker is still
+            # alive.  Composition may pass an independently authenticated
+            # liveness map, but the safe default treats every prior owner as
+            # unavailable and requires reconciliation before restart.
+            live_workers={} if live_workers is None else live_workers,
             max_records=max_records,
         )
         if decision.action == "reconcile":
