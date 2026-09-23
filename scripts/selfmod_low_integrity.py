@@ -196,6 +196,52 @@ def _child(spec_path: Path) -> int:
     return int(result["returncode"])
 
 
+# Non-secret host facts that ordinary Windows tooling needs to resolve
+# executables and system locations. Without PATHEXT, for example, PowerShell's
+# ``Get-Command python`` cannot find ``python.exe`` on PATH. Credentials,
+# tokens, and the user's real profile/AppData locations are never copied.
+_PASSTHROUGH_ENV = (
+    "PATHEXT", "COMSPEC", "SystemDrive", "ProgramFiles", "ProgramFiles(x86)",
+    "ProgramW6432", "ProgramData", "CommonProgramFiles",
+    "CommonProgramFiles(x86)", "CommonProgramW6432", "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER", "OS",
+)
+
+# Read-only toolchain homes. Redirecting USERPROFILE makes rustup/cargo look in
+# the disposable home and report "no default toolchain". The low token still
+# cannot write these medium-integrity directories.
+_TOOLCHAIN_HOMES = (("RUSTUP_HOME", ".rustup"), ("CARGO_HOME", ".cargo"))
+
+
+def _low_environment(work: Path, low_home: Path) -> dict[str, str]:
+    """Build the allowlisted environment for the low-integrity child."""
+    home_drive, home_tail = os.path.splitdrive(str(low_home))
+    env = {
+        "SystemRoot": os.environ.get("SystemRoot", r"C:\Windows"),
+        "WINDIR": os.environ.get("WINDIR", r"C:\Windows"),
+        "PATH": os.environ.get("PATH", ""),
+    }
+    for name in _PASSTHROUGH_ENV:
+        value = os.environ.get(name)
+        if value:
+            env[name] = value
+    real_home = Path(os.environ.get("USERPROFILE") or Path.home())
+    for name, default in _TOOLCHAIN_HOMES:
+        value = os.environ.get(name) or str(real_home / default)
+        if Path(value).is_dir():
+            env[name] = value
+    env.update({
+        "TEMP": str(work), "TMP": str(work),
+        "USERPROFILE": str(low_home), "HOME": str(low_home),
+        "HOMEDRIVE": home_drive, "HOMEPATH": home_tail,
+        "APPDATA": str(low_home / "AppData" / "Roaming"),
+        "LOCALAPPDATA": str(low_home / "AppData" / "Local"),
+        "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONPYCACHEPREFIX": str(work / "pycache"),
+    })
+    return env
+
+
 def run_isolated(
     command: Sequence[str], *, cwd: str | os.PathLike[str], timeout: int,
     protected_paths: Sequence[str | os.PathLike[str]] = (),
@@ -223,19 +269,7 @@ def run_isolated(
         result_path = work / "result.json"
         spec_path = work / "spec.json"
         low_home = work / "home"
-        home_drive, home_tail = os.path.splitdrive(str(low_home))
-        env = {
-            "SystemRoot": os.environ.get("SystemRoot", r"C:\Windows"),
-            "WINDIR": os.environ.get("WINDIR", r"C:\Windows"),
-            "PATH": os.environ.get("PATH", ""),
-            "TEMP": str(work), "TMP": str(work),
-            "USERPROFILE": str(low_home), "HOME": str(low_home),
-            "HOMEDRIVE": home_drive, "HOMEPATH": home_tail,
-            "APPDATA": str(low_home / "AppData" / "Roaming"),
-            "LOCALAPPDATA": str(low_home / "AppData" / "Local"),
-            "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
-            "PYTHONPYCACHEPREFIX": str(work / "pycache"),
-        }
+        env = _low_environment(work, low_home)
         spec_path.write_text(json.dumps({
             "command": list(command), "cwd": str(Path(cwd).resolve()),
             "timeout": max(1, int(timeout)), "env": env,

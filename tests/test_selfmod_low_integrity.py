@@ -254,3 +254,39 @@ def test_isolation_setup_failure_is_not_a_successful_reproducer(tmp_path, monkey
     )
     assert result["exit_code"] == 125
     assert result["passed"] is False
+
+
+def test_low_environment_allowlists_host_facts_without_secrets(tmp_path, monkeypatch):
+    from scripts.selfmod_low_integrity import _low_environment
+
+    rustup = tmp_path / "real" / ".rustup"
+    rustup.mkdir(parents=True)
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+    monkeypatch.setenv("RUSTUP_HOME", str(rustup))
+    monkeypatch.setenv("CARGO_HOME", str(tmp_path / "missing-cargo"))
+    monkeypatch.setenv("GITHUB_TOKEN", "must-not-leak")
+    monkeypatch.setenv("SONDER_ADMIN_SECRET", "must-not-leak")
+    work = tmp_path / "work"
+    env = _low_environment(work, work / "home")
+
+    assert env["PATHEXT"] == ".COM;.EXE;.BAT;.CMD"
+    assert env["RUSTUP_HOME"] == str(rustup)
+    # A toolchain home that does not exist is not invented.
+    assert "CARGO_HOME" not in env
+    assert "GITHUB_TOKEN" not in env and "SONDER_ADMIN_SECRET" not in env
+    assert env["USERPROFILE"] == str(work / "home")
+    assert env["TEMP"] == str(work)
+
+
+def test_low_child_resolves_executables_through_pathext(tmp_path):
+    from scripts.selfmod_low_integrity import run_isolated
+
+    # PowerShell's ``Get-Command`` and Python's ``shutil.which`` both need
+    # PATHEXT to resolve ``python`` to ``python.exe`` on PATH.
+    command = [
+        sys.executable, "-c",
+        "import os, shutil; assert os.environ.get('PATHEXT'); "
+        "assert shutil.which('cmd'), 'cmd not resolvable'",
+    ]
+    result = run_isolated(command, cwd=tmp_path, timeout=30)
+    assert result["passed"] is True, result.get("output")
