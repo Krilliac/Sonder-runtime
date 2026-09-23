@@ -334,6 +334,9 @@ from sonder_runtime.adapters.model_response_metadata import (
 )
 from sonder_runtime.adapters.offload_schema_argument import parse_schema_arg as _parse_schema_arg
 from sonder_runtime.adapters.agent_call_signature import call_signature as _agent_call_signature_policy
+from sonder_runtime.application.agents.retry_guard import (
+    FailedToolRetryGuard,
+)
 from sonder_runtime.domain.campaign_prompt import campaign_prompt as _campaign_prompt_policy
 from sonder_runtime.domain.automation.command_programs import command_programs as _autopilot_command_programs
 from sonder_runtime.adapters.agent_decision_generation import (
@@ -19490,6 +19493,12 @@ def _agent_call_signature(tool_name, args):
     )
 
 
+def _agent_retry_identity(tool_name, args, project_scope):
+    """Scope a canonical tool signature to the host-selected resource scope."""
+    scope = os.path.normcase(os.path.realpath(str(project_scope or ""))) if project_scope else ""
+    return repr((_agent_call_signature(tool_name, args), scope))
+
+
 
 
 
@@ -19915,7 +19924,10 @@ def _agent_turn(
     successful_web_calls = set()
     successful_inspection_results = {}
     repeated_inspection_counts = {}
-    failed_call_counts = {}
+    # Host-side retry state is separate from model/provider retry policy.  It
+    # fingerprints the canonical tool call, host-selected scope, and returned
+    # failed outcome so an unchanged failure is bounded at the execution loop.
+    failed_tool_retry_guard = FailedToolRetryGuard(max_retries=2)
     # Exact call signatures catch literal retries, but a model can evade that
     # fence by changing an otherwise irrelevant path/query on every attempt.
     # Keep only a small window of host-known failed/empty outcomes so those
@@ -20603,11 +20615,16 @@ def _agent_turn(
             policy_tool_args["mode"] = "overwrite"
             auto_promoted_overwrite = True
         call_signature = _agent_call_signature(tool_name, policy_tool_args)
+        retry_identity = _agent_retry_identity(
+            tool_name, policy_tool_args, project_scope,
+        )
         cached_inspection = (
             tool_name in _AGENT_DEDUPLICATED_INSPECTION_TOOLS
             and call_signature in successful_inspection_results
         )
-        prior_identical_failures = failed_call_counts.get(call_signature, 0)
+        prior_identical_failures = failed_tool_retry_guard.decision(
+            retry_identity,
+        ).attempts
         if prior_identical_failures >= 3:
             if auto_checklist:
                 _agent_checklist_fail(
@@ -20779,7 +20796,7 @@ def _agent_turn(
         tool_ok = _agent_tool_observation_ok(tool_name, observation)
         abort_observation = None
         if tool_ok:
-            failed_call_counts.pop(call_signature, None)
+            failed_tool_retry_guard.record_success(retry_identity)
             completion_blocking_failures.pop(call_signature, None)
             if tool_name == "file_write":
                 run_created_paths.add(
@@ -20804,7 +20821,21 @@ def _agent_turn(
                     _agent_created_path_key(policy_tool_args.get("output_path"))
                 )
         else:
-            failed_call_counts[call_signature] = prior_identical_failures + 1
+            if tool_dispatched:
+                failed_tool_retry_guard.record_failure(
+                    retry_identity,
+                    tool=tool_name,
+                    resource=policy_tool_args.get("path")
+                    or policy_tool_args.get("root")
+                    or policy_tool_args.get("cwd")
+                    or policy_tool_args.get("url")
+                    or "",
+                    scope=project_scope,
+                    arguments=policy_tool_args,
+                    outcome=observation_text,
+                )
+            else:
+                failed_tool_retry_guard.record_blocked(retry_identity)
             # Certain narrow routes cannot answer honestly after a specific
             # source fails. End immediately instead of consuming further
             # model/tool turns and risking a prose-only completion.
@@ -20916,14 +20947,11 @@ def _agent_turn(
             # the tree that exists after it.
             verification_ok = False
             if mutation_happened or tool_ok:
-                failed_call_counts.clear()
+                failed_tool_retry_guard.clear_except(retry_identity)
             else:
                 # The failing execution itself must remain bounded, while
                 # failures against the pre-execution workspace may be stale.
-                current_failure_count = failed_call_counts.get(call_signature, 0)
-                failed_call_counts.clear()
-                if current_failure_count:
-                    failed_call_counts[call_signature] = current_failure_count
+                failed_tool_retry_guard.clear_except(retry_identity)
         if mutation_attempt_may_have_changed:
             for record in _agent_mutation_records(tool_name, policy_tool_args):
                 if record not in mutations:
