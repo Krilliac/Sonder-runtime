@@ -18,6 +18,17 @@ not retrospectively discovered or copied. Migrate or remove those facts with
 an explicit operator-controlled procedure before activation. The legacy
 unconfigured graph retains its existing unjournaled fact path.
 
+Before enabling this source on an existing database, stop fact writers and
+back up `memory.db`. Inspect the exact configured project for rows in `facts`
+that have no matching active `memory_authoritative_fact_state` row owned by
+`local_node_id`. If any exist, leave replication disabled for that project;
+the runtime refuses new authoritative writes and does not reinterpret the old
+rows as verified source mutations. Use an empty project scope for a new
+deployment or complete a separately reviewed migration that creates matching
+source versions and journal records in one transaction. There is currently no
+automatic backfill command. Read access to existing local facts remains
+available while activation is deferred.
+
 The receiving host applies a validated page to its local replication journal
 and normal fact projection before it creates its durable receipt. A receipt
 therefore means that the supported target fact row has been projected locally
