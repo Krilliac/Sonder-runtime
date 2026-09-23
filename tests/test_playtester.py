@@ -157,7 +157,9 @@ def test_github_publisher_deduplicates_by_marker_without_creating_issue():
     def fake_gh(command, **kwargs):
         calls.append(command)
         if command[2] == "list":
-            return subprocess.CompletedProcess(command, 0, '[{"number": 9}]', "")
+            return subprocess.CompletedProcess(command, 0, json.dumps([{
+                "number": 9, "body": f"<!-- {plan.marker} -->",
+            }]), "")
         raise AssertionError("duplicate issue must not be created")
 
     class Adapter:
@@ -166,6 +168,28 @@ def test_github_publisher_deduplicates_by_marker_without_creating_issue():
     result = GitHubPublisher(dry_run=False, adapter=Adapter()).publish(plan)
     assert result["deduplicated_issue"] is True
     assert len(calls) == 1
+    assert calls[0][calls[0].index("--state") + 1] == "all"
+
+
+def test_github_publisher_requires_exact_marker_body_before_deduplication():
+    report = PlaytestRunner(ProcessAdapter()).run([
+        Scenario("smoke", "works", (sys.executable, "-c", "pass"))
+    ], commit_sha="d" * 40)[0]
+    plan = build_publish_plan(report, repository="x/y")
+    calls = []
+
+    class Adapter:
+        def run(self, command):
+            calls.append(command)
+            if command[2] == "list":
+                return subprocess.CompletedProcess(command, 0, json.dumps([{
+                    "number": 9, "body": "another marker in a closed issue",
+                }]), "")
+            return subprocess.CompletedProcess(command, 0, "https://example.test/issues/10", "")
+
+    result = GitHubPublisher(dry_run=False, adapter=Adapter()).publish(plan)
+    assert result["deduplicated_issue"] is False
+    assert calls[-1][:3] == ("gh", "issue", "create")
 
 
 def test_pr_requires_clean_non_base_branch_at_report_sha():
