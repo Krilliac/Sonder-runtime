@@ -46,6 +46,11 @@ class UnitOfWorkAdapter:
         path = self._db_path or paths.memory_db_path()
         self._conn = memory_store.connect(path)
         try:
+            if self._authoritative_fact_source is not None:
+                # Publish the durable authority marker before handing the
+                # connection to application callers.  This fences the legacy
+                # memory-store helpers for the configured project as well.
+                self._authoritative_fact_source.activate(self._conn)
             self.memory = MemoryRepositoryAdapter(
                 self._conn,
                 authoritative_fact_source=self._authoritative_fact_source,
