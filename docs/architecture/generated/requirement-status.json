@@ -516,9 +516,9 @@
     },
     {
       "checked": false,
-      "claim": "Live agent lanes accept configured bounded instruction and skill roots and bind reusable prefix identity to a sealed provider route, including provider, model, tokenizer, and template.",
+      "claim": "A bounded local Ollama probe through the live AgentLaneService path observed scoped skill refresh invalidating the application prefix while preserving provider model identity and forwarding provider cache telemetry.",
       "requirement_id": "CTX-009",
-      "revision": 5,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "68a1f30d0dde2e1ea9292dd9f487a02f9395bb45496689ac9106482e524ff354",
+    "ledger_sha256": "6de57af4e57d8869d863a0c1357735c752390c27eafe4156d681cea84665f496",
     "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
   }
 }
