@@ -38,6 +38,33 @@ def test_authority_index_and_required_classifications_exist():
         assert phrase in index
 
 
+def test_architecture_readme_is_a_direct_authority_map():
+    readme = _read("docs/architecture/README.md")
+    required_links = {
+        "SONDER-MASTER-IMPLEMENTATION-SPEC.md": "Authoritative requirements",
+        "../../ARCHITECTURE.md": "Authoritative current contract",
+        "../../SECURITY.md": "Authoritative current contract",
+        "../../SELFMOD.md": "Authoritative current contract",
+        "../../TRAINING.md": "Authoritative current contract",
+        "../../CLIENT.md": "Authoritative current contract",
+        "../../MOBILE_HOST_CONTROL.md": "Authoritative current contract",
+        "SPEC-5-End-State-Architecture.md": "Historical/superseded",
+        "SPEC-5-MIGRATION-RUNBOOK.md": "Historical/runbook",
+        "PROGRAM-STATUS.md": "Historical snapshot",
+    }
+    assert "## Direct authority map" in readme
+    for link, classification in required_links.items():
+        rows = [
+            line for line in readme.splitlines()
+            if line.startswith("|") and f"]({link})" in line
+        ]
+        assert len(rows) == 1, link
+        cells = [cell.strip() for cell in rows[0].split("|")]
+        assert cells[1] == classification, (link, rows[0])
+        target = (ROOT / "docs" / "architecture" / link).resolve()
+        assert target.is_file(), link
+
+
 def test_historical_documents_are_explicitly_labeled_and_focused_paths_exist():
     index = _read("docs/architecture/DOCUMENT-AUTHORITY-INDEX.md")
     for relative in (
