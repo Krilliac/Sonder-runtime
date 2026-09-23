@@ -32,6 +32,16 @@ scope, and still serves one that does not. The HTTP lifecycle tests in
 `tests/test_memory_replication_service.py` that only covered route lifecycle
 now use `receiver_enabled=False`.
 
+Retired coverage: `serve.main` coverage of attaching and detaching a receiver
+for the live application graph was removed, because the live graph can no
+longer produce a receiver. That path is unreachable from the live app, not
+deleted. `configure_memory_replication_service` still installs and detaches a
+receiver for a directly composed standalone service, which
+`test_http_owner_composes_only_the_local_receiver_without_peer_send` continues
+to cover, and `test_serve_main_refuses_receiver_before_listener_bind` covers
+the live refusal. `docs/runbooks/memory-replication.md` now marks live two-PC
+fact copy and its acceptance template as unavailable in this release.
+
 ## Per-transaction activation cost
 
 Full per-row journal authentication now runs only when a source first claims
