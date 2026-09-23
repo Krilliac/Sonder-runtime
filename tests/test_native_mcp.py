@@ -252,11 +252,13 @@ def test_native_compute_mutations_obey_runtime_permission_policy(monkeypatch):
             AssertionError("denied compute must not execute")
         )
     )
-    monkeypatch.setattr(
-        permission_policy,
-        "decide_for_caller",
-        lambda *_args, **_kwargs: SimpleNamespace(action="deny"),
-    )
+    decisions = []
+    forgotten = []
+    def deny(*args, **kwargs):
+        decisions.append((args, kwargs))
+        return SimpleNamespace(action="deny", call_id="approved-call-1")
+    monkeypatch.setattr(permission_policy, "decide_for_caller", deny)
+    monkeypatch.setattr(permission_policy, "forget_spent_approval", lambda: forgotten.append(True))
     requests = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
             "protocolVersion": "2.0", "capabilities": {"tools": {}},
@@ -280,6 +282,10 @@ def test_native_compute_mutations_obey_runtime_permission_policy(monkeypatch):
     rows = [json.loads(line) for line in output.getvalue().splitlines()]
     assert rows[1]["result"]["isError"] is True
     assert rows[1]["result"]["error"] == "permission_denied"
+    assert rows[1]["result"]["evidence"]["call_id"] == "approved-call-1"
+    assert decisions[0][0] == ("compute_submit",)
+    assert decisions[0][1]["arguments"] == requests[1]["params"]["arguments"]
+    assert forgotten == [True]
 
 
 def test_native_compute_mutations_have_deliberate_unpatched_permission_classes():

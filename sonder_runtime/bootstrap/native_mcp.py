@@ -767,24 +767,32 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             if canonical_name in {"compute_submit", "compute_cancel"}:
                 from ..adapters.security.permission_policy import permission_policy
 
-                decision = permission_policy.decide_for_caller(
-                    canonical_name,
-                    interactive=False,
-                    gate_control_exempt=False,
-                    surface="native-mcp",
-                )
-                if (
-                    decision is not None
-                    and decision.action != permission_policy.allow_action()
-                ):
-                    logger.error(f"compute tool permission denied, tool={canonical_name!r}, surface='native-mcp'")
-                    logger.warning(f"compute tool {canonical_name!r} denied by runtime permission policy")
-                    return {
-                        "output": "compute host control denied by runtime permission policy",
-                        "isError": True,
-                        "error": "permission_denied",
-                        "evidence": {"tool": canonical_name},
-                    }
+                try:
+                    decision = permission_policy.decide_for_caller(
+                        canonical_name,
+                        interactive=False,
+                        gate_control_exempt=False,
+                        surface="native-mcp",
+                        arguments=canonical_arguments,
+                    )
+                    if (
+                        decision is not None
+                        and decision.action != permission_policy.allow_action()
+                    ):
+                        logger.error(f"compute tool permission denied, tool={canonical_name!r}, surface='native-mcp'")
+                        logger.warning(f"compute tool {canonical_name!r} denied by runtime permission policy")
+                        return {
+                            "output": "compute host control denied by runtime permission policy",
+                            "isError": True,
+                            "error": "permission_denied",
+                            "evidence": {
+                                "tool": canonical_name,
+                                "call_id": getattr(decision, "call_id", ""),
+                            },
+                        }
+                    return compute_result(canonical_name, canonical_arguments)
+                finally:
+                    permission_policy.forget_spent_approval()
             return compute_result(canonical_name, canonical_arguments)
         cloud_consent = bool(canonical_arguments.pop("consent", False)) if canonical_name in {"web_fetch", "web_search", "weather_lookup", "approximate_location_lookup"} else False
         if cloud_consent:
