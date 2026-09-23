@@ -23,6 +23,25 @@ def test_default_compute_config_is_local_only_and_remote_disabled() -> None:
     assert config.compute.probe_timeout_ms == 2_000
 
 
+def test_local_only_catalog_rejects_mapping_without_a_configured_workspace_root(tmp_path) -> None:
+    path = tmp_path / "sonder.toml"
+    path.write_text(
+        """
+[state]
+workspace_roots = ["/srv/sonder/workspaces"]
+
+[[compute.jobs]]
+id = "node-build"
+workload = "build"
+program = "/usr/bin/cmake"
+workspace_mappings = ["node1-workspaces"]
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="not available locally"):
+        load_config(path, env={})
+
+
 def test_compute_nodes_and_catalog_entries_load_as_typed_toml(tmp_path) -> None:
     path = tmp_path / "sonder.toml"
     path.write_text(
