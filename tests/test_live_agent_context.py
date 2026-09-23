@@ -80,10 +80,15 @@ def test_live_agent_context_is_scoped_and_uses_last_good_on_partial_refresh(tmp_
     assert second.complete and "BETA" in second.records[0].content
     assert "ALPHA" not in "\n".join(record.content for record in second.records)
 
-    (project_a / "AGENTS.md").unlink()
+    (project_a / "AGENTS.md").write_text("x" * (128 * 1024 + 1), encoding="utf-8")
     stale = producer.refresh(project_a)
     assert not stale.complete and stale.reason.startswith("last_good:")
     assert "ALPHA" in "\n".join(record.content for record in stale.records)
+    (project_a / "AGENTS.md").unlink()
+    removed = producer.refresh(project_a)
+    assert removed.complete
+    assert "ALPHA" not in "\n".join(record.content for record in removed.records)
+    assert "No project-specific rules" in "\n".join(record.content for record in removed.records)
 
 
 def test_stale_project_rules_are_retained_but_not_injected_as_authoritative(tmp_path):
@@ -104,10 +109,37 @@ def test_stale_project_rules_are_retained_but_not_injected_as_authoritative(tmp_
     lane = store.read_lane(lane_id)
     first = service._request(lane, (), request_id="before-removal")
     assert "ALPHA RULE" in first.system
-    (project / "AGENTS.md").unlink()
+    (project / "AGENTS.md").write_text("x" * (128 * 1024 + 1), encoding="utf-8")
     stale = service._request(lane, (), request_id="after-removal")
     assert "ALPHA RULE" not in stale.system
     assert "Live stable context unavailable: last_good:" in stale.system
+    assert planner.prefix_cache_telemetry.writes == 1
+
+
+def test_empty_project_catalog_is_a_complete_live_prefix(tmp_path):
+    project = tmp_path / "empty"
+    project.mkdir()
+    producer = LiveAgentContextProducer()
+    result = producer.refresh(project)
+    assert result.complete
+    assert tuple(record.section for record in result.records) == (
+        "project_rules", "skill_catalog",
+    )
+    sessions = SQLiteSessionRepository(tmp_path / "sessions.db")
+    store = SQLiteAgentLaneStore(tmp_path / "lanes.db", sessions)
+    planner = ContextPlanningFacade()
+    service = AgentLaneService(
+        store, sessions, _Model(), auto_start=False,
+        context_planning=planner, live_context=producer,
+    )
+    context = local_owner_context(correlation_id="empty", workspace_roots=(tmp_path,))
+    lane_id = service.spawn(
+        command_id="spawn-empty", parent_session_id="parent", task="inspect",
+        workspace_root=str(project), context=context,
+    )["lane"]["id"]
+    request = service._request(store.read_lane(lane_id), (), request_id="empty-request")
+    assert "No project-specific rules" in request.system
+    assert "No project skills" in request.system
     assert planner.prefix_cache_telemetry.writes == 1
 
 
