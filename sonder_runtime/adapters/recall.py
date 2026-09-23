@@ -293,7 +293,7 @@ def recall_page(conn, task, k=2, embed_fn=None, min_sim=None,
         embedding_revision=embedding_revision,
         require_embedding=not (specialized or lexical_fallback),
         max_created_at=(at.isoformat() if mode == "temporal" else None),
-        embedding_dim=(len(qv) if qv is not None else None),
+        embedding_dim=(len(qv) if not (specialized or lexical_fallback) else None),
         cursor=candidate_cursor,
     )
     scored = []

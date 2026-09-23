@@ -226,6 +226,17 @@ def test_hybrid_falls_back_to_bounded_lexical_recall_without_embedding():
     assert page.degradation_reasons == ("embedding_unavailable_lexical_fallback",)
 
 
+def test_hybrid_invalid_query_vector_uses_lexical_fallback_without_len_error():
+    c = _conn()
+    ms.log_interaction(c, "lexical-only", "bounded lexical task", "", "result", "sonder")
+    ms.record_outcome_row(c, "lexical-only", "tests_passed", 1.0, source="caller")
+
+    page = recall.recall_page(c, "bounded lexical", qv=object(), min_sim=0.9)
+
+    assert page.results == ("bounded lexical task -> result",)
+    assert "embedding_unavailable_lexical_fallback" in page.degradation_reasons
+
+
 def test_recall_quarantines_ambiguous_migrated_session_project():
     c = _conn()
     ms.touch_session(c, "legacy-session", project="project-a")
