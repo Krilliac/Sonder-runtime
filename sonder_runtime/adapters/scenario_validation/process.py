@@ -1,4 +1,4 @@
-"""Subprocess boundary for playtest adapters."""
+"""Subprocess boundary for scenario validation adapters."""
 
 from __future__ import annotations
 
