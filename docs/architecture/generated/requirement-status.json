@@ -894,9 +894,9 @@
     },
     {
       "checked": false,
-      "claim": "The active project/source fence is enforced on direct authoritative upsert and delete paths, and the composed authoritative repository rejects cross-project fact, count, entity, and decision reads while preserving the unconfigured legacy behavior.",
+      "claim": "Composed authoritative fact writes now require an acyclic same-source and same-project supersession link, and scoped entity and decision indexes hide the predecessor after the successor becomes effective across restart and journal rebuild.",
       "requirement_id": "MEM-004",
-      "revision": 6,
+      "revision": 7,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "af99c59260b7eb5ccbfc17d9d045402232b7c9c91c46c0c3a92874fb97e4a7d1",
+    "ledger_sha256": "f8b785bf8a0781546baac769c144dad9e3258df77c877d2f806e065239c81ed6",
     "spec_sha256": "4797da92d2d1845ce944b2dc32353d52fe7a6e48dfa92593753ca727761ca714"
   }
 }

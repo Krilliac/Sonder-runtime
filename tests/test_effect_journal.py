@@ -7,7 +7,9 @@ from sonder_runtime.adapters.persistence.sqlite.effect_journal import SQLiteEffe
 from sonder_runtime.adapters.persistence.sqlite.runtime_checkpoints import SQLiteRuntimeCheckpointRepository
 from sonder_runtime.application.execution.effect_journal import (
     EffectIntent, EffectJournalError, EffectOutcome, EffectState, JournalBinding, bound,
+    ReconciliationProof,
 )
+from sonder_runtime.application.execution.worker_bindings import AuthenticatedWorkerBinding
 from sonder_runtime.application.ports.runtime_checkpoints import CheckpointError, RestoreStatus, RuntimeCheckpoint
 
 
@@ -424,3 +426,98 @@ def test_default_worker_checkpoint_projection_is_content_free(tmp_path):
     raw = (tmp_path / "effects.db").read_bytes()
     assert private_output.encode() not in raw
     assert private_prompt.encode() not in raw
+
+
+class _ExternalVerifier:
+    verifier_id = "external-api-v1"
+    operation_ids = frozenset({"reconcile-op"})
+
+    def __init__(self, proof_factory=None):
+        self.proof_factory = proof_factory
+
+    def verify(self, intent):
+        if self.proof_factory is not None:
+            return self.proof_factory(intent)
+        return ReconciliationProof(
+            intent_id=intent.intent_id, operation_id=intent.operation_id,
+            receipt_key="external-receipt-1", outcome_digest="d" * 64,
+            state=EffectState.COMPLETED, verifier_id=self.verifier_id,
+            external_reference="external-op-1",
+        )
+
+
+def _uncertain_for_reconciliation(tmp_path, operation="reconcile-op"):
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    journal.register_reconciliation_verifier(_ExternalVerifier())
+    first = AuthenticatedWorkerBinding(journal, "run", "worker", 1, "/workspace")
+    intent = first.binding().begin_request(
+        operation_id=operation, idempotency_key="reconcile-key", request_digest="a" * 64,
+    )
+    first.binding().mark_uncertain(intent, detail="crash after external call")
+    journal.claim_owner("run", "worker", 2)
+    journal.recover("run", live_workers={})
+    return journal, intent
+
+
+def test_host_verifier_reconciles_exact_effect_and_clears_epoch_fence(tmp_path):
+    journal, intent = _uncertain_for_reconciliation(tmp_path)
+    resolved = journal.reconcile(intent.intent_id, owner_epoch=2)
+    assert resolved.state is EffectState.COMPLETED
+    assert resolved.operation_id == "reconcile-op"
+    assert resolved.receipt_key == "external-receipt-1"
+    resumed = AuthenticatedWorkerBinding(journal, "run", "worker", 2, "/workspace")
+    assert resumed.binding().begin_request(
+        operation_id="after-reconcile", idempotency_key="after-reconcile",
+        request_digest="b" * 64,
+    ).state is EffectState.INTENT
+
+
+def test_unsupported_operation_family_stays_fenced(tmp_path):
+    journal, intent = _uncertain_for_reconciliation(tmp_path, operation="unsupported-op")
+    with pytest.raises(EffectJournalError, match="no trusted reconciliation verifier"):
+        journal.reconcile(intent.intent_id, owner_epoch=2)
+    with pytest.raises(EffectJournalError, match="duplicate effect intent"):
+        journal.begin(EffectIntent(
+            "run:after", "run", "worker", "after", "/workspace", 2,
+            "after", "b" * 64,
+        ))
+
+
+def test_stale_epoch_cannot_reconcile_after_restart(tmp_path):
+    journal, intent = _uncertain_for_reconciliation(tmp_path)
+    with pytest.raises(EffectJournalError, match="stale reconciliation owner epoch"):
+        journal.reconcile(intent.intent_id, owner_epoch=1)
+    assert journal.get(intent.intent_id).state is EffectState.UNCERTAIN
+
+
+def test_conflicting_verifier_proof_is_rejected_and_fence_remains(tmp_path):
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    journal.register_reconciliation_verifier(_ExternalVerifier(
+        lambda intent: ReconciliationProof(
+            intent_id="wrong", operation_id=intent.operation_id,
+            receipt_key="receipt", outcome_digest="e" * 64,
+            state=EffectState.COMPLETED, verifier_id="external-api-v1",
+            external_reference="external-op",
+        ),
+    ))
+    first = AuthenticatedWorkerBinding(journal, "run", "worker", 1, "/workspace")
+    intent = first.binding().begin_request(
+        operation_id="reconcile-op", idempotency_key="key", request_digest="a" * 64,
+    )
+    first.binding().mark_uncertain(intent, detail="crash")
+    journal.claim_owner("run", "worker", 2)
+    with pytest.raises(EffectJournalError, match="proof identity conflict"):
+        journal.reconcile(intent.intent_id, owner_epoch=2)
+    assert journal.get(intent.intent_id).state is EffectState.UNCERTAIN
+
+
+def test_reconciliation_is_idempotent_under_replay_and_concurrent_call(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    journal, intent = _uncertain_for_reconciliation(tmp_path)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(
+            lambda _: journal.reconcile(intent.intent_id, owner_epoch=2), range(2),
+        ))
+    assert {result.state for result in results} == {EffectState.COMPLETED}
+    replay = journal.reconcile(intent.intent_id, owner_epoch=2)
+    assert replay.receipt_key == "external-receipt-1"

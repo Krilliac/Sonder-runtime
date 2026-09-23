@@ -12,7 +12,8 @@ from typing import Mapping
 
 from sonder_runtime.adapters.persistence.owned_sqlite import transaction as owned_sqlite_transaction
 from sonder_runtime.application.execution.effect_journal import (
-    EffectIntent, EffectJournalError, EffectOutcome, EffectState, RecoveryDecision,
+    EffectIntent, EffectJournalError, EffectOutcome, EffectState,
+    ReconciliationProof, RecoveryDecision,
 )
 
 
@@ -68,6 +69,7 @@ class SQLiteEffectJournal:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._max_detail = max_detail
         self._lock = Lock()
+        self._reconciliation_verifiers = {}
         with self._connect() as connection:
             connection.executescript(_DDL)
             columns = {
@@ -233,6 +235,103 @@ class SQLiteEffectJournal:
                     "UPDATE effect_owner SET owner_epoch=? WHERE run_id=? AND worker_id=?",
                     (owner_epoch, run_id, worker_id),
                 )
+
+    def register_reconciliation_verifier(self, verifier) -> None:
+        """Register a host-owned verifier for its declared operation family.
+
+        The journal never accepts a proof supplied directly by a worker or
+        caller.  A verifier must be registered by trusted composition before
+        reconciliation, and each operation id can have only one owner.
+        """
+        verifier_id = getattr(verifier, "verifier_id", None)
+        operation_ids = getattr(verifier, "operation_ids", None)
+        verify = getattr(verifier, "verify", None)
+        if (
+            type(verifier_id) is not str or not verifier_id.strip()
+            or not isinstance(operation_ids, frozenset) or not operation_ids
+            or not callable(verify)
+            or any(type(operation_id) is not str or not operation_id.strip()
+                   for operation_id in operation_ids)
+        ):
+            raise EffectJournalError("invalid host reconciliation verifier")
+        with self._lock:
+            for operation_id in operation_ids:
+                if operation_id in self._reconciliation_verifiers:
+                    raise EffectJournalError(
+                        f"reconciliation verifier already registered for {operation_id}"
+                    )
+            for operation_id in operation_ids:
+                self._reconciliation_verifiers[operation_id] = verifier
+
+    def reconcile(self, intent_id: str, *, owner_epoch: int) -> EffectIntent:
+        """Apply one registered verifier result and clear the fence atomically.
+
+        The owner epoch is checked both before and during the transaction.
+        Unsupported operation families stay fenced; a stale reconciler cannot
+        clear a newer owner's recovery requirement.
+        """
+        if type(owner_epoch) is not int or owner_epoch < 1:
+            raise EffectJournalError("reconciliation owner epoch must be positive")
+        if type(intent_id) is not str or not intent_id.strip():
+            raise EffectJournalError("reconciliation intent_id is required")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._row(connection.execute(
+                "SELECT intent_id,run_id,worker_id,operation_id,scope,owner_epoch,"
+                "idempotency_key,request_digest,reconciliation,sequence,state,"
+                "outcome_digest,receipt_key,detail FROM effect_journal WHERE intent_id=?",
+                (intent_id,),
+            ).fetchone())
+            if current is None:
+                raise KeyError(intent_id)
+            if current.state in {EffectState.COMPLETED, EffectState.FAILED}:
+                return current
+            verifier = self._reconciliation_verifiers.get(current.operation_id)
+            if verifier is None:
+                raise EffectJournalError(
+                    f"no trusted reconciliation verifier for {current.operation_id}"
+                )
+            owner = connection.execute(
+                "SELECT owner_epoch,recovery_required FROM effect_owner "
+                "WHERE run_id=? AND worker_id=?",
+                (current.run_id, current.worker_id),
+            ).fetchone()
+            if owner is None or int(owner[0]) != owner_epoch:
+                raise EffectJournalError("stale reconciliation owner epoch")
+            proof = verifier.verify(current)
+            if type(proof) is not ReconciliationProof:
+                raise EffectJournalError("host verifier returned no trusted proof")
+            if (
+                proof.intent_id != current.intent_id
+                or proof.operation_id != current.operation_id
+                or proof.state not in {EffectState.COMPLETED, EffectState.FAILED}
+            ):
+                raise EffectJournalError("reconciliation proof identity conflict")
+            changed = connection.execute(
+                "UPDATE effect_journal SET state=?,outcome_digest=?,receipt_key=?,detail=? "
+                "WHERE intent_id=? AND state=?",
+                (proof.state.value, proof.outcome_digest, proof.receipt_key,
+                 f"verified:{proof.verifier_id}:{proof.external_reference}"[:self._max_detail],
+                 current.intent_id, current.state.value),
+            ).rowcount
+            if changed != 1:
+                raise EffectJournalError("reconciliation lost its effect race")
+            unresolved = connection.execute(
+                "SELECT 1 FROM effect_journal WHERE run_id=? AND state IN (?,?) LIMIT 1",
+                (current.run_id, EffectState.INTENT.value, EffectState.UNCERTAIN.value),
+            ).fetchone()
+            if unresolved is None:
+                connection.execute(
+                    "UPDATE effect_owner SET recovery_required=0 "
+                    "WHERE run_id=? AND worker_id=? AND owner_epoch=?",
+                    (current.run_id, current.worker_id, owner_epoch),
+                )
+            return self._row(connection.execute(
+                "SELECT intent_id,run_id,worker_id,operation_id,scope,owner_epoch,"
+                "idempotency_key,request_digest,reconciliation,sequence,state,"
+                "outcome_digest,receipt_key,detail FROM effect_journal WHERE intent_id=?",
+                (current.intent_id,),
+            ).fetchone())
 
     def get(self, intent_id: str) -> EffectIntent | None:
         with self._connect() as connection:
