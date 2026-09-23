@@ -65,9 +65,21 @@ if ($Preflight) {
   if ($SkipCampaign) { $arguments += '--skip-campaign' }
 }
 
-# Start-Process is explicitly waited on. Redirected output survives an
-# interrupted shell or a Task Scheduler history inspection.
-$process = Start-Process -FilePath $py -ArgumentList $arguments -WorkingDirectory $repo -RedirectStandardOutput $log -RedirectStandardError $stderr -WindowStyle Hidden -Wait -PassThru
+# Start-Process is explicitly waited on. Windows keeps the child console
+# hidden; PowerShell Core on Unix does not support WindowStyle.
+$startOptions = @{
+  FilePath = $py
+  ArgumentList = $arguments
+  WorkingDirectory = $repo
+  RedirectStandardOutput = $log
+  RedirectStandardError = $stderr
+  Wait = $true
+  PassThru = $true
+}
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+  $startOptions.WindowStyle = 'Hidden'
+}
+$process = Start-Process @startOptions
 Add-Content -LiteralPath $log -Value ([Environment]::NewLine + ("finished {0} exit={1}" -f (Get-Date -Format o), $process.ExitCode)) -Encoding UTF8
 Write-Output "nightly exit=$($process.ExitCode) log=$log stderr=$stderr"
 exit $process.ExitCode
