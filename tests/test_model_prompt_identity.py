@@ -1,6 +1,15 @@
 from types import SimpleNamespace
 
+import pytest
+
 import server
+
+
+@pytest.fixture(autouse=True)
+def clear_prompt_identity_cache():
+    server._MODEL_PROMPT_IDENTITY_CACHE.clear()
+    yield
+    server._MODEL_PROMPT_IDENTITY_CACHE.clear()
 
 
 def test_prompt_identity_fails_closed_for_multiple_configured_workers(monkeypatch):
@@ -81,20 +90,36 @@ def test_prompt_identity_changes_when_same_template_tag_digest_changes(monkeypat
     assert second[1].endswith("b" * 64)
 
 
-def test_prompt_identity_fails_closed_for_missing_or_mismatched_revision(monkeypatch):
+def test_prompt_identity_fails_closed_for_missing_digest(monkeypatch):
     monkeypatch.setattr(server, "BASE", "http://127.0.0.1:11434")
     monkeypatch.setattr(
         server, "OLLAMA_POOL", SimpleNamespace(configured_origins=("http://127.0.0.1:11434",))
     )
-    tag_responses = [
-        {"models": [{"name": "model-x", "modified_at": "rev"}]},
-        {"models": [{"name": "model-x", "digest": "a" * 64, "modified_at": "rev"}]},
-    ]
+    monkeypatch.setattr(
+        server, "_get",
+        lambda *_args, **_kwargs: {"models": [{"name": "model-x", "modified_at": "rev"}]},
+    )
+    monkeypatch.setattr(
+        server, "_post",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("missing digest must not reach /api/show")
+        ),
+    )
 
-    def get(*_args, **_kwargs):
-        return tag_responses.pop(0)
+    assert server._model_prompt_identity("model-x") == (None, None)
 
-    monkeypatch.setattr(server, "_get", get)
+
+def test_prompt_identity_fails_closed_for_show_revision_mismatch(monkeypatch):
+    monkeypatch.setattr(server, "BASE", "http://127.0.0.1:11434")
+    monkeypatch.setattr(
+        server, "OLLAMA_POOL", SimpleNamespace(configured_origins=("http://127.0.0.1:11434",))
+    )
+    monkeypatch.setattr(
+        server, "_get",
+        lambda *_args, **_kwargs: {
+            "models": [{"name": "model-x", "digest": "a" * 64, "modified_at": "rev"}]
+        },
+    )
     monkeypatch.setattr(
         server, "_post",
         lambda *_args, **_kwargs: {
@@ -105,4 +130,51 @@ def test_prompt_identity_fails_closed_for_missing_or_mismatched_revision(monkeyp
     )
 
     assert server._model_prompt_identity("model-x") == (None, None)
+
+
+def test_prompt_identity_fails_closed_when_tag_changes_during_probe(monkeypatch):
+    monkeypatch.setattr(server, "BASE", "http://127.0.0.1:11434")
+    monkeypatch.setattr(
+        server, "OLLAMA_POOL", SimpleNamespace(configured_origins=("http://127.0.0.1:11434",))
+    )
+    digests = iter(("a" * 64, "b" * 64))
+    monkeypatch.setattr(
+        server, "_get",
+        lambda *_args, **_kwargs: {
+            "models": [{"name": "model-x", "digest": next(digests), "modified_at": "rev"}]
+        },
+    )
+    monkeypatch.setattr(
+        server, "_post",
+        lambda *_args, **_kwargs: {
+            "model_info": {"tokenizer.ggml.model": "qwen"},
+            "template": "same",
+            "modified_at": "rev",
+        },
+    )
+
+    assert server._model_prompt_identity("model-x") == (None, None)
+
+
+def test_prompt_identity_fails_closed_for_duplicate_tag_records(monkeypatch):
+    monkeypatch.setattr(server, "BASE", "http://127.0.0.1:11434")
+    monkeypatch.setattr(
+        server, "OLLAMA_POOL", SimpleNamespace(configured_origins=("http://127.0.0.1:11434",))
+    )
+    monkeypatch.setattr(
+        server, "_get",
+        lambda *_args, **_kwargs: {
+            "models": [
+                {"name": "model-x", "digest": "a" * 64, "modified_at": "rev"},
+                {"name": "model-x", "digest": "b" * 64, "modified_at": "rev"},
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        server, "_post",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("ambiguous tag must not reach /api/show")
+        ),
+    )
+
     assert server._model_prompt_identity("model-x") == (None, None)
