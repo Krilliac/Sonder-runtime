@@ -261,7 +261,38 @@ def _first_line(text):
     return str(text or "").strip().splitlines()[0] if text else ""
 
 
-def _claim_lock(path, log) -> bool:
+def _pid_state(pid: int) -> str:
+    """Inspect a lock owner without sending a signal on Windows."""
+    if os.name == "nt":
+        # Python's os.kill(pid, 0) calls TerminateProcess on Windows.
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+        if not handle:
+            return "gone" if ctypes.get_last_error() == 87 else "unknown"
+        try:
+            status = kernel32.WaitForSingleObject(handle, 0)
+        finally:
+            kernel32.CloseHandle(handle)
+        return "running" if status == 258 else "gone" if status == 0 else "unknown"
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "gone"
+    except OSError:
+        return "unknown"
+    return "running"
+
+
+def _claim_lock(path, log) -> bool | None:
     """Exclusive-create a lock so overlapping triggers are a no-op.
 
     A stale lock older than six hours is reclaimed: a killed run must not
@@ -274,6 +305,18 @@ def _claim_lock(path, log) -> bool:
                 log("another nightly run holds the lock (%.0fm old); exiting"
                     % (age / 60))
                 return False
+            try:
+                owner_pid = int(path.read_text(encoding="utf-8").strip())
+                if owner_pid > 0:
+                    state = _pid_state(owner_pid)
+                    if state == "unknown":
+                        log("stale lock owner %s is not inspectable; refusing reclaim" % owner_pid)
+                        return False
+                    if state == "running":
+                        log("stale lock owner %s is still alive; refusing reclaim" % owner_pid)
+                        return False
+            except (OSError, ValueError):
+                pass
             log("reclaiming a stale lock (%.1fh old)" % (age / 3600))
             path.unlink(missing_ok=True)
         with path.open("x", encoding="utf-8") as handle:
@@ -283,8 +326,8 @@ def _claim_lock(path, log) -> bool:
         log("another nightly run claimed the lock first; exiting")
         return False
     except OSError as exc:
-        log("lock unavailable (%s); continuing without one" % str(exc)[:80])
-        return True
+        log("lock unavailable (%s); refusing nightly run" % str(exc)[:80])
+        return None
 
 
 def _winml_vitisai_check(log):
@@ -428,9 +471,10 @@ def main() -> int:
         sink.flush()
 
     lock = Path(sonder_paths.state_path("nightly.lock"))
-    if not _claim_lock(lock, log):
+    claimed = _claim_lock(lock, log)
+    if not claimed:
         sink.close()
-        return 0
+        return 1 if claimed is None else 0
 
     try:
         result = _run_locked(args, log, sonder_paths)
