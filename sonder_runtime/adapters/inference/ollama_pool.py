@@ -12,7 +12,10 @@ that policy.
 """
 from __future__ import annotations
 
-from sonder_runtime.platform.runtime_threads import ThreadPoolExecutor as owned_runtime_pool
+from sonder_runtime.platform.runtime_threads import (
+    ThreadPoolExecutor as owned_runtime_pool,
+    run_bounded,
+)
 
 import base64
 import hashlib
@@ -446,6 +449,7 @@ class _WorkerState:
     capabilities: WorkerCapabilities | None = None
     compatibility_error: str = ""
     capability_probe_failed: bool = False
+    capability_probe_inflight: bool = False
     capability_probe_generation: int = 0
     trips: int = 0
     known_models: frozenset[str] | None = None
@@ -517,6 +521,24 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
     return probe
 
 
+def _bounded_capability_probe(prober, origin, timeout, on_complete):
+    """Run one probe without allowing an uncooperative callable to hold the pool.
+
+    The transport prober has its own socket timeout, but injected probers and
+    broken transports can still fail to return.  A daemon boundary lets the
+    pool classify that case as a timeout and keep its owned executor
+    cancellable.  Late results are intentionally discarded by the caller;
+    ``on_complete`` only releases the in-flight marker.
+    """
+    value, error, _completed = run_bounded(
+        lambda: prober(origin),
+        max(0.001, float(timeout)),
+        on_complete=on_complete,
+        name="sonder-ollama-capability-probe",
+    )
+    return value, error
+
+
 class OllamaWorkerPool:
     """Thread-safe, model-aware scheduler for independent Ollama hosts."""
 
@@ -536,6 +558,7 @@ class OllamaWorkerPool:
         max_workers: int = _DEFAULT_MAX_WORKERS,
         capability_probe_parallelism: int = _DEFAULT_CAPABILITY_PROBE_PARALLELISM,
         capability_probe_batch_size: int = _DEFAULT_CAPABILITY_PROBE_BATCH_SIZE,
+        capability_probe_timeout_seconds: float = 2.0,
         status_page_size: int = _DEFAULT_STATUS_PAGE_SIZE,
         capability_prober: Callable[[str], object] | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -561,6 +584,8 @@ class OllamaWorkerPool:
             raise ValueError("capability probe parallelism must be within 1..8")
         if not 1 <= capability_probe_batch_size <= _MAX_CAPABILITY_PROBE_BATCH_SIZE:
             raise ValueError("capability probe batch size must be within 1..128")
+        if not 0 < capability_probe_timeout_seconds <= 30.0:
+            raise ValueError("capability probe timeout must be within (0, 30] seconds")
         if not 1 <= status_page_size <= _MAX_STATUS_PAGE_SIZE:
             raise ValueError("status page size must be within 1..128")
         all_origins = (primary_origin, *worker_origins)
@@ -614,6 +639,7 @@ class OllamaWorkerPool:
         self._max_workers = int(max_workers)
         self._probe_parallelism = int(capability_probe_parallelism)
         self._probe_batch_size = int(capability_probe_batch_size)
+        self._probe_timeout = float(capability_probe_timeout_seconds)
         self._status_page_size = int(status_page_size)
         self._capability_prober = capability_prober
         self._clock = time_fn or clock
@@ -1064,6 +1090,7 @@ class OllamaWorkerPool:
                         (force or self._capabilities_stale(state, now))
                         and (force or state.cooldown_until <= now)
                         and not state.half_open_inflight
+                        and not state.capability_probe_inflight
                     ):
                         continue
                     candidates.append(state)
@@ -1079,18 +1106,28 @@ class OllamaWorkerPool:
 
             def run(state: _WorkerState):
                 started = self._clock()
-                try:
-                    payload = self._capability_prober(state.endpoint.origin)
-                    elapsed_ms = max(0.0, (self._clock() - started) * 1000.0)
-                    return payload, elapsed_ms, None
-                except Exception as error:
-                    return None, 0.0, error
+                def clear_inflight():
+                    with self._condition:
+                        state.capability_probe_inflight = False
+                        self._condition.notify_all()
+
+                payload, error = _bounded_capability_probe(
+                    self._capability_prober,
+                    state.endpoint.origin,
+                    self._probe_timeout,
+                    clear_inflight,
+                )
+                elapsed_ms = max(0.0, (self._clock() - started) * 1000.0)
+                return payload, elapsed_ms, error
 
             logger.debug(
                 f"probing {len(candidates)} candidate workers: "
                 f"{[s.endpoint.worker_id for s in candidates]}"
             )
             logger.info(f"probing capabilities on {len(candidates)} worker(s)")
+            with self._condition:
+                for state in candidates:
+                    state.capability_probe_inflight = True
             workers = min(self._probe_parallelism, len(candidates))
             with owned_runtime_pool(max_workers=workers) as executor:
                 futures = [executor.submit(run, state) for state in candidates]
@@ -1606,7 +1643,7 @@ class OllamaWorkerPool:
             capabilities_stale=stale,
             cooldown_until=state.cooldown_until,
             trips=state.trips,
-            probing=state.half_open_inflight,
+            probing=state.half_open_inflight or state.capability_probe_inflight,
         )
 
     def _encode_status_cursor(self, offset: int, principal: str) -> str:
@@ -2021,6 +2058,7 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
         max_workers=max_workers,
         capability_probe_parallelism=probe_parallelism,
         capability_probe_batch_size=probe_batch_size,
+        capability_probe_timeout_seconds=probe_timeout_ms / 1000.0,
         status_page_size=status_page_size,
         max_inflight_per_worker=(
             typed_max_inflight if use_typed and typed_max_inflight is not None
