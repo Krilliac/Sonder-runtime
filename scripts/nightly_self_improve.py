@@ -90,8 +90,7 @@ def _bind_workspace_config_paths(root: Path | None = None) -> tuple[str, ...]:
 
 def _bind_ollama_pool_from_config(config_path: Path | None = None) -> tuple[str, ...]:
     """Export configured Ollama workers before ``server`` builds its pool."""
-    if os.environ.get("SONDER_OLLAMA_WORKERS", "").strip():
-        return ()
+    workers_explicit = bool(os.environ.get("SONDER_OLLAMA_WORKERS", "").strip())
     from sonder_runtime.platform import config as sonder_config
     from sonder_runtime.platform import paths as runtime_paths
 
@@ -108,17 +107,20 @@ def _bind_ollama_pool_from_config(config_path: Path | None = None) -> tuple[str,
         return ()
     cfg = sonder_config.load_config(configured)
     bound: list[str] = []
-    if cfg.ollama.workers:
+    if cfg.ollama.workers and not workers_explicit:
         os.environ["SONDER_OLLAMA_WORKERS"] = ",".join(cfg.ollama.workers)
         bound.append("SONDER_OLLAMA_WORKERS")
-    if "SONDER_ALLOW_REMOTE_OLLAMA" not in os.environ:
+    if not workers_explicit and "SONDER_ALLOW_REMOTE_OLLAMA" not in os.environ:
         os.environ["SONDER_ALLOW_REMOTE_OLLAMA"] = (
             "1" if cfg.ollama.allow_remote else "0"
         )
         bound.append("SONDER_ALLOW_REMOTE_OLLAMA")
-    if cfg.ollama.trusted_origins and not os.environ.get("SONDER_TRUSTED_ORIGINS", "").strip():
+    if not workers_explicit and cfg.ollama.trusted_origins and not os.environ.get("SONDER_TRUSTED_ORIGINS", "").strip():
         os.environ["SONDER_TRUSTED_ORIGINS"] = ",".join(cfg.ollama.trusted_origins)
         bound.append("SONDER_TRUSTED_ORIGINS")
+    if cfg.ollama.ca_bundle and not os.environ.get("SONDER_OLLAMA_CA_BUNDLE", "").strip():
+        os.environ["SONDER_OLLAMA_CA_BUNDLE"] = cfg.ollama.ca_bundle
+        bound.append("SONDER_OLLAMA_CA_BUNDLE")
     return tuple(bound)
 
 
@@ -135,6 +137,100 @@ def _blocking_result(name, result) -> str | None:
     if name == "selfmod" and text.startswith("working tree dirty ("):
         return "working tree dirty"
     return None
+
+
+class _CodeModelUnavailable(RuntimeError):
+    """The configured local code model failed its bounded readiness check."""
+
+
+def _local_ollama_json(server, path: str, payload: dict | None, timeout: float):
+    base = str(getattr(server, "BASE", "")).rstrip("/")
+    endpoint = getattr(server, "ollama_endpoint", None)
+    if not base or endpoint is None or not endpoint.is_loopback(base):
+        raise _CodeModelUnavailable("local Ollama endpoint is not configured")
+    from urllib.request import Request
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = Request(
+        base + path,
+        data=body,
+        headers={"Content-Type": "application/json"} if body else {},
+        method="POST" if body else "GET",
+    )
+    with endpoint.open_url(request, timeout=timeout, allow_remote=False) as response:
+        raw = response.read(1_048_577)
+    if len(raw) > 1_048_576:
+        raise _CodeModelUnavailable("local Ollama response exceeded 1 MiB")
+    return json.loads(raw.decode("utf-8"))
+
+
+def _prewarm_code_model(server, timeout_seconds: int = 60) -> str:
+    """Wait for the configured local code model to become resident."""
+    model = str(getattr(server, "TIERS", {}).get("code") or "").strip()
+    if not model:
+        raise _CodeModelUnavailable("code tier has no configured model")
+    if getattr(server, "_is_cloud_model_name", lambda value: False)(model):
+        raise _CodeModelUnavailable("code tier resolves to a cloud model")
+
+    deadline = time.monotonic() + max(60, int(timeout_seconds or 60))
+    try:
+        def resident():
+            state = _local_ollama_json(server, "/api/ps", None, 5)
+            rows = state.get("models", []) if isinstance(state, dict) else []
+            return any(
+                str(row.get("name") or row.get("model") or "").strip() == model
+                for row in rows if isinstance(row, dict)
+            )
+
+        if not resident():
+            _local_ollama_json(
+                server, "/api/generate",
+                {"model": model, "prompt": "", "stream": False, "keep_alive": "2m"},
+                max(60, int(timeout_seconds or 60)),
+            )
+            if resident():
+                return "ready model=%s" % model
+        while time.monotonic() < deadline:
+            if resident():
+                return "ready model=%s" % model
+            time.sleep(1.0)
+    except _CodeModelUnavailable:
+        raise
+    except Exception as exc:
+        raise _CodeModelUnavailable("readiness probe failed: %s" % str(exc)[:160]) from exc
+    raise _CodeModelUnavailable(
+        "model did not become resident within %ds" % max(60, int(timeout_seconds or 60))
+    )
+
+
+def _run_campaign(server, args):
+    """Run the campaign with one model request worker during nightly cold load."""
+    out = server.campaign_generate_compile_execute_record(
+        total=max(1, args.campaign_total), max_workers=1, repair_rounds=1,
+        timeout=12, record_failures=True,
+    )
+    return _first_line(out)
+
+
+def _run_code_model_stages(server, args, log, failures) -> bool:
+    """Prewarm once, then run model-bound campaign and repair stages."""
+    prewarm = _stage(
+        log, "code-model-prewarm",
+        lambda: _prewarm_code_model(server), failures,
+    )
+    if prewarm is None:
+        log("[campaign] SKIPPED: configured code model is not ready")
+        log("[repo-repair] SKIPPED: configured code model is not ready")
+        return False
+    _stage(log, "campaign", lambda: _run_campaign(server, args), failures)
+
+    def repair():
+        out = server.campaign_repo_repair(
+            total=max(1, args.repair_total), max_workers=2,
+            repair_rounds=2, timeout=45,
+        )
+        return _first_line(out)
+    _stage(log, "repo-repair", repair, failures)
+    return True
 
 
 def _stage(log, name, fn, failures=None):
@@ -225,27 +321,16 @@ def _run_locked(args, log, sonder_paths):
     import sonder_runtime.adapters.memory_store as memory_store
 
     critical_failures = []
+    code_model_ready = True
     rounds = max(1, min(int(args.rounds or 1), 12))
     for round_index in range(rounds):
         if rounds > 1:
             log("--- round %d/%d ---" % (round_index + 1, rounds))
 
         if not args.skip_campaign:
-            def campaign():
-                out = server.campaign_generate_compile_execute_record(
-                    total=max(1, args.campaign_total), repair_rounds=1,
-                    timeout=12, record_failures=True,
-                )
-                return _first_line(out)
-            _stage(log, "campaign", campaign, critical_failures)
-
-            def repair():
-                out = server.campaign_repo_repair(
-                    total=max(1, args.repair_total), max_workers=2,
-                    repair_rounds=2, timeout=45,
-                )
-                return _first_line(out)
-            _stage(log, "repo-repair", repair, critical_failures)
+            code_model_ready = _run_code_model_stages(
+                server, args, log, critical_failures,
+            )
 
     def drain():
         result = server._drain_deferred_distillations(limit=32)
@@ -293,7 +378,10 @@ def _run_locked(args, log, sonder_paths):
     def selfmod_cycle():
         import nightly_selfmod
         return nightly_selfmod.run(server, log)
-    _stage(log, "selfmod", selfmod_cycle, critical_failures)
+    if code_model_ready:
+        _stage(log, "selfmod", selfmod_cycle, critical_failures)
+    else:
+        log("[selfmod] SKIPPED: configured code model is not ready")
     _stage(log, "winml-vitisai-check", lambda: _winml_vitisai_check(log))
 
     if critical_failures:

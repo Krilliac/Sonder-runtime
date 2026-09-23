@@ -93,6 +93,26 @@ def test_nightly_keeps_explicit_worker_env(tmp_path, monkeypatch):
     assert nightly_self_improve.os.environ["SONDER_OLLAMA_WORKERS"] == "http://127.0.0.1:11435"
 
 
+def test_nightly_binds_ca_from_toml_even_with_explicit_workers(tmp_path, monkeypatch):
+    cfg = tmp_path / "sonder.toml"
+    ca = tmp_path / "ca.pem"
+    ca.write_text("certificate", encoding="ascii")
+    cfg.write_text(
+        "schema_version = 1\n[ollama]\n"
+        'workers = ["https://10.77.0.2:8443"]\n'
+        'ca_bundle = "' + str(ca).replace("\\", "\\\\") + '"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SONDER_OLLAMA_WORKERS", "http://127.0.0.1:11435")
+    monkeypatch.delenv("SONDER_OLLAMA_CA_BUNDLE", raising=False)
+
+    bound = nightly_self_improve._bind_ollama_pool_from_config(cfg)
+
+    assert "SONDER_OLLAMA_WORKERS" not in bound
+    assert "SONDER_OLLAMA_CA_BUNDLE" in bound
+    assert nightly_self_improve.os.environ["SONDER_OLLAMA_CA_BUNDLE"] == str(ca)
+
+
 def test_nightly_preflight_is_provider_and_workspace_binding_only(monkeypatch):
     calls = []
 
@@ -135,6 +155,118 @@ def test_nightly_classifies_known_blocking_results_but_keeps_intentional_skips()
     ]
     for name, result, expected in cases:
         assert bool(nightly_self_improve._blocking_result(name, result)) is expected
+
+
+def test_nightly_prewarm_waits_for_configured_code_model(monkeypatch):
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            import json
+            return json.dumps(self.payload).encode()
+
+    class FakeServer:
+        TIERS = {"code": "local-code"}
+        BASE = "http://127.0.0.1:11434"
+        OLLAMA_POOL = types.SimpleNamespace(request=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("remote pool used")))
+        calls = 0
+
+        class ollama_endpoint:
+            @staticmethod
+            def is_loopback(base):
+                return True
+
+            @classmethod
+            def open_url(cls, request, timeout, allow_remote):
+                FakeServer.calls += 1
+                if request.full_url.endswith("/api/generate"):
+                    return Response({"done": True})
+                return Response({"models": []} if FakeServer.calls == 1 else {"models": [{"name": "local-code"}]})
+
+        @staticmethod
+        def _is_cloud_model_name(model):
+            return False
+
+    assert nightly_self_improve._prewarm_code_model(FakeServer()) == "ready model=local-code"
+
+
+def test_nightly_prewarm_reports_readiness_failure():
+    class FakeServer:
+        TIERS = {"code": "local-code"}
+        BASE = "http://127.0.0.1:11434"
+
+        class ollama_endpoint:
+            @staticmethod
+            def is_loopback(base):
+                return True
+
+            @staticmethod
+            def open_url(*_args, **_kwargs):
+                raise TimeoutError("runner unavailable")
+
+        @staticmethod
+        def _is_cloud_model_name(model):
+            return False
+
+    with pytest.raises(nightly_self_improve._CodeModelUnavailable, match="readiness probe failed"):
+        nightly_self_improve._prewarm_code_model(FakeServer())
+
+
+def test_nightly_campaign_uses_one_worker():
+    captured = {}
+
+    class FakeServer:
+        @staticmethod
+        def campaign_generate_compile_execute_record(**kwargs):
+            captured.update(kwargs)
+            return "campaign ok"
+
+    args = types.SimpleNamespace(campaign_total=4)
+    assert nightly_self_improve._run_campaign(FakeServer(), args) == "campaign ok"
+    assert captured["max_workers"] == 1
+
+
+def test_nightly_skips_all_model_stages_after_prewarm_failure():
+    class FakeServer:
+        TIERS = {"code": "local-code"}
+        BASE = "http://127.0.0.1:11434"
+
+        class ollama_endpoint:
+            @staticmethod
+            def is_loopback(base):
+                return True
+
+            @staticmethod
+            def open_url(*_args, **_kwargs):
+                raise TimeoutError("runner unavailable")
+
+        @staticmethod
+        def _is_cloud_model_name(model):
+            return False
+
+        def campaign_generate_compile_execute_record(self, **_kwargs):
+            raise AssertionError("campaign must be skipped")
+
+        def campaign_repo_repair(self, **_kwargs):
+            raise AssertionError("repo repair must be skipped")
+
+    failures = []
+    messages = []
+    args = types.SimpleNamespace(campaign_total=4, repair_total=2)
+
+    assert not nightly_self_improve._run_code_model_stages(
+        FakeServer(), args, messages.append, failures,
+    )
+    assert failures == ["code-model-prewarm"]
+    assert any("campaign" in message and "SKIPPED" in message for message in messages)
+    assert any("repo-repair" in message and "SKIPPED" in message for message in messages)
 
 
 @pytest.mark.parametrize("failure", [ImportError("server import failed"), RuntimeError("stage failed")])
