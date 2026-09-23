@@ -736,6 +736,63 @@ def test_live_request_compacts_canonical_tool_output_and_recovers_after_restart(
     )
 
 
+def test_live_request_merges_evicted_placeholders_in_source_order(env):
+    service, _, sessions, model, context, _ = env
+    lane_id = spawn(env, command="compact-order")['lane']['id']
+    lane = service.store.read_lane(lane_id)
+    sessions.append(
+        lane["session_id"], "model.response", {"content": "before"},
+        event_id="before",
+    )
+    for index in range(3):
+        sessions.append(
+            lane["session_id"], "tool.result",
+            {"call_id": f"ordered-{index}", "content": "private-%d " % index * 5000},
+            event_id=f"ordered-{index}",
+        )
+        sessions.append(
+            lane["session_id"], "model.response", {"content": f"after-{index}"},
+            event_id=f"after-{index}",
+        )
+
+    service.run_pending(lane_id, context)
+    history = [item["content"] for item in model.requests[0][0].history]
+    archive_ids = [
+        event.payload["archive_id"]
+        for event in sorted(
+            sessions.search(
+                session_id=lane["session_id"],
+                event_type="context.archive.created",
+                limit=8,
+            ),
+            key=lambda event: event.payload["source_sequence"],
+        )
+    ]
+    positions = [
+        next(i for i, value in enumerate(history) if archive_id in value)
+        for archive_id in archive_ids
+    ]
+    assert positions == sorted(positions)
+    assert history.index("before") < positions[0]
+    assert positions[-1] < history.index("after-2")
+
+
+def test_live_request_fails_recoverably_when_protected_history_exceeds_budget(env):
+    from sonder_runtime.application.agents.interactive_lanes import ContextHistoryOverflowError
+
+    service, _, sessions, _, context, _ = env
+    lane_id = spawn(env, command="compact-protected-overflow")['lane']['id']
+    lane = service.store.read_lane(lane_id)
+    for index in range(41):
+        sessions.append(
+            lane["session_id"], "goal.updated",
+            {"decision": f"decision-{index}"}, event_id=f"decision-{index}",
+        )
+
+    with pytest.raises(ContextHistoryOverflowError, match="protected session history"):
+        service._request(lane, [], request_id="overflow-request", context=context)
+
+
 def test_recent_tool_context_cap_applies_to_matched_completed_calls(env):
     service, _, sessions, _, context, _ = env
     lane_id = spawn(env)["lane"]["id"]

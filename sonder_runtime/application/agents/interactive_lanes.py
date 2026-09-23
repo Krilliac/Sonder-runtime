@@ -63,6 +63,11 @@ _LANE_INLINE_TOOL_RESULT_BYTES = 2 * 1024
 # Canonical session history is input to every live lane request. Keep this
 # archive pass bounded independently of the provider token budget.
 _LANE_CANONICAL_HISTORY_BYTES = 32 * 1024
+_LANE_HISTORY_MESSAGES = 40
+_PROTECTED_HISTORY_TYPES = frozenset({
+    "lane.message", "goal.created", "goal.updated", "goal.completed",
+    "model.failed", "tool.failed", "lane.control",
+})
 _LOG = logging.getLogger(__name__)
 _HIDDEN = frozenset(
     {
@@ -160,6 +165,10 @@ class _LaneCancellation:
 class _ReplayReceipt(Exception):
     def __init__(self, receipt):
         self.receipt = receipt
+
+
+class ContextHistoryOverflowError(SessionCompactionError):
+    """Recoverable live-request overflow with protected facts intact."""
 
 
 def _recover_committed_command(method):
@@ -1331,7 +1340,14 @@ class AgentLaneService:
             if event.event_type == "tool.result"
             and isinstance(event.payload.get("call_id"), str)
         }
-        history = []
+        timeline = []
+        protected = []
+
+        def add_history(sequence, item, *, is_protected=False):
+            if is_protected:
+                protected.append(item)
+            timeline.append((sequence, len(timeline), item, is_protected))
+
         matched_tool_context = set()
         completed_calls = {
             event.payload.get("call_id") for event in canonical_events
@@ -1342,17 +1358,20 @@ class AgentLaneService:
                 event.event_type == "lane.message"
                 and event.payload.get("message_id") in handled
             ):
-                history.append(
+                add_history(
+                    event.sequence,
                     {
                         "role": "user",
                         "content": "["
                         + str(event.payload["author"])
                         + "] "
                         + str(event.payload["content"]),
-                    }
+                    },
+                    is_protected=event.event_type in _PROTECTED_HISTORY_TYPES,
                 )
             elif event.event_type == "model.response":
-                history.append(
+                add_history(
+                    event.sequence,
                     {"role": "assistant", "content": str(event.payload["content"])}
                 )
             elif event.event_type in {
@@ -1361,11 +1380,15 @@ class AgentLaneService:
             }:
                 # These are protected facts. Keep their bounded JSON visible
                 # even when neighbouring tool output is replaced by a pointer.
-                history.append({
-                    "role": "user",
-                    "content": "Durable session fact (" + event.event_type + "): "
-                    + json.dumps(event.payload, ensure_ascii=False, sort_keys=True),
-                })
+                add_history(
+                    event.sequence,
+                    {
+                        "role": "user",
+                        "content": "Durable session fact (" + event.event_type + "): "
+                        + json.dumps(event.payload, ensure_ascii=False, sort_keys=True),
+                    },
+                    is_protected=True,
+                )
             elif event.event_type == "tool.result":
                 call_id = event.payload.get("call_id")
                 if not isinstance(call_id, str) or not call_id:
@@ -1378,7 +1401,7 @@ class AgentLaneService:
                         event.payload, ensure_ascii=False, sort_keys=True,
                     )
                     content = "Tool result (data): " + encoded
-                history.append({"role": "user", "content": content})
+                add_history(event.sequence, {"role": "user", "content": content})
             elif (event.event_type in {"tool.completed", "tool.failed"}
                   or (event.event_type == "tool.requested"
                       and event.payload.get("call_id") not in completed_calls)):
@@ -1391,7 +1414,7 @@ class AgentLaneService:
                     continue
                 for sequence, source_call_id, item in recent_tool_context:
                     if source_call_id == call_id and sequence not in matched_tool_context:
-                        history.append(item)
+                        add_history(event.sequence, item)
                         matched_tool_context.add(sequence)
                         break
         retained_ids = {event.event_id for event in canonical_events}
@@ -1401,13 +1424,41 @@ class AgentLaneService:
             key=lambda pair: int(pair[1]["source_sequence"]),
         ):
             del source_event_id
-            history.append({"role": "user", "content": str(placeholder["content"])})
+            add_history(
+                int(placeholder["source_sequence"]),
+                {"role": "user", "content": str(placeholder["content"])},
+            )
         unmatched = [
             item for sequence, _, item in recent_tool_context
             if sequence not in matched_tool_context
         ]
-        history.extend(unmatched[-max(0, 8 - len(matched_tool_context)):])
-        return tuple(history[-40:])
+        for index, item in enumerate(unmatched[-max(0, 8 - len(matched_tool_context)):]):
+            add_history((canonical_events[-1].sequence + index + 1) if canonical_events else index + 1, item)
+
+        protected_bytes = sum(
+            len(str(item.get("content", "")).encode("utf-8")) for item in protected
+        )
+        if len(protected) > _LANE_HISTORY_MESSAGES:
+            raise ContextHistoryOverflowError(
+                "protected session history exceeds the live message budget; "
+                "resume after operator-led compaction"
+            )
+        if protected_bytes > _LANE_CANONICAL_HISTORY_BYTES:
+            raise ContextHistoryOverflowError(
+                "protected session history exceeds the live byte budget; "
+                "resume after operator-led compaction"
+            )
+        if len(timeline) > _LANE_HISTORY_MESSAGES:
+            # Keep every protected fact, then the newest ordinary context. The
+            # final sort restores source order, including archive pointers.
+            slots = _LANE_HISTORY_MESSAGES - len(protected)
+            ordinary = [entry for entry in timeline if not entry[3]]
+            selected_ordinary = ordinary[-max(0, slots):]
+            selected = [entry for entry in timeline if entry[3]] + selected_ordinary
+            timeline = sorted(selected, key=lambda entry: (entry[0], entry[1]))
+        else:
+            timeline.sort(key=lambda entry: (entry[0], entry[1]))
+        return tuple(item for _, _, item, _ in timeline)
 
     def retrieve_archived_tool(self, lane_id, archive_id, context):
         """Resolve a lane archive pointer through the existing lane surface."""
