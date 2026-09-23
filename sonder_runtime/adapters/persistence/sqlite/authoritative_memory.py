@@ -132,6 +132,32 @@ def plan_legacy_fact_migration(connection, *, source_id: str, project_scope: str
     # Reject malformed identities before showing an operator an approvable
     # digest or creating any backup in the apply path.
     SQLiteAuthoritativeFactSource(source_id, project_scope=project_scope)
+    conflicting_state = connection.execute(
+        "SELECT 1 FROM facts AS fact JOIN memory_authoritative_fact_state AS state "
+        "ON state.project=fact.project AND state.fact_id=fact.id "
+        "WHERE fact.project=? AND (state.source_id<>? OR state.tombstoned<>0) "
+        "LIMIT 1",
+        (project_scope, source_id),
+    ).fetchone()
+    if conflicting_state is not None:
+        raise MemoryReplicationError(
+            "legacy fact migration found conflicting authoritative ownership"
+        )
+    missing_evidence = connection.execute(
+        "SELECT 1 FROM facts AS fact JOIN memory_authoritative_fact_state AS state "
+        "ON state.project=fact.project AND state.fact_id=fact.id "
+        "WHERE fact.project=? AND state.source_id=? AND state.tombstoned=0 "
+        "AND NOT EXISTS (SELECT 1 FROM memory_replication_log AS journal "
+        "WHERE journal.source_id=state.source_id AND journal.project=fact.project "
+        "AND journal.entity_kind='fact' AND journal.entity_id=fact.id "
+        "AND journal.version=state.version AND journal.operation='upsert') "
+        "LIMIT 1",
+        (project_scope, source_id),
+    ).fetchone()
+    if missing_evidence is not None:
+        raise MemoryReplicationError(
+            "legacy fact migration found missing authoritative journal evidence"
+        )
     total_bytes = connection.execute(
         "SELECT COALESCE(SUM(COALESCE(length(CAST(fact.id AS BLOB)), 0) + "
         "COALESCE(length(CAST(fact.project AS BLOB)), 0) + "
@@ -274,7 +300,11 @@ def migrate_legacy_facts(
                 project_scope=plan.project_scope,
             )
         connection.commit()
-    except Exception:
+    except BaseException:
+        # Treat cancellation and interpreter shutdown like any other
+        # interrupted migration.  Keeping the connection in a transaction
+        # would make an operator retry fail with a misleading idle-connection
+        # error and would leave the caller holding the write lock.
         connection.rollback()
         raise
     return len(plan.rows)

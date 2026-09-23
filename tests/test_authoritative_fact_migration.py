@@ -91,6 +91,52 @@ def test_legacy_migration_rolls_back_fact_state_journal_and_indexes(tmp_path, mo
     connection.close()
 
 
+def test_interrupted_migration_releases_write_lock_and_can_resume(tmp_path, monkeypatch):
+    from sonder_runtime.adapters.persistence.sqlite import authoritative_memory
+
+    path = tmp_path / "interrupted.db"
+    connection = connect(path)
+    connection.execute(
+        "INSERT INTO facts(id,project,text,embedding) VALUES(?,?,?,?)",
+        ("legacy", "repo-a", "old fact", None),
+    )
+    connection.commit()
+    plan = plan_legacy_fact_migration(
+        connection, source_id="node-a", project_scope="repo-a",
+    )
+
+    original_append = authoritative_memory.append_memory_mutations_in_transaction
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt("simulated operator interruption")
+
+    monkeypatch.setattr(
+        authoritative_memory, "append_memory_mutations_in_transaction", interrupt,
+    )
+    with pytest.raises(KeyboardInterrupt, match="simulated"):
+        migrate_legacy_facts(
+            connection, plan, backup_path=tmp_path / "interrupted-backup.db",
+        )
+
+    assert connection.in_transaction is False
+    assert connection.execute(
+        "SELECT COUNT(*) FROM memory_replication_log"
+    ).fetchone()[0] == 0
+    assert facts_for_project(connection, "repo-a")[0]["text"] == "old fact"
+
+    monkeypatch.setattr(
+        authoritative_memory, "append_memory_mutations_in_transaction",
+        original_append,
+    )
+    assert migrate_legacy_facts(
+        connection, plan, backup_path=tmp_path / "resumed-backup.db",
+    ) == 1
+    assert connection.execute(
+        "SELECT COUNT(*) FROM memory_replication_log"
+    ).fetchone()[0] == 1
+    connection.close()
+
+
 def test_migration_replay_is_idempotent_only_after_plan_is_empty(tmp_path):
     connection = connect(tmp_path / "memory.db")
     connection.execute(
@@ -141,6 +187,38 @@ def test_migration_digest_binds_source_and_project_scope(tmp_path):
     ).digest
     with pytest.raises(MemoryReplicationError, match="stale"):
         migrate_legacy_facts(connection, replace(plan, source_id="node-b"))
+    connection.close()
+
+
+@pytest.mark.parametrize(
+    ("source_id", "state_source", "expected"),
+    [
+        ("node-a", "node-b", "conflicting authoritative ownership"),
+        ("node-a", "node-a", "missing authoritative journal evidence"),
+    ],
+)
+def test_migration_rejects_existing_state_without_matching_authority_evidence(
+    tmp_path, source_id, state_source, expected,
+):
+    connection = connect(tmp_path / f"inconsistent-{state_source}.db")
+    connection.execute(
+        "INSERT INTO facts(id,project,text,embedding) VALUES(?,?,?,?)",
+        ("fact-1", "repo-a", "already materialized", None),
+    )
+    connection.execute(
+        "INSERT INTO memory_authoritative_fact_state"
+        "(project,fact_id,source_id,version,tombstoned) VALUES(?,?,?,?,?)",
+        ("repo-a", "fact-1", state_source, 1, 0),
+    )
+    connection.commit()
+
+    with pytest.raises(MemoryReplicationError, match=expected):
+        plan_legacy_fact_migration(
+            connection, source_id=source_id, project_scope="repo-a",
+        )
+    assert connection.execute(
+        "SELECT COUNT(*) FROM memory_replication_log"
+    ).fetchone()[0] == 0
     connection.close()
 
 
