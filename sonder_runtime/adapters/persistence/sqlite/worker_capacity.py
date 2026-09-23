@@ -192,7 +192,7 @@ class SQLiteWorkerCapacity:
             self._reconcile_locked(connection, now, limit=_MAX_RECONCILIATION_ROWS)
             expires = (datetime.fromisoformat(now) + timedelta(seconds=lease_seconds)).isoformat()
             legacy = connection.execute(
-                "SELECT 1 FROM durable_job j WHERE j.kind LIKE 'compute-%' AND j.status NOT IN ('succeeded','failed','cancelled') AND NOT EXISTS (SELECT 1 FROM worker_capacity_reservation r WHERE r.job_id=j.job_id) LIMIT 1"
+                "SELECT 1 FROM durable_job j WHERE j.kind LIKE 'compute-%' AND j.kind <> 'compute-placement' AND j.status NOT IN ('succeeded','failed','cancelled') AND NOT EXISTS (SELECT 1 FROM worker_capacity_reservation r WHERE r.job_id=j.job_id) LIMIT 1"
             ).fetchone()
             if legacy:
                 raise CapacityExceeded('existing catalog job has unknown capacity ownership')
