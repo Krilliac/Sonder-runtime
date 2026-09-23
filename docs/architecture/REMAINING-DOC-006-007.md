@@ -4,7 +4,8 @@
 `REMAINING-*.md` evidence artifact. It requires an explicit evidence,
 verification, or limitation heading and verifies that each referenced focused
 test exists. The checker is intentionally independent of the requirement
-ledger: ledger entries remain `planned` until end-to-end verification exists.
+ledger. Current requirement status is generated from that ledger;
+DOC-006 has linked verification evidence, while DOC-007 remains open.
 
 Focused coverage is in `tests/test_evidence_document_consistency.py`. DOC-006
 is verified by the same-change evidence gate documented in
