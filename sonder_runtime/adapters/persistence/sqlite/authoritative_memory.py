@@ -16,9 +16,9 @@ import json
 import math
 import os
 from pathlib import Path
-import sqlite3
 import tempfile
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
 from sonder_runtime.adapters.persistence.sqlite.memory_replication import (
     append_memory_mutations_in_transaction,
     ensure_memory_replication_source,
@@ -189,7 +189,7 @@ def migrate_legacy_facts(
     os.close(fd)
     temporary = Path(temporary_name)
     try:
-        target = sqlite3.connect(str(temporary))
+        target = owned_sqlite_connect(str(temporary))
         try:
             connection.backup(target)
             target.commit()
