@@ -10,6 +10,7 @@ from __future__ import annotations
 from sonder_runtime.application.ports.runtime_threads import ThreadPoolExecutor as owned_runtime_pool
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext, contextmanager
+from collections.abc import Mapping
 from dataclasses import replace
 from functools import wraps
 import hashlib
@@ -1263,6 +1264,60 @@ class AgentLaneService:
             with self._condition:
                 self._condition.wait(min(0.25, max(0, end - time.monotonic())))
 
+    def _validated_compaction_replacements(self, lane, events):
+        """Return validated summary views and the exact covered sequences."""
+        candidates = [
+            event for event in events
+            if event.event_type == "compaction.completed"
+        ]
+        if not candidates:
+            return {}, set()
+        by_sequence = {event.sequence: event for event in events}
+        replacements = {}
+        covered = set()
+        ranges = []
+        for event in candidates:
+            payload = event.payload
+            source = payload.get("source_range")
+            if not isinstance(source, Mapping):
+                raise SessionCompactionError("persisted compaction source range is malformed")
+            start = source.get("start_sequence")
+            end = source.get("end_sequence")
+            if (
+                isinstance(start, bool) or isinstance(end, bool)
+                or not isinstance(start, int) or not isinstance(end, int)
+                or start < events[0].sequence or end > events[-1].sequence
+            ):
+                raise SessionCompactionError("persisted compaction range is outside the live tail")
+            if any(start <= prior_end and end >= prior_start for prior_start, prior_end in ranges):
+                raise SessionCompactionError("persisted compaction ranges overlap")
+            source_events = tuple(by_sequence.get(sequence) for sequence in range(start, end + 1))
+            if any(item is None for item in source_events):
+                raise SessionCompactionError("persisted compaction source range is incomplete")
+            summary = self._compaction.validate_persisted_event(event, source_events)
+            lines = ["Compacted session history (validated append-only summary):"]
+            for label, values in (
+                ("Facts", summary.facts),
+                ("Decisions", summary.decisions),
+                ("Unresolved tasks", summary.unresolved_tasks),
+                ("Artifacts", summary.artifacts),
+                ("Tool outcomes", summary.tool_outcomes),
+            ):
+                if values:
+                    lines.append(label + ": " + " | ".join(values))
+            for modality in summary.modalities:
+                lines.append(
+                    "Modality " + modality.event_type + ": "
+                    + json.dumps(dict(modality.payload), ensure_ascii=False, sort_keys=True)
+                )
+            replacements[start] = {
+                "role": "user",
+                "content": "\n".join(lines),
+            }
+            ranges.append((start, end))
+            covered.update(range(start, end + 1))
+        return replacements, covered
+
     def _history(self, lane):
         events = self.store.tail_events(lane["id"], limit=256)
         recent_tool_context = []
@@ -1328,6 +1383,14 @@ class AgentLaneService:
         canonical_events = (
             archived.retained_events if archived is not None else tuple(events)
         )
+        replacements, covered_sequences = self._validated_compaction_replacements(
+            lane, events,
+        )
+        canonical_events = tuple(
+            event for event in canonical_events
+            if event.event_type != "compaction.completed"
+            and event.sequence not in covered_sequences
+        )
         placeholders = {
             reference.source_event_id: placeholder
             for reference, placeholder in zip(
@@ -1348,6 +1411,9 @@ class AgentLaneService:
             if is_protected:
                 protected.append(item)
             timeline.append((sequence, len(timeline), item, is_protected))
+
+        for sequence, item in replacements.items():
+            add_history(sequence, item, is_protected=True)
 
         matched_tool_context = set()
         completed_calls = {
@@ -1422,7 +1488,8 @@ class AgentLaneService:
         retained_ids = {event.event_id for event in canonical_events}
         for source_event_id, placeholder in sorted(
             ((event_id, item) for event_id, item in placeholders.items()
-             if event_id not in retained_ids),
+             if event_id not in retained_ids
+             and int(item["source_sequence"]) not in covered_sequences),
             key=lambda pair: int(pair[1]["source_sequence"]),
         ):
             del source_event_id

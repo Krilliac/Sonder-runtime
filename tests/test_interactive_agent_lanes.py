@@ -778,13 +778,16 @@ def test_live_request_merges_evicted_placeholders_in_source_order(env):
 
 
 def test_live_request_fails_recoverably_when_protected_history_exceeds_budget(env):
-    service, _, sessions, _, context, _ = env
+    service, _, sessions, model, context, _ = env
     lane_id = spawn(env, command="compact-protected-overflow")['lane']['id']
     lane = service.store.read_lane(lane_id)
     for index in range(41):
         sessions.append(
             lane["session_id"], "model.response",
-            {"content": f"rationale-{index}"}, event_id=f"response-{index}",
+            {
+                "content": f"rationale-{index}",
+                "decisions": (["keep marked decision"] if index == 0 else []),
+            }, event_id=f"response-{index}",
         )
 
     service.run_pending(lane_id, context)
@@ -792,10 +795,79 @@ def test_live_request_fails_recoverably_when_protected_history_exceeds_budget(en
     assert failed["status"] == "awaiting_input"
     assert failed["error"] == "CONTEXT_HISTORY_OVERFLOW"
 
+    current = sessions.read_tail(lane["session_id"], limit=256)
+    compacted = service._compaction.compact(
+        lane["session_id"],
+        start_sequence=current[0].sequence,
+        end_sequence=current[-1].sequence,
+    )
+    assert compacted.event_type == "compaction.completed"
+
     resumed = service.control(
         lane_id, "resume", command_id="resume-overflow", context=context,
     )["lane"]
     assert resumed["status"] == "queued"
+    service.run_pending(lane_id, context)
+    assert len(model.requests) == 1
+    history = [item["content"] for item in model.requests[0][0].history]
+    assert any("keep marked decision" in item for item in history)
+    assert any("CONTEXT_HISTORY_OVERFLOW" in item for item in history)
+    assert any(
+        event.event_id == "response-0"
+        for event in sessions.read_range(lane["session_id"], limit=256)
+    )
+    assert sessions.search(
+        session_id=lane["session_id"], text="keep marked decision", limit=8,
+    )
+
+
+def test_live_request_rejects_malformed_or_overlapping_compaction_summaries(env):
+    from sonder_runtime.application.compaction import SessionCompactionError
+
+    service, _, sessions, _, _, _ = env
+    lane_id = spawn(env, command="compact-invalid")['lane']['id']
+    lane = service.store.read_lane(lane_id)
+    source = [
+        sessions.append(lane["session_id"], "model.response", {"content": f"r-{i}"})
+        for i in range(3)
+    ]
+    first = service._compaction.compact(
+        lane["session_id"],
+        start_sequence=source[0].sequence,
+        end_sequence=source[1].sequence,
+    )
+    second = service._compaction.compact(
+        lane["session_id"],
+        start_sequence=source[1].sequence,
+        end_sequence=source[2].sequence,
+    )
+    with pytest.raises(SessionCompactionError, match="overlap"):
+        service._history(lane)
+
+    malformed = sessions.append(
+        lane["session_id"], "compaction.completed",
+        {"source_range": {"session_id": lane["session_id"]}, "summary": {}},
+        event_id="malformed-compaction",
+    )
+    assert malformed.event_type == "compaction.completed"
+    with pytest.raises(SessionCompactionError):
+        service._history(lane)
+
+
+def test_live_request_keeps_bounded_tail_gap_explicit_for_long_sessions(env):
+    from sonder_runtime.application.agents.interactive_lanes import ContextHistoryOverflowError
+
+    service, _, sessions, _, _, _ = env
+    lane_id = spawn(env, command="compact-long-tail")['lane']['id']
+    lane = service.store.read_lane(lane_id)
+    for index in range(257):
+        sessions.append(
+            lane["session_id"], "model.response",
+            {"content": f"long-rationale-{index}"}, event_id=f"long-{index}",
+        )
+
+    with pytest.raises(ContextHistoryOverflowError, match="protected session history"):
+        service._history(lane)
 
 
 def test_recent_tool_context_cap_applies_to_matched_completed_calls(env):

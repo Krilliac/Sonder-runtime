@@ -18,7 +18,7 @@ service restart.
 
 ```text
 python -m pytest -q tests/test_interactive_agent_lanes.py tests/test_session_context_archive.py --basetemp .pytest-compact-live-full
-64 passed in 13.90s
+66 passed in 13.90s
 ```
 
 The canary
@@ -39,4 +39,9 @@ remains an open COMPACT gap. Protected facts within the selected tail are
 never silently truncated: exceeding the 40-message or 32 KiB protected-fact
 budget raises a recoverable `ContextHistoryOverflowError`, leaves the lane in
 `awaiting_input` with `CONTEXT_HISTORY_OVERFLOW`, and allows an explicit
-resume after operator-led compaction.
+resume after operator-led compaction. A persisted summary is accepted only
+when its exact source range and typed modalities validate, its factual and
+structured retention checks pass, and it does not overlap another summary;
+malformed, incomplete, or overlapping summaries fail closed. A 257-response
+canary keeps the bounded-tail limitation explicit rather than silently
+claiming full long-session coverage.

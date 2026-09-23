@@ -7,9 +7,13 @@ from uuid import uuid4
 
 from .legacy import CompactionApplicationService
 from ..ports.compaction import (
+    CompactionEvent,
     CompactionEngine,
     CompactionValidationError,
+    CompactionResult,
+    CompactionSummary,
     CompactionRequest,
+    CompactionValidation,
     SessionHistoryEvent,
     SourceRange,
 )
@@ -193,6 +197,127 @@ class SessionCompactionService:
             payload,
             event_id=result.appended_event.event_id,
         )
+
+    def validate_persisted_event(
+        self,
+        event: SessionEvent,
+        source_events: Sequence[SessionEvent],
+    ) -> CompactionSummary:
+        """Validate an append-only compaction event before live replay.
+
+        The source events remain the authority.  A persisted summary is merely
+        a provider-facing replacement after its exact range, typed modalities,
+        and engine retention validation all succeed.
+        """
+        try:
+            if event.event_type != "compaction.completed":
+                raise SessionCompactionError("persisted event is not compaction.completed")
+            payload = event.payload
+            source = payload.get("source_range")
+            raw_summary = payload.get("summary")
+            if not isinstance(source, Mapping) or not isinstance(raw_summary, Mapping):
+                raise SessionCompactionError("persisted compaction event is incomplete")
+            required_source = {
+                "session_id", "start_sequence", "end_sequence",
+                "start_event_id", "end_event_id",
+            }
+            if set(source) != required_source:
+                raise SessionCompactionError("persisted compaction source range is malformed")
+            if source["session_id"] != event.session_id:
+                raise SessionCompactionError("persisted compaction session changed")
+            start = source["start_sequence"]
+            end = source["end_sequence"]
+            if (
+                isinstance(start, bool) or isinstance(end, bool)
+                or not isinstance(start, int) or not isinstance(end, int)
+                or start < 1 or end < start or end - start + 1 > self._max_events
+                or event.sequence <= end
+            ):
+                raise SessionCompactionError("persisted compaction source range is invalid")
+            values = tuple(source_events)
+            expected = tuple(range(start, end + 1))
+            if (
+                len(values) != len(expected)
+                or tuple(item.sequence for item in values) != expected
+                or values[0].event_id != source["start_event_id"]
+                or values[-1].event_id != source["end_event_id"]
+                or any(item.session_id != event.session_id for item in values)
+                or any(item.event_type == "compaction.completed" for item in values)
+            ):
+                raise SessionCompactionError("persisted compaction source range is incomplete")
+            required_summary = {
+                "facts", "decisions", "unresolved_tasks", "artifacts",
+                "tool_outcomes", "confidence", "modalities",
+            }
+            if set(raw_summary) != required_summary:
+                raise SessionCompactionError("persisted compaction summary is incomplete")
+            raw_modalities = raw_summary["modalities"]
+            if not isinstance(raw_modalities, (list, tuple)):
+                raise SessionCompactionError("persisted compaction modalities are malformed")
+            modalities = []
+            for item in raw_modalities:
+                if not isinstance(item, Mapping) or set(item) != {
+                    "event_id", "event_type", "modality", "payload",
+                }:
+                    raise SessionCompactionError("persisted compaction modality is malformed")
+                if any(
+                    not isinstance(item[field], str) or not item[field].strip()
+                    for field in ("event_id", "event_type", "modality")
+                ):
+                    raise SessionCompactionError("persisted compaction modality identity is malformed")
+                if not isinstance(item["payload"], Mapping):
+                    raise SessionCompactionError("persisted compaction modality payload is malformed")
+                modalities.append(SessionHistoryEvent(
+                    item["event_id"], event.session_id, 0,
+                    item["event_type"], dict(item["payload"]),
+                    item["modality"],
+                ))
+            summary = CompactionSummary(
+                facts=raw_summary["facts"], decisions=raw_summary["decisions"],
+                unresolved_tasks=raw_summary["unresolved_tasks"],
+                artifacts=raw_summary["artifacts"],
+                tool_outcomes=raw_summary["tool_outcomes"],
+                modalities=tuple(modalities),
+                confidence=raw_summary["confidence"],
+            )
+            source_range = SourceRange(
+                event.session_id, start, end,
+                source["start_event_id"], source["end_event_id"],
+            )
+            request = CompactionRequest(
+                event.session_id,
+                tuple(self._history_event(item) for item in values),
+                source_range,
+            )
+            candidate = CompactionResult(
+                event.session_id, source_range, summary,
+                CompactionEvent(event.event_id, event.session_id, source_range, summary),
+                CompactionValidation(True),
+            )
+            validation = self._engine.validate(request, candidate)
+            if not validation.valid:
+                raise SessionCompactionError(validation.detail or "persisted compaction failed validation")
+            for field in ("facts", "decisions", "unresolved_tasks", "artifacts", "tool_outcomes"):
+                expected_values = []
+                for source_event in values:
+                    raw_values = source_event.payload.get(field, ())
+                    if isinstance(raw_values, str):
+                        raw_values = (raw_values,)
+                    if isinstance(raw_values, (list, tuple)):
+                        expected_values.extend(
+                            value for value in raw_values
+                            if isinstance(value, str) and value.strip()
+                        )
+                missing = set(expected_values) - set(getattr(summary, field))
+                if missing:
+                    raise SessionCompactionError(
+                        "persisted compaction summary omitted " + field
+                    )
+            return summary
+        except SessionCompactionError:
+            raise
+        except (CompactionValidationError, TypeError, ValueError, KeyError) as exc:
+            raise SessionCompactionError("persisted compaction event is malformed") from exc
 
     @staticmethod
     def _history_event(event: SessionEvent) -> SessionHistoryEvent:
