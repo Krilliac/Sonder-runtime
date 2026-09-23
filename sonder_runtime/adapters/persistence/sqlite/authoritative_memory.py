@@ -92,6 +92,62 @@ def _fact_payload(text: object, embedding: object, metadata: AuthoritativeFactMe
     return payload
 
 
+def _verify_scoped_journal_evidence(connection, *, source_id: str, project_scope: str) -> None:
+    """Validate journal authenticity and payload against every scoped state row."""
+    rows = connection.execute(
+        "SELECT state.fact_id,state.version,state.tombstoned,"
+        "fact.text,fact.embedding FROM memory_authoritative_fact_state AS state "
+        "LEFT JOIN facts AS fact ON fact.project=state.project AND fact.id=state.fact_id "
+        "WHERE state.project=? AND state.source_id=? ORDER BY state.fact_id",
+        (project_scope, source_id),
+    ).fetchall()
+    for fact_id, version, tombstoned, text, embedding in rows:
+        operation = "delete" if tombstoned else "upsert"
+        journal_rows = connection.execute(
+            "SELECT source_id,source_epoch,sequence,entity_kind,entity_id,version,"
+            "operation,project,payload_json,recorded_at,digest FROM memory_replication_log "
+            "WHERE source_id=? AND project=? AND entity_kind='fact' AND entity_id=? "
+            "AND version=? AND operation=?",
+            (source_id, project_scope, fact_id, version, operation),
+        ).fetchall()
+        if len(journal_rows) != 1:
+            raise MemoryReplicationError(
+                "missing authoritative journal evidence (missing or ambiguous)"
+            )
+        row = journal_rows[0]
+        try:
+            record = MemoryMutation.from_dict({
+                "schema": "sonder.memory-mutation.v1",
+                "source_id": row[0], "source_epoch": row[1], "sequence": row[2],
+                "entity_kind": row[3], "entity_id": row[4], "version": row[5],
+                "operation": row[6], "project": row[7],
+                "payload": json.loads(row[8]), "recorded_at": row[9],
+                "digest": row[10],
+            })
+        except (MemoryReplicationError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise MemoryReplicationError(
+                "missing authoritative journal evidence (malformed)"
+            ) from exc
+        if tombstoned:
+            if text is not None or record.payload:
+                raise MemoryReplicationError(
+                "missing authoritative journal evidence: tombstone conflicts with fact or journal payload"
+                )
+            continue
+        if text is None:
+            raise MemoryReplicationError(
+                "missing authoritative journal evidence: live state has no materialized fact"
+            )
+        expected = _fact_payload(text, embedding, None)
+        if (
+            record.payload.get("text") != expected["text"]
+            or record.payload.get("embedding") != expected["embedding"]
+        ):
+            raise MemoryReplicationError(
+                "missing authoritative journal evidence: journal payload does not match fact"
+            )
+
+
 @dataclass(frozen=True)
 class LegacyFactMigrationPlan:
     """A content-addressed, operator-approved legacy fact adoption plan."""
@@ -141,25 +197,9 @@ def plan_legacy_fact_migration(connection, *, source_id: str, project_scope: str
         raise MemoryReplicationError(
             "legacy fact migration found conflicting authoritative ownership"
         )
-    missing_evidence = connection.execute(
-        "SELECT 1 FROM memory_authoritative_fact_state AS state "
-        "LEFT JOIN facts AS fact ON fact.project=state.project "
-        "AND fact.id=state.fact_id WHERE state.project=? AND state.source_id=? "
-        "AND ((state.tombstoned=0 AND (fact.id IS NULL OR NOT EXISTS ("
-        "SELECT 1 FROM memory_replication_log AS journal WHERE journal.source_id=state.source_id "
-        "AND journal.project=state.project AND journal.entity_kind='fact' "
-        "AND journal.entity_id=state.fact_id AND journal.version=state.version "
-        "AND journal.operation='upsert'))) OR (state.tombstoned<>0 AND NOT EXISTS ("
-        "SELECT 1 FROM memory_replication_log AS journal WHERE journal.source_id=state.source_id "
-        "AND journal.project=state.project AND journal.entity_kind='fact' "
-        "AND journal.entity_id=state.fact_id AND journal.version=state.version "
-        "AND journal.operation='delete'))) LIMIT 1",
-        (project_scope, source_id),
-    ).fetchone()
-    if missing_evidence is not None:
-        raise MemoryReplicationError(
-            "legacy fact migration found missing authoritative journal evidence"
-        )
+    _verify_scoped_journal_evidence(
+        connection, source_id=source_id, project_scope=project_scope,
+    )
     total_bytes = connection.execute(
         "SELECT COALESCE(SUM(COALESCE(length(CAST(fact.id AS BLOB)), 0) + "
         "COALESCE(length(CAST(fact.project AS BLOB)), 0) + "
@@ -472,25 +512,16 @@ class SQLiteAuthoritativeFactSource:
             )
         if not verify_journal_evidence:
             return
-        missing_evidence = connection.execute(
-            "SELECT 1 FROM memory_authoritative_fact_state AS state "
-            "LEFT JOIN facts AS fact ON fact.project=state.project "
-            "AND fact.id=state.fact_id WHERE state.project=? AND state.source_id=? "
-            "AND ((state.tombstoned=0 AND (fact.id IS NULL OR NOT EXISTS ("
-            "SELECT 1 FROM memory_replication_log AS journal WHERE journal.source_id=state.source_id "
-            "AND journal.project=state.project AND journal.entity_kind='fact' "
-            "AND journal.entity_id=state.fact_id AND journal.version=state.version "
-            "AND journal.operation='upsert'))) OR (state.tombstoned<>0 AND NOT EXISTS ("
-            "SELECT 1 FROM memory_replication_log AS journal WHERE journal.source_id=state.source_id "
-            "AND journal.project=state.project AND journal.entity_kind='fact' "
-            "AND journal.entity_id=state.fact_id AND journal.version=state.version "
-            "AND journal.operation='delete'))) LIMIT 1",
-            (self.project_scope, self.source_id),
-        ).fetchone()
-        if missing_evidence is not None:
+        try:
+            _verify_scoped_journal_evidence(
+                connection,
+                source_id=self.source_id,
+                project_scope=self.project_scope,
+            )
+        except MemoryReplicationError as exc:
             raise MemoryReplicationError(
                 "existing project facts require authoritative journal evidence"
-            )
+            ) from exc
 
     def _record(
         self,

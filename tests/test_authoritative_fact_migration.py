@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import json
+import struct
 from dataclasses import replace
 import sys
 
@@ -262,6 +263,57 @@ def test_migration_rejects_same_source_tombstone_without_delete_evidence(tmp_pat
     )
     connection.commit()
     with pytest.raises(MemoryReplicationError, match="missing authoritative journal evidence"):
+        plan_legacy_fact_migration(
+            connection, source_id="node-a", project_scope="repo-a",
+        )
+    connection.close()
+
+
+@pytest.mark.parametrize("corruption", ["text", "embedding", "digest"])
+def test_migration_rejects_corrupt_live_journal_proof(tmp_path, corruption):
+    connection = connect(tmp_path / f"corrupt-{corruption}.db")
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    source.activate(connection)
+    source.add_fact(connection, "fact-1", "repo-a", "canonical")
+    if corruption == "text":
+        connection.execute("UPDATE facts SET text=? WHERE id=?", ("tampered", "fact-1"))
+    elif corruption == "embedding":
+        connection.execute(
+            "UPDATE facts SET embedding=? WHERE id=?",
+            (sqlite3.Binary(struct.pack("<f", 1.0)), "fact-1"),
+        )
+    else:
+        connection.execute(
+            "UPDATE memory_replication_log SET digest=? WHERE entity_id=?",
+            ("0" * 64, "fact-1"),
+        )
+    connection.commit()
+    with pytest.raises(MemoryReplicationError, match="authoritative journal evidence"):
+        plan_legacy_fact_migration(
+            connection, source_id="node-a", project_scope="repo-a",
+        )
+    connection.close()
+
+
+@pytest.mark.parametrize("corruption", ["payload", "version"])
+def test_migration_rejects_corrupt_tombstone_proof(tmp_path, corruption):
+    connection = connect(tmp_path / f"corrupt-tombstone-{corruption}.db")
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    source.activate(connection)
+    source.add_fact(connection, "gone", "repo-a", "temporary")
+    source.delete_fact(connection, "gone", "repo-a")
+    if corruption == "payload":
+        connection.execute(
+            "UPDATE memory_replication_log SET payload_json=? WHERE entity_id=?",
+            ('{"text":"forged"}', "gone"),
+        )
+    else:
+        connection.execute(
+            "UPDATE memory_authoritative_fact_state SET version=? WHERE fact_id=?",
+            (3, "gone"),
+        )
+    connection.commit()
+    with pytest.raises(MemoryReplicationError, match="authoritative journal evidence"):
         plan_legacy_fact_migration(
             connection, source_id="node-a", project_scope="repo-a",
         )
