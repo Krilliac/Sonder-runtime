@@ -73,6 +73,10 @@ def _child(spec_path: Path) -> int:
     output_path = Path(spec["output"]).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     env = {str(k): str(v) for k, v in spec["env"].items()}
+    # Create these inside the low token so their integrity label permits the
+    # candidate's ordinary per-user caches without exposing the real profile.
+    for name in ("USERPROFILE", "APPDATA", "LOCALAPPDATA"):
+        Path(env[name]).mkdir(parents=True, exist_ok=True)
     try:
         completed = subprocess.run(
             command, cwd=spec["cwd"], env=env, stdin=subprocess.DEVNULL,
@@ -119,11 +123,17 @@ def run_isolated(
         output = work / "output.bin"
         result_path = work / "result.json"
         spec_path = work / "spec.json"
+        low_home = work / "home"
+        home_drive, home_tail = os.path.splitdrive(str(low_home))
         env = {
             "SystemRoot": os.environ.get("SystemRoot", r"C:\Windows"),
             "WINDIR": os.environ.get("WINDIR", r"C:\Windows"),
             "PATH": os.environ.get("PATH", ""),
             "TEMP": str(work), "TMP": str(work),
+            "USERPROFILE": str(low_home), "HOME": str(low_home),
+            "HOMEDRIVE": home_drive, "HOMEPATH": home_tail,
+            "APPDATA": str(low_home / "AppData" / "Roaming"),
+            "LOCALAPPDATA": str(low_home / "AppData" / "Local"),
             "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONPYCACHEPREFIX": str(work / "pycache"),
         }
