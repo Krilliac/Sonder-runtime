@@ -3,11 +3,12 @@
 Status: `implemented_unverified`
 
 This slice adds a typed `WorkerExecutionContract` to delegated worker requests.
-It records bounded success criteria and deterministic argv verification commands,
+It records bounded success criteria and deterministic argv command declarations,
 persists them in the existing durable child-session request, restores them after
 restart, and makes `DelegationService.integrate` reject successful results when
-criteria or command identity do not match the persisted contract. Terminal
-verification retains the criteria and commands alongside the result evidence.
+criteria or declared command identity do not match the persisted contract.
+Terminal verification retains the criteria and declarations alongside the
+result record.
 
 Evidence:
 
@@ -21,8 +22,10 @@ Evidence:
 
 Limitations:
 
-- The contract validates and records exact verification command argv; this slice
-  does not execute those commands. A trusted verifier still supplies the evidence
-  and remains responsible for running the commands in the appropriate workspace.
+- The contract validates and records exact command argv declarations; this slice
+  does not execute commands, inspect exit status, or bind a host-owned verifier
+  receipt. Supplied tuples therefore do not prove that a command ran or passed.
+  A later verifier integration must provide that authority in the appropriate
+  workspace.
 - Hosted CI, external provider qualification, and post-merge evidence remain
   unverified.
