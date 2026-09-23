@@ -974,6 +974,21 @@ def test_live_request_recovers_early_decision_when_tail_would_have_omitted_it(en
                for item in history)
 
 
+def test_live_request_fails_closed_when_complete_recovery_exceeds_bound(env, monkeypatch):
+    from sonder_runtime.application.agents.interactive_lanes import ContextHistoryOverflowError
+
+    service, _, sessions, _, _, _ = env
+    lane_id = spawn(env, command="compact-recovery-bound")['lane']['id']
+    lane = service.store.read_lane(lane_id)
+
+    def over_bound(*args, **kwargs):
+        raise ValueError("session history exceeds recovery bound")
+
+    monkeypatch.setattr(sessions, "read_complete", over_bound)
+    with pytest.raises(ContextHistoryOverflowError, match="unavailable or failed integrity"):
+        service._history(lane)
+
+
 def test_recent_tool_context_cap_applies_to_matched_completed_calls(env):
     service, _, sessions, _, context, _ = env
     lane_id = spawn(env)["lane"]["id"]

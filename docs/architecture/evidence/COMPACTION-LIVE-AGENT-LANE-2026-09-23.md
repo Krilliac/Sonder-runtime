@@ -24,6 +24,12 @@ python -m pytest -q tests/test_interactive_agent_lanes.py tests/test_session_com
 64 passed in 24.68s
 ```
 
+Adversarial recovery coverage also proves mid-page hash and sequence
+corruption fail closed, a 10,001-event history exceeds the bounded recovery
+limit, and live continuation surfaces that bound as recoverable overflow.
+The combined focused session, replay, compaction, lane, and production wiring
+suite passes with 100 tests.
+
 The canary
 `test_live_request_compacts_canonical_tool_output_and_recovers_after_restart`
 proves one real lane request receives a bounded reference instead of the
