@@ -154,7 +154,7 @@ class GitHubPublisher:
             repo = plan.issue_command[plan.issue_command.index("--repo") + 1]
         except (ValueError, IndexError):
             raise ValueError("issue command must identify a repository")
-        command = ("gh", "issue", "list", "--repo", repo, "--search", f"{plan.marker} in:body", "--json", "number,url", "--limit", "10")
+        command = ("gh", "issue", "list", "--repo", repo, "--state", "all", "--search", f"{plan.marker} in:body", "--json", "number,url,body", "--limit", "10")
         if self.adapter is None:
             raise RuntimeError("a GitHub adapter is required for non-dry-run publication")
         completed = self.adapter.run(command)
@@ -164,7 +164,11 @@ class GitHubPublisher:
             value = json.loads(completed.stdout or "[]")
         except json.JSONDecodeError as exc:
             raise RuntimeError("gh issue dedupe query returned invalid JSON") from exc
-        return value if isinstance(value, list) else []
+        if not isinstance(value, list):
+            raise RuntimeError("gh issue dedupe query returned invalid records")
+        return [item for item in value if isinstance(item, dict)
+                and isinstance(item.get("body"), str)
+                and f"<!-- {plan.marker} -->" in item["body"]]
 
     def _existing_pr(self, plan: PublishPlan) -> list[object]:
         if not plan.pr_command:
@@ -174,7 +178,7 @@ class GitHubPublisher:
             branch = plan.pr_command[plan.pr_command.index("--head") + 1]
         except (ValueError, IndexError):
             raise ValueError("PR command must identify repository and head")
-        command = ("gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "open", "--search", f"{plan.marker} in:body", "--json", "number,url", "--limit", "10")
+        command = ("gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "all", "--search", f"{plan.marker} in:body", "--json", "number,url,body", "--limit", "10")
         if self.adapter is None:
             raise RuntimeError("a GitHub adapter is required for non-dry-run publication")
         completed = self.adapter.run(command)
@@ -184,4 +188,8 @@ class GitHubPublisher:
             value = json.loads(completed.stdout or "[]")
         except json.JSONDecodeError as exc:
             raise RuntimeError("gh PR dedupe query returned invalid JSON") from exc
-        return value if isinstance(value, list) else []
+        if not isinstance(value, list):
+            raise RuntimeError("gh PR dedupe query returned invalid records")
+        return [item for item in value if isinstance(item, dict)
+                and isinstance(item.get("body"), str)
+                and f"<!-- {plan.marker} -->" in item["body"]]
