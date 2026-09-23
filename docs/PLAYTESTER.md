@@ -51,3 +51,25 @@ failures on the same step. The adapter command can be supplied with
 `--command-json '["python", "adapters/aetherfall_playtest.py", "--scenario", "login-smoke"]'`.
 Browser automation remains the responsibility of the supplied project adapter;
 this package supplies the bounded runner, evidence contract, and GitHub publisher.
+
+## Aetherfall walk adapter
+
+`scripts/aetherfall_walk_playtest.py` executes Aetherfall's existing
+`tools/walk-playtest.mjs` through the bounded process adapter. It checks that
+all four rim directions were reached without leaving the world and that each
+walk returned to the origin. Run the outer playtester with Aetherfall as
+`--cwd` so the evidence records the **game checkout's** commit SHA:
+
+```powershell
+$gameRoot = 'D:\Aetherfall'
+$adapter = (Resolve-Path .\scripts\aetherfall_walk_playtest.py).Path
+$command = @('python', $adapter, '--root', $gameRoot) | ConvertTo-Json -Compress
+python .\scripts\playtester.py --name aetherfall-walk-boundaries `
+  --claim 'Rim walks stay in bounds and return to origin' `
+  --evidence-class seeded --cwd $gameRoot --command-json $command `
+  --publish-repo Krilliac/Aetherfall
+```
+
+This prepares a dry-run GitHub issue plan when the scenario fails. Publication
+still requires `--publish` and a clean, matching checkout. The adapter emits
+only compact verdicts; the raw game report is not copied into the issue body.
