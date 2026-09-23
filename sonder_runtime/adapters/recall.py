@@ -340,9 +340,10 @@ def recall_page(conn, task, k=2, embed_fn=None, min_sim=None,
         if _rules.passes_similarity(sim, min_sim):
             scored.append((sim, candidate_rank, row))
     scored.sort(key=lambda item: (-item[0], item[1]))
+    ranking_mode = "exact" if lexical_fallback else mode
     ordered = _hybrid_order(
         task, scored, project=project,
-        include_all_projects=include_all_projects, limit=k, mode=mode,
+        include_all_projects=include_all_projects, limit=k, mode=ranking_mode,
         at=at,
     )
     selected = ordered[:k]
