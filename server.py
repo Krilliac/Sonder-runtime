@@ -1551,6 +1551,30 @@ _MODEL_PROMPT_IDENTITY_CACHE = {}
 _MODEL_PROMPT_IDENTITY_CACHE_LOCK = threading.Lock()
 
 
+def _ollama_model_tag_metadata(model, *, timeout=30):
+    """Return the selected tag's digest/revision, or ``None`` if unproven."""
+    payload = _post("/api/tags", {}, timeout=timeout)
+    rows = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return None
+    wanted = str(model or "").strip().casefold()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or row.get("model") or "").strip()
+        digest = row.get("digest")
+        modified_at = row.get("modified_at")
+        if (
+            name.casefold() == wanted
+            and isinstance(digest, str)
+            and re.fullmatch(r"[0-9a-fA-F]{64}", digest.strip())
+            and isinstance(modified_at, str)
+            and modified_at.strip()
+        ):
+            return digest.strip().lower(), modified_at.strip()
+    return None
+
+
 def _model_prompt_identity(model):
     """Return stable local prompt identities proven by Ollama model metadata.
 
@@ -1584,17 +1608,26 @@ def _model_prompt_identity(model):
                 return cached[1], cached[2]
     tokenizer = template_identity = None
     try:
+        before = _ollama_model_tag_metadata(model)
+        if before is None:
+            raise ValueError("selected Ollama tag lacks a stable digest/revision")
         details = _post("/api/show", {"name": model}, timeout=30)
         info = details.get("model_info") if isinstance(details, dict) else {}
         info = info if isinstance(info, dict) else {}
         tokenizer_value = info.get("tokenizer.ggml.model")
         template_value = details.get("template") if isinstance(details, dict) else None
+        show_modified_at = details.get("modified_at") if isinstance(details, dict) else None
+        if not isinstance(show_modified_at, str) or show_modified_at.strip() != before[1]:
+            raise ValueError("Ollama tag/show revision mismatch")
+        after = _ollama_model_tag_metadata(model)
+        if after != before:
+            raise ValueError("Ollama tag changed during prompt identity probe")
         if isinstance(tokenizer_value, str) and tokenizer_value.strip():
             tokenizer = tokenizer_value.strip()
         if isinstance(template_value, str) and template_value.strip():
             template_identity = "ollama-template-sha256:" + hashlib.sha256(
                 template_value.encode("utf-8")
-            ).hexdigest()
+            ).hexdigest() + ";ollama-model-sha256:" + before[0]
     except Exception:
         tokenizer = template_identity = None
     if not (tokenizer and template_identity):
