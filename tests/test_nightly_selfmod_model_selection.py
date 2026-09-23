@@ -548,6 +548,57 @@ def test_rewrite_prompt_binds_selected_function_objective_target_and_source():
     assert prompt.endswith("def load_source(src):\n    return src\n")
 
 
+def test_run_cleans_plan_when_rewrite_request_raises(tmp_path, monkeypatch):
+    workspace = tmp_path / "candidate"
+    workspace.mkdir()
+    (workspace / "reflection.py").write_text(
+        "def selected(value):\n    return value\n", encoding="utf-8",
+    )
+    cancelled, discarded = [], []
+    monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
+    monkeypatch.setattr(
+        nightly_selfmod.selfmod, "settings",
+        lambda: {"enabled": True, "mode": "propose"},
+    )
+    monkeypatch.setattr(
+        nightly_selfmod.selfmod, "_git_info",
+        lambda _root: (True, "base", ""),
+    )
+    monkeypatch.setattr(
+        nightly_selfmod, "propose_objective",
+        lambda *_args, **_kwargs: ("reflection.py", "Guard input.", "selected"),
+    )
+    monkeypatch.setattr(
+        nightly_selfmod.selfmod, "create_plan",
+        lambda *_args, **_kwargs: {"id": "run-rewrite-error"},
+    )
+    monkeypatch.setattr(nightly_selfmod.selfmod, "create_backup", lambda _run_id: None)
+    monkeypatch.setattr(nightly_selfmod.selfmod, "verify_backup", lambda _run_id: None)
+    monkeypatch.setattr(nightly_selfmod.selfmod, "prepare_workspace", lambda _run_id: None)
+    monkeypatch.setattr(
+        nightly_selfmod.selfmod, "candidate_path", lambda _run_id: workspace,
+    )
+    monkeypatch.setattr(
+        nightly_selfmod.selfmod, "cancel",
+        lambda run_id: cancelled.append(run_id),
+    )
+    def discard(run_id):
+        discarded.append(run_id)
+        (workspace / "reflection.py").unlink()
+        workspace.rmdir()
+    monkeypatch.setattr(nightly_selfmod, "_discard_workspace", discard)
+    monkeypatch.setattr(
+        nightly_selfmod, "_ask",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("private model detail")),
+    )
+
+    result = nightly_selfmod.run(object(), lambda _message: None, test_timeout=60)
+
+    assert result == "candidate rejected: rewrite request failed (RuntimeError)"
+    assert cancelled == discarded == ["run-rewrite-error"]
+    assert not workspace.exists()
+
+
 def test_ast_splice_rejects_malformed_or_contract_changing_replies():
     original = "def sample(value):\n    return value\n"
 
