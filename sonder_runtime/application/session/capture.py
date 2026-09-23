@@ -92,6 +92,35 @@ def _canonical_json(value: object, name: str) -> str:
     return json.dumps(copied, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _context_evidence(value: object, name: str) -> dict[str, object] | None:
+    """Serialize provider-bound prefix evidence without retaining prompt text."""
+    if value is None:
+        return None
+    sections = getattr(value, "sections", None)
+    if not isinstance(sections, tuple):
+        raise InvalidInput(f"{name} has invalid sections")
+    serialized_sections = []
+    for section in sections:
+        fields = {
+            field: getattr(section, field, None)
+            for field in ("item_id", "section", "content_digest", "source", "ordinal")
+        }
+        if any(fields[field] is None for field in ("item_id", "section", "content_digest", "source", "ordinal")):
+            raise InvalidInput(f"{name} has an invalid section")
+        serialized_sections.append(fields)
+    payload: dict[str, object] = {"sections": serialized_sections}
+    for field in ("version", "cache_key", "identity_key", "request_id", "model", "prefix_key", "manifest_digest"):
+        field_value = getattr(value, field, None)
+        if field_value is not None:
+            payload[field] = field_value
+    metadata = getattr(value, "metadata", None)
+    if metadata is not None:
+        if not isinstance(metadata, Mapping):
+            raise InvalidInput(f"{name} metadata is invalid")
+        payload["metadata"] = dict(metadata)
+    return _json_copy(payload, name)
+
+
 def _snapshot_payload(
     request: ModelRequest,
     *,
@@ -116,6 +145,22 @@ def _snapshot_payload(
         "tools": tool_manifest,
         "ui_facts": ui,
     }
+    prefix = _context_evidence(request.prefix_manifest, "request.prefix_manifest")
+    replay = _context_evidence(request.replay_manifest, "request.replay_manifest")
+    observation = request.prefix_cache_observation
+    if prefix is not None:
+        payload["prefix_manifest"] = prefix
+    if replay is not None:
+        payload["replay_manifest"] = replay
+    if observation is not None:
+        payload["prefix_cache_observation"] = _json_copy({
+            "cache_key": getattr(observation, "cache_key", None),
+            "identity_key": getattr(observation, "identity_key", None),
+            "version": getattr(observation, "version", None),
+            "result": getattr(observation, "result", None),
+            "reason": getattr(observation, "reason", None),
+            "wrote": getattr(observation, "wrote", None),
+        }, "request.prefix_cache_observation")
     if request.context_packet is not None and request.provenance is not None:
         # Only redacted provenance crosses the durable event boundary.
         from ..security.prompt_provenance import PromptProvenanceBoundary

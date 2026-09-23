@@ -196,6 +196,34 @@ class PrefixCacheTelemetry:
 
 
 @dataclass(frozen=True)
+class PrefixCacheObservation:
+    """The cache decision for one concrete request assembly.
+
+    Aggregate counters are useful for operations, but cannot be attached to a
+    provider request without racing the next request.  This immutable record
+    binds the per-request result to the exact prefix and identity that was
+    resolved.
+    """
+
+    cache_key: str
+    identity_key: str
+    version: str
+    result: str
+    reason: str
+    wrote: bool
+
+    def __post_init__(self) -> None:
+        if not all(isinstance(value, str) and value for value in (
+            self.cache_key, self.identity_key, self.version, self.result, self.reason,
+        )):
+            raise ValueError("prefix cache observation identity is invalid")
+        if self.result not in {"hit", "miss"}:
+            raise ValueError("prefix cache observation result is invalid")
+        if type(self.wrote) is not bool:
+            raise TypeError("prefix cache observation wrote must be a bool")
+
+
+@dataclass(frozen=True)
 class PrefixIdentity:
     """Stable inputs that can make a rendered prefix reusable.
 
@@ -267,6 +295,7 @@ class PrefixManifestCache:
         self._last_cache_key: str | None = None
         self._last_identity_key: str | None = None
         self._last_version: str | None = None
+        self._last_observation: PrefixCacheObservation | None = None
 
     def resolve(self, records: Sequence[ContextRecord], *, version: str = "1", **identity: Any) -> PrefixManifest:
         manifest = build_prefix_manifest(records, version=version, **identity)
@@ -277,6 +306,10 @@ class PrefixManifestCache:
             self._reasons["hit"] += 1
             self._values.move_to_end(manifest.cache_key)
             self._remember(manifest)
+            self._last_observation = PrefixCacheObservation(
+                manifest.cache_key, manifest.identity_key, manifest.version,
+                "hit", "hit", False,
+            )
             return cached
         self.misses += 1
         if not self._values:
@@ -295,6 +328,10 @@ class PrefixManifestCache:
             self._values.popitem(last=False)
         self.writes += 1
         self._remember(manifest)
+        self._last_observation = PrefixCacheObservation(
+            manifest.cache_key, manifest.identity_key, manifest.version,
+            "miss", reason, True,
+        )
         return manifest
 
     def _remember(self, manifest: PrefixManifest) -> None:
@@ -305,6 +342,10 @@ class PrefixManifestCache:
     @property
     def telemetry(self) -> PrefixCacheTelemetry:
         return PrefixCacheTelemetry(self.hits, self.misses, self.writes, self._last_reason, MappingProxyType(dict(self._reasons)))
+
+    @property
+    def last_observation(self) -> PrefixCacheObservation | None:
+        return self._last_observation
 
 
 @dataclass(frozen=True)
@@ -346,5 +387,6 @@ def build_replay_manifest(
 __all__ = [
     "ContextRecord", "DedupProvenance", "DeduplicationResult", "deduplicate_context",
     "Snapshot", "LastGoodSnapshot", "PrefixManifest", "PrefixIdentity", "PrefixCacheTelemetry", "PrefixManifestCache",
+    "PrefixCacheObservation",
     "ReplaySection", "ReplayManifest", "build_prefix_manifest", "build_replay_manifest",
 ]

@@ -8,7 +8,7 @@ from sonder_runtime.application.agents.interactive_lanes import AgentLaneService
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.context_integration import ContextPlanningFacade
 from sonder_runtime.application.live_context import LiveAgentContextProducer
-from sonder_runtime.application.ports.model_gateway import ModelResponse
+from sonder_runtime.application.ports.model_gateway import InferenceTelemetry, ModelResponse
 from sonder_runtime.application.ports.model_target import ResolvedModelRoute
 
 
@@ -62,6 +62,12 @@ def test_live_agent_request_assembles_scoped_rules_skills_and_reuses_prefix(tmp_
     assert "ALPHA RULE: keep changes bounded" in request.system
     assert "play: Scoped scenario validation skill" in request.system
     assert planner.prefix_cache_telemetry.writes == 1
+    assert request.prefix_manifest is not None
+    assert request.replay_manifest is not None
+    assert request.replay_manifest.request_id.startswith("request-")
+    assert request.prefix_cache_observation.result == "miss"
+    assert request.prefix_cache_observation.wrote is True
+    assert request.replay_manifest.prefix_key == request.prefix_manifest.cache_key
 
     # A changed dynamic turn does not change stable producer identity.
     messages = service.inspect(lane, context)["messages"]
@@ -98,7 +104,13 @@ def test_live_prefix_request_crosses_provider_dispatch_with_sealed_route(tmp_pat
             assert request._resolved_route.provider_id == "provider"
             assert request._resolved_route.model == "provider-model"
             self.requests.append(request)
-            return ModelResponse("done", "provider-model", request.tier, tokens_out=1)
+            return ModelResponse(
+                "done", "provider-model", request.tier, tokens_out=1,
+                telemetry=InferenceTelemetry(
+                    prompt_tokens=20, prompt_cached_tokens=12,
+                    prompt_uncached_tokens=8,
+                ),
+            )
 
         def embed(self, texts, context):
             return ()
@@ -128,6 +140,12 @@ def test_live_prefix_request_crosses_provider_dispatch_with_sealed_route(tmp_pat
     assert "DISPATCH RULE" in request.system
     assert "play: Scoped scenario validation skill" in request.system
     assert planner.prefix_cache_telemetry.writes == 1
+    assert request.prefix_manifest is not None
+    assert request.replay_manifest is not None
+    assert request.prefix_cache_observation.result == "miss"
+    assert request.prefix_cache_observation.reason == "cold_start"
+    assert request.replay_manifest.manifest_digest
+    assert provider.requests[0].prefix_cache_observation.cache_key == request.prefix_manifest.cache_key
 
 
 def test_live_agent_context_is_scoped_and_uses_last_good_on_partial_refresh(tmp_path):
