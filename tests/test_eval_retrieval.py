@@ -82,6 +82,11 @@ def test_history_recording_is_idempotent(tmp_path, monkeypatch):
         suite_digest="b" * 64, run_id="run-002",
     )
     assert len(evaluation_history_store.load_history(history)["records"]) == 4
+    eval_retrieval._record_history(
+        results, history, model="mock-model", model_digest="a" * 64,
+        suite_digest="c" * 64, run_id="run-001",
+    )
+    assert len(evaluation_history_store.load_history(history)["records"]) == 6
 
 
 def test_record_history_requires_explicit_run_id(tmp_path, monkeypatch):

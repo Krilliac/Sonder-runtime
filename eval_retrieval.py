@@ -125,7 +125,9 @@ def _record_history(results, history_path, *, model, model_digest, suite_digest,
             suite_digest=suite_digest,
             passed=passed,
             total=total,
-            source="eval_retrieval:%s:%s" % (run_id, condition),
+            source="eval_retrieval:%s:%s:%s" % (
+                run_id, suite_digest[:24], condition,
+            ),
         )
         fields_list.append(fields)
     return store.record_result_pair_idempotent(history_path, fields_list)
