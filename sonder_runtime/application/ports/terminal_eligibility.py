@@ -17,3 +17,4 @@ class ManagedTerminalEligibility:
     published: object | None = None
     authenticated_worker_id: str | None = None
     verified_subject_digest: str | None = None
+    verified_failure_receipt: object | None = None
