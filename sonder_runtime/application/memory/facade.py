@@ -64,6 +64,16 @@ class MemoryLearningFacade:
                 interaction_id, signal, source=source,
             )
 
+    def authoritative_entities(self, project: str, *, entity_id: str | None = None, now: str | None = None):
+        """Read only committed, scoped entity materializations."""
+        with self._unit_of_work() as scope:
+            return scope.memory.entities_for_project(project, entity_id=entity_id, now=now)
+
+    def authoritative_decisions(self, project: str, *, decision_id: str | None = None, now: str | None = None):
+        """Read only committed, scoped decision materializations."""
+        with self._unit_of_work() as scope:
+            return scope.memory.decisions_for_project(project, decision_id=decision_id, now=now)
+
     # Explicit alias used by HTTP/MCP/CLI outcome handlers.
     record_outcome = record
 

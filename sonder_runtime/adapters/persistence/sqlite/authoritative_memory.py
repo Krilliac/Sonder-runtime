@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from array import array
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import math
 
@@ -20,20 +21,65 @@ from sonder_runtime.domain.memory.replication import (
     MemoryMutation,
     MemoryReplicationError,
 )
+from .authoritative_indexes import materialize_authoritative_fact_index
 
 
 _MAX_EMBEDDING = 16_384
 _SAVEPOINT = "sonder_authoritative_fact_write"
 
 
+@dataclass(frozen=True)
+class AuthoritativeFactMetadata:
+    """Explicit caller-supplied entity/decision metadata; never text-inferred."""
+
+    entities: tuple[str, ...] = ()
+    decision: dict[str, str] | None = None
+    valid_from: str | None = None
+    valid_until: str | None = None
+    supersedes: str | None = None
+    provenance: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if any(not isinstance(item, str) or not item.strip() or len(item) > 160 for item in self.entities):
+            raise MemoryReplicationError("entity metadata must be bounded explicit identifiers")
+        if len(set(self.entities)) != len(self.entities):
+            raise MemoryReplicationError("entity metadata identifiers must be unique")
+        if self.decision is not None:
+            if set(self.decision) != {"id", "value"} or any(
+                not isinstance(value, str) or not value.strip() or len(value) > 2048
+                for value in self.decision.values()
+            ):
+                raise MemoryReplicationError("decision metadata must contain bounded id and value")
+        for name in ("valid_from", "valid_until", "supersedes"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value.strip() or len(value) > 64):
+                raise MemoryReplicationError(f"{name} metadata is invalid")
+        if any(not isinstance(item, str) or not item.strip() or len(item) > 256 for item in self.provenance):
+            raise MemoryReplicationError("provenance metadata is invalid")
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "entities": self.entities,
+            "decision": self.decision,
+            "valid_from": self.valid_from,
+            "valid_until": self.valid_until,
+            "supersedes": self.supersedes,
+            "provenance": self.provenance,
+        }
+
+
 def _recorded_at() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _fact_payload(text: object, embedding: object) -> dict[str, object]:
+def _fact_payload(text: object, embedding: object, metadata: AuthoritativeFactMetadata | None) -> dict[str, object]:
     if not isinstance(text, str) or not text.strip():
         raise MemoryReplicationError("fact text must be a bounded non-empty string")
+    if metadata is not None and not isinstance(metadata, AuthoritativeFactMetadata):
+        raise MemoryReplicationError("fact metadata must use the typed authoritative contract")
     payload: dict[str, object] = {"text": text, "embedding": None}
+    if metadata is not None:
+        payload["metadata"] = metadata.as_payload()
     if embedding is None:
         return payload
     if isinstance(embedding, memoryview):
@@ -204,11 +250,12 @@ class SQLiteAuthoritativeFactSource:
         text: str,
         embedding=None,
         *,
+        metadata: AuthoritativeFactMetadata | None = None,
         replace: bool = False,
     ) -> MemoryMutation:
         if project != self.project_scope:
             raise MemoryReplicationError("authoritative fact scope cannot be widened")
-        payload = _fact_payload(text, embedding)
+        payload = _fact_payload(text, embedding, metadata)
         with self._transaction(connection):
             record = self._record(
                 connection,
@@ -246,6 +293,7 @@ class SQLiteAuthoritativeFactSource:
                 source_id=self.source_id,
                 project_scope=self.project_scope,
             )
+            materialize_authoritative_fact_index(connection, record)
         return record
 
     def add_fact(
@@ -255,9 +303,10 @@ class SQLiteAuthoritativeFactSource:
         project: str,
         text: str,
         embedding=None,
+        metadata: AuthoritativeFactMetadata | None = None,
     ) -> MemoryMutation:
         """Insert a new supported fact and its journal mutation together."""
-        return self._write_fact(connection, fact_id, project, text, embedding)
+        return self._write_fact(connection, fact_id, project, text, embedding, metadata=metadata)
 
     def upsert_fact(
         self,
@@ -266,10 +315,11 @@ class SQLiteAuthoritativeFactSource:
         project: str,
         text: str,
         embedding=None,
+        metadata: AuthoritativeFactMetadata | None = None,
     ) -> MemoryMutation:
         """Advance one supported fact's version without changing its scope."""
         return self._write_fact(
-            connection, fact_id, project, text, embedding, replace=True
+            connection, fact_id, project, text, embedding, metadata=metadata, replace=True
         )
 
     def delete_fact(self, connection, fact_id: str, project: str) -> bool:
@@ -306,6 +356,7 @@ class SQLiteAuthoritativeFactSource:
                 source_id=self.source_id,
                 project_scope=self.project_scope,
             )
+            materialize_authoritative_fact_index(connection, record)
         return True
 
     def advance_epoch(self, connection, source_epoch: int) -> None:
@@ -340,4 +391,4 @@ class SQLiteAuthoritativeFactSource:
             )
 
 
-__all__ = ["SQLiteAuthoritativeFactSource"]
+__all__ = ["AuthoritativeFactMetadata", "SQLiteAuthoritativeFactSource"]
