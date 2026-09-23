@@ -114,8 +114,10 @@ def plan_legacy_fact_migration(connection, *, source_id: str, project_scope: str
     # digest or creating any backup in the apply path.
     SQLiteAuthoritativeFactSource(source_id, project_scope=project_scope)
     total_bytes = connection.execute(
-        "SELECT COALESCE(SUM(length(CAST(fact.text AS BLOB)) + "
-        "COALESCE(length(fact.embedding), 0)), 0) "
+        "SELECT COALESCE(SUM(COALESCE(length(CAST(fact.id AS BLOB)), 0) + "
+        "COALESCE(length(CAST(fact.project AS BLOB)), 0) + "
+        "COALESCE(length(CAST(fact.text AS BLOB)), 0) + "
+        "COALESCE(length(CAST(fact.embedding AS BLOB)), 0)), 0) "
         "FROM facts AS fact LEFT JOIN memory_authoritative_fact_state AS state "
         "ON state.project=fact.project AND state.fact_id=fact.id "
         "WHERE fact.project=? AND state.fact_id IS NULL",
@@ -132,11 +134,24 @@ def plan_legacy_fact_migration(connection, *, source_id: str, project_scope: str
     ).fetchall()
     if len(rows) > _MAX_MIGRATION_ROWS:
         raise MemoryReplicationError("legacy fact migration exceeds the bounded plan size")
-    normalized = tuple(
-        (str(row[0]), str(row[1]), str(row[2]), bytes(row[3]) if row[3] is not None else None)
-        for row in rows
-    )
-    if sum(len(text.encode("utf-8")) + len(embedding or b"") for _, _, text, embedding in normalized) > _MAX_MIGRATION_BYTES:
+    normalized_rows = []
+    for row in rows:
+        fact_id, project, text, embedding = row
+        if type(fact_id) is not str or not fact_id:
+            raise MemoryReplicationError("legacy fact ID must be stored as text")
+        if type(project) is not str or project != project_scope:
+            raise MemoryReplicationError("legacy fact project must match the approved scope")
+        if type(text) is not str:
+            raise MemoryReplicationError("legacy fact text must be stored as text")
+        if embedding is not None and type(embedding) is not bytes:
+            raise MemoryReplicationError("legacy fact embedding must be stored as a blob")
+        normalized_rows.append((fact_id, project, text, embedding))
+    normalized = tuple(normalized_rows)
+    if sum(
+        len(fact_id.encode("utf-8")) + len(project.encode("utf-8"))
+        + len(text.encode("utf-8")) + len(embedding or b"")
+        for fact_id, project, text, embedding in normalized
+    ) > _MAX_MIGRATION_BYTES:
         raise MemoryReplicationError("legacy fact migration exceeds the byte limit")
     for fact_id, project, text, embedding in normalized:
         MemoryMutation(

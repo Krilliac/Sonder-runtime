@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from dataclasses import replace
 import sys
 
@@ -248,3 +249,109 @@ def test_operator_command_does_not_create_a_missing_database(tmp_path, monkeypat
         command.main()
     assert stopped.value.code == 2
     assert not missing.exists()
+
+
+def test_operator_refuses_stale_schema_before_dry_run_or_backup(tmp_path, monkeypatch, capsys):
+    from scripts import migrate_authoritative_facts as command
+
+    database = tmp_path / "legacy.db"
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "CREATE TABLE facts(id TEXT PRIMARY KEY, project TEXT, text TEXT, embedding BLOB)"
+    )
+    connection.execute(
+        "INSERT INTO facts(id,project,text,embedding) VALUES(?,?,?,?)",
+        ("legacy", "repo-a", "original", None),
+    )
+    connection.commit()
+    connection.close()
+    before = database.read_bytes()
+    base = [
+        "migrate_authoritative_facts.py", "--database", str(database),
+        "--source-id", "node-a", "--project", "repo-a",
+    ]
+
+    monkeypatch.setattr(sys, "argv", base)
+    with pytest.raises(SystemExit) as dry_run:
+        command.main()
+    assert dry_run.value.code == 2
+    assert "schema is not current" in capsys.readouterr().err
+    assert database.read_bytes() == before
+
+    backup = tmp_path / "backup.db"
+    monkeypatch.setattr(
+        sys, "argv", base + ["--apply", "--digest", "unapproved", "--backup", str(backup)],
+    )
+    with pytest.raises(SystemExit) as apply:
+        command.main()
+    assert apply.value.code == 2
+    assert not backup.exists()
+    assert database.read_bytes() == before
+
+
+def test_operator_dry_run_then_explicit_apply_on_current_schema(tmp_path, monkeypatch, capsys):
+    from scripts import migrate_authoritative_facts as command
+
+    database = tmp_path / "memory.db"
+    connection = connect(database)
+    connection.execute(
+        "INSERT INTO facts(id,project,text,embedding) VALUES(?,?,?,?)",
+        ("legacy", "repo-a", "exact original", None),
+    )
+    connection.commit()
+    connection.close()
+    base = [
+        "migrate_authoritative_facts.py", "--database", str(database),
+        "--source-id", "node-a", "--project", "repo-a",
+    ]
+
+    monkeypatch.setattr(sys, "argv", base)
+    assert command.main() == 0
+    planned = json.loads(capsys.readouterr().out)
+    assert planned["count"] == 1
+    readback = sqlite3.connect(database)
+    assert readback.execute("SELECT COUNT(*) FROM memory_replication_log").fetchone()[0] == 0
+    readback.close()
+
+    backup = tmp_path / "backup.db"
+    monkeypatch.setattr(
+        sys, "argv", base + ["--apply", "--digest", planned["digest"], "--backup", str(backup)],
+    )
+    assert command.main() == 0
+    applied = json.loads(capsys.readouterr().out)
+    assert applied["migrated"] == 1
+    assert backup.exists()
+    snapshot = sqlite3.connect(backup)
+    assert snapshot.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    assert snapshot.execute("SELECT COUNT(*) FROM memory_replication_log").fetchone()[0] == 0
+    snapshot.close()
+    current = sqlite3.connect(database)
+    assert current.execute("SELECT COUNT(*) FROM memory_replication_log").fetchone()[0] == 1
+    current.close()
+
+
+@pytest.mark.parametrize(
+    "fact_id,text,embedding,expected",
+    [
+        ("legacy", None, None, "text"),
+        ("legacy", sqlite3.Binary(b"bytes"), None, "text"),
+        (None, "valid text", None, "ID"),
+        ("legacy", "valid text", "not a blob", "embedding"),
+        ("legacy", "valid text", 10_000_000, "embedding"),
+    ],
+)
+def test_plan_refuses_malformed_storage_types_without_coercion(
+    tmp_path, fact_id, text, embedding, expected,
+):
+    connection = connect(tmp_path / "memory.db")
+    connection.execute(
+        "INSERT INTO facts(id,project,text,embedding) VALUES(?,?,?,?)",
+        (fact_id, "repo-a", text, embedding),
+    )
+    connection.commit()
+    with pytest.raises(MemoryReplicationError, match=expected):
+        plan_legacy_fact_migration(
+            connection, source_id="node-a", project_scope="repo-a",
+        )
+    assert connection.execute("SELECT COUNT(*) FROM memory_replication_log").fetchone()[0] == 0
+    connection.close()
