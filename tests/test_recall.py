@@ -325,6 +325,22 @@ def test_recall_quarantines_ambiguous_migrated_session_project():
     ) == []
 
 
+def test_scoped_recall_excludes_nonnull_unattributed_legacy_project():
+    c = _conn()
+    _store_good(c, "legacy-good", "legacy project task", "untrusted good", [1.0, 0.0],
+                project="project-a")
+    ms.log_interaction(c, "legacy-failed", "legacy project task", "",
+                       "untrusted failure", "sonder", project="project-a")
+    ms.record_outcome_row(c, "legacy-failed", "failed", -1.0, source="machine")
+    c.execute("UPDATE interactions SET project_explicit=0 WHERE id LIKE 'legacy-%'")
+    c.commit()
+
+    assert recall.recall(c, "legacy project", project="project-a", mode="exact",
+                         qv=[1.0, 0.0], min_sim=0.0) == []
+    assert recall.recall(c, "legacy project", project="project-a", mode="failure",
+                         qv=[1.0, 0.0], min_sim=0.0) == []
+
+
 def test_recall_vetoes_interaction_with_contradictory_outcome():
     c = _conn()
     _store_good(c, "conflict", "task", "response", [1.0, 0.0])

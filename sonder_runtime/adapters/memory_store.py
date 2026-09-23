@@ -3351,7 +3351,9 @@ def good_interaction_candidate_page(
             if project == "":
                 sql += " AND 0"
             else:
-                sql += " AND i.project=?"
+                # A migrated row may carry a plausible project string without
+                # proof that the interaction originally belonged to it.
+                sql += " AND i.project=? AND i.project_explicit=1"
                 params.append(project)
     if embedding_model:
         sql += " AND i.task_embedding_model=?"
