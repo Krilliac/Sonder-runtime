@@ -1700,20 +1700,20 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             for value in job.workspace_mappings
         ):
             errors.append(f"{where}.workspace_mappings contains an invalid workspace identity")
-        if not compute.allow_remote:
-            local_mappings = {"default"}
-            local_mappings.update(
-                Path(root).name for root in config.state.workspace_roots if Path(root).name
+        # compute.jobs is the local worker's catalog even when the controller
+        # is also allowed to place work on remote nodes.
+        local_mappings = {"default"}
+        local_mappings.update(
+            Path(root).name for root in config.state.workspace_roots if Path(root).name
+        )
+        unknown_local_mappings = sorted(
+            set(job.workspace_mappings) - local_mappings
+        )
+        if unknown_local_mappings:
+            errors.append(
+                f"{where}.workspace_mappings is not available locally: "
+                f"{unknown_local_mappings}; configure matching [state].workspace_roots"
             )
-            unknown_local_mappings = sorted(
-                set(job.workspace_mappings) - local_mappings
-            )
-            if unknown_local_mappings:
-                errors.append(
-                    f"{where}.workspace_mappings is not available locally: "
-                    f"{unknown_local_mappings}; configure a matching [state].workspace_roots "
-                    "or enable authenticated remote compute"
-                )
         if job.argument_policy not in {
             "none",
             "bounded",

@@ -42,10 +42,45 @@ workspace_mappings = ["node1-workspaces"]
         load_config(path, env={})
 
 
-def test_compute_nodes_and_catalog_entries_load_as_typed_toml(tmp_path) -> None:
+def test_remote_consent_does_not_make_an_invalid_local_catalog_mapping_valid(tmp_path) -> None:
+    workspace = tmp_path / "workspaces"
+    workspace.mkdir()
     path = tmp_path / "sonder.toml"
     path.write_text(
-        """
+        f"""
+[state]
+workspace_roots = ['{workspace.as_posix()}']
+
+[compute]
+allow_remote = true
+
+[[compute.nodes]]
+id = "remote"
+origin = "https://remote.example:8443"
+workloads = ["build"]
+workspace_mappings = ["node1-workspaces"]
+
+[[compute.jobs]]
+id = "local-build"
+workload = "build"
+program = "/usr/bin/cmake"
+workspace_mappings = ["node1-workspaces"]
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="not available locally"):
+        load_config(path, env={"SONDER_API_KEY": "x" * 24})
+
+
+def test_compute_nodes_and_catalog_entries_load_as_typed_toml(tmp_path) -> None:
+    workspace = tmp_path / "sonder"
+    workspace.mkdir()
+    path = tmp_path / "sonder.toml"
+    path.write_text(
+        f"""
+[state]
+workspace_roots = ['{workspace.as_posix()}']
+
 [compute]
 allow_remote = true
 node_id = "controller"
