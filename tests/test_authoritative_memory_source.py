@@ -17,7 +17,7 @@ from sonder_runtime.adapters.persistence.sqlite.memory_projection import (
     SQLiteMemoryReplicationProjection,
 )
 from sonder_runtime.domain.memory.replication import MemoryReplicationError
-from sonder_runtime.bootstrap.app import build_application
+from sonder_runtime.bootstrap.app import build_application, compose_memory_unit_of_work
 from sonder_runtime.platform.config import Secrets, SonderConfig
 from sonder_runtime.platform.memory_replication_config import (
     MemoryReplicationConfig, MemoryReplicationPeerConfig,
@@ -43,6 +43,20 @@ def _live_replication_config() -> SonderConfig:
             ),),
         ),
     )
+
+
+def test_memory_composition_captures_one_authority_for_every_live_unit_of_work(tmp_path):
+    factory = compose_memory_unit_of_work(_live_replication_config())
+
+    first = factory(str(tmp_path / "first.db"))
+    second = factory(str(tmp_path / "second.db"))
+    assert first._authoritative_fact_source is second._authoritative_fact_source
+    assert first._authoritative_fact_source.source_id == "node-a"
+    assert first._authoritative_fact_source.project_scope == "repo-a"
+
+
+def test_disabled_memory_composition_preserves_legacy_factory():
+    assert compose_memory_unit_of_work(SonderConfig()) is UnitOfWorkAdapter
 
 
 def test_live_application_composes_authoritative_fact_write_and_restart(tmp_path, monkeypatch):
