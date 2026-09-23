@@ -535,6 +535,14 @@ def test_tool_request_uses_scoped_typed_gateway_and_records_artifact(env):
         Executor(),
         policy=ResourcePolicy([PolicyRule("allow", Decision.ALLOW, tool="write_file")]),
     )
+    gateway_requests = []
+    execute = service.tools.execute
+
+    def capture_gateway_request(request):
+        gateway_requests.append(request)
+        return execute(request)
+
+    service.tools.execute = capture_gateway_request
     lane = spawn(env)["lane"]["id"]
     replies = iter(
         [
@@ -549,6 +557,12 @@ def test_tool_request_uses_scoped_typed_gateway_and_records_artifact(env):
 
     model.generate = generate
     service.run_pending(lane, context)
+    first_request = model.requests[0][0]
+    assert "Visible tool schemas" in first_request.system
+    assert '"name": "write_file"' in first_request.system
+    assert '"path"' in first_request.system
+    assert len(gateway_requests) == 1
+    assert gateway_requests[0].schema_selection.visible_names == frozenset({"write_file"})
     assert len(observed) == 1
     assert observed[0][0].arguments["path"] == str(
         (root / "child" / "result.txt").resolve()
