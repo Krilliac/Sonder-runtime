@@ -120,6 +120,7 @@ class DelegationService:
                 prompt=request.prompt,
                 owner_id=context.principal_id,
                 metadata=reservation_metadata,
+                execution_contract=request.execution_contract,
             )
             # The provider receives the exact metadata retained by the
             # continuation reservation, so the CAS admission cannot be
@@ -151,6 +152,7 @@ class DelegationService:
         result: SubagentResult,
         *,
         verification: Iterable[str] = (),
+        verification_commands: Iterable[tuple[str, ...]] = (),
         artifacts: Iterable[str] = (),
     ) -> DelegatedResult:
         """Validate provider identity and publish a bounded structured result."""
@@ -158,6 +160,20 @@ class DelegationService:
         if result.child_id != request.lineage.child_id or result.parent_id != request.lineage.parent_id:
             raise IntegrationError("provider result does not match delegation lineage")
         succeeded = result.status.value == "succeeded"
+        verification_values = tuple(verification)
+        command_values = tuple(tuple(command) for command in verification_commands)
+        if self._worker_registry is not None and succeeded:
+            get_record = getattr(self._worker_registry, "get", None)
+            if callable(get_record):
+                record = get_record(result.child_id)
+                if record is None:
+                    raise IntegrationError("worker registry record disappeared before execution gate")
+                contract = record.launch.execution_contract
+                missing = tuple(item for item in contract.success_criteria if item not in verification_values)
+                if missing:
+                    raise IntegrationError("worker execution criteria were not verified: " + ", ".join(missing))
+                if contract.verification_commands != command_values:
+                    raise IntegrationError("worker verification commands do not match its execution contract")
         if not succeeded:
             logger.error(f"delegation failed: delegation_id={request.delegation_id!r}, child_id={result.child_id!r}, status={result.status.value!r}")
             logger.warning(f"delegation failed: delegation_id={request.delegation_id!r}, child_id={result.child_id!r}, status={result.status.value!r}")
@@ -168,7 +184,7 @@ class DelegationService:
             request.delegation_id,
             DelegationStatus.SUCCEEDED if succeeded else DelegationStatus.FAILED,
             ResultEvidence.digest(output),
-            tuple(verification),
+            verification_values,
             tuple(artifacts),
             None if succeeded else output,
             usage_steps=result.usage.steps,
@@ -186,6 +202,8 @@ class DelegationService:
                         "status": evidence.status.value,
                         "output_digest": evidence.output_digest,
                         "verification": evidence.verification,
+                        "success_criteria": record.launch.execution_contract.success_criteria,
+                        "verification_commands": record.launch.execution_contract.verification_commands,
                         "artifacts": evidence.artifacts,
                     },
                     expected_revision=record.revision,

@@ -15,6 +15,7 @@ from pathlib import Path
 
 from sonder_runtime.application.agents.presets import AgentPreset, builtin_presets
 from sonder_runtime.domain.agents.roles import AgentRole, role_budget
+from sonder_runtime.application.ports.worker_registry import WorkerExecutionContract
 
 
 MAX_ID_CHARS = 128
@@ -148,6 +149,7 @@ class DelegationRequest:
     preset: AgentPreset
     workspace: WorkspaceAssignment
     evidence_tags: tuple[str, ...] = ()
+    execution_contract: WorkerExecutionContract = WorkerExecutionContract()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "delegation_id", _required(self.delegation_id, "delegation_id"))
@@ -161,6 +163,8 @@ class DelegationRequest:
             raise IntegrationError("lineage workspace and request workspace disagree")
         tags = tuple(sorted({_required(tag, "evidence tag") for tag in self.evidence_tags}))
         object.__setattr__(self, "evidence_tags", tags)
+        if not isinstance(self.execution_contract, WorkerExecutionContract):
+            raise IntegrationError("execution_contract must be WorkerExecutionContract")
 
 
 @dataclass(frozen=True)

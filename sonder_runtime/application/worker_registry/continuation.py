@@ -10,6 +10,7 @@ started; a different owner or launch cannot claim it.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import json
 import os
 import platform
 
@@ -32,6 +33,7 @@ from sonder_runtime.application.ports.worker_registry import (
     WorkerRecord,
     WorkerRegistry,
     WorkerRegistryError,
+    WorkerExecutionContract,
     WorkerStatus,
 )
 from sonder_runtime.application.subagents.durable_continuation import (
@@ -86,7 +88,13 @@ def _request_for(launch: WorkerLaunch) -> SubagentRequest:
         raise WorkerRegistryError("composed worker launch requires a prompt")
     if not launch.owner_id.strip():
         raise WorkerRegistryError("composed worker launch requires an owner")
-    metadata = launch.metadata or (
+    contract_metadata = ()
+    if launch.execution_contract.success_criteria or launch.execution_contract.verification_commands:
+        contract_metadata = (
+            ("execution_success_criteria", json.dumps(launch.execution_contract.success_criteria, separators=(",", ":"))),
+            ("execution_verification_commands", json.dumps(launch.execution_contract.verification_commands, separators=(",", ":"))),
+        )
+    metadata = (tuple(launch.metadata) + contract_metadata) if launch.metadata else (
         (_RESERVATION_MARKER, "true"),
         ("worker_role", launch.role),
         ("model", launch.model),
@@ -97,7 +105,7 @@ def _request_for(launch: WorkerLaunch) -> SubagentRequest:
         ("owner_id", launch.owner_id),
         ("worker_id", launch.worker_id),
         ("retry_max_attempts", str(launch.retry_policy.get("max_attempts", 1))),
-    )
+    ) + contract_metadata
     return SubagentRequest(
         parent_id=launch.parent_id,
         prompt=launch.prompt,
@@ -193,10 +201,14 @@ class ContinuationWorkerRegistry(WorkerRegistry):
                     and record.launch.idempotency_key == launch.idempotency_key
                     and record.launch.prompt == launch.prompt
                     and record.launch.owner_id == launch.owner_id
+                    and record.launch.execution_contract == launch.execution_contract
                     and all(
                         current_metadata.get(key) == requested_metadata.get(key)
                         for key in set(current_metadata) | set(requested_metadata)
-                        if key not in {"owner_nonce", "owner_pid", "owner_host", "worker_id", "request_digest"}
+                        if key not in {
+                            "owner_nonce", "owner_pid", "owner_host", "worker_id", "request_digest",
+                            "execution_success_criteria", "execution_verification_commands",
+                        }
                     )
                 )
                 owner_only_difference = stable_scope_match
@@ -298,6 +310,13 @@ class ContinuationWorkerRegistry(WorkerRegistry):
         scope = tuple(filter(None, metadata.get("scope", "").split("|")))
         tools = tuple(filter(None, metadata.get("allowed_tools", "").split("|")))
         max_attempts = int(metadata.get("retry_max_attempts", "1"))
+        try:
+            execution_contract = WorkerExecutionContract(
+                tuple(json.loads(metadata.get("execution_success_criteria", "[]"))),
+                tuple(tuple(item) for item in json.loads(metadata.get("execution_verification_commands", "[]"))),
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise WorkerRegistryError("persisted worker execution contract is invalid") from exc
         launch = WorkerLaunch(
             worker_id=session.request.child_id or "",
             parent_id=session.request.parent_id,
@@ -314,6 +333,7 @@ class ContinuationWorkerRegistry(WorkerRegistry):
             prompt=session.request.prompt,
             owner_id=metadata.get("owner_id", ""),
             metadata=tuple(session.request.metadata),
+            execution_contract=execution_contract,
         )
         progress = {}
         if session.checkpoint is not None:

@@ -51,6 +51,29 @@ def _text(value: str, name: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkerExecutionContract:
+    """Typed, durable proof requirements for one worker terminal result."""
+
+    success_criteria: tuple[str, ...] = ()
+    verification_commands: tuple[tuple[str, ...], ...] = ()
+
+    def __post_init__(self) -> None:
+        criteria = tuple(sorted({_text(value, "success criterion") for value in self.success_criteria}))
+        if any(len(value) > 512 for value in criteria):
+            raise WorkerRegistryError("success criterion exceeds its bound")
+        commands: list[tuple[str, ...]] = []
+        for command in self.verification_commands:
+            argv = tuple(_text(value, "verification command argument") for value in command)
+            if not argv:
+                raise WorkerRegistryError("verification commands must contain argv")
+            if any(len(value) > 512 for value in argv):
+                raise WorkerRegistryError("verification command argument exceeds its bound")
+            commands.append(argv)
+        object.__setattr__(self, "success_criteria", criteria)
+        object.__setattr__(self, "verification_commands", tuple(commands))
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerLaunch:
     worker_id: str
     parent_id: str
@@ -71,6 +94,7 @@ class WorkerLaunch:
     prompt: str = ""
     owner_id: str = ""
     metadata: tuple[tuple[str, str], ...] = ()
+    execution_contract: WorkerExecutionContract = WorkerExecutionContract()
 
     def __post_init__(self) -> None:
         for name in ("worker_id", "parent_id", "role", "model", "backend", "effort", "resume_key", "idempotency_key"):
@@ -101,6 +125,8 @@ class WorkerLaunch:
             object.__setattr__(self, name, tuple(sorted(set(values))))
         object.__setattr__(self, "budgets", _mapping(self.budgets, "budgets"))
         object.__setattr__(self, "retry_policy", _mapping(self.retry_policy, "retry_policy"))
+        if not isinstance(self.execution_contract, WorkerExecutionContract):
+            raise WorkerRegistryError("execution_contract must be WorkerExecutionContract")
         max_attempts = self.retry_policy.get("max_attempts", 1)
         if isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or not 1 <= max_attempts <= 16:
             raise WorkerRegistryError("retry_policy.max_attempts must be between 1 and 16")
@@ -131,4 +157,4 @@ class WorkerRegistry(Protocol):
     def get(self, worker_id: str) -> WorkerRecord | None: ...
 
 
-__all__ = ["ACTIVE_WORKER_STATUSES", "DuplicateWorkerError", "WorkerLaunch", "WorkerRecord", "WorkerRegistry", "WorkerRegistryError", "WorkerStatus"]
+__all__ = ["ACTIVE_WORKER_STATUSES", "DuplicateWorkerError", "WorkerExecutionContract", "WorkerLaunch", "WorkerRecord", "WorkerRegistry", "WorkerRegistryError", "WorkerStatus"]
