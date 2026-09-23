@@ -231,6 +231,17 @@ def test_per_workload_remote_consent_keeps_job_local() -> None:
     assert local.calls == 1
 
 
+def test_local_only_rejection_reports_local_inventory_scope() -> None:
+    service, _transport, local = _service(remote_age=60)
+    request = replace(
+        _request(allow_remote=False),
+        required_capabilities=frozenset({ComputeCapability.CUDA}),
+    )
+    with pytest.raises(DependencyUnavailable, match="no eligible node is available"):
+        service.submit(request, _envelope())
+    assert local.calls == 0
+
+
 def test_workload_profile_capabilities_are_merged_before_placement() -> None:
     service, transport, _local = _service(
         remote_capabilities=frozenset({ComputeCapability.CPU})

@@ -319,7 +319,13 @@ class ComputeFabricService:
         placement = self._place(profiled)
         node_id = placement.selected_node_id
         if node_id is None:
-            scope = "eligible node" if request.local_only else "eligible remote node"
+            scope = (
+                "eligible node"
+                if request.local_only
+                or not request.allow_remote
+                or request.placement_policy is PlacementPolicy.LOCAL_ONLY
+                else "eligible remote node"
+            )
             raise DependencyUnavailable(f"no {scope} is available for this workload")
         node = self._registry.get_node(node_id)
         # Retain the digest-bound placement before any call whose outcome can
