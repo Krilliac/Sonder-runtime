@@ -357,35 +357,35 @@
       "checked": false,
       "claim": "Non-destructive.",
       "requirement_id": "COMPACT-001",
-      "revision": 3,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Source range.",
       "requirement_id": "COMPACT-002",
-      "revision": 3,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Structured retention.",
       "requirement_id": "COMPACT-003",
-      "revision": 3,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Validation.",
       "requirement_id": "COMPACT-004",
-      "revision": 3,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Typed modalities.",
       "requirement_id": "COMPACT-005",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "6de57af4e57d8869d863a0c1357735c752390c27eafe4156d681cea84665f496",
+    "ledger_sha256": "5f36cc4d14561b73757dd397959b55f6fa4314ac0285c06c730b88e9a3eadc22",
     "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
   }
 }
