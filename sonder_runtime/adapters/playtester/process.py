@@ -10,6 +10,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+
 
 @dataclass(frozen=True)
 class ProcessResult:
@@ -54,8 +56,8 @@ class ProcessAdapter:
                         overflow.set()
 
             readers = [
-                threading.Thread(target=capture, args=(process.stdout, stdout_buffer), daemon=True),
-                threading.Thread(target=capture, args=(process.stderr, stderr_buffer), daemon=True),
+                owned_runtime_thread(target=capture, args=(process.stdout, stdout_buffer), daemon=True),
+                owned_runtime_thread(target=capture, args=(process.stderr, stderr_buffer), daemon=True),
             ]
             for reader in readers:
                 reader.start()
