@@ -866,9 +866,9 @@
     },
     {
       "checked": false,
-      "claim": "SQLiteEffectJournal exposes a read-only EffectJournalReader API for binding worker checkpoints to a journal position: settled_high_water(run_id) returns the largest sequence whose whole prefix is completed or failed, and effects_since(run_id, after_sequence, limit, worker_id) returns a bounded single-snapshot page of intents after a checkpoint position with run-wide high_water, settled_high_water, truncation, and unresolved records; neither call writes, claims ownership, or changes a recovery fence.",
+      "claim": "Corrects revisions 12 and 13 after an independent review of 3d22e670. Concurrent effects in one shared run now always commit their terminal outcome and checkpoint only the settled high-water prefix; restore accepts later effects only when every effect in the run is terminal and reports journal_high_water, so restart succeeds after verified reconciliation; reconcile clears the run-wide recovery fence once nothing is unresolved; checkpoint writes require the current unfenced owner epoch and idempotent outcome replays append no generation; checkpoint generations are bounded per run; the process-start verifier reports an attached launch as completed with the live {job_id}:{pid} receipt shape.",
       "requirement_id": "LOOP-008",
-      "revision": 14,
+      "revision": 15,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "39b3ff4ea5b51392b477fa1f375aba18f03e6a7caa5938bff0a9140376ad3849",
+    "ledger_sha256": "69fc297f9925de3862c925444e6d1a803f9ef0330af6dd9cc2483521ce06eb16",
     "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
   }
 }

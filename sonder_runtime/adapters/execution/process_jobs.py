@@ -70,11 +70,25 @@ class DurableProcessEffectVerifier:
             or type(revision) is not int or revision < 1
         ):
             return None
+        # The journaled effect is the *start*, not the job.  Only a durable
+        # attach record (launch_state "attached" plus a positive process id)
+        # proves the process was launched; the job's later exit status does
+        # not change that.  A terminal job without an attach record may have
+        # failed before launch or crashed between launch and attach, so it
+        # yields no proof and the fence stays set.
+        process_id = getattr(view, "process_id", None)
+        if (
+            metadata.get("launch_state") != "attached"
+            or isinstance(process_id, bool) or not isinstance(process_id, int)
+            or process_id <= 0
+        ):
+            return None
         canonical = {
             "job_id": job_id,
             "kind": getattr(identity, "kind", ""),
             "operation_id": getattr(identity, "operation_id", ""),
             "idempotency_key": getattr(identity, "idempotency_key", ""),
+            "process_id": process_id,
             "status": status,
             "revision": revision,
         }
@@ -84,12 +98,10 @@ class DurableProcessEffectVerifier:
         return ReconciliationProof(
             intent_id=intent.intent_id,
             operation_id=intent.operation_id,
-            receipt_key=f"process-job:{job_id}:{revision}",
+            # Same receipt shape as the live start path: "{job_id}:{pid}".
+            receipt_key=f"{job_id}:{process_id}",
             outcome_digest=outcome_digest,
-            state=(
-                EffectState.COMPLETED
-                if status == "succeeded" else EffectState.FAILED
-            ),
+            state=EffectState.COMPLETED,
             verifier_id=self.verifier_id,
             external_reference=f"job-registry:{job_id}:{revision}",
         )

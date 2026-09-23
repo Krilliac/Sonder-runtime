@@ -213,7 +213,10 @@ def _publish_outcome(
         )
         append_checkpoint = getattr(context.journal, "append_checkpoint", None)
         if callable(append_checkpoint):
-            append_checkpoint(context.run_id, state)
+            append_checkpoint(
+                context.run_id, state,
+                worker_id=context.worker_id, owner_epoch=context.owner_epoch,
+            )
 
 
 __all__ = ["AuthenticatedWorkerBinding", "journaled_effect"]
