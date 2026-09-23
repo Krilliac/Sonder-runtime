@@ -894,9 +894,9 @@
     },
     {
       "checked": false,
-      "claim": "Composed authoritative fact writes now require an acyclic same-source and same-project supersession link, and scoped entity and decision indexes hide the predecessor after the successor becomes effective across restart and journal rebuild.",
+      "claim": "After the live composition root activates a project scope, the replication projection and receiver sink refuse fact writes into that scope with full rollback, and an older-schema database copy is adopted through schema upgrade, operator migration, live writes, and restart.",
       "requirement_id": "MEM-004",
-      "revision": 7,
+      "revision": 8,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "6de57af4e57d8869d863a0c1357735c752390c27eafe4156d681cea84665f496",
+    "ledger_sha256": "0cabd2153995c67948a4fea0bd3ede5c3ce4b220df97c5494a278a188a6f2e4d",
     "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
   }
 }

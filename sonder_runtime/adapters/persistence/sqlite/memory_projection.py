@@ -361,8 +361,36 @@ class SQLiteMemoryReplicationProjection:
         elif record.entity_kind == "preference":
             self._materialize_preference(record, payload)
 
+    def _reject_active_authoritative_scope(self, record: MemoryMutation) -> None:
+        """Refuse a replicated fact write into a locally authoritative scope.
+
+        Once the live composition root activates an authoritative fact source
+        for a project, every visible fact row in that scope must carry the
+        local source state and journal evidence.  A peer projection would
+        materialize an unjournaled row (or delete a journaled one) behind the
+        source's back, so it fails closed before any fact row changes.  The
+        caller's transaction then rolls back the projection log, cursor, and
+        receiver journal rows written for the same batch.
+        """
+        table = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='memory_authoritative_fact_activation'"
+        ).fetchone()
+        if table is None:
+            return
+        active = self._conn.execute(
+            "SELECT 1 FROM memory_authoritative_fact_activation "
+            "WHERE project_scope=? LIMIT 1",
+            (record.project,),
+        ).fetchone()
+        if active is not None:
+            raise MemoryProjectionError(
+                "replicated fact writes are disabled for an authoritative project scope"
+            )
+
     def _materialize_fact(self, record: MemoryMutation, payload: dict) -> None:
-        existing = self._conn.execute("SELECT project FROM facts WHERE id=?", (record.entity_id,)).fetchone()
+        self._reject_active_authoritative_scope(record)
+        existing =self._conn.execute("SELECT project FROM facts WHERE id=?", (record.entity_id,)).fetchone()
         if existing is not None and existing[0] != record.project:
             raise MemoryProjectionError("fact identity is already bound to another project")
         if record.is_tombstone:
