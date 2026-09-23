@@ -192,6 +192,32 @@ def test_github_publisher_requires_exact_marker_body_before_deduplication():
     assert calls[-1][:3] == ("gh", "issue", "create")
 
 
+def test_github_publisher_deduplicates_merged_pr_by_exact_marker():
+    report = PlaytestRunner(ProcessAdapter()).run([
+        Scenario("smoke", "works", (sys.executable, "-c", "pass"))
+    ], commit_sha="e" * 40)[0]
+    plan = build_publish_plan(
+        report, repository="x/y", branch="feature/playtest", request_pr=True,
+        clean=True, head_sha="e" * 40,
+    )
+    calls = []
+
+    class Adapter:
+        def run(self, command):
+            calls.append(command)
+            if command[:3] == ("gh", "pr", "list"):
+                return subprocess.CompletedProcess(command, 0, json.dumps([{
+                    "number": 9, "body": f"<!-- {plan.marker} -->",
+                }]), "")
+            raise AssertionError("merged PR must not be recreated")
+
+    result = GitHubPublisher(dry_run=False, adapter=Adapter()).publish(
+        plan, create_issue=False, create_pr=True,
+    )
+    assert result["deduplicated_pr"] is True
+    assert calls[0][calls[0].index("--state") + 1] == "all"
+
+
 def test_pr_requires_clean_non_base_branch_at_report_sha():
     report = PlaytestRunner(ProcessAdapter()).run([Scenario("smoke", "works", (sys.executable, "-c", "pass"))], commit_sha="b" * 40)[0]
     with pytest.raises(ValueError, match="clean"):
