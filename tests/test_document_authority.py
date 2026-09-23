@@ -93,5 +93,6 @@ def test_stale_promise_inventory_is_explicit_and_unverified_checkboxes_remain_op
         assert f"| {category} |" in inventory
     spec = _read("docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md")
     assert re.search(r"- \[x\] \*\*DOC-006 —", spec, re.IGNORECASE)
-    for requirement in ("DOC-001", "DOC-002", "DOC-003", "DOC-004", "DOC-005", "DOC-007"):
+    assert re.search(r"- \[x\] \*\*DOC-005 —", spec, re.IGNORECASE)
+    for requirement in ("DOC-001", "DOC-002", "DOC-003", "DOC-004", "DOC-007"):
         assert re.search(rf"- \[ \] \*\*{requirement} —", spec)
