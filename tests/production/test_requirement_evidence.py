@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -80,6 +81,29 @@ def test_verified_requirement_rejects_missing_evidence_path(tmp_path):
     )
     assert module.validate() == [
         "ledger: verified TEST-001 evidence path is missing: does/not/exist.py"
+    ]
+
+
+def test_verified_requirement_rejects_evidence_outside_repository(tmp_path):
+    module = _checker()
+    module.SPEC = tmp_path / "spec.md"
+    module.LEDGER = tmp_path / "requirements.jsonl"
+    module.SPEC.write_text(
+        "- [x] **TEST-001 — Demonstration.** A checked claim.\n",
+        encoding="utf-8",
+    )
+    outside = tmp_path / "external-proof.txt"
+    outside.write_text("untrusted", encoding="utf-8")
+    module.LEDGER.write_text(
+        '{"schema":"sonder-requirement-evidence-v1",'
+        '"requirement_id":"TEST-001","revision":1,'
+        '"status":"verified","claim":"Demonstration.",'
+        '"baseline_sha":"abc","verified_sha":"def",'
+        '"evidence":[{"path":' + json.dumps(str(outside)) + '}]}\n',
+        encoding="utf-8",
+    )
+    assert module.validate() == [
+        "ledger: verified TEST-001 has invalid evidence path"
     ]
 
 
