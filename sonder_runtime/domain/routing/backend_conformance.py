@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import math
 from typing import Mapping
 
 from .capability_profiles import Capability
@@ -47,7 +48,7 @@ class BackendConformanceRecord:
     def __post_init__(self) -> None:
         if not self.backend.strip() or not self.model.strip():
             raise ValueError("backend and model are required")
-        if self.checked_at < 0 or self.probe_version <= 0:
+        if not math.isfinite(self.checked_at) or self.checked_at < 0 or self.probe_version <= 0:
             raise ValueError("invalid conformance record metadata")
         if len(self.results) > len(BackendCapability):
             raise ValueError("conformance record contains too many probe results")
