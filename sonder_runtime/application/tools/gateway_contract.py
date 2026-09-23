@@ -24,6 +24,7 @@ from enum import Enum
 from typing import Any, Mapping, Protocol
 
 from ...domain.common.errors import Cancelled, DeadlineExceeded, Forbidden, InvalidInput
+from ..ports.tool_registry import ToolSchemaSelection
 
 # Where a request came from and what privilege it carries. These mirror the
 # literals of ``application.context``: the scope is what a typed request knows
@@ -109,6 +110,9 @@ class ToolGatewayRequest:
     session_id: str | None = None
     project_id: str | None = None
     execution_world: str = ""
+    # Immutable per-turn visibility.  The executable registry remains the
+    # authority; this value only narrows which registered schemas may run.
+    schema_selection: ToolSchemaSelection | None = None
 
     def __post_init__(self) -> None:
         if not self.request_id.strip() or not self.tool_name.strip():
@@ -122,6 +126,10 @@ class ToolGatewayRequest:
                 raise InvalidInput(f"{name} must be non-empty when supplied")
         if not isinstance(self.execution_world, str):
             raise InvalidInput("execution_world must be text")
+        if self.schema_selection is not None and not isinstance(
+            self.schema_selection, ToolSchemaSelection
+        ):
+            raise InvalidInput("schema_selection must be a ToolSchemaSelection")
 
 
 class CancellationSignal(Protocol):
@@ -130,7 +138,9 @@ class CancellationSignal(Protocol):
 
 
 class SchemaValidator(Protocol):
-    def validate(self, tool_name: str, arguments: Mapping[str, Any]) -> None: ...
+    def validate(
+        self, tool_name: str, arguments: Mapping[str, Any], selection: Any = None
+    ) -> None: ...
 
 
 class PermissionEvaluator(Protocol):
@@ -299,7 +309,14 @@ class ToolGateway:
         policy_match = ""
         try:
             self._check_control(request)
-            self._schema.validate(request.tool_name, request.arguments)
+            if request.schema_selection is None:
+                # Preserve the small legacy schema port for callers that do
+                # not opt into per-turn visibility.
+                self._schema.validate(request.tool_name, request.arguments)
+            else:
+                self._schema.validate(
+                    request.tool_name, request.arguments, request.schema_selection
+                )
             unscoped_effects = request.permission.effects - request.scope.allowed_effects
             if unscoped_effects:
                 raise Forbidden(

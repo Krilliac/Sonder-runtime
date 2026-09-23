@@ -16,7 +16,7 @@ from typing import Any, Iterable, Mapping
 
 from ...domain.common.events import EventKind, payload_schema
 from ...domain.tools.descriptors import ExecutionClass, ToolEffect
-from ..ports.tool_registry import ToolDescriptor
+from ..ports.tool_registry import ToolDescriptor, ToolSchemaSelection
 
 
 class CatalogLimitError(ValueError):
@@ -48,6 +48,7 @@ class CatalogBundle:
     digest: str
     permissions: Mapping[str, Any] = field(default_factory=dict)
     conformance: Mapping[str, Any] = field(default_factory=dict)
+    summary: Mapping[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -58,6 +59,7 @@ class CatalogBundle:
             "openai": dict(self.openai),
             "permissions": dict(self.permissions),
             "conformance": dict(self.conformance),
+            "summary": dict(self.summary),
         }
 
 
@@ -151,6 +153,7 @@ class GeneratedCatalogs:
         commands: Iterable[Any] = (),
         event_kinds: Iterable[EventKind | str] = EventKind,
         limits: CatalogLimits | None = None,
+        selection: ToolSchemaSelection | None = None,
     ) -> CatalogBundle:
         limits = limits or CatalogLimits()
         source = registry.list_all() if hasattr(registry, "list_all") else tuple(registry)
@@ -166,18 +169,40 @@ class GeneratedCatalogs:
         if len(normalized_events) > limits.max_events:
             raise CatalogLimitError("event catalog exceeds max_events")
         event_contracts = tuple(_event_schema(item) for item in normalized_events)
+        visible_tools = tuple(
+            tool for tool in tools
+            if selection is None or selection.allows(tool.name)
+        )
         tool_contracts = tuple({
             "description": tool.description,
             "effects": sorted(_effect_name(effect) for effect in tool.effects),
             "execution_class": tool.execution_class.name.lower(),
             "input_schema": tool.input_schema,
             "name": tool.name,
-        } for tool in tools)
+        } for tool in visible_tools)
+        summary = {
+            "schema": "sonder-tool-summary-v1",
+            "summary_first": True,
+            "on_demand_schema": True,
+            "tools": tuple({
+                "name": tool.name,
+                "summary": tool.description,
+                "schema_available": selection is None or selection.allows(tool.name),
+            } for tool in tools),
+        }
+        selection_marker = (selection.marker() if selection is not None else {
+            "schema": "sonder-tool-schema-selection-v1",
+            "summary_first": True,
+            "on_demand": True,
+            "visible_names": tuple(tool.name for tool in tools),
+        })
         command_contracts = _commands(commands, limits.max_commands)
         canonical = {
             "commands": command_contracts,
             "events": event_contracts,
             "schema_version": cls.SCHEMA_VERSION,
+            "schema_selection": selection_marker,
+            "summary": summary,
             "tools": tool_contracts,
         }
         digest = hashlib.sha256(cls._json(canonical).encode("utf-8")).hexdigest()
@@ -185,6 +210,8 @@ class GeneratedCatalogs:
         openai = {"tools": tuple({"function": {"description": t["description"], "name": t["name"], "parameters": t["input_schema"]}, "type": "function"} for t in tool_contracts)}
         cli = {"commands": command_contracts, "tools": tuple({"name": t["name"], "summary": t["description"]} for t in tool_contracts)}
         client = {"digest": digest, "events": event_contracts, "schema_version": cls.SCHEMA_VERSION, "tools": tool_contracts}
+        client["summary"] = summary
+        client["schema_selection"] = selection_marker
         permissions = {
             "schema": "sonder-tool-permissions-v1",
             "tools": tuple({
@@ -204,7 +231,7 @@ class GeneratedCatalogs:
         }
         bundle = CatalogBundle(
             mcp=mcp, openai=openai, cli=cli, client=client, digest=digest,
-            permissions=permissions, conformance=conformance,
+            permissions=permissions, conformance=conformance, summary=summary,
         )
         if len(cls._json(bundle.as_dict()).encode("utf-8")) > limits.max_bytes:
             raise CatalogLimitError("generated catalogs exceed max_bytes")
