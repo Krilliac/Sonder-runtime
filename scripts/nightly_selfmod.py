@@ -183,8 +183,54 @@ def _ruff_command(py: str) -> list[str] | None:
     return [py, "-m", "ruff"] if probe.returncode == 0 else None
 
 
-def _regression_command(py: str, *, ignore_paths=()) -> list[str]:
-    """Use bounded xdist when installed; keep a portable serial fallback."""
+# The regression suite is partitioned by marker into three separately
+# recorded, all-required gates. Nothing is skipped: every collected test lands
+# in exactly one partition.
+#   regression         low integrity, parallel workers inside one Job
+#   regression_heavy   low integrity, one process, larger Job memory limit
+#   regression_medium  medium integrity (MSYS2 cannot start below it); NOT
+#                      write-isolated from the evaluator -- see
+#                      docs/architecture/evidence/SELFMOD-002-LOW-INTEGRITY-BASELINE-2026-09-23.md
+_MEDIUM_MARK = "requires_medium_integrity"
+_HEAVY_MARK = "heavy_memory"
+_REGRESSION_PARTITIONS = (
+    ("regression", "not %s and not %s" % (_MEDIUM_MARK, _HEAVY_MARK)),
+    ("regression_heavy", "%s and not %s" % (_HEAVY_MARK, _MEDIUM_MARK)),
+    ("regression_medium", _MEDIUM_MARK),
+)
+REGRESSION_KINDS = tuple(kind for kind, _ in _REGRESSION_PARTITIONS)
+# Every partition is required. A partition whose marked tests are missing
+# exits 5 (no tests collected) and rejects the candidate: removing the marked
+# tests is not a way to shrink the gate. Tests whose optional dependencies are
+# absent are still collected and reported as skips.
+
+
+def _regression_workers() -> int:
+    """Parallel workers for the low regression partition (bounded)."""
+    raw = os.environ.get("SONDER_SELFMOD_REGRESSION_WORKERS", "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return min(int(raw), 12)
+    return max(1, min(8, (os.cpu_count() or 2) // 2))
+
+
+def _regression_isolation(kind: str, workers: int) -> dict:
+    """Job limits and integrity level for one regression partition."""
+    if kind == "regression":
+        # Each xdist worker is its own process under the 2 GiB per-process
+        # limit; the job budget scales with the worker count.
+        return {"job_memory_mb": min(24576, max(4096, 2048 * (workers + 1))),
+                "active_processes": min(128, 32 + 8 * workers)}
+    if kind == "regression_heavy":
+        return {"process_memory_mb": 6144, "job_memory_mb": 8192}
+    if kind == "regression_medium":
+        return {"integrity": "medium"}
+    return {}
+
+
+def _regression_command(py: str, *, ignore_paths=(), kind: str = "regression",
+                        workers: int | None = None) -> list[str]:
+    """Build one partition's pytest command; xdist only for the low partition."""
+    marks = dict(_REGRESSION_PARTITIONS)[kind]
     probe = subprocess.run(
         [py, "-c", "import xdist"],
         capture_output=True, stdin=subprocess.DEVNULL, check=False,
@@ -196,9 +242,11 @@ def _regression_command(py: str, *, ignore_paths=()) -> list[str]:
     # Verbose collection/test progress is intentional: the low-integrity
     # supervisor retains only a bounded tail, and quiet xdist output left a
     # 900-second timeout with no indication whether pytest had started.
-    command = [py, "-m", "pytest", "-vv", "--maxfail=1"]
-    if probe.returncode == 0:
-        command.extend(["-n", "4", "--dist", "load"])
+    command = [py, "-m", "pytest", "-vv", "--maxfail=1", "-p", "no:cacheprovider",
+               "-m", marks]
+    workers = _regression_workers() if workers is None else workers
+    if kind == "regression" and probe.returncode == 0 and workers > 1:
+        command.extend(["-n", str(workers), "--dist", "load"])
     ignored = list(_LOW_SUPERVISOR_TESTS)
     for path in ignore_paths:
         if str(path) not in ignored:
@@ -208,7 +256,8 @@ def _regression_command(py: str, *, ignore_paths=()) -> list[str]:
     return command
 
 
-def _record_candidate_test(run_id, kind, command, *, timeout, protected_paths=()):
+def _record_candidate_test(run_id, kind, command, *, timeout, protected_paths=(),
+                           isolation=None):
     """Run one unattended gate with isolation selected explicitly.
 
     Keeping this choice at the nightly call site prevents the ordinary
@@ -217,6 +266,7 @@ def _record_candidate_test(run_id, kind, command, *, timeout, protected_paths=()
     return selfmod.record_test(
         run_id, kind, command, timeout=timeout,
         protected_paths=protected_paths, low_integrity=True,
+        isolation=isolation,
     )
 
 
@@ -1226,8 +1276,17 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     else:
         log("  lint: Ruff unavailable; Python compilation is the syntax gate")
     held_out = _prepare_held_out(target, workspace, test_timeout)
-    checks.append(("regression", _regression_command(py, ignore_paths=held_out["source_paths"])))
+    workers = _regression_workers()
+    for kind in REGRESSION_KINDS:
+        if kind == "regression_medium":
+            continue  # runs last; see below
+        checks.append((kind, _regression_command(
+            py, ignore_paths=held_out["source_paths"], kind=kind, workers=workers)))
     checks.append(("held_out", held_out["command"]))
+    # The medium partition is the only non-write-isolated gate, so it runs
+    # after every low-integrity verdict (including held-out) is recorded.
+    checks.append(("regression_medium", _regression_command(
+        py, ignore_paths=held_out["source_paths"], kind="regression_medium", workers=1)))
     try:
         for kind, command in checks:
             # cwd is deliberately NOT passed: the default is the candidate
@@ -1236,6 +1295,7 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
             outcome = _record_candidate_test(
                 run_id, kind, command, timeout=test_timeout,
                 protected_paths=held_out.get("protected_paths", ()) if kind == "held_out" else (),
+                isolation=_regression_isolation(kind, workers) if kind in REGRESSION_KINDS else None,
             )
             passed = bool(outcome.get("passed")) if isinstance(outcome, dict) else bool(outcome)
             results.append((kind, passed))
@@ -1260,7 +1320,7 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     # were dead code for the branch deliverable. (They fired on nothing real
     # only because two of review's checks were also structurally unsatisfiable,
     # both fixed in selfmod.py alongside this.)
-    reviewed = selfmod.review(run_id, require_kinds={"syntax", "regression", "held_out"})
+    reviewed = selfmod.review(run_id, require_kinds={"syntax", "held_out", *REGRESSION_KINDS})
     # A PASS lands on reviewing and may auto-advance to approved under
     # auto-low-risk; a FAIL lands on rejected/restored with last_error set.
     # Key on the failure states, not one success phase -- an earlier version
