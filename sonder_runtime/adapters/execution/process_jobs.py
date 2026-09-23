@@ -17,7 +17,7 @@ from ...application.execution.process_jobs import ProcessJobRequest, ProcessJobS
 from ...application.execution.effect_journal import (
     EffectIntent, EffectState, ReconciliationProof,
 )
-from ...application.execution.worker_bindings import AuthenticatedWorkerBinding, journaled_effect
+from ...application.execution.worker_bindings import AuthenticatedWorkerBinding, journaled_effect, _digest
 from ...application.jobs.durable_registry import ProcessTreeCleanupContract
 from ...application.jobs.session_lifecycle import JobRegistryLifecycleAdapter
 from ...application.execution.world_control import OutputStream
@@ -51,7 +51,11 @@ class DurableProcessEffectVerifier:
         if prefix != "process-start" or not separator or not job_id.strip():
             return None
         registry = self._registry_getter()
-        record = getattr(registry, "poll", lambda _job_id: None)(job_id)
+        view = getattr(registry, "view", lambda _job_id: None)(job_id)
+        record = getattr(view, "record", None)
+        metadata = getattr(view, "metadata", None) or {}
+        if record is None:
+            record = getattr(registry, "poll", lambda _job_id: None)(job_id)
         identity = getattr(record, "identity", None)
         status = getattr(getattr(record, "status", None), "value", None)
         revision = getattr(record, "revision", None)
@@ -61,6 +65,7 @@ class DurableProcessEffectVerifier:
             or not isinstance(getattr(identity, "operation_id", None), str)
             or not getattr(identity, "operation_id", "").strip()
             or getattr(identity, "idempotency_key", None) != intent.idempotency_key
+            or metadata.get("process_request_digest") != intent.request_digest
             or status not in {"succeeded", "failed", "cancelled"}
             or type(revision) is not int or revision < 1
         ):
@@ -289,6 +294,7 @@ class SubprocessJobProvider:
             ).isoformat()
         persisted_metadata = dict(request.metadata)
         persisted_metadata.update({
+            "process_request_digest": _digest(request),
             "hard_deadline_at": deadline_at,
             "max_descendants": request.max_descendants,
             "memory_limit_bytes": request.memory_limit_bytes,

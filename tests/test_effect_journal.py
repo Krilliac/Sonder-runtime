@@ -629,6 +629,12 @@ def test_production_process_registry_verifier_reconciles_after_restart(tmp_path)
                 self.status, revision=4,
             )
 
+        def view(self, job_id):
+            return type("View", (), {
+                "record": self.poll(job_id),
+                "metadata": {"process_request_digest": "a" * 64},
+            })()
+
     registry = Registry(JobStatus.SUCCEEDED)
     journal = SQLiteEffectJournal(
         tmp_path / "effects.db",
@@ -653,7 +659,7 @@ def test_production_process_registry_verifier_reconciles_after_restart(tmp_path)
     old_two = AuthenticatedWorkerBinding(journal, "run-2", "process", 1, "/workspace")
     pending = old_two.binding().begin_request(
         operation_id="process-start:job-2", idempotency_key="job-2",
-        request_digest="b" * 64, reconciliation="idempotent",
+        request_digest="a" * 64, reconciliation="idempotent",
     )
     old_two.binding().mark_uncertain(pending, detail="unknown process outcome")
     current_two = AuthenticatedWorkerBinding(journal, "run-2", "process", 2, "/workspace")
@@ -681,6 +687,36 @@ def test_process_verifier_rejects_durable_identity_mismatch(tmp_path):
     intent = old.binding().begin_request(
         operation_id="process-start:job-1", idempotency_key="expected",
         request_digest="a" * 64, reconciliation="idempotent",
+    )
+    old.binding().mark_uncertain(intent, detail="crash after process launch")
+    current = AuthenticatedWorkerBinding(journal, "run", "process", 2, "/workspace")
+    with pytest.raises(EffectJournalError, match="explicit reconciliation"):
+        current.recover_before_restart()
+    with pytest.raises(EffectJournalError, match="host verifier returned no trusted proof"):
+        journal.reconcile(intent.intent_id, owner_epoch=2)
+    assert journal.get(intent.intent_id).state is EffectState.UNCERTAIN
+
+
+def test_process_verifier_rejects_same_identity_with_changed_request_digest(tmp_path):
+    class Registry:
+        def view(self, job_id):
+            identity = JobIdentity(job_id, "process", "launch", "expected")
+            record = JobRecord(identity, JobStatus.SUCCEEDED, revision=3)
+            return type("View", (), {
+                "record": record,
+                "metadata": {"process_request_digest": "a" * 64},
+            })()
+
+    journal = SQLiteEffectJournal(
+        tmp_path / "effects.db",
+        reconciliation_verifiers={
+            "process-start": DurableProcessEffectVerifier(lambda: Registry()),
+        },
+    )
+    old = AuthenticatedWorkerBinding(journal, "run", "process", 1, "/workspace")
+    intent = old.binding().begin_request(
+        operation_id="process-start:job-1", idempotency_key="expected",
+        request_digest="b" * 64, reconciliation="idempotent",
     )
     old.binding().mark_uncertain(intent, detail="crash after process launch")
     current = AuthenticatedWorkerBinding(journal, "run", "process", 2, "/workspace")
