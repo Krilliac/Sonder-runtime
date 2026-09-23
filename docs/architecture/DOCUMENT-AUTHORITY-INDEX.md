@@ -96,8 +96,8 @@ still exist.
 
 ## Formal requirement status
 
-DOC-001 through DOC-004 and DOC-007 remain unchecked in the master
-specification. DOC-005 is checked with generated references for all six named
-families, a direct CI freshness gate, and linked exact-head and post-merge
-evidence. DOC-006 is checked with a separate verified ledger revision; the
-other documentation contracts remain open.
+DOC-001 through DOC-003 are checked with separate verified authority,
+historical-label, and ADR-namespace evidence. DOC-005 is checked with
+generated references for all six named families, a direct CI freshness gate,
+and linked exact-head and post-merge evidence. DOC-006 is checked with its
+separate verified ledger revision. DOC-004 and DOC-007 remain open.
