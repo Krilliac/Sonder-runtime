@@ -274,3 +274,10 @@ def test_complete_recovery_rejects_10001_events_without_unbounded_read(tmp_path)
 
     with pytest.raises(ValueError, match="exceeds recovery bound"):
         repo.read_complete("s1", max_events=10_000)
+
+
+def test_session_append_rejects_one_oversized_payload(tmp_path):
+    repo = SQLiteSessionRepository(tmp_path / "sessions.db")
+
+    with pytest.raises(ValueError, match="payload exceeds"):
+        repo.append("s1", "tool.result", {"content": "x" * (8 * 1024 * 1024)})
