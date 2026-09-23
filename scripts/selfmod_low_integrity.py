@@ -10,6 +10,7 @@ caller requests isolation.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import hashlib
 import json
 import os
@@ -18,9 +19,51 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from typing import Sequence
+
+
+_OUTPUT_TAIL_BYTES = 120_000
+
+
+def _write_output_tail(path: Path, chunks: deque[bytes], total: int) -> None:
+    """Publish a bounded output tail while the low child is still running."""
+    data = b"".join(chunks)
+    if len(data) > _OUTPUT_TAIL_BYTES:
+        data = data[-_OUTPUT_TAIL_BYTES:]
+    path.write_bytes(data)
+
+
+def _drain_output(stream, output_path: Path, state: dict[str, object]) -> None:
+    """Drain a pipe continuously so a noisy candidate cannot block on a full pipe."""
+    chunks: deque[bytes] = deque()
+    total = 0
+    try:
+        while True:
+            # ``read`` on a buffered Windows pipe can wait for the requested
+            # size, hiding a small early failure until the process exits.
+            # ``read1`` returns currently available bytes while still
+            # draining the pipe continuously.
+            reader = getattr(stream, "read1", stream.read)
+            chunk = reader(16 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            while total > _OUTPUT_TAIL_BYTES and chunks:
+                removed = chunks.popleft()
+                total -= len(removed)
+                if total < _OUTPUT_TAIL_BYTES and removed:
+                    keep = _OUTPUT_TAIL_BYTES - total
+                    chunks.appendleft(removed[-keep:])
+                    total += min(keep, len(removed))
+            _write_output_tail(output_path, chunks, total)
+    finally:
+        state["output_tail"] = b"".join(chunks)[-_OUTPUT_TAIL_BYTES:]
+        _write_output_tail(output_path, chunks, total)
+        stream.close()
 
 
 def _digest(path: Path) -> str:
@@ -77,20 +120,37 @@ def _child(spec_path: Path) -> int:
     # candidate's ordinary per-user caches without exposing the real profile.
     for name in ("USERPROFILE", "APPDATA", "LOCALAPPDATA"):
         Path(env[name]).mkdir(parents=True, exist_ok=True)
+    process = None
+    reader = None
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             command, cwd=spec["cwd"], env=env, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=False,
-            timeout=max(1, int(spec["timeout"])), check=False,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         )
-        data = completed.stdout[-120000:]
-        output_path.write_bytes(data)
-        result = {"returncode": completed.returncode, "timed_out": False}
-    except subprocess.TimeoutExpired as exc:
-        data = (exc.stdout or b"")[-120000:]
-        output_path.write_bytes(data)
-        result = {"returncode": 124, "timed_out": True}
+        assert process.stdout is not None
+        state: dict[str, object] = {}
+        reader = threading.Thread(
+            target=_drain_output, args=(process.stdout, output_path, state),
+            name="selfmod-output-drain", daemon=True,
+        )
+        reader.start()
+        try:
+            returncode = process.wait(timeout=max(1, int(spec["timeout"])))
+            result = {"returncode": returncode, "timed_out": False}
+        except subprocess.TimeoutExpired:
+            process.kill()
+            returncode = process.wait(timeout=10)
+            result = {"returncode": 124, "timed_out": True}
+        reader.join(timeout=10)
+        if reader.is_alive():
+            result = {"returncode": 125, "timed_out": False,
+                      "error": "output drain did not terminate"}
     except BaseException as exc:  # preserve a bounded diagnostic for parent
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait(timeout=10)
+        if reader is not None:
+            reader.join(timeout=10)
         output_path.write_text("%s: %s\n" % (type(exc).__name__, exc), encoding="utf-8")
         result = {"returncode": 125, "timed_out": False, "error": str(exc)}
     Path(spec["result"]).write_text(json.dumps(result), encoding="utf-8")
