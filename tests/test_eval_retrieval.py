@@ -48,7 +48,7 @@ def test_history_is_opt_in_and_stores_only_bounded_aggregates(tmp_path, monkeypa
     assert not history.exists()
     assert eval_retrieval.main([
         "eval_retrieval.py", "0", "2", "--record-history",
-        "--history-path", str(history),
+        "--history-path", str(history), "--run-id", "run-001",
     ]) == 0
     loaded = evaluation_history_store.load_history(history)
     assert len(loaded["records"]) == 2
@@ -69,14 +69,31 @@ def test_history_recording_is_idempotent(tmp_path, monkeypatch):
     history = tmp_path / "history.jsonl"
     first = eval_retrieval._record_history(
         results, history, model="mock-model", model_digest="a" * 64,
-        suite_digest="b" * 64,
+        suite_digest="b" * 64, run_id="run-001",
     )
     second = eval_retrieval._record_history(
         results, history, model="mock-model", model_digest="a" * 64,
-        suite_digest="b" * 64,
+        suite_digest="b" * 64, run_id="run-001",
     )
     assert [r["record_id"] for r in first] == [r["record_id"] for r in second]
     assert len(evaluation_history_store.load_history(history)["records"]) == 2
+    eval_retrieval._record_history(
+        results, history, model="mock-model", model_digest="a" * 64,
+        suite_digest="b" * 64, run_id="run-002",
+    )
+    assert len(evaluation_history_store.load_history(history)["records"]) == 4
+
+
+def test_record_history_requires_explicit_run_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(eval_retrieval, "HELDOUT", [
+        {"name": "one", "prompt": "p", "check": "c"},
+    ])
+    monkeypatch.setattr(eval_retrieval.server, "resolve_sonder_model",
+                        lambda _allow_cloud: "mock-model")
+    assert eval_retrieval.main([
+        "eval_retrieval.py", "--record-history", "--history-path",
+        str(tmp_path / "history.jsonl"),
+    ]) == 2
 
 
 def test_history_failure_is_reported_as_nonzero(tmp_path, monkeypatch):
@@ -91,12 +108,12 @@ def test_history_failure_is_reported_as_nonzero(tmp_path, monkeypatch):
         "name": task["name"], "retrieval": True, "baseline": True,
         "retrieval_detail": "", "baseline_detail": "",
     })
-    monkeypatch.setattr(evaluation_history_store, "record_result_idempotent",
+    monkeypatch.setattr(evaluation_history_store, "record_result_pair_idempotent",
                         lambda *args, **kwargs: (_ for _ in ()).throw(
                             OSError("disk full")))
     assert eval_retrieval.main([
         "eval_retrieval.py", "--record-history", "--history-path",
-        str(tmp_path / "history.jsonl"),
+        str(tmp_path / "history.jsonl"), "--run-id", "run-001",
     ]) == 2
 
 
@@ -113,5 +130,6 @@ def test_model_digest_change_aborts_without_recording(tmp_path, monkeypatch):
     history = tmp_path / "history.jsonl"
     assert eval_retrieval.main([
         "eval_retrieval.py", "--record-history", "--history-path", str(history),
+        "--run-id", "run-001",
     ]) == 2
     assert not history.exists()

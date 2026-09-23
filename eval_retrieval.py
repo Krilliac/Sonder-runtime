@@ -100,7 +100,8 @@ def _suite_digest(chunk, start, count):
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _record_history(results, history_path, *, model, model_digest, suite_digest):
+def _record_history(results, history_path, *, model, model_digest, suite_digest,
+                    run_id):
     """Record the two bounded condition aggregates, with local deduplication.
 
     The history store only receives model/suite identity and pass counts.  The
@@ -113,7 +114,7 @@ def _record_history(results, history_path, *, model, model_digest, suite_digest)
     total = len(results)
     if total <= 0:
         raise ValueError("cannot record an empty retrieval evaluation")
-    records = []
+    fields_list = []
     for condition in ("retrieval", "baseline"):
         passed = sum(1 for result in results if result[condition])
         fields = dict(
@@ -124,10 +125,10 @@ def _record_history(results, history_path, *, model, model_digest, suite_digest)
             suite_digest=suite_digest,
             passed=passed,
             total=total,
-            source="eval_retrieval",
+            source="eval_retrieval:%s:%s" % (run_id, condition),
         )
-        records.append(store.record_result_idempotent(history_path, **fields))
-    return records
+        fields_list.append(fields)
+    return store.record_result_pair_idempotent(history_path, fields_list)
 
 
 def baseline_generate(prompt, model=None):
@@ -195,6 +196,9 @@ def _parse_args(argv):
         help="explicitly append aggregate results to evaluation history",
     )
     parser.add_argument("--history-path", help="history JSONL path")
+    parser.add_argument(
+        "--run-id", help="required stable identifier for an opted-in run retry",
+    )
     return parser.parse_args(argv[1:])
 
 
@@ -207,6 +211,10 @@ def main(argv):
         print("EVAL chunk: no tasks in range [%d:%d) (pool size %d)" %
               (start, start + count, len(HELDOUT)))
         return 0
+
+    if args.record_history and not args.run_id:
+        print("history: NOT recorded (--run-id is required with --record-history)")
+        return 2
 
     model = server.resolve_sonder_model(False)
     model_digest = None
@@ -234,6 +242,9 @@ def main(argv):
         except Exception as e:
             # Defense in depth: run_task itself shouldn't raise, but one bad task
             # must never kill the rest of the chunk.
+            if args.record_history:
+                print("history: NOT recorded (task failed: %s)" % e)
+                return 2
             print("%s: retrieval=FAIL baseline=FAIL (harness error: %r)" % (task["name"], e))
             results.append({"retrieval": False, "baseline": False})
             continue
@@ -256,10 +267,14 @@ def main(argv):
     print("EVAL chunk: retrieval %d/%d, baseline %d/%d" % (retrieval_pass, n, baseline_pass, n))
     if args.record_history:
         try:
+            final_digest = promotion_eval.local_model_digest(model)
+            if final_digest != model_digest:
+                raise ModelConsistencyError("model digest changed before history write")
             _record_history(
                 results, args.history_path, model=model,
                 model_digest=model_digest,
                 suite_digest=_suite_digest(chunk, start, count),
+                run_id=args.run_id,
             )
         except Exception as exc:
             print("history: NOT recorded (%s)" % exc)
