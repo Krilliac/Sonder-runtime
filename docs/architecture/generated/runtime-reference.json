@@ -9110,6 +9110,12 @@
     },
     {
       "default": null,
+      "field": "context",
+      "section": "root",
+      "type": "ContextConfig"
+    },
+    {
+      "default": null,
       "field": "ollama",
       "section": "root",
       "type": "OllamaConfig"
@@ -9695,6 +9701,42 @@
       "field": "cancel_timeout_seconds",
       "section": "child_storage",
       "type": "<class 'int'>"
+    },
+    {
+      "default": [],
+      "field": "instruction_bundled_roots",
+      "section": "context",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": [],
+      "field": "instruction_global_roots",
+      "section": "context",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": [],
+      "field": "instruction_configured_roots",
+      "section": "context",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": [],
+      "field": "skill_bundled_roots",
+      "section": "context",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": [],
+      "field": "skill_global_roots",
+      "section": "context",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": [],
+      "field": "skill_configured_roots",
+      "section": "context",
+      "type": "tuple[str, ...]"
     },
     {
       "default": false,
@@ -10297,11 +10339,11 @@
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
     "commands": 320,
-    "configuration": 201,
+    "configuration": 208,
     "events": 43,
     "tools": 214
   },
-  "digest": "cd172a40543b80af9b30a86c097e1c9a74cc246784bcfce4c00e318966d7e188",
+  "digest": "f7607a8b4307f61806f28198dfa0e787305d451d10fb8996857820ca66062012",
   "events": [
     {
       "name": "session.started",
@@ -10775,7 +10817,7 @@
     "server.py": "735b1fa093163fdbd374c52b5c5ae51798d41d2b34e166ddf55215e15145f97a",
     "sonder_runtime/application/tools/generated_catalogs.py": "57a490ddd581e3e7a5d4b7b73379d205048f1db6de8e7e73c71f1124c6d84900",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
-    "sonder_runtime/platform/config.py": "4f0a7ce76709cdf1b12a729abb56f9e4933f7def5789ef8b23c3ba6f22bd4e2c",
+    "sonder_runtime/platform/config.py": "9715b77d76bda6c59460f6d74a7b1877ebc1386e0b2b08b7344d752ae92a8ea0",
     "sonder_runtime/platform/memory_replication_config.py": "1981bbc57a4e6442fc1b770d9c37cc766c66334089697d762e9b9b7ed578d179"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
