@@ -1,5 +1,11 @@
 # Sonder Runtime thin client (`sonder_client.py`)
 
+> **Contract scope:** this focused contract describes current behavior. Unfinished
+> implementation work is tracked in the
+> [master implementation specification](docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md); the
+> [behavior status](#behavior-status) table labels what is implemented,
+> experimental, proposed, degraded, or unsupported.
+
 `sonder_client.py` is a **standalone** thin remote client: stdlib-only
 Python, no repo checkout, no Ollama, no `mcp` package. Drop the one file on
 any PC and point it at a Sonder Runtime host elsewhere. Remote hosts use the
@@ -120,3 +126,17 @@ surface and consume host resources. Treat the key like a privileged password:
   clients must use HTTPS through the documented reverse proxy.
 - Never expose or port-forward the runtime's loopback port. Restrict the TLS
   endpoint at the firewall or security-group layer as well.
+
+## Behavior status
+
+Labels follow the [documentation status vocabulary](docs/architecture/DOCUMENT-AUTHORITY-INDEX.md#documentation-status-vocabulary). Unfinished
+implementation work is tracked only in the
+[master implementation specification](docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md).
+
+| Behavior | Status | Boundary |
+|---|---|---|
+| Standalone stdlib-only thin client | Implemented | Configured by `SONDER_SERVER`, `SONDER_API_KEY`, `--server`, and `--key`. |
+| Automatic retry against the local server when the hosted server is unreachable | Implemented | `SONDER_FALLBACK_LOCAL=0` disables it; HTTP errors from the hosted server never fall back. |
+| Direct execution without adding a shebang | Unsupported | `sonder_client.py` has no shebang line; invoke it with Python or add one. |
+| Sending the API key over plaintext HTTP to a non-loopback host | Unsupported | Not a supported deployment; the client itself does not refuse it, so use HTTPS. |
+| Resumable streams with sequence numbers and resume watermarks | Proposed | API-002; protocol-boundary validation exists, but the thin client does not resume streams. |
