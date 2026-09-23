@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import hashlib
+import ntpath
 import os
 import re
 import shutil
@@ -67,12 +68,37 @@ class _WindowsJobToken:
         self._lock = RLock()
         self._process_handles = []
         self._last_observation = None
+        self._last_member_pids: tuple[int, ...] = ()
+        self._last_member_images: tuple[tuple[int, str], ...] = ()
+        self._member_images_by_pid: dict[int, str] = {}
         self._proof_failed = False
 
     @property
     def cleanup_observation(self):
         """Last bounded accounting/handle wait results, without PID inference."""
         return self._last_observation
+
+    @staticmethod
+    def _forced_cleanup_detail(member_images: tuple[tuple[int, str], ...]) -> str:
+        parts = []
+        for pid, image in member_images[:256]:
+            basename = ntpath.basename(str(image)) or "?"
+            safe_image = "".join(
+                character if 32 <= ord(character) < 127 else "?"
+                for character in basename
+            )
+            parts.append(f"{int(pid)}={safe_image[:128] or '?'}")
+        return ("observed before forced cleanup: " + ",".join(parts))[:4096]
+
+    def _remember_member_images(self, member_pids: tuple[int, ...], image_lookup) -> None:
+        current = {}
+        for pid in member_pids[:256]:
+            image = self._member_images_by_pid.get(pid)
+            if image is None:
+                image = image_lookup(pid)
+            current[pid] = image or "?"
+        self._member_images_by_pid = current
+        self._last_member_images = tuple((pid, current[pid]) for pid in member_pids[:256])
 
     def _observe(self):
         import ctypes
@@ -101,14 +127,47 @@ class _WindowsJobToken:
         belongs = kernel.IsProcessInJob
         belongs.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
         belongs.restype = wintypes.BOOL
+        try:
+            query_image = kernel.QueryFullProcessImageNameW
+            query_image.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                    ctypes.POINTER(wintypes.DWORD)]
+            query_image.restype = wintypes.BOOL
+        except AttributeError:
+            query_image = None
+
+        def image_basename(handle):
+            if query_image is None:
+                return "?"
+            # Windows executable basenames are bounded well below this size;
+            # keep the diagnostic query itself bounded per member.
+            buffer = ctypes.create_unicode_buffer(1024)
+            length = wintypes.DWORD(len(buffer))
+            if not query_image(handle, 0, buffer, ctypes.byref(length)):
+                return "?"
+            basename = ntpath.basename(buffer.value[:length.value])
+            if not basename:
+                return "?"
+            safe = "".join(
+                character if 32 <= ord(character) < 127 else "?"
+                for character in basename
+            )
+            return safe[:128] or "?"
+
         members = Members()
         if not query(self._handle, 3, ctypes.byref(members), ctypes.sizeof(members), None):
             raise ExtensionMemoryLimitError("owned job membership query failed")
         if members.assigned > 256 or members.listed != members.assigned:
             raise ExtensionMemoryLimitError("owned job membership exceeds proof bound")
+        self._last_member_pids = tuple(int(pid) for pid in members.pids[:members.listed])
+        member_handles = {}
         for pid in members.pids[:members.listed]:
-            if any(saved_pid == pid and wait(handle, 0) == 258
-                   for saved_pid, handle in self._process_handles):
+            known_handle = next(
+                (handle for saved_pid, handle in self._process_handles
+                 if saved_pid == pid and wait(handle, 0) == 258),
+                None,
+            )
+            if known_handle is not None:
+                member_handles[int(pid)] = known_handle
                 continue
             if len(self._process_handles) >= 256:
                 raise ExtensionMemoryLimitError("owned process handle proof capacity exhausted")
@@ -120,6 +179,11 @@ class _WindowsJobToken:
                 self._close_handle(handle)
                 raise ExtensionMemoryLimitError("observed process membership cannot be proved")
             self._process_handles.append((pid, handle))
+            member_handles[int(pid)] = handle
+        self._remember_member_images(
+            self._last_member_pids,
+            lambda pid: image_basename(member_handles[pid]),
+        )
         accounting = Accounting()
         if not query(self._handle, 1, ctypes.byref(accounting), ctypes.sizeof(accounting), None):
             raise ExtensionMemoryLimitError("job accounting query failed")
@@ -133,6 +197,7 @@ class _WindowsJobToken:
         from ctypes import wintypes
         deadline = time.monotonic() + 3
         forced = False
+        forced_member_images: tuple[tuple[int, str], ...] = ()
         with self._lock:
             if self._handle is None:
                 return ProcessContainmentResult(False, detail="job handle is no longer held")
@@ -146,13 +211,19 @@ class _WindowsJobToken:
                 if (not self._proof_failed and active == 0 and states
                         and all(state == 0 for state in states)):
                     self._quiescent_proved = True
-                    return ProcessContainmentResult(True, forced=forced)
+                    detail = ""
+                    if forced:
+                        detail = self._forced_cleanup_detail(forced_member_images)
+                    return ProcessContainmentResult(True, forced=forced, detail=detail)
                 if any(state not in (0, 258) for state in states):
                     self._proof_failed = True
                 # Accounting and process signaling can settle in either order.
                 # Permission to force cleanup is not evidence it is necessary.
                 needs_termination = self._proof_failed or (active > 0 and 258 in states)
                 if force and not forced and needs_termination:
+                    forced_member_images = self._last_member_images or tuple(
+                        (pid, "?") for pid in self._last_member_pids
+                    )
                     if not self._terminate_job():
                         return ProcessContainmentResult(False, detail="owned job termination failed")
                     forced = True
