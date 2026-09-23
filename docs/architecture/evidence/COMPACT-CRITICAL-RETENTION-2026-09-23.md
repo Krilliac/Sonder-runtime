@@ -9,8 +9,11 @@ that motivated this change is
 
 - `sonder_runtime/application/compaction_retention.py` (new, pure). It
   classifies critical source events:
-  - failures: `*.failed`/`*.error` events, error keys, a failed status,
-    `ok: false`, or a non-zero exit code;
+  - failures: `*.failed`/`*.error` events, error keys, a failed, denied,
+    cancelled, or timeout status, `ok`/`success` false, a non-zero integer or
+    numeric-string exit code, or a Python traceback on stderr. These are
+    checked at the top level and exactly one level inside
+    `result`/`output`/`receipt`/`response`;
   - `constraints` and `requirements`;
   - the five structured fields.
 
@@ -22,8 +25,11 @@ that motivated this change is
   - critical messages are kept as typed modalities;
   - tool output larger than 2 KiB becomes a flat, digest-bound reference
     (`reference_event_id`, `reference_sequence`, `reference_event_type`,
-    `reference_sha256`, `reference_byte_count`). Its call, status, error, and
-    constraint keys are kept beside it.
+    `reference_sha256`, `reference_byte_count`). The reference is not
+    content-free. Its call and status keys (including `success`), and for a
+    failure its error, constraint, stderr, and nested `result.*` failure
+    values, are kept beside it. Each value is bounded to 1 KiB, and stderr
+    keeps its tail.
 
   Engine validation now fails when critical history is missing.
   `canonical_summary(request, schema=1|2)` re-derives either schema.
@@ -32,16 +38,26 @@ that motivated this change is
     validation. A lossy engine cannot append a summary.
   - New events carry `summary_schema: 2`.
   - `validate_persisted_event` re-derives legacy (schema 1) and schema 2
-    summaries. A legacy summary that collapsed a constraint now fails closed
-    and asks for re-compaction from the original events. Legacy summaries
-    without critical loss still replay. Unknown schemas are rejected.
+    summaries and rejects any summary that differs from its canonical
+    projection. An authentic legacy summary that collapsed a constraint is
+    replayed as the lossless schema-2 projection re-derived from the same
+    original events, so no re-compaction is needed. Re-compacting would be
+    rejected by lane replay as an overlapping range. Unknown schemas are
+    rejected.
   - New lossless-archive APIs:
     - `recover_source`: the validated original range;
     - `recall_critical`: decisions, failures, constraints, and facts, with
       event identity and hash as provenance;
     - `retrieve_reference`: re-reads the event and verifies its digest;
-    - `search_compacted`: raw-text search that marks the summary covering each
-      match.
+    - `search_compacted`: a literal, case-sensitive raw-text search in which
+      `%` and `_` are not wildcards. It returns the newest matches first and
+      marks the newest summary covering each match. The repository's
+      oldest-first `LIKE` search is only a superset prefilter; when it could be
+      truncated, the service scans the session in keyset pages, and fails
+      closed past `max_scan_events`, default 100,000. `recover_source` finds
+      summaries the same way, so the newest summary stays reachable beyond the
+      adapter read bound. `session_repository.py` is not modified, because
+      open PR #542 edits it.
 
 ## Canary
 
@@ -77,7 +93,8 @@ Other tests in the file cover these cases:
 
 - a lossy engine that reports itself valid is rejected with no append;
 - engine self-validation flags a lossy summary;
-- a legacy lossy summary fails closed;
+- an authentic legacy lossy summary replays the lossless projection;
+- a tampered legacy summary fails closed;
 - a legacy summary without loss still replays;
 - an unknown schema is rejected;
 - a tampered reference digest is rejected.
@@ -88,6 +105,44 @@ every durable component, and continues the lane. The single provider request
 contains the constraint, the decision, and both failures. It does not contain
 the bulky output, only its reference, and that reference is recoverable after
 the restart.
+
+## Review fixes (PR #547)
+
+`tests/test_compaction_retention_review.py` has 31 tests. Before the fixes, 21
+of them failed; the other 10 are guards for non-failure cases and the depth
+bound.
+
+| Item | Before | After |
+|---|---|---|
+| P2-a: a lane `tool.result` over 2 KiB with `success: False` | Reference kept only `call_id` and `name`. Removing `success is False` from the classifier left all 7 canary tests passing | `success` is a status field and is kept. That mutation now fails a test |
+| P2-b: `{"result": {"status": "failed"}}`, exit code `"1"`, status `denied`, traceback on stderr | Not failures. The capture-shaped result lost its failure signal | Detected at the top level and one level nested. References carry `result.status`, `result.exit_code`, and the tail of `result.stderr` |
+| P3-a: more summaries than the read bound (8 summaries at `max_read_limit=5`) | `recover_source(newest)` raised "unavailable". `search_compacted` reported no covering summary | A complete search or keyset scan finds the newest summary |
+| P3-b: `100%`, `a_b`, and summaries using up the row budget | `LIKE` wildcards over-matched. Summary rows took the budget (3 of 6 matches returned) | Literal matching; the newest 5 of 6 matches are returned |
+| P3-c: remediation for a legacy lossy summary | The error advised re-compaction, which lane replay rejects as an overlap. The lane turn failed | The lossless projection is replayed. The live lane continues with the constraint in its provider request |
+| P3-d: `message.emitted` (the canonical assistant type) | Plain assistant chatter was retained as a modality | It collapses like other plain text. Constrained text is kept |
+| P3-e: documentation | The reference was described as "content-free" | Wording corrected; rollback note added below |
+
+Mutation checks: removing each of these makes at least one test fail:
+
+- the `success` signal;
+- the `success` status field;
+- nested inspection;
+- numeric-string exit codes;
+- the `denied` status;
+- traceback detection;
+- the stderr tail;
+- `message.emitted`.
+
+## Rollback note
+
+Code before this PR does not know `summary_schema`. It recomputes every
+summary with the schema-1 projection. A schema-2 summary written by this PR
+differs from that projection, so after a rollback,
+`validate_persisted_event` raises "differs from canonical source summary".
+Lane turns whose live tail contains such a summary then fail closed, and no
+data is lost. To recover after a rollback, those lanes must continue in a new
+session, or the rollback must be paired with a forward fix that accepts
+schema 2.
 
 ## Verification (Windows local, Python 3.12.10)
 
@@ -109,12 +164,16 @@ LOSSY_ACCEPTED False
 ```
 
 ```text
-python -m pytest -q tests/test_compaction_continue_canary.py
-7 passed
+python -m pytest -q tests/test_compaction_continue_canary.py tests/test_compaction_retention_review.py
+39 passed
 
-python -m pytest -q -n 8 <117 compaction/session/context/lane/replay/archive test files>
-2004 passed, 1 warning in 167.99s
+python -m pytest -q -n 8 <118 compaction/session/context/lane/replay/archive test files>
+2036 passed, 1 warning in 125.97s
 ```
+
+In one earlier parallel run, `test_agent_lane_http_wiring.py::test_agent_routes_require_auth_before_service_access[None]`
+failed once. The file passes on its own, both with and without this change,
+and the whole set passed on the rerun.
 
 ## Limitations
 

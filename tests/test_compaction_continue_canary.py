@@ -277,14 +277,29 @@ def _request(events):
     )
 
 
-def test_legacy_summary_that_collapsed_a_constraint_fails_closed(tmp_path):
+def test_legacy_summary_that_collapsed_a_constraint_replays_lossless_view(tmp_path):
     repo = SQLiteSessionRepository(tmp_path / "sessions.db")
     planted = _plant(repo)
     legacy = canonical_summary(_request(planted), schema=1)
     assert "req-1" not in {item.event_id for item in legacy.modalities}
     event = _append_persisted(repo, planted, legacy, event_id="legacy-lossy")
 
-    with pytest.raises(SessionCompactionError, match="omits critical history"):
+    # Authentic legacy marker: replay re-derives the schema-2 view from source.
+    summary = SessionCompactionService(repo).validate_persisted_event(event, planted)
+    assert "req-1" in {item.event_id for item in summary.modalities}
+    assert summary == canonical_summary(_request(planted))
+
+
+def test_tampered_legacy_summary_still_fails_closed(tmp_path):
+    repo = SQLiteSessionRepository(tmp_path / "sessions.db")
+    planted = _plant(repo)
+    legacy = canonical_summary(_request(planted), schema=1)
+    forged = CompactionSummary(
+        facts=legacy.facts, decisions=("FORGED",), modalities=legacy.modalities,
+    )
+    event = _append_persisted(repo, planted, forged, event_id="legacy-forged")
+
+    with pytest.raises(SessionCompactionError, match="differs from canonical"):
         SessionCompactionService(repo).validate_persisted_event(event, planted)
 
 

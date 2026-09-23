@@ -6,18 +6,25 @@ the append-only source events still exist.  This module defines, without any
 I/O, which source events carry *critical* history and how a summary must
 represent them:
 
-* failures -- ``*.failed``/``*.error`` events and tool results that report a
-  failed status, ``ok: false``, a non-zero exit code, or an error;
+* failures -- ``*.failed``/``*.error`` events and events that report a
+  failed/denied/cancelled/timeout status, ``ok``/``success`` false, a non-zero
+  (integer or numeric-string) exit code, an error, or a Python traceback on
+  stderr, either at the top level or exactly one level inside
+  ``result``/``output``/``receipt``/``response`` (the shapes lane receipts and
+  session capture store);
 * constraints and requirements -- ``constraints``/``requirements`` payload
   fields, including on plain text messages that are otherwise collapsed;
 * decisions, facts, unresolved tasks, artifacts, and tool outcomes -- the
   structured summary fields.
 
 Bulky tool output is the first thing to leave live context: a large tool
-result is represented by a content-free, digest-bound reference (flat
-``reference_*`` keys) plus its small failure/status keys instead of being
-inlined in the summary.  The reference is recoverable because the source
-event remains append-only.
+result is represented by a digest-bound reference (flat ``reference_*`` keys)
+instead of being inlined in the summary.  The reference is *not* content-free:
+beside it the summary keeps the event's call/status keys and, for a failure,
+its error, constraint, and stderr/traceback values, each bounded to
+``MAX_RETAINED_KEY_BYTES`` (stderr keeps its tail, where a traceback's cause
+is).  Bulk payload fields (output, content, logs) are never copied.  The full
+payload is recoverable because the source event remains append-only.
 
 ``critical_retention_problems`` is a deterministic gate, independent of the
 summarizing engine, so a lossy (for example model-backed) engine cannot drop a
@@ -39,17 +46,28 @@ INLINE_TOOL_OUTPUT_BYTES = 2 * 1024
 """Tool payloads above this canonical size are summarized by reference."""
 
 MAX_RETAINED_KEY_BYTES = 1024
-"""Bound for one critical scalar carried beside a bulky-output reference."""
+"""Bound for one critical value carried beside a bulky-output reference."""
 
 STRUCTURED_FIELDS = (
     "facts", "decisions", "unresolved_tasks", "artifacts", "tool_outcomes",
 )
 CONSTRAINT_FIELDS = ("constraints", "requirements")
 FAILURE_FIELDS = ("error", "error_code", "failure", "failures", "failed_attempts")
-STATUS_FIELDS = ("call_id", "tool", "name", "status", "ok", "exit_code", "returncode")
+STATUS_FIELDS = (
+    "call_id", "tool", "name", "status", "ok", "success", "exit_code", "returncode",
+)
+STDERR_FIELDS = ("stderr", "traceback")
+NESTED_RESULT_FIELDS = ("result", "output", "receipt", "response")
+"""Containers inspected exactly one level deep for failure signals."""
 TOOL_OUTPUT_TYPES = frozenset({"tool.result", "tool.completed"})
-MESSAGE_TYPES = frozenset({"message.received", "message.sent"})
-_FAILED_STATUSES = frozenset({"failed", "failure", "error", "errored", "timeout", "cancelled"})
+MESSAGE_TYPES = frozenset({"message.received", "message.emitted", "message.sent"})
+"""Conversation text types; ``message.emitted`` is the canonical assistant type."""
+_FAILED_STATUSES = frozenset({
+    "failed", "failure", "error", "errored", "timeout", "timed_out", "timedout",
+    "cancelled", "canceled", "denied", "rejected", "aborted", "killed",
+})
+_TRACEBACK_MARK = "Traceback (most recent call last)"
+_MAX_EXIT_CODE_TEXT = 12
 REFERENCE_KEYS = (
     "reference_event_id", "reference_sequence", "reference_event_type",
     "reference_sha256", "reference_byte_count",
@@ -90,12 +108,21 @@ def _present(value: object) -> bool:
     return True
 
 
-def is_failure(event: SessionHistoryEvent) -> bool:
-    """Whether the event records a failed attempt that must survive."""
-    event_type = event.event_type
-    if event_type.endswith((".failed", ".error", ".errored")):
-        return True
-    payload = event.payload
+def _nonzero_exit(code: object) -> bool:
+    if isinstance(code, bool):
+        return False
+    if isinstance(code, int):
+        return code != 0
+    if isinstance(code, str):
+        text = code.strip()
+        digits = text[1:] if text[:1] in ("+", "-") else text
+        if digits.isdigit() and len(text) <= _MAX_EXIT_CODE_TEXT:
+            return int(text) != 0
+    return False
+
+
+def _has_failure_signal(payload: Mapping[str, object]) -> bool:
+    """Failure markers within one mapping level (no recursion)."""
     if any(_present(payload.get(key)) for key in FAILURE_FIELDS):
         return True
     status = payload.get("status")
@@ -103,34 +130,83 @@ def is_failure(event: SessionHistoryEvent) -> bool:
         return True
     if payload.get("ok") is False or payload.get("success") is False:
         return True
-    for key in ("exit_code", "returncode"):
-        code = payload.get(key)
-        if isinstance(code, int) and not isinstance(code, bool) and code != 0:
-            return True
-    return False
+    if any(_nonzero_exit(payload.get(key)) for key in ("exit_code", "returncode")):
+        return True
+    if _present(payload.get("traceback")):
+        return True
+    stderr = payload.get("stderr")
+    return isinstance(stderr, str) and _TRACEBACK_MARK in stderr
+
+
+def _failed_containers(payload: Mapping[str, object]) -> tuple[str, ...]:
+    return tuple(
+        key for key in NESTED_RESULT_FIELDS
+        if isinstance(payload.get(key), Mapping) and _has_failure_signal(payload[key])
+    )
+
+
+def is_failure(event: SessionHistoryEvent) -> bool:
+    """Whether the event records a failed attempt that must survive."""
+    if event.event_type.endswith((".failed", ".error", ".errored")):
+        return True
+    return _has_failure_signal(event.payload) or bool(_failed_containers(event.payload))
+
+
+_FAILURE_DETAIL_FIELDS = (*FAILURE_FIELDS, *STATUS_FIELDS, *STDERR_FIELDS)
 
 
 def critical_keys(event: SessionHistoryEvent) -> tuple[str, ...]:
-    """Payload keys whose values a summary must carry for this event."""
+    """Payload keys whose values a summary must carry for this event.
+
+    Nested failure details are named ``<container>.<key>`` (for example
+    ``result.status``): a fully retained event carries them inside its
+    container, a bulky-output reference carries them as flat keys.
+    """
     payload = event.payload
     keys = [key for key in CONSTRAINT_FIELDS if _present(payload.get(key))]
     if is_failure(event):
         keys.extend(
-            key for key in (*FAILURE_FIELDS, *STATUS_FIELDS)
+            key for key in _FAILURE_DETAIL_FIELDS
             if key in payload and payload.get(key) is not None
         )
+        for container in _failed_containers(payload):
+            nested = payload[container]
+            keys.extend(
+                f"{container}.{key}" for key in _FAILURE_DETAIL_FIELDS
+                if key in nested and nested.get(key) is not None
+            )
     return tuple(dict.fromkeys(keys))
+
+
+def _critical_value(payload: Mapping[str, object], key: str) -> tuple[bool, object]:
+    """Resolve a plain or ``container.key`` critical key in a payload."""
+    if key in payload:
+        return True, payload[key]
+    container, _, inner = key.partition(".")
+    nested = payload.get(container) if inner else None
+    if isinstance(nested, Mapping) and inner in nested:
+        return True, nested[inner]
+    return False, None
 
 
 def is_critical(event: SessionHistoryEvent) -> bool:
     return is_failure(event) or bool(critical_keys(event))
 
 
-def _bounded(value: object) -> object:
+def _truncate(text: str, *, tail: bool) -> str:
+    budget = MAX_RETAINED_KEY_BYTES - len(_TRUNCATION_MARK.encode("utf-8"))
+    encoded = text.encode("utf-8")
+    if tail:
+        return _TRUNCATION_MARK + encoded[-budget:].decode("utf-8", errors="ignore")
+    return encoded[:budget].decode("utf-8", errors="ignore") + _TRUNCATION_MARK
+
+
+def _bounded(value: object, *, tail: bool = False) -> object:
     """A flat, bounded copy of one critical value kept beside a reference.
 
     Reference payloads stay flat (scalars only) so every replay surface can
     serialize them; a structured value is carried as its canonical JSON text.
+    ``tail`` keeps the end of an oversized value (stderr and tracebacks).
     """
     plain = _plain(value)
     if isinstance(plain, (bool, int, float)) or plain is None:
@@ -138,11 +214,19 @@ def _bounded(value: object) -> object:
     text = plain if isinstance(plain, str) else canonical_bytes(plain).decode("utf-8")
     if len(text.encode("utf-8")) <= MAX_RETAINED_KEY_BYTES:
         return text
-    return text[: MAX_RETAINED_KEY_BYTES - len(_TRUNCATION_MARK)] + _TRUNCATION_MARK
+    return _truncate(text, tail=tail)
+
+
+def _bounded_for(key: str, value: object) -> object:
+    return _bounded(value, tail=key.rpartition(".")[2] in STDERR_FIELDS)
 
 
 def reference_payload(event: SessionHistoryEvent) -> dict[str, object]:
-    """Content-free, digest-bound pointer plus the small critical keys."""
+    """Digest-bound pointer plus bounded status and critical values.
+
+    Not content-free: error, constraint, and (for failures) stderr values are
+    kept, each at most ``MAX_RETAINED_KEY_BYTES``; bulk fields are not.
+    """
     digest, byte_count = payload_digest(event.payload)
     retained: dict[str, object] = {
         "reference_event_id": event.event_id,
@@ -154,6 +238,10 @@ def reference_payload(event: SessionHistoryEvent) -> dict[str, object]:
     for key in (*STATUS_FIELDS, *FAILURE_FIELDS, *CONSTRAINT_FIELDS):
         if key in event.payload and event.payload.get(key) is not None:
             retained[key] = _bounded(event.payload[key])
+    for key in critical_keys(event):
+        found, value = _critical_value(event.payload, key)
+        if found and key not in retained:
+            retained[key] = _bounded_for(key, value)
     return retained
 
 
@@ -192,8 +280,8 @@ def critical_retention_problems(
 
     An empty tuple means every structured value, failure, constraint, and
     requirement in ``events`` is represented in ``summary`` (directly or by a
-    digest-bound reference whose small critical keys are kept verbatim or
-    visibly truncated).
+    digest-bound reference whose critical values are kept verbatim or visibly
+    truncated).
     """
     problems: list[str] = []
     modalities = {item.event_id: item for item in summary.modalities}
@@ -217,16 +305,22 @@ def critical_retention_problems(
         payload = retained.payload
         is_reference = "reference_sha256" in payload
         for key in keys:
-            if key not in payload:
+            _, source_value = _critical_value(event.payload, key)
+            if is_reference:
+                # References carry nested details as flat ``container.key``.
+                if key not in payload:
+                    problems.append(f"{event.event_id}: critical key {key} omitted")
+                    continue
+                actual = _plain(payload[key])
+                if actual == _plain(source_value) or actual == _bounded_for(key, source_value):
+                    continue
+                problems.append(f"{event.event_id}: critical key {key} changed")
+                continue
+            found, actual = _critical_value(payload, key)
+            if not found:
                 problems.append(f"{event.event_id}: critical key {key} omitted")
-                continue
-            expected = _plain(event.payload[key])
-            actual = _plain(payload[key])
-            if actual == expected:
-                continue
-            if is_reference and actual == _bounded(event.payload[key]):
-                continue
-            problems.append(f"{event.event_id}: critical key {key} changed")
+            elif _plain(actual) != _plain(source_value):
+                problems.append(f"{event.event_id}: critical key {key} changed")
         if is_reference:
             digest, byte_count = payload_digest(event.payload)
             if (

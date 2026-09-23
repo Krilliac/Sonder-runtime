@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
+import json
 from typing import Any
 from uuid import uuid4
 
@@ -66,9 +67,14 @@ class SessionCompactionService:
         event_id_factory: Callable[[], str] | None = None,
         max_events: int = 1_000,
         archive_service: SessionContextArchiveService | None = None,
+        max_scan_events: int = 100_000,
     ) -> None:
         if isinstance(max_events, bool) or max_events < 1:
             raise ValueError("max_events must be positive")
+        if isinstance(max_scan_events, bool) or not isinstance(max_scan_events, int) \
+                or max_scan_events < 1:
+            raise ValueError("max_scan_events must be positive")
+        self._max_scan_events = max_scan_events
         self._repository = repository
         # Keep the repository orchestration independent from the summarizer.
         # Production may inject a different typed engine; the deterministic
@@ -345,20 +351,27 @@ class SessionCompactionService:
                 raise SessionCompactionError(
                     "persisted compaction summary differs from canonical source summary"
                 )
+            problems = critical_retention_problems(request.history, summary)
+            if problems and schema == 1:
+                # An authentic summary written before critical retention (it
+                # matched the schema-1 canonical projection above) may have
+                # collapsed a constrained message.  The persisted event is only
+                # a marker binding the range; replay the lossless schema-2
+                # projection re-derived from the same original events instead.
+                # No re-compaction is needed (and a second summary over the
+                # same range would be rejected by lane replay as an overlap).
+                summary = canonical_summary(request, schema=SUMMARY_SCHEMA_VERSION)
+                problems = critical_retention_problems(request.history, summary)
+            if problems:
+                raise SessionCompactionError(
+                    "persisted compaction summary omits critical history: "
+                    + "; ".join(problems[:8])
+                )
             candidate = CompactionResult(
                 event.session_id, source_range, summary,
                 CompactionEvent(event.event_id, event.session_id, source_range, summary),
                 CompactionValidation(True),
             )
-            problems = critical_retention_problems(request.history, summary)
-            if problems:
-                # Typically a summary written before critical retention that
-                # collapsed a constrained message.  Fail closed rather than
-                # replay a lossy view; the source range remains the authority.
-                raise SessionCompactionError(
-                    "persisted compaction summary omits critical history; "
-                    "re-compact from original events: " + "; ".join(problems[:8])
-                )
             validation = self._engine.validate(request, candidate)
             if not validation.valid:
                 raise SessionCompactionError(validation.detail or "persisted compaction failed validation")
@@ -390,15 +403,54 @@ class SessionCompactionService:
             return self._max_events
         return max(1, min(self._max_events, adapter_limit))
 
+    def _complete_search(self, session_id: str, **filters) -> tuple[SessionEvent, ...] | None:
+        """One bounded repository search, or ``None`` when it may be truncated.
+
+        The repository search is oldest-first with a row limit, so a full page
+        cannot prove that newer rows were not cut off.
+        """
+        bound = self._read_bound()
+        rows = self._repository.search(session_id=session_id, limit=bound, **filters)
+        return tuple(rows) if len(rows) < bound else None
+
+    def _scan(self, session_id: str):
+        """Every event of the session in sequence order, keyset-paged.
+
+        Fails closed past ``max_scan_events`` instead of silently stopping, so
+        a caller can never mistake a partial scan for a complete one.
+        """
+        page_size = self._read_bound()
+        start, scanned = 1, 0
+        while True:
+            page = self._repository.read_range(
+                session_id, start_sequence=start, limit=page_size,
+            )
+            if not page:
+                return
+            scanned += len(page)
+            if scanned > self._max_scan_events:
+                raise SessionCompactionError("session exceeds the compaction scan bound")
+            yield from page
+            if len(page) < page_size:
+                return
+            start = page[-1].sequence + 1
+
+    def _summaries(self, session_id: str) -> tuple[SessionEvent, ...]:
+        rows = self._complete_search(session_id, event_type="compaction.completed")
+        if rows is None:
+            rows = tuple(
+                event for event in self._scan(session_id)
+                if event.event_type == "compaction.completed"
+            )
+        return rows
+
     def _compaction_event(self, session_id: str, compaction_event_id: str) -> SessionEvent:
         if not isinstance(compaction_event_id, str) or not compaction_event_id.strip():
             raise SessionCompactionError("compaction event id is required")
-        # Event identities are row metadata, not payload text, so scan the
-        # bounded set of summaries rather than a payload text match.
-        for candidate in self._repository.search(
-            session_id=session_id, event_type="compaction.completed",
-            limit=self._read_bound(),
-        ):
+        # Event identities are row metadata, not payload text; match on the
+        # complete set of summaries (bounded search, or a keyset scan when
+        # the search could have cut off the newest rows).
+        for candidate in self._summaries(session_id):
             if candidate.event_id == compaction_event_id:
                 return candidate
         raise SessionCompactionError("compaction event is unavailable")
@@ -479,17 +531,22 @@ class SessionCompactionService:
         """Search raw history, marking which summary (if any) covers a match.
 
         Compaction never removes source events, so summarized or evicted
-        material stays searchable by its original text.
+        material stays searchable by its original text.  ``query`` is a
+        literal, case-sensitive substring of the stored canonical payload:
+        SQL ``LIKE`` wildcards (``%``, ``_``) have no special meaning.  The
+        repository ``LIKE`` search is used only as a superset prefilter; when
+        it could be truncated (a full page, possibly filled by summary or
+        non-literal rows) the session is keyset-scanned instead.  Returns the
+        newest ``limit`` source matches, newest first; the covering summary is
+        the newest one whose range includes the match.
         """
         if not isinstance(query, str) or not query.strip():
             raise SessionCompactionError("query must be non-empty")
-        bound = self._read_bound()
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= bound:
+        needle = query.strip()
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= self._max_events:
             raise SessionCompactionError("limit is out of bounds")
         ranges = []
-        for event in self._repository.search(
-            session_id=session_id, event_type="compaction.completed", limit=bound,
-        ):
+        for event in self._summaries(session_id):
             source = event.payload.get("source_range")
             if isinstance(source, Mapping):
                 start, end = source.get("start_sequence"), source.get("end_sequence")
@@ -497,21 +554,33 @@ class SessionCompactionService:
                     isinstance(start, int) and isinstance(end, int)
                     and not isinstance(start, bool) and not isinstance(end, bool)
                 ):
-                    ranges.append((start, end, event.event_id))
-        matches = []
-        for event in self._repository.search(
-            session_id=session_id, text=query.strip(), limit=bound,
-        ):
+                    ranges.append((event.sequence, start, end, event.event_id))
+        ranges.sort(reverse=True)
+        candidates = self._complete_search(session_id, text=needle)
+        if candidates is None:
+            candidates = self._scan(session_id)
+        literal = []
+        for event in candidates:
             if event.event_type in {"compaction.completed", "context.archive.created"}:
                 continue
-            covering = next(
-                (event_id for start, end, event_id in ranges if start <= event.sequence <= end),
-                None,
+            stored = json.dumps(
+                _json_value(event.payload), ensure_ascii=False,
+                sort_keys=True, separators=(",", ":"),
             )
-            matches.append(CompactedMatch(event, covering))
-            if len(matches) == limit:
-                break
-        return tuple(matches)
+            if needle in stored:
+                literal.append(event)
+        literal.sort(key=lambda event: event.sequence, reverse=True)
+        return tuple(
+            CompactedMatch(
+                event,
+                next(
+                    (event_id for _, start, end, event_id in ranges
+                     if start <= event.sequence <= end),
+                    None,
+                ),
+            )
+            for event in literal[:limit]
+        )
 
     @staticmethod
     def _history_event(event: SessionEvent) -> SessionHistoryEvent:
