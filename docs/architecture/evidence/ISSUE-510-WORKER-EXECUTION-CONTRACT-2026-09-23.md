@@ -10,15 +10,85 @@ criteria or declared command identity do not match the persisted contract.
 Terminal verification retains the criteria and declarations alongside the
 result record.
 
+## Context policy and ownership (second slice)
+
+The contract now also carries:
+
+- `context_policy` (`WorkerContextPolicy`): `inherit` requires one lowercase
+  SHA-256 `inherited_context_sha256`; `scoped` requires a non-empty list of
+  explicit `WorkerContextInput(reference, sha256)` values; `clean` forbids both;
+  `unspecified` (the legacy default) forbids both. A reference pinned to two
+  different digests is rejected.
+- `owned_files`: normalized paths the worker exclusively mutates (no `..`,
+  `\` folded to `/`, de-duplicated). `DelegationService.dispatch` requires each
+  owned file to be absolute and permitted by the child's write assignment
+  before registry admission or provider spawn.
+- `task_scope`: the logical task the worker owns, distinct from owned files and
+  from `WorkerLaunch.scope` (the readable workspace roots).
+- `speculative_lane`: an explicit opt-in that lets two active workers share a
+  `task_scope`; speculative lanes may not own files.
+
+`ContinuationWorkerRegistry.admit` rejects a new reservation with
+`DuplicateWorkerError` when an active child session already owns an
+overlapping owned path (equal or ancestor, compared case-insensitively) or the
+same non-speculative `task_scope`. Terminal children release ownership. All
+contract fields persist as canonical `execution_*` metadata in the single
+`durable_child_session` row; rows written by the first slice (criteria and
+commands only) restore with `unspecified` policy, and any malformed field fails
+closed with `WorkerRegistryError`. Terminal verification records the policy,
+input digests, inherited digest, owned files, and task scope. Integration also
+rejects a request whose contract (including the inherited-context digest)
+differs from the persisted one.
+
 Evidence:
 
 - `sonder_runtime/application/ports/worker_registry.py`
 - `sonder_runtime/application/agents/lineage_delegation.py`
 - `sonder_runtime/application/agents/delegation_service.py`
 - `sonder_runtime/application/worker_registry/continuation.py`
-- `tests/test_continuation_worker_registry.py`
-- `python -m pytest tests/test_worker_registry.py tests/test_remaining_agent_004_008_009.py tests/test_continuation_worker_registry.py -q` (`21 passed`)
-- `python -m pytest tests/test_delegated_verification.py tests/test_remaining_agent_010.py tests/test_workflows.py -q` (`46 passed`)
+- `tests/test_continuation_worker_registry.py` (41 tests, including 10
+  validation cases, restart round-trip, inherited-digest drift, owned-file
+  write-assignment gate, owned-file overlap, task-scope/speculative lanes,
+  legacy rows, and 7 malformed-metadata cases)
+- `python -m pytest -p no:cacheprovider -q tests/test_worker_registry.py tests/test_remaining_agent_004_008_009.py tests/test_continuation_worker_registry.py tests/test_delegated_verification.py tests/test_remaining_agent_010.py tests/test_workflows.py`
+  (`97 passed`)
+- Load-bearing check: disabling the active-session scan in
+  `_reject_ownership_conflict` fails the overlap and task-scope tests; removing
+  the dispatch owned-file checks fails both write-assignment cases.
+
+## Atomic launch/start/checkpoint/finish
+
+Current single-store facts (verified by reading the code, not by a new test):
+reservation (`admit` -> `create`), start, checkpoint (`save_checkpoint` with
+`expected_sequence`), terminal result, and `record_verification` are all
+mutations of one `durable_child_session` row in `child-sessions.db`, each a
+single `BEGIN IMMEDIATE` prepared mutation with revision/sequence
+compare-and-set and `reconcile` for commit-ambiguous writes. The worker
+lifecycle therefore needs no cross-database transaction.
+
+The remaining cross-store gap is the subagent effect journal
+(`worker-effects.db`, run id `subagent:<child_id>`), which ADR-003 keeps in a
+separate file. A crash between a journaled effect outcome and the next child
+checkpoint leaves the journal ahead of the checkpoint. Designed saga (not
+implemented here because it touches `effect_journal.py` and
+`worker_bindings.py`, owned by the PR #523 lane):
+
+1. Before each checkpoint CAS, the runner reads the journal's settled
+   high-water sequence for its run and stores it as `effect_high_water` in the
+   checkpoint state (same CAS as the checkpoint; no second write).
+2. On resume or `recover_after_restart`, journal records above the persisted
+   high-water are classified: settled records with receipts are replayed by
+   idempotency key (returning the stored receipt, never re-invoking); intents
+   without an outcome or marked uncertain set `recovery_required` and refuse
+   restart, which `AuthenticatedWorkerBinding.recover_before_restart` already
+   enforces for uncertain effects.
+3. A terminal success is written only when the journal holds no unresolved
+   intents for the run; otherwise the child is finished with
+   `recovery_required=True` and needs the explicit resume path.
+
+Required dependency: a read-only journal API returning the settled high-water
+sequence for one run id. Until it exists, checkpoints do not bind the journal
+position.
 
 Limitations:
 
@@ -27,5 +97,12 @@ Limitations:
   receipt. Supplied tuples therefore do not prove that a command ran or passed.
   A later verifier integration must provide that authority in the appropriate
   workspace.
+- Context inputs and the inherited-context digest are declared and durably
+  bound, but this slice does not compute or re-hash the parent context or input
+  contents; the caller supplies the digests.
+- Owned-file and task-scope exclusivity is serialized by a process-wide lock
+  around the active-session scan and create. Stable-key uniqueness remains an
+  atomic SQLite check, but ownership exclusivity is not a database constraint,
+  so two processes sharing one `child-sessions.db` could still race.
 - Hosted CI, external provider qualification, and post-merge evidence remain
   unverified.

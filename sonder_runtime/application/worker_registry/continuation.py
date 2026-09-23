@@ -13,6 +13,7 @@ from collections.abc import Mapping
 import json
 import os
 import platform
+import threading
 
 from sonder_runtime.application.ports.continuation_records import (
     ChildSessionLineage,
@@ -33,6 +34,8 @@ from sonder_runtime.application.ports.worker_registry import (
     WorkerRecord,
     WorkerRegistry,
     WorkerRegistryError,
+    WorkerContextInput,
+    WorkerContextPolicy,
     WorkerExecutionContract,
     WorkerStatus,
 )
@@ -43,6 +46,7 @@ from sonder_runtime.application.owner_process import recorded_owner_is_dead
 
 
 _RESERVATION_MARKER = "worker_registry_admitted"
+_ADMISSION_LOCK = threading.Lock()
 
 
 def _metadata(request: SubagentRequest) -> dict[str, str]:
@@ -83,18 +87,82 @@ def _budget(launch: WorkerLaunch) -> SubagentBudget:
         raise WorkerRegistryError("worker launch budget is invalid") from exc
 
 
+_CONTRACT_KEYS = frozenset((
+    "execution_success_criteria",
+    "execution_verification_commands",
+    "execution_context_policy",
+    "execution_context_inputs",
+    "execution_inherited_context_sha256",
+    "execution_owned_files",
+    "execution_task_scope",
+    "execution_speculative_lane",
+))
+
+
+def _compact(value: object) -> str:
+    return json.dumps(value, separators=(",", ":"), sort_keys=True)
+
+
+def _contract_metadata(contract: WorkerExecutionContract) -> tuple[tuple[str, str], ...]:
+    """Serialize a requested contract into canonical child-session metadata."""
+    if not contract.requested:
+        return ()
+    return (
+        ("execution_success_criteria", _compact(contract.success_criteria)),
+        ("execution_verification_commands", _compact(contract.verification_commands)),
+        ("execution_context_policy", contract.context_policy.value),
+        ("execution_context_inputs", _compact([[item.reference, item.sha256] for item in contract.context_inputs])),
+        ("execution_inherited_context_sha256", contract.inherited_context_sha256),
+        ("execution_owned_files", _compact(contract.owned_files)),
+        ("execution_task_scope", contract.task_scope),
+        ("execution_speculative_lane", "true" if contract.speculative_lane else "false"),
+    )
+
+
+def _string_list(raw: object) -> list[str]:
+    if type(raw) is not list or any(type(item) is not str for item in raw):
+        raise ValueError("execution contract JSON shape is invalid")
+    return raw
+
+
+def _contract_from_metadata(metadata: Mapping[str, str]) -> WorkerExecutionContract:
+    """Rebuild a persisted contract; any malformed field fails closed."""
+    try:
+        criteria = _string_list(json.loads(metadata.get("execution_success_criteria", "[]")))
+        raw_commands = json.loads(metadata.get("execution_verification_commands", "[]"))
+        if type(raw_commands) is not list or any(not _string_list(command) for command in raw_commands):
+            raise ValueError("execution contract JSON shape is invalid")
+        raw_inputs = json.loads(metadata.get("execution_context_inputs", "[]"))
+        if type(raw_inputs) is not list or any(len(_string_list(item)) != 2 for item in raw_inputs):
+            raise ValueError("execution context inputs JSON shape is invalid")
+        owned = _string_list(json.loads(metadata.get("execution_owned_files", "[]")))
+        speculative = metadata.get("execution_speculative_lane", "false")
+        if speculative not in {"true", "false"}:
+            raise ValueError("execution speculative lane flag is invalid")
+        return WorkerExecutionContract(
+            success_criteria=tuple(criteria),
+            verification_commands=tuple(tuple(command) for command in raw_commands),
+            context_policy=WorkerContextPolicy(
+                metadata.get("execution_context_policy", WorkerContextPolicy.UNSPECIFIED.value)
+            ),
+            context_inputs=tuple(WorkerContextInput(reference, digest) for reference, digest in raw_inputs),
+            inherited_context_sha256=metadata.get("execution_inherited_context_sha256", ""),
+            owned_files=tuple(owned),
+            task_scope=metadata.get("execution_task_scope", ""),
+            speculative_lane=speculative == "true",
+        )
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise WorkerRegistryError("persisted worker execution contract is invalid") from exc
+
+
 def _request_for(launch: WorkerLaunch) -> SubagentRequest:
     if not launch.prompt.strip():
         raise WorkerRegistryError("composed worker launch requires a prompt")
     if not launch.owner_id.strip():
         raise WorkerRegistryError("composed worker launch requires an owner")
-    contract_metadata = ()
-    if launch.execution_contract.success_criteria or launch.execution_contract.verification_commands:
-        contract_metadata = (
-            ("execution_success_criteria", json.dumps(launch.execution_contract.success_criteria, separators=(",", ":"))),
-            ("execution_verification_commands", json.dumps(launch.execution_contract.verification_commands, separators=(",", ":"))),
-        )
-    metadata = (tuple(launch.metadata) + contract_metadata) if launch.metadata else (
+    contract_metadata = _contract_metadata(launch.execution_contract)
+    caller_metadata = tuple(item for item in launch.metadata if item[0] not in _CONTRACT_KEYS)
+    metadata = (caller_metadata + contract_metadata) if launch.metadata else (
         (_RESERVATION_MARKER, "true"),
         ("worker_role", launch.role),
         ("model", launch.model),
@@ -207,8 +275,7 @@ class ContinuationWorkerRegistry(WorkerRegistry):
                         for key in set(current_metadata) | set(requested_metadata)
                         if key not in {
                             "owner_nonce", "owner_pid", "owner_host", "worker_id", "request_digest",
-                            "execution_success_criteria", "execution_verification_commands",
-                        }
+                        } | _CONTRACT_KEYS
                     )
                 )
                 owner_only_difference = stable_scope_match
@@ -242,16 +309,34 @@ class ContinuationWorkerRegistry(WorkerRegistry):
             launch.parent_id,
             () if parent_is_root else (parent.lineage.chain if parent else ()),
         )
-        try:
-            created = self._repository.create(DurableChildSession(request, lineage))
-        except InvalidSubagentRequest as exc:
-            # The repository performs the atomic key check.  Re-read only to
-            # classify the conflict; never retry the create.
-            active = self._repository.get_active_by_key(launch.parent_id, launch.resume_key, "resume")
-            if active is not None:
-                raise DuplicateWorkerError("active worker resume key already exists") from exc
-            raise WorkerRegistryError("worker admission was rejected by durable child storage") from exc
+        # Owned-file/task exclusivity is checked and the reservation created
+        # under one process-wide lock.  Stable-key uniqueness remains the
+        # repository's atomic SQLite check; ownership exclusivity is serialized
+        # only within this process (see ISSUE-510 worker contract evidence).
+        with _ADMISSION_LOCK:
+            self._reject_ownership_conflict(launch)
+            try:
+                created = self._repository.create(DurableChildSession(request, lineage))
+            except InvalidSubagentRequest as exc:
+                # The repository performs the atomic key check.  Re-read only to
+                # classify the conflict; never retry the create.
+                active = self._repository.get_active_by_key(launch.parent_id, launch.resume_key, "resume")
+                if active is not None:
+                    raise DuplicateWorkerError("active worker resume key already exists") from exc
+                raise WorkerRegistryError("worker admission was rejected by durable child storage") from exc
         return self._project(created)
+
+    def _reject_ownership_conflict(self, launch: WorkerLaunch) -> None:
+        """Refuse a second active worker for the same owned files or task."""
+        contract = launch.execution_contract
+        if not contract.owned_files and not contract.task_scope:
+            return
+        for session in self._repository.list_active():
+            if session.request.child_id == launch.worker_id:
+                continue
+            reason = contract.conflicts_with(_contract_from_metadata(_metadata(session.request)))
+            if reason:
+                raise DuplicateWorkerError(reason)
 
     def get(self, worker_id: str) -> WorkerRecord | None:
         record = self._repository.get(worker_id)
@@ -310,26 +395,7 @@ class ContinuationWorkerRegistry(WorkerRegistry):
         scope = tuple(filter(None, metadata.get("scope", "").split("|")))
         tools = tuple(filter(None, metadata.get("allowed_tools", "").split("|")))
         max_attempts = int(metadata.get("retry_max_attempts", "1"))
-        try:
-            raw_criteria = json.loads(metadata.get("execution_success_criteria", "[]"))
-            raw_commands = json.loads(metadata.get("execution_verification_commands", "[]"))
-            if (
-                type(raw_criteria) is not list
-                or any(type(item) is not str for item in raw_criteria)
-                or type(raw_commands) is not list
-                or any(
-                    type(command) is not list
-                    or not command
-                    or any(type(argument) is not str for argument in command)
-                    for command in raw_commands
-                )
-            ):
-                raise ValueError("execution contract JSON shape is invalid")
-            execution_contract = WorkerExecutionContract(
-                tuple(raw_criteria), tuple(tuple(item) for item in raw_commands)
-            )
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise WorkerRegistryError("persisted worker execution contract is invalid") from exc
+        execution_contract = _contract_from_metadata(metadata)
         launch = WorkerLaunch(
             worker_id=session.request.child_id or "",
             parent_id=session.request.parent_id,

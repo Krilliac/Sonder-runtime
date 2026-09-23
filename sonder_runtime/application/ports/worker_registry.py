@@ -50,12 +50,84 @@ def _text(value: str, name: str) -> str:
     return value.strip()
 
 
+class WorkerContextPolicy(str, Enum):
+    """How much parent context a worker is allowed to start from.
+
+    ``UNSPECIFIED`` preserves legacy launches that never declared a policy and
+    therefore may not carry context inputs or an inherited-context digest.
+    ``INHERIT`` binds the child to one exact parent-context digest, ``SCOPED``
+    requires an explicit, digest-pinned input list, and ``CLEAN`` forbids both.
+    """
+
+    UNSPECIFIED = "unspecified"
+    INHERIT = "inherit"
+    SCOPED = "scoped"
+    CLEAN = "clean"
+
+
+_MAX_CONTRACT_ITEMS = 64
+
+
+def _sha256_hex(value: str, name: str) -> str:
+    if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+        raise WorkerRegistryError(f"{name} must be a lowercase sha256 hex digest")
+    return value
+
+
+def _owned_path(value: str) -> str:
+    text = _text(value, "owned file").replace("\\", "/")
+    if len(text) > 512:
+        raise WorkerRegistryError("owned file exceeds its bound")
+    parts = [part for part in text.split("/") if part not in ("", ".")]
+    if ".." in parts:
+        raise WorkerRegistryError("owned file must not traverse with '..'")
+    if not parts:
+        raise WorkerRegistryError("owned file must name a path")
+    return ("/" if text.startswith("/") else "") + "/".join(parts)
+
+
+def owned_paths_overlap(left: str, right: str) -> bool:
+    """Return true when one owned path equals or contains the other.
+
+    Comparison is case-insensitive so a case-only spelling difference on a
+    case-insensitive filesystem fails closed as an overlap.
+    """
+    a, b = left.casefold(), right.casefold()
+    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerContextInput:
+    """One explicit, content-pinned context input handed to a worker."""
+
+    reference: str
+    sha256: str
+
+    def __post_init__(self) -> None:
+        reference = _text(self.reference, "context input reference")
+        if len(reference) > 512:
+            raise WorkerRegistryError("context input reference exceeds its bound")
+        object.__setattr__(self, "reference", reference)
+        object.__setattr__(self, "sha256", _sha256_hex(self.sha256, "context input sha256"))
+
+
 @dataclass(frozen=True, slots=True)
 class WorkerExecutionContract:
-    """Typed, durable proof requirements for one worker terminal result."""
+    """Typed, durable proof requirements for one worker terminal result.
+
+    ``owned_files`` are the paths this worker exclusively mutates; they are
+    distinct from ``task_scope`` (the logical task identity it owns) and from
+    ``WorkerLaunch.scope`` (the workspace roots it may read).
+    """
 
     success_criteria: tuple[str, ...] = ()
     verification_commands: tuple[tuple[str, ...], ...] = ()
+    context_policy: WorkerContextPolicy = WorkerContextPolicy.UNSPECIFIED
+    context_inputs: tuple[WorkerContextInput, ...] = ()
+    inherited_context_sha256: str = ""
+    owned_files: tuple[str, ...] = ()
+    task_scope: str = ""
+    speculative_lane: bool = False
 
     def __post_init__(self) -> None:
         criteria = tuple(sorted({_text(value, "success criterion") for value in self.success_criteria}))
@@ -71,6 +143,71 @@ class WorkerExecutionContract:
             commands.append(argv)
         object.__setattr__(self, "success_criteria", criteria)
         object.__setattr__(self, "verification_commands", tuple(commands))
+        try:
+            policy = WorkerContextPolicy(self.context_policy)
+        except ValueError as exc:
+            raise WorkerRegistryError("context_policy must be inherit, scoped, or clean") from exc
+        object.__setattr__(self, "context_policy", policy)
+        inputs: dict[str, WorkerContextInput] = {}
+        for item in self.context_inputs:
+            if not isinstance(item, WorkerContextInput):
+                raise WorkerRegistryError("context inputs must be WorkerContextInput values")
+            prior = inputs.get(item.reference)
+            if prior is not None and prior.sha256 != item.sha256:
+                raise WorkerRegistryError("context input reference is pinned to conflicting digests")
+            inputs[item.reference] = item
+        ordered_inputs = tuple(inputs[key] for key in sorted(inputs))
+        inherited = self.inherited_context_sha256
+        if inherited:
+            inherited = _sha256_hex(inherited, "inherited_context_sha256")
+        if policy is WorkerContextPolicy.INHERIT and not inherited:
+            raise WorkerRegistryError("inherit context policy requires inherited_context_sha256")
+        if policy is not WorkerContextPolicy.INHERIT and inherited:
+            raise WorkerRegistryError("only inherit context policy may carry an inherited-context digest")
+        if policy is WorkerContextPolicy.SCOPED and not ordered_inputs:
+            raise WorkerRegistryError("scoped context policy requires explicit context inputs")
+        if policy in (WorkerContextPolicy.CLEAN, WorkerContextPolicy.UNSPECIFIED) and ordered_inputs:
+            raise WorkerRegistryError(f"{policy.value} context policy may not carry context inputs")
+        owned = tuple(sorted({_owned_path(value) for value in self.owned_files}))
+        task_scope = self.task_scope
+        if not isinstance(task_scope, str):
+            raise WorkerRegistryError("task_scope must be text")
+        task_scope = task_scope.strip()
+        if len(task_scope) > 512:
+            raise WorkerRegistryError("task_scope exceeds its bound")
+        if type(self.speculative_lane) is not bool:
+            raise WorkerRegistryError("speculative_lane must be a boolean")
+        if self.speculative_lane and owned:
+            raise WorkerRegistryError("speculative lanes may not own files")
+        for name, values in (
+            ("success criteria", criteria), ("verification commands", commands),
+            ("context inputs", ordered_inputs), ("owned files", owned),
+        ):
+            if len(values) > _MAX_CONTRACT_ITEMS:
+                raise WorkerRegistryError(f"{name} exceed the contract bound")
+        object.__setattr__(self, "context_inputs", ordered_inputs)
+        object.__setattr__(self, "inherited_context_sha256", inherited)
+        object.__setattr__(self, "owned_files", owned)
+        object.__setattr__(self, "task_scope", task_scope)
+
+    @property
+    def requested(self) -> bool:
+        """Whether any field differs from the empty legacy contract."""
+        return self != WorkerExecutionContract()
+
+    def conflicts_with(self, other: "WorkerExecutionContract") -> str:
+        """Return why two active contracts cannot run together, or ``""``."""
+        for mine in self.owned_files:
+            for theirs in other.owned_files:
+                if owned_paths_overlap(mine, theirs):
+                    return f"owned file {mine!r} overlaps active worker ownership {theirs!r}"
+        if (
+            self.task_scope
+            and self.task_scope == other.task_scope
+            and not (self.speculative_lane and other.speculative_lane)
+        ):
+            return f"task scope {self.task_scope!r} is already owned by an active worker"
+        return ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,4 +294,8 @@ class WorkerRegistry(Protocol):
     def get(self, worker_id: str) -> WorkerRecord | None: ...
 
 
-__all__ = ["ACTIVE_WORKER_STATUSES", "DuplicateWorkerError", "WorkerExecutionContract", "WorkerLaunch", "WorkerRecord", "WorkerRegistry", "WorkerRegistryError", "WorkerStatus"]
+__all__ = [
+    "ACTIVE_WORKER_STATUSES", "DuplicateWorkerError", "WorkerContextInput", "WorkerContextPolicy",
+    "WorkerExecutionContract", "WorkerLaunch", "WorkerRecord", "WorkerRegistry", "WorkerRegistryError",
+    "WorkerStatus", "owned_paths_overlap",
+]

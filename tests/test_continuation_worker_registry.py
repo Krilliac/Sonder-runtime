@@ -17,7 +17,9 @@ from sonder_runtime.application.ports.subagents import (
     SubagentResult, SubagentStatus, SubagentUsage,
 )
 from sonder_runtime.application.ports.worker_registry import DuplicateWorkerError, WorkerLaunch, WorkerRegistryError, WorkerStatus
-from sonder_runtime.application.ports.worker_registry import WorkerExecutionContract
+from sonder_runtime.application.ports.worker_registry import (
+    WorkerContextInput, WorkerContextPolicy, WorkerExecutionContract, owned_paths_overlap,
+)
 from sonder_runtime.application.agents.lineage_delegation import IntegrationError
 from sonder_runtime.application.subagents.durable_continuation import DurableContinuationService
 from sonder_runtime.application.worker_registry.continuation import ContinuationWorkerRegistry
@@ -489,6 +491,249 @@ def test_malformed_persisted_execution_contract_fails_closed(tmp_path, criteria_
             ("execution_success_criteria", criteria_json),
             ("execution_verification_commands", commands_json),
         ),
+        "resume-1", "idempotency-1",
+    )
+    repository.create(DurableChildSession(child, ChildSessionLineage("root-1")))
+    with pytest.raises(WorkerRegistryError, match="execution contract"):
+        ContinuationWorkerRegistry(repository).get("child-1")
+
+
+def _root_repository(path):
+    repository = SQLiteDurableContinuationRepository(path)
+    repository.create(DurableChildSession(
+        SubagentRequest(
+            "root-1", "provider root",
+            SubagentBudget(max_steps=30, max_output_tokens=6000, max_wall_seconds=600),
+            "root-1", (("provider_root", "true"),),
+        ),
+        ChildSessionLineage("root-1"),
+    ))
+    return repository
+
+
+_DIGEST_A = "a" * 64
+_DIGEST_B = "b" * 64
+
+
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"context_policy": "inherit"}, "inherited_context_sha256"),
+        ({"context_policy": "scoped"}, "explicit context inputs"),
+        ({"context_policy": "clean", "context_inputs": (WorkerContextInput("spec.md", _DIGEST_A),)}, "may not carry"),
+        ({"context_inputs": (WorkerContextInput("spec.md", _DIGEST_A),)}, "may not carry"),
+        ({"context_policy": "clean", "inherited_context_sha256": _DIGEST_A}, "only inherit"),
+        ({"context_policy": "inherit", "inherited_context_sha256": "ABC"}, "sha256"),
+        ({"context_policy": "sideways"}, "context_policy"),
+        (
+            {
+                "context_policy": "scoped",
+                "context_inputs": (WorkerContextInput("spec.md", _DIGEST_A), WorkerContextInput("spec.md", _DIGEST_B)),
+            },
+            "conflicting digests",
+        ),
+        ({"owned_files": ("src/../secrets.txt",)}, r"'\.\.'"),
+        ({"owned_files": ("src/a.py",), "speculative_lane": True}, "speculative lanes"),
+    ],
+)
+def test_execution_contract_context_and_ownership_validation(kwargs, match):
+    with pytest.raises(WorkerRegistryError, match=match):
+        WorkerExecutionContract(**kwargs)
+
+
+def test_execution_contract_normalizes_context_and_ownership():
+    contract = WorkerExecutionContract(
+        context_policy=WorkerContextPolicy.SCOPED,
+        context_inputs=(WorkerContextInput("b.md", _DIGEST_B), WorkerContextInput("a.md", _DIGEST_A)),
+        owned_files=("src\\pkg\\mod.py", "./src/pkg/mod.py", "docs/"),
+        task_scope="  issue-510 contract  ",
+    )
+    assert [item.reference for item in contract.context_inputs] == ["a.md", "b.md"]
+    assert contract.owned_files == ("docs", "src/pkg/mod.py")
+    assert contract.task_scope == "issue-510 contract"
+    assert contract.requested
+    assert not WorkerExecutionContract().requested
+    assert owned_paths_overlap("src/pkg", "SRC/pkg/mod.py")
+    assert not owned_paths_overlap("src/pkg", "src/pkg2")
+
+
+def test_full_contract_survives_restart_and_is_recorded_with_terminal_verification(tmp_path):
+    database = tmp_path / "full-contract.sqlite"
+    root = tmp_path / "repo"
+    write_root = root / "write"
+    owned = (write_root / "module.py").as_posix()
+    preset = resolve_preset("researcher")
+    workspace = WorkspaceAssignment((str(root),), (str(write_root),))
+    contract = WorkerExecutionContract(
+        success_criteria=("tests pass",),
+        verification_commands=(("python", "-m", "pytest", "-q"),),
+        context_policy="scoped",
+        context_inputs=(WorkerContextInput("docs/spec.md", _DIGEST_A),),
+        owned_files=(owned,),
+        task_scope="issue-510/contract",
+    )
+    lineage = LineageRecord("line-1", "root-1", "root-1", "child-1", 1, preset.name, preset.role, workspace)
+    request = DelegationRequest("delegation-1", lineage, "implement", preset, workspace, execution_contract=contract)
+    repository = _root_repository(database)
+    provider = RunnerBoundSubagentProvider(
+        DurableContinuationService(repository), lambda state, save, cancellation: "done"
+    )
+    service = DelegationService(provider, worker_registry=ContinuationWorkerRegistry(repository))
+    context = local_owner_context(correlation_id="delegation-1", workspace_roots=(root,))
+    assert service.dispatch(request, context).result(timeout=5).output == "done"
+    reopened_registry = ContinuationWorkerRegistry(SQLiteDurableContinuationRepository(database))
+    restored = reopened_registry.get("child-1")
+    assert restored is not None and restored.launch.execution_contract == contract
+    service.integrate(
+        request,
+        SubagentResult("child-1", "root-1", SubagentStatus.SUCCEEDED, output="done", usage=SubagentUsage(steps=1)),
+        verification=contract.success_criteria,
+        verification_commands=contract.verification_commands,
+    )
+    terminal = reopened_registry.get("child-1").terminal_verification
+    assert terminal["context_policy"] == "scoped"
+    assert terminal["context_inputs"] == (("docs/spec.md", _DIGEST_A),)
+    assert terminal["owned_files"] == (owned,)
+    assert terminal["task_scope"] == "issue-510/contract"
+
+
+def test_inherit_contract_mismatch_cannot_certify_result(tmp_path):
+    database = tmp_path / "inherit.sqlite"
+    root = tmp_path / "repo"
+    preset = resolve_preset("researcher")
+    workspace = WorkspaceAssignment((str(root),), ())
+    contract = WorkerExecutionContract(context_policy="inherit", inherited_context_sha256=_DIGEST_A)
+    lineage = LineageRecord("line-1", "root-1", "root-1", "child-1", 1, preset.name, preset.role, workspace)
+    request = DelegationRequest("delegation-1", lineage, "review", preset, workspace, execution_contract=contract)
+    repository = _root_repository(database)
+    provider = RunnerBoundSubagentProvider(
+        DurableContinuationService(repository), lambda state, save, cancellation: "done"
+    )
+    service = DelegationService(provider, worker_registry=ContinuationWorkerRegistry(repository))
+    context = local_owner_context(correlation_id="delegation-1", workspace_roots=(root,))
+    assert service.dispatch(request, context).result(timeout=5).output == "done"
+    result = SubagentResult("child-1", "root-1", SubagentStatus.SUCCEEDED, output="done", usage=SubagentUsage(steps=1))
+    drifted = replace(
+        request,
+        execution_contract=WorkerExecutionContract(context_policy="inherit", inherited_context_sha256=_DIGEST_B),
+    )
+    with pytest.raises(IntegrationError, match="does not match request"):
+        service.integrate(drifted, result)
+    service.integrate(request, result)
+
+
+@pytest.mark.parametrize("owned", ["relative/module.py", "OUTSIDE"])
+def test_owned_files_must_be_inside_write_assignment(tmp_path, owned):
+    root = tmp_path / "repo"
+    if owned == "OUTSIDE":
+        owned = (tmp_path / "elsewhere" / "module.py").as_posix()
+    preset = resolve_preset("researcher")
+    workspace = WorkspaceAssignment((str(root),), (str(root / "write"),))
+    contract = WorkerExecutionContract(owned_files=(owned,))
+    lineage = LineageRecord("line-1", "root-1", "root-1", "child-1", 1, preset.name, preset.role, workspace)
+    request = DelegationRequest("delegation-1", lineage, "implement", preset, workspace, execution_contract=contract)
+
+    class Registry:
+        def admit(self, launch):
+            raise AssertionError("ownership must be validated before admission")
+
+    class Provider:
+        def spawn(self, request, context):
+            raise AssertionError("ownership must be validated before spawn")
+
+    service = DelegationService(Provider(), worker_registry=Registry())
+    with pytest.raises(IntegrationError, match="owned file"):
+        service.dispatch(request, local_owner_context(correlation_id="d", workspace_roots=(root,)))
+
+
+def _owned_launch(root, worker_id, key, contract):
+    return replace(
+        _launch(root, worker_id=worker_id),
+        parent_id="root-1", resume_key=key, idempotency_key=key, execution_contract=contract,
+    )
+
+
+def test_active_owned_file_overlap_rejects_second_worker_until_first_is_terminal(tmp_path):
+    repository = _root_repository(tmp_path / "owned.sqlite")
+    registry = ContinuationWorkerRegistry(repository)
+    first = _owned_launch(tmp_path / "repo", "child-1", "task-1", WorkerExecutionContract(owned_files=("/repo/src/pkg",)))
+    registry.admit(first)
+    overlapping = _owned_launch(
+        tmp_path / "repo", "child-2", "task-2", WorkerExecutionContract(owned_files=("/repo/src/pkg/mod.py",))
+    )
+    with pytest.raises(DuplicateWorkerError, match="overlaps"):
+        registry.admit(overlapping)
+    assert repository.get("child-2") is None
+    disjoint = _owned_launch(
+        tmp_path / "repo", "child-3", "task-3", WorkerExecutionContract(owned_files=("/repo/src/pkg2/mod.py",))
+    )
+    assert registry.admit(disjoint).status is WorkerStatus.QUEUED
+
+    service = DurableContinuationService(repository)
+    handle = service.spawn(
+        repository.get("child-1").request,
+        local_owner_context(correlation_id="task-1", workspace_roots=(tmp_path / "repo",)),
+        lambda state, save, cancellation: "released",
+    )
+    assert handle.result(timeout=5).output == "released"
+    assert registry.admit(overlapping).status is WorkerStatus.QUEUED
+
+
+def test_duplicate_task_scope_requires_both_lanes_to_be_speculative(tmp_path):
+    repository = _root_repository(tmp_path / "task.sqlite")
+    registry = ContinuationWorkerRegistry(repository)
+    registry.admit(_owned_launch(
+        tmp_path / "repo", "child-1", "task-1",
+        WorkerExecutionContract(task_scope="issue-510", speculative_lane=True),
+    ))
+    with pytest.raises(DuplicateWorkerError, match="task scope"):
+        registry.admit(_owned_launch(
+            tmp_path / "repo", "child-2", "task-2", WorkerExecutionContract(task_scope="issue-510"),
+        ))
+    speculative = registry.admit(_owned_launch(
+        tmp_path / "repo", "child-3", "task-3",
+        WorkerExecutionContract(task_scope="issue-510", speculative_lane=True),
+    ))
+    assert speculative.launch.execution_contract.speculative_lane is True
+
+
+def test_legacy_two_key_contract_rows_still_restore(tmp_path):
+    repository = _root_repository(tmp_path / "legacy.sqlite")
+    child = SubagentRequest(
+        "root-1", "worker prompt", SubagentBudget(max_steps=8), "child-1",
+        (
+            ("worker_registry_admitted", "true"),
+            ("worker_role", "researcher"),
+            ("owner_id", "owner"),
+            ("worker_id", "child-1"),
+            ("execution_success_criteria", '["tests pass"]'),
+            ("execution_verification_commands", '[["pytest","-q"]]'),
+        ),
+        "resume-1", "idempotency-1",
+    )
+    repository.create(DurableChildSession(child, ChildSessionLineage("root-1")))
+    record = ContinuationWorkerRegistry(repository).get("child-1")
+    assert record.launch.execution_contract == WorkerExecutionContract(("tests pass",), (("pytest", "-q"),))
+    assert record.launch.execution_contract.context_policy is WorkerContextPolicy.UNSPECIFIED
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("execution_context_policy", "sideways"),
+        ("execution_context_inputs", '[["spec.md"]]'),
+        ("execution_context_inputs", '[["spec.md","not-a-digest"]]'),
+        ("execution_owned_files", '"src/a.py"'),
+        ("execution_owned_files", '["../escape"]'),
+        ("execution_speculative_lane", "yes"),
+        ("execution_inherited_context_sha256", "a" * 64),
+    ],
+)
+def test_malformed_persisted_context_contract_fails_closed(tmp_path, key, value):
+    repository = _root_repository(tmp_path / "malformed-context.sqlite")
+    child = SubagentRequest(
+        "root-1", "worker prompt", SubagentBudget(max_steps=8), "child-1",
+        (("worker_registry_admitted", "true"), ("owner_id", "owner"), ("worker_id", "child-1"), (key, value)),
         "resume-1", "idempotency-1",
     )
     repository.create(DurableChildSession(child, ChildSessionLineage("root-1")))

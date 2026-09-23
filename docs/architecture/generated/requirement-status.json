@@ -194,9 +194,9 @@
     },
     {
       "checked": false,
-      "claim": "Structured delegation validates lineage, workspace, budgets, and result evidence.",
+      "claim": "Structured delegation validates lineage, workspace, budgets, and result evidence; delegated workers also carry a durable typed execution contract: success criteria, argv verification commands, inherit/scoped/clean context policy with digest-pinned inputs or inherited-context hash, owned files distinct from task scope, and an explicit speculative-lane flag; dispatch gates owned files to the write assignment, admission rejects overlapping active ownership, and integration fails closed on contract drift.",
       "requirement_id": "AGENT-009",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "6de57af4e57d8869d863a0c1357735c752390c27eafe4156d681cea84665f496",
+    "ledger_sha256": "95b0d5b3d1037e396a675ec309d74469166a603264c665b2373c4b72513f52d2",
     "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
   }
 }
