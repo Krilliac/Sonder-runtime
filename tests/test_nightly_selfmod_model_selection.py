@@ -8,6 +8,27 @@ from scripts import nightly_selfmod
 class _FakeServer:
     def __init__(self):
         self.calls = []
+        self.BASE = "http://127.0.0.1:11434"
+        self.OLLAMA_POOL = type(
+            "BrokenRemotePool", (),
+            {"request": lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("remote pool must not be used"))},
+        )()
+
+    class ollama_endpoint:
+        @staticmethod
+        def is_loopback(base):
+            return True
+
+        @staticmethod
+        def open_url(request, timeout, allow_remote):
+            import json
+            class Response:
+                def __enter__(self): return self
+                def __exit__(self, *_args): return False
+                def read(self, _limit):
+                    return json.dumps({"models": [{"name": "qwen2.5-coder:14b"}]}).encode()
+            return Response()
 
     def ensemble_answer(self, prompt, *, tiers, num_predict, mode, **kwargs):
         call = {
@@ -23,10 +44,6 @@ class _FakeServer:
     @staticmethod
     def _is_cloud_model_name(model):
         return str(model).endswith(":cloud")
-
-    @staticmethod
-    def resolve_discovered_model(model):
-        return model if model == "qwen2.5-coder:14b" else None
 
     def _make_generate(self, model, _system, _temperature, num_predict, num_ctx, **kwargs):
         self.calls.append({"gateway_model": model, "gateway_num_predict": num_predict,
