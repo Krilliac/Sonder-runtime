@@ -243,6 +243,6 @@ def test_timeout_is_blocked(tmp_path):
 
 
 def test_evidence_class_is_serializable():
-    scenario = Scenario("natural", "progression", (sys.executable, "-c", "pass"), EvidenceClass.NATURAL)
+    scenario = Scenario("normal-flow", "application flow", (sys.executable, "-c", "pass"), EvidenceClass.NORMAL_FLOW)
     report = ScenarioValidationRunner(ProcessAdapter()).run([scenario], commit_sha="c" * 40)[0]
     assert json.dumps(report.as_dict(), sort_keys=True)

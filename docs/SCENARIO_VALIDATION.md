@@ -41,7 +41,7 @@ An adapter should expose one bounded command for one observable claim. A
 browser adapter, for example, may reuse a healthy local server, open one
 isolated browser context, perform one setup/action/assertion sequence, capture
 artifacts, report console or page errors, and close the context. It should
-classify evidence as `natural`, `GM-accelerated`, `seeded`, or `structural
+classify evidence as `normal flow`, `operator assisted`, `seeded`, or `structural
 only`, and stop after the configured failure ceiling. Browser automation and
 other application-specific behavior remain the responsibility of the supplied
 adapter; this package supplies the bounded runner, evidence contract, and
