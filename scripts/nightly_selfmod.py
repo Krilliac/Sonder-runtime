@@ -193,7 +193,10 @@ def _regression_command(py: str, *, ignore_paths=()) -> list[str]:
     # A single failing regression is enough to reject this candidate. Stop
     # promptly instead of spending the entire nightly budget collecting the
     # same infrastructure failure thousands of times.
-    command = [py, "-m", "pytest", "-q", "--maxfail=1"]
+    # Verbose collection/test progress is intentional: the low-integrity
+    # supervisor retains only a bounded tail, and quiet xdist output left a
+    # 900-second timeout with no indication whether pytest had started.
+    command = [py, "-m", "pytest", "-vv", "--maxfail=1"]
     if probe.returncode == 0:
         command.extend(["-n", "4", "--dist", "load"])
     ignored = list(_LOW_SUPERVISOR_TESTS)

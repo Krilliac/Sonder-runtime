@@ -149,8 +149,42 @@ def test_low_child_timeout_keeps_interim_diagnostic(tmp_path):
     assert _child(spec) == 124
     assert time.monotonic() - started < 10
     assert b"started" in output.read_bytes()
+    assert b"SELFMOD LOW TIMEOUT DIAGNOSTIC" in output.read_bytes()
+    assert json.loads(result.read_text(encoding="utf-8"))["diagnostic"].startswith(
+        "SELFMOD LOW TIMEOUT DIAGNOSTIC: phase=child-output"
+    )
     details = json.loads(result.read_text(encoding="utf-8"))
     assert details["timed_out"] is True
+
+
+def test_timeout_diagnostic_is_content_free_for_a_quiet_hung_child():
+    from scripts.selfmod_low_integrity import _timeout_diagnostic
+
+    marker = _timeout_diagnostic(b"")
+    assert marker == (
+        "\nSELFMOD LOW TIMEOUT DIAGNOSTIC: phase=unknown; output_tail_bytes=0\n"
+    )
+    assert "prompt" not in marker.casefold()
+
+
+def test_timeout_diagnostic_classifies_progress_without_retaining_test_names():
+    from scripts.selfmod_low_integrity import _timeout_diagnostic
+
+    marker = _timeout_diagnostic(b"collecting ...\ntests/test_secret.py::test_x PASSED\n")
+    assert "phase=test-progress" in marker
+    assert "test_secret" not in marker
+
+
+def test_timeout_marker_preserves_tail_bound_under_noisy_hung_child(tmp_path):
+    from scripts.selfmod_low_integrity import _child
+
+    command = [sys.executable, "-c", (
+        "import sys,time; sys.stdout.write('x'*200000); sys.stdout.flush(); time.sleep(30)"
+    )]
+    spec, output, result = _child_spec(tmp_path, command, timeout=1)
+    assert _child(spec) == 124
+    assert output.stat().st_size <= 120_000
+    assert b"SELFMOD LOW TIMEOUT DIAGNOSTIC" in output.read_bytes()
 
 
 def test_low_child_refuses_success_when_output_drain_fails(tmp_path, monkeypatch):
