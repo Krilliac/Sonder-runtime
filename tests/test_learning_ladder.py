@@ -42,6 +42,22 @@ def test_repeated_same_source_does_not_count_as_independent_evidence():
     assert decision.independent_sources == ("same",)
 
 
+def test_observation_replay_is_idempotent_and_identity_conflict_fails_closed():
+    first = obs(1, "source-a")
+    replay = LearningLadder().evaluate([first, first])[0]
+    assert replay.stage is LearningStage.CANDIDATE
+    assert replay.observation_ids == ("obs-1",)
+    assert replay.independent_sources == ("source-a",)
+
+    conflicting = obs(1, "source-b")
+    try:
+        LearningLadder().evaluate([first, conflicting])
+    except ValueError as exc:
+        assert "conflicting learning observation identity" in str(exc)
+    else:
+        raise AssertionError("one observation ID must not count as independent sources")
+
+
 def test_untrusted_evidence_cannot_promote_and_contradiction_demotes():
     untrusted = LearningLadder().evaluate([obs(1, "a", trusted=False), obs(2, "b", trusted=False)])[0]
     assert untrusted.stage is LearningStage.CANDIDATE

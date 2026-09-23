@@ -92,9 +92,16 @@ class LearningLadder:
 
     def evaluate(self, observations: Iterable[LearningObservation]) -> tuple[LearningDecision, ...]:
         grouped: dict[str, list[LearningObservation]] = {}
+        by_id: dict[str, LearningObservation] = {}
         for index, observation in enumerate(observations):
             if index >= MAX_OBSERVATIONS:
                 raise ValueError("too many learning observations")
+            previous = by_id.get(observation.observation_id)
+            if previous is not None:
+                if previous != observation:
+                    raise ValueError("conflicting learning observation identity")
+                continue
+            by_id[observation.observation_id] = observation
             grouped.setdefault(observation.content_key, []).append(observation)
         decisions: list[LearningDecision] = []
         for key, values in grouped.items():
