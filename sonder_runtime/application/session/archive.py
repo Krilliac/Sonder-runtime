@@ -116,6 +116,9 @@ class SessionContextArchiveService:
         if not isinstance(reason, str) or not reason.strip() or len(reason) > 128:
             raise InvalidInput("archive reason must be bounded text")
         encoded = _canonical(dict(event.payload))
+        existing = self._existing_reference(event, encoded)
+        if existing is not None:
+            return existing
         reference = ArchiveReference(
             archive_id=archive_id or self._event_id_factory(),
             session_id=event.session_id,
@@ -136,6 +139,39 @@ class SessionContextArchiveService:
             event_id=reference.archive_id,
         )
         return reference
+
+    def _existing_reference(
+        self, event: SessionEvent, encoded: bytes
+    ) -> ArchiveReference | None:
+        """Return an already committed, verified pointer for this source."""
+        matches = self._repository.search(
+            session_id=event.session_id,
+            event_type="context.archive.created",
+            text=event.event_id,
+            limit=min(self._max_items, getattr(self._repository, "_max_read_limit", self._max_items)),
+        )
+        digest = hashlib.sha256(encoded).hexdigest()
+        for candidate in matches:
+            payload = candidate.payload
+            if (
+                payload.get("source_event_id") != event.event_id
+                or payload.get("source_sequence") != event.sequence
+                or payload.get("source_event_type") != event.event_type
+                or payload.get("sha256") != digest
+                or payload.get("byte_count") != len(encoded)
+                or not isinstance(payload.get("archive_id"), str)
+            ):
+                continue
+            return ArchiveReference(
+                archive_id=payload["archive_id"],
+                session_id=event.session_id,
+                source_event_id=event.event_id,
+                source_sequence=event.sequence,
+                source_event_type=event.event_type,
+                sha256=digest,
+                byte_count=len(encoded),
+            )
+        return None
 
     def prepare_context(
         self,
@@ -189,6 +225,13 @@ class SessionContextArchiveService:
             reference = self.archive_tool_output(event, archive_id=archive_id)
             references.append(reference)
             evicted.add(event.event_id)
+            # ``archive_tool_output`` may reuse an existing durable reference
+            # on a repeated request.  Bind the placeholder to that returned
+            # identity rather than the speculative id generated above.
+            placeholder["archive_id"] = reference.archive_id
+            placeholder["content"] = (
+                f"[tool output archived: {reference.archive_id}]"
+            )
             placeholders.append(placeholder)
             # The placeholder is model-visible context and therefore counts
             # toward the same budget as retained source payloads.  Archive
