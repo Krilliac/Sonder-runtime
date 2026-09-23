@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 
 import pytest
 
@@ -281,3 +282,39 @@ def test_session_append_rejects_one_oversized_payload(tmp_path):
 
     with pytest.raises(ValueError, match="payload exceeds"):
         repo.append("s1", "tool.result", {"content": "x" * (8 * 1024 * 1024)})
+
+
+def test_complete_recovery_uses_one_snapshot_during_concurrent_append(tmp_path):
+    database = tmp_path / "sessions.db"
+    repo = SQLiteSessionRepository(database, max_read_limit=256)
+    rows = []
+    previous_hash = None
+    payload = {"content": "x" * 300_000}
+    for index in range(200):
+        payload_json = repo._canonical_payload(payload)
+        event_id = f"seed-{index}"
+        occurred_at = "2026-01-01T00:00:00Z"
+        event_hash = repo._hash(
+            "s1", index + 1, event_id, "tool.requested", occurred_at,
+            payload_json, previous_hash,
+        )
+        rows.append(("s1", index + 1, event_id, "tool.requested", occurred_at,
+                     payload_json, previous_hash, event_hash))
+        previous_hash = event_hash
+    with sqlite3.connect(database) as connection:
+        connection.executemany("INSERT INTO session_event VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+
+    def append_more():
+        for index in range(32):
+            repo.append("s1", "tool.requested", payload, event_id=f"append-{index}")
+
+    writer = threading.Thread(target=append_more)
+    writer.start()
+    try:
+        recovered = repo.read_complete("s1", max_events=10_000)
+    except ValueError as exc:
+        assert "payload bytes exceed recovery bound" in str(exc)
+    else:
+        assert sum(len(repo._canonical_payload(event.payload).encode("utf-8")) for event in recovered) <= 64 * 1024 * 1024
+    writer.join(timeout=10)
+    assert not writer.is_alive()

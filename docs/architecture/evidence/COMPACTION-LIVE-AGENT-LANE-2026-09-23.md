@@ -29,9 +29,10 @@ corruption fail closed, a 10,001-event history exceeds the bounded recovery
 limit, per-event payloads cannot exceed 8 MiB, and a 257-event history with
 300 KiB payloads per event exceeds the 64 MiB total recovery ceiling before
 page materialization. Live continuation surfaces each bound as recoverable
-overflow.
+overflow. Concurrent appends are read from one SQLite snapshot, so preflight
+and materialization cannot observe different page sizes.
 The combined focused session, replay, compaction, lane, and production wiring
-suite passes with 102 tests.
+suite passes with 103 tests.
 
 The canary
 `test_live_request_compacts_canonical_tool_output_and_recovers_after_restart`
