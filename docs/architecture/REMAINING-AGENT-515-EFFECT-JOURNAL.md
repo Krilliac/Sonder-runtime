@@ -139,6 +139,55 @@ and `test_success_predicate_failure_after_effect_is_uncertain` failed before
 the fix (`state=intent`, `recover(...).action == "reattach"` path) and pass
 after it.
 
+## Read API for checkpoint binding (for the #510 worker-registry saga)
+
+PR #541 designed a saga to close this gap: `worker-effects.db` can be ahead
+of the last `child-sessions.db` checkpoint after a crash. That saga needs a
+read-only journal position. `SQLiteEffectJournal` now implements
+`EffectJournalReader`, which is defined in
+`sonder_runtime/application/execution/effect_journal.py`:
+
+- `settled_high_water(run_id: str) -> int` returns the largest sequence `S`
+  such that every intent of the run with `sequence <= S` is `completed` or
+  `failed`. It returns 0 when the run has no intents or its first intent is
+  unresolved. An `intent` or `uncertain` row caps the value just below itself,
+  and resolving that row advances the value. Sequences are allocated
+  contiguously per run, so this is `MIN(unresolved sequence) - 1`, or
+  `MAX(sequence)` when nothing is unresolved.
+- `effects_since(run_id: str, after_sequence: int, *, limit: int = 100,
+  worker_id: str | None = None) -> EffectJournalPage` returns a bounded list
+  of intents with `sequence > after_sequence`, in sequence order. The page has
+  these fields:
+  - `records`: full `EffectIntent` values, including state, idempotency key,
+    receipt key, and owner epoch.
+  - `high_water`: the maximum sequence for the whole run.
+  - `settled_high_water`: the settled sequence for the whole run. Both
+    high-water values ignore the `worker_id` filter.
+  - `truncated`: true when more records exist. The caller then pages with
+    `after_sequence=records[-1].sequence`.
+  - `unresolved`: a property listing the records in `intent` or `uncertain`
+    state.
+
+  All values come from one deferred SQLite read snapshot. `limit` must be in
+  `1..10000`, `after_sequence` must be an `int >= 0`, and invalid input raises
+  `EffectJournalError`.
+
+Neither method writes anything. They do not claim ownership or touch
+`recovery_required`. A test compares every journal, owner, and checkpoint row
+before and after reads made while a fence is set. The intended consumer flow
+from the #541 design is:
+
+1. Before each checkpoint CAS, store `settled_high_water(run_id)` as
+   `effect_high_water`.
+2. On resume, call `effects_since(run_id, effect_high_water)`. Settled records
+   map idempotency keys to stored receipts, and they are not re-invoked. Any
+   entry in `unresolved` means restart is refused through
+   `recover_before_restart`.
+
+Tests: `tests/test_effect_journal_reader.py`, 14 passed. A mutation check made
+`settled_high_water` ignore unresolved rows, and 4 of those tests failed. The
+source was then restored. This PR does not change any #541 files.
+
 Evidence:
 
 - `sonder_runtime/adapters/persistence/sqlite/effect_journal.py`
