@@ -938,7 +938,7 @@ def test_live_request_rejects_forged_extra_summary_fields_and_tampered_modalitie
         service._history(lane)
 
 
-def test_live_request_keeps_bounded_tail_gap_explicit_for_long_sessions(env):
+def test_live_request_keeps_protected_history_overflow_explicit_for_long_sessions(env):
     from sonder_runtime.application.agents.interactive_lanes import ContextHistoryOverflowError
 
     service, _, sessions, _, _, _ = env
@@ -950,13 +950,11 @@ def test_live_request_keeps_bounded_tail_gap_explicit_for_long_sessions(env):
             {"content": f"long-rationale-{index}"}, event_id=f"long-{index}",
         )
 
-    with pytest.raises(ContextHistoryOverflowError, match="canonical session tail omits"):
+    with pytest.raises(ContextHistoryOverflowError, match="protected session history exceeds"):
         service._history(lane)
 
 
-def test_live_request_rejects_tail_gap_hiding_an_earlier_model_decision(env):
-    from sonder_runtime.application.agents.interactive_lanes import ContextHistoryOverflowError
-
+def test_live_request_recovers_early_decision_when_tail_would_have_omitted_it(env):
     service, _, sessions, _, _, _ = env
     lane_id = spawn(env, command="compact-hidden-decision")["lane"]["id"]
     lane = service.store.read_lane(lane_id)
@@ -971,8 +969,9 @@ def test_live_request_rejects_tail_gap_hiding_an_earlier_model_decision(env):
             {"call_id": f"late-{index}"}, event_id=f"late-request-{index}",
         )
 
-    with pytest.raises(ContextHistoryOverflowError, match="canonical session tail omits"):
-        service._history(lane)
+    history = service._history(lane)
+    assert any("Accepted decision: preserve the first project rule." in item["content"]
+               for item in history)
 
 
 def test_recent_tool_context_cap_applies_to_matched_completed_calls(env):
