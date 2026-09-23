@@ -16,6 +16,7 @@ order, generated inventories, and freshness rules remain in the companion
 
 | Classification | Document | Scope |
 |---|---|---|
+| Authoritative requirements | [`SONDER-MASTER-IMPLEMENTATION-SPEC.md`](SONDER-MASTER-IMPLEMENTATION-SPEC.md) | Unfinished requirement list and checkbox state |
 | Authoritative current contract | [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md) | Product and package boundaries |
 | Authoritative current contract | [`../../SECURITY.md`](../../SECURITY.md) | Trust, authorization, and isolation |
 | Authoritative current contract | [`../../SELFMOD.md`](../../SELFMOD.md) | Guarded self-modification lifecycle |
