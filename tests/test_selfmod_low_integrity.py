@@ -81,14 +81,15 @@ def test_low_job_limits_descendant_process_count(tmp_path):
         sys.executable, "-c",
         "import subprocess, sys; children=[]\n"
         "try:\n"
-        "  for _ in range(32):\n"
+        "  for _ in range(40):\n"
         "    children.append(subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)']))\n"
         "except OSError:\n"
-        "  raise SystemExit(0)\n"
+        "  print('launched', len(children))\n"
+        "  raise SystemExit(0 if len(children) >= 10 else 4)\n"
         "raise SystemExit(3)",
     ]
     result = run_isolated(command, cwd=tmp_path, timeout=10)
-    assert result["passed"] is True
+    assert result["passed"] is True, result
 
 
 def _child_spec(tmp_path, command, timeout=10):

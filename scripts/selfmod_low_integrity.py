@@ -228,7 +228,10 @@ def run_isolated(
             job = win32job.CreateJobObject(None, "SonderSelfmod-" + uuid.uuid4().hex)
             limits = win32job.QueryInformationJobObject(job, win32job.JobObjectExtendedLimitInformation)
             basic = limits["BasicLimitInformation"]
-            basic["ActiveProcessLimit"] = 16
+            # Four pytest workers and their short-lived test subprocesses can
+            # overlap. Keep a finite ceiling without misclassifying routine
+            # test setup as a candidate regression.
+            basic["ActiveProcessLimit"] = 32
             basic["LimitFlags"] |= (
                 win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
                 | win32job.JOB_OBJECT_LIMIT_ACTIVE_PROCESS
