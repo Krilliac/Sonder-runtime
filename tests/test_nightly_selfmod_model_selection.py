@@ -1,6 +1,7 @@
 """Focused contract tests for the bounded selfmod worker's model pin."""
 
 import sys
+import subprocess
 
 from scripts import nightly_selfmod
 
@@ -128,6 +129,17 @@ def test_regression_command_falls_back_to_serial_without_xdist(monkeypatch):
     ]
 
 
+def test_regression_excludes_the_separate_held_out_suite(monkeypatch):
+    monkeypatch.setattr(nightly_selfmod.subprocess, "run", lambda *args, **kwargs: type(
+        "Result", (), {"returncode": 1}
+    )())
+    assert nightly_selfmod._regression_command(
+        "python", ignore_paths=("tests/test_reflection.py",)
+    ) == [
+        "python", "-m", "pytest", "-q", "--ignore", "tests/test_reflection.py",
+    ]
+
+
 def test_protected_and_missing_modules_are_not_eligible_candidates(tmp_path, monkeypatch):
     monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
     (tmp_path / "reflection.py").write_text("def f():\n    return 1\n", encoding="utf-8")
@@ -138,6 +150,51 @@ def test_protected_and_missing_modules_are_not_eligible_candidates(tmp_path, mon
     assert "reflection.py" in candidates
     assert "safe_update.py" not in candidates
     assert all((tmp_path / name).is_file() for name in candidates)
+
+
+def test_held_out_suite_is_selected_from_the_base_checkout(tmp_path, monkeypatch):
+    monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_reflection.py").write_text(
+        "def test_holdout():\n    assert True\n", encoding="utf-8"
+    )
+    assert nightly_selfmod._held_out_suite_paths("reflection.py") == (
+        "tests/test_reflection.py",
+    )
+
+
+def test_missing_held_out_suite_is_an_explicit_failure_command(tmp_path, monkeypatch):
+    monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
+    prepared = nightly_selfmod._prepare_held_out("unmapped.py", tmp_path, 60)
+    assert prepared["source_paths"] == ()
+    assert "held-out evaluator unavailable" in prepared["command"][2]
+    assert prepared["cleanup"] is None
+
+
+def test_held_out_runner_executes_snapshot_against_candidate_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_reflection.py").write_text(
+        "from reflection import answer\n\n"
+        "def test_answer_is_stable():\n    assert answer() == 42\n",
+        encoding="utf-8",
+    )
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "reflection.py").write_text(
+        "def answer():\n    return 42\n", encoding="utf-8"
+    )
+    prepared = nightly_selfmod._prepare_held_out("reflection.py", candidate, 60)
+    try:
+        result = subprocess.run(
+            prepared["command"], cwd=candidate, text=True,
+            capture_output=True, timeout=60,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "CANARY PASSED" in result.stdout
+    finally:
+        if prepared["cleanup"] is not None:
+            prepared["cleanup"].cleanup()
 
 
 def test_non_executable_objectives_are_filtered_before_a_run():
