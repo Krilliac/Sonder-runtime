@@ -7,7 +7,7 @@ certificate and its bound authority scope.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 import hashlib
 import json
 
@@ -19,6 +19,36 @@ def _digest(value: object) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
     ).hexdigest()
+
+
+_OBSERVATION_AUTH_SEAL = object()
+
+
+class _ObservationAuthorization:
+    __slots__ = ("_receipt_id", "_observation_id", "_content_key")
+
+    def __init__(self, receipt_id, observation_id, content_key, seal):
+        if seal is not _OBSERVATION_AUTH_SEAL:
+            raise TypeError("observation authorization is private")
+        self._receipt_id = receipt_id
+        self._observation_id = observation_id
+        self._content_key = content_key
+
+    def matches(self, receipt, observation) -> bool:
+        return (
+            type(receipt) is VerifierReceipt
+            and type(observation) is LearningObservation
+            and self._receipt_id == receipt.receipt_id
+            and self._observation_id == observation.observation_id
+            and self._content_key == observation.content_key
+        )
+
+
+def _issue_observation_authorization(receipt, observation):
+    return _ObservationAuthorization(
+        receipt.receipt_id, observation.observation_id, observation.content_key,
+        _OBSERVATION_AUTH_SEAL,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +66,7 @@ class VerifierReceipt:
     subject_digest: str
     receipt_digest: str
     authority_scope: str
+    authorization: object | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         for name in (
@@ -76,6 +107,19 @@ class ReceiptObservationProducer:
     def from_terminal_eligibility(cls, eligibility: ManagedTerminalEligibility) -> tuple[VerifierReceipt, LearningObservation]:
         if type(eligibility) is not ManagedTerminalEligibility:
             raise TypeError("verified terminal eligibility is required")
+        authority = eligibility.authority
+        resolver = getattr(authority, "resolve", None)
+        if authority is None or not callable(resolver):
+            raise PermissionError(
+                "owner-bound managed verifier authority is required"
+            )
+        # Do not trust any fields on the public eligibility value.  The live
+        # resolver re-reads the current owner-bound durable host turn and
+        # verifier result, so a copied or modified dataclass cannot mint a
+        # trusted observation.
+        eligibility = resolver()
+        if type(eligibility) is not ManagedTerminalEligibility:
+            raise PermissionError("owner-bound managed verifier result is invalid")
         if eligibility.phase in {"certified", "certified_after_return"}:
             if eligibility.eligible is not True:
                 raise PermissionError("current certified terminal eligibility is required")
@@ -179,7 +223,10 @@ class ReceiptObservationProducer:
             evaluation_passed=outcome == "passed",
             trusted_source=outcome in {"passed", "failed"},
         )
-        return receipt, observation
+        return replace(
+            receipt,
+            authorization=_issue_observation_authorization(receipt, observation),
+        ), observation
 
 
 __all__ = ["ReceiptObservationProducer", "VerifierReceipt"]

@@ -16,6 +16,7 @@ from sonder_runtime.application.ports.host_turn_links import (
 )
 from sonder_runtime.application.ports.lane_continuation import PendingVerificationIdentity
 from sonder_runtime.application.ports.terminal_eligibility import ManagedTerminalEligibility
+from sonder_runtime.application.ports.terminal_eligibility import _issue_host_verifier_authority
 from sonder_runtime.bootstrap.managed_standalone import ManagedStandaloneSession
 
 
@@ -45,12 +46,23 @@ def _eligibility(evidence, *, worker_id="lane-worker-a", eligible=True, phase="c
         "continuation-1", "verification-1", "parent-1", 1, 1,
         "b" * 64, "command-1", "a" * 64, 1,
     )
-    return ManagedTerminalEligibility(
+    value = ManagedTerminalEligibility(
         evidence, eligible, phase, "CERTIFIED" if eligible else "FINAL_CERTIFICATE_MISMATCH",
         pending_identity=identity if eligible else None,
         authenticated_worker_id=worker_id if eligible else None,
         verified_subject_digest=subject_digest if eligible else None,
     )
+    return _authorize(value)
+
+
+def _authorize(value):
+    holder = {}
+    authority = _issue_host_verifier_authority(lambda: holder["value"])
+    holder["value"] = replace(
+        value,
+        authority=authority,
+    )
+    return holder["value"]
 
 
 def test_real_typed_host_receipt_derives_trust_and_identity_without_spoofable_fields():
@@ -63,6 +75,27 @@ def test_real_typed_host_receipt_derives_trust_and_identity_without_spoofable_fi
     assert observation.provenance[0] == "receipt:" + receipt.receipt_id
     with pytest.raises(TypeError):
         ReceiptObservationProducer.from_terminal_eligibility(_evidence(), source="attributed")
+
+
+def test_public_eligibility_without_owner_authority_cannot_mint_trusted_evidence():
+    value = _eligibility(_evidence())
+    forged = replace(value, authority=None, authenticated_worker_id="forged-worker")
+    with pytest.raises(PermissionError, match="owner-bound managed verifier authority"):
+        ReceiptObservationProducer.from_terminal_eligibility(forged)
+
+
+def test_modified_public_fields_are_ignored_when_owner_authority_is_present():
+    value = _eligibility(_evidence(), worker_id="real-worker")
+    modified = replace(
+        value,
+        authenticated_worker_id="forged-worker",
+        verified_subject_digest="f" * 64,
+    )
+    receipt, observation = ReceiptObservationProducer.from_terminal_eligibility(modified)
+    assert receipt.authority_scope == _digest({
+        "worker_id": "real-worker", "workspace_scope": r"D:\owned\project",
+    })
+    assert "forged-worker" not in observation.independent_key
 
 
 def test_one_authenticated_worker_cannot_create_independence_from_repeated_receipts():
@@ -85,7 +118,7 @@ def test_distinct_authenticated_workers_can_reach_fact_but_contradiction_demotes
         "after_manifest_digest": "d" * 64,
     }
     failure["receipt_digest"] = _digest(failure)
-    negative = replace(
+    negative = _authorize(replace(
         _eligibility(
             _evidence(principal="owner", run_id="run-3", outcome="failed"),
             worker_id="lane-worker-b",
@@ -94,7 +127,7 @@ def test_distinct_authenticated_workers_can_reach_fact_but_contradiction_demotes
         eligible=False,
         code="CHECK_FAILED",
         verified_failure_receipt=failure,
-    )
+    ))
     receipt, negative_observation = ReceiptObservationProducer.from_terminal_eligibility(negative)
     assert receipt.verifier_outcome == "failed"
     assert negative_observation.positive is False
@@ -105,7 +138,7 @@ def test_distinct_authenticated_workers_can_reach_fact_but_contradiction_demotes
 
 
 def test_negative_receipt_requires_specific_immutable_failed_check_proof():
-    eligibility = replace(
+    eligibility = _authorize(replace(
         _eligibility(_evidence(principal="owner", run_id="run-negative")),
         phase="failed",
         eligible=False,
@@ -117,10 +150,10 @@ def test_negative_receipt_requires_specific_immutable_failed_check_proof():
             "before_manifest_digest": "f" * 64,
             "after_manifest_digest": "f" * 64,
         },
-    )
+    ))
     bad = dict(eligibility.verified_failure_receipt)
     bad["receipt_digest"] = _digest({k: v for k, v in bad.items() if k != "receipt_digest"})
-    eligibility = replace(eligibility, verified_failure_receipt=bad)
+    eligibility = _authorize(replace(eligibility, verified_failure_receipt=bad))
     with pytest.raises(PermissionError, match="immutable verifier failure receipt is invalid"):
         ReceiptObservationProducer.from_terminal_eligibility(eligibility)
 
@@ -142,7 +175,7 @@ def test_uncertain_receipt_cannot_mint_positive_trusted_observation():
     evidence = replace(evidence, facts=replace(evidence.facts, validation_attempted=False, terminal_class="UNVERIFIED"))
     with pytest.raises(PermissionError, match="current certified terminal eligibility"):
         ReceiptObservationProducer.from_terminal_eligibility(
-            _eligibility(evidence, eligible=False, phase="unknown")
+            _authorize(_eligibility(evidence, eligible=False, phase="unknown"))
         )
 
 
@@ -165,6 +198,19 @@ def test_sqlite_repository_is_restart_replay_idempotent_and_immutable(tmp_path):
     with pytest.raises(sqlite3.IntegrityError):
         second.execute("DELETE FROM verifier_learning_observations")
     second.close()
+
+
+def test_first_repository_insert_requires_producer_authorization(tmp_path):
+    path = tmp_path / "memory.db"
+    receipt, observation = ReceiptObservationProducer.from_terminal_eligibility(
+        _eligibility(_evidence())
+    )
+    connection = sqlite3.connect(path)
+    repo = SQLiteVerifierObservationRepository(connection)
+    with pytest.raises(PermissionError, match="producer authorization"):
+        repo.append(replace(receipt, authorization=None), observation)
+    assert repo.append(receipt, observation) == observation
+    connection.close()
 
 
 def test_observation_append_respects_caller_transaction_and_conflict_savepoint(tmp_path):
