@@ -104,6 +104,9 @@ class MemoryLearningFacade:
             source = scope.authoritative_fact_source
             if source is None:
                 raise RuntimeError("authoritative fact source is not configured")
+            # Freeze the observation snapshot together with the eventual fact
+            # mutation so a newly persisted contradiction cannot be omitted.
+            scope.connection.execute("BEGIN IMMEDIATE")
             result = VerifiedSubjectFactPromotion().apply(
                 project=project,
                 fact_id=fact_id,

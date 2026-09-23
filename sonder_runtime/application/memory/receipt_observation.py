@@ -266,6 +266,17 @@ class VerifiedSubjectFactPromotion:
         from .learning_ladder import LearningLadder
         self._ladder = ladder or LearningLadder()
 
+    @staticmethod
+    def fact_id_for_subject(content: str) -> str:
+        if (
+            not isinstance(content, str)
+            or not content.startswith("verified-subject:")
+            or len(content) != len("verified-subject:") + 64
+            or any(char not in "0123456789abcdef" for char in content.split(":", 1)[1])
+        ):
+            raise PermissionError("canonical verifier subject identity is required")
+        return "verified-subject-fact-" + content.split(":", 1)[1]
+
     def apply(self, *, project, fact_id, observation_ids, repository, fact_source, connection):
         if not isinstance(project, str) or not project.strip():
             raise ValueError("fact project is required")
@@ -281,9 +292,36 @@ class VerifiedSubjectFactPromotion:
             getattr(fact_source, "delete_fact", None)
         ):
             raise TypeError("authoritative fact source is required")
-        pairs = tuple(repository.get(item) for item in observation_ids)
-        if any(pair is None for pair in pairs):
+        if not bool(getattr(connection, "in_transaction", False)):
+            raise PermissionError("promotion requires an active observation snapshot transaction")
+        selected = tuple(repository.get(item) for item in observation_ids)
+        if any(pair is None for pair in selected):
             raise PermissionError("authenticated observation is unavailable")
+        selected_observations = tuple(pair[1] for pair in selected)
+        if len({observation.content_key for observation in selected_observations}) != 1:
+            raise PermissionError("observations must describe one verified subject")
+        content = selected_observations[0].content
+        expected_fact_id = self.fact_id_for_subject(content)
+        if fact_id != expected_fact_id:
+            raise PermissionError("fact identity is reserved for the verified subject")
+        list_pairs = getattr(repository, "list_pairs", None)
+        if not callable(list_pairs):
+            raise TypeError("complete verifier observation snapshot is required")
+        complete = list_pairs(limit=10_001)
+        if len(complete) > 10_000:
+            raise PermissionError("verifier observation snapshot is incomplete")
+        subject_pairs = tuple(
+            pair for pair in complete
+            if pair[0].project_scope == project
+            and pair[0].workspace_scope == project
+            and pair[1].content_key == selected_observations[0].content_key
+        )
+        if not subject_pairs:
+            raise PermissionError("authenticated subject observations are unavailable")
+        persisted_ids = {pair[1].observation_id for pair in subject_pairs}
+        if not set(observation_ids).issubset(persisted_ids):
+            raise PermissionError("observation snapshot changed")
+        pairs = subject_pairs
         observations = tuple(pair[1] for pair in pairs)
         if any(
             receipt.project_scope != project
@@ -302,7 +340,6 @@ class VerifiedSubjectFactPromotion:
         if len(decisions) != 1:
             raise PermissionError("observations must describe one verified subject")
         decision = decisions[0]
-        content = observations[0].content
         if any(not observation.positive for observation in observations):
             mutation = fact_source.delete_fact(connection, fact_id, project)
             return "demoted" if mutation else "unchanged", decision

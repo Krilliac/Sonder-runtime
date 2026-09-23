@@ -376,14 +376,20 @@ def test_application_composition_persists_and_promotes_independent_subject_recei
             SQLiteVerifierObservationRepository(scope.connection).append(receipt, observation)
         produced.append(observation.observation_id)
 
+    fact_id = "verified-subject-fact-" + "a" * 64
+    with UnitOfWorkAdapter(db_path, authoritative_fact_source=source) as scope:
+        source.add_fact(scope.connection, "unrelated-fact", "repo-a", "keep me")
+    with pytest.raises(PermissionError, match="reserved"):
+        application.promote_verified_subject("repo-a", "unrelated-fact", tuple(produced))
     status, decision = application.promote_verified_subject(
-        "repo-a", "verified-subject-fact", tuple(produced)
+        "repo-a", fact_id, tuple(produced)
     )
     assert status == "promoted"
     assert decision.stage == LearningStage.FACT
     with UnitOfWorkAdapter(db_path, authoritative_fact_source=source) as scope:
         facts = scope.memory.facts_for_project("repo-a")
-    assert facts[0]["text"] == "verified-subject:" + "a" * 64
+    promoted = [fact for fact in facts if fact["id"] == fact_id]
+    assert promoted[0]["text"] == "verified-subject:" + "a" * 64
 
 
 def test_application_promotion_demotes_on_persisted_verified_negative(tmp_path):
@@ -403,8 +409,9 @@ def test_application_promotion_demotes_on_persisted_verified_negative(tmp_path):
         with UnitOfWorkAdapter(db_path, authoritative_fact_source=source) as scope:
             SQLiteVerifierObservationRepository(scope.connection).append(*pair)
         positive.append(pair[1].observation_id)
+    fact_id = "verified-subject-fact-" + "a" * 64
     status, _ = application.promote_verified_subject(
-        "repo-a", "verified-subject-fact", tuple(positive)
+        "repo-a", fact_id, tuple(positive)
     )
     assert status == "promoted"
 
@@ -414,7 +421,7 @@ def test_application_promotion_demotes_on_persisted_verified_negative(tmp_path):
     with UnitOfWorkAdapter(db_path, authoritative_fact_source=source) as scope:
         SQLiteVerifierObservationRepository(scope.connection).append(*negative)
     status, decision = application.promote_verified_subject(
-        "repo-a", "verified-subject-fact", (positive[0], positive[1], negative[1].observation_id)
+        "repo-a", fact_id, tuple(positive)
     )
     assert status == "demoted"
     assert decision.contradiction_count == 1

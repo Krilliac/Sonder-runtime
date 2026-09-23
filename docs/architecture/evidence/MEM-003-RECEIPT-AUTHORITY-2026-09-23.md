@@ -22,6 +22,13 @@ can promote the canonical `verified-subject:<digest>` token after the learning
 ladder has two independent authenticated workers; a persisted verified
 negative demotes the same fact.
 
+Promotion derives the reserved fact identity as
+`verified-subject-fact-<subject-digest>` and rejects caller-selected IDs. It
+also takes a `BEGIN IMMEDIATE` snapshot, loads the complete bounded
+observation set, and evaluates every persisted observation for the subject;
+omitted contradictory receipts therefore cannot be bypassed. An incomplete
+snapshot fails closed.
+
 The authority and insert capability are process-local Python objects. Exact
 internal types reject ordinary duck-typed or caller-constructed public values,
 but arbitrary code already running in the same Python process can inspect
@@ -30,7 +37,7 @@ not a substitute for process isolation against a malicious extension.
 
 Evidence:
 
-- `tests/test_receipt_observation.py`: 12 focused tests, including public
+- `tests/test_receipt_observation.py`: 17 focused tests, including public
   eligibility forgery, modified-field substitution, first-insert forgery,
   restart/replay, and immutable conflict behavior.
 - `tests/test_managed_terminal_eligibility.py`: 6 focused tests, including the
