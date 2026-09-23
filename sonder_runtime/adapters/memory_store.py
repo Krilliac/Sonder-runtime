@@ -19,6 +19,9 @@ from sonder_runtime.adapters.persistence.sqlite.outbox import OUTBOX_DDL
 from sonder_runtime.adapters.persistence.sqlite.memory_replication import (
     MEMORY_REPLICATION_DDL,
 )
+from sonder_runtime.adapters.persistence.sqlite.authoritative_indexes import (
+    AUTHORITATIVE_INDEX_DDL,
+)
 
 
 _ABANDONED_SESSION_CLAIMS_LOCK = globals().get(
@@ -271,6 +274,10 @@ CREATE TABLE IF NOT EXISTS memory_authoritative_fact_state (
     PRIMARY KEY(project, fact_id)
 );
 """
+
+# Derived entity/decision materializations share the authoritative fact
+# database and are always rebuildable from memory_replication_log.
+_SCHEMA += AUTHORITATIVE_INDEX_DDL
 
 
 def connect(path=":memory:", check_same_thread=True):

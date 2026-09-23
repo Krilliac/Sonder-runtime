@@ -20,6 +20,7 @@ from sonder_runtime.domain.memory.replication import (
     MemoryReplicationBatch,
     MemoryReplicationError,
 )
+from .authoritative_indexes import materialize_authoritative_fact_index
 
 
 _MAX_ROWS = 1024
@@ -268,6 +269,8 @@ class SQLiteMemoryReplicationProjection:
                     ),
                 )
                 self._materialize(record, payload)
+                if record.entity_kind == "fact":
+                    materialize_authoritative_fact_index(self._conn, record)
                 expected = record.sequence + 1
                 inserted += 1
 
@@ -288,9 +291,11 @@ class SQLiteMemoryReplicationProjection:
                     raise MemoryProjectionError("outcome tombstone identity is malformed")
             return
         if record.entity_kind == "fact":
-            _allowed(payload, frozenset({"text", "embedding"}), "fact")
+            _allowed(payload, frozenset({"text", "embedding", "metadata"}), "fact")
             _bounded_text(payload, "text")
             _embedding(payload, "embedding")
+            if "metadata" in payload and not isinstance(payload["metadata"], dict):
+                raise MemoryProjectionError("fact metadata must be an object")
         elif record.entity_kind == "interaction":
             _allowed(
                 payload,
