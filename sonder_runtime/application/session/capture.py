@@ -92,10 +92,12 @@ def _canonical_json(value: object, name: str) -> str:
     return json.dumps(copied, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def _context_evidence(value: object, name: str) -> dict[str, object] | None:
+def _context_evidence(value: object, name: str, expected_type: type) -> dict[str, object] | None:
     """Serialize provider-bound prefix evidence without retaining prompt text."""
     if value is None:
         return None
+    if type(value) is not expected_type:
+        raise InvalidInput(f"{name} must be a live immutable manifest")
     sections = getattr(value, "sections", None)
     if not isinstance(sections, tuple):
         raise InvalidInput(f"{name} has invalid sections")
@@ -145,14 +147,18 @@ def _snapshot_payload(
         "tools": tool_manifest,
         "ui_facts": ui,
     }
-    prefix = _context_evidence(request.prefix_manifest, "request.prefix_manifest")
-    replay = _context_evidence(request.replay_manifest, "request.replay_manifest")
+    from ..context_manifests import PrefixCacheObservation, PrefixManifest, ReplayManifest
+
+    prefix = _context_evidence(request.prefix_manifest, "request.prefix_manifest", PrefixManifest)
+    replay = _context_evidence(request.replay_manifest, "request.replay_manifest", ReplayManifest)
     observation = request.prefix_cache_observation
     if prefix is not None:
         payload["prefix_manifest"] = prefix
     if replay is not None:
         payload["replay_manifest"] = replay
     if observation is not None:
+        if type(observation) is not PrefixCacheObservation or prefix is None:
+            raise InvalidInput("cache observation requires a live matching prefix")
         payload["prefix_cache_observation"] = _json_copy({
             "cache_key": getattr(observation, "cache_key", None),
             "identity_key": getattr(observation, "identity_key", None),

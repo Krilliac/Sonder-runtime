@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from sonder_runtime.adapters.persistence.session_repository import SQLiteSessionRepository
@@ -135,3 +137,45 @@ def test_capture_persists_prefix_and_replay_evidence_without_prompt_contents(tmp
     assert reconstructed is not None
     assert reconstructed.replay_manifest["manifest_digest"] == replay.manifest_digest
     assert reconstructed.prefix_cache_observation["reason"] == "cold_start"
+
+
+def test_request_rejects_cache_observation_for_another_prefix():
+    first = build_prefix_manifest(
+        (ContextRecord("first", "project_rules", "one", "project", 1, True),),
+        model="model", provider_id="ollama",
+    )
+    second = build_prefix_manifest(
+        (ContextRecord("second", "project_rules", "two", "project", 1, True),),
+        model="model", provider_id="ollama",
+    )
+    with pytest.raises(ValueError, match="does not match"):
+        ModelRequest(
+            prompt="hello", tier="code", prefix_manifest=first,
+            prefix_cache_observation=PrefixCacheObservation(
+                second.cache_key, second.identity_key, second.version,
+                "hit", "hit", False,
+            ),
+        )
+    with pytest.raises(ValueError, match="replay manifest"):
+        ModelRequest(
+            prompt="hello", tier="code", prefix_manifest=first,
+            replay_manifest=build_replay_manifest(
+                "r2", "model", (), prefix_key=second.cache_key,
+            ),
+        )
+
+    forged = ModelRequest(
+        prompt="hello", tier="code",
+        prefix_manifest=SimpleNamespace(
+            cache_key=first.cache_key, identity_key=first.identity_key,
+            version=first.version, sections=first.sections,
+        ),
+        prefix_cache_observation=PrefixCacheObservation(
+            first.cache_key, first.identity_key, first.version,
+            "hit", "hit", False,
+        ),
+    )
+    with pytest.raises(InvalidInput, match="live immutable manifest"):
+        SessionCaptureService(SQLiteSessionRepository(":memory:")).capture_turn(
+            "s1", "t1", forged, request_id="r1", model_response="world",
+        )

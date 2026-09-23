@@ -175,23 +175,23 @@ class ContextPlanningFacade:
             project_policy is not None,
         ))
         should_resolve_prefix = bool(manifest_records or has_prefix_identity)
-        prefix = self._prefix_cache.resolve(
-            deduped,
-            version=prefix_version,
-            model=effective_model.model,
-            provider_id=provider_id,
-            tokenizer=tokenizer,
-            template=template,
-            system_prefix=system_prefix,
-            visible_tool_schemas=visible_tool_schemas,
-            tool_schemas=tool_schemas,
-            project_policy=project_policy,
-            # Accepted for callers that have the complete request at hand;
-            # these values are intentionally excluded from stable identity.
-            dynamic_memory=dynamic_memory,
-            retrieval=retrieval,
-        ) if should_resolve_prefix else None
-        prefix_observation = self._prefix_cache.last_observation if prefix is not None else None
+        prefix = prefix_observation = None
+        if should_resolve_prefix:
+            prefix, prefix_observation = self._prefix_cache.resolve_observed(
+                deduped,
+                version=prefix_version,
+                model=effective_model.model,
+                provider_id=provider_id,
+                tokenizer=tokenizer,
+                template=template,
+                system_prefix=system_prefix,
+                visible_tool_schemas=visible_tool_schemas,
+                tool_schemas=tool_schemas,
+                project_policy=project_policy,
+                # Dynamic inputs never contribute to reusable identity.
+                dynamic_memory=dynamic_memory,
+                retrieval=retrieval,
+            )
         replay = (
             build_replay_manifest(
                 request_id,
