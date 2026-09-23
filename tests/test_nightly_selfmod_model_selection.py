@@ -120,7 +120,7 @@ def test_regression_command_uses_bounded_four_worker_xdist(monkeypatch):
         "Result", (), {"returncode": 0}
     )())
     assert nightly_selfmod._regression_command("python") == [
-        "python", "-m", "pytest", "-q", "-n", "4", "--dist", "load",
+        "python", "-m", "pytest", "-q", "--maxfail=1", "-n", "4", "--dist", "load",
     ]
 
 
@@ -129,7 +129,7 @@ def test_regression_command_falls_back_to_serial_without_xdist(monkeypatch):
         "Result", (), {"returncode": 1}
     )())
     assert nightly_selfmod._regression_command("python") == [
-        "python", "-m", "pytest", "-q",
+        "python", "-m", "pytest", "-q", "--maxfail=1",
     ]
 
 
@@ -140,7 +140,7 @@ def test_regression_excludes_the_separate_held_out_suite(monkeypatch):
     assert nightly_selfmod._regression_command(
         "python", ignore_paths=("tests/test_reflection.py",)
     ) == [
-        "python", "-m", "pytest", "-q", "--ignore", "tests/test_reflection.py",
+        "python", "-m", "pytest", "-q", "--maxfail=1", "--ignore", "tests/test_reflection.py",
     ]
 
 
