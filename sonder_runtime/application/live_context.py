@@ -57,14 +57,40 @@ class LiveAgentContextProducer:
         self._max_catalog_bytes = max_catalog_bytes
         self._last_good: dict[Path, LiveContextResult] = {}
 
+    @classmethod
+    def from_config(cls, config, **kwargs) -> "LiveAgentContextProducer":
+        """Build roots from the host's validated typed configuration."""
+        context = getattr(config, "context", None)
+        if context is None:
+            return cls(**kwargs)
+        return cls(
+            instruction_roots={
+                "bundled": context.instruction_bundled_roots,
+                "global": context.instruction_global_roots,
+                "configured": context.instruction_configured_roots,
+            },
+            skill_roots={
+                "bundled": context.skill_bundled_roots,
+                "global": context.skill_global_roots,
+                "configured": context.skill_configured_roots,
+            },
+            **kwargs,
+        )
+
     @staticmethod
     def _normalize(values: Mapping[str, Sequence[Path | str]]) -> dict[str, tuple[Path, ...]]:
         if set(values) - {"bundled", "global", "configured"}:
             raise ValueError("unsupported live context source")
-        return {
-            str(kind): tuple(Path(root).resolve() for root in roots)
-            for kind, roots in values.items()
-        }
+        normalized = {}
+        for kind, roots in values.items():
+            result = []
+            for raw in roots:
+                path = Path(raw)
+                if not path.is_absolute() or path.is_symlink():
+                    raise ValueError("live context roots must be absolute non-link paths")
+                result.append(path.resolve(strict=False))
+            normalized[str(kind)] = tuple(result)
+        return normalized
 
     @staticmethod
     def _sources(values: Mapping[str, tuple[Path, ...]], project: Path):
@@ -115,7 +141,8 @@ class LiveAgentContextProducer:
                 self._sources(self._instruction_roots, root)
             )
             skills = ProgressiveSkillRegistry(
-                self._skill_sources(self._skill_roots, root)
+                self._skill_sources(self._skill_roots, root),
+                max_entries=self._max_skills,
             )
             summaries = skills.discover()
             if len(summaries) > self._max_skills:

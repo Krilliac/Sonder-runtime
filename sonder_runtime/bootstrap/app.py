@@ -787,7 +787,7 @@ def build_application(
                 authorize_grant=authorize_lane_grant,
                 allowed_tools=tuple(item.name for item in lane_tools.graph.registry.list_all()),
                 context_planning=context_planning,
-                live_context=LiveAgentContextProducer(),
+                live_context=LiveAgentContextProducer.from_config(effective_config),
                 effect_journal=SQLiteEffectJournal(
                     state_path("agent-effects.db", "SONDER_AGENT_EFFECTS_DB")
                 ),
