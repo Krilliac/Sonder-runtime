@@ -260,13 +260,23 @@ class SQLiteEffectJournal:
             if len(rows) > max_records:
                 raise EffectJournalError("effect recovery exceeds bounded page")
             selected = rows
+            # An intent that was never observed past its admission point may
+            # be reattached to the exact live owner.  Once an effect has been
+            # marked UNCERTAIN, however, the process may have crossed the
+            # external side-effect boundary before it died.  Treating that
+            # row as reattachable would let a recovered worker invoke it a
+            # second time.  Uncertainty therefore remains a reconciliation
+            # requirement even when the old worker identity still appears
+            # live.
             attached = tuple(
                 str(row[0]) for row in selected
-                if live_workers.get(str(row[1])) == int(row[2])
+                if str(row[3]) == EffectState.INTENT.value
+                and live_workers.get(str(row[1])) == int(row[2])
             )
             orphaned = tuple(
                 str(row[0]) for row in selected
-                if live_workers.get(str(row[1])) != int(row[2])
+                if str(row[3]) != EffectState.INTENT.value
+                or live_workers.get(str(row[1])) != int(row[2])
             )
             for intent_id in orphaned:
                 connection.execute(
