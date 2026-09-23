@@ -6,6 +6,7 @@ from ..application.ports.lane_continuation import (
     PendingVerificationIdentity,
 )
 from ..application.agents.host_turns import require_host_pending_turn
+from ..application.ports.delegated_verification import digest
 from .standalone_continuation import PublishedHostTerminal
 
 
@@ -88,6 +89,28 @@ def terminal_eligibility(session, expected_turn, *, verifier_factory):
             evidence, False, "unknown", "WORKER_ATTRIBUTION_AMBIGUOUS", identity
         )
     authenticated_worker_id = prepared.children[0][0]
+    certificate = view.get("certificate")
+    manifest_digest = (
+        certificate.get("before_manifest_digest")
+        if isinstance(certificate, dict) else None
+    )
+    if (
+        not isinstance(manifest_digest, str)
+        or len(manifest_digest) != 64
+        or any(char not in "0123456789abcdef" for char in manifest_digest)
+        or certificate.get("after_manifest_digest") != manifest_digest
+    ):
+        return ManagedTerminalEligibility(
+            evidence, False, "unknown", "CERTIFICATE_SUBJECT_UNAVAILABLE", identity
+        )
+    verified_subject_digest = digest({
+        "project_scope": facts.project_scope,
+        "source_manifest": manifest_digest,
+        "checks": tuple(
+            (check.target, check.catalog_digest, check.argv_digest, check.workspace_root)
+            for check in prepared.checks
+        ),
+    })
     original_certified = not (
         facts.certificate_id != verdict.certificate_id
         or facts.certificate_generation != verdict.generation
@@ -111,6 +134,7 @@ def terminal_eligibility(session, expected_turn, *, verifier_factory):
         or published.verdict != verdict
         or published.output != original.output
         or published.receipt.original_projection_digest != identity.projection_digest
+        or digest(certificate) != published.receipt.certificate_digest
         or published.receipt.revision != identity.projection_revision + 1
     ):
         raise PermissionError("exact current certificate publication required")
@@ -126,4 +150,5 @@ def terminal_eligibility(session, expected_turn, *, verifier_factory):
         None,
         published,
         authenticated_worker_id,
+        verified_subject_digest,
     )

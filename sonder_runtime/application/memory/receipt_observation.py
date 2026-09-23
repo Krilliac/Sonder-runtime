@@ -33,6 +33,7 @@ class VerifierReceipt:
     workspace_scope: str
     verifier_outcome: str
     content_digest: str
+    subject_digest: str
     receipt_digest: str
     authority_scope: str
 
@@ -46,7 +47,7 @@ class VerifierReceipt:
                 raise ValueError(f"{name} must be bounded non-empty text")
         if self.verifier_outcome not in {"passed", "failed", "uncertain"}:
             raise ValueError("unsupported verifier outcome")
-        for name in ("content_digest", "receipt_digest"):
+        for name in ("content_digest", "subject_digest", "receipt_digest"):
             value = getattr(self, name)
             if not isinstance(value, str) or len(value) != 64 or any(
                 char not in "0123456789abcdef" for char in value
@@ -63,14 +64,12 @@ class ReceiptObservationProducer:
 
     @staticmethod
     def _subject(eligibility: ManagedTerminalEligibility, facts) -> tuple[str, str]:
-        identity = eligibility.pending_identity
-        if identity is None or not identity.bundle_digest:
+        subject_digest = eligibility.verified_subject_digest
+        if (
+            not isinstance(subject_digest, str) or len(subject_digest) != 64
+            or any(char not in "0123456789abcdef" for char in subject_digest)
+        ):
             raise PermissionError("verified subject identity is unavailable")
-        subject_digest = _digest({
-            "bundle_digest": identity.bundle_digest,
-            "project_scope": facts.project_scope,
-            "workspace_scope": facts.project_scope,
-        })
         return "verified-subject:" + subject_digest, subject_digest
 
     @classmethod
@@ -109,7 +108,8 @@ class ReceiptObservationProducer:
             project_scope=facts.project_scope,
             workspace_scope=facts.project_scope,
             verifier_outcome=outcome,
-            content_digest=subject_digest,
+            content_digest=link.output_digest,
+            subject_digest=subject_digest,
             receipt_digest=link.receipt_digest,
             authority_scope=authority_scope,
         )
