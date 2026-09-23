@@ -132,13 +132,8 @@ def _preflight(root: Path | None = None) -> tuple[tuple[str, ...], tuple[str, ..
 def _blocking_result(name, result) -> str | None:
     """Return a bounded failure reason for known fail-soft blocking results."""
     text = str(result or "").strip()
-    if name in {"campaign", "repo-repair"} and text.startswith("ERROR:"):
-        return "returned ERROR"
-    if name == "selfmod":
-        if text.startswith("working tree dirty ("):
-            return "working tree dirty"
-        if text.startswith("ERROR: model unavailable") or text.startswith("model unavailable:"):
-            return "model unavailable"
+    if name == "selfmod" and text.startswith("working tree dirty ("):
+        return "working tree dirty"
     return None
 
 
