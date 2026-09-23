@@ -87,4 +87,3 @@ def test_index_surface_rejects_ambiguous_or_malformed_time(authoritative_surface
         server.sonder_authoritative_indexes(project="repo-a", now="2026-01-01T00:00:00")
     with pytest.raises(InvalidInput):
         server.sonder_authoritative_indexes(project="repo-a", now="not-a-date")
-
