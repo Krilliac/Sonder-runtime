@@ -209,6 +209,51 @@ class SQLiteSessionRepository:
             ).fetchall()
         return tuple(self._row_to_event(row) for row in reversed(rows))
 
+    def read_complete(self, session_id: str, *, max_events: int = 10_000) -> tuple[SessionEvent, ...]:
+        """Read and verify one complete bounded session history.
+
+        The adapter read ceiling applies to each SQL page, not to the
+        session's recoverable history.  This keeps continuation retrieval
+        bounded while allowing a long session to be reconstructed across
+        pages.  The chain is verified over the same immutable snapshot before
+        any caller can present it to a model.
+        """
+        if not isinstance(max_events, int) or isinstance(max_events, bool) or not 1 <= max_events <= 100_000:
+            raise ValueError("max_events must be between 1 and 100000")
+        page_size = min(max_events, self._max_read_limit)
+        events: list[SessionEvent] = []
+        next_sequence = 1
+        while len(events) <= max_events:
+            page = self.read_range(
+                session_id, start_sequence=next_sequence, limit=page_size,
+            )
+            events.extend(page)
+            if len(page) < page_size:
+                break
+            if len(events) >= max_events:
+                probe = self.read_range(
+                    session_id, start_sequence=next_sequence + len(page), limit=1,
+                )
+                if probe:
+                    raise ValueError("session history exceeds recovery bound")
+                break
+            next_sequence += len(page)
+        expected = 1
+        previous_hash = None
+        for event in events:
+            if event.sequence != expected or event.previous_hash != previous_hash:
+                raise ValueError("session history is not contiguous")
+            calculated = self._hash(
+                event.session_id, event.sequence, event.event_id,
+                event.event_type, event.occurred_at_utc,
+                self._canonical_payload(event.payload), event.previous_hash,
+            )
+            if calculated != event.event_hash:
+                raise ValueError("session history failed integrity verification")
+            expected += 1
+            previous_hash = event.event_hash
+        return tuple(events)
+
     def search(self, *, session_id: str | None = None, event_type: str | None = None,
                text: str | None = None, limit: int | None = None) -> tuple[SessionEvent, ...]:
         limit = self._max_read_limit if limit is None else limit

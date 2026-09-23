@@ -205,3 +205,22 @@ def test_session_tail_reads_recent_events_with_a_small_adapter_limit(tmp_path):
 
     assert [event.event_id for event in repo.read_tail("s1", limit=2)] == ["e2", "e3"]
     assert [event.event_id for event in repo.read_range("s1", limit=2)] == ["e0", "e1"]
+
+
+def test_complete_recovery_reads_across_adapter_pages_and_proves_tail(tmp_path):
+    repo = SQLiteSessionRepository(tmp_path / "sessions.db", max_read_limit=2)
+    for index in range(5):
+        repo.append("s1", "model.response", {"content": str(index)}, event_id=f"e{index}")
+
+    recovered = repo.read_complete("s1", max_events=8)
+
+    assert [event.event_id for event in recovered] == [f"e{index}" for index in range(5)]
+
+
+def test_complete_recovery_fails_closed_at_bound(tmp_path):
+    repo = SQLiteSessionRepository(tmp_path / "sessions.db", max_read_limit=2)
+    for index in range(3):
+        repo.append("s1", "model.response", {"content": str(index)}, event_id=f"e{index}")
+
+    with pytest.raises(ValueError, match="exceeds recovery bound"):
+        repo.read_complete("s1", max_events=2)

@@ -34,12 +34,12 @@ The provider is still responsible for its own token accounting and semantic
 summary. This slice does not claim factual validation, re-compaction, or
 provider-specific tokenizer equivalence; those remain separate COMPACT gates.
 
-The live request path reads a bounded 256-event canonical tail. If that tail
-starts after the first session event, the request now fails before archive or
-provider assembly: an older event could contain an accepted constraint or
-decision, and the selected tail cannot prove otherwise. Older events remain
-durable, but full long-session continuation requires a reference-backed
-selection or a durable continuation cursor and remains an open COMPACT gap.
+The live request path now reads a complete canonical session history through
+bounded adapter pages, verifies the sequence and hash chain before provider
+assembly, and then applies the existing selective archive policy. A bounded
+recovery limit remains enforced; unavailable or tampered history fails closed.
+This allows long-session continuation to retain an earlier requirement,
+decision, or failure that would have been omitted by the old 256-event tail.
 Protected facts within a complete selected tail are never silently truncated:
 exceeding the 40-message or 32 KiB budget for protected facts raises a
 recoverable `ContextHistoryOverflowError`, leaves the lane in
@@ -47,6 +47,6 @@ recoverable `ContextHistoryOverflowError`, leaves the lane in
 resume after operator-led compaction. A persisted summary is accepted only
 when its exact source range and typed modalities validate, its factual and
 structured retention checks pass, and it does not overlap another summary;
-malformed, incomplete, or overlapping summaries fail closed. The 257-response
-canary and an earlier-decision-plus-257-tool-requests canary prove that an
-incomplete tail fails rather than silently losing protected history.
+malformed, incomplete, or overlapping summaries fail closed. The cross-page
+recovery canary and an earlier-decision-plus-257-tool-requests canary prove
+that omitted tail history is recovered rather than silently lost.
