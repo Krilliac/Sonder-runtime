@@ -1098,6 +1098,7 @@ class AgentLaneService:
                     "completed",
                     "interrupted",
                     "failed",
+                    "awaiting_input",
                     "queued",
                 }:
                     raise ValueError(
@@ -1372,7 +1373,8 @@ class AgentLaneService:
             elif event.event_type == "model.response":
                 add_history(
                     event.sequence,
-                    {"role": "assistant", "content": str(event.payload["content"])}
+                    {"role": "assistant", "content": str(event.payload["content"])},
+                    is_protected=True,
                 )
             elif event.event_type in {
                 "goal.created", "goal.updated", "goal.completed",
@@ -1913,18 +1915,20 @@ class AgentLaneService:
                 lane = tx.lane(lane_id)
                 if lane["owner"] == self.owner:
                     # Persist uncertainty; no automatic retry of possibly executed effects.
+                    overflow = isinstance(exc, ContextHistoryOverflowError)
+                    if overflow:
+                        lane_error = "CONTEXT_HISTORY_OVERFLOW"
+                    elif isinstance(exc, PermissionError):
+                        lane_error = "AUTHORITY_DENIED"
+                    elif isinstance(exc, TimeoutError):
+                        lane_error = "BUDGET_EXHAUSTED"
+                    else:
+                        lane_error = "LANE_ATTEMPT_FAILED"
                     lane.update(
-                        status="awaiting_input" if lane["pending_effect"] else "failed",
+                        status=("awaiting_input"
+                                if lane["pending_effect"] or overflow else "failed"),
                         owner="",
-                        error=(
-                            "AUTHORITY_DENIED"
-                            if isinstance(exc, PermissionError)
-                            else (
-                                "BUDGET_EXHAUSTED"
-                                if isinstance(exc, TimeoutError)
-                                else "LANE_ATTEMPT_FAILED"
-                            )
-                        ),
+                        error=lane_error,
                         used_wall=lane["used_wall"] + time.monotonic() - started,
                     )
                     tx.emit(

@@ -778,19 +778,24 @@ def test_live_request_merges_evicted_placeholders_in_source_order(env):
 
 
 def test_live_request_fails_recoverably_when_protected_history_exceeds_budget(env):
-    from sonder_runtime.application.agents.interactive_lanes import ContextHistoryOverflowError
-
     service, _, sessions, _, context, _ = env
     lane_id = spawn(env, command="compact-protected-overflow")['lane']['id']
     lane = service.store.read_lane(lane_id)
     for index in range(41):
         sessions.append(
-            lane["session_id"], "goal.updated",
-            {"decision": f"decision-{index}"}, event_id=f"decision-{index}",
+            lane["session_id"], "model.response",
+            {"content": f"rationale-{index}"}, event_id=f"response-{index}",
         )
 
-    with pytest.raises(ContextHistoryOverflowError, match="protected session history"):
-        service._request(lane, [], request_id="overflow-request", context=context)
+    service.run_pending(lane_id, context)
+    failed = service.inspect(lane_id, context)["lane"]
+    assert failed["status"] == "awaiting_input"
+    assert failed["error"] == "CONTEXT_HISTORY_OVERFLOW"
+
+    resumed = service.control(
+        lane_id, "resume", command_id="resume-overflow", context=context,
+    )["lane"]
+    assert resumed["status"] == "queued"
 
 
 def test_recent_tool_context_cap_applies_to_matched_completed_calls(env):
@@ -841,7 +846,7 @@ def test_recent_lane_tool_context_is_capped_ordered_and_survives_canonical_prefi
     service, _, sessions, _, context, _ = env
     lane_id = spawn(env)["lane"]["id"]
     lane = service.store.read_lane(lane_id)
-    for index in range(1_050):
+    for index in range(30):
         sessions.append(
             lane["session_id"], "model.response",
             {"content": f"historical-{index}"}, event_id=f"history-{index}",
@@ -869,7 +874,7 @@ def test_recent_lane_tool_context_is_capped_ordered_and_survives_canonical_prefi
     ]
     assert [pointer.split("Tool result archived for this project; ", 1)[1].rstrip(".") for pointer in pointers] == expected
     assert len(archive_events) == 10
-    assert any(item["content"] == "historical-1049" for item in history)
+    assert any(item["content"] == "historical-29" for item in history)
     assert any(
         event.payload.get("content") == "historical-0"
         for event in sessions.read_range(lane["session_id"], limit=16)

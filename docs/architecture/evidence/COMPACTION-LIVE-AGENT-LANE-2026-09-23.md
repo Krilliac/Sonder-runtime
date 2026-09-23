@@ -7,7 +7,9 @@ before the `ModelRequest` is built.
 
 The archive policy can replace only `tool.result` and `tool.completed` payloads
 with content-free references. User messages, model responses, goals, control
-facts, and model/tool failures remain in the source range. A reference can be
+facts, and model/tool failures remain in the source range. Model responses are
+treated as protected because their rationale may carry a decision even when
+the event is not semantically classified. A reference can be
 resolved through the existing lane retrieval surface, and session references
 are verified against the append-only source event and its digest after a
 service restart.
@@ -35,4 +37,6 @@ to a resumed provider request. Full long-session decision/failure retention
 requires a reference-backed selection or a durable continuation cursor and
 remains an open COMPACT gap. Protected facts within the selected tail are
 never silently truncated: exceeding the 40-message or 32 KiB protected-fact
-budget raises a recoverable `ContextHistoryOverflowError`.
+budget raises a recoverable `ContextHistoryOverflowError`, leaves the lane in
+`awaiting_input` with `CONTEXT_HISTORY_OVERFLOW`, and allows an explicit
+resume after operator-led compaction.
