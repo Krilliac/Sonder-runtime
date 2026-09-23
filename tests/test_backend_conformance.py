@@ -5,7 +5,12 @@ import pytest
 from sonder_runtime.application.routing.backend_conformance import (
     DeterministicFakeProvider,
     RecentCapabilityEvidence,
+    run_gateway_probes,
     run_smoke_probes,
+)
+from sonder_runtime.adapters.inference.openai_compat_gateway import (
+    OpenAICompatibleConfig,
+    OpenAICompatibleGateway,
 )
 from sonder_runtime.application.routing.capability_router import (
     CapabilityRoutingError,
@@ -26,6 +31,56 @@ def test_fake_provider_records_plain_structured_and_cancellation(tmp_path):
         "chat", "structured", "cancellation"
     }
     assert restored.synthetic is True
+
+
+def test_openai_compatible_gateway_emits_real_non_synthetic_route_evidence():
+    calls = []
+
+    def transport(url, payload, headers, timeout):
+        calls.append(payload)
+        prompt = payload["messages"][-1]["content"]
+        text = '{"tool":"echo","continued":true}' if "Return only JSON" in prompt else "ok"
+        return {
+            "choices": [{"message": {"content": text}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }
+
+    gateway = OpenAICompatibleGateway(
+        OpenAICompatibleConfig(base_url="http://127.0.0.1:8080", model="contract-model"),
+        transport=transport,
+    )
+    record = run_gateway_probes(gateway, backend="openai-compatible", model="contract-model", now=100)
+
+    assert record.synthetic is False
+    assert record.passed == frozenset({
+        record.results[0].capability,
+        record.results[1].capability,
+        record.results[2].capability,
+    })
+    assert len(calls) == 2
+
+
+def test_gateway_probe_rejects_unbounded_timeout():
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        run_gateway_probes(object(), backend="test", model="fixture", timeout_seconds=301)
+
+
+def test_gateway_probe_does_not_certify_a_different_configured_model():
+    def transport(url, payload, headers, timeout):
+        text = ('{"tool":"echo","continued":true}'
+                if "Return only JSON" in payload["messages"][-1]["content"] else "ok")
+        return {"choices": [{"message": {"content": text}}]}
+
+    gateway = OpenAICompatibleGateway(
+        OpenAICompatibleConfig(base_url="http://127.0.0.1:8080", model="other-model"),
+        transport=transport,
+    )
+    record = run_gateway_probes(gateway, backend="openai-compatible", model="requested-model", now=100)
+
+    assert record.results[0].passed is False
+    assert record.results[1].passed is False
+    assert "model_mismatch" in record.results[0].reason_code
+    assert "model_mismatch" in record.results[1].reason_code
 
 
 def test_store_preserves_two_models_across_reopen(tmp_path):
