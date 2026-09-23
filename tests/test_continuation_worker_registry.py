@@ -81,6 +81,57 @@ def test_registry_reserves_in_the_continuation_store_and_provider_consumes_it(tm
     assert record.launch.owner_id == "owner"
 
 
+def test_completed_child_is_reused_after_service_restart_before_spawn(tmp_path):
+    repository = SQLiteDurableContinuationRepository(tmp_path / "continuation.sqlite")
+    root_request = SubagentRequest(
+        "root-1", "provider root", SubagentBudget(max_steps=8), "root-1",
+        (("provider_root", "true"),),
+    )
+    repository.create(DurableChildSession(root_request, ChildSessionLineage("root-1")))
+    launch = _launch(tmp_path / "repo")
+    request = _request_for_reservation(launch)
+    context = local_owner_context(
+        correlation_id="delegation-1", workspace_roots=(tmp_path / "repo",)
+    )
+    calls = []
+
+    def runner(state, save, cancellation):
+        calls.append(1)
+        return "persisted result"
+
+    first = DurableContinuationService(repository)
+    first_handle = first.spawn(request, context, runner)
+    assert first_handle.result(timeout=5).output == "persisted result"
+    first.close(timeout=1)
+
+    restarted = DurableContinuationService(repository)
+    reused = restarted.spawn(request, context, lambda *_: calls.append(2) or "wrong")
+    assert reused.child_id == launch.worker_id
+    assert reused.result(timeout=1).output == "persisted result"
+    assert calls == [1]
+
+
+def test_terminal_child_scope_mismatch_cannot_be_reused_or_respawned(tmp_path):
+    repository = SQLiteDurableContinuationRepository(tmp_path / "continuation.sqlite")
+    root_request = SubagentRequest(
+        "root-1", "provider root", SubagentBudget(max_steps=8), "root-1",
+        (("provider_root", "true"),),
+    )
+    repository.create(DurableChildSession(root_request, ChildSessionLineage("root-1")))
+    launch = _launch(tmp_path / "repo")
+    request = _request_for_reservation(launch)
+    context = local_owner_context(
+        correlation_id="delegation-1", workspace_roots=(tmp_path / "repo",)
+    )
+    service = DurableContinuationService(repository)
+    assert service.spawn(request, context, lambda *_: "done").result(timeout=5).output == "done"
+    mismatched = replace(request, prompt="changed prompt")
+    with pytest.raises(InvalidSubagentRequest, match="terminal child identity"):
+        DurableContinuationService(repository).spawn(
+            mismatched, context, lambda *_: pytest.fail("runner must not run")
+        )
+
+
 def test_reserved_worker_cannot_be_claimed_by_another_owner(tmp_path):
     repository = SQLiteDurableContinuationRepository(tmp_path / "continuation.sqlite")
     root = SubagentRequest("root-1", "provider root", SubagentBudget(max_steps=8), "root-1", (("provider_root", "true"),))

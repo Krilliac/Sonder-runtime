@@ -256,6 +256,27 @@ class DurableContinuationService:
                         raise InvalidSubagentRequest("active child operation scope is incompatible")
                     return _Handle(self, existing_child_id, request.parent_id)
                 raise InvalidSubagentRequest("active child requires recover/resume after restart")
+            if existing is not None and existing.status in TERMINAL_SUBAGENT_STATUSES:
+                same_scope = (
+                    existing.request.parent_id == request.parent_id
+                    and existing.request.prompt == request.prompt
+                    and existing.request.budget == request.budget
+                    and existing.request.metadata == request.metadata
+                    and existing.request.resume_key == request.resume_key
+                    and existing.request.idempotency_key == request.idempotency_key
+                )
+                if not same_scope:
+                    raise InvalidSubagentRequest(
+                        "terminal child identity or scope does not match requested delegation"
+                    )
+                if existing.recovery_required:
+                    raise InvalidSubagentRequest(
+                        "terminal child requires explicit resume after recovery"
+                    )
+                # The durable terminal result is the authoritative reuse
+                # value. Return a handle backed by the repository and do not
+                # admit a second worker or invoke the runner again.
+                return _Handle(self, existing.request.child_id, request.parent_id)
             parent = self._repository.get(request.parent_id)
             # A provider root is an admission anchor whose own id is already the
             # requested parent; it must not be duplicated in a child's ancestors.

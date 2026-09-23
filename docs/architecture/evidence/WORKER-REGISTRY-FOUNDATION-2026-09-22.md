@@ -36,3 +36,17 @@ python -m pytest -q tests/test_worker_registry.py
 python -m pytest -q tests/test_continuation_worker_registry.py
 python scripts/check_architecture.py
 ```
+
+The durable continuation service now reuses a matching terminal child before
+any new admission or runner spawn, including after a fresh service instance
+opens the same repository. A changed prompt, metadata, budget, resume key, or
+idempotency key is rejected; a terminal record marked `recovery_required`
+still requires the explicit resume path. The reuse handle reads the persisted
+terminal result, so the repository remains the only worker truth.
+
+Additional verification:
+
+```text
+python -m pytest -q tests/test_continuation_worker_registry.py
+18 passed
+```
