@@ -3182,6 +3182,7 @@ def good_interaction_candidate_page(
     cursor=None, row_limit=RECALL_CANDIDATE_ROW_LIMIT,
     byte_limit=RECALL_CANDIDATE_BYTE_LIMIT,
     time_limit_s=RECALL_CANDIDATE_TIME_LIMIT_S, cancel_check=None,
+    _outcome_kind="good",
 ):
     """Return a bounded deterministic recall-candidate page.
 
@@ -3198,6 +3199,8 @@ def good_interaction_candidate_page(
     content or embedding backfill is required.
     """
     include_all_projects = include_all_projects is True
+    if _outcome_kind not in {"good", "failure"}:
+        raise ValueError("recall candidate outcome kind is invalid")
     if isinstance(row_limit, bool) or not isinstance(row_limit, int):
         raise ValueError("recall candidate row limit must be an integer")
     if isinstance(byte_limit, bool) or not isinstance(byte_limit, int):
@@ -3227,6 +3230,54 @@ def good_interaction_candidate_page(
         for signal in good_signals
         for value in (signal, memory_rules.reward_score(signal))
     )
+    if _outcome_kind == "failure":
+        outcome_select = (
+            "(SELECT CAST(failed.signal AS BLOB) FROM outcomes failed "
+            "WHERE failed.interaction_id=i.id AND failed.signal='failed' "
+            "ORDER BY failed.rowid ASC LIMIT 1) AS outcome_signal, "
+            "(SELECT CAST(failed.source AS BLOB) FROM outcomes failed "
+            "WHERE failed.interaction_id=i.id AND failed.signal='failed' "
+            "ORDER BY failed.rowid ASC LIMIT 1) AS outcome_source, "
+            "(SELECT failed.reward FROM outcomes failed "
+            "WHERE failed.interaction_id=i.id AND failed.signal='failed' "
+            "ORDER BY failed.rowid ASC LIMIT 1) AS outcome_reward "
+        )
+        outcome_filter = (
+            "AND EXISTS (SELECT 1 FROM outcomes failed "
+            "WHERE failed.interaction_id=i.id AND failed.signal='failed' "
+            "AND typeof(failed.reward) IN ('integer','real') "
+            "AND failed.reward=?) "
+        )
+        outcome_params = [memory_rules.reward_score("failed")]
+    else:
+        outcome_select = (
+            "(SELECT CAST(good.signal AS BLOB) FROM outcomes good "
+            "WHERE good.interaction_id=i.id ORDER BY good.rowid ASC LIMIT 1) "
+            "AS outcome_signal, "
+            "(SELECT CAST(good.source AS BLOB) FROM outcomes good "
+            "WHERE good.interaction_id=i.id ORDER BY good.rowid ASC LIMIT 1) "
+            "AS outcome_source, "
+            "(SELECT good.reward FROM outcomes good "
+            "WHERE good.interaction_id=i.id ORDER BY good.rowid ASC LIMIT 1) "
+            "AS outcome_reward "
+        )
+        outcome_filter = (
+            "AND EXISTS (SELECT 1 FROM outcomes good "
+            "WHERE good.interaction_id=i.id AND good.signal IN (%s) "
+            "AND typeof(good.reward) IN ('integer','real') "
+            "AND good.reward=CASE good.signal %s END) "
+            "AND NOT EXISTS (SELECT 1 FROM outcomes bad "
+            "WHERE bad.interaction_id=i.id AND "
+            "(bad.signal NOT IN (%s) OR bad.signal IS NULL "
+            "OR typeof(bad.reward) NOT IN ('integer','real') "
+            "OR bad.reward!=CASE bad.signal %s END OR bad.reward<?))"
+            % (placeholders, reward_case, placeholders, reward_case)
+        )
+        outcome_params = [
+            *good_signals, *canonical_rewards,
+            *good_signals, *canonical_rewards,
+            memory_rules.GOOD_THRESHOLD,
+        ]
     sql = (
         "SELECT CAST(i.ts AS BLOB) AS candidate_ts, "
         "CAST(i.id AS BLOB) AS candidate_cursor_id, "
@@ -3241,16 +3292,8 @@ def good_interaction_candidate_page(
         "CAST(i.task_embedding_revision AS BLOB) AS task_embedding_revision, "
         "i.task_embedding_dim, CASE WHEN NULLIF(i.project,'') IS NULL "
         "THEN NULL ELSE CAST(i.project AS BLOB) END AS project, "
-        "(SELECT CAST(good.signal AS BLOB) FROM outcomes good "
-        "WHERE good.interaction_id=i.id ORDER BY good.rowid ASC LIMIT 1) "
-        "AS outcome_signal, "
-        "(SELECT CAST(good.source AS BLOB) FROM outcomes good "
-        "WHERE good.interaction_id=i.id ORDER BY good.rowid ASC LIMIT 1) "
-        "AS outcome_source, "
-        "(SELECT good.reward FROM outcomes good "
-        "WHERE good.interaction_id=i.id ORDER BY good.rowid ASC LIMIT 1) "
-        "AS outcome_reward "
-        "FROM interactions i WHERE 1=1 "
+        + outcome_select
+        + "FROM interactions i WHERE 1=1 "
         "AND typeof(i.id)='text' AND length(i.id) BETWEEN 1 AND 256 "
         "AND typeof(i.ts)='text' AND length(i.ts) BETWEEN 1 AND 64 "
         "AND typeof(i.task)='text' AND length(i.task)<=? "
@@ -3265,25 +3308,12 @@ def good_interaction_candidate_page(
         "AND (i.task_embedding_revision IS NULL OR "
         "(typeof(i.task_embedding_revision)='text' "
         "AND length(i.task_embedding_revision)<=256)) "
-        "AND EXISTS (SELECT 1 FROM outcomes good "
-        "WHERE good.interaction_id=i.id AND good.signal IN (%s) "
-        "AND typeof(good.reward) IN ('integer','real') "
-        "AND good.reward=CASE good.signal %s END) "
-        "AND NOT EXISTS (SELECT 1 FROM outcomes bad "
-        "WHERE bad.interaction_id=i.id AND "
-        "(bad.signal NOT IN (%s) OR bad.signal IS NULL "
-        "OR typeof(bad.reward) NOT IN ('integer','real') "
-        "OR bad.reward!=CASE bad.signal %s END OR bad.reward<?))"
-        % (placeholders, reward_case, placeholders, reward_case)
+        + outcome_filter
     )
     params = [
         RECALL_RESPONSE_PREFIX_CHARS,
         RECALL_MAX_STORED_TASK_CHARS,
-        *good_signals,
-        *canonical_rewards,
-        *good_signals,
-        *canonical_rewards,
-        memory_rules.GOOD_THRESHOLD,
+        *outcome_params,
     ]
     if require_embedding:
         sql = sql.replace(
@@ -3445,6 +3475,33 @@ def good_interaction_candidate_page(
         termination=termination,
         rows_examined=examined,
         bytes_loaded=loaded_bytes,
+    )
+
+
+def failed_interaction_candidate_page(
+    conn, exclude_session=None, project=None, include_all_projects=False,
+    *, embedding_model=None, embedding_revision=None, embedding_dim=None,
+    require_embedding=False, max_created_at=None, cursor=None,
+    row_limit=RECALL_CANDIDATE_ROW_LIMIT,
+    byte_limit=RECALL_CANDIDATE_BYTE_LIMIT,
+    time_limit_s=RECALL_CANDIDATE_TIME_LIMIT_S, cancel_check=None,
+):
+    """Return bounded project/session-scoped interactions with failed evidence.
+
+    Failure history is deliberately metadata-only: it does not load or filter
+    on embeddings, and a row remains eligible when it also has a later good
+    signal. Callers must label these rows as failure evidence; this adapter
+    never promotes them into successful-solution candidates.
+    """
+    if require_embedding is not False:
+        raise ValueError("failure recall cannot require embeddings")
+    return good_interaction_candidate_page(
+        conn, exclude_session, project=project,
+        include_all_projects=include_all_projects,
+        require_embedding=False, max_created_at=max_created_at,
+        cursor=cursor, row_limit=row_limit, byte_limit=byte_limit,
+        time_limit_s=time_limit_s, cancel_check=cancel_check,
+        _outcome_kind="failure",
     )
 
 def good_interactions_with_embeddings(

@@ -156,7 +156,7 @@ def _format(task, response, max_len=MAX_RESP_CHARS):
     return line
 
 
-_RECALL_MODES = frozenset(("hybrid", "exact", "temporal"))
+_RECALL_MODES = frozenset(("hybrid", "exact", "temporal", "failure"))
 
 
 def _parse_timestamp(value):
@@ -222,6 +222,7 @@ def _hybrid_order(task, scored, *, project, include_all_projects, limit,
             privacy=PrivacyClass.PROJECT if memory_project else PrivacyClass.PUBLIC,
             semantic_score=float(similarity),
             provenance=provenance,
+            failure_tags=("failed",) if outcome == "failed" else (),
             temporal=(
                 TemporalTruth(valid_from=created, confidence=1.0,
                               last_revalidated_at=created)
@@ -233,7 +234,7 @@ def _hybrid_order(task, scored, *, project, include_all_projects, limit,
         candidates,
         RetrievalQuery(
             task, mode=mode, limit=limit, scope=scope, project=query_project,
-            at=now,
+            at=now, failure_tag="failed" if mode == "failure" else None,
         ),
     )
     return [rows_by_id[item.candidate.memory_id] for item in ranked]
@@ -257,7 +258,7 @@ def recall_page(conn, task, k=2, embed_fn=None, min_sim=None,
     if not isinstance(mode, str) or mode not in _RECALL_MODES:
         raise InvalidInput(
             "recall mode is unavailable; supported modes are hybrid, exact, "
-            "and temporal"
+            "temporal, and failure"
         )
     if mode != "hybrid" and (not isinstance(task, str) or not task.strip()):
         raise InvalidInput("specialized recall modes require a non-empty query")
@@ -284,7 +285,12 @@ def recall_page(conn, task, k=2, embed_fn=None, min_sim=None,
             if embedding_revision is None:
                 embedding_revision = query_provenance.get("revision")
 
-    candidates = memory_store.good_interaction_candidate_page(
+    candidate_page = (
+        memory_store.failed_interaction_candidate_page
+        if mode == "failure"
+        else memory_store.good_interaction_candidate_page
+    )
+    candidates = candidate_page(
         conn,
         exclude_session,
         project=project,
@@ -292,7 +298,11 @@ def recall_page(conn, task, k=2, embed_fn=None, min_sim=None,
         embedding_model=embedding_model,
         embedding_revision=embedding_revision,
         require_embedding=not (specialized or lexical_fallback),
-        max_created_at=(at.isoformat() if mode == "temporal" else None),
+        max_created_at=(
+            at.isoformat()
+            if at is not None and mode in {"temporal", "failure"}
+            else None
+        ),
         embedding_dim=(len(qv) if not (specialized or lexical_fallback) else None),
         cursor=candidate_cursor,
     )
@@ -348,7 +358,12 @@ def recall_page(conn, task, k=2, embed_fn=None, min_sim=None,
     )
     selected = ordered[:k]
     formatted = tuple(
-        _format(row["task"], row["response"])
+        (
+            "[failed evidence] "
+            + _format(row["task"], row["response"])
+            if mode == "failure"
+            else _format(row["task"], row["response"])
+        )
         for _, _, row in selected
     )
     items = tuple(
