@@ -26,6 +26,9 @@ class ModelRequest:
     stream: bool = False
     provenance: ModelRequestProvenance | None = None
     context_packet: ContextPacket | None = None
+    # In-process capability only. It is intentionally excluded from the
+    # JSON-serializable durable request options captured for replay.
+    _resolved_route: object | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         # Ordinary user-authored prompts may remain unlabelled.  Any request

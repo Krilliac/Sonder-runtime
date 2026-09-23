@@ -26,6 +26,7 @@ from ..loop_contract import StepState
 from ..loop_event_classification import DurableSessionFact
 from ..loop_steering import SteeringCommand
 from ..ports.model_gateway import ModelRequest, require_model_text
+from ..ports.model_target import ResolvedModelRoute
 from ..session.capture import CapturedRequest, SessionCaptureService, _snapshot_payload
 from ..session.archive import ArchiveReference, SessionContextArchiveService
 from ..tools.gateway_contract import ToolGatewayRequest, ToolScope, ToolPermission
@@ -1425,20 +1426,24 @@ class AgentLaneService:
                 + "\nVisible tool schemas (only these tools may be requested): "
                 + rendered
             )
+        route = route if isinstance(route, ResolvedModelRoute) else None
         route_identity = (
-            route if isinstance(route, dict)
-            and all(isinstance(route.get(key), str) and route[key].strip()
-                    for key in ("model", "tokenizer", "template"))
+            route if route is not None
+            and all(isinstance(getattr(route, key), str) and getattr(route, key).strip()
+                    for key in ("provider_id", "model", "tokenizer", "template"))
             else None
         )
         if self._context_planning is not None and self._live_context is not None:
             live = self._live_context.refresh(Path(lane["workspace_root"]))
-            if route_identity is None:
-                system += "\nProvider model/tokenizer/template identity unavailable; reusable prefix disabled"
-            elif not live.complete:
+            if not live.complete:
                 # Keep the failure visible to the model and operators, while
                 # refusing to claim a reusable prefix for incomplete inputs.
                 system += "\nLive stable context unavailable: " + live.reason
+            elif route_identity is None:
+                system += "\nProvider model/tokenizer/template identity unavailable; reusable prefix disabled"
+                system += "\nAuthoritative project context:\n" + "\n\n".join(
+                    record.content for record in live.records
+                )
             else:
                 base = ContextRecord(
                     "agent-system", "stable_instructions", system,
@@ -1462,13 +1467,14 @@ class AgentLaneService:
                 budgets = {section: 8192 for section in CONTEXT_SECTIONS}
                 try:
                     assembly = self._context_planning.assemble(
-                        ModelContext(route_identity["model"], 32768, min(
+                        ModelContext(route_identity.model, 32768, min(
                             max(1, lane["max_output_tokens"]), 32767
                         )),
                         items, budgets, records=records,
                         prefix_version="agent-lane-v1",
-                        tokenizer=route_identity["tokenizer"],
-                        template=route_identity["template"],
+                        provider_id=route_identity.provider_id,
+                        tokenizer=route_identity.tokenizer,
+                        template=route_identity.template,
                         system_prefix=system,
                         visible_tool_schemas=(schemas if selection is not None else ()),
                         project_policy={
@@ -1497,14 +1503,13 @@ class AgentLaneService:
         request_options = {
             "num_predict": max(1, lane["max_output_tokens"] - lane["used_tokens"])
         }
-        if route is not None:
-            request_options["_resolved_route"] = route
         return ModelRequest(
             prompt,
             tier=lane["tier"],
             system=system,
             history=self._history(lane),
             options=request_options,
+            _resolved_route=route,
         )
 
     def _tool_schema_selection(self, lane, *, turn_number=None):
