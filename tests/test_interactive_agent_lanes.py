@@ -685,6 +685,57 @@ def test_small_lane_tool_result_stays_inline_without_archive_reference(env):
     ) == ()
 
 
+def test_live_request_compacts_canonical_tool_output_and_recovers_after_restart(env):
+    service, store, sessions, model, context, _ = env
+    lane_id = spawn(env, command="compact-live")['lane']['id']
+    lane = service.store.read_lane(lane_id)
+    sessions.append(
+        lane["session_id"], "goal.updated",
+        {"decision": "preserve user contract", "constraint": "keep failure visible"},
+        event_id="decision-1",
+    )
+    sessions.append(
+        lane["session_id"], "tool.result",
+        {"call_id": "canonical-large", "content": "private output " * 5000},
+        event_id="canonical-large",
+    )
+    sessions.append(
+        lane["session_id"], "model.failed",
+        {"request_id": "prior", "error_code": "timeout", "detail": "retry required"},
+        event_id="failure-1",
+    )
+
+    service.run_pending(lane_id, context)
+    request = model.requests[0][0]
+    pointer = next(
+        item["content"] for item in request.history
+        if "tool output archived" in item["content"]
+    )
+    assert "private output" not in pointer
+    assert any("preserve user contract" in item["content"] for item in request.history)
+    assert any("retry required" in item["content"] for item in request.history)
+
+    archive = sessions.search(
+        session_id=lane["session_id"],
+        event_type="context.archive.created",
+        text="canonical-large",
+        limit=4,
+    )[0]
+    archive_id = archive.payload["archive_id"]
+    recovered = service.retrieve_archived_tool(lane_id, archive_id, context)
+    assert recovered["payload"]["content"].startswith("private output")
+
+    reopened = AgentLaneService(store, sessions, model, auto_start=False)
+    recovered_after_restart = reopened.retrieve_archived_tool(
+        lane_id, archive_id, context
+    )
+    assert recovered_after_restart == recovered
+    assert any(
+        "tool output archived" in item["content"]
+        for item in reopened._history(reopened.store.read_lane(lane_id))
+    )
+
+
 def test_recent_tool_context_cap_applies_to_matched_completed_calls(env):
     service, _, sessions, _, context, _ = env
     lane_id = spawn(env)["lane"]["id"]

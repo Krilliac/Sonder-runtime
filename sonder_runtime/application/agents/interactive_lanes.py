@@ -29,6 +29,7 @@ from ..ports.model_gateway import ModelRequest, require_model_text
 from ..ports.model_target import ResolvedModelRoute
 from ..session.capture import CapturedRequest, SessionCaptureService, _snapshot_payload
 from ..session.archive import ArchiveReference, SessionContextArchiveService
+from ..compaction import SessionCompactionError, SessionCompactionService
 from ..tools.gateway_contract import ToolGatewayRequest, ToolScope, ToolPermission
 from ..execution.effect_journal import JournalBinding, bound as bound_effect_journal
 from ..ports.tool_registry import ToolSchemaSelection
@@ -59,6 +60,9 @@ _WAIT_OWNERS = {}
 
 _ACTIVE = frozenset({"queued", "running", "interrupt_requested", "cancel_requested"})
 _LANE_INLINE_TOOL_RESULT_BYTES = 2 * 1024
+# Canonical session history is input to every live lane request. Keep this
+# archive pass bounded independently of the provider token budget.
+_LANE_CANONICAL_HISTORY_BYTES = 32 * 1024
 _LOG = logging.getLogger(__name__)
 _HIDDEN = frozenset(
     {
@@ -192,6 +196,7 @@ class AgentLaneService:
         context_planning: ContextPlanningFacade | None = None,
         live_context: LiveAgentContextProducer | None = None,
         effect_journal=None,
+        compaction_service: SessionCompactionService | None = None,
     ):
         self.store, self.sessions, self.gateway, self.tools = (
             store,
@@ -229,6 +234,9 @@ class AgentLaneService:
         self._capacity_waiters = {}
         self._capture = SessionCaptureService(sessions)
         self._archive = SessionContextArchiveService(sessions)
+        self._compaction = compaction_service or SessionCompactionService(
+            sessions, max_events=256, archive_service=self._archive,
+        )
         if loop is not None and loop_factory is not None:
             raise ValueError("loop and loop_factory are mutually exclusive")
         if loop is not None and not callable(getattr(loop, "admit_turn", None)):
@@ -1293,13 +1301,43 @@ class AgentLaneService:
             )
         except (AttributeError, TypeError, ValueError) as exc:
             raise RuntimeError("canonical session tail is unavailable") from exc
+        # Use the durable compaction seam immediately before provider request
+        # assembly. Only tool results are eligible for eviction; model/user
+        # events, including decisions and failures, stay in the source range.
+        try:
+            archived = self._compaction.archive_context(
+                lane["session_id"],
+                start_sequence=events[0].sequence,
+                end_sequence=events[-1].sequence,
+                budget_bytes=_LANE_CANONICAL_HISTORY_BYTES,
+            ) if events else None
+        except SessionCompactionError:
+            # A truncated or unverifiable source must not become an apparently
+            # valid provider history after restart.
+            raise
+        canonical_events = (
+            archived.retained_events if archived is not None else tuple(events)
+        )
+        placeholders = {
+            reference.source_event_id: placeholder
+            for reference, placeholder in zip(
+                archived.references if archived is not None else (),
+                archived.placeholders if archived is not None else (),
+            )
+        }
+        canonical_tool_calls = {
+            event.payload.get("call_id")
+            for event in canonical_events
+            if event.event_type == "tool.result"
+            and isinstance(event.payload.get("call_id"), str)
+        }
         history = []
         matched_tool_context = set()
         completed_calls = {
-            event.payload.get("call_id") for event in events
+            event.payload.get("call_id") for event in canonical_events
             if event.event_type in {"tool.completed", "tool.failed"}
         }
-        for event in events:
+        for event in canonical_events:
             if (
                 event.event_type == "lane.message"
                 and event.payload.get("message_id") in handled
@@ -1317,17 +1355,53 @@ class AgentLaneService:
                 history.append(
                     {"role": "assistant", "content": str(event.payload["content"])}
                 )
+            elif event.event_type in {
+                "goal.created", "goal.updated", "goal.completed",
+                "model.failed", "tool.failed", "lane.control",
+            }:
+                # These are protected facts. Keep their bounded JSON visible
+                # even when neighbouring tool output is replaced by a pointer.
+                history.append({
+                    "role": "user",
+                    "content": "Durable session fact (" + event.event_type + "): "
+                    + json.dumps(event.payload, ensure_ascii=False, sort_keys=True),
+                })
+            elif event.event_type == "tool.result":
+                call_id = event.payload.get("call_id")
+                if not isinstance(call_id, str) or not call_id:
+                    continue
+                placeholder = placeholders.get(event.event_id)
+                if placeholder is not None:
+                    content = str(placeholder["content"])
+                else:
+                    encoded = json.dumps(
+                        event.payload, ensure_ascii=False, sort_keys=True,
+                    )
+                    content = "Tool result (data): " + encoded
+                history.append({"role": "user", "content": content})
             elif (event.event_type in {"tool.completed", "tool.failed"}
                   or (event.event_type == "tool.requested"
                       and event.payload.get("call_id") not in completed_calls)):
                 call_id = event.payload.get("call_id")
                 if not isinstance(call_id, str) or not call_id:
                     continue
+                if call_id in canonical_tool_calls:
+                    # The canonical tool.result is already represented at its
+                    # source sequence; avoid duplicating it on completion.
+                    continue
                 for sequence, source_call_id, item in recent_tool_context:
                     if source_call_id == call_id and sequence not in matched_tool_context:
                         history.append(item)
                         matched_tool_context.add(sequence)
                         break
+        retained_ids = {event.event_id for event in canonical_events}
+        for source_event_id, placeholder in sorted(
+            ((event_id, item) for event_id, item in placeholders.items()
+             if event_id not in retained_ids),
+            key=lambda pair: int(pair[1]["source_sequence"]),
+        ):
+            del source_event_id
+            history.append({"role": "user", "content": str(placeholder["content"])})
         unmatched = [
             item for sequence, _, item in recent_tool_context
             if sequence not in matched_tool_context
@@ -1350,8 +1424,13 @@ class AgentLaneService:
         match = next(
             (event for event in matches
              if event.payload.get("archive_id") == archive_id
-             and event.payload.get("source_lane_id") == lane_id
-             and event.payload.get("project_id") == lane["workspace_root"]),
+             and (
+                 event.payload.get("source_kind") == "session"
+                 or (
+                     event.payload.get("source_lane_id") == lane_id
+                     and event.payload.get("project_id") == lane["workspace_root"]
+                 )
+             )),
             None,
         )
         if match is None:
@@ -1362,17 +1441,25 @@ class AgentLaneService:
             str(payload["source_event_id"]), int(payload["source_sequence"]),
             str(payload.get("source_event_type", "tool.result")),
             str(payload["sha256"]), int(payload["byte_count"]),
-            str(payload["source_kind"]), str(payload["source_lane_id"]),
-            str(payload["project_id"]),
+            str(payload.get("source_kind", "session")),
+            (str(payload["source_lane_id"])
+             if payload.get("source_lane_id") is not None else None),
+            (str(payload["project_id"])
+             if payload.get("project_id") is not None else None),
+        )
+        recovered = (
+            self._archive.retrieve(reference)
+            if reference.source_kind == "session"
+            else SessionContextArchiveService.retrieve_external(
+                reference,
+                lambda source_lane, sequence: self.store.event(source_lane, sequence),
+                project_id=lane["workspace_root"],
+            )
         )
         return {
             "archive_id": archive_id,
             "project_id": lane["workspace_root"],
-            "payload": SessionContextArchiveService.retrieve_external(
-                reference,
-                lambda source_lane, sequence: self.store.event(source_lane, sequence),
-                project_id=lane["workspace_root"],
-            ),
+            "payload": recovered,
         }
 
     def _request(self, lane, messages, *, request_id=None, context=None):
