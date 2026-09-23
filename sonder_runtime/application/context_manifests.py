@@ -14,6 +14,7 @@ import re
 import string
 from collections import Counter, OrderedDict
 from dataclasses import dataclass
+from threading import RLock
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 
@@ -296,9 +297,25 @@ class PrefixManifestCache:
         self._last_identity_key: str | None = None
         self._last_version: str | None = None
         self._last_observation: PrefixCacheObservation | None = None
+        self._lock = RLock()
 
     def resolve(self, records: Sequence[ContextRecord], *, version: str = "1", **identity: Any) -> PrefixManifest:
+        manifest, _observation = self.resolve_observed(
+            records, version=version, **identity,
+        )
+        return manifest
+
+    def resolve_observed(
+        self, records: Sequence[ContextRecord], *, version: str = "1", **identity: Any,
+    ) -> tuple[PrefixManifest, PrefixCacheObservation]:
+        """Return the manifest and its own cache decision as one result."""
         manifest = build_prefix_manifest(records, version=version, **identity)
+        with self._lock:
+            return self._resolve_observed_locked(manifest)
+
+    def _resolve_observed_locked(
+        self, manifest: PrefixManifest,
+    ) -> tuple[PrefixManifest, PrefixCacheObservation]:
         cached = self._values.get(manifest.cache_key)
         if cached is not None:
             self.hits += 1
@@ -306,11 +323,12 @@ class PrefixManifestCache:
             self._reasons["hit"] += 1
             self._values.move_to_end(manifest.cache_key)
             self._remember(manifest)
-            self._last_observation = PrefixCacheObservation(
+            observation = PrefixCacheObservation(
                 manifest.cache_key, manifest.identity_key, manifest.version,
                 "hit", "hit", False,
             )
-            return cached
+            self._last_observation = observation
+            return cached, observation
         self.misses += 1
         if not self._values:
             reason = "cold_start"
@@ -328,11 +346,12 @@ class PrefixManifestCache:
             self._values.popitem(last=False)
         self.writes += 1
         self._remember(manifest)
-        self._last_observation = PrefixCacheObservation(
+        observation = PrefixCacheObservation(
             manifest.cache_key, manifest.identity_key, manifest.version,
             "miss", reason, True,
         )
-        return manifest
+        self._last_observation = observation
+        return manifest, observation
 
     def _remember(self, manifest: PrefixManifest) -> None:
         self._last_cache_key = manifest.cache_key
@@ -341,11 +360,13 @@ class PrefixManifestCache:
 
     @property
     def telemetry(self) -> PrefixCacheTelemetry:
-        return PrefixCacheTelemetry(self.hits, self.misses, self.writes, self._last_reason, MappingProxyType(dict(self._reasons)))
+        with self._lock:
+            return PrefixCacheTelemetry(self.hits, self.misses, self.writes, self._last_reason, MappingProxyType(dict(self._reasons)))
 
     @property
     def last_observation(self) -> PrefixCacheObservation | None:
-        return self._last_observation
+        with self._lock:
+            return self._last_observation
 
 
 @dataclass(frozen=True)

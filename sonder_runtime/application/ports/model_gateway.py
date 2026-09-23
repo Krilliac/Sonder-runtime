@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 import numbers
+from collections.abc import Mapping
 from typing import Protocol, Sequence
 
 from ..context import OperationContext
@@ -14,6 +15,10 @@ from ..security.prompt_provenance import (
     PromptProvenanceBoundary,
     ProvenanceError,
 )
+
+
+def _evidence_field(value: object, name: str) -> object:
+    return value.get(name) if isinstance(value, Mapping) else getattr(value, name, None)
 
 
 @dataclass(frozen=True)
@@ -36,6 +41,23 @@ class ModelRequest:
     _resolved_route: object | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        # Provider-bound cache evidence must describe this request's own
+        # prefix. Replay reconstructs these fields as dictionaries, while live
+        # requests carry immutable manifest values.
+        if self.prefix_cache_observation is not None:
+            if self.prefix_manifest is None or any(
+                not isinstance(_evidence_field(self.prefix_manifest, field), str)
+                or not _evidence_field(self.prefix_manifest, field)
+                or _evidence_field(self.prefix_manifest, field)
+                != _evidence_field(self.prefix_cache_observation, field)
+                for field in ("cache_key", "identity_key", "version")
+            ):
+                raise ValueError("cache observation does not match the request prefix")
+        if self.prefix_manifest is not None and self.replay_manifest is not None:
+            if _evidence_field(self.replay_manifest, "prefix_key") != _evidence_field(
+                self.prefix_manifest, "cache_key"
+            ):
+                raise ValueError("replay manifest does not match the request prefix")
         # Ordinary user-authored prompts may remain unlabelled.  Any request
         # carrying prompt-visible external material must carry both halves of
         # the binding; partial metadata is never treated as trustworthy.
