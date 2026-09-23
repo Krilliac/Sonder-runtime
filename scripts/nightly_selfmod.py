@@ -31,12 +31,13 @@ WHY THERE ARE TWO TEST GATES
   Measured 2026-08-08: an agent lane produced four plausible fixes whose tests
   had never been executed, and running them revealed that one broke an
   architecture rule. The regression gate covers the repository suite except
-  for a target-specific held-out suite. The held-out gate runs a best-effort,
-  tamper-evident snapshot outside the candidate's editable files. It is not a
-  privilege boundary: a same-user candidate may be able to alter and restore
-  the snapshot, so this gate cannot claim security-grade isolation. If no
-  matching suite exists, the evaluator is unavailable and the candidate is
-  rejected.
+  for a target-specific held-out suite. The held-out gate runs a tamper-
+  evident snapshot outside the candidate's editable files. On Windows, both
+  candidate checks run through the low-integrity supervisor and the evaluator
+  files remain medium-integrity, so a candidate cannot rewrite or read the
+  evaluator truth. On unsupported hosts, the isolation helper fails closed
+  for the unattended check. If no matching suite exists, the evaluator is
+  unavailable and the candidate is rejected.
 """
 from __future__ import annotations
 
@@ -60,12 +61,6 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 import selfmod  # noqa: E402
-
-# Every unattended candidate check runs below the Windows low-integrity
-# supervisor.  The supervisor is deliberately opt-in here so human-driven
-# selfmod runs retain their existing lifecycle and diagnostics.
-if os.name == "nt":
-    os.environ["SELFMOD_LOW_INTEGRITY"] = "1"
 
 _HELD_OUT_MAX_FILES = 2048
 _HELD_OUT_MAX_BYTES = 32 * 1024 * 1024
@@ -197,6 +192,18 @@ def _regression_command(py: str, *, ignore_paths=()) -> list[str]:
     for path in ignore_paths:
         command.extend(["--ignore", str(path)])
     return command
+
+
+def _record_candidate_test(run_id, kind, command, *, timeout, protected_paths=()):
+    """Run one unattended gate with isolation selected explicitly.
+
+    Keeping this choice at the nightly call site prevents the ordinary
+    selfmod API from inheriting a process-global security mode.
+    """
+    return selfmod.record_test(
+        run_id, kind, command, timeout=timeout,
+        protected_paths=protected_paths, low_integrity=True,
+    )
 
 
 # The selfmod model sees only the candidate module. These suites are selected
@@ -1063,7 +1070,7 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
             # cwd is deliberately NOT passed: the default is the candidate
             # workspace, which keeps imports and pytest collection grounded in
             # the isolated checkout.
-            outcome = selfmod.record_test(
+            outcome = _record_candidate_test(
                 run_id, kind, command, timeout=test_timeout,
                 protected_paths=held_out.get("protected_paths", ()) if kind == "held_out" else (),
             )
