@@ -60,3 +60,41 @@ structured retention checks pass, and it does not overlap another summary;
 malformed, incomplete, or overlapping summaries fail closed. The cross-page
 recovery canary and an earlier-decision-plus-257-tool-requests canary prove
 that omitted tail history is recovered rather than silently lost.
+
+## Adversarial recovery hardening (2026-09-23)
+
+`tests/test_session_complete_recovery_adversarial.py` adds 29 canaries for
+`SQLiteSessionRepository.read_complete`: exact page-boundary counts (0-6
+events at page size 2), a bound equal to a full-page multiple, one event past
+it, invalid bounds, head truncation, gaps at and across page boundaries, a
+displaced sequence, a `previous_hash` cycle, payloads swapped across pages, an
+event grafted from another session, interleaved sessions, an append forced
+between pages, concurrent appenders against repeated recovery, recovery after
+restart with a differently sized adapter page, and refusal after close.
+
+Defect found and fixed: the recovery cursor advanced by the count of rows
+read (`sequence >= next`), so a displaced row made a page re-read an already
+recovered sequence. A within-bound corrupt history (sequences 1,2,4,5,9,
+`max_events=5`) was misreported as a recovery-bound overflow instead of an
+integrity failure. The RED run reported `1 failed, 28 passed` with actual
+message `session history exceeds recovery bound`. The cursor is now keyset
+(`sequence > last observed`) and each page is chain-verified before the next
+page is fetched.
+
+The append-between-pages canary proves the writer is still blocked after the
+first page (SQLite rollback-journal shared lock held by the deferred read
+transaction), the recovered snapshot is exactly sequences 1-5, and the late
+event becomes visible, correctly chained, on the next recovery.
+
+Known limitation, pinned by a test: deleting the newest events leaves a valid
+shorter chain. Without an external head anchor, tail truncation is not
+detectable by the hash chain alone.
+
+```text
+python -m pytest -p no:cacheprovider -q tests/test_session_complete_recovery_adversarial.py
+1 failed, 28 passed   (before the cursor fix)
+29 passed             (after the cursor fix)
+
+python -m pytest -p no:cacheprovider -q <76 session/compaction/replay/lane/control-plane/wp4 files>
+673 passed in 128.81s
+```

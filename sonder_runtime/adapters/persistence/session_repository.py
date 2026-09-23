@@ -230,16 +230,21 @@ class SQLiteSessionRepository:
         page_size = min(max_events, self._max_read_limit, _COMPLETE_PAGE_SIZE)
         events: list[SessionEvent] = []
         recovered_payload_bytes = 0
-        next_sequence = 1
+        # Keyset cursor: each page starts strictly after the last sequence
+        # actually observed, never at a count-derived offset, so a gap or a
+        # displaced row cannot make a page re-read (cycle over) recovered
+        # rows. Each page is chain-verified before the next is fetched.
+        last_sequence = 0
+        previous_hash: str | None = None
         with self._connect() as conn:
             conn.execute("BEGIN")
             while len(events) <= max_events:
                 row = conn.execute(
                     "SELECT COUNT(*), COALESCE(SUM(payload_bytes), 0) FROM ("
                     "SELECT length(CAST(payload_json AS BLOB)) AS payload_bytes "
-                    "FROM session_event WHERE session_id=? AND sequence>=? "
+                    "FROM session_event WHERE session_id=? AND sequence>? "
                     "ORDER BY sequence LIMIT ?) ",
-                    (session_id, next_sequence, page_size),
+                    (session_id, last_sequence, page_size),
                 ).fetchone()
                 page_count, page_bytes = int(row[0]), int(row[1])
                 if page_count == 0:
@@ -251,32 +256,29 @@ class SQLiteSessionRepository:
                 rows = conn.execute(
                     "SELECT session_id, sequence, event_id, event_type, occurred_at_utc, "
                     "payload_json, previous_hash, event_hash "
-                    "FROM session_event WHERE session_id = ? AND sequence >= ? "
+                    "FROM session_event WHERE session_id = ? AND sequence > ? "
                     "ORDER BY sequence LIMIT ?",
-                    (session_id, next_sequence, page_size),
+                    (session_id, last_sequence, page_size),
                 ).fetchall()
                 if len(rows) != page_count:
                     raise ValueError("session history changed during recovery")
-                page = tuple(self._row_to_event(item) for item in rows)
-                events.extend(page)
+                for item in rows:
+                    event = self._row_to_event(item)
+                    if event.sequence != last_sequence + 1 or event.previous_hash != previous_hash:
+                        raise ValueError("session history is not contiguous")
+                    calculated = self._hash(
+                        event.session_id, event.sequence, event.event_id,
+                        event.event_type, event.occurred_at_utc,
+                        self._canonical_payload(event.payload), event.previous_hash,
+                    )
+                    if calculated != event.event_hash:
+                        raise ValueError("session history failed integrity verification")
+                    events.append(event)
+                    last_sequence = event.sequence
+                    previous_hash = event.event_hash
                 recovered_payload_bytes += page_bytes
-                if len(page) < page_size:
+                if len(rows) < page_size:
                     break
-                next_sequence += len(page)
-        expected = 1
-        previous_hash = None
-        for event in events:
-            if event.sequence != expected or event.previous_hash != previous_hash:
-                raise ValueError("session history is not contiguous")
-            calculated = self._hash(
-                event.session_id, event.sequence, event.event_id,
-                event.event_type, event.occurred_at_utc,
-                self._canonical_payload(event.payload), event.previous_hash,
-            )
-            if calculated != event.event_hash:
-                raise ValueError("session history failed integrity verification")
-            expected += 1
-            previous_hash = event.event_hash
         return tuple(events)
 
     def search(self, *, session_id: str | None = None, event_type: str | None = None,
