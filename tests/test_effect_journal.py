@@ -282,7 +282,11 @@ def test_worker_effect_checkpoint_is_bound_to_terminal_high_water(tmp_path):
     assert second["effect_high_water"] == 2
 
 
-def test_worker_checkpoint_rejects_effect_admitted_after_last_checkpoint(tmp_path):
+def test_worker_checkpoint_behind_journal_restores_only_when_later_effects_settle(tmp_path):
+    # Semantics changed in the PR #523 review fix (P1-2): a checkpoint binds
+    # its settled prefix.  Later effects are acceptable only when terminal,
+    # and restore reports the journal position so the caller reads them via
+    # effects_since(); any unresolved later effect still refuses restart.
     from sonder_runtime.application.execution.worker_bindings import AuthenticatedWorkerBinding
 
     journal = SQLiteEffectJournal(tmp_path / "effects.db")
@@ -291,14 +295,23 @@ def test_worker_checkpoint_rejects_effect_admitted_after_last_checkpoint(tmp_pat
         operation_id="first", idempotency_key="first", request_digest="a" * 64,
     )
     binding.complete(first, outcome_digest="b" * 64, receipt_key="receipt-first")
-    journal.append_checkpoint("worker-run", "state-one")
+    journal.append_checkpoint("worker-run", "state-one", worker_id="worker", owner_epoch=1)
     second = binding.begin_request(
         operation_id="second", idempotency_key="second", request_digest="c" * 64,
     )
     binding.complete(second, outcome_digest="d" * 64, receipt_key="receipt-second")
-    with pytest.raises(EffectJournalError, match="high-water is stale"):
+    restored = journal.restore_checkpoint("worker-run")
+    assert (restored["effect_high_water"], restored["journal_high_water"]) == (1, 2)
+    later = journal.effects_since("worker-run", restored["effect_high_water"])
+    assert [(r.intent_id, r.receipt_key) for r in later.records] == [
+        (second.intent_id, "receipt-second"),
+    ]
+    binding.begin_request(
+        operation_id="third", idempotency_key="third", request_digest="e" * 64,
+    )
+    with pytest.raises(EffectJournalError, match="without a definitive outcome"):
         journal.restore_checkpoint("worker-run")
-    with pytest.raises(EffectJournalError, match="checkpoint reconciliation"):
+    with pytest.raises(EffectJournalError, match="reconciliation"):
         AuthenticatedWorkerBinding(
             journal, "worker-run", "worker", 2, "/workspace",
         ).recover_before_restart()
@@ -632,7 +645,8 @@ def test_production_process_registry_verifier_reconciles_after_restart(tmp_path)
         def view(self, job_id):
             return type("View", (), {
                 "record": self.poll(job_id),
-                "metadata": {"process_request_digest": "a" * 64},
+                "process_id": 77,
+                "metadata": {"process_request_digest": "a" * 64, "launch_state": "attached"},
             })()
 
     registry = Registry(JobStatus.SUCCEEDED)
@@ -653,7 +667,9 @@ def test_production_process_registry_verifier_reconciles_after_restart(tmp_path)
         current.recover_before_restart()
     resolved = journal.reconcile(intent.intent_id, owner_epoch=2)
     assert resolved.state is EffectState.COMPLETED
-    assert resolved.receipt_key == "process-job:job-1:4"
+    assert resolved.receipt_key == "job-1:77"
+    # Post-reconciliation restart is no longer wedged (review P1-2).
+    assert current.recover_before_restart().action == "resume"
 
     registry.status = JobStatus.PENDING
     old_two = AuthenticatedWorkerBinding(journal, "run-2", "process", 1, "/workspace")

@@ -64,6 +64,8 @@ CREATE TABLE IF NOT EXISTS effect_owner (
 """
 
 _VERIFIER_SLOTS = threading.BoundedSemaphore(4)
+# Checkpoint generations retained per run; older rows are pruned on append.
+CHECKPOINT_RETENTION = 16
 
 
 class SQLiteEffectJournal:
@@ -357,10 +359,12 @@ class SQLiteEffectJournal:
                 (current.run_id, EffectState.INTENT.value, EffectState.UNCERTAIN.value),
             ).fetchone()
             if unresolved is None:
+                # recover() fences every owner in the run; once no effect in
+                # the run is unresolved, every owner's fence is released, not
+                # only the reconciled intent's worker.
                 connection.execute(
-                    "UPDATE effect_owner SET recovery_required=0 "
-                    "WHERE run_id=? AND worker_id=? AND owner_epoch=?",
-                    (current.run_id, current.worker_id, owner_epoch),
+                    "UPDATE effect_owner SET recovery_required=0 WHERE run_id=?",
+                    (current.run_id,),
                 )
             return self._row(connection.execute(
                 "SELECT intent_id,run_id,worker_id,operation_id,scope,owner_epoch,"
@@ -437,7 +441,8 @@ class SQLiteEffectJournal:
                 outcome.state, outcome.outcome_digest, outcome.receipt_key
             ):
                 raise EffectJournalError("terminal effect outcome conflict")
-            return current
+            # Idempotent replay: signal it so no new checkpoint is appended.
+            return replace(current, replayed=True)
         if current.state is EffectState.UNCERTAIN:
             raise EffectJournalError(
                 "uncertain effect requires explicit reconciliation; late receipt refused"
@@ -454,6 +459,28 @@ class SQLiteEffectJournal:
             "outcome_digest,receipt_key,detail FROM effect_journal WHERE intent_id=?",
             (outcome.intent_id,),
         ).fetchone())
+
+    @staticmethod
+    def _require_current_owner_in_transaction(
+        connection, run_id: str, worker_id: str, owner_epoch: int,
+    ) -> None:
+        """Checkpoint writers must be the run's current, unfenced owner."""
+        if not isinstance(worker_id, str) or not worker_id.strip():
+            raise EffectJournalError("checkpoint writer owner identity is required")
+        if type(owner_epoch) is not int or owner_epoch < 1:
+            raise EffectJournalError("checkpoint writer owner epoch must be positive")
+        row = connection.execute(
+            "SELECT owner_epoch,recovery_required FROM effect_owner WHERE run_id=? AND worker_id=?",
+            (run_id, worker_id),
+        ).fetchone()
+        if row is None:
+            raise EffectJournalError("checkpoint writer is not an admitted owner of the run")
+        if int(row[0]) > owner_epoch:
+            raise EffectJournalError("stale worker owner epoch")
+        if int(row[0]) != owner_epoch:
+            raise EffectJournalError("checkpoint writer owner epoch was never claimed")
+        if int(row[1]):
+            raise EffectJournalError("recovery is required before writing a checkpoint")
 
     def uncertain(self, intent_id: str, *, detail: str) -> EffectIntent:
         if not detail.strip():
@@ -585,30 +612,33 @@ class SQLiteEffectJournal:
 
     def _append_checkpoint_in_transaction(
         self, connection, run_id: str, state: object,
+        encoded: tuple[str, str] | None = None,
     ) -> dict[str, object]:
-        state_json, state_digest = self._encode_state(state)
+        """Append one generation bound to the run's settled high-water.
+
+        Concurrent effects in one run are normal (process and compute workers
+        share a run id), so an in-flight intent does not refuse the
+        checkpoint.  The checkpoint binds only the settled prefix: every
+        effect at or below ``effect_high_water`` has a definitive outcome.
+        """
+        state_json, state_digest = encoded if encoded is not None else self._encode_state(state)
         latest = connection.execute(
-            "SELECT generation FROM effect_checkpoint WHERE run_id=? "
+            "SELECT generation,effect_high_water FROM effect_checkpoint WHERE run_id=? "
             "ORDER BY generation DESC LIMIT 1", (run_id,),
         ).fetchone()
         generation = -1 if latest is None else int(latest[0])
-        high_water = int(connection.execute(
-            "SELECT COALESCE(MAX(sequence),0) FROM effect_journal WHERE run_id=?",
-            (run_id,),
-        ).fetchone()[0])
-        unresolved = connection.execute(
-            "SELECT 1 FROM effect_journal WHERE run_id=? AND state IN (?,?) LIMIT 1",
-            (run_id, EffectState.INTENT.value, EffectState.UNCERTAIN.value),
-        ).fetchone()
-        if unresolved is not None:
-            raise EffectJournalError(
-                "checkpoint has an admitted effect without a definitive outcome"
-            )
+        high_water = self._settled_high_water_in(connection, run_id)
+        if latest is not None and high_water < int(latest[1]):
+            raise EffectJournalError("settled effect high-water moved backwards")
         generation += 1
         connection.execute(
             "INSERT INTO effect_checkpoint(run_id,generation,effect_high_water,state_digest,state_json) "
             "VALUES(?,?,?,?,?)",
             (run_id, generation, high_water, state_digest, state_json),
+        )
+        connection.execute(
+            "DELETE FROM effect_checkpoint WHERE run_id=? AND generation<=?",
+            (run_id, generation - CHECKPOINT_RETENTION),
         )
         return {
             "run_id": run_id,
@@ -620,35 +650,60 @@ class SQLiteEffectJournal:
 
     def outcome_and_checkpoint(
         self, outcome: EffectOutcome, state: object,
-    ) -> dict[str, object]:
-        """Commit a terminal outcome and serialized worker state together."""
+    ) -> dict[str, object] | None:
+        """Commit a terminal outcome and serialized worker state together.
+
+        The outcome's worker and epoch must still be the run's current,
+        unfenced owner.  An idempotent replay of an already-recorded outcome
+        appends no checkpoint and returns ``None``.
+        """
         if not isinstance(outcome, EffectOutcome):
             raise TypeError("outcome must be an EffectOutcome")
         if len(outcome.detail) > self._max_detail:
             raise EffectJournalError("outcome detail exceeds bound")
+        encoded = self._encode_state(state)
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             stored = self._apply_outcome_in_transaction(connection, outcome)
+            self._require_current_owner_in_transaction(
+                connection, stored.run_id, outcome.worker_id, int(outcome.owner_epoch),
+            )
+            if stored.replayed:
+                return None
             return self._append_checkpoint_in_transaction(
-                connection, stored.run_id, state,
+                connection, stored.run_id, state, encoded,
             )
 
-    def append_checkpoint(self, run_id: str, state: object) -> dict[str, object]:
+    def append_checkpoint(
+        self, run_id: str, state: object, *, worker_id: str, owner_epoch: int,
+    ) -> dict[str, object]:
         """Persist a worker checkpoint atomically with its journal high-water.
 
-        The generation is allocated by the host-owned SQLite transaction.  A
-        worker cannot claim a generation or high-water value supplied by an
-        untrusted caller, and a checkpoint is never written while an admitted
-        effect is unresolved.
+        The generation and settled high-water are allocated by the host-owned
+        SQLite transaction; a caller cannot supply either.  The writer must be
+        the run's current owner at ``owner_epoch`` with no recovery fence, so
+        a stale owner cannot overwrite a newer owner's restore point.
         """
         if not isinstance(run_id, str) or not run_id.strip():
             raise EffectJournalError("checkpoint run_id is required")
+        encoded = self._encode_state(state)
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            return self._append_checkpoint_in_transaction(connection, run_id, state)
+            self._require_current_owner_in_transaction(
+                connection, run_id, worker_id, owner_epoch,
+            )
+            return self._append_checkpoint_in_transaction(connection, run_id, state, encoded)
 
     def restore_checkpoint(self, run_id: str) -> dict[str, object] | None:
-        """Return the latest checkpoint only when its journal view is current."""
+        """Return the latest checkpoint when every journal effect is settled.
+
+        A checkpoint binds its settled prefix (``effect_high_water``).  Later
+        effects may exist, for example one resolved by verified
+        reconciliation after a crash; they are accepted only when every
+        effect in the run is terminal, and ``journal_high_water`` tells the
+        caller to read them with ``effects_since(run_id, effect_high_water)``.
+        Any unresolved effect, or a checkpoint ahead of the journal, refuses.
+        """
         if not isinstance(run_id, str) or not run_id.strip():
             raise EffectJournalError("checkpoint run_id is required")
         with self._lock, self._connect() as connection:
@@ -663,9 +718,9 @@ class SQLiteEffectJournal:
                 "SELECT COALESCE(MAX(sequence),0) FROM effect_journal WHERE run_id=?",
                 (run_id,),
             ).fetchone()[0])
-            if current != int(row[1]):
+            if int(row[1]) > current:
                 raise EffectJournalError(
-                    "checkpoint effect high-water is stale: "
+                    "checkpoint effect high-water is ahead of the journal: "
                     f"checkpoint={int(row[1])}, journal={current}"
                 )
             unresolved = connection.execute(
@@ -680,6 +735,7 @@ class SQLiteEffectJournal:
                 "run_id": run_id,
                 "generation": int(row[0]),
                 "effect_high_water": int(row[1]),
+                "journal_high_water": current,
                 "state_digest": str(row[2]),
                 "state": json.loads(str(row[3])) if str(row[3]) else None,
             }

@@ -30,7 +30,11 @@ worker-effects database. The host allocates the generation and captures the
 an explicit trusted state projection as canonical JSON, generation, and journal
 high-water in one transaction. The default projection is content-free metadata
 only, so worker output and prompts are not copied into the journal.
-Restore rejects a stale high-water or an unresolved intent, so a restart
+*Superseded by the review fix below:* restore originally rejected any
+checkpoint whose high-water differed from the journal maximum. Now a checkpoint
+binds the run's settled prefix. Restore rejects a checkpoint when any effect is
+unresolved or when the checkpoint is ahead of the journal. It reports
+`journal_high_water` when later terminal effects exist, so a restart still
 cannot treat a partially published worker result as a safe replay point. The
 same database durably records each `(run, worker, owner_epoch)` fence; restart
 claims the newer epoch before recovery, and older bindings cannot admit new
@@ -62,9 +66,14 @@ operation must be non-empty under the supported process contract.
 The process adapter also persists a SHA-256 canonical request digest in the
 existing bounded job metadata extension; the verifier requires that digest to
 match the journal intent. Legacy rows without the digest remain fenced.
-`succeeded` produces a completed proof; `failed` or
-`cancelled` produces a failed proof. Pending, missing, malformed, or otherwise
-unknown registry state produces no proof and leaves the fence set. The
+*Superseded by the review fix below:* before that fix, `succeeded` produced a
+completed proof and `failed` or `cancelled` produced a failed proof, with
+receipt `process-job:{id}:{rev}`. Now only a durable attach record (launch
+state `attached` and a positive `process_id`) on a terminal job produces a
+completed proof, with receipt `{job_id}:{pid}`. The journaled effect is the
+start of the process. The job's exit status is not that effect's outcome.
+Pending, missing, malformed, unattached, or otherwise unknown registry state
+produces no proof and leaves the fence set. The
 verifier never uses process output, caller text, or an in-memory process handle
 as authority. Other worker families remain unsupported and fenced.
 
@@ -138,6 +147,64 @@ evidence: `test_post_invoke_publication_failure_is_uncertain_not_reattachable`
 and `test_success_predicate_failure_after_effect_is_uncertain` failed before
 the fix (`state=intent`, `recover(...).action == "reattach"` path) and pass
 after it.
+
+## Review fixes (PR #523 review of 3d22e670)
+
+An independent review reproduced five defects. Each fix has a regression test
+in `tests/test_effect_journal_review_523.py`. All 18 tests in that file failed
+against the pre-fix sources (the four source files checked out from
+`3d22e670`), and all 18 pass after the fix. The reviewer's repro script now
+prints success for R1 through R3. R4 is now a `TypeError`: `append_checkpoint`
+requires an owner identity, and the stale epoch is refused.
+
+- **P1-1: concurrent effects in one run.** Production process and compute
+  workers share one run ID. Previously, when A was in flight while B was
+  admitted, A's `outcome_and_checkpoint` refused the checkpoint and rolled back
+  A's outcome. A was then marked `uncertain` even though it had launched. Now
+  the terminal outcome always commits, and the checkpoint binds the settled
+  high-water: the largest fully terminal prefix, which never moves backwards.
+  Tests cover interleaved calls and 8 real threads held open at a barrier, and
+  confirm restart succeeds afterward.
+- **P1-2: restart wedged after reconciliation.** Previously, `restore_checkpoint`
+  required the checkpoint high-water to equal the journal maximum, so a
+  verified `reconcile()` left restart failing forever with a "stale
+  high-water" error. Restore now accepts later records when every effect in
+  the run is terminal. It returns `journal_high_water`, and the caller reads
+  the later records with `effects_since`. Restore still refuses unresolved
+  effects and refuses a checkpoint ahead of the journal. The test runs crash,
+  reconcile, `recover_before_restart`, and gets `resume`. The test previously
+  named `test_worker_checkpoint_rejects_effect_admitted_after_last_checkpoint`
+  was rewritten to this semantics, and it still asserts refusal once a later
+  intent is unresolved.
+- **P2-1: fence cleared only for the reconciled worker.** `recover()` fences
+  every owner in the run. `reconcile()` now clears the fence for the whole run
+  once nothing in the run is unresolved, instead of only for the reconciled
+  worker.
+- **P2-2: checkpoint writes had no owner fence.** `append_checkpoint` now takes
+  keyword-only `worker_id` and `owner_epoch`, and requires the current,
+  unfenced owner. `outcome_and_checkpoint` makes the same check inside its
+  transaction; a stale owner is refused and its outcome is rolled back. An
+  idempotent replay of an already-recorded outcome appends no generation and
+  returns `None`.
+- **P3.**
+  - The protocol's `append_checkpoint` signature now matches the
+    implementation.
+  - Checkpoint generations are pruned to the latest `CHECKPOINT_RETENTION`
+    (16) per run.
+  - The process verifier now reports a launched start as `completed` with the
+    live-path receipt shape `{job_id}:{pid}`. A test covers a real
+    `DurableJobRegistry` attach record.
+
+Correction to earlier claims: the 25 hard-crash cuts above each run one
+effect at a time. They did not exercise overlapping effects in one run, which
+is how P1-1 went unnoticed. Revision 12 did not demonstrate a successful
+restart after verification; P1-2 shows it could not. LOOP-008 revision 15
+records these corrections.
+
+Verification after the fixes: the 27 test files that import the journal,
+bindings, process jobs, compute jobs, subagents, selfmod service, or runtime
+checkpoints: 477 passed, 2 skipped. One skip needs a container runtime and one
+needs `/proc`.
 
 ## Read API for checkpoint binding (for the #510 worker-registry saga)
 
