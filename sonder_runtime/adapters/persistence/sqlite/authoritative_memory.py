@@ -386,6 +386,18 @@ class SQLiteAuthoritativeFactSource:
             raise MemoryReplicationError("fact is owned by another source")
         return state
 
+    def _assert_active_source_owner(self, connection) -> None:
+        """Reject direct mutations from a source that lost the project fence."""
+        active = connection.execute(
+            "SELECT source_id FROM memory_authoritative_fact_activation "
+            "WHERE project_scope=?",
+            (self.project_scope,),
+        ).fetchone()
+        if active is not None and active[0] != self.source_id:
+            raise MemoryReplicationError(
+                "authoritative fact scope is already owned by another source"
+            )
+
     def _require_scoped_facts_authoritative(self, connection) -> None:
         """Refuse activation over facts with no matching source evidence.
 
@@ -461,6 +473,7 @@ class SQLiteAuthoritativeFactSource:
             raise MemoryReplicationError("authoritative fact scope cannot be widened")
         payload = _fact_payload(text, embedding, metadata)
         with self._transaction(connection):
+            self._assert_active_source_owner(connection)
             record = self._record(
                 connection,
                 fact_id,
@@ -526,6 +539,7 @@ class SQLiteAuthoritativeFactSource:
         if project != self.project_scope:
             raise MemoryReplicationError("authoritative fact scope cannot be widened")
         with self._transaction(connection):
+            self._assert_active_source_owner(connection)
             existing = connection.execute(
                 "SELECT project FROM facts WHERE id=?", (fact_id,)
             ).fetchone()

@@ -101,6 +101,53 @@ def test_live_authority_fences_legacy_fact_helpers_for_the_active_scope(tmp_path
         connection.close()
 
 
+@pytest.mark.parametrize("operation", ["upsert", "delete"])
+def test_active_authoritative_scope_rejects_direct_other_source_mutations(
+    tmp_path, operation,
+):
+    path = tmp_path / f"other-source-{operation}.db"
+    connection = connect(path)
+    owner = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    owner.activate(connection)
+    owner.add_fact(connection, "fact-1", "repo-a", "owned value")
+    outsider = SQLiteAuthoritativeFactSource("node-b", project_scope="repo-a")
+
+    with pytest.raises(MemoryReplicationError, match="already owned"):
+        if operation == "upsert":
+            outsider.upsert_fact(connection, "fact-1", "repo-a", "bypass")
+        else:
+            outsider.delete_fact(connection, "fact-1", "repo-a")
+
+    assert facts_for_project(connection, "repo-a")[0]["text"] == "owned value"
+    assert connection.execute(
+        "SELECT COUNT(*) FROM memory_replication_log"
+    ).fetchone()[0] == 1
+    assert tuple(connection.execute(
+        "SELECT source_id,version,tombstoned FROM memory_authoritative_fact_state "
+        "WHERE project=? AND fact_id=?", ("repo-a", "fact-1"),
+    ).fetchone()) == ("node-a", 1, 0)
+    connection.close()
+
+
+def test_composed_authoritative_reads_reject_cross_project_scope(tmp_path):
+    path = tmp_path / "read-scope.db"
+    application = build_application(config=_live_replication_config())
+    try:
+        with application.unit_of_work(db_path=str(path)) as scope:
+            scope.memory.add_fact("fact-1", "repo-a", "scoped value")
+        with application.unit_of_work(db_path=str(path)) as scope:
+            for read in (
+                lambda: scope.memory.facts_for_project("repo-b"),
+                lambda: scope.memory.count_facts("repo-b"),
+                lambda: scope.memory.entities_for_project("repo-b"),
+                lambda: scope.memory.decisions_for_project("repo-b"),
+            ):
+                with pytest.raises(MemoryReplicationError, match="widen"):
+                    read()
+    finally:
+        application.close_providers()
+
+
 @pytest.mark.parametrize("stage", ["fact", "state", "journal", "index"])
 def test_composed_authoritative_fact_stages_roll_back_after_injected_failure(
     tmp_path, monkeypatch, stage,
