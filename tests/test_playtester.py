@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
+from pathlib import Path
 
 import pytest
 
@@ -37,6 +39,42 @@ def test_runner_redacts_token_output_and_secret_argv(tmp_path):
     assert report.as_dict()["exit_code"] == 0
 
 
+def test_runner_redacts_equals_form_headers_and_artifact_credentials(tmp_path):
+    secret = "secret-value"
+    scenario = Scenario(
+        "redact",
+        "claim",
+        (sys.executable, "-c", "print('authorization: bearer secret-value')", "--token=" + secret, "--header", "Authorization: Basic " + secret, "--header", "Proxy-Authorization: Basic " + secret),
+        artifact_refs=("https://example.test/report?token=" + secret, "safe-artifact.json"),
+    )
+    report = PlaytestRunner(ProcessAdapter(), cwd=tmp_path).run([scenario])[0]
+    assert secret not in report.command
+    assert secret not in report.stdout
+    assert report.artifact_refs == ("[REDACTED_ARTIFACT]", "safe-artifact.json")
+
+
+def test_runner_stops_a_child_that_exceeds_output_limit(tmp_path):
+    adapter = ProcessAdapter()
+    adapter.max_output_bytes = 128
+    scenario = Scenario("large", "bounded", (sys.executable, "-c", "print('x' * 10000)"))
+    report = PlaytestRunner(adapter, cwd=tmp_path).run([scenario])[0]
+    assert report.result == "blocked"
+    assert report.errors == ("adapter error: OutputLimitExceeded",)
+    assert len(report.stdout.encode()) <= 128
+
+
+def test_runner_terminates_an_infinite_noisy_child_at_output_limit(tmp_path):
+    adapter = ProcessAdapter()
+    adapter.max_output_bytes = 128
+    scenario = Scenario("noisy", "bounded", (sys.executable, "-c", "import sys; [print('x' * 10000, flush=True) for _ in iter(int, 1)]"), timeout_seconds=30)
+    started = time.monotonic()
+    report = PlaytestRunner(adapter, cwd=tmp_path).run([scenario])[0]
+    elapsed = time.monotonic() - started
+    assert report.result == "blocked"
+    assert report.errors == ("adapter error: OutputLimitExceeded",)
+    assert elapsed < 5
+
+
 def test_process_adapter_does_not_forward_github_token(tmp_path, monkeypatch):
     monkeypatch.setenv("GH_TOKEN", "ghp_" + "x" * 30)
     scenario = Scenario("env", "secret absent", (sys.executable, "-c", "import os; print(os.getenv('GH_TOKEN', 'absent'))"))
@@ -67,6 +105,17 @@ def test_scenario_rejects_shell_style_command():
 def test_catalog_defaults_to_structural_evidence():
     scenario = Scenario.from_mapping({"name": "catalog", "claim": "loads", "command": [sys.executable, "-c", "pass"]})
     assert scenario.evidence_class is EvidenceClass.STRUCTURAL_ONLY
+
+
+def test_cli_requires_explicit_trust_for_catalog_commands(tmp_path):
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text(json.dumps([{"name": "smoke", "claim": "works", "command": [sys.executable, "-c", "pass"]}]), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).parents[1] / "scripts" / "playtester.py"), "--catalog", str(catalog)],
+        cwd=Path(__file__).parents[1], capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 2
+    assert "--trusted-local" in result.stderr
 
 
 def test_github_publisher_is_dry_run_and_does_not_call_gh():

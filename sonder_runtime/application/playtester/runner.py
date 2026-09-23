@@ -109,7 +109,8 @@ class PlaytestReport:
 def _redact(text: str) -> str:
     """Keep command output useful without persisting common credential shapes."""
     text = re.sub(r"gh[pousr]_[A-Za-z0-9_]{20,}", "[REDACTED_GH_TOKEN]", text)
-    text = re.sub(r"(?i)(authorization\s*:\s*bearer\s+)[^\s]+", r"\1[REDACTED]", text)
+    text = re.sub(r"(?i)((?:proxy-)?authorization\s*:\s*[^\s]+\s+)[^\s]+", r"\1[REDACTED]", text)
+    text = re.sub(r"(?i)(\b(?:token|password|secret|api[_-]?key)=)[^\s&]+", r"\1[REDACTED]", text)
     return text[:20000]
 
 
@@ -118,18 +119,43 @@ _SECRET_FLAGS = {"--token", "--password", "--secret", "--api-key", "--authorizat
 
 def _safe_argv(command: tuple[str, ...]) -> tuple[str, ...]:
     safe: list[str] = []
-    redact_next = False
+    redact_next = None
     for part in command:
-        if redact_next:
+        if redact_next == "secret":
             safe.append("[REDACTED_ARG]")
-            redact_next = False
+            redact_next = None
             continue
-        if part.lower() in _SECRET_FLAGS:
+        if redact_next == "header":
+            if re.match(r"(?i)(?:proxy-)?authorization\s*:\s*[^\s]+\s+", part):
+                safe.append("[REDACTED_ARG]")
+            else:
+                safe.append(_redact(part))
+            redact_next = None
+            continue
+        lower = part.lower()
+        if lower in _SECRET_FLAGS:
             safe.append(part)
-            redact_next = True
+            redact_next = "secret"
+            continue
+        if any(lower.startswith(flag + "=") for flag in _SECRET_FLAGS):
+            safe.append(part.split("=", 1)[0] + "=[REDACTED_ARG]")
+            continue
+        if lower in {"-h", "--header"}:
+            safe.append(part)
+            redact_next = "header"
             continue
         safe.append(_redact(part))
     return tuple(safe)
+
+
+def _safe_artifact_ref(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9._:/#%+~-]{1,512}", value) or "@" in value:
+        return "[REDACTED_ARTIFACT]"
+    if re.search(r"(?i)(?:token|password|secret|api[_-]?key)=", value):
+        return "[REDACTED_ARTIFACT]"
+    if re.search(r"gh[pousr]_[A-Za-z0-9_]{20,}", value):
+        return "[REDACTED_ARTIFACT]"
+    return value
 
 
 def stable_marker(scenario: str, commit_sha: str) -> str:
@@ -168,7 +194,7 @@ class PlaytestRunner:
             errors.append(f"command timed out after {scenario.timeout_seconds:g}s")
         elif completed.error_type:
             result, passed, exit_code = "blocked", False, None
-            errors.append(f"adapter could not start: {completed.error_type}")
+            errors.append(f"adapter error: {completed.error_type}")
         else:
             passed = completed.returncode == 0
             result = "passed" if passed else "failed"
@@ -187,7 +213,7 @@ class PlaytestRunner:
             stdout=_redact(str(stdout)),
             stderr=_redact(str(stderr)),
             errors=tuple(errors),
-            artifact_refs=scenario.artifact_refs,
+            artifact_refs=tuple(_safe_artifact_ref(ref) for ref in scenario.artifact_refs),
             repository=repository,
             commit_sha=commit_sha,
             marker=stable_marker(scenario.name, commit_sha),
