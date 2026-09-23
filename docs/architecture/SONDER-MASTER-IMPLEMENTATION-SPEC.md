@@ -401,7 +401,7 @@ schema, cancellation, cleanup-to-quiescence contract, and conformance tests.
 - [ ] **SELFMOD-005 — Unrestricted truthfulness.** When unrestricted selfmod bypasses
   gates, report exactly what was bypassed; retain deadlines, cancellation, cleanup,
   output bounds, operation IDs, and logging.
-- [ ] **SELFMOD-006 — No automatic push.** Guarded selfmod may create a local descriptive
+- [x] **SELFMOD-006 — No automatic push.** Guarded selfmod may create a local descriptive
   commit from a clean starting checkout, but never pushes remotely by itself.
 
 ## 12. Model routing, inference, and hardware
