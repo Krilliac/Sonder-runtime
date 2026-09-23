@@ -10046,6 +10046,12 @@
       "type": "int"
     },
     {
+      "default": "",
+      "field": "ca_bundle",
+      "section": "ollama",
+      "type": "str"
+    },
+    {
       "default": "127.0.0.1",
       "field": "host",
       "section": "server",
@@ -10214,11 +10220,11 @@
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
     "commands": 319,
-    "configuration": 200,
+    "configuration": 201,
     "events": 43,
     "tools": 213
   },
-  "digest": "314b81e3247ed963a5fbf74958dcc699d33ead87cac980f999c3d41260276caf",
+  "digest": "ec541229fdac8749d0ecdb4f9a7caa53e178b91f7821d169a15dd4d486bda5d2",
   "events": [
     {
       "name": "session.started",
@@ -10692,7 +10698,7 @@
     "server.py": "f768afe5fa300b4778ad63d003831db9c17e575a85aafb8c5e633bfcbba9d25e",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
-    "sonder_runtime/platform/config.py": "27c2eee84240cdc4e044020fda72168229f2b3810e4f130d1e85bf5f7ad229ba",
+    "sonder_runtime/platform/config.py": "4f0a7ce76709cdf1b12a729abb56f9e4933f7def5789ef8b23c3ba6f22bd4e2c",
     "sonder_runtime/platform/memory_replication_config.py": "1981bbc57a4e6442fc1b770d9c37cc766c66334089697d762e9b9b7ed578d179"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",

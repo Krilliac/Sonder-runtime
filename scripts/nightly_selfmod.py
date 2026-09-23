@@ -164,6 +164,18 @@ def _ruff_command(py: str) -> list[str] | None:
     return [py, "-m", "ruff"] if probe.returncode == 0 else None
 
 
+def _regression_command(py: str) -> list[str]:
+    """Use bounded xdist when installed; keep a portable serial fallback."""
+    probe = subprocess.run(
+        [py, "-c", "import xdist"],
+        capture_output=True, stdin=subprocess.DEVNULL, check=False,
+        timeout=10,
+    )
+    if probe.returncode == 0:
+        return [py, "-m", "pytest", "-q", "-n", "4", "--dist", "load"]
+    return [py, "-m", "pytest", "-q"]
+
+
 _NON_EXECUTABLE_OBJECTIVE = re.compile(
     r"\b(?:add|improve|fix|clarify|update|document)\b[^\n]{0,40}\b"
     r"(?:docstring|comment|comments|formatting|style|whitespace)\b|"
@@ -188,22 +200,63 @@ def _eligible_candidate_files() -> tuple[str, ...]:
     )
 
 
+def _local_catalog_model(server, selected: str) -> str | None:
+    """Resolve an exact model name from the loopback Ollama catalog only."""
+    base = str(getattr(server, "BASE", "")).rstrip("/")
+    endpoint = getattr(server, "ollama_endpoint", None)
+    if not base or endpoint is None or not endpoint.is_loopback(base):
+        return None
+    from urllib.request import Request
+    request = Request(base + "/api/tags")
+    with endpoint.open_url(request, timeout=10, allow_remote=False) as response:
+        raw = response.read(1_048_577)
+    if len(raw) > 1_048_576:
+        raise RuntimeError("model catalog exceeded 1 MiB")
+    payload = json.loads(raw.decode("utf-8"))
+    rows = payload.get("models", []) if isinstance(payload, dict) else []
+    wanted = selected.casefold()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or row.get("model") or "").strip()
+        if name.casefold() == wanted:
+            return name
+    return None
+
+
 def _ask(server, prompt, num_predict=1200, model="", num_ctx=0):
     # An explicit model is a catalog selector, not a temporary tier mutation.
     # The server refreshes its persisted runtime policy at every request, so
     # changing ``server.TIERS['code']`` in a caller is overwritten before the
-    # request is resolved.  Passing the exact installed model through the
-    # normal ensemble surface keeps this worker isolated from the live REPL's
-    # policy and makes --model effective.
+    # request is resolved.  An exact installed model goes through the local
+    # generation factory; the unpinned path retains the configured code tier.
     selected = str(model or "").strip()
-    kwargs = {
-        "tiers": selected or "code",
-        "num_predict": num_predict,
-        "mode": "code",
-    }
-    if int(num_ctx or 0) > 0:
-        kwargs["num_ctx"] = int(num_ctx)
-    reply = server.ensemble_answer(prompt, **kwargs)
+    if selected:
+        is_cloud = getattr(server, "_is_cloud_model_name", lambda value: False)
+        if is_cloud(selected):
+            raise RuntimeError("model unavailable: explicit selfmod model is cloud-backed")
+        try:
+            resolved = _local_catalog_model(server, selected)
+        except Exception as exc:
+            raise RuntimeError("model unavailable: local catalog probe failed: %s" % str(exc)[:160]) from exc
+        if not resolved or str(resolved).casefold() != selected.casefold():
+            raise RuntimeError("model unavailable: explicit local model is not installed")
+        factory = getattr(server, "_make_generate", None)
+        if not callable(factory):
+            raise RuntimeError("model unavailable: local model gateway is unavailable")
+        reply = factory(
+            resolved, "", 0.2, num_predict, num_ctx,
+            cloud=False, timeout=60,
+        )(prompt)
+    else:
+        kwargs = {
+            "tiers": "code",
+            "num_predict": num_predict,
+            "mode": "code",
+        }
+        if int(num_ctx or 0) > 0:
+            kwargs["num_ctx"] = int(num_ctx)
+        reply = server.ensemble_answer(prompt, **kwargs)
     text = (reply or "").strip()
     # ensemble_answer reports failure by RETURNING prose rather than raising.
     # Splicing that into a source file is how a dead backend becomes a code
@@ -721,7 +774,7 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
         log("  lint: Ruff available")
     else:
         log("  lint: Ruff unavailable; Python compilation is the syntax gate")
-    checks.append(("regression", [py, "-m", "pytest", "-q"]))
+    checks.append(("regression", _regression_command(py)))
     for kind, command in checks:
         # cwd is deliberately NOT passed: the default is the candidate
         # workspace, which keeps imports and pytest collection grounded in

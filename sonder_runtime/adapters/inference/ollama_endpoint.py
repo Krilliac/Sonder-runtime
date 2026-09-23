@@ -4,6 +4,8 @@ from __future__ import annotations
 from contextlib import contextmanager
 import logging
 import os
+from pathlib import Path
+import ssl
 import threading
 import weakref
 import urllib.parse
@@ -17,6 +19,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_HOST = ollama_policy.DEFAULT_HOST
 REMOTE_OPT_IN = ollama_policy.REMOTE_OPT_IN
 _configured_endpoint: str | None = None
+_configured_ca_bundle: str | None = None
 _configuration_lock = threading.RLock()
 
 
@@ -108,6 +111,33 @@ def configure_typed_endpoint(value: str | None) -> None:
 
 def reset_typed_endpoint() -> None:
     configure_typed_endpoint(None)
+
+
+def configure_typed_ca_bundle(value: str | None) -> None:
+    """Bind an optional absolute CA bundle for verified HTTPS Ollama calls."""
+    global _configured_ca_bundle
+    raw = str(value or "").strip()
+    if not raw:
+        with _configuration_lock:
+            _configured_ca_bundle = None
+        return
+    path = Path(raw).expanduser()
+    if not path.is_absolute() or not path.is_file():
+        raise ValueError("Ollama CA bundle must be an existing absolute file")
+    with _configuration_lock:
+        _configured_ca_bundle = str(path)
+
+
+def _ca_bundle() -> str | None:
+    with _configuration_lock:
+        configured = _configured_ca_bundle
+    raw = configured or os.environ.get("SONDER_OLLAMA_CA_BUNDLE", "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_absolute() or not path.is_file():
+        raise ValueError("Ollama CA bundle must be an existing absolute file")
+    return str(path)
 
 
 def remote_allowed() -> bool:
@@ -258,4 +288,13 @@ def open_url(request, timeout=30, *, allow_remote=None):
         )
     else:
         canonical_request = canonical_url
+    if urllib.parse.urlsplit(canonical_url).scheme == "https":
+        bundle = _ca_bundle()
+        if bundle:
+            context = ssl.create_default_context(cafile=bundle)
+            opener = urllib.request.build_opener(
+                _PROXY_HANDLER, _NoRedirect(),
+                urllib.request.HTTPSHandler(context=context),
+            )
+            return opener.open(canonical_request, timeout=timeout)
     return _OPENER.open(canonical_request, timeout=timeout)

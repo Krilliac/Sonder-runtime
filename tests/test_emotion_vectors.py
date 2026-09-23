@@ -125,3 +125,35 @@ def test_update_emotion_vectors_bad_json():
     import server
 
     assert server.update_emotion_vectors("{bad").startswith("ERROR: vectors_json")
+
+
+def test_resolve_path_accepts_windows_drive_case_mismatch(monkeypatch, tmp_path):
+    import os
+    import pytest
+
+    if os.path.normcase("A") != os.path.normcase("a"):
+        pytest.skip("filesystem is case-sensitive")
+    root = tmp_path / "Work"
+    root.mkdir()
+    target = root / "emotion_vectors.json"
+    monkeypatch.setattr(emotion_vectors, "workspace_root", lambda: str(root))
+    mixed = str(target)
+    mixed = mixed[0].swapcase() + mixed[1:]
+    monkeypatch.setenv("SONDER_EMOTION_VECTORS", mixed)
+    resolved = emotion_vectors._resolve_path()
+    assert os.path.normcase(resolved) == os.path.normcase(str(target.resolve()))
+
+
+def test_resolve_path_still_rejects_a_sibling_checkout(monkeypatch, tmp_path):
+    import os
+    import pytest
+
+    root = tmp_path / "runtime"
+    other = tmp_path / "worktree"
+    root.mkdir()
+    other.mkdir()
+    monkeypatch.setattr(emotion_vectors, "workspace_root", lambda: str(root))
+    monkeypatch.setenv("SONDER_EMOTION_VECTORS", str(other / "emotion_vectors.json"))
+    with pytest.raises(ValueError, match="must stay inside workspace"):
+        emotion_vectors._resolve_path()
+    assert "emotion_vectors.json" not in os.listdir(root)

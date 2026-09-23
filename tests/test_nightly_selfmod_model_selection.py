@@ -8,6 +8,27 @@ from scripts import nightly_selfmod
 class _FakeServer:
     def __init__(self):
         self.calls = []
+        self.BASE = "http://127.0.0.1:11434"
+        self.OLLAMA_POOL = type(
+            "BrokenRemotePool", (),
+            {"request": lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("remote pool must not be used"))},
+        )()
+
+    class ollama_endpoint:
+        @staticmethod
+        def is_loopback(base):
+            return True
+
+        @staticmethod
+        def open_url(request, timeout, allow_remote):
+            import json
+            class Response:
+                def __enter__(self): return self
+                def __exit__(self, *_args): return False
+                def read(self, _limit):
+                    return json.dumps({"models": [{"name": "qwen2.5-coder:14b"}]}).encode()
+            return Response()
 
     def ensemble_answer(self, prompt, *, tiers, num_predict, mode, **kwargs):
         call = {
@@ -19,6 +40,15 @@ class _FakeServer:
         call.update(kwargs)
         self.calls.append(call)
         return "def sample():\n    return 1\n"
+
+    @staticmethod
+    def _is_cloud_model_name(model):
+        return str(model).endswith(":cloud")
+
+    def _make_generate(self, model, _system, _temperature, num_predict, num_ctx, **kwargs):
+        self.calls.append({"gateway_model": model, "gateway_num_predict": num_predict,
+                           "gateway_num_ctx": num_ctx, **kwargs})
+        return lambda prompt: "def sample():\n    return 1\n"
 
 
 def test_selfmod_model_pin_is_passed_as_an_explicit_catalog_selector():
@@ -33,11 +63,28 @@ def test_selfmod_model_pin_is_passed_as_an_explicit_catalog_selector():
 
     assert reply.startswith("def sample")
     assert server.calls == [{
-        "prompt": "rewrite one function",
-        "tiers": "qwen2.5-coder:14b",
-        "num_predict": 64,
-        "mode": "code",
+        "gateway_model": "qwen2.5-coder:14b",
+        "gateway_num_predict": 64,
+        "gateway_num_ctx": 0,
+        "cloud": False,
+        "timeout": 60,
     }]
+
+
+def test_selfmod_refuses_unknown_or_cloud_explicit_models():
+    server = _FakeServer()
+    try:
+        nightly_selfmod._ask(server, "inspect", model="missing:latest")
+    except RuntimeError as exc:
+        assert "not installed" in str(exc)
+    else:
+        raise AssertionError("unknown model must be refused")
+    try:
+        nightly_selfmod._ask(server, "inspect", model="qwen:cloud")
+    except RuntimeError as exc:
+        assert "cloud-backed" in str(exc)
+    else:
+        raise AssertionError("cloud model must be refused")
 
 
 def test_selfmod_without_model_pin_keeps_using_code_tier():
@@ -61,6 +108,24 @@ def test_selfmod_uses_worker_interpreter_when_worktree_has_no_venv(tmp_path, mon
     monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
 
     assert nightly_selfmod._test_python() == sys.executable
+
+
+def test_regression_command_uses_bounded_four_worker_xdist(monkeypatch):
+    monkeypatch.setattr(nightly_selfmod.subprocess, "run", lambda *args, **kwargs: type(
+        "Result", (), {"returncode": 0}
+    )())
+    assert nightly_selfmod._regression_command("python") == [
+        "python", "-m", "pytest", "-q", "-n", "4", "--dist", "load",
+    ]
+
+
+def test_regression_command_falls_back_to_serial_without_xdist(monkeypatch):
+    monkeypatch.setattr(nightly_selfmod.subprocess, "run", lambda *args, **kwargs: type(
+        "Result", (), {"returncode": 1}
+    )())
+    assert nightly_selfmod._regression_command("python") == [
+        "python", "-m", "pytest", "-q",
+    ]
 
 
 def test_protected_and_missing_modules_are_not_eligible_candidates(tmp_path, monkeypatch):
