@@ -160,6 +160,8 @@ def _base_diff_fixture(tmp_path: Path, *, revise: bool) -> tuple[object, Path]:
     if revise:
         module.LEDGER.write_text(
             '{"schema":"sonder-requirement-evidence-v1","requirement_id":"TEST-001",'
+            '"revision":1,"status":"implemented_unverified","claim":"Claim."}\n'
+            '{"schema":"sonder-requirement-evidence-v1","requirement_id":"TEST-001",'
             '"revision":2,"status":"verified","claim":"Claim.",'
             '"baseline_sha":"abc","verified_sha":"def",'
             '"evidence":[{"path":"proof.txt"}]}\n',
@@ -168,9 +170,7 @@ def _base_diff_fixture(tmp_path: Path, *, revise: bool) -> tuple[object, Path]:
     else:
         module.LEDGER.write_text(
             '{"schema":"sonder-requirement-evidence-v1","requirement_id":"TEST-001",'
-            '"revision":1,"status":"verified","claim":"Claim.",'
-            '"baseline_sha":"abc","verified_sha":"def",'
-            '"evidence":[{"path":"proof.txt"}]}\n',
+            '"revision":1,"status":"implemented_unverified","claim":"Claim."}\n',
             encoding="utf-8",
         )
     return module, tmp_path
@@ -184,6 +184,7 @@ def test_base_diff_accepts_new_checkbox_with_new_verified_revision(tmp_path):
 def test_base_diff_rejects_checkbox_without_new_verified_revision(tmp_path):
     module, _ = _base_diff_fixture(tmp_path, revise=False)
     assert module.validate("HEAD") == [
+        "spec: checked requirement TEST-001 is not verified",
         "base-diff: newly checked requirement TEST-001 lacks a newly added "
         "verified ledger revision with evidence"
     ]
@@ -199,3 +200,78 @@ def test_base_diff_rejects_unresolvable_ref(tmp_path):
 def test_base_diff_rejects_empty_ref(tmp_path):
     module, _ = _base_diff_fixture(tmp_path, revise=True)
     assert module.validate("") == ["base-ref: cannot resolve ''"]
+
+
+def _append_only_fixture(tmp_path: Path, current_lines: list[str]):
+    module = _checker()
+    module.ROOT = tmp_path
+    module.SPEC = tmp_path / "docs/architecture/spec.md"
+    module.LEDGER = tmp_path / "docs/architecture/evidence/requirements.jsonl"
+    module.SPEC.parent.mkdir(parents=True)
+    module.LEDGER.parent.mkdir(parents=True)
+    module.SPEC.write_text("- [ ] **TEST-001 — Demonstration.** Claim.\n", encoding="utf-8")
+    base_lines = [
+        '{"schema":"sonder-requirement-evidence-v1","requirement_id":"TEST-001",'
+        '"revision":1,"status":"implemented_unverified","claim":"Claim."}',
+        '{"schema":"sonder-requirement-evidence-v1","requirement_id":"TEST-002",'
+        '"revision":1,"status":"planned","claim":"Second."}',
+    ]
+    module.LEDGER.write_text("\n".join(base_lines) + "\n", encoding="utf-8")
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "test@example.invalid")
+    _git(tmp_path, "config", "user.name", "Evidence Test")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-qm", "base")
+    module.LEDGER.write_text("\n".join(current_lines) + "\n", encoding="utf-8")
+    return module
+
+
+def test_base_diff_accepts_inserted_record(tmp_path):
+    lines = [
+        '{"schema":"sonder-requirement-evidence-v1","requirement_id":"TEST-001","revision":1,"status":"implemented_unverified","claim":"Claim."}',
+        '{"schema":"sonder-requirement-evidence-v1","requirement_id":"TEST-002","revision":1,"status":"planned","claim":"Second."}',
+    ]
+    inserted = '{"schema":"sonder-requirement-evidence-v1","requirement_id":"TEST-003","revision":1,"status":"planned","claim":"Inserted."}'
+    module = _append_only_fixture(tmp_path, [lines[0], inserted, lines[1]])
+    assert module._base_diff_problems("HEAD") == []
+
+
+def test_base_diff_rejects_deleted_record(tmp_path):
+    module = _checker()
+    module = _append_only_fixture(tmp_path, [
+        '{"schema":"sonder-requirement-evidence-v1","requirement_id":"TEST-001","revision":1,"status":"implemented_unverified","claim":"Claim."}',
+    ])
+    assert module._base_diff_problems("HEAD") == [
+        "base-diff: evidence ledger removed or rewrote pre-existing record at base line 2"
+    ]
+
+
+def test_base_diff_rejects_modified_record(tmp_path):
+    module = _append_only_fixture(tmp_path, [
+        '{"schema":"sonder-requirement-evidence-v1","requirement_id":"TEST-001","revision":1,"status":"implemented_unverified","claim":"Changed."}',
+        '{"schema":"sonder-requirement-evidence-v1","requirement_id":"TEST-002","revision":1,"status":"planned","claim":"Second."}',
+    ])
+    assert module._base_diff_problems("HEAD") == [
+        "base-diff: evidence ledger removed or rewrote pre-existing record at base line 1"
+    ]
+
+
+def test_base_diff_rejects_ambiguous_duplicate_loss(tmp_path):
+    module = _checker()
+    module.ROOT = tmp_path
+    module.SPEC = tmp_path / "docs/architecture/spec.md"
+    module.LEDGER = tmp_path / "docs/architecture/evidence/requirements.jsonl"
+    module.SPEC.parent.mkdir(parents=True)
+    module.LEDGER.parent.mkdir(parents=True)
+    module.SPEC.write_text("- [ ] **TEST-001 — Demonstration.** Claim.\n", encoding="utf-8")
+    duplicate = '{"schema":"sonder-requirement-evidence-v1","requirement_id":"TEST-001","revision":1,"status":"planned","claim":"Claim."}'
+    module.LEDGER.write_text(duplicate + "\n" + duplicate + "\n", encoding="utf-8")
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "test@example.invalid")
+    _git(tmp_path, "config", "user.name", "Evidence Test")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-qm", "base")
+    module.LEDGER.write_text(duplicate + "\n", encoding="utf-8")
+    assert module._base_diff_problems("HEAD") == [
+        "base-diff: evidence ledger removed or rewrote pre-existing record at base line 2"
+    ]
