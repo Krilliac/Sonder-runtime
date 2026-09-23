@@ -7,6 +7,7 @@ from sonder_runtime.adapters.embeddings import from_blob, to_blob
 from sonder_runtime.adapters.memory_store import connect, facts_for_project
 from sonder_runtime.adapters.unit_of_work import UnitOfWorkAdapter
 from sonder_runtime.adapters.persistence.sqlite.authoritative_memory import (
+    AuthoritativeFactMetadata,
     SQLiteAuthoritativeFactSource,
 )
 from sonder_runtime.adapters.persistence.sqlite.memory_replication import (
@@ -76,6 +77,41 @@ def test_live_application_composes_authoritative_fact_write_and_restart(tmp_path
         ]
     finally:
         journal.close()
+
+
+def test_live_composition_preserves_scoped_supersession_after_restart(tmp_path, monkeypatch):
+    path = tmp_path / "memory.db"
+    monkeypatch.setenv("SONDER_DB", str(path))
+    config = _live_replication_config()
+    application = build_application(config=config)
+    try:
+        with application.unit_of_work() as scope:
+            scope.memory.add_fact("old", "repo-a", "old policy", metadata=AuthoritativeFactMetadata(
+                entities=("parser",), valid_from="2026-01-01T00:00:00Z",
+                provenance=("review:old",),
+            ))
+            scope.memory.add_fact("new", "repo-a", "new policy", metadata=AuthoritativeFactMetadata(
+                entities=("parser",), supersedes="old",
+                valid_from="2026-02-01T00:00:00Z", provenance=("review:new",),
+            ))
+    finally:
+        application.close_providers()
+
+    restarted = build_application(config=config)
+    try:
+        with restarted.unit_of_work() as scope:
+            january = scope.memory.entities_for_project("repo-a", now="2026-01-15T00:00:00Z")
+            february = scope.memory.entities_for_project("repo-a", now="2026-02-15T00:00:00Z")
+            assert [row["fact_id"] for row in january] == ["old"]
+            assert [row["fact_id"] for row in february] == ["new"]
+            with pytest.raises(MemoryReplicationError, match="scope"):
+                scope.memory.entities_for_project("repo-b")
+            assert scope.memory.rebuild_authoritative_indexes(project="repo-a") == 2
+            assert [row["fact_id"] for row in scope.memory.entities_for_project(
+                "repo-a", now="2026-02-15T00:00:00Z",
+            )] == ["new"]
+    finally:
+        restarted.close_providers()
 
 
 def test_live_authority_fences_legacy_fact_helpers_for_the_active_scope(tmp_path):
