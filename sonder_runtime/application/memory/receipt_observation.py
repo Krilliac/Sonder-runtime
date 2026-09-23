@@ -1,9 +1,9 @@
 """Host-authenticated verifier receipts as durable learning observations.
 
-The producer accepts only the typed host-final evidence returned by the real
-managed verification boundary.  It deliberately has no ``source``, worker, or
-independence arguments: those values come from the authenticated receipt and
-its bound authority scope.
+The producer accepts only the typed current eligibility decision returned by
+the real managed verification boundary. It deliberately has no ``source``,
+worker, or independence arguments: those values come from the authenticated
+certificate and its bound authority scope.
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 
-from ..ports.host_turn_links import ManagedHostFinalEvidence
+from ..ports.terminal_eligibility import ManagedTerminalEligibility
 from .learning_ladder import LearningObservation
 
 
@@ -62,9 +62,14 @@ class ReceiptObservationProducer:
     SOURCE = "authenticated_verifier"
 
     @classmethod
-    def from_host_final(cls, evidence: ManagedHostFinalEvidence) -> tuple[VerifierReceipt, LearningObservation]:
-        if type(evidence) is not ManagedHostFinalEvidence:
-            raise TypeError("typed host-final evidence is required")
+    def from_terminal_eligibility(cls, eligibility: ManagedTerminalEligibility) -> tuple[VerifierReceipt, LearningObservation]:
+        if type(eligibility) is not ManagedTerminalEligibility:
+            raise TypeError("verified terminal eligibility is required")
+        if not eligibility.eligible or eligibility.phase not in {"certified", "certified_after_return"}:
+            raise PermissionError("current certified terminal eligibility is required")
+        if not eligibility.authenticated_worker_id:
+            raise PermissionError("unambiguous authenticated worker attribution is required")
+        evidence = eligibility.evidence
         link = evidence.result.receipt
         facts = evidence.facts
         turn = link.turn
@@ -81,7 +86,7 @@ class ReceiptObservationProducer:
         else:
             outcome = "uncertain"
         authority_scope = _digest({
-            "principal_id": turn.principal_id,
+            "worker_id": eligibility.authenticated_worker_id,
             "workspace_scope": facts.project_scope,
         })
         receipt = VerifierReceipt(
@@ -103,7 +108,7 @@ class ReceiptObservationProducer:
             content=facts.certificate_code,
             source=cls.SOURCE,
             independent_key=_digest({
-                "principal_id": receipt.principal_id,
+                "worker_id": eligibility.authenticated_worker_id,
                 "authority_scope": receipt.authority_scope,
             }),
             provenance=(
