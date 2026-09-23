@@ -96,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--name", default="explicit-playtest")
     parser.add_argument("--claim", default="The adapter command completes successfully")
     parser.add_argument("--evidence-class", default="structural only", choices=[e.value for e in EvidenceClass])
-    parser.add_argument("--command", nargs="+", help="argv for one isolated adapter command")
+    parser.add_argument("--command", nargs="+", help="argv without flag-prefixed arguments; use --command-json for flags")
     parser.add_argument("--command-json", help="argv as a JSON string array; supports arguments beginning with '-'")
     parser.add_argument("--timeout", type=float, default=60)
     parser.add_argument("--artifact", action="append", default=[])
