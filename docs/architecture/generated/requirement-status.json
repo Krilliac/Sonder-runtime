@@ -36,9 +36,9 @@
       "verified": 0
     },
     "DOC": {
-      "checked": 1,
+      "checked": 2,
       "total": 7,
-      "verified": 1
+      "verified": 2
     },
     "EVAL": {
       "checked": 0,
@@ -127,13 +127,13 @@
     }
   },
   "overall": {
-    "checked": 2,
+    "checked": 3,
     "statuses": {
-      "implemented_unverified": 202,
-      "verified": 2
+      "implemented_unverified": 201,
+      "verified": 3
     },
     "total": 204,
-    "verified": 2
+    "verified": 3
   },
   "requirements": [
     {
@@ -606,11 +606,11 @@
       "status": "implemented_unverified"
     },
     {
-      "checked": false,
-      "claim": "The generated runtime reference now includes tools, commands, events, configuration, four typed schema projections, and typed SDK plus operational capability references, all bound to source hashes and a fail-closed freshness check.",
+      "checked": true,
+      "claim": "Source-derived tool, command, event, configuration, MCP/OpenAI/client/event schema, and SDK/operational capability references are generated and freshness-gated directly in CI with unavailable tool sources rejected.",
       "requirement_id": "DOC-005",
-      "revision": 3,
-      "status": "implemented_unverified"
+      "revision": 4,
+      "status": "verified"
     },
     {
       "checked": true,
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "9fe3f18c75add44b372672a2254fe947da021ad7c8bd2a1ec6e8d2af91002058",
-    "spec_sha256": "4797da92d2d1845ce944b2dc32353d52fe7a6e48dfa92593753ca727761ca714"
+    "ledger_sha256": "14bef28fac1920d1f354801332a4c5d5f7a5492f138d2ff6e488b63c3b1db91b",
+    "spec_sha256": "61faa94ce65d66c87613361fa79a5afbd4053660e10f6801c6dc8be62c0c92d8"
   }
 }
