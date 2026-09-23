@@ -8,6 +8,7 @@ from sonder_runtime.adapters import embeddings
 from sonder_runtime.adapters.persistence.sqlite.authoritative_memory import SQLiteAuthoritativeFactSource
 from sonder_runtime.adapters.unit_of_work import UnitOfWorkAdapter
 from sonder_runtime.application.memory.facade import MemoryLearningFacade
+from sonder_runtime.domain.common.errors import InvalidInput
 
 
 @pytest.fixture
@@ -47,23 +48,26 @@ def test_remember_and_index_tools_use_explicit_scoped_metadata(authoritative_sur
 
 
 def test_surface_rejects_malformed_metadata_without_text_inference(authoritative_surface):
-    assert server.sonder_remember_fact(
-        "The parser should be safe", project="repo-a", entities_json='{"guess":"parser"}'
-    ).startswith("ERROR:")
-    assert server.sonder_remember_fact(
-        "The parser should be safe", project="repo-a",
-        decision_json='{"id":"x","value":"y","policy":"promote"}',
-    ).startswith("ERROR:")
-    assert server.sonder_remember_fact(
-        "The parser should be safe", project="repo-a", valid_from="x" * 65
-    ).startswith("ERROR:")
+    with pytest.raises(InvalidInput):
+        server.sonder_remember_fact(
+            "The parser should be safe", project="repo-a", entities_json='{"guess":"parser"}'
+        )
+    with pytest.raises(InvalidInput):
+        server.sonder_remember_fact(
+            "The parser should be safe", project="repo-a",
+            decision_json='{"id":"x","value":"y","policy":"promote"}',
+        )
+    with pytest.raises(InvalidInput):
+        server.sonder_remember_fact(
+            "The parser should be safe", project="repo-a", valid_from="x" * 65
+        )
 
 
 def test_surface_refuses_authoritative_scope_widening(authoritative_surface):
-    result = server.sonder_remember_fact(
-        "Must stay in repo-a", project="repo-b", entities_json='["parser"]'
-    )
-    assert result.startswith("ERROR:")
+    with pytest.raises(InvalidInput):
+        server.sonder_remember_fact(
+            "Must stay in repo-a", project="repo-b", entities_json='["parser"]'
+        )
     assert json.loads(server.sonder_authoritative_indexes(project="repo-b"))["entities"] == []
 
 
@@ -74,17 +78,13 @@ def test_surface_keeps_legacy_fact_calls_without_metadata(authoritative_surface)
 
 
 def test_surface_rejects_non_string_metadata_inputs(authoritative_surface):
-    result = server.sonder_remember_fact(
-        "Typed input", project="repo-a", entities_json=None
-    )
-    assert result.startswith("ERROR:")
+    with pytest.raises(InvalidInput):
+        server.sonder_remember_fact("Typed input", project="repo-a", entities_json=None)
 
 
 def test_index_surface_rejects_ambiguous_or_malformed_time(authoritative_surface):
-    assert server.sonder_authoritative_indexes(
-        project="repo-a", now="2026-01-01T00:00:00"
-    ).startswith("ERROR:")
-    assert server.sonder_authoritative_indexes(
-        project="repo-a", now="not-a-date"
-    ).startswith("ERROR:")
+    with pytest.raises(InvalidInput):
+        server.sonder_authoritative_indexes(project="repo-a", now="2026-01-01T00:00:00")
+    with pytest.raises(InvalidInput):
+        server.sonder_authoritative_indexes(project="repo-a", now="not-a-date")
 

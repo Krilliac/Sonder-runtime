@@ -13818,7 +13818,7 @@ def sonder_remember_fact(
             supersedes, provenance_json,
         )
     except ValueError as exc:
-        return "ERROR: " + str(exc)
+        raise InvalidInput(str(exc)) from exc
     project_id = _resolve_project(project) or DEFAULT_PROJECT
     emb = embeddings.embed(text)
     if not embeddings.valid_vector(emb):
@@ -13849,7 +13849,7 @@ def sonder_remember_fact(
             # A configured authoritative source owns one exact project scope.
             # Keep the external tool boundary stable while refusing a scope
             # widening attempt; do not fall back to the legacy store.
-            return "ERROR: " + str(exc)
+            raise InvalidInput(str(exc)) from exc
         n = uow.memory.count_facts(project_id)
     return "Remembered fact for project '%s' (%d total). id=%s" % (project_id, n, fact_id)
 
@@ -13863,12 +13863,14 @@ def sonder_authoritative_indexes(
     from sonder_runtime.adapters.persistence.sqlite.authoritative_indexes import MAX_INDEX_RESULTS
     project_id = _resolve_project(project) or DEFAULT_PROJECT
     if any(not isinstance(value, str) or len(value) > 160 for value in (entity_id, decision_id, now)):
-        return "ERROR: index selector exceeds the input bound."
+        raise InvalidInput("index selector exceeds the input bound")
     if type(offset) is not int or not 0 <= offset <= 100_000:
-        return "ERROR: index offset must be within 0..100000."
+        raise InvalidInput("index offset must be within 0..100000")
     facade = getattr(_application(), "memory", None)
     if facade is None:
-        return "ERROR: memory facade is unavailable."
+        from sonder_runtime.domain.common.errors import DependencyUnavailable
+
+        raise DependencyUnavailable("memory facade is unavailable")
     try:
         return json.dumps({
             "project": project_id,
@@ -13882,7 +13884,7 @@ def sonder_authoritative_indexes(
             ),
         }, sort_keys=True, ensure_ascii=True)
     except (TypeError, ValueError) as exc:
-        return "ERROR: " + str(exc)
+        raise InvalidInput(str(exc)) from exc
 
 
 @mcp.tool()
