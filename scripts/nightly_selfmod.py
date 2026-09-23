@@ -390,6 +390,9 @@ def _prepare_held_out(target: str, workspace: Path, timeout: int):
     total_bytes = 0
     limit_error = None
     for path in (REPO / "tests").rglob("*"):
+        if path.is_symlink():
+            limit_error = "held-out evaluator snapshot contains a symlink"
+            break
         if not path.is_file() or "__pycache__" in path.parts:
             continue
         if len(snapshot_files) >= _HELD_OUT_MAX_FILES:
