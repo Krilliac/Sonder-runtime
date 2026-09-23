@@ -866,9 +866,9 @@
     },
     {
       "checked": false,
-      "claim": "Live agent tools and composed process, compute, local subagent, and self-mod worker adapters persist host-owned effect intents and outcomes; checkpoint restore validates journal high-water and unresolved effects.",
+      "claim": "Host-owned direct worker effects append durable checkpoints coupled to the effect journal high-water after terminal receipts; restore rejects stale checkpoints and a real process-port crash remains uncertain and unreplayed.",
       "requirement_id": "LOOP-008",
-      "revision": 4,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "b375dc60620060afb2cbe9812b241ec0b5d79f1f3802e530249ad25c94fa87e6",
+    "ledger_sha256": "c4b1568ca4aff5555553c1fbfbd7bbc8587a98732c3ad5838cab15397b3cd6aa",
     "spec_sha256": "4797da92d2d1845ce944b2dc32353d52fe7a6e48dfa92593753ca727761ca714"
   }
 }

@@ -36,6 +36,15 @@ CREATE INDEX IF NOT EXISTS ix_effect_journal_run_sequence
     ON effect_journal(run_id, sequence);
 CREATE INDEX IF NOT EXISTS ix_effect_journal_run_state
     ON effect_journal(run_id, state);
+CREATE TABLE IF NOT EXISTS effect_checkpoint (
+    run_id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    effect_high_water INTEGER NOT NULL,
+    state_digest TEXT NOT NULL,
+    PRIMARY KEY (run_id, generation)
+);
+CREATE INDEX IF NOT EXISTS ix_effect_checkpoint_latest
+    ON effect_checkpoint(run_id, generation DESC);
 """
 
 
@@ -215,6 +224,88 @@ class SQLiteEffectJournal:
                 "SELECT COALESCE(MAX(sequence),0) FROM effect_journal WHERE run_id=?",
                 (run_id,),
             ).fetchone()[0])
+
+    def append_checkpoint(self, run_id: str, state_digest: str) -> dict[str, object]:
+        """Persist a worker checkpoint atomically with its journal high-water.
+
+        The generation is allocated by the host-owned SQLite transaction.  A
+        worker cannot claim a generation or high-water value supplied by an
+        untrusted caller, and a checkpoint is never written while an admitted
+        effect is unresolved.
+        """
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise EffectJournalError("checkpoint run_id is required")
+        if not isinstance(state_digest, str) or not state_digest.strip():
+            raise EffectJournalError("checkpoint state digest is required")
+        if len(state_digest) > 256:
+            raise EffectJournalError("checkpoint state digest exceeds bound")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            latest = connection.execute(
+                "SELECT generation FROM effect_checkpoint WHERE run_id=? "
+                "ORDER BY generation DESC LIMIT 1", (run_id,),
+            ).fetchone()
+            generation = -1 if latest is None else int(latest[0])
+            high_water = int(connection.execute(
+                "SELECT COALESCE(MAX(sequence),0) FROM effect_journal WHERE run_id=?",
+                (run_id,),
+            ).fetchone()[0])
+            unresolved = connection.execute(
+                "SELECT 1 FROM effect_journal WHERE run_id=? AND state IN (?,?) LIMIT 1",
+                (run_id, EffectState.INTENT.value, EffectState.UNCERTAIN.value),
+            ).fetchone()
+            if unresolved is not None:
+                raise EffectJournalError(
+                    "checkpoint has an admitted effect without a definitive outcome"
+                )
+            generation += 1
+            connection.execute(
+                "INSERT INTO effect_checkpoint(run_id,generation,effect_high_water,state_digest) "
+                "VALUES(?,?,?,?)",
+                (run_id, generation, high_water, state_digest),
+            )
+            return {
+                "run_id": run_id,
+                "generation": generation,
+                "effect_high_water": high_water,
+                "state_digest": state_digest,
+            }
+
+    def restore_checkpoint(self, run_id: str) -> dict[str, object] | None:
+        """Return the latest checkpoint only when its journal view is current."""
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise EffectJournalError("checkpoint run_id is required")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN")
+            row = connection.execute(
+                "SELECT generation,effect_high_water,state_digest FROM effect_checkpoint "
+                "WHERE run_id=? ORDER BY generation DESC LIMIT 1", (run_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            current = int(connection.execute(
+                "SELECT COALESCE(MAX(sequence),0) FROM effect_journal WHERE run_id=?",
+                (run_id,),
+            ).fetchone()[0])
+            if current != int(row[1]):
+                raise EffectJournalError(
+                    "checkpoint effect high-water is stale: "
+                    f"checkpoint={int(row[1])}, journal={current}"
+                )
+            unresolved = connection.execute(
+                "SELECT 1 FROM effect_journal WHERE run_id=? AND state IN (?,?) LIMIT 1",
+                (run_id, EffectState.INTENT.value, EffectState.UNCERTAIN.value),
+            ).fetchone()
+            if unresolved is not None:
+                raise EffectJournalError(
+                    "checkpoint has an admitted effect without a definitive outcome"
+                )
+            return {
+                "run_id": run_id,
+                "generation": int(row[0]),
+                "effect_high_water": int(row[1]),
+                "state_digest": str(row[2]),
+            }
 
     def validate_checkpoint(self, run_id: str, high_water: int) -> None:
         with self._connect() as connection:

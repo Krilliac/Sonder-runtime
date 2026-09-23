@@ -79,6 +79,14 @@ class AuthenticatedWorkerBinding:
             raise EffectJournalError(
                 "worker restart requires explicit reconciliation of uncertain effects"
             )
+        restore_checkpoint = getattr(self.journal, "restore_checkpoint", None)
+        if callable(restore_checkpoint):
+            try:
+                restore_checkpoint(self.run_id)
+            except EffectJournalError as exc:
+                raise EffectJournalError(
+                    "worker restart requires checkpoint reconciliation"
+                ) from exc
         return decision
 
 
@@ -117,6 +125,12 @@ def journaled_effect(
         receipt_key=key,
         success=bool(is_success),
     )
+    append_checkpoint = getattr(context.journal, "append_checkpoint", None)
+    if callable(append_checkpoint):
+        # The result is already sealed by the terminal journal outcome.  The
+        # worker checkpoint records that exact state and the journal's current
+        # high-water in one host-owned transaction.
+        append_checkpoint(context.run_id, _digest(result))
     return result
 
 

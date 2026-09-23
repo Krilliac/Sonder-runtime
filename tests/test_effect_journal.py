@@ -249,3 +249,52 @@ def test_gateway_marks_effect_uncertain_when_runner_crashes(tmp_path):
         with pytest.raises(RuntimeError):
             gateway.execute(request)
     assert journal.get("run-1:req-2").state is EffectState.UNCERTAIN
+
+
+def test_worker_effect_checkpoint_is_bound_to_terminal_high_water(tmp_path):
+    from sonder_runtime.application.execution.worker_bindings import (
+        AuthenticatedWorkerBinding, journaled_effect,
+    )
+
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    binding = AuthenticatedWorkerBinding(journal, "worker-run", "worker", 1, "/workspace")
+    journaled_effect(
+        binding, operation_id="write-1", idempotency_key="write-1",
+        request={"value": "one"}, invoke=lambda: {"receipt": "one"},
+        receipt_key="receipt-one",
+    )
+    first = journal.restore_checkpoint("worker-run")
+    assert first is not None
+    assert first["generation"] == 0
+    assert first["effect_high_water"] == 1
+    journaled_effect(
+        binding, operation_id="write-2", idempotency_key="write-2",
+        request={"value": "two"}, invoke=lambda: {"receipt": "two"},
+        receipt_key="receipt-two",
+    )
+    second = journal.restore_checkpoint("worker-run")
+    assert second is not None
+    assert second["generation"] == 1
+    assert second["effect_high_water"] == 2
+
+
+def test_worker_checkpoint_rejects_effect_admitted_after_last_checkpoint(tmp_path):
+    from sonder_runtime.application.execution.worker_bindings import AuthenticatedWorkerBinding
+
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    binding = JournalBinding(journal, "worker-run", "worker", 1, "/workspace")
+    first = binding.begin_request(
+        operation_id="first", idempotency_key="first", request_digest="a" * 64,
+    )
+    binding.complete(first, outcome_digest="b" * 64, receipt_key="receipt-first")
+    journal.append_checkpoint("worker-run", "state-one")
+    second = binding.begin_request(
+        operation_id="second", idempotency_key="second", request_digest="c" * 64,
+    )
+    binding.complete(second, outcome_digest="d" * 64, receipt_key="receipt-second")
+    with pytest.raises(EffectJournalError, match="high-water is stale"):
+        journal.restore_checkpoint("worker-run")
+    with pytest.raises(EffectJournalError, match="checkpoint reconciliation"):
+        AuthenticatedWorkerBinding(
+            journal, "worker-run", "worker", 2, "/workspace",
+        ).recover_before_restart()
