@@ -31,6 +31,8 @@ def test_low_candidate_can_run_and_write_low_temp(tmp_path):
     command = [
         sys.executable, "-c",
         "import os; from pathlib import Path; "
+        "home=Path.home(); assert str(home).startswith(os.environ['TEMP']); "
+        "home.joinpath('low-home-marker.txt').write_text('ok'); "
         "Path(os.environ['TEMP'], 'low-marker.txt').write_text('ok')",
     ]
     result = run_isolated(command, cwd=tmp_path, timeout=10)
