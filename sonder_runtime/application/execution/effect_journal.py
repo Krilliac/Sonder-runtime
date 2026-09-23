@@ -42,6 +42,7 @@ class EffectIntent:
     outcome_digest: str = ""
     receipt_key: str = ""
     detail: str = ""
+    replayed: bool = False
 
     def __post_init__(self) -> None:
         for name in ("intent_id", "run_id", "worker_id", "operation_id", "scope",
@@ -54,6 +55,8 @@ class EffectIntent:
             raise EffectJournalError("unsupported reconciliation strategy")
         if type(self.sequence) is not int or self.sequence < 0:
             raise EffectJournalError("sequence cannot be negative")
+        if not isinstance(self.replayed, bool):
+            raise EffectJournalError("replayed must be boolean")
         if self.state in {EffectState.COMPLETED, EffectState.FAILED}:
             if not self.outcome_digest or not self.receipt_key:
                 raise EffectJournalError("terminal outcome requires digest and receipt")
@@ -113,7 +116,13 @@ class JournalBinding:
             operation_id, self.scope, self.owner_epoch, idempotency_key,
             request_digest, reconciliation,
         )
-        return self.journal.begin(intent)
+        existing = getattr(self.journal, "get", lambda _intent_id: None)(intent.intent_id)
+        stored = self.journal.begin(intent)
+        if existing is not None or stored.replayed:
+            raise EffectJournalError(
+                "duplicate effect intent requires reconciliation before invocation"
+            )
+        return stored
 
     def complete(self, intent: EffectIntent, *, outcome_digest: str,
                  receipt_key: str, detail: str = "", success: bool = True) -> EffectIntent:

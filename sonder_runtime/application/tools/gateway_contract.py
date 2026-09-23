@@ -92,10 +92,13 @@ class ToolScope:
 class ToolPermission:
     effects: frozenset[str] = frozenset()
     approval: ApprovalMode = ApprovalMode.NOT_REQUIRED
+    reconciliation: str = "manual"
 
     def __post_init__(self) -> None:
         if any(not effect.strip() for effect in self.effects):
             raise InvalidInput("tool permission effects must be non-empty")
+        if self.reconciliation not in {"manual", "idempotent", "query"}:
+            raise InvalidInput("tool reconciliation must be manual, idempotent, or query")
 
 
 @dataclass(frozen=True)
@@ -336,7 +339,7 @@ class ToolGateway:
                     operation_id=request.request_id,
                     idempotency_key=request.request_id,
                     request_digest=_digest(dict(request.arguments)),
-                    reconciliation="idempotent",
+                    reconciliation=request.permission.reconciliation,
                 )
             try:
                 result = self._invoker.invoke(request)
