@@ -78,6 +78,8 @@ def test_delegation_service_uses_subagent_port_and_integrates_result(tmp_path):
     assert handle.child_id == request.lineage.child_id
     assert child_request.metadata[0] == ("delegation_id", request.delegation_id)
     assert child_request.metadata[2] == ("preset", "researcher")
+    assert child_request.resume_key == request.delegation_id
+    assert child_request.idempotency_key == request.delegation_id
     assert child_context is context
     assert events.rows[0][0] == "agent.delegation.accepted"
 
