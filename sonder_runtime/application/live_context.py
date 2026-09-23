@@ -33,8 +33,8 @@ class LiveContextResult:
 class LiveAgentContextProducer:
     """Discover trusted-in-scope rules and skill metadata for one lane.
 
-    The caller supplies only explicitly configured roots.  The lane workspace
-    is appended at highest precedence for project-local overrides.  A failed
+    The caller supplies only explicitly configured roots.  Bundled, global,
+    project, then configured sources have increasing precedence.  A failed
     refresh can reuse the last complete snapshot for the same workspace, but
     the result remains observable through ``reason``.
     """
@@ -59,6 +59,8 @@ class LiveAgentContextProducer:
 
     @staticmethod
     def _normalize(values: Mapping[str, Sequence[Path | str]]) -> dict[str, tuple[Path, ...]]:
+        if set(values) - {"bundled", "global", "configured"}:
+            raise ValueError("unsupported live context source")
         return {
             str(kind): tuple(Path(root).resolve() for root in roots)
             for kind, roots in values.items()
@@ -68,20 +70,28 @@ class LiveAgentContextProducer:
     def _sources(values: Mapping[str, tuple[Path, ...]], project: Path):
         sources = [
             InstructionSource(kind, root)
-            for kind, roots in values.items()
-            for root in roots
+            for kind in ("bundled", "global")
+            for root in values.get(kind, ())
         ]
         sources.append(InstructionSource("project", project))
+        sources.extend(
+            InstructionSource("configured", root)
+            for root in values.get("configured", ())
+        )
         return sources
 
     @staticmethod
     def _skill_sources(values: Mapping[str, tuple[Path, ...]], project: Path):
         sources = [
             SkillSource(kind, root)
-            for kind, roots in values.items()
-            for root in roots
+            for kind in ("bundled", "global")
+            for root in values.get(kind, ())
         ]
         sources.append(SkillSource("project", project))
+        sources.extend(
+            SkillSource("configured", root)
+            for root in values.get("configured", ())
+        )
         return sources
 
     @staticmethod

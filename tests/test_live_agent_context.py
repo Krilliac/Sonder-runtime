@@ -97,3 +97,24 @@ def test_live_agent_context_rejects_redirected_workspace_root(tmp_path):
     assert not result.complete
     assert result.records == ()
 
+
+def test_live_context_configured_source_overrides_project_and_global(tmp_path):
+    global_root = _project(tmp_path, name="global", rule="GLOBAL RULE")
+    project = _project(tmp_path, name="project", rule="PROJECT RULE")
+    configured = _project(tmp_path, name="configured", rule="CONFIGURED RULE")
+    (configured / "play" / "SKILL.md").write_text(
+        "---\nname: play\ndescription: Configured skill\n---\n",
+        encoding="utf-8",
+    )
+    producer = LiveAgentContextProducer(
+        instruction_roots={"global": (global_root,), "configured": (configured,)},
+        skill_roots={"global": (global_root,), "configured": (configured,)},
+    )
+    result = producer.refresh(project)
+    rendered = "\n".join(record.content for record in result.records)
+    assert result.complete
+    assert "CONFIGURED RULE" in rendered
+    assert "Configured skill" in rendered
+    assert "PROJECT RULE" not in rendered
+    assert "GLOBAL RULE" not in rendered
+
