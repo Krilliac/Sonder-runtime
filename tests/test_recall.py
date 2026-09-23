@@ -194,6 +194,72 @@ def test_exact_and_temporal_modes_are_vector_independent():
     ) == ["metadata lane task -> result"]
 
 
+def test_failure_mode_returns_failed_evidence_from_mixed_outcome_without_solution_label():
+    c = _conn()
+    _store_good(c, "mixed", "repair parser", "candidate response", [1.0, 0.0], project="p")
+    ms.record_outcome_row(c, "mixed", "failed", -1.0, source="machine")
+    _store_good(c, "good", "repair parser", "successful response", [1.0, 0.0], project="p")
+
+    result = recall.recall(
+        c, "repair parser", project="p", mode="failure", embed_fn=lambda _q: (
+            _ for _ in ()
+        ).throw(AssertionError("failure recall must not embed")),
+    )
+
+    assert result == ["[failed evidence] repair parser -> candidate response"]
+    assert "successful response" not in " ".join(result)
+
+
+def test_failure_mode_is_project_and_session_scoped_and_reads_rows_without_vectors():
+    c = _conn()
+    ms.log_interaction(c, "p1", "project failure", "", "p1 failure", "sonder",
+                       project="project-a", session_id="current")
+    ms.record_outcome_row(c, "p1", "failed", -1.0, source="machine")
+    ms.log_interaction(c, "p2", "project failure", "", "p2 failure", "sonder",
+                       project="project-b", session_id="other")
+    ms.record_outcome_row(c, "p2", "failed", -1.0, source="machine")
+
+    result = recall.recall(
+        c, "project failure", project="project-a", exclude_session="current",
+        mode="failure", embed_fn=lambda _q: (_ for _ in ()).throw(
+            AssertionError("failure recall must not embed")
+        ),
+    )
+
+    assert result == []
+    assert recall.recall(
+        c, "project failure", project="project-a", mode="failure",
+        embed_fn=lambda _q: None,
+    ) == ["[failed evidence] project failure -> p1 failure"]
+    assert recall.recall(
+        c, "project failure", project="project-b", mode="failure",
+        embed_fn=lambda _q: None,
+    ) == ["[failed evidence] project failure -> p2 failure"]
+
+
+def test_failure_candidate_page_has_bounded_exclusive_paging():
+    c = _conn()
+    for index in range(3):
+        interaction_id = "failure-%d" % index
+        ms.log_interaction(c, interaction_id, "bounded failure %d" % index, "",
+                           "failure response %d" % index, "sonder", project="p")
+        ms.record_outcome_row(c, interaction_id, "failed", -1.0, source="machine")
+    c.execute("UPDATE interactions SET ts=printf('%020d',rowid)")
+    c.commit()
+
+    first = ms.failed_interaction_candidate_page(c, project="p", row_limit=1)
+    second = ms.failed_interaction_candidate_page(
+        c, project="p", row_limit=1, cursor=first.next_cursor,
+    )
+
+    assert first.incomplete and first.termination == "row_limit"
+    assert second.incomplete and second.termination == "row_limit"
+    assert first.next_cursor and second.next_cursor
+    assert {first.rows[0]["id"], second.rows[0]["id"]} == {"failure-1", "failure-2"}
+    assert first.rows[0]["outcome_signal"] == "failed"
+    assert second.rows[0]["outcome_signal"] == "failed"
+
+
 def test_metadata_mode_does_not_load_large_embedding_blob():
     c = _conn()
     c.execute(
