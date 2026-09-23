@@ -942,6 +942,86 @@ def test_schedule_deduplicates_pressure_and_releases_after_worker_finishes(env):
     assert len(submitted) == 1
 
 
+def test_schedule_replays_wakeup_during_worker_terminal_boundary(env):
+    service, _, _, _, context, _ = env
+    lane = spawn(env)["lane"]["id"]
+    submitted = []
+
+    class Pool:
+        def submit(self, fn, *args):
+            submitted.append((fn, args))
+
+    service._pool = Pool()
+    entered = Event()
+    release = Event()
+
+    def active_worker(lane_id, worker_context):
+        entered.set()
+        assert release.wait(5)
+
+    service.run_pending = active_worker
+    service._schedule(lane, context)
+    first, args = submitted.pop()
+    worker = Thread(target=first, args=args)
+    worker.start()
+    assert entered.wait(5)
+
+    # This is the notification that used to be lost while the worker was
+    # completing its current turn.
+    service._schedule(lane, context)
+    assert not submitted
+    release.set()
+    worker.join(5)
+    assert not worker.is_alive()
+    assert len(submitted) == 1
+
+    follow_up, follow_up_args = submitted.pop()
+    follow_up(*follow_up_args)
+    assert not service._scheduled_lanes
+    assert not service._scheduled_dirty
+
+
+def test_capacity_blocked_lane_is_retried_when_active_slot_releases(env):
+    service, store, _, _, context, root = env
+    lanes = []
+    for index in range(5):
+        workspace = root / f"capacity-{index}"
+        workspace.mkdir()
+        lanes.append(
+            service.spawn(
+                command_id=f"capacity-{index}",
+                parent_session_id="parent",
+                task="capacity probe",
+                workspace_root=str(workspace),
+                context=context,
+            )["lane"]["id"]
+        )
+    with store.transaction() as tx:
+        for lane_id in lanes[:4]:
+            lane = tx.lane(lane_id)
+            lane.update(status="running", owner="busy")
+            tx.save(lane)
+
+    submitted = []
+
+    class Pool:
+        def submit(self, fn, *args):
+            submitted.append((fn, args))
+
+    service._pool = Pool()
+    service._schedule(lanes[4], context)
+    fn, args = submitted.pop()
+    fn(*args)
+    assert lanes[4] in service._capacity_waiters
+
+    with store.transaction() as tx:
+        lane = tx.lane(lanes[0])
+        lane.update(status="completed", owner="")
+        tx.save(lane)
+    service._done()
+    assert len(submitted) == 1
+
+
 def test_oversized_provider_body_is_not_persisted_even_with_small_usage(env):
     service, _, sessions, model, context, _ = env
     lane = spawn(env)["lane"]["id"]

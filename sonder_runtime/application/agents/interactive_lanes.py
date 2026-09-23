@@ -209,6 +209,9 @@ class AgentLaneService:
         # no-op run_pending calls.  The marker is released by the wrapper even
         # when the worker raises, allowing a later recovery/resume to retry.
         self._scheduled_lanes = set()
+        self._running_scheduled = set()
+        self._scheduled_dirty = set()
+        self._capacity_waiters = {}
         self._capture = SessionCaptureService(sessions)
         self._archive = SessionContextArchiveService(sessions)
         if loop is not None and loop_factory is not None:
@@ -574,6 +577,30 @@ class AgentLaneService:
         self.store.flush()
         with self._condition:
             self._condition.notify_all()
+        self._wake_capacity_waiter()
+
+    def _wake_capacity_waiter(self):
+        """Admit one queued lane after a worker releases an active slot."""
+        with self._condition:
+            candidates = tuple(self._capacity_waiters.items())
+        for lane_id, context in candidates:
+            try:
+                with self.store.transaction() as tx:
+                    lane = tx.lane(lane_id)
+                    active = sum(
+                        row["owner"] != ""
+                        for _, row in tx.lanes(context.principal_id, limit=256)
+                    )
+                    if lane["status"] != "queued" or lane["owner"] or active >= 4:
+                        continue
+            except (KeyError, ValueError):
+                continue
+            with self._condition:
+                if self._capacity_waiters.get(lane_id) is not context:
+                    continue
+                self._capacity_waiters.pop(lane_id, None)
+            self._schedule(lane_id, context)
+            return
 
     def _schedule(self, lane_id, context):
         managed = (
@@ -586,7 +613,13 @@ class AgentLaneService:
         # the already queued worker and make that valid worker fail closed.
         with self._condition:
             if lane_id in self._scheduled_lanes:
+                # The active worker may be between its final mailbox read and
+                # terminal persistence.  Remember one follow-up wakeup rather
+                # than dropping this notification or recursively submitting.
+                if lane_id in self._running_scheduled:
+                    self._scheduled_dirty.add(lane_id)
                 return
+            self._capacity_waiters.pop(lane_id, None)
             if managed and len(self._app_dispatch) >= 256:
                 raise CapacityExceeded("managed dispatch capacity unavailable")
             self._scheduled_lanes.add(lane_id)
@@ -613,11 +646,21 @@ class AgentLaneService:
             raise
 
     def _run_scheduled(self, lane_id, context):
+        with self._condition:
+            self._running_scheduled.add(lane_id)
         try:
             self.run_pending(lane_id, context)
         finally:
             with self._condition:
+                self._running_scheduled.discard(lane_id)
                 self._scheduled_lanes.discard(lane_id)
+                dirty = lane_id in self._scheduled_dirty
+                self._scheduled_dirty.discard(lane_id)
+            if dirty:
+                # The marker is clear before re-admission, so this is bounded
+                # to one follow-up per worker and cannot recurse through the
+                # executor submission path.
+                self._schedule(lane_id, context)
 
     @_recover_committed_command
     def spawn(
@@ -1366,6 +1409,9 @@ class AgentLaneService:
                 l["owner"] != "" for _, l in tx.lanes(context.principal_id, limit=256)
             )
             if active >= 4:
+                with self._condition:
+                    if lane_id in self._scheduled_lanes:
+                        self._capacity_waiters[lane_id] = context
                 return
             self._remaining(lane)
             lane.update(status="running", owner=self.owner)
