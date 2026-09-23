@@ -17,6 +17,12 @@ restart/replay still compares the immutable persisted payload. Contradictory
 and failed verifier receipts remain negative learning evidence; this slice
 does not promote semantic facts or policies.
 
+The authority and insert capability are process-local Python objects. Exact
+internal types reject ordinary duck-typed or caller-constructed public values,
+but arbitrary code already running in the same Python process can inspect
+underscore-prefixed module internals. This is an API and ownership boundary,
+not a substitute for process isolation against a malicious extension.
+
 Evidence:
 
 - `tests/test_receipt_observation.py`: 12 focused tests, including public

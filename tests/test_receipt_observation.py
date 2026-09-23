@@ -84,6 +84,18 @@ def test_public_eligibility_without_owner_authority_cannot_mint_trusted_evidence
         ReceiptObservationProducer.from_terminal_eligibility(forged)
 
 
+def test_duck_typed_public_authority_cannot_mint_trusted_evidence():
+    value = _eligibility(_evidence())
+
+    class ForgedAuthority:
+        def resolve(self):
+            return value
+
+    forged = replace(value, authority=ForgedAuthority())
+    with pytest.raises(PermissionError, match="owner-bound managed verifier authority"):
+        ReceiptObservationProducer.from_terminal_eligibility(forged)
+
+
 def test_modified_public_fields_are_ignored_when_owner_authority_is_present():
     value = _eligibility(_evidence(), worker_id="real-worker")
     modified = replace(
@@ -209,6 +221,42 @@ def test_first_repository_insert_requires_producer_authorization(tmp_path):
     repo = SQLiteVerifierObservationRepository(connection)
     with pytest.raises(PermissionError, match="producer authorization"):
         repo.append(replace(receipt, authorization=None), observation)
+    assert repo.append(receipt, observation) == observation
+    connection.close()
+
+
+def test_first_insert_authorization_binds_every_receipt_and_observation_field(tmp_path):
+    receipt, observation = ReceiptObservationProducer.from_terminal_eligibility(
+        _eligibility(_evidence())
+    )
+    receipt_mutations = (
+        {"interaction_id": "forged-interaction"},
+        {"run_id": "forged-run"},
+        {"principal_id": "forged-principal"},
+        {"project_scope": "forged-project"},
+        {"workspace_scope": "forged-workspace"},
+        {"verifier_outcome": "failed"},
+        {"content_digest": "f" * 64},
+        {"subject_digest": "e" * 64},
+        {"authority_scope": "d" * 64},
+    )
+    observation_mutations = (
+        {"content": "forged-content"},
+        {"source": "attributed"},
+        {"independent_key": "forged-worker"},
+        {"provenance": ("forged-provenance",)},
+        {"positive": False},
+        {"evaluation_passed": False},
+        {"trusted_source": False},
+    )
+    connection = sqlite3.connect(tmp_path / "memory.db")
+    repo = SQLiteVerifierObservationRepository(connection)
+    for changes in receipt_mutations:
+        with pytest.raises(PermissionError, match="producer authorization"):
+            repo.append(replace(receipt, **changes), observation)
+    for changes in observation_mutations:
+        with pytest.raises(PermissionError, match="producer authorization"):
+            repo.append(receipt, replace(observation, **changes))
     assert repo.append(receipt, observation) == observation
     connection.close()
 
