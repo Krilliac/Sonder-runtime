@@ -11,7 +11,10 @@ from dataclasses import dataclass, field, replace
 import hashlib
 import json
 
-from ..ports.terminal_eligibility import ManagedTerminalEligibility
+from ..ports.terminal_eligibility import (
+    ManagedTerminalEligibility,
+    _HostVerifierAuthority,
+)
 from .learning_ladder import LearningObservation
 
 
@@ -24,29 +27,51 @@ def _digest(value: object) -> str:
 _OBSERVATION_AUTH_SEAL = object()
 
 
-class _ObservationAuthorization:
-    __slots__ = ("_receipt_id", "_observation_id", "_content_key")
+def _receipt_payload(receipt) -> dict:
+    """Return the immutable receipt fields, excluding its live capability."""
+    return {
+        name: getattr(receipt, name)
+        for name in receipt.__dataclass_fields__
+        if name != "authorization"
+    }
 
-    def __init__(self, receipt_id, observation_id, content_key, seal):
+
+def _observation_payload(observation) -> dict:
+    value = {
+        name: getattr(observation, name)
+        for name in observation.__dataclass_fields__
+    }
+    value["observed_at"] = observation.observed_at.isoformat()
+    value["provenance"] = list(observation.provenance)
+    return value
+
+
+def _authorization_digest(receipt, observation) -> str:
+    return _digest({
+        "receipt": _receipt_payload(receipt),
+        "observation": _observation_payload(observation),
+    })
+
+
+class _ObservationAuthorization:
+    __slots__ = ("_binding_digest",)
+
+    def __init__(self, binding_digest, seal):
         if seal is not _OBSERVATION_AUTH_SEAL:
             raise TypeError("observation authorization is private")
-        self._receipt_id = receipt_id
-        self._observation_id = observation_id
-        self._content_key = content_key
+        self._binding_digest = binding_digest
 
     def matches(self, receipt, observation) -> bool:
         return (
             type(receipt) is VerifierReceipt
             and type(observation) is LearningObservation
-            and self._receipt_id == receipt.receipt_id
-            and self._observation_id == observation.observation_id
-            and self._content_key == observation.content_key
+            and self._binding_digest == _authorization_digest(receipt, observation)
         )
 
 
 def _issue_observation_authorization(receipt, observation):
     return _ObservationAuthorization(
-        receipt.receipt_id, observation.observation_id, observation.content_key,
+        _authorization_digest(receipt, observation),
         _OBSERVATION_AUTH_SEAL,
     )
 
@@ -109,7 +134,7 @@ class ReceiptObservationProducer:
             raise TypeError("verified terminal eligibility is required")
         authority = eligibility.authority
         resolver = getattr(authority, "resolve", None)
-        if authority is None or not callable(resolver):
+        if type(authority) is not _HostVerifierAuthority or not callable(resolver):
             raise PermissionError(
                 "owner-bound managed verifier authority is required"
             )

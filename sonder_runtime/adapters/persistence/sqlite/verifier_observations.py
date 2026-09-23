@@ -6,7 +6,11 @@ import sqlite3
 from contextlib import contextmanager
 
 from ....application.memory.learning_ladder import LearningObservation
-from ....application.memory.receipt_observation import VerifierReceipt
+from ....application.memory.receipt_observation import (
+    VerifierReceipt,
+    _observation_payload,
+    _receipt_payload,
+)
 
 
 _TABLE_DDL = """CREATE TABLE IF NOT EXISTS verifier_learning_observations (
@@ -28,22 +32,6 @@ END;"""
 
 def _json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
-
-
-def _receipt_payload(receipt: VerifierReceipt) -> dict:
-    # The in-process authorization capability is intentionally never durable.
-    return {
-        name: getattr(receipt, name)
-        for name in receipt.__dataclass_fields__
-        if name != "authorization"
-    }
-
-
-def _observation_payload(observation: LearningObservation) -> dict:
-    value = {name: getattr(observation, name) for name in observation.__dataclass_fields__}
-    value["observed_at"] = observation.observed_at.isoformat()
-    value["provenance"] = list(observation.provenance)
-    return value
 
 
 def _observation(value: dict) -> LearningObservation:
