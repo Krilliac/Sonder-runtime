@@ -29,6 +29,8 @@ ALLOWED = REQUIRED | {
     "baseline_sha", "verified_sha", "pr", "evidence", "platforms",
     "limitations", "verified_at",
 }
+MAX_LEDGER_LINES = 10_000
+MAX_LEDGER_LINE_LENGTH = 16_384
 
 
 def _parse_spec(text: str) -> dict[str, bool]:
@@ -76,6 +78,32 @@ def _git_text(base_sha: str, path: str) -> tuple[str | None, str | None]:
     return result.stdout, None
 
 
+def _logical_ledger_lines(text: str) -> list[str]:
+    """Return nonblank JSONL lines without platform newline differences."""
+    return [line for line in text.replace("\r\n", "\n").split("\n") if line]
+
+
+def _append_only_problems(base_ledger: str, current_ledger: str) -> list[str]:
+    """Require every base ledger record to survive in order, byte-for-byte."""
+    base_lines = _logical_ledger_lines(base_ledger)
+    current_lines = _logical_ledger_lines(current_ledger)
+    if len(base_lines) > MAX_LEDGER_LINES or len(current_lines) > MAX_LEDGER_LINES:
+        return ["base-diff: evidence ledger exceeds bounded append-only comparison"]
+    if any(len(line) > MAX_LEDGER_LINE_LENGTH for line in base_lines + current_lines):
+        return ["base-diff: evidence ledger contains an oversized append-only record"]
+    cursor = 0
+    for base_number, base_line in enumerate(base_lines, start=1):
+        while cursor < len(current_lines) and current_lines[cursor] != base_line:
+            cursor += 1
+        if cursor == len(current_lines):
+            return [
+                "base-diff: evidence ledger removed or rewrote pre-existing "
+                f"record at base line {base_number}"
+            ]
+        cursor += 1
+    return []
+
+
 def _base_diff_problems(base_ref: str) -> list[str]:
     """Require each newly checked ID to add a verified ledger revision."""
     base_sha, problem = _resolve_base_ref(base_ref)
@@ -87,6 +115,9 @@ def _base_diff_problems(base_ref: str) -> list[str]:
     base_ledger, problem = _git_text(base_sha, str(LEDGER.relative_to(ROOT)).replace("\\", "/"))
     if problem:
         return [problem]
+    problems = _append_only_problems(
+        base_ledger or "", LEDGER.read_text(encoding="utf-8")
+    )
     base_checked = _parse_spec(base_spec or "")
     current_checked = _parse_spec(SPEC.read_text(encoding="utf-8"))
     newly_checked = sorted(
@@ -94,7 +125,7 @@ def _base_diff_problems(base_ref: str) -> list[str]:
         if checked and not base_checked.get(requirement_id, False)
     )
     if not newly_checked:
-        return []
+        return problems
 
     base_records = _parse_ledger(base_ledger or "")
     old_revisions = {
@@ -121,7 +152,6 @@ def _base_diff_problems(base_ref: str) -> list[str]:
         if isinstance(record, dict):
             added.append(record)
 
-    problems: list[str] = []
     for requirement_id in newly_checked:
         old_revision = old_revisions.get(requirement_id, 0)
         evidence = [
