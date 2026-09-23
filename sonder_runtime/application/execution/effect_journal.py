@@ -133,6 +133,49 @@ class RecoveryDecision:
     detail: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class EffectJournalPage:
+    """Read-only, bounded view of one run's journal after a checkpoint position.
+
+    ``records`` holds the intents with ``sequence > after_sequence`` in
+    sequence order (optionally only one worker's), at most ``limit`` of them.
+    ``high_water`` (the run's maximum sequence) and ``settled_high_water``
+    (see ``EffectJournalReader.settled_high_water``) are read in the same
+    snapshot as ``records`` and always cover the whole run, not the page.
+    ``truncated`` is true when more matching records exist; the caller must
+    page with ``after_sequence=records[-1].sequence`` before concluding
+    anything about the remainder.
+    """
+
+    run_id: str
+    after_sequence: int
+    records: tuple[EffectIntent, ...]
+    high_water: int
+    settled_high_water: int
+    truncated: bool
+
+    @property
+    def unresolved(self) -> tuple[EffectIntent, ...]:
+        """Records in this page with no definitive outcome (intent/uncertain)."""
+        return tuple(
+            record for record in self.records
+            if record.state in {EffectState.INTENT, EffectState.UNCERTAIN}
+        )
+
+
+class EffectJournalReader(Protocol):
+    """Read-only queries for binding a checkpoint to a journal position.
+
+    Neither method writes, claims ownership, or changes a recovery fence.
+    """
+
+    def settled_high_water(self, run_id: str) -> int: ...
+    def effects_since(
+        self, run_id: str, after_sequence: int, *, limit: int = 100,
+        worker_id: str | None = None,
+    ) -> EffectJournalPage: ...
+
+
 class EffectJournal(Protocol):
     def begin(self, intent: EffectIntent) -> EffectIntent: ...
     def outcome(self, outcome: EffectOutcome) -> EffectIntent: ...
@@ -203,6 +246,7 @@ def bound(binding: JournalBinding) -> Iterator[JournalBinding]:
         _CURRENT.reset(token)
 
 
-__all__ = ["EffectIntent", "EffectJournal", "EffectJournalError", "EffectOutcome",
+__all__ = ["EffectIntent", "EffectJournal", "EffectJournalError", "EffectJournalPage",
+           "EffectJournalReader", "EffectOutcome",
            "EffectReconciliationVerifier", "EffectState", "JournalBinding",
            "ReconciliationProof", "RecoveryDecision", "bound", "current"]

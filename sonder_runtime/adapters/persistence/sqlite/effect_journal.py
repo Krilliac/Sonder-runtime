@@ -17,8 +17,8 @@ from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thre
 
 from sonder_runtime.adapters.persistence.owned_sqlite import transaction as owned_sqlite_transaction
 from sonder_runtime.application.execution.effect_journal import (
-    EffectIntent, EffectJournalError, EffectOutcome, EffectState,
-    ReconciliationProof, RecoveryDecision,
+    EffectIntent, EffectJournalError, EffectJournalPage, EffectOutcome,
+    EffectState, ReconciliationProof, RecoveryDecision,
 )
 
 
@@ -487,6 +487,88 @@ class SQLiteEffectJournal:
                 "SELECT COALESCE(MAX(sequence),0) FROM effect_journal WHERE run_id=?",
                 (run_id,),
             ).fetchone()[0])
+
+    @staticmethod
+    def _settled_high_water_in(connection, run_id: str) -> int:
+        # Sequences are allocated contiguously per run (MAX+1 under BEGIN
+        # IMMEDIATE), so the settled prefix ends just before the first
+        # intent that has no definitive outcome.
+        first_unresolved = connection.execute(
+            "SELECT MIN(sequence) FROM effect_journal WHERE run_id=? AND state IN (?,?)",
+            (run_id, EffectState.INTENT.value, EffectState.UNCERTAIN.value),
+        ).fetchone()[0]
+        if first_unresolved is not None:
+            return int(first_unresolved) - 1
+        return int(connection.execute(
+            "SELECT COALESCE(MAX(sequence),0) FROM effect_journal WHERE run_id=?",
+            (run_id,),
+        ).fetchone()[0])
+
+    def settled_high_water(self, run_id: str) -> int:
+        """Return the largest sequence whose whole prefix is terminal.
+
+        Every intent of ``run_id`` with ``sequence <= result`` is COMPLETED or
+        FAILED; the intent at ``result + 1`` (if any) is INTENT or UNCERTAIN.
+        Returns 0 for a run with no intents or whose first intent is
+        unresolved.  Read-only: no ownership claim, fence or state change.
+        A checkpoint that records this value binds exactly the effects whose
+        outcomes it may rely on.
+        """
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise EffectJournalError("run_id is required")
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            return self._settled_high_water_in(connection, run_id)
+
+    def effects_since(
+        self, run_id: str, after_sequence: int, *, limit: int = 100,
+        worker_id: str | None = None,
+    ) -> EffectJournalPage:
+        """Return a bounded snapshot of intents after a checkpoint position.
+
+        ``after_sequence`` is normally the ``effect_high_water`` a checkpoint
+        stored (0 for none).  Records are returned in sequence order with
+        their current state, receipt key and idempotency key, so a resuming
+        worker can map settled effects to stored receipts by idempotency key
+        without re-invoking them, and see unresolved ones that require
+        reconciliation.  ``worker_id`` narrows ``records`` only; high-water
+        values always describe the whole run.  Read-only.
+        """
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise EffectJournalError("run_id is required")
+        if type(after_sequence) is not int or after_sequence < 0:
+            raise EffectJournalError("after_sequence must be a non-negative integer")
+        if type(limit) is not int or not 1 <= limit <= 10_000:
+            raise EffectJournalError("limit must be within 1..10000")
+        if worker_id is not None and (not isinstance(worker_id, str) or not worker_id.strip()):
+            raise EffectJournalError("worker_id must be non-empty when supplied")
+        query = (
+            "SELECT intent_id,run_id,worker_id,operation_id,scope,owner_epoch,"
+            "idempotency_key,request_digest,reconciliation,sequence,state,"
+            "outcome_digest,receipt_key,detail FROM effect_journal "
+            "WHERE run_id=? AND sequence>?"
+        )
+        params: list[object] = [run_id, after_sequence]
+        if worker_id is not None:
+            query += " AND worker_id=?"
+            params.append(worker_id)
+        query += " ORDER BY sequence LIMIT ?"
+        params.append(limit + 1)
+        with self._connect() as connection:
+            # One deferred read transaction: records and both high-water
+            # values come from the same snapshot.
+            connection.execute("BEGIN")
+            rows = connection.execute(query, params).fetchall()
+            high_water = int(connection.execute(
+                "SELECT COALESCE(MAX(sequence),0) FROM effect_journal WHERE run_id=?",
+                (run_id,),
+            ).fetchone()[0])
+            settled = self._settled_high_water_in(connection, run_id)
+        records = tuple(self._row(row) for row in rows[:limit])
+        return EffectJournalPage(
+            run_id, after_sequence, records, high_water, settled,
+            truncated=len(rows) > limit,
+        )
 
     @staticmethod
     def _encode_state(state: object) -> tuple[str, str]:
