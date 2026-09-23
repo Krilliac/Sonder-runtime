@@ -1,0 +1,193 @@
+"""Windows low-integrity supervisor for unattended self-mod checks.
+
+The parent stays at the normal user integrity level and owns the evaluator
+truth.  Candidate code runs with a restricted low-integrity token in a Job
+Object whose lifetime is tied to this supervisor.  This is intentionally a
+small, dependency-light boundary: unsupported platforms fail closed when the
+caller requests isolation.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from typing import Sequence
+
+
+def _digest(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _label(path: Path, sid_name: str, mask: int) -> None:
+    import win32security
+
+    sid = win32security.CreateWellKnownSid(
+        getattr(win32security, sid_name), None
+    )
+    sacl = win32security.ACL()
+    sacl.AddMandatoryAce(win32security.ACL_REVISION, 0, mask, sid)
+    win32security.SetNamedSecurityInfo(
+        str(path), win32security.SE_FILE_OBJECT,
+        win32security.LABEL_SECURITY_INFORMATION,
+        None, None, None, sacl,
+    )
+
+
+def _low_token():
+    import win32api
+    import win32con
+    import win32security
+
+    current = win32security.OpenProcessToken(
+        win32api.GetCurrentProcess(), win32con.TOKEN_ALL_ACCESS
+    )
+    restricted = win32security.CreateRestrictedToken(
+        current, win32security.DISABLE_MAX_PRIVILEGE, [], [], []
+    )
+    low_sid = win32security.CreateWellKnownSid(
+        win32security.WinLowLabelSid, None
+    )
+    win32security.SetTokenInformation(
+        restricted, win32security.TokenIntegrityLevel, (low_sid, 96)
+    )
+    return restricted
+
+
+def _child(spec_path: Path) -> int:
+    """Run the actual check. This process and all descendants are low."""
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    command = [str(item) for item in spec["command"]]
+    output_path = Path(spec["output"]).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    env = {str(k): str(v) for k, v in spec["env"].items()}
+    try:
+        completed = subprocess.run(
+            command, cwd=spec["cwd"], env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=False,
+            timeout=max(1, int(spec["timeout"])), check=False,
+        )
+        data = completed.stdout[-120000:]
+        output_path.write_bytes(data)
+        result = {"returncode": completed.returncode, "timed_out": False}
+    except subprocess.TimeoutExpired as exc:
+        data = (exc.stdout or b"")[-120000:]
+        output_path.write_bytes(data)
+        result = {"returncode": 124, "timed_out": True}
+    except BaseException as exc:  # preserve a bounded diagnostic for parent
+        output_path.write_text("%s: %s\n" % (type(exc).__name__, exc), encoding="utf-8")
+        result = {"returncode": 125, "timed_out": False, "error": str(exc)}
+    Path(spec["result"]).write_text(json.dumps(result), encoding="utf-8")
+    return int(result["returncode"])
+
+
+def run_isolated(
+    command: Sequence[str], *, cwd: str | os.PathLike[str], timeout: int,
+    protected_paths: Sequence[str | os.PathLike[str]] = (),
+) -> dict[str, object]:
+    """Run ``command`` below low MIC and return a selfmod-compatible result."""
+    if os.name != "nt":
+        raise RuntimeError("low-integrity selfmod isolation requires Windows")
+    try:
+        import win32api
+        import win32con
+        import win32job
+        import win32process
+        import win32security
+    except ImportError as exc:
+        raise RuntimeError("pywin32 is required for low-integrity selfmod isolation") from exc
+
+    protected = [Path(item).resolve() for item in protected_paths]
+    before = {str(path): _digest(path) for path in protected if path.is_file()}
+    work = Path(tempfile.mkdtemp(prefix="sonder-selfmod-low-"))
+    try:
+        # A low object is writable by the low candidate; the evaluator files
+        # remain medium with NO_READ_UP|NO_WRITE_UP below.
+        _label(work, "WinLowLabelSid", 0)
+        output = work / "output.bin"
+        result_path = work / "result.json"
+        spec_path = work / "spec.json"
+        env = {
+            "SystemRoot": os.environ.get("SystemRoot", r"C:\Windows"),
+            "WINDIR": os.environ.get("WINDIR", r"C:\Windows"),
+            "PATH": os.environ.get("PATH", ""),
+            "TEMP": str(work), "TMP": str(work),
+            "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONPYCACHEPREFIX": str(work / "pycache"),
+            "PYTHONPATH": os.pathsep.join(
+                item for item in (str(Path(__file__).resolve().parent), os.environ.get("PYTHONPATH", "")) if item
+            ),
+        }
+        spec_path.write_text(json.dumps({
+            "command": list(command), "cwd": str(Path(cwd).resolve()),
+            "timeout": max(1, int(timeout)), "env": env,
+            "output": str(output), "result": str(result_path),
+        }), encoding="utf-8")
+        _label(spec_path, "WinLowLabelSid", 0)
+        _label(output, "WinLowLabelSid", 0) if output.exists() else None
+        # Keep the digest manifest itself outside the candidate's editable
+        # surface. The suite files stay readable to the low evaluator, while
+        # the parent verifies their bytes against this medium-protected key.
+        manifest = work / "truth-manifest.json"
+        manifest.write_text(json.dumps(before, sort_keys=True), encoding="utf-8")
+        _label(manifest, "WinMediumLabelSid", win32security.SYSTEM_MANDATORY_LABEL_NO_READ_UP | win32security.SYSTEM_MANDATORY_LABEL_NO_WRITE_UP)
+        token = _low_token()
+        job = win32job.CreateJobObject(None, "SonderSelfmodLow")
+        limits = win32job.QueryInformationJobObject(job, win32job.JobObjectExtendedLimitInformation)
+        limits["BasicLimitInformation"]["LimitFlags"] |= win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        win32job.SetInformationJobObject(job, win32job.JobObjectExtendedLimitInformation, limits)
+        startup = win32process.STARTUPINFO()
+        flags = win32con.CREATE_NO_WINDOW | win32con.CREATE_UNICODE_ENVIRONMENT | win32con.CREATE_SUSPENDED
+        command_line = subprocess.list2cmdline([sys.executable, "-m", "selfmod_low_integrity", "--child", str(spec_path)])
+        info = win32process.CreateProcessAsUser(token, None, command_line, None, None, False, flags, env, str(Path(cwd).resolve()), startup)
+        process_handle, thread_handle, _pid, _tid = info
+        try:
+            win32job.AssignProcessToJobObject(job, process_handle)
+            win32process.ResumeThread(thread_handle)
+            deadline = time.monotonic() + max(1, int(timeout)) + 10
+            while win32process.GetExitCodeProcess(process_handle) == win32con.STILL_ACTIVE and time.monotonic() < deadline:
+                time.sleep(0.05)
+            timed_out = win32process.GetExitCodeProcess(process_handle) == win32con.STILL_ACTIVE
+            if timed_out:
+                win32process.TerminateProcess(process_handle, 124)
+            code = win32process.GetExitCodeProcess(process_handle)
+        finally:
+            win32api.CloseHandle(thread_handle)
+            win32api.CloseHandle(process_handle)
+            win32api.CloseHandle(job)
+            win32api.CloseHandle(token)
+        result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else {}
+        output_text = output.read_bytes()[-120000:].decode("utf-8", "replace") if output.exists() else ""
+        after = {str(path): _digest(path) for path in protected if path.is_file()}
+        if before != after:
+            return {"exit_code": 2, "output": output_text + "\nSELFMOD EVALUATOR CANARY FAILED: protected truth changed\n", "passed": False}
+        if timed_out:
+            code = 124
+        return {"exit_code": int(code), "output": output_text, "passed": int(code) == 0}
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--child", type=Path)
+    args = parser.parse_args(argv)
+    if args.child:
+        return _child(args.child)
+    parser.error("--child is required")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
