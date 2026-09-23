@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from enum import StrEnum
 import hashlib
 
@@ -21,7 +22,7 @@ from typing import Any, Callable, Mapping
 from ..execution.process_jobs import ProcessJobProvider, ProcessJobRequest
 from ..execution.worker_bindings import AuthenticatedWorkerBinding, journaled_effect
 from ..ports.jobs import JobIdentity
-from ...domain.common.errors import Conflict, DependencyUnavailable, InvalidInput, NotFound
+from ...domain.common.errors import CapacityExceeded, Conflict, DependencyUnavailable, InvalidInput, NotFound
 from ...domain.compute_fabric import WorkloadKind
 from .capacity import WorkerBudget, WorkerCapacity, bounded_positive
 from .artifact_spool import (
@@ -621,6 +622,7 @@ class ComputeJobWorker:
                 if prior.request_sha256 != envelope.request_sha256:
                     raise Conflict("idempotency key is already bound to another request")
                 return prior
+            self._reject_occupied_capacity_before_intent(envelope)
             return journaled_effect(
                 self._effect_binding,
                 operation_id=f"compute-submit:{self.worker_id}:{envelope.idempotency_key}",
@@ -631,6 +633,40 @@ class ComputeJobWorker:
                 reconciliation="idempotent",
             )
         return self._submit_unjournaled(envelope)
+
+    def _reject_occupied_capacity_before_intent(self, envelope: RemoteJobEnvelope) -> None:
+        """Avoid an effect intent for a known admission-only capacity refusal.
+
+        The durable reservation remains the authoritative race-safe gate in
+        ``_submit_unjournaled``.  This read-only check prevents a caller from
+        turning a clearly occupied slot into an uncertain effect that blocks
+        a later retry after the running job is cancelled.
+        """
+        if self._capacity is None:
+            return
+        entry = self._catalog.get(envelope.catalog_entry_id)
+        list_capacity = getattr(self._capacity, "list_capacity", None)
+        if entry is None or not callable(list_capacity):
+            return
+        budget = self._budget() if callable(self._budget) else self._budget
+        demand = budget.memory_bytes if entry.memory_reservation_bytes is None else entry.memory_reservation_bytes
+        if budget.memory_bytes == 0 or demand > budget.memory_bytes:
+            raise CapacityExceeded("worker RAM budget is unconfigured or insufficient")
+        rows = list_capacity(host_id=budget.host_id, limit=256)
+        if len(rows) >= 256:
+            return  # The transactional reservation remains authoritative.
+        now = datetime.now(timezone.utc)
+        occupied = tuple(
+            row for row in rows
+            if row.state == "dispatched" or (
+                row.state == "reserved" and datetime.fromisoformat(row.expires_at) > now
+            )
+        )
+        if (
+            len(occupied) >= budget.max_jobs
+            or sum(row.memory_bytes for row in occupied) + demand > budget.memory_bytes
+        ):
+            raise CapacityExceeded("worker catalog capacity is occupied")
 
     def _submit_unjournaled(self, envelope: RemoteJobEnvelope) -> RemoteJobReceipt:
         logger.debug(f"ComputeJobWorker.submit: worker_id={self.worker_id!r}, catalog_entry={envelope.catalog_entry_id!r}, idempotency_key={envelope.idempotency_key!r}, workload={envelope.workload.value!r}")

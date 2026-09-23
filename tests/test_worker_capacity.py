@@ -258,6 +258,10 @@ def test_production_composition_measures_and_enforces_default_exclusive_admissio
     first = worker.submit(envelope('first'))
     with pytest.raises(CapacityExceeded):
         worker.submit(envelope('second'))
+    from sonder_runtime.adapters.persistence.sqlite.effect_journal import SQLiteEffectJournal
+    assert SQLiteEffectJournal(tmp_path / 'worker-effects.db').get(
+        'runtime:compute-jobs:compute-submit:local:second'
+    ) is None
     worker.cancel(first.remote_job_id)
     second = worker.submit(envelope('second'))
     worker.cancel(second.remote_job_id)
