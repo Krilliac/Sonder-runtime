@@ -61,6 +61,18 @@ class ReceiptObservationProducer:
 
     SOURCE = "authenticated_verifier"
 
+    @staticmethod
+    def _subject(eligibility: ManagedTerminalEligibility, facts) -> tuple[str, str]:
+        identity = eligibility.pending_identity
+        if identity is None or not identity.bundle_digest:
+            raise PermissionError("verified subject identity is unavailable")
+        subject_digest = _digest({
+            "bundle_digest": identity.bundle_digest,
+            "project_scope": facts.project_scope,
+            "workspace_scope": facts.project_scope,
+        })
+        return "verified-subject:" + subject_digest, subject_digest
+
     @classmethod
     def from_terminal_eligibility(cls, eligibility: ManagedTerminalEligibility) -> tuple[VerifierReceipt, LearningObservation]:
         if type(eligibility) is not ManagedTerminalEligibility:
@@ -79,12 +91,12 @@ class ReceiptObservationProducer:
             raise ValueError("authenticated verifier certificate is required")
         if not facts.certificate_code:
             raise ValueError("verifier certificate code is required")
-        if facts.validation_passed and facts.terminal_class == "NORMAL":
-            outcome = "passed"
-        elif facts.validation_attempted and facts.terminal_class == "VALIDATION_FAILED":
-            outcome = "failed"
-        else:
-            outcome = "uncertain"
+        if facts.validation_passed is not True or facts.terminal_class != "NORMAL":
+            raise PermissionError(
+                "independently verified negative evidence is not available at this boundary"
+            )
+        claim, subject_digest = cls._subject(eligibility, facts)
+        outcome = "passed"
         authority_scope = _digest({
             "worker_id": eligibility.authenticated_worker_id,
             "workspace_scope": facts.project_scope,
@@ -97,15 +109,15 @@ class ReceiptObservationProducer:
             project_scope=facts.project_scope,
             workspace_scope=facts.project_scope,
             verifier_outcome=outcome,
-            content_digest=link.output_digest,
+            content_digest=subject_digest,
             receipt_digest=link.receipt_digest,
             authority_scope=authority_scope,
         )
-        # The certificate code is host-authenticated and receipt-bound.  Model
-        # output is never accepted as the claim text or as a trust label.
+        # The subject digest is bound to the verified check bundle and scope.
+        # Verdict tokens and model output are never accepted as claim text.
         observation = LearningObservation(
             observation_id="observation-" + receipt.receipt_id,
-            content=facts.certificate_code,
+            content=claim,
             source=cls.SOURCE,
             independent_key=_digest({
                 "worker_id": eligibility.authenticated_worker_id,
@@ -115,6 +127,7 @@ class ReceiptObservationProducer:
                 "receipt:" + receipt.receipt_id,
                 "receipt_digest:" + receipt.receipt_digest,
                 "content_digest:" + receipt.content_digest,
+                "subject:" + subject_digest,
                 "run:" + receipt.run_id,
             ),
             confidence=1.0 if outcome in {"passed", "failed"} else 0.0,
