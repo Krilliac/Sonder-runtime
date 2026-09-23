@@ -345,6 +345,29 @@ def test_activation_accepts_same_source_tombstone_only_state_with_delete_evidenc
     connection.close()
 
 
+def test_activation_pages_large_authoritative_state_without_rejecting_valid_rows(tmp_path):
+    connection = connect(tmp_path / "large-authoritative-state.db")
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    source.activate(connection)
+    for index in range(1025):
+        source.add_fact(connection, f"fact-{index:04d}", "repo-a", f"value-{index}")
+
+    statements = []
+    connection.set_trace_callback(statements.append)
+    try:
+        source.activate(connection)
+    finally:
+        connection.set_trace_callback(None)
+    evidence_pages = [
+        statement for statement in statements
+        if "memory_authoritative_fact_state AS state" in statement
+        and "LIMIT 256" in statement
+    ]
+    assert len(evidence_pages) >= 5
+    assert connection.in_transaction is False
+    connection.close()
+
+
 def test_activation_rejects_state_without_matching_journal_evidence(tmp_path):
     path = tmp_path / "missing-journal.db"
     connection = connect(path)
