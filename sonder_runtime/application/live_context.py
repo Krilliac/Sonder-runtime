@@ -89,10 +89,17 @@ class LiveAgentContextProducer:
         return path == root or root in path.parents
 
     def refresh(self, workspace_root: Path | str) -> LiveContextResult:
-        root = Path(workspace_root).resolve()
+        supplied_root = Path(workspace_root)
+        # Resolve only after checking the caller's path.  Checking the
+        # resolved path would hide a symlink or Windows junction at the
+        # workspace boundary.
+        redirected = supplied_root.is_symlink() or getattr(
+            supplied_root, "is_junction", lambda: False
+        )()
+        root = supplied_root.resolve()
         previous = self._last_good.get(root)
         try:
-            if not root.is_dir() or root.is_symlink():
+            if redirected or not root.is_dir():
                 raise ValueError("workspace scope is unavailable")
             instruction = InstructionRegistry(
                 self._sources(self._instruction_roots, root)

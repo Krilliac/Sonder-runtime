@@ -1,4 +1,5 @@
 from pathlib import Path
+import pytest
 
 from sonder_runtime.adapters.persistence.agent_lanes import SQLiteAgentLaneStore
 from sonder_runtime.adapters.persistence.session_repository import SQLiteSessionRepository
@@ -83,4 +84,16 @@ def test_live_agent_context_is_scoped_and_uses_last_good_on_partial_refresh(tmp_
     stale = producer.refresh(project_a)
     assert stale.complete and stale.reason.startswith("last_good:")
     assert "ALPHA" in "\n".join(record.content for record in stale.records)
+
+
+def test_live_agent_context_rejects_redirected_workspace_root(tmp_path):
+    project = _project(tmp_path, name="alpha", rule="ALPHA")
+    link = tmp_path / "redirected"
+    try:
+        link.symlink_to(project, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("directory symlinks are unavailable on this host")
+    result = LiveAgentContextProducer().refresh(link)
+    assert not result.complete
+    assert result.records == ()
 
