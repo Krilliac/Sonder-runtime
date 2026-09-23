@@ -41,6 +41,48 @@ def test_checked_requirement_requires_verified_evidence(tmp_path):
     ]
 
 
+def test_verified_requirement_requires_master_checkbox(tmp_path):
+    module = _checker()
+    module.SPEC = tmp_path / "spec.md"
+    module.LEDGER = tmp_path / "requirements.jsonl"
+    module.SPEC.write_text(
+        "- [ ] **TEST-001 — Demonstration.** An unchecked claim.\n",
+        encoding="utf-8",
+    )
+    module.LEDGER.write_text(
+        '{"schema":"sonder-requirement-evidence-v1",'
+        '"requirement_id":"TEST-001","revision":1,'
+        '"status":"verified","claim":"Demonstration.",'
+        '"baseline_sha":"abc","verified_sha":"def",'
+        '"evidence":[{"path":"tests/production/test_requirement_evidence.py"}]}\n',
+        encoding="utf-8",
+    )
+    assert module.validate() == [
+        "spec: verified requirement TEST-001 is not checked"
+    ]
+
+
+def test_verified_requirement_rejects_missing_evidence_path(tmp_path):
+    module = _checker()
+    module.SPEC = tmp_path / "spec.md"
+    module.LEDGER = tmp_path / "requirements.jsonl"
+    module.SPEC.write_text(
+        "- [x] **TEST-001 — Demonstration.** A checked claim.\n",
+        encoding="utf-8",
+    )
+    module.LEDGER.write_text(
+        '{"schema":"sonder-requirement-evidence-v1",'
+        '"requirement_id":"TEST-001","revision":1,'
+        '"status":"verified","claim":"Demonstration.",'
+        '"baseline_sha":"abc","verified_sha":"def",'
+        '"evidence":[{"path":"does/not/exist.py"}]}\n',
+        encoding="utf-8",
+    )
+    assert module.validate() == [
+        "ledger: verified TEST-001 evidence path is missing: does/not/exist.py"
+    ]
+
+
 def test_generated_status_rejects_stale_projection(tmp_path):
     module = _checker()
     module.SPEC = tmp_path / "spec.md"
