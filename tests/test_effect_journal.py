@@ -76,6 +76,56 @@ def test_late_receipt_from_orphaned_owner_is_not_accepted(tmp_path):
         ))
 
 
+def test_uncertain_effect_never_reattaches_even_if_old_owner_is_live(tmp_path):
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    journal.begin(_intent(worker_id="worker"))
+    journal.uncertain("i-1", detail="worker stopped after external call")
+
+    decision = journal.recover("run-1", live_workers={"worker": 2})
+
+    assert decision.action == "reconcile"
+    assert decision.intent_ids == ("i-1",)
+    assert journal.get("i-1").state is EffectState.UNCERTAIN
+
+
+def test_crash_cut_points_never_turn_an_unresolved_effect_into_completion(tmp_path):
+    """Persisted journal state is authoritative at each worker crash boundary."""
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    binding = JournalBinding(journal, "run-1", "worker", 2, "/workspace")
+
+    # Crash before invocation: no admission exists, so recovery is a no-op.
+    assert journal.recover("run-1", live_workers={}).action == "resume"
+
+    # Crash during invocation / after the external effect but before its
+    # receipt: an admitted intent remains uncertain and cannot be replayed.
+    intent = binding.begin_request(
+        operation_id="mutate", idempotency_key="mutate-1", request_digest="a" * 64,
+    )
+    assert intent.state is EffectState.INTENT
+    reopened = SQLiteEffectJournal(tmp_path / "effects.db")
+    decision = reopened.recover("run-1", live_workers={})
+    assert decision.action == "reconcile"
+    assert reopened.get(intent.intent_id).state is EffectState.UNCERTAIN
+    with pytest.raises(EffectJournalError, match="duplicate effect intent"):
+        JournalBinding(reopened, "run-1", "worker", 2, "/workspace").begin_request(
+            operation_id="mutate", idempotency_key="mutate-1", request_digest="a" * 64,
+        )
+
+    # A durable receipt before a checkpoint is terminal and cannot be
+    # mistaken for a second invocation after restart.
+    terminal = SQLiteEffectJournal(tmp_path / "terminal.db")
+    terminal_binding = JournalBinding(terminal, "run-2", "worker", 2, "/workspace")
+    terminal_intent = terminal_binding.begin_request(
+        operation_id="mutate", idempotency_key="mutate-2", request_digest="b" * 64,
+    )
+    terminal_binding.complete(
+        terminal_intent, outcome_digest="c" * 64, receipt_key="receipt-2",
+    )
+    replay = terminal.begin(terminal_intent)
+    assert replay.replayed is True
+    assert replay.state is EffectState.COMPLETED
+
+
 def test_recovery_requires_exact_live_owner_epoch_and_complete_page(tmp_path):
     journal = SQLiteEffectJournal(tmp_path / "effects.db")
     journal.begin(_intent("first", worker_id="worker", key="first"))
