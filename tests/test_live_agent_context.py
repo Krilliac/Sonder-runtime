@@ -3,6 +3,7 @@ import pytest
 
 from sonder_runtime.adapters.persistence.agent_lanes import SQLiteAgentLaneStore
 from sonder_runtime.adapters.persistence.session_repository import SQLiteSessionRepository
+from sonder_runtime.adapters.provider_dispatch.gateway import ProviderDispatchGateway
 from sonder_runtime.application.agents.interactive_lanes import AgentLaneService
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.context_integration import ContextPlanningFacade
@@ -74,6 +75,59 @@ def test_live_agent_request_assembles_scoped_rules_skills_and_reuses_prefix(tmp_
     assert "ALPHA RULE: require review" in changed.system
     assert planner.prefix_cache_telemetry.writes == 2
     assert planner.prefix_cache_telemetry.last_reason == "prefix_changed"
+
+
+def test_live_prefix_request_crosses_provider_dispatch_with_sealed_route(tmp_path):
+    project = _project(tmp_path, name="dispatch", rule="DISPATCH RULE")
+    sessions = SQLiteSessionRepository(tmp_path / "sessions.db")
+    store = SQLiteAgentLaneStore(tmp_path / "lanes.db", sessions)
+
+    class Provider:
+        def __init__(self):
+            self.requests = []
+            self._issuer = object()
+
+        def resolve_route(self, request, context):
+            return ResolvedModelRoute(
+                "provider", "provider-model", request.tier, request.tier,
+                False, "provider-tokenizer", "provider-template", self._issuer,
+            )
+
+        def generate(self, request, context):
+            assert request._resolved_route is not None
+            assert request._resolved_route.provider_id == "provider"
+            assert request._resolved_route.model == "provider-model"
+            self.requests.append(request)
+            return ModelResponse("done", "provider-model", request.tier, tokens_out=1)
+
+        def embed(self, texts, context):
+            return ()
+
+    provider = Provider()
+    gateway = ProviderDispatchGateway(
+        providers={"provider": provider},
+        tier_providers={"code": "provider"},
+        default_generation_provider="provider",
+        embedding_provider="provider",
+    )
+    planner = ContextPlanningFacade()
+    service = AgentLaneService(
+        store, sessions, gateway, auto_start=False,
+        context_planning=planner, live_context=LiveAgentContextProducer(),
+    )
+    context = local_owner_context(correlation_id="dispatch", workspace_roots=(tmp_path,))
+    lane = service.spawn(
+        command_id="spawn-dispatch", parent_session_id="parent", task="inspect",
+        workspace_root=str(project), context=context,
+    )["lane"]["id"]
+
+    service.run_pending(lane, context)
+
+    assert len(provider.requests) == 1
+    request = provider.requests[0]
+    assert "DISPATCH RULE" in request.system
+    assert "play: Scoped scenario validation skill" in request.system
+    assert planner.prefix_cache_telemetry.writes == 1
 
 
 def test_live_agent_context_is_scoped_and_uses_last_good_on_partial_refresh(tmp_path):
