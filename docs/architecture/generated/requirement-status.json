@@ -866,9 +866,9 @@
     },
     {
       "checked": false,
-      "claim": "Direct worker outcomes and canonical serializable worker state are committed atomically with checkpoint generation and effect high-water; durable worker owner epochs fence stale bindings before new intent admission.",
+      "claim": "After restart recovery marks a run reconciliation-required, the journal rejects every new effect at admission before invocation, including bindings at the current owner epoch.",
       "requirement_id": "LOOP-008",
-      "revision": 6,
+      "revision": 7,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "b01f8b8f262aab65a500a30cd95b521986f1cf4f02010edbcbfbc6de8a0739ef",
+    "ledger_sha256": "a6a2b44a19964620956354cc1d15c60f4f719b5393372bbfd579b034884fdd87",
     "spec_sha256": "4797da92d2d1845ce944b2dc32353d52fe7a6e48dfa92593753ca727761ca714"
   }
 }

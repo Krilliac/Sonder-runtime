@@ -351,3 +351,29 @@ def test_outcome_and_checkpoint_roll_back_together_at_checkpoint_cut(tmp_path, m
     restored = journal.restore_checkpoint("run")
     assert restored is not None
     assert restored["state"] == {"worker": {"step": 1}}
+
+
+def test_recovery_refusal_blocks_new_effect_before_invocation(tmp_path):
+    from sonder_runtime.application.execution.worker_bindings import (
+        AuthenticatedWorkerBinding, journaled_effect,
+    )
+
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    old = AuthenticatedWorkerBinding(journal, "run", "worker", 1, "/workspace")
+    old_intent = old.binding().begin_request(
+        operation_id="op-1", idempotency_key="op-1", request_digest="a" * 64,
+    )
+    old.binding().mark_uncertain(old_intent, detail="crash after external effect")
+
+    current = AuthenticatedWorkerBinding(journal, "run", "worker", 2, "/workspace")
+    with pytest.raises(EffectJournalError, match="uncertain effects"):
+        current.recover_before_restart()
+
+    invoked = []
+    with pytest.raises(EffectJournalError, match="reconciliation"):
+        journaled_effect(
+            current, operation_id="op-2", idempotency_key="op-2",
+            request={"value": "must-not-run"},
+            invoke=lambda: invoked.append(True), receipt_key="receipt-op-2",
+        )
+    assert invoked == []

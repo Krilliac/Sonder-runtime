@@ -32,7 +32,8 @@ Restore rejects a stale high-water or an unresolved intent, so a restart
 cannot treat a partially published worker result as a safe replay point. The
 same database durably records each `(run, worker, owner_epoch)` fence; restart
 claims the newer epoch before recovery, and older bindings cannot admit new
-effects afterward.
+effects afterward. A recovery-required fence also blocks every new operation
+until the unresolved effect is explicitly reconciled.
 
 The process adapter is exercised at its real worker boundary. A test starts a
 real child process that performs one filesystem mutation, injects a crash after
@@ -51,7 +52,7 @@ Evidence:
 
 Focused verification:
 
-- `python -m pytest -q tests/test_effect_journal.py tests/test_worker_effect_bindings.py` — 22 passed.
+- `python -m pytest -q tests/test_effect_journal.py tests/test_worker_effect_bindings.py` — 23 passed.
 - `python -m compileall -q sonder_runtime/application/execution/worker_bindings.py sonder_runtime/adapters/persistence/sqlite/effect_journal.py` — passed.
 - `git diff --check` — passed.
 

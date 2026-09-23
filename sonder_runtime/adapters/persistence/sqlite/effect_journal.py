@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS effect_owner (
     run_id TEXT NOT NULL,
     worker_id TEXT NOT NULL,
     owner_epoch INTEGER NOT NULL,
+    recovery_required INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (run_id, worker_id)
 );
 """
@@ -77,6 +78,15 @@ class SQLiteEffectJournal:
             if "state_json" not in columns:
                 connection.execute(
                     "ALTER TABLE effect_checkpoint ADD COLUMN state_json TEXT NOT NULL DEFAULT ''"
+                )
+            owner_columns = {
+                str(row[1]) for row in connection.execute(
+                    "PRAGMA table_info(effect_owner)"
+                ).fetchall()
+            }
+            if "recovery_required" not in owner_columns:
+                connection.execute(
+                    "ALTER TABLE effect_owner ADD COLUMN recovery_required INTEGER NOT NULL DEFAULT 0"
                 )
 
     @property
@@ -166,7 +176,7 @@ class SQLiteEffectJournal:
     @staticmethod
     def _ensure_owner_in_transaction(connection, run_id: str, worker_id: str, owner_epoch: int) -> None:
         row = connection.execute(
-            "SELECT owner_epoch FROM effect_owner WHERE run_id=? AND worker_id=?",
+            "SELECT owner_epoch,recovery_required FROM effect_owner WHERE run_id=? AND worker_id=?",
             (run_id, worker_id),
         ).fetchone()
         if row is None:
@@ -178,6 +188,10 @@ class SQLiteEffectJournal:
         current_epoch = int(row[0])
         if current_epoch > owner_epoch:
             raise EffectJournalError("stale worker owner epoch")
+        if int(row[1]):
+            raise EffectJournalError(
+                "duplicate effect intent requires reconciliation before admitting new effects"
+            )
         if current_epoch == owner_epoch:
             return
         unresolved = connection.execute(
@@ -207,14 +221,16 @@ class SQLiteEffectJournal:
                 current_epoch = int(row[0])
                 if owner_epoch < current_epoch:
                     raise EffectJournalError("stale worker owner epoch")
+                if owner_epoch == current_epoch:
+                    return
             if row is None:
                 connection.execute(
-                    "INSERT INTO effect_owner(run_id,worker_id,owner_epoch) VALUES(?,?,?)",
+                    "INSERT INTO effect_owner(run_id,worker_id,owner_epoch,recovery_required) VALUES(?,?,?,0)",
                     (run_id, worker_id, owner_epoch),
                 )
             else:
                 connection.execute(
-                    "UPDATE effect_owner SET owner_epoch=? WHERE run_id=? AND worker_id=?",
+                    "UPDATE effect_owner SET owner_epoch=?,recovery_required=0 WHERE run_id=? AND worker_id=?",
                     (owner_epoch, run_id, worker_id),
                 )
 
@@ -521,6 +537,10 @@ class SQLiteEffectJournal:
                      EffectState.INTENT.value, EffectState.UNCERTAIN.value),
                 )
             if orphaned:
+                connection.execute(
+                    "UPDATE effect_owner SET recovery_required=1 WHERE run_id=?",
+                    (run_id,),
+                )
                 action = "reconcile"
                 detail = "unresolved effects require explicit reconciliation"
             elif attached:
