@@ -79,6 +79,8 @@ sources and emits a SHA-256 freshness digest. The contract is exercised by
 | Events | `EventKind` and payload schemas | catalog digest and derived event schema | implemented foundation |
 | Client schema | generated client projection | client digest equals bundle digest | implemented foundation |
 | Configuration | typed configuration dataclasses | generated field/default projection and source digest | generated where metadata permits |
+| MCP/OpenAI/event schemas | typed `GeneratedCatalogs` projections | shared catalog digest plus generated-reference freshness check | implemented foundation |
+| Capabilities | typed `CapabilitySnapshot` and operational capability projection | capability catalog digest, source hashes, and generated-reference freshness check | implemented foundation |
 
 A changed typed source must produce a changed digest; a reordered source must
 not. Oversized output fails closed rather than silently truncating.
@@ -95,5 +97,8 @@ still exist.
 ## Formal requirement status
 
 DOC-001 through DOC-005 and DOC-007 remain unchecked in the master
-specification. DOC-006 is checked with a verified ledger revision and linked
-evidence in this change; the other documentation contracts remain open.
+specification. DOC-005 now has all six named reference families in its
+implemented-unverified evidence slice; hosted CI and post-merge receipts are
+still required before checking it off. DOC-006 is checked with a verified
+ledger revision and linked evidence in this change; the other documentation
+contracts remain open.
