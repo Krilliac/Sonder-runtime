@@ -205,6 +205,42 @@ def test_removal_or_replacement_drains_original_inflight_endpoint(replace_endpoi
         assert control.close(timeout=2)
 
 
+def test_readding_origin_reuses_unresolved_probe_state():
+    clock = Clock()
+    source = Source(signed_snapshot())
+    entered, release = threading.Event(), threading.Event()
+
+    def stuck(_origin):
+        entered.set()
+        release.wait(5)
+        return {"models": ["code"]}
+
+    pool = OllamaWorkerPool(
+        REMOTE,
+        allow_remote=True,
+        capability_prober=stuck,
+        capability_probe_timeout_seconds=0.05,
+    )
+    control = controller(source, pool, clock)
+    try:
+        control.refresh(timeout_seconds=2)
+        assert entered.wait(1)
+        assert len(pool._states) == 1
+
+        source.snapshot = signed_snapshot((), generation=2)
+        control.refresh(timeout_seconds=2, probe=False)
+        assert len(pool._states) == 1
+
+        source.snapshot = signed_snapshot((REMOTE,), generation=3, member_generation=2)
+        control.refresh(timeout_seconds=2, probe=False)
+        assert len(pool._states) == 1
+        assert pool.origins == (REMOTE,)
+        assert pool._states[0].capability_probe_inflight is True
+    finally:
+        release.set()
+        assert control.close(timeout=2)
+
+
 def test_reconciliation_never_replays_a_response_bearing_failure():
     source = Source(signed_snapshot((REMOTE, REPLACEMENT)))
     pool = OllamaWorkerPool(REMOTE, (REPLACEMENT,), allow_remote=True,
