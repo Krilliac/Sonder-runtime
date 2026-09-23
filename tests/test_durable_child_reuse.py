@@ -5,7 +5,7 @@ import pytest
 from sonder_runtime.adapters.persistence.durable_continuation import SQLiteDurableContinuationRepository
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.continuation_records import ChildSessionLineage, DurableChildSession
-from sonder_runtime.application.ports.subagents import InvalidSubagentRequest, SubagentBudget, SubagentRequest, SubagentStatus
+from sonder_runtime.application.ports.subagents import InvalidSubagentRequest, SubagentBudget, SubagentRequest, SubagentResult, SubagentStatus
 from sonder_runtime.application.subagents.durable_continuation import DurableContinuationService
 
 
@@ -129,3 +129,17 @@ def test_reuse_rejects_a_stricter_new_deadline(tmp_path):
     release.set()
     assert first.result(2).output == "done"
     service.close(1)
+
+
+def test_terminal_key_ambiguity_fails_closed(tmp_path):
+    repository = SQLiteDurableContinuationRepository(tmp_path / "ambiguous.sqlite")
+    first = request("child-one")
+    second = request("child-two")
+    repository.create(DurableChildSession(first, ChildSessionLineage("parent")))
+    repository.update("child-one", status=SubagentStatus.SUCCEEDED,
+                      result=SubagentResult("child-one", "parent", SubagentStatus.SUCCEEDED, output="one"))
+    repository.create(DurableChildSession(second, ChildSessionLineage("parent")))
+    repository.update("child-two", status=SubagentStatus.SUCCEEDED,
+                      result=SubagentResult("child-two", "parent", SubagentStatus.SUCCEEDED, output="two"))
+    with pytest.raises(InvalidSubagentRequest, match="ambiguous"):
+        repository.get_by_key("parent", "delegation-1", "resume")

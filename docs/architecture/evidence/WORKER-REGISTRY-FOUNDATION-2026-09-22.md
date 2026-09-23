@@ -52,6 +52,12 @@ the current `OperationContext`; missing proof or a foreign principal cannot
 read the persisted result. Distinct resume/idempotency keys remain available
 for intentional parallel lanes.
 
+`DelegationService` now propagates the registry's canonical persisted child ID
+into the provider request. A restart retry with a new proposed lineage child
+ID therefore returns the old terminal result without a runner. Legacy
+duplicate terminal rows for one stable key are rejected as ambiguous, and the
+same-key terminal path checks durable owner/context metadata before reuse.
+
 Additional verification:
 
 ```text
