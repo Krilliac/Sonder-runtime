@@ -807,6 +807,14 @@ class OllamaWorkerPool:
                         # a still-fresh capability cache predates this admission.
                         state.capabilities = None
                         state.known_models = None
+                        state.capability_checked_at = None
+                    elif reused_unresolved:
+                        # The old probe belongs to the previous lease. Keep
+                        # its in-flight fence, but never carry its cached
+                        # evidence into the replacement admission.
+                        state.capabilities = None
+                        state.known_models = None
+                        state.capability_checked_at = None
                 state.membership_state = member.lifecycle_state
                 state.membership_expires_at = result.roster.snapshot.expires_at
                 state.membership_evidence = member.evidence
@@ -1136,6 +1144,17 @@ class OllamaWorkerPool:
                 elapsed_ms = max(0.0, (self._clock() - started) * 1000.0)
                 return payload, elapsed_ms, error
 
+            def probe_identity(state):
+                advertisement = state.advertisement
+                return (
+                    state.endpoint.origin,
+                    state.endpoint.worker_id,
+                    state.membership_state,
+                    advertisement.origin if advertisement is not None else None,
+                    advertisement.worker_id if advertisement is not None else None,
+                    advertisement.member_generation if advertisement is not None else None,
+                )
+
             logger.debug(
                 f"probing {len(candidates)} candidate workers: "
                 f"{[s.endpoint.worker_id for s in candidates]}"
@@ -1144,6 +1163,9 @@ class OllamaWorkerPool:
             with self._condition:
                 for state in candidates:
                     state.capability_probe_inflight = True
+                selected_identities = {
+                    id(state): probe_identity(state) for state in candidates
+                }
             workers = min(self._probe_parallelism, len(candidates))
             submitted = []
             try:
@@ -1169,6 +1191,15 @@ class OllamaWorkerPool:
                 for state, (payload, measured_ms, error) in zip(candidates, outcomes):
                     state.capability_probe_generation += 1
                     if state.membership_state == "draining" or not any(current is state for current in self._states):
+                        continue
+                    if probe_identity(state) != selected_identities[id(state)]:
+                        self._metrics["capability_probe_failures"] += 1
+                        state.capability_probe_failed = True
+                        state.last_error = "capability probe result discarded after membership change"
+                        logger.warning(
+                            "discarding capability probe result for %s after membership identity changed",
+                            state.endpoint.worker_id,
+                        )
                         continue
                     self._metrics["capability_probes"] += 1
                     if error is not None:
