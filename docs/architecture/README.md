@@ -7,6 +7,25 @@
 > specification remains the authoritative list of unfinished requirements;
 > this documentation pass does not alter its checkboxes.
 
+## Direct authority map
+
+This page is the human-facing map of the documents that define current
+behavior and preserve project history. The detailed classifications, authority
+order, generated inventories, and freshness rules remain in the companion
+[`DOCUMENT-AUTHORITY-INDEX.md`](DOCUMENT-AUTHORITY-INDEX.md).
+
+| Classification | Document | Scope |
+|---|---|---|
+| Authoritative current contract | [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md) | Product and package boundaries |
+| Authoritative current contract | [`../../SECURITY.md`](../../SECURITY.md) | Trust, authorization, and isolation |
+| Authoritative current contract | [`../../SELFMOD.md`](../../SELFMOD.md) | Guarded self-modification lifecycle |
+| Authoritative current contract | [`../../TRAINING.md`](../../TRAINING.md) | Training, evaluation, and deployment |
+| Authoritative current contract | [`../../CLIENT.md`](../../CLIENT.md) | Client-facing behavior and compatibility |
+| Authoritative current contract | [`../../MOBILE_HOST_CONTROL.md`](../../MOBILE_HOST_CONTROL.md) | Mobile-to-host control boundary |
+| Historical/superseded | [`SPEC-5-End-State-Architecture.md`](SPEC-5-End-State-Architecture.md) | Earlier end-state architecture |
+| Historical/runbook | [`SPEC-5-MIGRATION-RUNBOOK.md`](SPEC-5-MIGRATION-RUNBOOK.md) | Earlier migration procedure |
+| Historical snapshot | [`PROGRAM-STATUS.md`](PROGRAM-STATUS.md) | Earlier program status |
+
 ## Read this first
 
 - **Unfinished requirements:**
