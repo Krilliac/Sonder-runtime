@@ -491,6 +491,44 @@ def _objective_is_actionable(objective: str) -> bool:
     return not text.lower().startswith(("add a docstring", "update the docstring", "fix the comment"))
 
 
+def _objective_is_grounded(objective: str, rationale: str, source: str) -> bool:
+    """Require an objective to name evidence and one rewritable function.
+
+    The proposal model can invent a defect from a plausible description. A
+    concrete duplicate claim therefore needs a quoted/path-like anchor that
+    occurs at least twice in the actual module. Any proposal also needs one
+    top-level function that can receive the single-function rewrite contract;
+    declarative-only modules and ambiguous multi-function targets are skipped.
+    """
+    claim = "%s\n%s" % (objective or "", rationale or "")
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    functions = [
+        node for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    if not functions:
+        return False
+    anchors = [match.group(1) or match.group(2) or match.group(3)
+               for match in re.finditer(r"`([^`]+)`|'([^']+)'|\"([^\"]+)\"", claim)]
+    anchors = [anchor.strip() for anchor in anchors if anchor and len(anchor.strip()) > 1]
+    if re.search(r"\bduplicates?\b|\bduplicated\b", claim, re.I):
+        if not anchors or any(source.count(anchor) < 2 for anchor in anchors):
+            return False
+    if len(functions) == 1:
+        return True
+    distinctive = _distinctive(claim)
+    matches = []
+    for node in functions:
+        segment = ast.get_source_segment(source, node) or ""
+        lowered = segment.casefold()
+        if any(token.casefold() in lowered for token in distinctive):
+            matches.append(node)
+    return len(matches) == 1
+
+
 def _eligible_candidate_files() -> tuple[str, ...]:
     """Return existing, ordinary-scope candidate modules only."""
     return tuple(
@@ -947,6 +985,9 @@ def propose_objective(
         if objective:
             if not _objective_is_actionable(objective):
                 log("  %s: non-executable objective, skipping" % name)
+                continue
+            if not _objective_is_grounded(objective, why, source):
+                log("  %s: objective is not grounded in one replaceable function, skipping" % name)
                 continue
             if _too_similar(objective, seen_before):
                 log("  %s: objective restates a previous run, skipping" % name)

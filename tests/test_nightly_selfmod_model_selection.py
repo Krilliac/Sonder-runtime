@@ -442,6 +442,38 @@ def test_non_executable_objectives_are_filtered_before_a_run():
     assert nightly_selfmod._objective_is_actionable("Guard the empty input before indexing it")
 
 
+def test_grounding_accepts_concrete_duplicate_claim_with_one_rewrite_target():
+    source = (
+        "COMMANDS = ['/foo', '/foo']\n\n"
+        "def remove_duplicate_commands():\n"
+        "    return [item for item in COMMANDS if item != '/foo']\n"
+    )
+    assert nightly_selfmod._objective_is_grounded(
+        "Remove duplicate '/foo' command entries.",
+        "The '/foo' entry appears twice.",
+        source,
+    )
+
+
+def test_grounding_rejects_false_duplicate_and_declarative_targets():
+    one_entry = (
+        "COMMANDS = ['/foo']\n\n"
+        "def remove_duplicate_commands():\n"
+        "    return COMMANDS\n"
+    )
+    declarative = "COMMANDS = ['/foo', '/foo']\n"
+    assert not nightly_selfmod._objective_is_grounded(
+        "Remove duplicate '/foo' command entries.",
+        "The '/foo' entry appears twice.",
+        one_entry,
+    )
+    assert not nightly_selfmod._objective_is_grounded(
+        "Remove duplicate '/foo' command entries.",
+        "The '/foo' entry appears twice.",
+        declarative,
+    )
+
+
 def test_ast_splice_preserves_contract_and_sibling_code():
     original = (
         "@decorator\n"
