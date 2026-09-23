@@ -9,6 +9,9 @@ import threading
 import time
 from typing import Protocol
 
+from ...application.context import local_owner_context
+from ...application.ports.model_gateway import ModelRequest
+from ...domain.common.errors import Cancelled
 from ...domain.routing.backend_conformance import (
     BackendCapability, BackendConformanceRecord, EvidenceReason, ProbeResult,
     backend_requirements,
@@ -58,6 +61,104 @@ def run_smoke_probes(provider: SmokeProvider, *, backend: str, model: str,
     except Exception:
         results.append(ProbeResult(BackendCapability.CANCELLATION, False, "cancellation_error"))
     return BackendConformanceRecord(backend, model, checked_at, tuple(results), synthetic=synthetic)
+
+
+def run_gateway_probes(
+    gateway,
+    *,
+    backend: str,
+    model: str,
+    now: float | None = None,
+    timeout_seconds: float = 30.0,
+    cloud_allowed: bool = False,
+    remote_ollama_allowed: bool = False,
+) -> BackendConformanceRecord:
+    """Probe one concrete ``ModelGateway`` route and emit non-synthetic evidence.
+
+    The probe uses fixed, non-sensitive prompts and records only outcome codes;
+    provider text is never persisted.  The structured check requires a small
+    JSON response from the requested model, while cancellation is checked
+    with a pre-cancelled context so an implementation cannot pass by merely
+    returning a plausible cancellation flag.  ``timeout_seconds`` is bounded
+    to keep an operator or nightly preflight from becoming an unbounded model
+    call.
+    """
+    if not 0.0 < float(timeout_seconds) <= 300.0:
+        raise ValueError("timeout_seconds must be between 0 and 300")
+    checked_at = time.time() if now is None else float(now)
+    results: list[ProbeResult] = []
+
+    def context(*, cancellation=None):
+        return local_owner_context(
+            correlation_id="backend-conformance",
+            timeout_seconds=float(timeout_seconds),
+            cancellation=cancellation,
+            cloud_allowed=cloud_allowed,
+            remote_ollama_allowed=remote_ollama_allowed,
+        )
+
+    try:
+        response = gateway.generate(
+            ModelRequest(prompt="sonder conformance plain chat", tier=model),
+            context(),
+        )
+        actual_model = getattr(response, "model", None)
+        passed = (actual_model == model and isinstance(getattr(response, "text", None), str)
+                  and bool(response.text.strip()))
+        results.append(ProbeResult(
+            BackendCapability.CHAT,
+            passed,
+            "plain_chat_passed" if passed else (
+                "plain_chat_model_mismatch" if actual_model != model else "plain_chat_empty"
+            ),
+        ))
+    except Exception:
+        results.append(ProbeResult(BackendCapability.CHAT, False, "plain_chat_error"))
+
+    try:
+        response = gateway.generate(
+            ModelRequest(
+                prompt=(
+                    'Return only JSON: {"tool":"echo","continued":true}. '
+                    "Do not add prose."
+                ),
+                tier=model,
+            ),
+            context(),
+        )
+        value = json.loads(response.text) if isinstance(response.text, str) else None
+        actual_model = getattr(response, "model", None)
+        passed = (actual_model == model and isinstance(value, dict)
+                  and value.get("continued") is True and bool(value.get("tool")))
+        results.append(ProbeResult(
+            BackendCapability.STRUCTURED,
+            passed,
+            "structured_json_passed" if passed else (
+                "structured_json_model_mismatch" if actual_model != model
+                else "structured_json_invalid"
+            ),
+        ))
+    except Exception:
+        results.append(ProbeResult(BackendCapability.STRUCTURED, False, "structured_tool_continuation_error"))
+
+    class _Cancelled:
+        cancelled = True
+
+        def wait(self, timeout=None):
+            return True
+
+    try:
+        gateway.generate(
+            ModelRequest(prompt="sonder conformance cancellation", tier=model),
+            context(cancellation=_Cancelled()),
+        )
+    except Cancelled:
+        results.append(ProbeResult(BackendCapability.CANCELLATION, True, "cancellation_passed"))
+    except Exception:
+        results.append(ProbeResult(BackendCapability.CANCELLATION, False, "cancellation_wrong_error"))
+    else:
+        results.append(ProbeResult(BackendCapability.CANCELLATION, False, "cancellation_not_supported"))
+    return BackendConformanceRecord(backend, model, checked_at, tuple(results), synthetic=False)
 
 
 class RecentCapabilityEvidence:
@@ -134,4 +235,7 @@ class RecentCapabilityEvidence:
         return backend.strip() + "\0" + model.strip()
 
 
-__all__ = ["DeterministicFakeProvider", "RecentCapabilityEvidence", "run_smoke_probes"]
+__all__ = [
+    "DeterministicFakeProvider", "RecentCapabilityEvidence", "run_gateway_probes",
+    "run_smoke_probes",
+]
