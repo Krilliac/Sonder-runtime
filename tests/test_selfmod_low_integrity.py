@@ -1,7 +1,10 @@
 import os
 from contextlib import nullcontext
+import json
 from pathlib import Path
 import sys
+import threading
+import time
 
 import pytest
 
@@ -86,6 +89,67 @@ def test_low_job_limits_descendant_process_count(tmp_path):
     ]
     result = run_isolated(command, cwd=tmp_path, timeout=10)
     assert result["passed"] is True
+
+
+def _child_spec(tmp_path, command, timeout=10):
+    output = tmp_path / "child-output.txt"
+    result = tmp_path / "child-result.json"
+    spec = tmp_path / "child-spec.json"
+    spec.write_text(json.dumps({
+        "command": command,
+        "cwd": str(tmp_path),
+        "timeout": timeout,
+        "env": {
+            "SystemRoot": os.environ.get("SystemRoot", r"C:\\Windows"),
+            "WINDIR": os.environ.get("WINDIR", r"C:\\Windows"),
+            "PATH": os.environ.get("PATH", ""),
+            "TEMP": str(tmp_path), "TMP": str(tmp_path),
+            "USERPROFILE": str(tmp_path / "home"),
+            "APPDATA": str(tmp_path / "home" / "AppData" / "Roaming"),
+            "LOCALAPPDATA": str(tmp_path / "home" / "AppData" / "Local"),
+        },
+        "output": str(output), "result": str(result),
+    }), encoding="utf-8")
+    return spec, output, result
+
+
+def test_low_child_publishes_interim_output_and_bounds_noisy_tail(tmp_path):
+    from scripts.selfmod_low_integrity import _child
+
+    command = [sys.executable, "-c", (
+        "import sys,time; print('early', flush=True); time.sleep(1); "
+        "sys.stdout.write('x'*250000); sys.stdout.flush()"
+    )]
+    spec, output, result = _child_spec(tmp_path, command)
+    worker = threading.Thread(target=_child, args=(spec,))
+    worker.start()
+    deadline = time.monotonic() + 5
+    saw_interim = False
+    while time.monotonic() < deadline and worker.is_alive():
+        if output.exists() and b"early" in output.read_bytes():
+            saw_interim = True
+            break
+        time.sleep(0.05)
+    assert saw_interim
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    assert output.stat().st_size <= 120_000
+    assert json.loads(result.read_text(encoding="utf-8"))["returncode"] == 0
+
+
+def test_low_child_timeout_keeps_interim_diagnostic(tmp_path):
+    from scripts.selfmod_low_integrity import _child
+
+    command = [sys.executable, "-c", (
+        "import time; print('started', flush=True); time.sleep(30)"
+    )]
+    spec, output, result = _child_spec(tmp_path, command, timeout=1)
+    started = time.monotonic()
+    assert _child(spec) == 124
+    assert time.monotonic() - started < 10
+    assert b"started" in output.read_bytes()
+    details = json.loads(result.read_text(encoding="utf-8"))
+    assert details["timed_out"] is True
 
 
 def test_record_test_routes_regression_and_held_out_through_low_runner(tmp_path, monkeypatch):
