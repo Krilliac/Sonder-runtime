@@ -42,12 +42,44 @@ before a migration plan or backup is approved when ownership differs or the
 exact versioned journal upsert/delete evidence is missing. The canonical
 journal digest and upsert text/embedding payload must also match the current
 fact row; tombstones must have an empty payload. If the process is
-interrupted after the write lock is
-interrupted after the write lock is
-acquired, the transaction is rolled back and the connection is left idle so
-a fresh dry run can safely resume the operation. Each adopted fact gets a
-version-one upsert record with empty
+interrupted after the write lock is acquired, the transaction is rolled back
+and the connection is left idle so a fresh dry run can safely resume the
+operation. Each adopted fact gets a version-one upsert record with empty
 metadata; the fact row, source state, journal record, and derived indexes
 commit together.  Any failure rolls all of those writes back.  A second plan
 is empty after a successful migration, so restart and replay remain
 deterministic.
+
+## Older-schema database copies
+
+An older memory database is adopted in this order, always on a copy with the
+original left untouched:
+
+1. Copy the database and keep a separate pre-upgrade backup of the copy.
+2. Upgrade the copy's schema by opening it once with the normal Sonder memory
+   store (this creates the authoritative state, activation, and journal tables
+   and stamps the current schema version).
+3. Starting the live composition root at this point is refused: the unit of
+   work fails closed over the unjournaled facts and publishes no activation
+   marker or journal row.
+4. Run the dry run and explicit apply above with a second, new backup path.
+5. Start the live composition root. Adopted facts are readable, new writes and
+   deletes are journaled after them, and facts in other projects are left
+   exactly as they were.
+
+`tests/test_authoritative_live_fences.py` exercises this sequence through the
+real `build_application` composition root and restart path, starting from the
+original `facts` DDL with no authoritative tables.
+
+## Alternate fact writers after activation
+
+Once the live unit of work activates a project scope, the legacy
+`memory_store.add_fact`/`delete_fact` helpers refuse that scope.  The
+replication projection (used by the fact receiver sink and by projection
+rebuild) also refuses to materialize, replace, or delete a fact in an
+activated scope. The refusal happens inside the receiver's transaction, so the
+receiver journal, projection log, cursor, fact rows, and derived indexes all
+roll back and no receipt is issued.  Consequently a node cannot currently both
+own a scope authoritatively and accept peer fact batches for the same scope;
+multi-writer reconciliation for one scope is not supported.  Projection into
+scopes that are not activated keeps its existing behavior.
