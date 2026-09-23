@@ -164,6 +164,14 @@ class ContinuationWorkerRegistry(WorkerRegistry):
                 existing = self._repository.get_active_by_key(launch.parent_id, key, namespace)
                 if existing is not None:
                     break
+        if existing is None:
+            lookup = getattr(self._repository, "get_by_key", None)
+            if callable(lookup):
+                for key, namespace in ((launch.resume_key, "resume"), (launch.idempotency_key, "idempotency")):
+                    if key:
+                        existing = lookup(launch.parent_id, key, namespace)
+                        if existing is not None:
+                            break
         if existing is None and self._owner_nonce and dict(request.metadata).get("owner_nonce") != self._owner_nonce:
             raise WorkerRegistryError("worker launch owner nonce does not match this provider")
         if existing is not None:
@@ -171,9 +179,8 @@ class ContinuationWorkerRegistry(WorkerRegistry):
             if record.launch != launch:
                 current_metadata = dict(record.launch.metadata)
                 requested_metadata = dict(launch.metadata)
-                owner_only_difference = (
-                    record.launch.worker_id == launch.worker_id
-                    and record.launch.parent_id == launch.parent_id
+                stable_scope_match = (
+                    record.launch.parent_id == launch.parent_id
                     and record.launch.role == launch.role
                     and record.launch.model == launch.model
                     and record.launch.backend == launch.backend
@@ -189,9 +196,10 @@ class ContinuationWorkerRegistry(WorkerRegistry):
                     and all(
                         current_metadata.get(key) == requested_metadata.get(key)
                         for key in set(current_metadata) | set(requested_metadata)
-                        if key not in {"owner_nonce", "owner_pid", "owner_host"}
+                        if key not in {"owner_nonce", "owner_pid", "owner_host", "worker_id", "request_digest"}
                     )
                 )
+                owner_only_difference = stable_scope_match
                 owner_dead = (
                     owner_only_difference
                     and current_metadata.get("owner_nonce") != self._owner_nonce
@@ -204,6 +212,13 @@ class ContinuationWorkerRegistry(WorkerRegistry):
                     return record
                 if record.status in {WorkerStatus.QUEUED, WorkerStatus.RUNNING}:
                     raise DuplicateWorkerError("active worker identity or scope already belongs to another launch")
+                if stable_scope_match and record.status in {
+                    WorkerStatus.SUCCEEDED, WorkerStatus.FAILED, WorkerStatus.INTERRUPTED,
+                }:
+                    # Stable keys identify the durable child; a retry may carry
+                    # a fresh proposal child ID, but the provider must consume
+                    # the canonical persisted worker identity.
+                    return record
                 raise WorkerRegistryError("worker identity is already bound to a different terminal launch")
             return record
 
