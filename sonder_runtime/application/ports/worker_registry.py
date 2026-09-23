@@ -104,13 +104,14 @@ def _owned_path(value: str) -> str:
 
 
 def owned_paths_overlap(left: str, right: str) -> bool:
-    """Return true when one owned path equals or contains the other.
+    """Return true when one canonical owned path equals or contains the other.
 
-    Comparison is case-insensitive so a case-only spelling difference on a
-    case-insensitive filesystem fails closed as an overlap.
+    Inputs are the canonical strings produced by ``WorkerExecutionContract``:
+    ``os.path.normcase`` already folds case where the platform filesystem is
+    case-insensitive (Windows), so comparison here is exact and case-distinct
+    files on POSIX do not falsely conflict.
     """
-    a, b = left.casefold(), right.casefold()
-    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
+    return left == right or left.startswith(right + "/") or right.startswith(left + "/")
 
 
 @dataclass(frozen=True, slots=True)

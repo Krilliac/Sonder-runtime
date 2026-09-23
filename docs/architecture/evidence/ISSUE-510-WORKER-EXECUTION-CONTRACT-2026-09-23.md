@@ -34,7 +34,9 @@ The contract now also carries:
 
 `ContinuationWorkerRegistry.admit` rejects a new reservation with
 `DuplicateWorkerError` when an active child session already owns an
-overlapping owned path (equal or ancestor, compared case-insensitively) or the
+overlapping owned path (equal or ancestor, compared exactly on the canonical
+strings; case folding happens only through `os.path.normcase`, so case variants
+conflict on Windows while case-distinct POSIX files do not) or the
 same non-speculative `task_scope`. Terminal children release ownership. All
 contract fields persist as canonical `execution_*` metadata in the single
 `durable_child_session` row; rows written by the first slice (criteria and
@@ -52,13 +54,15 @@ Evidence:
 - `sonder_runtime/application/agents/lineage_delegation.py`
 - `sonder_runtime/application/agents/delegation_service.py`
 - `sonder_runtime/application/worker_registry/continuation.py`
-- `tests/test_continuation_worker_registry.py` (45 tests, including 11
+- `tests/test_continuation_worker_registry.py` (48 tests, including 11
   validation cases, restart round-trip, inherited-digest drift, owned-file
   write-assignment gate, owned-file overlap, task-scope/speculative lanes,
   legacy rows, 7 malformed-metadata cases, failed-worker-with-contract,
-  relative-path registry bypass, and symlinked spellings)
+  relative-path registry bypass, symlinked spellings, exact canonical overlap,
+  and platform-specific case tests: the POSIX case-distinct test skips on
+  Windows and the Windows case-variant test skips on POSIX)
 - `python -m pytest -p no:cacheprovider -q tests/test_worker_registry.py tests/test_remaining_agent_004_008_009.py tests/test_continuation_worker_registry.py tests/test_delegated_verification.py tests/test_remaining_agent_010.py tests/test_workflows.py`
-  (`101 passed`)
+  (Windows: `103 passed, 1 skipped`; the skip is the POSIX-only case test)
 - Load-bearing check: disabling the active-session scan in
   `_reject_ownership_conflict` fails the overlap and task-scope tests; removing
   the dispatch write-assignment check fails the write-assignment cases.
@@ -112,6 +116,11 @@ Limitations:
 - Context inputs and the inherited-context digest are declared and durably
   bound, but this slice does not compute or re-hash the parent context or input
   contents; the caller supplies the digests.
+- Owned-path canonicalization touches the filesystem at contract construction
+  (including every restore from persisted metadata): `Path.resolve` queries
+  existing path components, so an owned path on an unreachable UNC share or
+  disconnected mapped drive can stall construction for the OS network timeout.
+  Owned files should live on local workspace volumes.
 - Owned-path canonicalization reflects the filesystem when the contract is
   built or restored; a symlink created or retargeted later can change the
   canonical form, and a restored contract would then fail the equality gate
