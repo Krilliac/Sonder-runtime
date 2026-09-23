@@ -1368,11 +1368,12 @@ class AgentLaneService:
         # Use the durable compaction seam immediately before provider request
         # assembly. Only tool results are eligible for eviction; model/user
         # events, including decisions and failures, stay in the source range.
+        # The chain-verified snapshot itself is archived: a second range read
+        # here would let a row changed after verification reach the model.
         try:
-            archived = self._compaction.archive_context(
+            archived = self._compaction.archive_verified_context(
                 lane["session_id"],
-                start_sequence=events[0].sequence,
-                end_sequence=events[-1].sequence,
+                events,
                 budget_bytes=_LANE_CANONICAL_HISTORY_BYTES,
             ) if events else None
         except SessionCompactionError:

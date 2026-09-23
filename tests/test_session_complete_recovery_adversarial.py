@@ -263,3 +263,47 @@ def test_closed_repository_refuses_recovery(tmp_path):
 
     with pytest.raises(RuntimeError, match="closed"):
         repo.read_complete("s1")
+
+
+# -- legacy oversized events (PR #542 review P3-b) --------------------------
+
+def _insert_legacy(repo, database, payload, *, session_id="s1", tamper=False):
+    payload_json = __import__("json").dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    occurred_at = "2026-01-01T00:00:00Z"
+    event_hash = repo._hash(session_id, 1, "legacy", "tool.result", occurred_at, payload_json, None)
+    stored = payload_json.replace("x", "y", 1) if tamper else payload_json
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO session_event VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (session_id, 1, "legacy", "tool.result", occurred_at, stored, None, event_hash),
+        )
+
+
+def test_legacy_event_over_append_cap_remains_recoverable_and_reportable(tmp_path):
+    database = tmp_path / "s.db"
+    repo = SQLiteSessionRepository(database)
+    _insert_legacy(repo, database, {"content": "x" * (9 * 1024 * 1024)})
+
+    recovered = repo.read_complete("s1", max_events=4)
+    report = repo.inspect_integrity("s1")
+
+    assert [event.event_id for event in recovered] == ["legacy"]
+    assert report.valid is True and report.checked_events == 1
+    appended = repo.append("s1", "model.response", {"content": "after legacy"})
+    assert appended.previous_hash == recovered[0].event_hash
+    with pytest.raises(ValueError, match="payload exceeds"):
+        repo.append("s1", "tool.result", {"content": "x" * (9 * 1024 * 1024)})
+
+
+def test_tampered_legacy_oversized_event_is_reported_not_raised(tmp_path):
+    database = tmp_path / "s.db"
+    repo = SQLiteSessionRepository(database)
+    _insert_legacy(repo, database, {"content": "x" * (9 * 1024 * 1024)}, tamper=True)
+
+    report = repo.inspect_integrity("s1")
+
+    assert report.valid is False
+    assert [issue.code for issue in report.issues] == ["event_hash_mismatch"]
+    with pytest.raises(ValueError, match="integrity"):
+        repo.read_complete("s1", max_events=4)

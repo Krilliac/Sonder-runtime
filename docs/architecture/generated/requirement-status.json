@@ -376,9 +376,9 @@
     },
     {
       "checked": false,
-      "claim": "Continuation refuses incomplete or tampered durable history before model assembly: complete recovery uses a keyset cursor, verifies each page against the hash chain before fetching the next, and fails closed on head truncation, gaps, displaced sequences, hash cycles, swapped payloads, and cross-session grafts.",
+      "claim": "Continuation refuses incomplete or tampered durable history before model assembly and archives exactly the chain-verified snapshot, so a row changed after verification cannot reach the model through a second read; legacy events above the append cap remain verifiable and reportable.",
       "requirement_id": "COMPACT-004",
-      "revision": 5,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
@@ -1335,9 +1335,9 @@
     },
     {
       "checked": false,
-      "claim": "A long-session continuation can reopen and recover complete durable history across adapter pages before compaction and provider dispatch, from one read snapshot that excludes appends committed during paging.",
+      "claim": "A long-session continuation can reopen and recover complete durable history across adapter pages from one read snapshot, including under the production default compaction wiring and with legacy events larger than the current append cap.",
       "requirement_id": "SESSION-005",
-      "revision": 4,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "6dc6d601d51047bc1b588d787a8d0387609db990ae406003365c5c77c484d2fd",
+    "ledger_sha256": "55d3f537436c463a8a8c70ded317bef8384af89689c278f2f79d1d9651189ffb",
     "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
   }
 }

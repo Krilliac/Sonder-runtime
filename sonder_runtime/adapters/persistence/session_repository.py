@@ -131,6 +131,15 @@ class SQLiteSessionRepository:
             encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         except (TypeError, ValueError) as exc:
             raise TypeError("payload must contain JSON-serializable values") from exc
+        # No size cap here: this encoding is also used to verify stored
+        # events, and a legacy event written before the append cap existed
+        # must stay verifiable and reportable. Appends enforce the cap; reads
+        # enforce the bounded total-bytes guard in ``read_complete``.
+        return encoded
+
+    @staticmethod
+    def _bounded_append_payload(payload: Mapping[str, object]) -> str:
+        encoded = SQLiteSessionRepository._canonical_payload(payload)
         if len(encoded.encode("utf-8")) > _MAX_EVENT_PAYLOAD_BYTES:
             raise ValueError("payload exceeds the session event byte bound")
         return encoded
@@ -154,7 +163,7 @@ class SQLiteSessionRepository:
             raise ValueError("session_id must be non-empty")
         if not isinstance(event_type, str) or not event_type.strip():
             raise ValueError("event_type must be non-empty")
-        payload_json = self._canonical_payload(payload)
+        payload_json = self._bounded_append_payload(payload)
         event_id = event_id or f"sev_{uuid.uuid4().hex}"
         occurred_at_utc = occurred_at_utc or _now()
         with self._lock, self._connect() as conn:
