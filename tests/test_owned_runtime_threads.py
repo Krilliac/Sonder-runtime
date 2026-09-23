@@ -115,6 +115,23 @@ def test_unmanaged_factories_return_native_types():
         assert pool.submit(lambda: 1).result(2) == 1
 
 
+def test_bounded_call_start_failure_runs_completion_cleanup(monkeypatch):
+    from sonder_runtime.platform import runtime_threads
+
+    completed = []
+
+    def fail_start(_thread):
+        raise RuntimeError("synthetic daemon start failure")
+
+    monkeypatch.setattr(runtime_threads._NativeThread, "start", fail_start)
+    with pytest.raises(RuntimeError, match="synthetic daemon start failure"):
+        runtime_threads.run_bounded(
+            lambda: None, 0.1, on_complete=lambda: completed.append(True),
+        )
+
+    assert completed == [True]
+
+
 def test_real_worker_sqlite_caches_close_and_reopen_on_reused_thread(tmp_path):
     import os
     from pathlib import Path
