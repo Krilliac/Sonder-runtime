@@ -14,6 +14,8 @@ from sonder_runtime.application.ports.host_turn_links import (
     FinalizedHostResult, ManagedHostFinalEvidence, ManagedHostTerminalLink,
     ManagedHostTurnLink,
 )
+from sonder_runtime.application.ports.terminal_eligibility import ManagedTerminalEligibility
+from sonder_runtime.bootstrap.managed_standalone import ManagedStandaloneSession
 
 
 def _evidence(*, principal="worker-a", run_id="run-1", outcome="passed", receipt_id=None):
@@ -37,8 +39,15 @@ def _evidence(*, principal="worker-a", run_id="run-1", outcome="passed", receipt
     return ManagedHostFinalEvidence(FinalizedHostResult(output, link), facts)
 
 
+def _eligibility(evidence, *, worker_id="lane-worker-a", eligible=True, phase="certified"):
+    return ManagedTerminalEligibility(
+        evidence, eligible, phase, "CERTIFIED" if eligible else "FINAL_CERTIFICATE_MISMATCH",
+        authenticated_worker_id=worker_id if eligible else None,
+    )
+
+
 def test_real_typed_host_receipt_derives_trust_and_identity_without_spoofable_fields():
-    receipt, observation = ReceiptObservationProducer.from_host_final(_evidence())
+    receipt, observation = ReceiptObservationProducer.from_terminal_eligibility(_eligibility(_evidence()))
     assert receipt.verifier_outcome == "passed"
     assert observation.source == "authenticated_verifier"
     assert observation.trusted_source is True
@@ -46,23 +55,23 @@ def test_real_typed_host_receipt_derives_trust_and_identity_without_spoofable_fi
     assert "worker-a" not in observation.independent_key
     assert observation.provenance[0] == "receipt:" + receipt.receipt_id
     with pytest.raises(TypeError):
-        ReceiptObservationProducer.from_host_final(_evidence(), source="attributed")
+        ReceiptObservationProducer.from_terminal_eligibility(_evidence(), source="attributed")
 
 
 def test_one_authenticated_worker_cannot_create_independence_from_repeated_receipts():
-    first = ReceiptObservationProducer.from_host_final(_evidence(run_id="run-1"))[1]
-    second = ReceiptObservationProducer.from_host_final(_evidence(run_id="run-2"))[1]
+    first = ReceiptObservationProducer.from_terminal_eligibility(_eligibility(_evidence(run_id="run-1")))[1]
+    second = ReceiptObservationProducer.from_terminal_eligibility(_eligibility(_evidence(run_id="run-2")))[1]
     assert first.independent_key == second.independent_key
     decision = LearningLadder().evaluate((first, second))[0]
     assert decision.stage == LearningStage.CANDIDATE
 
 
 def test_distinct_authenticated_workers_can_reach_fact_but_contradiction_demotes():
-    first = ReceiptObservationProducer.from_host_final(_evidence(principal="worker-a"))[1]
-    second = ReceiptObservationProducer.from_host_final(_evidence(principal="worker-b", run_id="run-2"))[1]
+    first = ReceiptObservationProducer.from_terminal_eligibility(_eligibility(_evidence(principal="owner"), worker_id="lane-worker-a"))[1]
+    second = ReceiptObservationProducer.from_terminal_eligibility(_eligibility(_evidence(principal="owner", run_id="run-2"), worker_id="lane-worker-b"))[1]
     assert LearningLadder().evaluate((first, second))[0].stage == LearningStage.FACT
-    negative = ReceiptObservationProducer.from_host_final(
-        _evidence(principal="worker-b", run_id="run-3", outcome="failed")
+    negative = ReceiptObservationProducer.from_terminal_eligibility(
+        _eligibility(_evidence(principal="owner", run_id="run-3", outcome="failed"), worker_id="lane-worker-b")
     )[1]
     decision = LearningLadder().evaluate((first, second, negative))[0]
     assert decision.stage == LearningStage.CANDIDATE
@@ -72,16 +81,16 @@ def test_distinct_authenticated_workers_can_reach_fact_but_contradiction_demotes
 def test_uncertain_receipt_cannot_mint_positive_trusted_observation():
     evidence = _evidence(outcome="uncertain")
     evidence = replace(evidence, facts=replace(evidence.facts, validation_attempted=False, terminal_class="UNVERIFIED"))
-    _, observation = ReceiptObservationProducer.from_host_final(evidence)
-    assert observation.positive is False
-    assert observation.trusted_source is False
-    assert observation.confidence == 0.0
+    with pytest.raises(PermissionError, match="current certified terminal eligibility"):
+        ReceiptObservationProducer.from_terminal_eligibility(
+            _eligibility(evidence, eligible=False, phase="unknown")
+        )
 
 
 def test_sqlite_repository_is_restart_replay_idempotent_and_immutable(tmp_path):
     path = tmp_path / "memory.db"
     evidence = _evidence()
-    receipt, observation = ReceiptObservationProducer.from_host_final(evidence)
+    receipt, observation = ReceiptObservationProducer.from_terminal_eligibility(_eligibility(evidence))
     first = sqlite3.connect(path)
     repo = SQLiteVerifierObservationRepository(first)
     assert repo.append(receipt, observation) == observation
@@ -97,3 +106,23 @@ def test_sqlite_repository_is_restart_replay_idempotent_and_immutable(tmp_path):
     with pytest.raises(sqlite3.IntegrityError):
         second.execute("DELETE FROM verifier_learning_observations")
     second.close()
+
+
+def test_host_session_persists_only_after_current_eligibility():
+    evidence = _evidence()
+    eligibility = _eligibility(evidence, worker_id="lane-worker-a")
+    session = ManagedStandaloneSession.__new__(ManagedStandaloneSession)
+    session.terminal_eligibility = lambda expected_turn, verifier_factory: eligibility
+
+    class Repository:
+        def __init__(self):
+            self.rows = []
+
+        def append(self, receipt, observation):
+            self.rows.append((receipt, observation))
+
+    repository = Repository()
+    observed = session.persist_learning_observation(
+        object(), verifier_factory=object(), repository=repository
+    )
+    assert observed == repository.rows[0][1]

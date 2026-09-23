@@ -1,24 +1,12 @@
 """Private current terminal decision; returned values confer no authority."""
 
-from dataclasses import dataclass
-from ..application.ports.host_turn_links import ManagedHostFinalEvidence
+from ..application.ports.terminal_eligibility import ManagedTerminalEligibility
 from ..application.ports.lane_continuation import (
     PendingApprovalEvidence,
     PendingVerificationIdentity,
 )
 from ..application.agents.host_turns import require_host_pending_turn
 from .standalone_continuation import PublishedHostTerminal
-
-
-@dataclass(frozen=True)
-class ManagedTerminalEligibility:
-    evidence: ManagedHostFinalEvidence
-    eligible: bool
-    phase: str
-    code: str
-    pending_identity: PendingVerificationIdentity | None = None
-    pending_approval: PendingApprovalEvidence | None = None
-    published: PublishedHostTerminal | None = None
 
 
 def terminal_eligibility(session, expected_turn, *, verifier_factory):
@@ -95,6 +83,11 @@ def terminal_eligibility(session, expected_turn, *, verifier_factory):
         return ManagedTerminalEligibility(
             evidence, False, "unknown", "CERTIFICATE_NOT_CURRENT", identity
         )
+    if len(prepared.children) != 1 or not prepared.children[0][0]:
+        return ManagedTerminalEligibility(
+            evidence, False, "unknown", "WORKER_ATTRIBUTION_AMBIGUOUS", identity
+        )
+    authenticated_worker_id = prepared.children[0][0]
     original_certified = not (
         facts.certificate_id != verdict.certificate_id
         or facts.certificate_generation != verdict.generation
@@ -132,4 +125,5 @@ def terminal_eligibility(session, expected_turn, *, verifier_factory):
         identity,
         None,
         published,
+        authenticated_worker_id,
     )
