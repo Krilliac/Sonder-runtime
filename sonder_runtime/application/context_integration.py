@@ -136,6 +136,14 @@ class ContextPlanningFacade:
         capability: MeasuredContextCapability | None = None,
         records: Sequence[ContextRecord] = (),
         prefix_version: str = "1",
+        tokenizer: str = "",
+        template: str = "",
+        system_prefix: str = "",
+        visible_tool_schemas: Any = (),
+        tool_schemas: Any = None,
+        project_policy: Any = None,
+        dynamic_memory: Any = None,
+        retrieval: Any = None,
         request_id: str | None = None,
         replay_metadata: Mapping[str, Any] | None = None,
     ) -> ContextAssembly:
@@ -156,7 +164,28 @@ class ContextPlanningFacade:
 
         manifest_records = tuple(records)
         deduped = deduplicate_context(manifest_records).retained if manifest_records else ()
-        prefix = self._prefix_cache.resolve(deduped, version=prefix_version) if manifest_records else None
+        has_prefix_identity = any((
+            tokenizer, template, system_prefix,
+            visible_tool_schemas not in ((), {}, None),
+            tool_schemas is not None,
+            project_policy is not None,
+        ))
+        should_resolve_prefix = bool(manifest_records or has_prefix_identity)
+        prefix = self._prefix_cache.resolve(
+            deduped,
+            version=prefix_version,
+            model=effective_model.model,
+            tokenizer=tokenizer,
+            template=template,
+            system_prefix=system_prefix,
+            visible_tool_schemas=visible_tool_schemas,
+            tool_schemas=tool_schemas,
+            project_policy=project_policy,
+            # Accepted for callers that have the complete request at hand;
+            # these values are intentionally excluded from stable identity.
+            dynamic_memory=dynamic_memory,
+            retrieval=retrieval,
+        ) if should_resolve_prefix else None
         replay = (
             build_replay_manifest(
                 request_id,
@@ -178,6 +207,11 @@ class ContextPlanningFacade:
         """Return an isolated complete assembly, if one has been published."""
         snapshot = self._last_good.get()
         return None if snapshot is None else snapshot.value
+
+    @property
+    def prefix_cache_telemetry(self):
+        """Return bounded hit/miss reasons for the stable prefix cache."""
+        return self._prefix_cache.telemetry
 
     def prepare_overflow(
         self,
