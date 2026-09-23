@@ -83,6 +83,8 @@ class SubagentRequest:
     budget: SubagentBudget
     child_id: str | None = None
     metadata: tuple[tuple[str, str], ...] = ()
+    resume_key: str = ""
+    idempotency_key: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.parent_id, str) or not self.parent_id.strip():
@@ -93,6 +95,12 @@ class SubagentRequest:
             not isinstance(self.child_id, str) or not self.child_id.strip()
         ):
             raise InvalidSubagentRequest("child_id must be non-empty when supplied")
+        for name in ("resume_key", "idempotency_key"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or len(value) > 256:
+                raise InvalidSubagentRequest(f"{name} must be bounded text")
+            if value and not value.strip():
+                raise InvalidSubagentRequest(f"{name} must not be whitespace-only")
 
 
 @dataclass(frozen=True)

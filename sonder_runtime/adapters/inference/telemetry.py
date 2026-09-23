@@ -31,6 +31,13 @@ def _rate(value) -> float | None:
     return _number(value, maximum=_MAX_RATE)
 
 
+def _count(value, *, maximum: int = 1_000_000_000) -> int | None:
+    """Accept only finite, integral provider counts within a hard bound."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if 0 <= value <= maximum else None
+
+
 def _derived_rate(count, duration_ms: float | None) -> float | None:
     measured_count = _number(count, maximum=1_000_000_000.0)
     if measured_count is None or duration_ms is None or duration_ms <= 0:
@@ -55,6 +62,19 @@ def _load_state(payload: dict) -> str | None:
 
 def from_ollama(payload: dict) -> InferenceTelemetry | None:
     """Normalize Ollama's documented nanosecond measurements."""
+    prompt_tokens = _count(payload.get("prompt_eval_count"))
+    cached_tokens = _count(payload.get("prompt_eval_cached_count"))
+    # Ollama documents cached prompt tokens as a subset of prompt_eval_count.
+    # Do not manufacture a cache result when either field is absent or invalid.
+    if (
+        prompt_tokens is None
+        or cached_tokens is None
+        or cached_tokens > prompt_tokens
+    ):
+        cached_tokens = None
+        uncached_tokens = None
+    else:
+        uncached_tokens = prompt_tokens - cached_tokens
     total_ms = _nanoseconds_to_ms(payload.get("total_duration"))
     load_ms = _nanoseconds_to_ms(payload.get("load_duration"))
     prompt_ms = _nanoseconds_to_ms(payload.get("prompt_eval_duration"))
@@ -64,6 +84,10 @@ def from_ollama(payload: dict) -> InferenceTelemetry | None:
         load_ms=load_ms,
         prompt_eval_ms=prompt_ms,
         eval_ms=eval_ms,
+        prompt_tokens=prompt_tokens,
+        prompt_cached_tokens=cached_tokens,
+        prompt_uncached_tokens=uncached_tokens,
+        output_tokens=_count(payload.get("eval_count")),
         prompt_tokens_per_second=_derived_rate(
             payload.get("prompt_eval_count"), prompt_ms
         ),

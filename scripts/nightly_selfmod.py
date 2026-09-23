@@ -27,21 +27,31 @@ WHAT IT WILL NOT DO
     it mutates source with no commit to review or revert to.
   - It never touches a protected path, never merges, and never pushes.
 
-WHY THE TEST COMMAND IS THE WHOLE SUITE
+WHY THERE ARE TWO TEST GATES
   Measured 2026-08-08: an agent lane produced four plausible fixes whose tests
   had never been executed, and running them revealed that one broke an
-  architecture rule. A candidate that changes source unattended has to clear the same bar
-  the humans do, and a targeted subset cannot show what a change broke
-  elsewhere.
+  architecture rule. The regression gate covers the repository suite except
+  for a target-specific held-out suite. The held-out gate runs a best-effort,
+  tamper-evident snapshot outside the candidate's editable files. It is not a
+  privilege boundary: a same-user candidate may be able to alter and restore
+  the snapshot, so this gate cannot claim security-grade isolation. If no
+  matching suite exists, the evaluator is unavailable and the candidate is
+  rejected.
 """
 from __future__ import annotations
 
 import ast
+import hashlib
+import importlib.util
 import json
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
+import time
+from collections import deque
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -49,6 +59,9 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 import selfmod  # noqa: E402
+
+_HELD_OUT_MAX_FILES = 2048
+_HELD_OUT_MAX_BYTES = 32 * 1024 * 1024
 
 # Files the nightly stage may propose changes to. Every entry is a module
 # with its own test file, small enough that one function is a meaningful
@@ -164,16 +177,273 @@ def _ruff_command(py: str) -> list[str] | None:
     return [py, "-m", "ruff"] if probe.returncode == 0 else None
 
 
-def _regression_command(py: str) -> list[str]:
+def _regression_command(py: str, *, ignore_paths=()) -> list[str]:
     """Use bounded xdist when installed; keep a portable serial fallback."""
     probe = subprocess.run(
         [py, "-c", "import xdist"],
         capture_output=True, stdin=subprocess.DEVNULL, check=False,
         timeout=10,
     )
+    command = [py, "-m", "pytest", "-q"]
     if probe.returncode == 0:
-        return [py, "-m", "pytest", "-q", "-n", "4", "--dist", "load"]
-    return [py, "-m", "pytest", "-q"]
+        command.extend(["-n", "4", "--dist", "load"])
+    for path in ignore_paths:
+        command.extend(["--ignore", str(path)])
+    return command
+
+
+# The selfmod model sees only the candidate module. These suites are selected
+# from the base checkout, copied into a best-effort read-only evaluator root
+# outside the candidate, and digest checked before and after pytest. A same-user
+# candidate may still be able to alter and restore it, so this is tamper
+# evidence rather than a privilege boundary. Output is drained continuously
+# while retaining only a bounded tail.
+_HELD_OUT_RUNNER = r'''
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import threading
+import time
+from collections import deque
+
+payload = json.loads(sys.argv[1])
+root = Path(payload["root"]).resolve()
+
+# Do not let the base process's checkout or user-site imports become part of
+# the held-out truth source. The candidate root and the worker environment are
+# the only project paths allowed into the evaluator interpreter.
+for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE"):
+    os.environ.pop(name, None)
+prefixes = tuple(Path(item).resolve() for item in {sys.prefix, sys.base_prefix})
+sys.path[:] = [
+    str(root),
+    *[
+        item for item in sys.path
+        if item and any(Path(item).resolve() == prefix or prefix in Path(item).resolve().parents
+                        for prefix in prefixes)
+    ],
+]
+
+def digest(path):
+    stream = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            stream.update(chunk)
+    return stream.hexdigest()
+
+def verify(label):
+    for item in payload["files"]:
+        path = Path(item["path"])
+        if not path.is_file() or digest(path) != item["sha256"]:
+            print("SELFMOD HELD-OUT CANARY FAILED: %s changed (%s)" % (label, path))
+            return False
+    return True
+
+if not verify("before"):
+    raise SystemExit(2)
+suite_root = Path(payload["suite_root"]).resolve()
+if root in suite_root.parents:
+    print("SELFMOD HELD-OUT CANARY FAILED: evaluator is inside candidate root")
+    raise SystemExit(2)
+target_module = payload.get("target_module")
+if target_module:
+    try:
+        sys.path.insert(0, str(root))
+        origin = importlib.util.find_spec(target_module).origin
+        resolved = Path(origin).resolve() if origin else None
+    except BaseException as exc:
+        print("SELFMOD HELD-OUT CANARY FAILED: target cannot be resolved: %s" % exc)
+        raise SystemExit(2)
+    if resolved is None or root not in resolved.parents:
+        print("SELFMOD HELD-OUT CANARY FAILED: target resolved outside candidate: %s" % resolved)
+        raise SystemExit(2)
+environment = os.environ.copy()
+candidate = str(root)
+environment.pop("PYTHONHOME", None)
+environment.pop("PYTHONUSERBASE", None)
+environment["PYTHONPATH"] = candidate
+environment["PYTHONNOUSERSITE"] = "1"
+environment["PYTHONSAFEPATH"] = "1"
+tail = deque(maxlen=12000)
+captured = [0]
+def drain(stream):
+    while True:
+        chunk = stream.read(8192)
+        if not chunk:
+            return
+        captured[0] += len(chunk)
+        tail.extend(chunk.decode("utf-8", "replace")[-12000:])
+def output():
+    return "".join(tail)
+
+def terminate_tree(pid):
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=10, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+    else:
+        try:
+            os.killpg(pid, 9)
+        except (OSError, AttributeError):
+            pass
+try:
+    process = subprocess.Popen(
+        [sys.executable, "-m", "pytest", "-q", "-s", "--rootdir", str(suite_root),
+         *[item["path"] for item in payload["suites"]]],
+        cwd=candidate, env=environment, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        start_new_session=(os.name != "nt"),
+    )
+except OSError as exc:
+    print("SELFMOD HELD-OUT FAILED: evaluator could not start: %s" % exc)
+    raise SystemExit(2)
+reader = threading.Thread(target=drain, args=(process.stdout,), daemon=True)
+reader.start()
+deadline = time.monotonic() + int(payload["timeout"])
+while process.poll() is None:
+    if time.monotonic() >= deadline:
+        terminate_tree(process.pid)
+        process.kill()
+        process.wait()
+        reader.join(timeout=2)
+        print(output())
+        print("SELFMOD HELD-OUT FAILED: evaluator timed out")
+        raise SystemExit(124)
+    time.sleep(0.05)
+reader.join(timeout=2)
+print(output())
+if captured[0] > len(output().encode("utf-8")):
+    print("SELFMOD HELD-OUT OUTPUT TRUNCATED: retained last 12000 characters")
+if "no tests ran" in output().lower():
+    print("SELFMOD HELD-OUT FAILED: evaluator collected no tests")
+    raise SystemExit(3)
+if not verify("after"):
+    raise SystemExit(2)
+if process.returncode:
+    raise SystemExit(process.returncode)
+print("SELFMOD HELD-OUT CANARY PASSED: tamper-evident snapshot and candidate-root imports")
+'''
+
+
+def _held_out_suite_paths(target: str) -> tuple[str, ...]:
+    """Return a bounded, base-checkout suite for one candidate module.
+
+    A missing mapping is intentionally not replaced with a generic smoke
+    command.  A held-out gate that does not exercise a real suite is an
+    unavailable evaluator and must reject the candidate.
+    """
+    stem = Path(str(target).replace("\\", "/")).stem
+    test_root = REPO / "tests"
+    exact = test_root / ("test_%s.py" % stem)
+    candidates = [exact] if exact.is_file() else []
+    candidates.extend(sorted(test_root.glob("test_%s_*.py" % stem)))
+    selected = []
+    for path in candidates:
+        relative = path.relative_to(REPO).as_posix()
+        if relative not in selected:
+            selected.append(relative)
+        if len(selected) == 2:
+            break
+    return tuple(selected)
+
+
+def _prepare_held_out(target: str, workspace: Path, timeout: int):
+    """Snapshot and prepare the best-effort tamper-evident held-out command."""
+    suites = _held_out_suite_paths(target)
+    copied = []
+    selected_source_paths = []
+    if not suites:
+        return {
+            "command": [
+                _test_python(), "-c",
+                "raise SystemExit('held-out evaluator unavailable for candidate')",
+            ],
+            "source_paths": (),
+            "cleanup": None,
+        }
+    base_root = REPO.resolve()
+    if base_root == workspace.resolve():
+        return {
+            "command": [
+                _test_python(), "-c",
+                "raise SystemExit('held-out evaluator must be outside candidate')",
+            ],
+            "source_paths": (),
+            "cleanup": None,
+        }
+    snapshot = tempfile.TemporaryDirectory(prefix="sonder-heldout-")
+    suite_root = Path(snapshot.name).resolve()
+    # Snapshot the whole test tree, including fixtures and data files that a
+    # selected suite may import indirectly. Stop discovery at the configured
+    # bounds so a pathological tree cannot consume memory before rejection.
+    snapshot_files = []
+    total_bytes = 0
+    limit_error = None
+    for path in (REPO / "tests").rglob("*"):
+        if path.is_symlink():
+            limit_error = "held-out evaluator snapshot contains a symlink"
+            break
+        if not path.is_file() or "__pycache__" in path.parts:
+            continue
+        if len(snapshot_files) >= _HELD_OUT_MAX_FILES:
+            limit_error = "held-out evaluator snapshot exceeds file limit"
+            break
+        size = path.stat().st_size
+        if total_bytes + size > _HELD_OUT_MAX_BYTES:
+            limit_error = "held-out evaluator snapshot exceeds byte limit"
+            break
+        snapshot_files.append(path)
+        total_bytes += size
+    if limit_error:
+        snapshot.cleanup()
+        return {
+            "command": [_test_python(), "-c", "raise SystemExit(%r)" % limit_error],
+            "source_paths": tuple(suites),
+            "cleanup": None,
+        }
+    for source in snapshot_files:
+        relative = source.relative_to(REPO).as_posix()
+        destination = suite_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        destination.chmod(0o444)
+        digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+        copied.append({"path": str(destination), "sha256": digest})
+        if relative in suites:
+            selected_source_paths.append(relative)
+    for directory in sorted(
+        (path for path in suite_root.rglob("*") if path.is_dir()),
+        key=lambda path: len(path.parts), reverse=True,
+    ):
+        directory.chmod(0o555)
+    payload = {
+        "root": str(workspace),
+        "suite_root": str(suite_root),
+        "target_module": _module_name_for_target(target),
+        "suites": [{"path": str(suite_root / item)} for item in suites],
+        "files": copied,
+        "timeout": max(1, min(int(timeout), 900)),
+    }
+    command = [_test_python(), "-c", _HELD_OUT_RUNNER, json.dumps(payload, sort_keys=True)]
+    return {"command": command, "source_paths": tuple(selected_source_paths), "cleanup": snapshot}
+
+
+def _module_name_for_target(target: str) -> str | None:
+    """Return the import name used by the held-out candidate-root canary."""
+    parts = tuple(Path(str(target).replace("\\", "/")).with_suffix("").parts)
+    if not parts or any(not item.isidentifier() for item in parts):
+        return None
+    return ".".join(parts)
 
 
 _NON_EXECUTABLE_OBJECTIVE = re.compile(
@@ -774,20 +1044,27 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
         log("  lint: Ruff available")
     else:
         log("  lint: Ruff unavailable; Python compilation is the syntax gate")
-    checks.append(("regression", _regression_command(py)))
-    for kind, command in checks:
-        # cwd is deliberately NOT passed: the default is the candidate
-        # workspace, which keeps imports and pytest collection grounded in
-        # the isolated checkout.
-        outcome = selfmod.record_test(
-            run_id, kind, command, timeout=test_timeout)
-        passed = bool(outcome.get("passed")) if isinstance(outcome, dict) else bool(outcome)
-        results.append((kind, passed))
-        log("  %s: %s" % (kind, "pass" if passed else "FAIL"))
-        if not passed:
-            selfmod.reject(run_id, reason="%s failed" % kind)
-            _discard_workspace(run_id)
-            return "candidate rejected: %s failed (run %s kept for inspection)" % (kind, run_id)
+    held_out = _prepare_held_out(target, workspace, test_timeout)
+    checks.append(("regression", _regression_command(py, ignore_paths=held_out["source_paths"])))
+    checks.append(("held_out", held_out["command"]))
+    try:
+        for kind, command in checks:
+            # cwd is deliberately NOT passed: the default is the candidate
+            # workspace, which keeps imports and pytest collection grounded in
+            # the isolated checkout.
+            outcome = selfmod.record_test(
+                run_id, kind, command, timeout=test_timeout)
+            passed = bool(outcome.get("passed")) if isinstance(outcome, dict) else bool(outcome)
+            results.append((kind, passed))
+            log("  %s: %s" % (kind, "pass" if passed else "FAIL"))
+            if not passed:
+                selfmod.reject(run_id, reason="%s failed" % kind)
+                _discard_workspace(run_id)
+                return "candidate rejected: %s failed (run %s kept for inspection)" % (kind, run_id)
+    finally:
+        cleanup = held_out.get("cleanup")
+        if cleanup is not None:
+            cleanup.cleanup()
 
     # Only the kinds this stage actually records; the default set includes
     # reproducer/targeted/smoke phases that belong to a human-driven run.
@@ -800,7 +1077,7 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     # were dead code for the branch deliverable. (They fired on nothing real
     # only because two of review's checks were also structurally unsatisfiable,
     # both fixed in selfmod.py alongside this.)
-    reviewed = selfmod.review(run_id, require_kinds={"syntax", "regression"})
+    reviewed = selfmod.review(run_id, require_kinds={"syntax", "regression", "held_out"})
     # A PASS lands on reviewing and may auto-advance to approved under
     # auto-low-risk; a FAIL lands on rejected/restored with last_error set.
     # Key on the failure states, not one success phase -- an earlier version

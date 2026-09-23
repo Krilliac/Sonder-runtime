@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 import string
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
@@ -181,35 +181,125 @@ class PrefixManifest:
     version: str
     sections: tuple[ContextRecord, ...]
     cache_key: str
+    identity_key: str = ""
 
 
-def build_prefix_manifest(records: Sequence[ContextRecord], *, version: str = "1") -> PrefixManifest:
+@dataclass(frozen=True)
+class PrefixCacheTelemetry:
+    """Bounded, provider-neutral accounting for prefix identity decisions."""
+
+    hits: int
+    misses: int
+    writes: int
+    last_reason: str | None
+    reasons: Mapping[str, int]
+
+
+@dataclass(frozen=True)
+class PrefixIdentity:
+    """Stable inputs that can make a rendered prefix reusable.
+
+    Dynamic memory and retrieval are deliberately absent.  They may affect the
+    surrounding request, but must not accidentally invalidate a stable prefix.
+    """
+
+    model: str = ""
+    tokenizer: str = ""
+    template: str = ""
+    system_prefix: str = ""
+    visible_tool_schemas: Any = ()
+    project_policy: Any = None
+
+    @property
+    def digest(self) -> str:
+        return _digest({
+            "model": self.model,
+            "tokenizer": self.tokenizer,
+            "template": self.template,
+            "system_prefix": self.system_prefix,
+            "visible_tool_schemas": self.visible_tool_schemas,
+            "project_policy": self.project_policy,
+        })
+
+
+def build_prefix_manifest(
+    records: Sequence[ContextRecord], *, version: str = "1",
+    model: str = "", tokenizer: str = "", template: str = "",
+    system_prefix: str = "", visible_tool_schemas: Any = (),
+    tool_schemas: Any = None,
+    project_policy: Any = None, dynamic_memory: Any = None,
+    retrieval: Any = None,
+) -> PrefixManifest:
     """Build a stable prefix from stable records, independent of input order."""
     if not version:
         raise ValueError("version must be non-empty")
     stable = tuple(record for record in records if record.stable)
     ordered = tuple(sorted(stable, key=lambda item: (item.section, item.item_id, item.content_digest)))
-    material = {"version": version, "sections": [(item.section, item.item_id, item.content_digest) for item in ordered]}
-    return PrefixManifest(version, ordered, _digest(material))
+    if tool_schemas is not None:
+        visible_tool_schemas = tool_schemas
+    identity = PrefixIdentity(model, tokenizer, template, system_prefix, visible_tool_schemas, project_policy)
+    material = {
+        "version": version,
+        "identity": identity.digest,
+        "sections": [(item.section, item.item_id, item.content_digest) for item in ordered],
+    }
+    return PrefixManifest(version, ordered, _digest(material), identity.digest)
 
 
 class PrefixManifestCache:
     """Small deterministic cache accounting prefix hits and writes."""
 
-    def __init__(self) -> None:
-        self._values: dict[str, PrefixManifest] = {}
+    def __init__(self, *, max_entries: int = 128) -> None:
+        if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries < 1:
+            raise ValueError("max_entries must be a positive integer")
+        self.max_entries = max_entries
+        self._values: OrderedDict[str, PrefixManifest] = OrderedDict()
         self.hits = 0
+        self.misses = 0
         self.writes = 0
+        self._last_reason: str | None = None
+        self._reasons: Counter[str] = Counter()
+        self._last_cache_key: str | None = None
+        self._last_identity_key: str | None = None
+        self._last_version: str | None = None
 
-    def resolve(self, records: Sequence[ContextRecord], *, version: str = "1") -> PrefixManifest:
-        manifest = build_prefix_manifest(records, version=version)
+    def resolve(self, records: Sequence[ContextRecord], *, version: str = "1", **identity: Any) -> PrefixManifest:
+        manifest = build_prefix_manifest(records, version=version, **identity)
         cached = self._values.get(manifest.cache_key)
         if cached is not None:
             self.hits += 1
+            self._last_reason = "hit"
+            self._reasons["hit"] += 1
+            self._values.move_to_end(manifest.cache_key)
+            self._remember(manifest)
             return cached
+        self.misses += 1
+        if not self._values:
+            reason = "cold_start"
+        elif self._last_identity_key != manifest.identity_key:
+            reason = "identity_changed"
+        elif self._last_version != manifest.version:
+            reason = "version_changed"
+        else:
+            reason = "prefix_changed"
+        self._last_reason = reason
+        self._reasons[reason] += 1
         self._values[manifest.cache_key] = manifest
+        self._values.move_to_end(manifest.cache_key)
+        while len(self._values) > self.max_entries:
+            self._values.popitem(last=False)
         self.writes += 1
+        self._remember(manifest)
         return manifest
+
+    def _remember(self, manifest: PrefixManifest) -> None:
+        self._last_cache_key = manifest.cache_key
+        self._last_identity_key = manifest.identity_key
+        self._last_version = manifest.version
+
+    @property
+    def telemetry(self) -> PrefixCacheTelemetry:
+        return PrefixCacheTelemetry(self.hits, self.misses, self.writes, self._last_reason, MappingProxyType(dict(self._reasons)))
 
 
 @dataclass(frozen=True)
@@ -250,6 +340,6 @@ def build_replay_manifest(
 
 __all__ = [
     "ContextRecord", "DedupProvenance", "DeduplicationResult", "deduplicate_context",
-    "Snapshot", "LastGoodSnapshot", "PrefixManifest", "PrefixManifestCache",
+    "Snapshot", "LastGoodSnapshot", "PrefixManifest", "PrefixIdentity", "PrefixCacheTelemetry", "PrefixManifestCache",
     "ReplaySection", "ReplayManifest", "build_prefix_manifest", "build_replay_manifest",
 ]

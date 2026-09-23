@@ -1,5 +1,8 @@
 # Requirement evidence audit — next formalization pass
 
+Historical snapshot from 2026-08-21. For current formal status, see
+`docs/architecture/generated/requirement-status.md`.
+
 Date: 2026-08-21
 Audited branch: `agent/wp1-execution-status`  
 Audit baseline: current branch HEAD `13be730` (2026-08-21 refresh)

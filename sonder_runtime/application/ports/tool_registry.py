@@ -6,10 +6,11 @@ application services validate calls before they cross the policy boundary.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Protocol
 
-from ...domain.common.errors import Conflict, InvalidInput, NotFound
+from ...domain.common.errors import Conflict, Forbidden, InvalidInput, NotFound
 from ...domain.tools.descriptors import ExecutionClass, ToolEffect
 
 
@@ -42,6 +43,82 @@ class ToolCall:
     tool_name: str
     arguments: dict[str, Any] = field(default_factory=dict)
     call_id: str = ""
+
+
+@dataclass(frozen=True)
+class ToolSchemaSelection:
+    """Immutable per-turn set of tool schemas made visible to a caller.
+
+    The executable inventory remains owned by the registry.  A selection only
+    controls which registered descriptors may be admitted for this turn; it
+    is deliberately a value object so callers can carry it across bounded
+    context resets without copying mutable registry state.
+    """
+
+    visible_names: frozenset[str] = frozenset()
+    selection_id: str = ""
+    summary_first: bool = True
+    on_demand: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "visible_names", frozenset(self.visible_names))
+        if any(not isinstance(name, str) or not name.strip() for name in self.visible_names):
+            raise InvalidInput("visible tool names must be non-empty strings")
+        if not isinstance(self.selection_id, str):
+            raise InvalidInput("tool schema selection_id must be text")
+
+    def allows(self, name: str) -> bool:
+        return name in self.visible_names
+
+    def marker(self) -> dict[str, Any]:
+        """Return the explicit, model-safe marker for catalog consumers."""
+        return {
+            "schema": "sonder-tool-schema-selection-v1",
+            "selection_id": self.selection_id,
+            "summary_first": self.summary_first,
+            "on_demand": self.on_demand,
+            "visible_names": tuple(sorted(self.visible_names)),
+        }
+
+
+@dataclass(frozen=True)
+class ExecutableToolInventory:
+    """Stable descriptor snapshot, independent of later registrations."""
+
+    descriptors: tuple[ToolDescriptor, ...]
+
+    def __post_init__(self) -> None:
+        # ToolDescriptor is frozen, but its JSON schema is a dict.  Copy it at
+        # snapshot creation so later registry or caller mutations cannot alter
+        # this inventory's captured descriptor metadata.
+        object.__setattr__(
+            self,
+            "descriptors",
+            tuple(
+                ToolDescriptor(
+                    name=item.name,
+                    description=item.description,
+                    input_schema=deepcopy(item.input_schema),
+                    effects=frozenset(item.effects),
+                    execution_class=item.execution_class,
+                )
+                for item in self.descriptors
+            ),
+        )
+
+    def get(self, name: str) -> ToolDescriptor | None:
+        return next((item for item in self.descriptors if item.name == name), None)
+
+    def list_all(self) -> tuple[ToolDescriptor, ...]:
+        return self.descriptors
+
+    def admit(self, name: str, selection: ToolSchemaSelection | None = None) -> ToolDescriptor:
+        descriptor = self.get(name)
+        if descriptor is None:
+            raise NotFound(f"unknown tool {name!r}")
+        if selection is not None and not selection.allows(name):
+            raise Forbidden(f"tool {name!r} is not visible in the active schema selection")
+        return descriptor
 
 
 def _validate(value: Any, schema: dict[str, Any], path: str) -> None:
@@ -98,6 +175,7 @@ class ToolRegistry(Protocol):
 
     def get(self, name: str) -> ToolDescriptor | None: ...
     def list_all(self) -> tuple[ToolDescriptor, ...]: ...
+    def admit(self, name: str, selection: ToolSchemaSelection | None = None) -> ToolDescriptor: ...
 
 
 class InMemoryToolRegistry:
@@ -116,6 +194,13 @@ class InMemoryToolRegistry:
     def get(self, name: str) -> ToolDescriptor | None:
         return self._tools.get(name)
 
+    def executable_inventory(self) -> ExecutableToolInventory:
+        """Return a stable executable snapshot, independent of visibility."""
+        return ExecutableToolInventory(tuple(self._tools.values()))
+
+    def admit(self, name: str, selection: ToolSchemaSelection | None = None) -> ToolDescriptor:
+        return self.executable_inventory().admit(name, selection)
+
     def require(self, name: str) -> ToolDescriptor:
         descriptor = self.get(name)
         if descriptor is None:
@@ -126,4 +211,7 @@ class InMemoryToolRegistry:
         return tuple(self._tools.values())
 
 
-__all__ = ["InMemoryToolRegistry", "ToolCall", "ToolDescriptor", "ToolRegistry", "validate_tool_call"]
+__all__ = [
+    "ExecutableToolInventory", "InMemoryToolRegistry", "ToolCall", "ToolDescriptor",
+    "ToolRegistry", "ToolSchemaSelection", "validate_tool_call",
+]

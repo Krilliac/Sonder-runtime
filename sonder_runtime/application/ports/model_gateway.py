@@ -58,6 +58,10 @@ class InferenceTelemetry:
     load_ms: float | None = None
     prompt_eval_ms: float | None = None
     eval_ms: float | None = None
+    prompt_tokens: int | None = None
+    prompt_cached_tokens: int | None = None
+    prompt_uncached_tokens: int | None = None
+    output_tokens: int | None = None
     prompt_tokens_per_second: float | None = None
     output_tokens_per_second: float | None = None
     load_state: str | None = None

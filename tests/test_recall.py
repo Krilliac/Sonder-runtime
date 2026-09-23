@@ -1,6 +1,7 @@
 import sonder_runtime.adapters.embeddings as embeddings
 import memory_store as ms
 from sonder_runtime.adapters import recall
+from datetime import datetime, timezone
 import sqlite3
 import time
 import pytest
@@ -78,10 +79,10 @@ def test_recall_respects_min_sim_threshold():
     assert recall.recall(c, "q", embed_fn=lambda t: [0.0, 1.0], min_sim=0.5) == []
 
 
-def test_recall_soft_fails_when_no_embeddings():
+def test_recall_falls_back_to_lexical_when_no_embeddings():
     c = _conn()
     _store_good(c, "i1", "task", "resp", [1.0, 0.0])
-    assert recall.recall(c, "q", embed_fn=lambda t: None) == []
+    assert recall.recall(c, "task", embed_fn=lambda t: None) == ["task -> resp"]
 
 
 def test_recall_excludes_current_session():
@@ -140,6 +141,168 @@ def test_recall_is_project_scoped_unless_global_override_is_explicit():
     assert string_false == ["same task -> project B solution"]
 
 
+def test_specialized_exact_mode_uses_stored_task_text_after_sqlite_scope():
+    c = _conn()
+    _store_good(c, "exact", "retry the bounded worker", "exact result", [1.0, 0.0], project="p")
+    _store_good(c, "near", "worker retry", "near result", [1.0, 0.0], project="p")
+
+    out = recall.recall(
+        c, "bounded worker", k=2, qv=[1.0, 0.0], min_sim=0.0,
+        project="p", mode="exact",
+    )
+
+    assert out[0] == "retry the bounded worker -> exact result"
+    assert len(out) == 2
+
+
+def test_temporal_mode_uses_creation_timestamp_and_excludes_future_rows():
+    c = _conn()
+    _store_good(c, "old", "temporal policy", "old result", [1.0, 0.0])
+    _store_good(c, "future", "temporal policy", "future result", [1.0, 0.0])
+    c.execute("UPDATE interactions SET ts=? WHERE id=?", ("2026-09-20T00:00:00+00:00", "old"))
+    c.execute("UPDATE interactions SET ts=? WHERE id=?", ("2026-09-24T00:00:00+00:00", "future"))
+    c.commit()
+
+    out = recall.recall(
+        c, "temporal policy", k=2, qv=[1.0, 0.0], min_sim=0.0,
+        mode="temporal", at=datetime(2026, 9, 23, tzinfo=timezone.utc),
+    )
+
+    assert out == ["temporal policy -> old result"]
+
+
+def test_specialized_recall_rejects_unsupported_metadata_lanes():
+    c = _conn()
+    _store_good(c, "one", "task", "result", [1.0, 0.0])
+    with pytest.raises(Exception, match="supported modes"):
+        recall.recall(c, "task", qv=[1.0, 0.0], min_sim=0.0, mode="entity")
+
+
+def test_exact_and_temporal_modes_are_vector_independent():
+    c = _conn()
+    ms.log_interaction(c, "metadata-only", "metadata lane task", "", "result", "sonder")
+    ms.record_outcome_row(c, "metadata-only", "tests_passed", 1.0, source="caller")
+
+    def fail_embed(_task):
+        raise AssertionError("metadata retrieval must not request an embedding")
+
+    assert recall.recall(
+        c, "metadata lane", embed_fn=fail_embed, min_sim=0.0, mode="exact",
+    ) == ["metadata lane task -> result"]
+    assert recall.recall(
+        c, "metadata lane", embed_fn=fail_embed, min_sim=0.0, mode="temporal",
+    ) == ["metadata lane task -> result"]
+
+
+def test_failure_mode_returns_failed_evidence_from_mixed_outcome_without_solution_label():
+    c = _conn()
+    _store_good(c, "mixed", "repair parser", "candidate response", [1.0, 0.0], project="p")
+    ms.record_outcome_row(c, "mixed", "failed", -1.0, source="machine")
+    _store_good(c, "good", "repair parser", "successful response", [1.0, 0.0], project="p")
+
+    result = recall.recall(
+        c, "repair parser", project="p", mode="failure", embed_fn=lambda _q: (
+            _ for _ in ()
+        ).throw(AssertionError("failure recall must not embed")),
+    )
+
+    assert result == ["[failed evidence] repair parser -> candidate response"]
+    assert "successful response" not in " ".join(result)
+
+
+def test_failure_mode_is_project_and_session_scoped_and_reads_rows_without_vectors():
+    c = _conn()
+    ms.log_interaction(c, "p1", "project failure", "", "p1 failure", "sonder",
+                       project="project-a", session_id="current")
+    ms.record_outcome_row(c, "p1", "failed", -1.0, source="machine")
+    ms.log_interaction(c, "p2", "project failure", "", "p2 failure", "sonder",
+                       project="project-b", session_id="other")
+    ms.record_outcome_row(c, "p2", "failed", -1.0, source="machine")
+
+    result = recall.recall(
+        c, "project failure", project="project-a", exclude_session="current",
+        mode="failure", embed_fn=lambda _q: (_ for _ in ()).throw(
+            AssertionError("failure recall must not embed")
+        ),
+    )
+
+    assert result == []
+    assert recall.recall(
+        c, "project failure", project="project-a", mode="failure",
+        embed_fn=lambda _q: None,
+    ) == ["[failed evidence] project failure -> p1 failure"]
+    assert recall.recall(
+        c, "project failure", project="project-b", mode="failure",
+        embed_fn=lambda _q: None,
+    ) == ["[failed evidence] project failure -> p2 failure"]
+
+
+def test_failure_candidate_page_has_bounded_exclusive_paging():
+    c = _conn()
+    for index in range(3):
+        interaction_id = "failure-%d" % index
+        ms.log_interaction(c, interaction_id, "bounded failure %d" % index, "",
+                           "failure response %d" % index, "sonder", project="p")
+        ms.record_outcome_row(c, interaction_id, "failed", -1.0, source="machine")
+    c.execute("UPDATE interactions SET ts=printf('%020d',rowid)")
+    c.commit()
+
+    first = ms.failed_interaction_candidate_page(c, project="p", row_limit=1)
+    second = ms.failed_interaction_candidate_page(
+        c, project="p", row_limit=1, cursor=first.next_cursor,
+    )
+
+    assert first.incomplete and first.termination == "row_limit"
+    assert second.incomplete and second.termination == "row_limit"
+    assert first.next_cursor and second.next_cursor
+    assert {first.rows[0]["id"], second.rows[0]["id"]} == {"failure-1", "failure-2"}
+    assert first.rows[0]["outcome_signal"] == "failed"
+    assert second.rows[0]["outcome_signal"] == "failed"
+
+
+def test_metadata_mode_does_not_load_large_embedding_blob():
+    c = _conn()
+    c.execute(
+        "INSERT INTO interactions"
+        "(id,task,retrieved_ctx,response,tier,task_embedding,task_embedding_dim) "
+        "VALUES(?,?,?,?,?,?,?)",
+        ("huge-vector", "bounded metadata task", "", "result", "sonder", b"x" * (8 * 1024 * 1024), 2_000_000),
+    )
+    ms.record_outcome_row(c, "huge-vector", "tests_passed", 1.0, source="caller")
+
+    assert recall.recall(
+        c, "metadata task", embed_fn=lambda _task: (_ for _ in ()).throw(
+            AssertionError("metadata retrieval must not embed")
+        ), min_sim=0.0, mode="exact",
+    ) == ["bounded metadata task -> result"]
+
+
+def test_hybrid_falls_back_to_bounded_lexical_recall_without_embedding():
+    c = _conn()
+    ms.log_interaction(c, "lexical-only", "lexical fallback task", "", "result", "sonder")
+    ms.record_outcome_row(c, "lexical-only", "tests_passed", 1.0, source="caller")
+    ms.log_interaction(c, "newer-noise", "unrelated recent operation", "", "noise", "sonder")
+    ms.record_outcome_row(c, "newer-noise", "tests_passed", 1.0, source="caller")
+
+    page = recall.recall_page(
+        c, "lexical fallback task", embed_fn=lambda _task: None, min_sim=0.9,
+    )
+
+    assert page.results == ("lexical fallback task -> result",)
+    assert page.degradation_reasons == ("embedding_unavailable_lexical_fallback",)
+
+
+def test_hybrid_invalid_query_vector_uses_lexical_fallback_without_len_error():
+    c = _conn()
+    ms.log_interaction(c, "lexical-only", "bounded lexical task", "", "result", "sonder")
+    ms.record_outcome_row(c, "lexical-only", "tests_passed", 1.0, source="caller")
+
+    page = recall.recall_page(c, "bounded lexical", qv=object(), min_sim=0.9)
+
+    assert page.results == ("bounded lexical task -> result",)
+    assert "embedding_unavailable_lexical_fallback" in page.degradation_reasons
+
+
 def test_recall_quarantines_ambiguous_migrated_session_project():
     c = _conn()
     ms.touch_session(c, "legacy-session", project="project-a")
@@ -160,6 +323,22 @@ def test_recall_quarantines_ambiguous_migrated_session_project():
         c, "same task", qv=[1.0, 0.0], min_sim=0.5,
         project="project-b",
     ) == []
+
+
+def test_scoped_recall_excludes_nonnull_unattributed_legacy_project():
+    c = _conn()
+    _store_good(c, "legacy-good", "legacy project task", "untrusted good", [1.0, 0.0],
+                project="project-a")
+    ms.log_interaction(c, "legacy-failed", "legacy project task", "",
+                       "untrusted failure", "sonder", project="project-a")
+    ms.record_outcome_row(c, "legacy-failed", "failed", -1.0, source="machine")
+    c.execute("UPDATE interactions SET project_explicit=0 WHERE id LIKE 'legacy-%'")
+    c.commit()
+
+    assert recall.recall(c, "legacy project", project="project-a", mode="exact",
+                         qv=[1.0, 0.0], min_sim=0.0) == []
+    assert recall.recall(c, "legacy project", project="project-a", mode="failure",
+                         qv=[1.0, 0.0], min_sim=0.0) == []
 
 
 def test_recall_vetoes_interaction_with_contradictory_outcome():

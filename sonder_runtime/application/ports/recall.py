@@ -51,6 +51,8 @@ class RecallGateway(Protocol):
         include_all_projects: bool = False,
         embedding_model: str | None = None,
         embedding_revision: str | None = None,
+        mode: str = "hybrid",
+        at: Any = None,
     ) -> list[str]: ...
 
 

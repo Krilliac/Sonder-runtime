@@ -92,10 +92,10 @@ def test_recall_page_reports_unknown_timestamp_and_preserves_compatibility():
     assert page.items[0].degradation_reasons == ("freshness_unavailable",)
 
 
-def test_recall_page_explains_missing_query_embedding():
+def test_recall_page_explains_lexical_fallback_when_embedding_is_missing():
     conn = _conn()
     page = recall.recall_page(conn, "repair test", embed_fn=lambda _task: None)
 
     assert page.results == ()
     assert page.items == ()
-    assert page.degradation_reasons == ("no_query_embedding",)
+    assert page.degradation_reasons == ("embedding_unavailable_lexical_fallback",)

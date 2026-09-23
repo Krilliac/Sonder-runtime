@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import hashlib
 import re
+import subprocess
 import sys
 from argparse import ArgumentParser
 from collections import Counter, defaultdict
@@ -28,9 +29,160 @@ ALLOWED = REQUIRED | {
     "baseline_sha", "verified_sha", "pr", "evidence", "platforms",
     "limitations", "verified_at",
 }
+MAX_LEDGER_LINES = 10_000
+MAX_LEDGER_LINE_LENGTH = 16_384
+MAX_LEDGER_BYTES = 16 * 1024 * 1024
 
 
-def validate() -> list[str]:
+def _parse_spec(text: str) -> dict[str, bool]:
+    spec_rows: dict[str, bool] = {}
+    for line in text.splitlines():
+        match = CHECKBOX_PATTERN.match(line)
+        if match:
+            spec_rows[match.group("id")] = match.group("checked").lower() == "x"
+    return spec_rows
+
+
+def _parse_ledger(text: str) -> dict[str, list[dict[str, object]]]:
+    records: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for raw in text.splitlines():
+        if not raw:
+            continue
+        try:
+            record = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict) and isinstance(record.get("requirement_id"), str):
+            records[record["requirement_id"]].append(record)
+    return records
+
+
+def _resolve_base_ref(base_ref: str) -> tuple[str | None, str | None]:
+    """Resolve a trusted, already-fetched Git ref to an immutable commit."""
+    resolved = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{base_ref}^{{commit}}"],
+        cwd=ROOT, text=True, capture_output=True, check=False,
+    )
+    if resolved.returncode:
+        return None, f"base-ref: cannot resolve {base_ref!r}"
+    return resolved.stdout.strip(), None
+
+
+def _git_text(base_sha: str, path: str) -> tuple[str | None, str | None]:
+    """Read one tracked file from an immutable base commit."""
+    limit = MAX_LEDGER_BYTES if path.endswith("/requirements.jsonl") else 2 * 1024 * 1024
+    size = subprocess.run(
+        ["git", "cat-file", "-s", f"{base_sha}:{path}"],
+        cwd=ROOT, text=True, capture_output=True, check=False, timeout=15,
+    )
+    if size.returncode or not size.stdout.strip().isdigit():
+        return None, f"base-ref: cannot size {path} from {base_sha!r}"
+    if int(size.stdout.strip()) > limit:
+        return None, f"base-ref: {path} exceeds byte ceiling"
+    result = subprocess.run(
+        ["git", "show", f"{base_sha}:{path}"],
+        cwd=ROOT, text=True, capture_output=True, check=False, timeout=15,
+    )
+    if result.returncode:
+        return None, f"base-ref: cannot read {path} from {base_sha!r}"
+    return result.stdout, None
+
+
+def _logical_ledger_lines(text: str) -> list[str]:
+    """Return nonblank JSONL lines without platform newline differences."""
+    return [line for line in text.replace("\r\n", "\n").split("\n") if line]
+
+
+def _append_only_problems(base_ledger: str, current_ledger: str) -> list[str]:
+    """Require every base ledger record to survive in order, byte-for-byte."""
+    base_lines = _logical_ledger_lines(base_ledger)
+    current_lines = _logical_ledger_lines(current_ledger)
+    if len(base_lines) > MAX_LEDGER_LINES or len(current_lines) > MAX_LEDGER_LINES:
+        return ["base-diff: evidence ledger exceeds bounded append-only comparison"]
+    if any(len(line) > MAX_LEDGER_LINE_LENGTH for line in base_lines + current_lines):
+        return ["base-diff: evidence ledger contains an oversized append-only record"]
+    cursor = 0
+    for base_number, base_line in enumerate(base_lines, start=1):
+        while cursor < len(current_lines) and current_lines[cursor] != base_line:
+            cursor += 1
+        if cursor == len(current_lines):
+            return [
+                "base-diff: evidence ledger removed or rewrote pre-existing "
+                f"record at base line {base_number}"
+            ]
+        cursor += 1
+    return []
+
+
+def _base_diff_problems(base_ref: str) -> list[str]:
+    """Require each newly checked ID to add a verified ledger revision."""
+    base_sha, problem = _resolve_base_ref(base_ref)
+    if problem:
+        return [problem]
+    base_spec, problem = _git_text(base_sha, str(SPEC.relative_to(ROOT)).replace("\\", "/"))
+    if problem:
+        return [problem]
+    base_ledger, problem = _git_text(base_sha, str(LEDGER.relative_to(ROOT)).replace("\\", "/"))
+    if problem:
+        return [problem]
+    if LEDGER.stat().st_size > MAX_LEDGER_BYTES:
+        return ["base-diff: current evidence ledger exceeds byte ceiling"]
+    problems = _append_only_problems(base_ledger or "", LEDGER.read_text(encoding="utf-8"))
+    base_checked = _parse_spec(base_spec or "")
+    current_checked = _parse_spec(SPEC.read_text(encoding="utf-8"))
+    newly_checked = sorted(
+        requirement_id for requirement_id, checked in current_checked.items()
+        if checked and not base_checked.get(requirement_id, False)
+    )
+    if not newly_checked:
+        return problems
+
+    base_records = _parse_ledger(base_ledger or "")
+    old_revisions = {
+        requirement_id: max(
+            (row.get("revision", 0) for row in rows if isinstance(row.get("revision"), int)),
+            default=0,
+        )
+        for requirement_id, rows in base_records.items()
+    }
+    diff = subprocess.run(
+        ["git", "diff", "--no-ext-diff", "--unified=0", base_sha, "--", str(LEDGER.relative_to(ROOT))],
+        cwd=ROOT, text=True, capture_output=True, check=False,
+    )
+    if diff.returncode:
+        return [f"base-ref: cannot compare {base_ref!r} with current tree"]
+    added: list[dict[str, object]] = []
+    for line in diff.stdout.splitlines():
+        if not line.startswith("+") or line.startswith("+++"):
+            continue
+        try:
+            record = json.loads(line[1:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            added.append(record)
+
+    for requirement_id in newly_checked:
+        old_revision = old_revisions.get(requirement_id, 0)
+        evidence = [
+            record for record in added
+            if record.get("requirement_id") == requirement_id
+            and record.get("status") == "verified"
+            and isinstance(record.get("revision"), int)
+            and not isinstance(record.get("revision"), bool)
+            and record["revision"] > old_revision
+            and isinstance(record.get("evidence"), list)
+            and bool(record["evidence"])
+        ]
+        if not evidence:
+            problems.append(
+                f"base-diff: newly checked requirement {requirement_id} lacks "
+                "a newly added verified ledger revision with evidence"
+            )
+    return problems
+
+
+def validate(base_ref: str | None = None) -> list[str]:
     problems: list[str] = []
     spec_rows: dict[str, bool] = {}
     all_ids: list[str] = []
@@ -92,11 +244,42 @@ def validate() -> list[str]:
         latest = rows[-1]
         if spec_rows[requirement_id] and latest.get("status") != "verified":
             problems.append(f"spec: checked requirement {requirement_id} is not verified")
+        if not spec_rows[requirement_id] and latest.get("status") == "verified":
+            problems.append(f"spec: verified requirement {requirement_id} is not checked")
         if latest.get("status") == "verified":
             for key in ("baseline_sha", "verified_sha", "evidence"):
                 if not latest.get(key):
                     problems.append(f"ledger: verified {requirement_id} lacks {key}")
+            evidence = latest.get("evidence")
+            if not isinstance(evidence, list):
+                problems.append(
+                    f"ledger: verified {requirement_id} has invalid evidence path"
+                )
+            else:
+                for item in evidence:
+                    path = item if isinstance(item, str) else (
+                        item.get("path") if isinstance(item, dict) else None
+                    )
+                    if not isinstance(path, str) or not path:
+                        problems.append(
+                            f"ledger: verified {requirement_id} has invalid evidence path"
+                        )
+                    elif (
+                        Path(path).is_absolute()
+                        or Path(path).drive
+                        or ".." in Path(path).parts
+                        or not (ROOT / path).resolve().is_relative_to(ROOT.resolve())
+                    ):
+                        problems.append(
+                            f"ledger: verified {requirement_id} has invalid evidence path"
+                        )
+                    elif not (ROOT / path).is_file():
+                        problems.append(
+                            f"ledger: verified {requirement_id} evidence path is missing: {path}"
+                        )
 
+    if base_ref is not None:
+        problems.extend(_base_diff_problems(base_ref))
     return problems
 
 
@@ -214,6 +397,10 @@ def main() -> int:
         "--write-generated", action="store_true",
         help="write deterministic generated requirement-status projections",
     )
+    parser.add_argument(
+        "--base-ref",
+        help="in pull-request validation, require newly checked IDs to add verified ledger evidence",
+    )
     args = parser.parse_args()
     if args.write_generated:
         payload, markdown = generated_status()
@@ -223,7 +410,7 @@ def main() -> int:
         )
         STATUS_MD.write_text(markdown, encoding="utf-8")
         return 0
-    problems = validate() + generated_problems()
+    problems = validate(args.base_ref) + generated_problems()
     for problem in problems:
         print(problem)
     if problems:

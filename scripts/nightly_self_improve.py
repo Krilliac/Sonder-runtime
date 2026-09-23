@@ -15,6 +15,9 @@ One bounded pass over everything Sonder's learning loop can do unattended:
                VitisAI execution provider for this NPU driver; a flip from
                absent to present is logged loudly (it means real NPU
                execution is one reconnect away).
+8. backend-attest — optionally run bounded, local-only backend capability
+                    probes. This stage is disabled unless ``--backend-attest``
+                    or ``SONDER_NIGHTLY_BACKEND_ATTEST=1`` is set.
 
 ``--rounds N`` repeats the exercise-and-groom cycle N times, which is how
 this is meant to run overnight: several waves with grooming between them
@@ -266,6 +269,86 @@ def _first_line(text):
     return str(text or "").strip().splitlines()[0] if text else ""
 
 
+def _backend_attestation_enabled(args) -> bool:
+    """Return whether the operator explicitly enabled nightly attestation."""
+    if bool(getattr(args, "backend_attest", False)):
+        return True
+    return os.environ.get("SONDER_NIGHTLY_BACKEND_ATTEST", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _run_backend_attestation(args, sonder_paths):
+    """Probe an explicitly local route and persist typed outcomes only."""
+    from urllib.parse import urlsplit
+
+    from scripts import backend_attest
+    from sonder_runtime.adapters.inference.openai_compat_gateway import (
+        OpenAICompatibleConfig,
+        OpenAICompatibleGateway,
+    )
+
+    base_url = str(
+        getattr(args, "backend_attest_base_url", "")
+        or os.environ.get("SONDER_OPENAI_BASE_URL", "")
+    ).strip()
+    model = str(
+        getattr(args, "backend_attest_model", "")
+        or os.environ.get("SONDER_OPENAI_MODEL", "")
+    ).strip()
+    if not base_url or not model:
+        raise RuntimeError(
+            "backend attestation requires SONDER_OPENAI_BASE_URL and "
+            "SONDER_OPENAI_MODEL (or nightly CLI overrides)"
+        )
+    try:
+        parsed = urlsplit(base_url)
+        host = parsed.hostname
+    except ValueError as exc:
+        raise RuntimeError("backend attestation endpoint is invalid") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not host
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or host.lower() not in {"127.0.0.1", "localhost", "::1"}
+    ):
+        raise RuntimeError("nightly backend attestation requires a loopback HTTP(S) endpoint")
+    timeout = float(getattr(args, "backend_attest_timeout", 30.0) or 30.0)
+    if not 0.0 < timeout <= 300.0:
+        raise RuntimeError("backend attestation timeout must be between 0 and 300 seconds")
+    evidence = getattr(args, "backend_attest_evidence", "") or sonder_paths.state_path(
+        "backend-capabilities.json"
+    )
+    result = backend_attest.attest(
+        OpenAICompatibleGateway(OpenAICompatibleConfig(
+            base_url=base_url,
+            api_key=os.environ.get("SONDER_OPENAI_API_KEY", "").strip(),
+            model=model,
+        )),
+        backend="openai-compatible",
+        model=model,
+        evidence_path=evidence,
+        timeout_seconds=timeout,
+        cloud_allowed=False,
+    )
+    failed = result.get("failed") or []
+    if failed:
+        reasons = result.get("reasons") or {}
+        raise RuntimeError(
+            "backend capability failure: %s"
+            % ", ".join("%s=%s" % (name, reasons.get(name, "failed")) for name in failed)
+        )
+    passed = result.get("passed") or []
+    return "local model=%s passed=%s evidence=%s" % (
+        model,
+        ",".join(str(value) for value in passed) or "none",
+        str(evidence),
+    )
+
+
 def _pid_state(pid: int) -> str:
     """Inspect a lock owner without sending a signal on Windows."""
     if os.name == "nt":
@@ -430,6 +513,15 @@ def _run_locked(args, log, sonder_paths):
         _stage(log, "selfmod", selfmod_cycle, critical_failures)
     else:
         log("[selfmod] SKIPPED: configured code model is not ready")
+    if _backend_attestation_enabled(args):
+        _stage(
+            log,
+            "backend-attestation",
+            lambda: _run_backend_attestation(args, sonder_paths),
+            critical_failures,
+        )
+    else:
+        log("[backend-attestation] SKIPPED: explicit local opt-in not set")
     _stage(log, "winml-vitisai-check", lambda: _winml_vitisai_check(log))
 
     if critical_failures:
@@ -446,6 +538,14 @@ def main() -> int:
     parser.add_argument("--rounds", type=int, default=1,
                         help="repeat the exercise-and-groom cycle N times")
     parser.add_argument("--skip-campaign", action="store_true")
+    parser.add_argument(
+        "--backend-attest", action="store_true",
+        help="run bounded capability probes against the configured loopback endpoint",
+    )
+    parser.add_argument("--backend-attest-base-url", default="")
+    parser.add_argument("--backend-attest-model", default="")
+    parser.add_argument("--backend-attest-evidence", default="")
+    parser.add_argument("--backend-attest-timeout", type=float, default=30.0)
     parser.add_argument("--preflight", action="store_true",
                         help="validate checkout and provider binding without touching state")
     args = parser.parse_args()

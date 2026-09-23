@@ -298,6 +298,15 @@ class LaneTransaction:
         ).fetchall()
         return [(r[0], json.loads(r[1])) for r in rows]
 
+    def active_count(self, principal):
+        """Count every owned lane, including those beyond a history page."""
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM agent_lanes WHERE principal=? "
+            "AND json_extract(data, '$.owner') IS NOT NULL "
+            "AND json_extract(data, '$.owner') != ''",
+            (principal,),
+        ).fetchone()[0]
+
     def all_lanes(self):
         rows = self.conn.execute(
             "SELECT data FROM agent_lanes ORDER BY position LIMIT 10001"
@@ -924,3 +933,36 @@ class SQLiteAgentLaneStore:
             page.append(event)
             size += event_size
         return page, len(rows) > len(page)
+
+    def event(self, lane_id, sequence):
+        """Read one immutable lane event by its durable sequence."""
+        with self._connection_scope() as conn:
+            row = conn.execute(
+                "SELECT sequence,event_id,event_type,payload FROM agent_lane_events "
+                "WHERE lane_id=? AND sequence=?",
+                (lane_id, sequence),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "sequence": row[0],
+            "event_id": row[1],
+            "event_type": row[2],
+            "payload": json.loads(row[3]),
+        }
+
+    def tail_events(self, lane_id, limit=256):
+        """Read the newest bounded lane events in ascending sequence order."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise ValueError("lane tail limit is out of bounds")
+        with self._connection_scope() as conn:
+            rows = conn.execute(
+                "SELECT sequence,event_id,event_type,payload FROM agent_lane_events "
+                "WHERE lane_id=? ORDER BY sequence DESC LIMIT ?",
+                (lane_id, limit),
+            ).fetchall()
+        return [
+            {"sequence": row[0], "event_id": row[1], "event_type": row[2],
+             "payload": json.loads(row[3])}
+            for row in reversed(rows)
+        ]
