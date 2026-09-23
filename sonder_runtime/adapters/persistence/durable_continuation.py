@@ -374,6 +374,24 @@ class SQLiteDurableContinuationRepository:
         with self._connect() as connection:
             return self._select(connection, child_id)
 
+    @_storage_read
+    def get_active_by_key(self, parent_id: str, key: str, namespace: str) -> DurableChildSession | None:
+        if not isinstance(parent_id, str) or not parent_id.strip() or not isinstance(key, str) or not key.strip():
+            raise InvalidSubagentRequest("parent_id and key are required")
+        column = {"resume": "resume_key", "idempotency": "idempotency_key"}.get(namespace)
+        if column is None:
+            raise InvalidSubagentRequest("key namespace must be resume or idempotency")
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT child_id,parent_id,ancestors_json,prompt,budget_json,metadata_json,status,"
+                "checkpoint_sequence,checkpoint_state_json,checkpoint_cursor,revision,usage_json,result_json,"
+                "recovery_required,cancellation_requested,cancellation_reason,resume_key,idempotency_key "
+                f"FROM durable_child_session WHERE parent_id=? AND {column}=? "
+                "AND status IN (?,?,?) ORDER BY child_id LIMIT 1",
+                (parent_id, key, SubagentStatus.CREATED.value, SubagentStatus.QUEUED.value, SubagentStatus.RUNNING.value),
+            ).fetchone()
+        return self._row(row) if row else None
+
     def _capacity(self, connection, extra=0):
         count, size = connection.execute(
             "SELECT COUNT(*),COALESCE(SUM(length(payload)),0) FROM continuation_intent"

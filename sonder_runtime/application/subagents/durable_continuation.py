@@ -45,6 +45,7 @@ class DurableContinuationRepository(Protocol):
 
     def create(self, session: DurableChildSession) -> DurableChildSession: ...
     def get(self, child_id: str) -> DurableChildSession | None: ...
+    def get_active_by_key(self, parent_id: str, key: str, namespace: str) -> DurableChildSession | None: ...
     def save_checkpoint(self, checkpoint: ContinuableCheckpoint, *, expected_sequence: int) -> DurableChildSession | None: ...
     def update(self, child_id: str, *, status: SubagentStatus, expected_revision: int | None = None,
                usage: SubagentUsage | None = None, result: SubagentResult | None = None,
@@ -106,6 +107,7 @@ class DurableContinuationService:
         self._threads: dict[str, Thread] = {}
         self._lock = Lock()
         self._spawn_lock = Lock()
+        self._contexts: dict[str, OperationContext] = {}
         self._admitted_roots: dict[str, int] = {}
         self._storage_failures: dict[str, ContinuationStorageFailure] = {}
 
@@ -170,14 +172,34 @@ class DurableContinuationService:
         request = SubagentRequest(request.parent_id, request.prompt, request.budget, child_id, request.metadata, request.resume_key, request.idempotency_key)
         with self._spawn_lock:
             existing = self._repository.get(child_id)
+            if existing is None:
+                lookup = getattr(self._repository, "get_active_by_key", None)
+                if callable(lookup):
+                    for key, namespace in ((request.resume_key, "resume"), (request.idempotency_key, "idempotency")):
+                        if key:
+                            existing = lookup(request.parent_id, key, namespace)
+                            if existing is not None:
+                                break
             if existing is not None and existing.status in {SubagentStatus.CREATED, SubagentStatus.QUEUED, SubagentStatus.RUNNING}:
-                if (not request.resume_key or not request.idempotency_key
-                        or existing.request != request):
+                same_scope = (
+                    existing.request.parent_id == request.parent_id
+                    and existing.request.prompt == request.prompt
+                    and existing.request.budget == request.budget
+                    and existing.request.metadata == request.metadata
+                    and existing.request.resume_key == request.resume_key
+                    and existing.request.idempotency_key == request.idempotency_key
+                )
+                if (not request.resume_key or not request.idempotency_key or not same_scope):
                     raise InvalidSubagentRequest("active child identity or scope does not match requested delegation")
+                existing_child_id = existing.request.child_id
                 with self._lock:
-                    thread = self._threads.get(child_id)
+                    thread = self._threads.get(existing_child_id)
                 if thread is not None and thread.is_alive():
-                    return _Handle(self, child_id, request.parent_id)
+                    with self._lock:
+                        original_context = self._contexts.get(existing_child_id)
+                    if original_context is None or not self._compatible_context(original_context, context):
+                        raise InvalidSubagentRequest("active child operation scope is incompatible")
+                    return _Handle(self, existing_child_id, request.parent_id)
                 raise InvalidSubagentRequest("active child requires recover/resume after restart")
             parent = self._repository.get(request.parent_id)
             # A provider root is an admission anchor whose own id is already the
@@ -315,8 +337,26 @@ class DurableContinuationService:
             self._controls[child_id] = control
             thread = owned_runtime_thread(target=self._run, args=(child_id, context, runner, control, record.lineage.chain[0]), daemon=True)
             self._threads[child_id] = thread
+        with self._lock:
+            self._contexts[child_id] = context
         thread.start()
         return _Handle(self, child_id, record.request.parent_id)
+
+    @staticmethod
+    def _compatible_context(original: OperationContext, current: OperationContext) -> bool:
+        if (current.expired or original.expired
+                or getattr(current.cancellation, "cancelled", False)
+                or getattr(original.cancellation, "cancelled", False)):
+            return False
+        for name in ("principal_id", "auth_level", "source", "cloud_allowed", "remote_ollama_allowed", "session_id"):
+            if getattr(original, name, None) != getattr(current, name, None):
+                return False
+        if tuple(original.workspace_roots) != tuple(current.workspace_roots):
+            return False
+        old_deadline, new_deadline = original.deadline_monotonic, current.deadline_monotonic
+        if old_deadline is None:
+            return new_deadline is None
+        return new_deadline is None or new_deadline >= old_deadline
 
     def _run(self, child_id, context, runner, control, root_id):
         try:
@@ -326,6 +366,8 @@ class DurableContinuationService:
             control._event.set()
         finally:
             self._release(root_id)
+            with self._lock:
+                self._contexts.pop(child_id, None)
 
     def _run_body(self, child_id: str, context: OperationContext, runner: Runner, control: DurableCancellation) -> None:
         record = self._require(child_id)
