@@ -516,9 +516,9 @@
     },
     {
       "checked": false,
-      "claim": "Stable prefix manifests and cache keys are composed from canonical retained context records.",
+      "claim": "The provider-neutral prefix manifest/cache contract and local Ollama telemetry are implemented, but live Sonder consumption is not proved.",
       "requirement_id": "CTX-009",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "5c3fdb54855d43c09da565636b68284816a64fccf412f366ba3d597f9c7b8e84",
+    "ledger_sha256": "c48dd2fcf0714c2a656be564c2f9dd52de576a81c273da36fa8de97a401d32dc",
     "spec_sha256": "1aaaccdccb6f4884941c478905df25ef32f849d750e939f528be7db16554bf3c"
   }
 }

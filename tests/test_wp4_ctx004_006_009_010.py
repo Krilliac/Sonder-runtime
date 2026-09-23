@@ -40,11 +40,25 @@ def test_last_good_snapshot_rejects_incomplete_refresh_and_isolated_mutation():
 
 def test_prefix_manifest_and_cache_key_are_stable_with_hit_write_metrics():
     cache = PrefixManifestCache()
-    rows = [record("rules", "rules", ordinal=4, stable=True), record("schema", "schema", ordinal=1, stable=True)]
-    first = cache.resolve(rows, version="v2")
-    second = cache.resolve(list(reversed(rows)), version="v2")
+    rows = [
+        record("rules", "rules", ordinal=4, stable=True, section="project_rules"),
+        record("schema", "schema", ordinal=1, stable=True, section="tool_schemas"),
+        record("skill", "skill", ordinal=2, stable=True, section="skill_catalog"),
+    ]
+    identity = {
+        "model": "model-a",
+        "tokenizer": "tok-1",
+        "template": "chat-v2",
+        "system_prefix": "system",
+        "visible_tool_schemas": {"read": {"type": "object"}},
+        "project_policy": {"network": "deny"},
+    }
+    first = cache.resolve(rows, version="v2", **identity)
+    second = cache.resolve(list(reversed(rows)), version="v2", **identity)
     assert first.cache_key == second.cache_key
-    assert [item.item_id for item in first.sections] == ["rules", "schema"]
+    assert [item.section for item in first.sections] == [
+        "project_rules", "skill_catalog", "tool_schemas"
+    ]
     assert (cache.writes, cache.hits) == (1, 1)
 
 
