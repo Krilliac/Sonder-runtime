@@ -222,6 +222,7 @@ def build_application(
             # must not be translated through the mutable process environment.
             runtime_paths.configure_home(config.state.home)
         ollama_endpoint.configure_typed_endpoint(config.ollama.url)
+        ollama_endpoint.configure_typed_ca_bundle(config.ollama.ca_bundle)
         from ..adapters.inference import ollama_pool
         logger.info(f"ollama pool configured, workers={len(config.ollama.workers)}, allow_remote={config.ollama.allow_remote}")
         logger.debug(f"configuring ollama pool: workers={len(config.ollama.workers)}, allow_remote={config.ollama.allow_remote}")

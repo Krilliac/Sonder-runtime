@@ -175,6 +175,7 @@ class OllamaConfig:
     worker_capability_probe_parallelism: int = 4
     worker_capability_probe_batch_size: int = 32
     worker_status_page_size: int = 32
+    ca_bundle: str = ""
 
 
 @dataclass(frozen=True)
@@ -1145,6 +1146,8 @@ def _apply_environment(
                 if value.strip()
             ),
         )
+    if env.get("SONDER_OLLAMA_CA_BUNDLE", "").strip():
+        ollama = replace(ollama, ca_bundle=env["SONDER_OLLAMA_CA_BUNDLE"].strip())
     ollama = replace(
         ollama,
         worker_pool_max_workers=_env_int(
@@ -1482,6 +1485,13 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             "[ollama].url remote Ollama must use https so prompts and "
             "embeddings are protected in transit"
         )
+
+    if config.ollama.ca_bundle:
+        ca_path = Path(config.ollama.ca_bundle).expanduser()
+        if not ca_path.is_absolute():
+            errors.append("[ollama].ca_bundle must be an absolute path")
+        elif not ca_path.is_file():
+            errors.append("[ollama].ca_bundle must name an existing regular file")
 
     canonical_primary = _canonical_ollama_origin(config.ollama.url)
     canonical_workers: list[str] = []
@@ -1888,6 +1898,8 @@ def load_config(
     _validate(config, errors)
     if errors:
         raise ConfigError(errors)
+    if config.ollama.ca_bundle:
+        private_source_paths.append(str(Path(config.ollama.ca_bundle).resolve()))
     if config.app_control.catalog_file:
         private_source_paths.append(str(Path(config.app_control.catalog_file).resolve()))
     if config.child_storage.binding_file:
