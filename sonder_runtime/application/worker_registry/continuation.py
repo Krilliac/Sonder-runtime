@@ -10,6 +10,8 @@ started; a different owner or launch cannot claim it.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import os
+import platform
 
 from sonder_runtime.application.ports.continuation_records import (
     ChildSessionLineage,
@@ -35,6 +37,7 @@ from sonder_runtime.application.ports.worker_registry import (
 from sonder_runtime.application.subagents.durable_continuation import (
     DurableContinuationRepository,
 )
+from sonder_runtime.application.owner_process import recorded_owner_is_dead
 
 
 _RESERVATION_MARKER = "worker_registry_admitted"
@@ -119,29 +122,86 @@ def _status(value: SubagentStatus) -> WorkerStatus:
 
 
 class ContinuationWorkerRegistry(WorkerRegistry):
-    """Expose worker metadata while retaining one durable source of truth."""
+    """Expose admission/evidence over one durable child-session authority.
 
-    def __init__(self, repository: DurableContinuationRepository, *, owner_nonce: str = "") -> None:
+    ``DurableContinuationService`` remains the only owner of start, progress,
+    retry, resume and terminal result transitions.  The lifecycle methods
+    required by the legacy registry protocol therefore fail closed here; this
+    adapter intentionally narrows that protocol to ``admit``, ``get`` and
+    ``record_verification`` instead of maintaining a competing state machine.
+    """
+
+    def __init__(
+        self,
+        repository: DurableContinuationRepository,
+        *,
+        owner_nonce: str = "",
+        owner_pid: int | None = None,
+        owner_host: str = "",
+    ) -> None:
         self._repository = repository
         self._owner_nonce = owner_nonce.strip()
+        self._owner_pid = os.getpid() if owner_pid is None else owner_pid
+        self._owner_host = owner_host or platform.node()
 
     @property
     def owner_nonce(self) -> str:
         return self._owner_nonce
 
+    @property
+    def owner_pid(self) -> int:
+        return self._owner_pid
+
+    @property
+    def owner_host(self) -> str:
+        return self._owner_host
+
     def admit(self, launch: WorkerLaunch) -> WorkerRecord:
         request = _request_for(launch)
-        if self._owner_nonce and dict(request.metadata).get("owner_nonce") != self._owner_nonce:
-            raise WorkerRegistryError("worker launch owner nonce does not match this provider")
         existing = self._repository.get(launch.worker_id)
         if existing is None:
             for key, namespace in ((launch.resume_key, "resume"), (launch.idempotency_key, "idempotency")):
                 existing = self._repository.get_active_by_key(launch.parent_id, key, namespace)
                 if existing is not None:
                     break
+        if existing is None and self._owner_nonce and dict(request.metadata).get("owner_nonce") != self._owner_nonce:
+            raise WorkerRegistryError("worker launch owner nonce does not match this provider")
         if existing is not None:
             record = self._project(existing)
             if record.launch != launch:
+                current_metadata = dict(record.launch.metadata)
+                requested_metadata = dict(launch.metadata)
+                owner_only_difference = (
+                    record.launch.worker_id == launch.worker_id
+                    and record.launch.parent_id == launch.parent_id
+                    and record.launch.role == launch.role
+                    and record.launch.model == launch.model
+                    and record.launch.backend == launch.backend
+                    and record.launch.effort == launch.effort
+                    and record.launch.scope == launch.scope
+                    and record.launch.allowed_tools == launch.allowed_tools
+                    and record.launch.budgets == launch.budgets
+                    and record.launch.retry_policy == launch.retry_policy
+                    and record.launch.resume_key == launch.resume_key
+                    and record.launch.idempotency_key == launch.idempotency_key
+                    and record.launch.prompt == launch.prompt
+                    and record.launch.owner_id == launch.owner_id
+                    and all(
+                        current_metadata.get(key) == requested_metadata.get(key)
+                        for key in set(current_metadata) | set(requested_metadata)
+                        if key not in {"owner_nonce", "owner_pid", "owner_host"}
+                    )
+                )
+                owner_dead = (
+                    owner_only_difference
+                    and current_metadata.get("owner_nonce") != self._owner_nonce
+                    and recorded_owner_is_dead(current_metadata)
+                )
+                if owner_dead:
+                    # Return the persisted metadata, including its original
+                    # nonce, so the provider can consume it after independently
+                    # proving the old owner process is gone.
+                    return record
                 if record.status in {WorkerStatus.QUEUED, WorkerStatus.RUNNING}:
                     raise DuplicateWorkerError("active worker identity or scope already belongs to another launch")
                 raise WorkerRegistryError("worker identity is already bound to a different terminal launch")
@@ -171,16 +231,9 @@ class ContinuationWorkerRegistry(WorkerRegistry):
         return None if record is None else self._project(record)
 
     def start(self, worker_id: str, *, expected_revision: int) -> WorkerRecord | None:
-        current = self._repository.get(worker_id)
-        if current is None or current.revision != expected_revision:
-            return None
-        updated = self._repository.update(
-            worker_id,
-            status=SubagentStatus.RUNNING,
-            expected_revision=expected_revision,
-            recovery_required=False,
+        raise WorkerRegistryError(
+            "worker lifecycle is owned by DurableContinuationService; use spawn or explicit resume"
         )
-        return None if updated is None else self._project(updated)
 
     def progress(self, worker_id: str, progress: Mapping[str, object], *, expected_revision: int) -> WorkerRecord | None:
         # Checkpoint state is owned by the continuation service.  Accepting a
@@ -196,30 +249,31 @@ class ContinuationWorkerRegistry(WorkerRegistry):
         error: str = "",
         expected_revision: int,
     ) -> WorkerRecord | None:
-        if status not in {WorkerStatus.SUCCEEDED, WorkerStatus.FAILED, WorkerStatus.INTERRUPTED}:
-            raise WorkerRegistryError("finish requires a terminal worker status")
-        current = self._repository.get(worker_id)
-        if current is None or current.revision != expected_revision:
-            return None
-        result_status = {
-            WorkerStatus.SUCCEEDED: SubagentStatus.SUCCEEDED,
-            WorkerStatus.FAILED: SubagentStatus.FAILED,
-            WorkerStatus.INTERRUPTED: SubagentStatus.CANCELLED,
-        }[status]
-        result = SubagentResult(
-            worker_id,
-            current.request.parent_id,
-            result_status,
-            error=None if result_status is SubagentStatus.SUCCEEDED else SubagentError("worker_finished", error or status.value),
-            usage=current.usage,
+        raise WorkerRegistryError(
+            "worker lifecycle is owned by DurableContinuationService; use integrate for verification"
         )
+
+    def record_verification(
+        self,
+        worker_id: str,
+        verification: Mapping[str, object],
+        *,
+        expected_revision: int,
+    ) -> WorkerRecord | None:
+        current = self._repository.get(worker_id)
+        if current is None or current.revision != expected_revision or current.status not in {
+            SubagentStatus.SUCCEEDED,
+            SubagentStatus.FAILED,
+            SubagentStatus.CANCELLED,
+            SubagentStatus.TIMED_OUT,
+        }:
+            return None
         updated = self._repository.update(
             worker_id,
-            status=result_status,
+            status=current.status,
             expected_revision=expected_revision,
-            result=result,
             usage=current.usage,
-            recovery_required=False,
+            verification=verification,
         )
         return None if updated is None else self._project(updated)
 
@@ -249,8 +303,8 @@ class ContinuationWorkerRegistry(WorkerRegistry):
         progress = {}
         if session.checkpoint is not None:
             progress = {"sequence": session.checkpoint.sequence, "cursor": session.checkpoint.cursor or ""}
-        verification = {}
-        if session.result is not None:
+        verification = dict(session.terminal_verification)
+        if not verification and session.result is not None:
             verification = {"status": session.result.status.value, "usage": {"steps": session.result.usage.steps}}
         error = "" if session.result is None or session.result.error is None else session.result.error.message
         return WorkerRecord(

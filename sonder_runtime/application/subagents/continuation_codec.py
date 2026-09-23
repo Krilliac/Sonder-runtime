@@ -25,6 +25,7 @@ def session_from_data(value):
     from ..ports.continuation_records import DurableChildSession, ChildSessionLineage
 
     value = dict(value)
+    value.setdefault("terminal_verification", {})
     request = dict(value["request"])
     lineage = dict(value["lineage"])
     request["budget"] = SubagentBudget(**request["budget"])

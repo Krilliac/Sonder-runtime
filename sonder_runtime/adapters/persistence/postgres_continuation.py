@@ -531,6 +531,7 @@ class PostgreSQLDurableContinuationRepository:
         usage=None,
         result=None,
         recovery_required=None,
+        verification=None,
     ):
         return self.mutate(
             prepare_call(
@@ -541,6 +542,7 @@ class PostgreSQLDurableContinuationRepository:
                 usage=usage,
                 result=result,
                 recovery_required=recovery_required,
+                verification=verification,
             )
         ).value
 
@@ -677,7 +679,9 @@ def _apply(kind, current, args, kwargs):
         values = {
             key: value
             for key, value in kwargs.items()
-            if key != "expected_revision" and value is not None
+            if key not in {"expected_revision", "verification"} and value is not None
         }
+        if kwargs.get("verification") is not None:
+            values["terminal_verification"] = kwargs["verification"]
         result = replace(current, **values, revision=current.revision + 1)
     return result, result

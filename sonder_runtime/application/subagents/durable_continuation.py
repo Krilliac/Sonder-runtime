@@ -13,6 +13,8 @@ from sonder_runtime.application.ports.runtime_threads import Thread as owned_run
 from collections.abc import Callable, Mapping
 from threading import Event, Lock, Thread
 from time import monotonic, sleep
+import os
+import platform
 from typing import Protocol
 from uuid import uuid4
 from ..ports.continuation_mutations import (
@@ -28,6 +30,7 @@ from ..ports.subagents import (
 )
 from .continuable import ContinuableCheckpoint
 from sonder_runtime.domain.agents.roles import AgentRole, role_budget
+from sonder_runtime.application.owner_process import recorded_owner_is_dead
 
 
 from ..ports.continuation_records import ChildSessionLineage, DurableChildSession
@@ -49,7 +52,8 @@ class DurableContinuationRepository(Protocol):
     def save_checkpoint(self, checkpoint: ContinuableCheckpoint, *, expected_sequence: int) -> DurableChildSession | None: ...
     def update(self, child_id: str, *, status: SubagentStatus, expected_revision: int | None = None,
                usage: SubagentUsage | None = None, result: SubagentResult | None = None,
-               recovery_required: bool | None = None) -> DurableChildSession | None: ...
+               recovery_required: bool | None = None, metadata: tuple[tuple[str, str], ...] | None = None,
+               verification: Mapping[str, object] | None = None) -> DurableChildSession | None: ...
     def claim_resume(self, child_id: str, *, expected_revision: int) -> DurableChildSession | None:
         """Atomically claim eligible recovery as RUNNING, clearing its old result."""
         ...
@@ -114,10 +118,20 @@ class DurableContinuationService:
         # created it.  This is deliberately process-scoped; restart recovery
         # remains an explicit path and never happens from ``spawn``.
         self._owner_nonce = uuid4().hex
+        self._owner_pid = os.getpid()
+        self._owner_host = platform.node()
 
     @property
     def owner_nonce(self) -> str:
         return self._owner_nonce
+
+    @property
+    def owner_pid(self) -> int:
+        return self._owner_pid
+
+    @property
+    def owner_host(self) -> str:
+        return self._owner_host
 
     def _write(self, method, *args, _settlement_timeout=0.0, **kwargs):
         value = args[0]
@@ -210,11 +224,18 @@ class DurableContinuationService:
                     existing.status is SubagentStatus.CREATED
                     and existing_metadata.get("worker_registry_admitted") == "true"
                 ):
+                    owner_nonce = existing_metadata.get("owner_nonce")
+                    owner_dead = (
+                        owner_nonce
+                        and owner_nonce != self._owner_nonce
+                        and recorded_owner_is_dead(existing_metadata)
+                    )
                     if (
-                        existing_metadata.get("owner_nonce")
-                        and existing_metadata.get("owner_nonce") != self._owner_nonce
+                        owner_nonce
+                        and owner_nonce != self._owner_nonce
+                        and not owner_dead
                     ) or (
-                        not existing_metadata.get("owner_nonce")
+                        not owner_nonce
                         and existing_metadata.get("owner_id") != context.principal_id
                     ):
                         raise InvalidSubagentRequest("worker reservation belongs to another owner")

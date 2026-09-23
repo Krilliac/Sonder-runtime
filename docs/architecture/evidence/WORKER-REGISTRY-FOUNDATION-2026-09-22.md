@@ -17,9 +17,15 @@ effort, workspace scope, tools, budgets, owner, retry policy, and both stable
 keys. SQLite performs the atomic duplicate-key check; the provider performs the
 final budget and lineage admission under its existing CAS state transition.
 
-Reservations carry a process-scoped owner nonce. A different provider process
-cannot consume a reservation through ordinary `spawn`; restart recovery remains
-an explicit recovery operation. The standalone `SQLiteWorkerRegistry` remains
+Reservations carry a process-scoped owner nonce plus host/PID evidence. A
+different provider process cannot consume a reservation while the old owner is
+live or its liveness is unresolved. After a crash, a new owner may reuse only a
+`CREATED` reservation whose recorded process is proved dead; `RUNNING` work
+still requires the existing explicit recovery path. Terminal verification is
+persisted in the child session and projected by the adapter. Start, progress,
+retry, and resume remain owned by `DurableContinuationService`, so this adapter
+does not expose a second lifecycle state machine. The standalone
+`SQLiteWorkerRegistry` remains
 available for its compatibility contract tests, but is not composed into the
 application runtime and is not an independent source of active-worker truth.
 
