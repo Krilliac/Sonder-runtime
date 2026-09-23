@@ -7,12 +7,52 @@ from concurrent.futures import ThreadPoolExecutor as _NativePool
 from dataclasses import dataclass
 import inspect
 import math
-from threading import RLock, Thread as _NativeThread, current_thread
+from threading import Event as _NativeEvent, RLock, Thread as _NativeThread, current_thread
 from time import monotonic
+from typing import Callable
 
 
 class ThreadOwnershipRefused(RuntimeError):
     pass
+
+
+def run_bounded(
+    action: Callable[[], object],
+    timeout: float,
+    *,
+    on_complete: Callable[[], object] | None = None,
+    name: str = "sonder-bounded-call",
+) -> tuple[object | None, BaseException | None, bool]:
+    """Run an untrusted blocking call behind a daemon timeout boundary.
+
+    This is intentionally separate from ``OwnedRuntimeThreads``: a call that
+    cannot be cancelled cannot be owned safely by a pool that must shut down.
+    The caller receives a timeout verdict and late results are discarded; the
+    daemon is allowed to finish without holding a runtime pool or shutdown
+    path open.
+    """
+    if type(timeout) not in (int, float) or timeout <= 0:
+        raise ValueError("bounded call timeout must be positive")
+    result: dict[str, object] = {}
+    finished = _NativeEvent()
+
+    def invoke():
+        try:
+            result["value"] = action()
+        except BaseException as error:
+            result["error"] = error
+        finally:
+            try:
+                if on_complete is not None:
+                    on_complete()
+            finally:
+                finished.set()
+
+    worker = _NativeThread(target=invoke, name=name, daemon=True)
+    worker.start()
+    if not finished.wait(float(timeout)):
+        return None, TimeoutError("bounded call timed out after %.3fs" % float(timeout)), False
+    return result.get("value"), result.get("error"), True
 
 
 @dataclass(frozen=True)
