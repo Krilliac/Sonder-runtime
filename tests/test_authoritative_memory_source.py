@@ -312,6 +312,39 @@ def test_direct_activation_fails_closed_without_publishing_marker(tmp_path):
         connection.close()
 
 
+def test_activation_rejects_foreign_tombstone_only_state(tmp_path):
+    connection = connect(tmp_path / "foreign-tombstone-activation.db")
+    try:
+        connection.execute(
+            "INSERT INTO memory_authoritative_fact_state"
+            "(project,fact_id,source_id,version,tombstoned) VALUES(?,?,?,?,?)",
+            ("repo-a", "gone", "node-b", 2, 1),
+        )
+        connection.commit()
+        with pytest.raises(MemoryReplicationError, match="conflicting authoritative ownership"):
+            SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a").activate(connection)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM memory_authoritative_fact_activation"
+        ).fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_activation_accepts_same_source_tombstone_only_state_with_delete_evidence(tmp_path):
+    path = tmp_path / "same-tombstone-activation.db"
+    connection = connect(path)
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    source.activate(connection)
+    source.add_fact(connection, "gone", "repo-a", "temporary")
+    assert source.delete_fact(connection, "gone", "repo-a") is True
+    source.activate(connection)
+    assert connection.execute(
+        "SELECT source_id FROM memory_authoritative_fact_activation "
+        "WHERE project_scope=?", ("repo-a",)
+    ).fetchone()[0] == "node-a"
+    connection.close()
+
+
 def test_activation_rejects_state_without_matching_journal_evidence(tmp_path):
     path = tmp_path / "missing-journal.db"
     connection = connect(path)

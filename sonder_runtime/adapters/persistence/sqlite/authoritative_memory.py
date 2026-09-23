@@ -133,10 +133,8 @@ def plan_legacy_fact_migration(connection, *, source_id: str, project_scope: str
     # digest or creating any backup in the apply path.
     SQLiteAuthoritativeFactSource(source_id, project_scope=project_scope)
     conflicting_state = connection.execute(
-        "SELECT 1 FROM facts AS fact JOIN memory_authoritative_fact_state AS state "
-        "ON state.project=fact.project AND state.fact_id=fact.id "
-        "WHERE fact.project=? AND (state.source_id<>? OR state.tombstoned<>0) "
-        "LIMIT 1",
+        "SELECT 1 FROM memory_authoritative_fact_state AS state "
+        "WHERE state.project=? AND state.source_id<>? LIMIT 1",
         (project_scope, source_id),
     ).fetchone()
     if conflicting_state is not None:
@@ -144,14 +142,18 @@ def plan_legacy_fact_migration(connection, *, source_id: str, project_scope: str
             "legacy fact migration found conflicting authoritative ownership"
         )
     missing_evidence = connection.execute(
-        "SELECT 1 FROM facts AS fact JOIN memory_authoritative_fact_state AS state "
-        "ON state.project=fact.project AND state.fact_id=fact.id "
-        "WHERE fact.project=? AND state.source_id=? AND state.tombstoned=0 "
-        "AND NOT EXISTS (SELECT 1 FROM memory_replication_log AS journal "
-        "WHERE journal.source_id=state.source_id AND journal.project=fact.project "
-        "AND journal.entity_kind='fact' AND journal.entity_id=fact.id "
-        "AND journal.version=state.version AND journal.operation='upsert') "
-        "LIMIT 1",
+        "SELECT 1 FROM memory_authoritative_fact_state AS state "
+        "LEFT JOIN facts AS fact ON fact.project=state.project "
+        "AND fact.id=state.fact_id WHERE state.project=? AND state.source_id=? "
+        "AND ((state.tombstoned=0 AND (fact.id IS NULL OR NOT EXISTS ("
+        "SELECT 1 FROM memory_replication_log AS journal WHERE journal.source_id=state.source_id "
+        "AND journal.project=state.project AND journal.entity_kind='fact' "
+        "AND journal.entity_id=state.fact_id AND journal.version=state.version "
+        "AND journal.operation='upsert'))) OR (state.tombstoned<>0 AND NOT EXISTS ("
+        "SELECT 1 FROM memory_replication_log AS journal WHERE journal.source_id=state.source_id "
+        "AND journal.project=state.project AND journal.entity_kind='fact' "
+        "AND journal.entity_id=state.fact_id AND journal.version=state.version "
+        "AND journal.operation='delete'))) LIMIT 1",
         (project_scope, source_id),
     ).fetchone()
     if missing_evidence is not None:
@@ -456,20 +458,30 @@ class SQLiteAuthoritativeFactSource:
             raise MemoryReplicationError(
                 "existing project facts require authoritative migration"
             )
+        conflicting_state = connection.execute(
+            "SELECT 1 FROM memory_authoritative_fact_state "
+            "WHERE project=? AND source_id<>? LIMIT 1",
+            (self.project_scope, self.source_id),
+        ).fetchone()
+        if conflicting_state is not None:
+            raise MemoryReplicationError(
+                "existing project facts have conflicting authoritative ownership"
+            )
         if not verify_journal_evidence:
             return
         missing_evidence = connection.execute(
-            "SELECT 1 FROM facts AS fact "
-            "JOIN memory_authoritative_fact_state AS state "
-            "ON state.project=fact.project AND state.fact_id=fact.id "
-            "WHERE fact.project=? AND state.source_id=? AND state.tombstoned=0 "
-            "AND NOT EXISTS ("
-            "SELECT 1 FROM memory_replication_log AS journal "
-            "WHERE journal.source_id=state.source_id "
-            "AND journal.project=fact.project AND journal.entity_kind='fact' "
-            "AND journal.entity_id=fact.id AND journal.version=state.version "
-            "AND journal.operation='upsert'"
-            ") LIMIT 1",
+            "SELECT 1 FROM memory_authoritative_fact_state AS state "
+            "LEFT JOIN facts AS fact ON fact.project=state.project "
+            "AND fact.id=state.fact_id WHERE state.project=? AND state.source_id=? "
+            "AND ((state.tombstoned=0 AND (fact.id IS NULL OR NOT EXISTS ("
+            "SELECT 1 FROM memory_replication_log AS journal WHERE journal.source_id=state.source_id "
+            "AND journal.project=state.project AND journal.entity_kind='fact' "
+            "AND journal.entity_id=state.fact_id AND journal.version=state.version "
+            "AND journal.operation='upsert'))) OR (state.tombstoned<>0 AND NOT EXISTS ("
+            "SELECT 1 FROM memory_replication_log AS journal WHERE journal.source_id=state.source_id "
+            "AND journal.project=state.project AND journal.entity_kind='fact' "
+            "AND journal.entity_id=state.fact_id AND journal.version=state.version "
+            "AND journal.operation='delete'))) LIMIT 1",
             (self.project_scope, self.source_id),
         ).fetchone()
         if missing_evidence is not None:
