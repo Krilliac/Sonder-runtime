@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from datetime import datetime, timezone
 
 import pytest
@@ -30,6 +31,38 @@ def _roster(total: int) -> tuple[str, tuple[str, ...]]:
             for offset in range(total - 1)
         ),
     )
+
+
+def test_hanging_capability_prober_is_bounded_and_fails_closed():
+    entered, release = threading.Event(), threading.Event()
+
+    def stuck(_origin):
+        entered.set()
+        release.wait(5)
+        return {"models": ["code"]}
+
+    pool = OllamaWorkerPool(
+        "http://127.0.0.1:11434",
+        capability_prober=stuck,
+        capability_probe_timeout_seconds=0.05,
+    )
+    started = time.monotonic()
+    pool.refresh_capabilities()
+    elapsed = time.monotonic() - started
+
+    assert entered.wait(1)
+    assert elapsed < 1
+    snapshot = pool.snapshots()[0]
+    assert snapshot.capabilities_stale is True
+    assert snapshot.models == ()
+    assert snapshot.healthy is False
+    assert snapshot.probing is True
+
+    release.set()
+    deadline = time.monotonic() + 1
+    while pool.snapshots()[0].probing and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert pool.snapshots()[0].probing is False
 
 
 @pytest.mark.parametrize("maximum", [16, 64, 256])
