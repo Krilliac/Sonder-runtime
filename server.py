@@ -19801,6 +19801,11 @@ def _agent_turn(
     successful_inspection_results = {}
     repeated_inspection_counts = {}
     failed_call_counts = {}
+    # Exact call signatures catch literal retries, but a model can evade that
+    # fence by changing an otherwise irrelevant path/query on every attempt.
+    # Keep only a small window of host-known failed/empty outcomes so those
+    # semantic retries cannot consume the whole agent budget.
+    semantic_no_progress = collections.deque(maxlen=6)
     # A later unrelated success must not turn a failed required/evidence call
     # into a host-approved completion. Key by the canonical call signature so
     # only a successful retry of that exact host observation can recover it.
@@ -20854,6 +20859,35 @@ def _agent_turn(
                         if validation_covered else "did not validate changed paths",
                     ),
                 )
+        # A successful mutation or a validator that covers the current change
+        # is real progress; discard earlier failed/empty streaks. Classify
+        # only the structured host outcome (failure or empty), never by
+        # parsing model-controlled error prose.
+        semantic_stall = None
+        evidence_progress = (
+            tool_dispatched and tool_ok
+            and tool_name in _AGENT_FILE_EVIDENCE_TOOLS
+            and bool(str(observation).strip())
+        )
+        if mutation_happened or evidence_progress or (
+            tool_name in _WORK_VALIDATION_TOOLS and validation_covered
+        ):
+            semantic_no_progress.clear()
+        else:
+            outcome_class = (
+                "failed" if not tool_ok
+                else "empty" if not str(observation).strip()
+                else ""
+            )
+            if tool_dispatched and outcome_class:
+                semantic_no_progress.append((tool_name, outcome_class, call_signature))
+                matching = [
+                    item for item in semantic_no_progress
+                    if item[0] == tool_name and item[1] == outcome_class
+                ]
+                distinct_signatures = {item[2] for item in matching}
+                if len(matching) >= 4 and len(distinct_signatures) >= 3:
+                    semantic_stall = (tool_name, outcome_class, len(distinct_signatures))
         if host_controller is not None:
             host_controller.observe_host_tool(
                 tool=tool_name, arguments=policy_tool_args,
@@ -20875,6 +20909,14 @@ def _agent_turn(
                 observation_text[:6000],
             )
         )
+        if semantic_stall is not None:
+            stalled_tool, outcome_class, distinct_count = semantic_stall
+            return _early_exit(
+                "ERROR: agent made no semantic progress: %s produced %s outcomes "
+                "across %d distinct calls. Change the recovery strategy or make "
+                "a state-changing call."
+                % (stalled_tool, outcome_class, distinct_count)
+            )
         if abort_observation is not None:
             return _early_exit(
                 "ERROR: required %s failed; no answer was produced from "
