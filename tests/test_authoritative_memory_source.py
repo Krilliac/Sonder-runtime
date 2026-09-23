@@ -275,6 +275,25 @@ def test_live_activation_refuses_existing_unjournaled_scoped_facts(tmp_path):
     try:
         assert [row["id"] for row in facts_for_project(connection, "repo-a")] == ["legacy"]
         assert connection.execute("SELECT COUNT(*) FROM memory_replication_log").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM memory_authoritative_fact_activation"
+        ).fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_direct_activation_fails_closed_without_publishing_marker(tmp_path):
+    path = tmp_path / "activation-gate.db"
+    connection = connect(path)
+    try:
+        from sonder_runtime.adapters import memory_store
+        memory_store.add_fact(connection, "legacy", "repo-a", "requires migration")
+        source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+        with pytest.raises(MemoryReplicationError, match="authoritative migration"):
+            source.activate(connection)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM memory_authoritative_fact_activation"
+        ).fetchone()[0] == 0
     finally:
         connection.close()
 

@@ -356,6 +356,11 @@ class SQLiteAuthoritativeFactSource:
         marker to refuse a journal-bypassing write for this exact project.
         """
         with self._transaction(connection):
+            # Do not publish the fence over legacy rows.  An operator must run
+            # the explicit bounded migration first; leaving the marker absent
+            # keeps a failed activation restartable and avoids claiming that
+            # unjournaled facts are authoritative.
+            self._require_scoped_facts_authoritative(connection)
             self._activate_in_transaction(connection)
 
     def _activate_in_transaction(self, connection) -> None:
