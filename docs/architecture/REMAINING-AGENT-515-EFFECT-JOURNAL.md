@@ -53,6 +53,16 @@ bounded process-wide, and a timed-out provider retains its slot until its
 thread actually exits. This bounds resource use while preserving fail-closed
 behavior when a provider hangs.
 
+Trust boundary: this is a cooperative host-process API, not an in-process
+Python authentication boundary. Any code that can open the effects database
+can construct a second journal with its own verifier registry, or mutate the
+SQLite tables directly; the runtime cannot distinguish that code from trusted
+composition. Supported extensions are launched by `ExtensionHost` in a child
+process over bounded JSON-lines IPC and do not receive the journal object or
+database path. Protection against a same-user process that independently
+discovers and opens the database requires the host OS filesystem/process
+boundary and is outside this module's claim.
+
 The process adapter is exercised at its real worker boundary. A test starts a
 real child process that performs one filesystem mutation, injects a crash after
 launch and before the adapter returns a receipt, then reopens the journal.
