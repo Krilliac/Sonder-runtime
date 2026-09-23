@@ -78,6 +78,100 @@ def test_live_application_composes_authoritative_fact_write_and_restart(tmp_path
         journal.close()
 
 
+def test_live_authority_fences_legacy_fact_helpers_for_the_active_scope(tmp_path):
+    from sonder_runtime.adapters import memory_store
+
+    path = tmp_path / "memory.db"
+    application = build_application(config=_live_replication_config())
+    try:
+        # Entering the real application UoW publishes the authority marker,
+        # even before the first fact write.
+        with application.unit_of_work(db_path=str(path)):
+            pass
+    finally:
+        application.close_providers()
+
+    connection = connect(path)
+    try:
+        with pytest.raises(MemoryReplicationError, match="legacy fact writes"):
+            memory_store.add_fact(connection, "legacy", "repo-a", "bypass")
+        with pytest.raises(MemoryReplicationError, match="legacy fact writes"):
+            memory_store.delete_fact(connection, "legacy", "repo-a")
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("stage", ["fact", "state", "journal", "index"])
+def test_composed_authoritative_fact_stages_roll_back_after_injected_failure(
+    tmp_path, monkeypatch, stage,
+):
+    from sonder_runtime.adapters.persistence.sqlite import authoritative_memory
+
+    path = tmp_path / f"{stage}.db"
+    if stage == "fact":
+        monkeypatch.setattr(
+            authoritative_memory,
+            "_insert_fact_row",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("fact stage failed")
+            ),
+        )
+    elif stage == "state":
+        original = authoritative_memory.SQLiteAuthoritativeFactSource._store_state
+
+        def fail_state(self, connection, record):
+            original(self, connection, record)
+            raise RuntimeError("state stage failed")
+
+        monkeypatch.setattr(
+            authoritative_memory.SQLiteAuthoritativeFactSource,
+            "_store_state",
+            fail_state,
+        )
+    elif stage == "journal":
+        monkeypatch.setattr(
+            authoritative_memory,
+            "append_memory_mutations_in_transaction",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("journal stage failed")
+            ),
+        )
+    else:
+        monkeypatch.setattr(
+            authoritative_memory,
+            "materialize_authoritative_fact_index",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("index stage failed")
+            ),
+        )
+
+    application = build_application(config=_live_replication_config())
+    try:
+        with pytest.raises(RuntimeError, match=f"{stage} stage failed"):
+            with application.unit_of_work(db_path=str(path)) as scope:
+                scope.memory.add_fact("fact-1", "repo-a", "must roll back")
+    finally:
+        application.close_providers()
+
+    connection = connect(path)
+    try:
+        assert facts_for_project(connection, "repo-a") == []
+        for table in (
+            "memory_authoritative_fact_state",
+            "memory_replication_log",
+            "memory_authoritative_entity_index",
+            "memory_authoritative_decision_index",
+        ):
+            assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+        # Activation is durable policy state; only the attempted fact mutation
+        # must disappear on rollback.
+        assert tuple(connection.execute(
+            "SELECT source_id,project_scope FROM memory_authoritative_fact_activation"
+        ).fetchone()) == ("node-a", "repo-a")
+    finally:
+        connection.close()
+
+
 def test_live_activation_refuses_existing_unjournaled_scoped_facts(tmp_path):
     from sonder_runtime.adapters import memory_store
 
@@ -375,11 +469,13 @@ def test_authoritative_fact_uow_rolls_back_source_state_after_later_failure(tmp_
         for table in (
             "memory_authoritative_fact_state",
             "memory_replication_log",
-            "memory_replication_meta",
         ):
             assert connection.execute(
                 f"SELECT COUNT(*) FROM {table}"
             ).fetchone()[0] == 0
+        assert tuple(connection.execute(
+            "SELECT source_id,project_scope FROM memory_authoritative_fact_activation"
+        ).fetchone()) == ("node-a", "repo-a")
     finally:
         connection.close()
 
