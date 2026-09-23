@@ -318,6 +318,7 @@ def test_nightly_prewarm_waits_for_configured_code_model(monkeypatch):
     class FakeServer:
         TIERS = {"code": "local-code"}
         BASE = "http://127.0.0.1:11434"
+        SESSION_NUM_CTX = 8192
         OLLAMA_POOL = types.SimpleNamespace(request=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("remote pool used")))
         calls = 0
 
@@ -329,7 +330,11 @@ def test_nightly_prewarm_waits_for_configured_code_model(monkeypatch):
             @classmethod
             def open_url(cls, request, timeout, allow_remote):
                 FakeServer.calls += 1
-                if request.full_url.endswith("/api/generate"):
+                if request.full_url.endswith("/api/chat"):
+                    import json
+                    payload = json.loads(request.data)
+                    assert payload["messages"][0]["content"]
+                    assert payload["options"]["num_ctx"] == 8192
                     return Response({"done": True})
                 return Response({"models": []} if FakeServer.calls == 1 else {"models": [{"name": "local-code"}]})
 
@@ -338,6 +343,53 @@ def test_nightly_prewarm_waits_for_configured_code_model(monkeypatch):
             return False
 
     assert nightly_self_improve._prewarm_code_model(FakeServer()) == "ready model=local-code"
+
+
+def test_nightly_prewarm_rejects_chat_error_even_when_model_is_resident(monkeypatch):
+    calls = []
+
+    class FakeServer:
+        TIERS = {"code": "local-code"}
+        BASE = "http://127.0.0.1:11434"
+
+        @staticmethod
+        def _is_cloud_model_name(model):
+            return False
+
+    def local_json(_server, path, _payload, _timeout):
+        calls.append(path)
+        if path == "/api/ps":
+            return {"models": [{"name": "local-code"}]}
+        return {"error": "CUDA error", "done": False}
+
+    monkeypatch.setattr(nightly_self_improve, "_local_ollama_json", local_json)
+    with pytest.raises(nightly_self_improve._CodeModelUnavailable, match="chat probe"):
+        nightly_self_improve._prewarm_code_model(FakeServer())
+    assert "/api/chat" in calls
+
+
+def test_skip_campaign_still_prewarms_before_selfmod(monkeypatch):
+    messages = []
+    stages = []
+    monkeypatch.setitem(sys.modules, "server", types.SimpleNamespace())
+    monkeypatch.setattr(nightly_self_improve, "_preflight", lambda: ((), ()))
+    monkeypatch.setattr(nightly_self_improve, "_backend_attestation_enabled", lambda _args: False)
+
+    def stage(_log, name, _action, failures=None):
+        stages.append(name)
+        if name == "code-model-prewarm":
+            failures.append(name)
+            return None
+        if name == "selfmod":
+            pytest.fail("selfmod must not start after a failed chat probe")
+        return "ok"
+
+    monkeypatch.setattr(nightly_self_improve, "_stage", stage)
+    args = types.SimpleNamespace(rounds=1, skip_campaign=True)
+    assert nightly_self_improve._run_locked(args, messages.append, types.SimpleNamespace()) == 1
+    assert "code-model-prewarm" in stages
+    assert "selfmod" not in stages
+    assert any("[selfmod] SKIPPED" in line for line in messages)
 
 
 def test_nightly_prewarm_reports_readiness_failure():
