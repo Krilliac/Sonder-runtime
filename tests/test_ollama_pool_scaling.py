@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+import sonder_runtime.adapters.inference.ollama_pool as ollama_pool_module
 from sonder_runtime.adapters.inference.static_membership import StaticMembershipSource
 from sonder_runtime.application.inference_membership.controller import MembershipController
 from sonder_runtime.platform.config import OllamaConfig
@@ -63,6 +64,39 @@ def test_hanging_capability_prober_is_bounded_and_fails_closed():
     while pool.snapshots()[0].probing and time.monotonic() < deadline:
         time.sleep(0.01)
     assert pool.snapshots()[0].probing is False
+
+
+def test_capability_probe_submission_failure_clears_unsubmitted_marker(monkeypatch):
+    pool = OllamaWorkerPool(
+        "http://127.0.0.1:11434",
+        capability_prober=lambda _origin: {"models": ["code"]},
+    )
+
+    def fail_pool(**_kwargs):
+        raise RuntimeError("synthetic pool setup failure")
+
+    monkeypatch.setattr(ollama_pool_module, "owned_runtime_pool", fail_pool)
+    with pytest.raises(RuntimeError, match="synthetic pool setup failure"):
+        pool.refresh_capabilities()
+
+    assert pool.snapshots()[0].probing is False
+
+
+def test_draining_probe_state_is_retained_until_late_probe_finishes():
+    pool = OllamaWorkerPool(
+        "http://127.0.0.1:11434",
+        capability_prober=lambda _origin: {"models": ["code"]},
+    )
+    state = pool._states[0]
+    state.membership_state = "draining"
+    state.capability_probe_inflight = True
+
+    pool._prune_drained()
+    assert pool.origins == ("http://127.0.0.1:11434",)
+
+    state.capability_probe_inflight = False
+    pool._prune_drained()
+    assert pool.origins == ()
 
 
 @pytest.mark.parametrize("maximum", [16, 64, 256])
