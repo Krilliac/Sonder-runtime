@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from threading import Event, Thread
+import json
 import pytest
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelResponse
@@ -968,7 +969,8 @@ def test_schedule_replays_wakeup_during_worker_terminal_boundary(env):
 
     # This is the notification that used to be lost while the worker was
     # completing its current turn.
-    service._schedule(lane, context)
+    fresh_context = replace(context, correlation_id="fresh-notification")
+    service._schedule(lane, fresh_context)
     assert not submitted
     release.set()
     worker.join(5)
@@ -976,9 +978,66 @@ def test_schedule_replays_wakeup_during_worker_terminal_boundary(env):
     assert len(submitted) == 1
 
     follow_up, follow_up_args = submitted.pop()
+    assert follow_up_args[1].correlation_id == "fresh-notification"
     follow_up(*follow_up_args)
     assert not service._scheduled_lanes
     assert not service._scheduled_dirty
+
+
+def test_failed_wakeup_submission_keeps_latest_context_for_recovery(env):
+    service, _, _, _, context, _ = env
+    lane = spawn(env)["lane"]["id"]
+    fresh = replace(context, correlation_id="newer-admission")
+    submitted = []
+
+    class FailingPool:
+        def submit(self, fn, *args):
+            if submitted:
+                raise OSError("pool temporarily unavailable")
+            submitted.append((fn, args))
+
+    service._pool = FailingPool()
+    service.run_pending = lambda lane_id, worker_context: service._schedule(
+        lane_id, fresh
+    )
+    service._schedule(lane, context)
+    fn, args = submitted[0]
+    fn(*args)
+
+    assert service._capacity_waiters[lane].correlation_id == "newer-admission"
+    assert lane not in service._scheduled_dirty
+
+    recovered = []
+
+    class WorkingPool:
+        def submit(self, fn, *args):
+            recovered.append((fn, args))
+
+    service._pool = WorkingPool()
+    service._done()
+    assert len(recovered) == 1
+    assert recovered[0][1][1].correlation_id == "newer-admission"
+
+
+def test_old_replay_cannot_replace_newer_scheduled_notification(env):
+    service, _, _, _, context, _ = env
+    lane = spawn(env)["lane"]["id"]
+    newer = replace(context, correlation_id="newer-admission")
+    submitted = []
+
+    class Pool:
+        def submit(self, fn, *args):
+            submitted.append((fn, args))
+
+    service._pool = Pool()
+    service._schedule(lane, newer)
+    # The previous worker's replay arrives after the external notification
+    # reserved this lane but before that newer worker starts.
+    service._schedule(lane, context, replay=True)
+
+    assert len(submitted) == 1
+    assert service._scheduled_contexts[lane] is newer
+    assert lane not in service._scheduled_dirty
 
 
 def test_capacity_blocked_lane_is_retried_when_active_slot_releases(env):
@@ -1020,6 +1079,49 @@ def test_capacity_blocked_lane_is_retried_when_active_slot_releases(env):
         tx.save(lane)
     service._done()
     assert len(submitted) == 1
+
+
+def test_capacity_waiter_cleans_stale_context_without_poisoning_done(env):
+    service, _, _, _, context, _ = env
+    lane = spawn(env)["lane"]["id"]
+    service._capacity_waiters[lane] = replace(context, deadline_monotonic=0.0)
+
+    service._done()
+
+    assert lane not in service._capacity_waiters
+
+
+def test_active_lane_count_covers_history_beyond_first_page(env):
+    _, store, _, _, context, _ = env
+    with store.transaction() as tx:
+        for index in range(260):
+            tx.conn.execute(
+                "INSERT INTO agent_lanes(id,principal,parent_session,data) "
+                "VALUES(?,?,?,?)",
+                (f"historical-{index}", context.principal_id, "parent",
+                 json.dumps({"owner": "busy" if index >= 256 else ""})),
+            )
+        assert tx.active_count(context.principal_id) == 4
+        assert sum(bool(row["owner"]) for _, row in tx.lanes(
+            context.principal_id, limit=256,
+        )) == 0
+
+
+def test_capacity_admission_refusal_does_not_fail_another_committed_event(env):
+    service, _, sessions, _, context, _ = env
+    lane = spawn(env)["lane"]["id"]
+    service._capacity_waiters[lane] = context
+    original_schedule = service._schedule
+    service._schedule = lambda *args, **kwargs: (_ for _ in ()).throw(
+        PermissionError("expired managed proof")
+    )
+    sessions.append("other-session", "model.response", {"content": "committed"})
+
+    service._done()
+
+    assert lane not in service._capacity_waiters
+    assert sessions.read_tail("other-session", limit=1)[0].payload["content"] == "committed"
+    service._schedule = original_schedule
 
 
 def test_oversized_provider_body_is_not_persisted_even_with_small_usage(env):
