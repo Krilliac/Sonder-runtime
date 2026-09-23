@@ -33,8 +33,11 @@ def test_history_is_opt_in_and_stores_only_bounded_aggregates(tmp_path, monkeypa
         {"name": "one", "prompt": "PRIVATE PROMPT", "check": "PRIVATE CHECK"},
         {"name": "two", "prompt": "PRIVATE PROMPT 2", "check": "PRIVATE CHECK 2"},
     ])
-    monkeypatch.setattr(eval_retrieval.server, "resolve_sonder_model",
-                        lambda _allow_cloud: "mock-model")
+    resolutions = []
+    def resolve_model(_allow_cloud):
+        resolutions.append(True)
+        return "mock-model"
+    monkeypatch.setattr(eval_retrieval.server, "resolve_sonder_model", resolve_model)
     monkeypatch.setattr(eval_retrieval.promotion_eval, "local_model_digest",
                         lambda model: "a" * 64)
     monkeypatch.setattr(eval_retrieval, "run_task", lambda task, **kwargs: {
@@ -45,11 +48,13 @@ def test_history_is_opt_in_and_stores_only_bounded_aggregates(tmp_path, monkeypa
     history = tmp_path / "history.jsonl"
 
     assert eval_retrieval.main(["eval_retrieval.py", "0", "2"]) == 0
+    assert resolutions == []
     assert not history.exists()
     assert eval_retrieval.main([
         "eval_retrieval.py", "0", "2", "--record-history",
         "--history-path", str(history), "--run-id", "run-001",
     ]) == 0
+    assert resolutions == [True]
     loaded = evaluation_history_store.load_history(history)
     assert len(loaded["records"]) == 2
     assert {(r["identity"]["suite"], r["result"]["passed"])

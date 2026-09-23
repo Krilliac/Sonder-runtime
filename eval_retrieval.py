@@ -225,10 +225,11 @@ def main(argv):
         print("history: NOT recorded (--run-id is required with --record-history)")
         return 2
 
-    model = server.resolve_sonder_model(False)
+    model = None
     model_digest = None
     if args.record_history:
         try:
+            model = server.resolve_sonder_model(False)
             model_digest = promotion_eval.local_model_digest(model)
         except Exception as exc:
             print("history: NOT recorded (model digest unavailable: %s)" % exc)
