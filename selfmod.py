@@ -760,10 +760,21 @@ def begin_testing(run_id):
     return _phase(run_id, {"editing", "interrupted"}, "testing", "testing", "host-controlled validation started")
 
 
-def _record_command(run, kind, command, cwd_path, seconds, expect_failure=False, receipt=None, protected_paths=()):
+def _record_command(
+    run, kind, command, cwd_path, seconds, expect_failure=False, receipt=None,
+    protected_paths=(), low_integrity=None,
+):
     run_id = run["id"]
     isolation_failed = False
-    if os.environ.get("SELFMOD_LOW_INTEGRITY") == "1" and os.name == "nt":
+    # ``low_integrity`` is explicit for unattended candidate checks.  Keep the
+    # environment fallback for older callers and operators that already opt in
+    # through the process environment, but do not make nightly's choice a
+    # process-global side effect.
+    use_low_integrity = (
+        os.environ.get("SELFMOD_LOW_INTEGRITY") == "1"
+        if low_integrity is None else bool(low_integrity)
+    )
+    if use_low_integrity and os.name == "nt":
         from scripts.selfmod_low_integrity import run_isolated
         started = time.monotonic()
         try:
@@ -813,14 +824,20 @@ def record_reproducer_before(run_id, command, timeout=None):
     return _record_command(run, "reproducer_before", command, Path(run["repository_root"]), seconds, expect_failure=True)
 
 
-def record_test(run_id, kind, command, *, cwd=None, timeout=None, protected_paths=()):
+def record_test(
+    run_id, kind, command, *, cwd=None, timeout=None, protected_paths=(),
+    low_integrity=None,
+):
     run = get_run(run_id)
     if run["phase"] != "testing":
         raise RuntimeError("tests may run only in testing phase")
     workspace = candidate_path(run_id)
     cwd_path = workspace if cwd is None else (workspace / _rel(workspace, cwd)).parent
     seconds = min(int(timeout or run["budgets"]["max_test_seconds"]), run["budgets"]["max_test_seconds"])
-    return _record_command(run, kind, command, cwd_path, seconds, protected_paths=protected_paths)
+    return _record_command(
+        run, kind, command, cwd_path, seconds,
+        protected_paths=protected_paths, low_integrity=low_integrity,
+    )
 
 
 SMOKE_RECEIPT_PREFIX = "SELFMOD-SMOKE-RECEIPT"
