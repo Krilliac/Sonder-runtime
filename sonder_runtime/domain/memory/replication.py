@@ -18,7 +18,10 @@ from typing import Mapping
 
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
-_PROJECT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
+# Project scopes may be stable identifiers or canonical workspace paths.  The
+# latter use backslashes on Windows and are already bounded by the same shape
+# and length checks as slash separated scopes.
+_PROJECT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:\\/\\-]{0,255}\Z")
 _KINDS = frozenset({"fact", "interaction", "outcome", "preference", "lesson_decision"})
 _OPERATIONS = frozenset({"upsert", "delete"})
 _MAX_PAYLOAD_BYTES = 64 * 1024
