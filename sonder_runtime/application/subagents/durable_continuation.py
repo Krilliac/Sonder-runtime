@@ -105,6 +105,7 @@ class DurableContinuationService:
         self._controls: dict[str, DurableCancellation] = {}
         self._threads: dict[str, Thread] = {}
         self._lock = Lock()
+        self._spawn_lock = Lock()
         self._admitted_roots: dict[str, int] = {}
         self._storage_failures: dict[str, ContinuationStorageFailure] = {}
 
@@ -167,26 +168,36 @@ class DurableContinuationService:
     def spawn(self, request: SubagentRequest, context: OperationContext, runner: Runner) -> SubagentHandle:
         child_id = request.child_id or f"child-{uuid4().hex}"
         request = SubagentRequest(request.parent_id, request.prompt, request.budget, child_id, request.metadata, request.resume_key, request.idempotency_key)
-        parent = self._repository.get(request.parent_id)
-        # A provider root is an admission anchor whose own id is already the
-        # requested parent; it must not be duplicated in a child's ancestors.
-        # Ordinary parents contribute their completed chain unchanged.
-        parent_is_root = parent is not None and dict(parent.request.metadata).get("provider_root") == "true"
-        lineage = ChildSessionLineage(
-            request.parent_id,
-            () if parent_is_root else (parent.lineage.chain if parent else ()),
-        )
-        self._admit(request, lineage, parent)
-        try:
-            self._write("create", DurableChildSession(request, lineage))
-        except Exception:
-            self._release(lineage.chain[0])
-            raise
-        try:
-            return self._start(child_id, context, runner)
-        except Exception:
-            self._release(lineage.chain[0])
-            raise
+        with self._spawn_lock:
+            existing = self._repository.get(child_id)
+            if existing is not None and existing.status in {SubagentStatus.CREATED, SubagentStatus.QUEUED, SubagentStatus.RUNNING}:
+                if (not request.resume_key or not request.idempotency_key
+                        or existing.request != request):
+                    raise InvalidSubagentRequest("active child identity or scope does not match requested delegation")
+                with self._lock:
+                    thread = self._threads.get(child_id)
+                if thread is not None and thread.is_alive():
+                    return _Handle(self, child_id, request.parent_id)
+                raise InvalidSubagentRequest("active child requires recover/resume after restart")
+            parent = self._repository.get(request.parent_id)
+            # A provider root is an admission anchor whose own id is already the
+            # requested parent; it must not be duplicated in a child's ancestors.
+            parent_is_root = parent is not None and dict(parent.request.metadata).get("provider_root") == "true"
+            lineage = ChildSessionLineage(
+                request.parent_id,
+                () if parent_is_root else (parent.lineage.chain if parent else ()),
+            )
+            self._admit(request, lineage, parent)
+            try:
+                self._write("create", DurableChildSession(request, lineage))
+            except Exception:
+                self._release(lineage.chain[0])
+                raise
+            try:
+                return self._start(child_id, context, runner)
+            except Exception:
+                self._release(lineage.chain[0])
+                raise
 
     def register_root(self, root_id: str, budget: SubagentBudget) -> DurableChildSession:
         """Publish the provider-owned parent required for local children.
