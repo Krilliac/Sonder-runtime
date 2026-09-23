@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run bounded playtest scenarios and optionally prepare GitHub publication."""
+"""Run bounded scenario validation scenarios and optionally prepare GitHub publication."""
 
 from __future__ import annotations
 
@@ -16,15 +16,15 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from sonder_runtime.application.playtester import (  # noqa: E402
+from sonder_runtime.application.scenario_validation import (  # noqa: E402
     EvidenceClass,
     GitHubPublisher,
-    PlaytestRunner,
+    ScenarioValidationRunner,
     Scenario,
     build_publish_plan,
     write_reports,
 )
-from sonder_runtime.adapters.playtester import GhCliAdapter, ProcessAdapter  # noqa: E402
+from sonder_runtime.adapters.scenario_validation import GhCliAdapter, ProcessAdapter  # noqa: E402
 
 
 def _scenarios(args: argparse.Namespace) -> list[Scenario]:
@@ -70,7 +70,7 @@ def _validate_real_pr_state(cwd: str, repository: str, branch: str, expected_sha
             raise RuntimeError(f"git {name} check failed")
         checks[name] = output
     if checks["HEAD"] != expected_sha or checks["branch"] != branch or checks["status"]:
-        raise RuntimeError("working tree changed during playtest or is not clean")
+        raise RuntimeError("working tree changed during scenario validation or is not clean")
     if _remote_repo(checks["origin"]).casefold() != repository.casefold():
         raise RuntimeError("origin repository does not match publication repository")
     remote_fields = checks["remote-head"].split()
@@ -84,7 +84,7 @@ def _validate_issue_state(cwd: str, repository: str, expected_sha: str) -> None:
     status_code, status = _git(cwd, "status", "--porcelain")
     origin_code, origin = _git(cwd, "remote", "get-url", "origin")
     if head_code or status_code or origin_code or head != expected_sha or status:
-        raise RuntimeError("working tree changed during playtest or is not clean")
+        raise RuntimeError("working tree changed during scenario validation or is not clean")
     if _remote_repo(origin).casefold() != repository.casefold():
         raise RuntimeError("origin repository does not match publication repository")
 
@@ -93,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--catalog", help="JSON array of scenarios")
     parser.add_argument("--trusted-local", action="store_true", help="allow commands from a local, operator-trusted catalog")
-    parser.add_argument("--name", default="explicit-playtest")
+    parser.add_argument("--name", default="explicit-scenario-validation")
     parser.add_argument("--claim", default="The adapter command completes successfully")
     parser.add_argument("--evidence-class", default="structural only", choices=[e.value for e in EvidenceClass])
     parser.add_argument("--command", nargs="+", help="argv without flag-prefixed arguments; use --command-json for flags")
@@ -127,8 +127,8 @@ def main(argv: list[str] | None = None) -> int:
     if sha_code or not sha:
         raise RuntimeError("could not resolve tested HEAD SHA")
     repo = args.publish_repo or ""
-    reports = PlaytestRunner(ProcessAdapter(), cwd=args.cwd, max_steps=args.max_steps, max_failures=args.max_failures).run(scenarios, repository=repo, commit_sha=sha)
-    output_path = Path(args.output) if args.output else Path(tempfile.mkdtemp(prefix="sonder-playtest-")) / "evidence.json"
+    reports = ScenarioValidationRunner(ProcessAdapter(), cwd=args.cwd, max_steps=args.max_steps, max_failures=args.max_failures).run(scenarios, repository=repo, commit_sha=sha)
+    output_path = Path(args.output) if args.output else Path(tempfile.mkdtemp(prefix="sonder-scenario-validation-")) / "evidence.json"
     write_reports(output_path, reports)
     output: dict[str, object] = {"reports": [report.as_dict() for report in reports], "output": str(output_path.resolve())}
     if args.publish_repo:
@@ -146,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
             output_inside_worktree = output_path.resolve().is_relative_to(Path(args.cwd).resolve())
             clean = not bool(status) and not output_inside_worktree
             if args.pr and final_branch != args.branch:
-                raise RuntimeError("PR branch changed during playtest")
+                raise RuntimeError("PR branch changed during scenario validation")
             if args.publish:
                 _validate_issue_state(args.cwd, args.publish_repo, report.commit_sha)
                 if args.pr:
