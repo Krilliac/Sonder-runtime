@@ -1553,11 +1553,12 @@ _MODEL_PROMPT_IDENTITY_CACHE_LOCK = threading.Lock()
 def _model_prompt_identity(model):
     """Return stable local prompt identities proven by Ollama model metadata.
 
-    The cache key uses the selected model name.  Ollama's ``/api/show`` exposes
-    the tokenizer family and chat template, but not a portable tokenizer
-    object, so the template identity is a digest of the provider template.
-    Missing or failed metadata remains ``(None, None)`` and disables reusable
-    application prefixes conservatively.
+    Ollama's ``/api/show`` exposes the tokenizer family and chat template, but
+    not a portable tokenizer object, so the template identity is a digest of
+    the provider template. Positive identities are never cached: an operator
+    may replace a model tag in place while retaining its name, and stale
+    identity would make a reusable prefix unsound. Missing metadata is cached
+    briefly to avoid hammering an unavailable provider and remains fail-closed.
     """
     key = str(model or "").strip().casefold()
     if not key or _is_cloud_model_name(model):
@@ -1565,9 +1566,8 @@ def _model_prompt_identity(model):
     now = time.monotonic()
     with _MODEL_PROMPT_IDENTITY_CACHE_LOCK:
         cached = _MODEL_PROMPT_IDENTITY_CACHE.get(key)
-        if cached:
-            ttl = _MODEL_CONTEXT_CACHE_TTL if cached[1] and cached[2] else _MODEL_CONTEXT_CACHE_NEGATIVE_TTL
-            if now - cached[0] < ttl:
+        if cached and not (cached[1] and cached[2]):
+            if now - cached[0] < _MODEL_CONTEXT_CACHE_NEGATIVE_TTL:
                 return cached[1], cached[2]
     tokenizer = template_identity = None
     try:
@@ -1584,8 +1584,9 @@ def _model_prompt_identity(model):
             ).hexdigest()
     except Exception:
         tokenizer = template_identity = None
-    with _MODEL_PROMPT_IDENTITY_CACHE_LOCK:
-        _MODEL_PROMPT_IDENTITY_CACHE[key] = (now, tokenizer, template_identity)
+    if not (tokenizer and template_identity):
+        with _MODEL_PROMPT_IDENTITY_CACHE_LOCK:
+            _MODEL_PROMPT_IDENTITY_CACHE[key] = (now, tokenizer, template_identity)
     return tokenizer, template_identity
 
 
