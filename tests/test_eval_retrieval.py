@@ -3,6 +3,7 @@ Must never call the model -- no GPU/Ollama needed to run this file.
 """
 import eval_retrieval
 import training_tasks
+from sonder_runtime.adapters import evaluation_history_store
 
 
 def test_heldout_pool_has_at_least_ten_tasks():
@@ -25,3 +26,65 @@ def test_heldout_tasks_well_formed():
         names.add(t["name"])
     # also distinct amongst themselves
     assert len(names) == len(eval_retrieval.HELDOUT)
+
+
+def test_history_is_opt_in_and_stores_only_bounded_aggregates(tmp_path, monkeypatch):
+    monkeypatch.setattr(eval_retrieval, "HELDOUT", [
+        {"name": "one", "prompt": "PRIVATE PROMPT", "check": "PRIVATE CHECK"},
+        {"name": "two", "prompt": "PRIVATE PROMPT 2", "check": "PRIVATE CHECK 2"},
+    ])
+    monkeypatch.setattr(eval_retrieval.server, "resolve_sonder_model",
+                        lambda _allow_cloud: "mock-model")
+    monkeypatch.setattr(eval_retrieval, "run_task", lambda task: {
+        "name": task["name"], "retrieval": task["name"] == "one",
+        "baseline": False, "retrieval_detail": "secret response",
+        "baseline_detail": "secret response 2",
+    })
+    history = tmp_path / "history.jsonl"
+
+    assert eval_retrieval.main(["eval_retrieval.py", "0", "2"]) == 0
+    assert not history.exists()
+    assert eval_retrieval.main([
+        "eval_retrieval.py", "0", "2", "--record-history",
+        "--history-path", str(history),
+    ]) == 0
+    loaded = evaluation_history_store.load_history(history)
+    assert len(loaded["records"]) == 2
+    assert {(r["identity"]["suite"], r["result"]["passed"])
+            for r in loaded["records"]} == {
+                ("eval-retrieval:retrieval", 1),
+                ("eval-retrieval:baseline", 0),
+            }
+    raw = history.read_text(encoding="utf-8")
+    assert "PRIVATE PROMPT" not in raw
+    assert "secret response" not in raw
+
+
+def test_history_recording_is_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setattr(eval_retrieval.server, "resolve_sonder_model",
+                        lambda _allow_cloud: "mock-model")
+    results = [{"retrieval": True, "baseline": False}]
+    history = tmp_path / "history.jsonl"
+    first = eval_retrieval._record_history(results, history)
+    second = eval_retrieval._record_history(results, history)
+    assert [r["record_id"] for r in first] == [r["record_id"] for r in second]
+    assert len(evaluation_history_store.load_history(history)["records"]) == 2
+
+
+def test_history_failure_is_reported_as_nonzero(tmp_path, monkeypatch):
+    monkeypatch.setattr(eval_retrieval, "HELDOUT", [
+        {"name": "one", "prompt": "p", "check": "c"},
+    ])
+    monkeypatch.setattr(eval_retrieval.server, "resolve_sonder_model",
+                        lambda _allow_cloud: "mock-model")
+    monkeypatch.setattr(eval_retrieval, "run_task", lambda task: {
+        "name": task["name"], "retrieval": True, "baseline": True,
+        "retrieval_detail": "", "baseline_detail": "",
+    })
+    monkeypatch.setattr(evaluation_history_store, "record_result",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(
+                            OSError("disk full")))
+    assert eval_retrieval.main([
+        "eval_retrieval.py", "--record-history", "--history-path",
+        str(tmp_path / "history.jsonl"),
+    ]) == 2
