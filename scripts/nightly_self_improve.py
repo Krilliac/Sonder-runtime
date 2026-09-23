@@ -217,60 +217,10 @@ def _winml_vitisai_check(log):
     return "VitisAI absent (catalog: %s)" % ", ".join(names or ["none"])
 
 
-def main() -> int:
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--campaign-total", type=int, default=24)
-    parser.add_argument("--repair-total", type=int, default=10)
-    parser.add_argument("--rounds", type=int, default=1,
-                        help="repeat the exercise-and-groom cycle N times")
-    parser.add_argument("--skip-campaign", action="store_true")
-    parser.add_argument("--preflight", action="store_true",
-                        help="validate checkout and provider binding without touching state")
-    args = parser.parse_args()
-
-    if args.preflight:
-        try:
-            rebound, workers_bound = _preflight()
-        except Exception as exc:
-            print("nightly preflight FAILED: %s" % str(exc)[:300])
-            return 1
-        print("nightly preflight ok%s%s" % (
-            ("; workspace paths rehomed: " + ", ".join(rebound)) if rebound else "",
-            ("; Ollama env bound: " + ", ".join(workers_bound)) if workers_bound else "",
-        ))
-        return 0
-
-    import sonder_paths
-
-    log_dir = Path(sonder_paths.state_path("nightly-logs"))
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / (time.strftime("%Y-%m-%d") + ".log")
-    sink = log_path.open("a", encoding="utf-8")
-
-    def log(message):
-        line = "%s %s" % (time.strftime("%H:%M:%S"), message)
-        print(line)
-        sink.write(line + "\n")
-        sink.flush()
-
-    lock = Path(sonder_paths.state_path("nightly.lock"))
-    if not _claim_lock(lock, log):
-        sink.close()
-        return 0
-
+def _run_locked(args, log, sonder_paths):
+    """Run the stages after the caller has acquired the nightly lock."""
     log("=== nightly self-improvement start ===")
-    try:
-        rebound, workers_bound = _preflight()
-    except Exception as exc:
-        log("nightly config binding failed (%s); aborting nightly run" % str(exc)[:120])
-        try:
-            lock.unlink(missing_ok=True)
-        except OSError:
-            log("nightly lock cleanup failed")
-        finally:
-            sink.close()
-        return 1
+    rebound, workers_bound = _preflight()
     if rebound:
         log("workspace config paths rehomed: %s" % ", ".join(rebound))
     if workers_bound:
@@ -345,29 +295,72 @@ def main() -> int:
             result["proposed"], result["skipped"])
     _stage(log, "goal-proposals", goal_proposals)
 
-    # The only stage that changes Sonder's own source. It honours the
-    # configured selfmod mode: under the default "propose" it stops at a
-    # reviewable candidate and waits for /selfmod approve. It refuses to
-    # start on a dirty tree, because selfmod declines to COMMIT a run that
-    # began with uncommitted changes -- such a run could only mutate source
-    # with nothing to review or revert to.
     def selfmod_cycle():
         import nightly_selfmod
         return nightly_selfmod.run(server, log)
-    _stage(log, "selfmod", selfmod_cycle)
-
+    _stage(log, "selfmod", selfmod_cycle, critical_failures)
     _stage(log, "winml-vitisai-check", lambda: _winml_vitisai_check(log))
 
     if critical_failures:
         log("critical stage failures: %s" % ", ".join(critical_failures))
     log("=== nightly self-improvement done ===")
-    try:
-        lock.unlink(missing_ok=True)
-    except OSError:
-        pass
-    sink.close()
     return 1 if critical_failures else 0
 
+
+def main() -> int:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--campaign-total", type=int, default=24)
+    parser.add_argument("--repair-total", type=int, default=10)
+    parser.add_argument("--rounds", type=int, default=1,
+                        help="repeat the exercise-and-groom cycle N times")
+    parser.add_argument("--skip-campaign", action="store_true")
+    parser.add_argument("--preflight", action="store_true",
+                        help="validate checkout and provider binding without touching state")
+    args = parser.parse_args()
+
+    if args.preflight:
+        try:
+            rebound, workers_bound = _preflight()
+        except Exception as exc:
+            print("nightly preflight FAILED: %s" % str(exc)[:300])
+            return 1
+        print("nightly preflight ok%s%s" % (
+            ("; workspace paths rehomed: " + ", ".join(rebound)) if rebound else "",
+            ("; Ollama env bound: " + ", ".join(workers_bound)) if workers_bound else "",
+        ))
+        return 0
+
+    import sonder_paths
+
+    log_dir = Path(sonder_paths.state_path("nightly-logs"))
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / (time.strftime("%Y-%m-%d") + ".log")
+    sink = log_path.open("a", encoding="utf-8")
+
+    def log(message):
+        line = "%s %s" % (time.strftime("%H:%M:%S"), message)
+        print(line)
+        sink.write(line + "\n")
+        sink.flush()
+
+    lock = Path(sonder_paths.state_path("nightly.lock"))
+    if not _claim_lock(lock, log):
+        sink.close()
+        return 0
+
+    try:
+        result = _run_locked(args, log, sonder_paths)
+    except Exception as exc:
+        log("nightly run failed: %s" % str(exc)[:300])
+        result = 1
+    finally:
+        try:
+            lock.unlink(missing_ok=True)
+        except OSError as exc:
+            log("nightly lock cleanup failed: %s" % str(exc)[:120])
+        sink.close()
+    return result
 
 if __name__ == "__main__":
     raise SystemExit(main())
