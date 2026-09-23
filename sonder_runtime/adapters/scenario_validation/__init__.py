@@ -1,4 +1,4 @@
-"""Concrete playtest and GitHub boundary adapters."""
+"""Concrete scenario validation and GitHub boundary adapters."""
 
 from .github_cli import GhCliAdapter
 from .process import ProcessAdapter

@@ -1,4 +1,4 @@
-"""Opt-in GitHub issue/PR publication for playtest evidence."""
+"""Opt-in GitHub issue/PR publication for scenario validation evidence."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from .runner import PlaytestReport, _redact
+from .runner import ScenarioReport, _redact
 
 
 class GitHubAdapter(Protocol):
@@ -34,7 +34,7 @@ class _PublicationLock:
 
     def __init__(self, plan: PublishPlan):
         key = hashlib.sha256((plan.issue_command[plan.issue_command.index("--repo") + 1] + "\0" + plan.marker).encode()).hexdigest()
-        self.path = Path(tempfile.gettempdir()) / ("sonder-playtester-" + key + ".lock")
+        self.path = Path(tempfile.gettempdir()) / ("sonder-scenario-validation-" + key + ".lock")
         self.handle = None
 
     def __enter__(self):
@@ -54,7 +54,7 @@ class _PublicationLock:
             except (OSError, BlockingIOError):
                 if time.monotonic() >= deadline:
                     self.handle.close()
-                    raise RuntimeError("timed out waiting for playtest publication lock")
+                    raise RuntimeError("timed out waiting for scenario validation publication lock")
                 time.sleep(0.05)
 
     def __exit__(self, *_):
@@ -72,7 +72,7 @@ class _PublicationLock:
             self.handle.close()
 
 
-def _body(report: PlaytestReport) -> str:
+def _body(report: ScenarioReport) -> str:
     # Publish a concise, curated summary. Raw adapter output remains local evidence.
     scenario = re.sub(r"[^A-Za-z0-9 ._:/-]", "?", report.scenario)[:120]
     claim = _safe_text(report.claim, 240)
@@ -100,13 +100,13 @@ def _safe_ref(value: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9._:/#%+~-]{1,512}", value)) and "@" not in value and not re.search(r"gh[pousr]_[A-Za-z0-9_]{20,}", value)
 
 
-def build_publish_plan(report: PlaytestReport, *, repository: str, branch: str | None = None, base: str = "main", request_pr: bool = False, clean: bool = False, head_sha: str | None = None) -> PublishPlan:
+def build_publish_plan(report: ScenarioReport, *, repository: str, branch: str | None = None, base: str = "main", request_pr: bool = False, clean: bool = False, head_sha: str | None = None) -> PublishPlan:
     if not report.marker or not report.commit_sha:
         raise ValueError("issue/PR publication requires an exact commit SHA and marker")
     if request_pr and (not report.passed or not clean or not branch or branch == base or head_sha != report.commit_sha):
         raise ValueError("PR publication requires a clean non-base branch at the report SHA")
     safe_title = re.sub(r"[^A-Za-z0-9 ._:/-]", "?", _redact(report.scenario)).replace("\n", " ")[:100]
-    title = f"playtest: {safe_title} ({report.result})"
+    title = f"scenario validation: {safe_title} ({report.result})"
     body = _body(report)
     issue = ("gh", "issue", "create", "--repo", repository, "--title", title, "--body", body)
     pr = None
