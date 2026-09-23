@@ -31,7 +31,12 @@ def _json(value: object) -> str:
 
 
 def _receipt_payload(receipt: VerifierReceipt) -> dict:
-    return {name: getattr(receipt, name) for name in receipt.__dataclass_fields__}
+    # The in-process authorization capability is intentionally never durable.
+    return {
+        name: getattr(receipt, name)
+        for name in receipt.__dataclass_fields__
+        if name != "authorization"
+    }
 
 
 def _observation_payload(observation: LearningObservation) -> dict:
@@ -94,6 +99,13 @@ class SQLiteVerifierObservationRepository:
                 if row[2] != receipt_payload or row[3] != observation_payload:
                     raise ValueError("conflicting verifier receipt replay")
                 return _observation(json.loads(row[3]))
+            authorization = getattr(receipt, "authorization", None)
+            if not callable(getattr(authorization, "matches", None)) or not authorization.matches(
+                receipt, observation
+            ):
+                raise PermissionError(
+                    "first verifier observation insert requires host producer authorization"
+                )
             try:
                 self._connection.execute(
                     "INSERT INTO verifier_learning_observations"
