@@ -53,7 +53,7 @@ def test_audit_lists_every_requested_requirement() -> None:
     })
 
 
-def test_formal_checkboxes_and_ledger_remain_unpromoted() -> None:
+def test_formal_checkboxes_match_latest_verified_ledger_evidence() -> None:
     requirements = spec_requirements()
     assert len(requirements) == 204
     checkbox_lines = [
@@ -61,8 +61,6 @@ def test_formal_checkboxes_and_ledger_remain_unpromoted() -> None:
         if re.match(r"^\s*- \[[ xX]\]", line)
     ]
     assert len(checkbox_lines) == 250
-    assert not any(requirements.values())
-
     latest: dict[str, dict[str, object]] = {}
     for raw in LEDGER.read_text(encoding="utf-8").splitlines():
         record = json.loads(raw)
@@ -74,8 +72,18 @@ def test_formal_checkboxes_and_ledger_remain_unpromoted() -> None:
             latest[requirement_id] = record
     assert len(latest) == 204
     statuses = {record["status"] for record in latest.values()}
-    assert statuses <= {"planned", "implemented_unverified"}
-    assert "verified" not in statuses
+    assert statuses <= {"planned", "implemented_unverified", "verified"}
+    checked = {requirement_id for requirement_id, value in requirements.items() if value}
+    verified = {
+        requirement_id for requirement_id, record in latest.items()
+        if record["status"] == "verified"
+    }
+    assert checked == verified
+    for requirement_id in checked:
+        record = latest[requirement_id]
+        assert record.get("baseline_sha")
+        assert record.get("verified_sha")
+        assert record.get("evidence")
 
 
 def test_audit_explicitly_has_no_safe_checkbox_candidates() -> None:
