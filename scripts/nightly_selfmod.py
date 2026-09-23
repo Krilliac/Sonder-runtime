@@ -685,6 +685,23 @@ def _splice_function(original: str, reply: str, expected_name: str | None = None
     return "".join(lines[:first]) + body.rstrip() + "\n" + "".join(lines[last:])
 
 
+def _rewrite_prompt(objective: str, target: str, function_name: str, source: str) -> str:
+    """Build the selected-function rewrite prompt without positional drift."""
+    return (
+        "Rewrite ONE function from this Python module so that it accomplishes\n"
+        "the objective in the selected function `%s` and no other function:\n"
+        "exactly this objective, and nothing else:\n\n    %s\n\n"
+        "Rules:\n"
+        "- If the function already meets the objective, output exactly NONE.\n"
+        "  Otherwise output ONLY that single function, complete, from its\n"
+        "  `def` line to its last line. No preface, suffix, or fence.\n"
+        "- Keep its name, signature and indentation exactly as they are.\n"
+        "- Change executable behavior; a comment-only edit is invalid.\n\n"
+        "=== %s (selected function: %s) ===\n%s"
+        % (function_name, objective, target, function_name, source)
+    )
+
+
 def _diff_objection(original: str, edited: str):
     """Why this candidate should be thrown away, or None to keep it.
 
@@ -1071,18 +1088,11 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     workspace = selfmod.candidate_path(run_id)
     original = (workspace / target).read_text(encoding="utf-8", errors="replace")
 
-    edited = _ask(server, (
-        "Rewrite ONE function from this Python module so that it accomplishes\n"
-        "the objective in the selected function `%s` and no other function:\n"
-        "exactly this objective, and nothing else:\n\n    %s\n\n"
-        "Rules:\n"
-        "- If the function already meets the objective, output exactly NONE.\n"
-        "  Otherwise output ONLY that single function, complete, from its\n"
-        "  `def` line to its last line. No preface, suffix, or fence.\n"
-        "- Keep its name, signature and indentation exactly as they are.\n"
-        "- Change executable behavior; a comment-only edit is invalid.\n\n"
-        "=== %s (selected function: %s) ===\n%s" % (objective, function_name, target, original)
-    ), num_predict=2000, model=model, num_ctx=num_ctx)
+    edited = _ask(
+        server,
+        _rewrite_prompt(objective, target, function_name, original),
+        num_predict=2000, model=model, num_ctx=num_ctx,
+    )
 
     # Splice one function back rather than accepting a whole-file rewrite.
     #
