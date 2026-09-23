@@ -103,3 +103,9 @@ therefore disables reusable-prefix identity instead of reusing a key for a
 replaced model tag. Tests cover same-template changed-digest, missing metadata,
 revision mismatch, tag changes during probing, multi-worker locality refusal,
 and the absence of positive caching. Test fixtures contain no prompt content.
+
+The two tag reads establish a versioned snapshot during request assembly, not
+an atomic lease on Ollama's mutable model tag. A concurrent replacement after
+the second read and before generation remains possible. Binding generation to
+an immutable artifact digest or an operator-controlled model update boundary
+is still required for a complete replacement guarantee; CTX-009 remains open.
