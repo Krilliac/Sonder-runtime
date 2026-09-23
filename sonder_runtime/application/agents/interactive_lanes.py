@@ -14,6 +14,7 @@ from dataclasses import replace
 from functools import wraps
 import hashlib
 import json
+import logging
 import threading
 import time
 import uuid
@@ -50,6 +51,7 @@ _WAIT_OWNERS = {}
 
 _ACTIVE = frozenset({"queued", "running", "interrupt_requested", "cancel_requested"})
 _LANE_INLINE_TOOL_RESULT_BYTES = 2 * 1024
+_LOG = logging.getLogger(__name__)
 _HIDDEN = frozenset(
     {
         "principal_id",
@@ -210,7 +212,8 @@ class AgentLaneService:
         # when the worker raises, allowing a later recovery/resume to retry.
         self._scheduled_lanes = set()
         self._running_scheduled = set()
-        self._scheduled_dirty = set()
+        self._scheduled_contexts = {}
+        self._scheduled_dirty = {}
         self._capacity_waiters = {}
         self._capture = SessionCaptureService(sessions)
         self._archive = SessionContextArchiveService(sessions)
@@ -587,22 +590,38 @@ class AgentLaneService:
             try:
                 with self.store.transaction() as tx:
                     lane = tx.lane(lane_id)
-                    active = sum(
-                        row["owner"] != ""
-                        for _, row in tx.lanes(context.principal_id, limit=256)
-                    )
-                    if lane["status"] != "queued" or lane["owner"] or active >= 4:
-                        continue
+                    stale = lane["status"] != "queued" or bool(lane["owner"])
+                    active = tx.active_count(context.principal_id)
             except (KeyError, ValueError):
+                stale = True
+                active = 0
+            except Exception as exc:
+                _LOG.warning("lane capacity inspection failed: %s", type(exc).__name__)
+                continue
+            if stale or context.expired or context.cancellation.cancelled:
+                with self._condition:
+                    if self._capacity_waiters.get(lane_id) is context:
+                        self._capacity_waiters.pop(lane_id, None)
+                continue
+            if active >= 4:
                 continue
             with self._condition:
                 if self._capacity_waiters.get(lane_id) is not context:
                     continue
                 self._capacity_waiters.pop(lane_id, None)
-            self._schedule(lane_id, context)
+            try:
+                self._schedule(lane_id, context, replay=True)
+            except (PermissionError, CapacityExceeded, TimeoutError, ValueError) as exc:
+                _LOG.warning("lane capacity admission refused: %s", type(exc).__name__)
+                continue
+            except Exception as exc:
+                with self._condition:
+                    self._capacity_waiters.setdefault(lane_id, context)
+                _LOG.warning("lane capacity admission failed: %s", type(exc).__name__)
+                continue
             return
 
-    def _schedule(self, lane_id, context):
+    def _schedule(self, lane_id, context, *, replay=False):
         managed = (
             self.managed_authority is not None and context.principal_id != LOCAL_OWNER
         )
@@ -613,22 +632,31 @@ class AgentLaneService:
         # the already queued worker and make that valid worker fail closed.
         with self._condition:
             if lane_id in self._scheduled_lanes:
-                # The active worker may be between its final mailbox read and
-                # terminal persistence.  Remember one follow-up wakeup rather
-                # than dropping this notification or recursively submitting.
-                if lane_id in self._running_scheduled:
-                    self._scheduled_dirty.add(lane_id)
+                if replay:
+                    # A newer notification won the gap after this wakeup was
+                    # read. Never replace its context with an older replay.
+                    return
+                # The queued or active worker may use an older admission. Keep
+                # the latest notification context for one bounded replay.
+                if (lane_id in self._running_scheduled
+                        or self._scheduled_contexts.get(lane_id) is not context):
+                    self._scheduled_dirty[lane_id] = context
                 return
             self._capacity_waiters.pop(lane_id, None)
             if managed and len(self._app_dispatch) >= 256:
                 raise CapacityExceeded("managed dispatch capacity unavailable")
             self._scheduled_lanes.add(lane_id)
+            self._scheduled_contexts[lane_id] = context
         if managed:
             try:
                 lane = self._fresh_execution(lane_id, context)
             except Exception:
                 with self._condition:
                     self._scheduled_lanes.discard(lane_id)
+                    self._scheduled_contexts.pop(lane_id, None)
+                    replay_context = self._scheduled_dirty.pop(lane_id, None)
+                    if replay_context is not None:
+                        self._capacity_waiters[lane_id] = replay_context
                 raise
             with self._condition:
                 self._app_dispatch[lane_id] = (context, lane["attempt_id"])
@@ -638,6 +666,10 @@ class AgentLaneService:
         except Exception:
             with self._condition:
                 self._scheduled_lanes.discard(lane_id)
+                self._scheduled_contexts.pop(lane_id, None)
+                replay_context = self._scheduled_dirty.pop(lane_id, None)
+                if replay_context is not None:
+                    self._capacity_waiters[lane_id] = replay_context
                 if managed and self._app_dispatch.get(lane_id) == (
                     context,
                     lane["attempt_id"],
@@ -654,13 +686,18 @@ class AgentLaneService:
             with self._condition:
                 self._running_scheduled.discard(lane_id)
                 self._scheduled_lanes.discard(lane_id)
-                dirty = lane_id in self._scheduled_dirty
-                self._scheduled_dirty.discard(lane_id)
-            if dirty:
+                self._scheduled_contexts.pop(lane_id, None)
+                replay_context = self._scheduled_dirty.pop(lane_id, None)
+            if replay_context is not None:
                 # The marker is clear before re-admission, so this is bounded
                 # to one follow-up per worker and cannot recurse through the
                 # executor submission path.
-                self._schedule(lane_id, context)
+                try:
+                    self._schedule(lane_id, replay_context, replay=True)
+                except Exception as exc:
+                    with self._condition:
+                        self._capacity_waiters[lane_id] = replay_context
+                    _LOG.warning("lane wakeup replay failed: %s", type(exc).__name__)
 
     @_recover_committed_command
     def spawn(
@@ -1405,9 +1442,7 @@ class AgentLaneService:
                 return
             if lane["status"] != "queued" or lane["owner"]:
                 return
-            active = sum(
-                l["owner"] != "" for _, l in tx.lanes(context.principal_id, limit=256)
-            )
+            active = tx.active_count(context.principal_id)
             if active >= 4:
                 with self._condition:
                     if lane_id in self._scheduled_lanes:

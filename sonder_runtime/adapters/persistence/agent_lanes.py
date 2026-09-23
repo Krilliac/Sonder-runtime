@@ -298,6 +298,15 @@ class LaneTransaction:
         ).fetchall()
         return [(r[0], json.loads(r[1])) for r in rows]
 
+    def active_count(self, principal):
+        """Count every owned lane, including those beyond a history page."""
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM agent_lanes WHERE principal=? "
+            "AND json_extract(data, '$.owner') IS NOT NULL "
+            "AND json_extract(data, '$.owner') != ''",
+            (principal,),
+        ).fetchone()[0]
+
     def all_lanes(self):
         rows = self.conn.execute(
             "SELECT data FROM agent_lanes ORDER BY position LIMIT 10001"
