@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from scripts import check_documentation_authority as checker
 from sonder_runtime.application.tools.generated_catalogs import GeneratedCatalogs
 from sonder_runtime.application.ports.tool_registry import InMemoryToolRegistry
 
@@ -87,8 +88,10 @@ def test_historical_documents_are_explicitly_labeled_and_focused_paths_exist():
 
 def test_new_adr_namespace_is_unique_and_historical_numbers_are_classified():
     policy = _read("docs/architecture/adr/README.md")
+    canonical_policy = _read("docs/adr/README.md")
     assert "New ADRs belong under `docs/adr/`" in policy
     assert "ADR-YYYY-MM-DD-<slug>.md" in policy
+    assert "New architecture decisions belong in this directory" in canonical_policy
 
     new_pattern = re.compile(r"^ADR-\d{4}-\d{2}-\d{2}-.+\.md$")
     new_names = [
@@ -98,6 +101,47 @@ def test_new_adr_namespace_is_unique_and_historical_numbers_are_classified():
     ]
     assert len(new_names) == len(set(new_names))
     assert "existing `ADR-001` through `ADR-009` files here are retained" in policy
+
+
+def test_adr_namespace_rejects_new_numeric_ids_and_historical_directory_writes(tmp_path, monkeypatch):
+    canonical = tmp_path / "docs" / "adr"
+    historical = tmp_path / "docs" / "architecture" / "adr"
+    canonical.mkdir(parents=True)
+    historical.mkdir(parents=True)
+    for name in checker.LEGACY_CANONICAL_ADRS:
+        (canonical / name).touch()
+    for name in checker.LEGACY_ARCHITECTURE_ADRS:
+        (historical / name).touch()
+    monkeypatch.setattr(checker, "CANONICAL_ADR", canonical)
+    monkeypatch.setattr(checker, "HISTORICAL_ADR", historical)
+
+    (canonical / "ADR-2026-09-23-new-decision.md").touch()
+    assert checker._check_adr_namespace() == []
+
+    (canonical / "ADR-007-new-numeric-decision.md").touch()
+    (historical / "ADR-010-new-historical-decision.md").touch()
+    (canonical / "ADR-2026-99-99-invalid-date.md").touch()
+    problems = checker._check_adr_namespace()
+    assert any("ADR-007-new-numeric-decision.md: new ADR needs" in item for item in problems)
+    assert any("ADR-010-new-historical-decision.md: historical ADR directory is frozen" in item for item in problems)
+    assert any("ADR-2026-99-99-invalid-date.md: invalid ADR date" in item for item in problems)
+
+
+def test_adr_namespace_rejects_missing_historical_record(tmp_path, monkeypatch):
+    canonical = tmp_path / "docs" / "adr"
+    historical = tmp_path / "docs" / "architecture" / "adr"
+    canonical.mkdir(parents=True)
+    historical.mkdir(parents=True)
+    for name in checker.LEGACY_CANONICAL_ADRS:
+        (canonical / name).touch()
+    for name in checker.LEGACY_ARCHITECTURE_ADRS:
+        (historical / name).touch()
+    missing = sorted(checker.LEGACY_CANONICAL_ADRS)[0]
+    (canonical / missing).unlink()
+    monkeypatch.setattr(checker, "CANONICAL_ADR", canonical)
+    monkeypatch.setattr(checker, "HISTORICAL_ADR", historical)
+
+    assert f"docs/adr/{missing}: historical ADR is missing" in checker._check_adr_namespace()
 
 
 def test_generated_catalog_freshness_contract_is_discoverable_and_deterministic():
