@@ -173,9 +173,9 @@
     },
     {
       "checked": false,
-      "claim": "A matching terminal child session is reused from the authoritative durable continuation repository before any new worker admission or runner spawn, including after service restart; mismatched scope is rejected and recovery-required terminals still require explicit resume.",
+      "claim": "Stable-key retries with a new child ID search terminal rows through the authoritative durable continuation repository, reuse only one exact result with proven owner/workspace/consent/session context, and fail closed on ambiguous rows or foreign context before any runner spawn.",
       "requirement_id": "AGENT-006",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "0bdbeed0dc4ee1b7ac9efbe0e7e7a249e0ffa0e2836a082143530d6e163776a5",
+    "ledger_sha256": "17d3ac97d6a3c1962bc40e0f3e784c82c0da4f86e224e185a325a8cc3cd5e7e4",
     "spec_sha256": "4797da92d2d1845ce944b2dc32353d52fe7a6e48dfa92593753ca727761ca714"
   }
 }

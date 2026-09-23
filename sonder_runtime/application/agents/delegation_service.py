@@ -89,6 +89,10 @@ class DelegationService:
                 ("allowed_tools", "|".join(request.preset.capabilities)),
                 ("owner_id", context.principal_id),
                 ("worker_id", child_request.child_id or request.delegation_id),
+                ("context_workspace_roots", "|".join(map(str, context.workspace_roots))),
+                ("context_cloud_allowed", str(context.cloud_allowed)),
+                ("context_remote_ollama_allowed", str(context.remote_ollama_allowed)),
+                ("context_session_id", str(context.session_id)),
                 ("retry_max_attempts", "1"),
             )
             owner_nonce = getattr(self._worker_registry, "owner_nonce", "")
