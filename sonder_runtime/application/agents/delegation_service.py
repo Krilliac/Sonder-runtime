@@ -17,6 +17,7 @@ from sonder_runtime.application.ports.event_sink import EventSink
 from sonder_runtime.application.ports.subagents import (
     SubagentBudget, SubagentHandle, SubagentProvider, SubagentRequest, SubagentResult,
 )
+from sonder_runtime.application.ports.worker_registry import WorkerLaunch, WorkerRegistry
 
 
 @dataclass(frozen=True)
@@ -31,9 +32,15 @@ class DelegatedResult:
 class DelegationService:
     """Translate validated agent envelopes to and from ``SubagentProvider``."""
 
-    def __init__(self, provider: SubagentProvider, event_sink: EventSink | None = None) -> None:
+    def __init__(
+        self,
+        provider: SubagentProvider,
+        event_sink: EventSink | None = None,
+        worker_registry: WorkerRegistry | None = None,
+    ) -> None:
         self._provider = provider
         self._events = event_sink
+        self._worker_registry = worker_registry
 
     def dispatch(self, request: DelegationRequest, context: OperationContext) -> SubagentHandle:
         """Spawn one child only when its assignment fits the parent context."""
@@ -67,6 +74,56 @@ class DelegationService:
             resume_key=request.delegation_id,
             idempotency_key=request.delegation_id,
         )
+        if self._worker_registry is not None:
+            # The continuation-backed registry performs the durable duplicate
+            # check before provider threads are created.  The provider then
+            # consumes that same reservation; no parallel active-worker store
+            # is opened.
+            reservation_metadata = child_request.metadata + (
+                ("worker_registry_admitted", "true"),
+                ("worker_role", request.preset.role.value),
+                ("model", "local-provider"),
+                ("backend", "subagent-provider"),
+                ("effort", "default"),
+                ("scope", "|".join(request.workspace.read_roots + request.workspace.write_roots)),
+                ("allowed_tools", "|".join(request.preset.capabilities)),
+                ("owner_id", context.principal_id),
+                ("worker_id", child_request.child_id or request.delegation_id),
+                ("retry_max_attempts", "1"),
+            )
+            owner_nonce = getattr(self._worker_registry, "owner_nonce", "")
+            if owner_nonce:
+                reservation_metadata += (("owner_nonce", owner_nonce),)
+            worker_launch = WorkerLaunch(
+                worker_id=child_request.child_id or request.delegation_id,
+                parent_id=child_request.parent_id,
+                role=request.preset.role.value,
+                model="local-provider",
+                backend="subagent-provider",
+                effort="default",
+                scope=tuple(request.workspace.read_roots + request.workspace.write_roots),
+                allowed_tools=tuple(request.preset.capabilities),
+                budgets={
+                    "max_steps": budget.steps,
+                    "max_output_tokens": budget.output_tokens,
+                    "max_wall_seconds": budget.wall_seconds,
+                },
+                retry_policy={"max_attempts": 1},
+                resume_key=request.delegation_id,
+                idempotency_key=request.delegation_id,
+                prompt=request.prompt,
+                owner_id=context.principal_id,
+                metadata=reservation_metadata,
+            )
+            # The provider receives the exact metadata retained by the
+            # continuation reservation, so the CAS admission cannot be
+            # confused with a caller that merely reused the same key.
+            child_request = SubagentRequest(
+                child_request.parent_id, child_request.prompt, child_request.budget,
+                child_request.child_id, worker_launch.metadata,
+                child_request.resume_key, child_request.idempotency_key,
+            )
+            self._worker_registry.admit(worker_launch)
         logger.debug(f"DelegationService.dispatch: spawning child_id={request.lineage.child_id!r}, parent_id={request.lineage.parent_id!r}")
         handle = self._provider.spawn(child_request, context)
         logger.info(f"agent delegated: delegation_id={request.delegation_id!r}, preset={request.preset.name!r}, role={request.preset.role.value!r}, child_id={handle.child_id!r}")

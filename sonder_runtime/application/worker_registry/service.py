@@ -39,9 +39,12 @@ class WorkerRegistryService:
             scope=scope,
             allowed_tools=tools,
             budgets=budgets,
-            retry_policy={"retryable": metadata.get("retryable", "true")},
+            retry_policy={"max_attempts": int(metadata.get("retry_max_attempts", "1"))},
             resume_key=resume_key,
             idempotency_key=metadata.get("idempotency_key", resume_key),
+            prompt=request.prompt,
+            owner_id=metadata.get("owner_id", ""),
+            metadata=tuple(request.metadata),
         )
 
     def admit(self, request: SubagentRequest) -> WorkerRecord:

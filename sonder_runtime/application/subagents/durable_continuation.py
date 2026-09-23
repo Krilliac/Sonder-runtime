@@ -110,6 +110,14 @@ class DurableContinuationService:
         self._contexts: dict[str, OperationContext] = {}
         self._admitted_roots: dict[str, int] = {}
         self._storage_failures: dict[str, ContinuationStorageFailure] = {}
+        # A reservation is consumable only by the provider instance that
+        # created it.  This is deliberately process-scoped; restart recovery
+        # remains an explicit path and never happens from ``spawn``.
+        self._owner_nonce = uuid4().hex
+
+    @property
+    def owner_nonce(self) -> str:
+        return self._owner_nonce
 
     def _write(self, method, *args, _settlement_timeout=0.0, **kwargs):
         value = args[0]
@@ -192,6 +200,32 @@ class DurableContinuationService:
                 if (not request.resume_key or not request.idempotency_key or not same_scope):
                     raise InvalidSubagentRequest("active child identity or scope does not match requested delegation")
                 existing_child_id = existing.request.child_id
+                existing_metadata = self._metadata(existing.request)
+                # A continuation-backed worker registry may have durably
+                # reserved this exact child before the provider thread was
+                # created.  Consume that reservation only for the same
+                # authenticated owner; another process must use explicit
+                # recovery rather than silently taking over a live worker.
+                if (
+                    existing.status is SubagentStatus.CREATED
+                    and existing_metadata.get("worker_registry_admitted") == "true"
+                ):
+                    if (
+                        existing_metadata.get("owner_nonce")
+                        and existing_metadata.get("owner_nonce") != self._owner_nonce
+                    ) or (
+                        not existing_metadata.get("owner_nonce")
+                        and existing_metadata.get("owner_id") != context.principal_id
+                    ):
+                        raise InvalidSubagentRequest("worker reservation belongs to another owner")
+                    parent = self._repository.get(request.parent_id)
+                    self._admit(
+                        request,
+                        existing.lineage,
+                        parent,
+                        exclude_child_id=existing_child_id,
+                    )
+                    return self._start(existing_child_id, context, runner)
                 with self._lock:
                     thread = self._threads.get(existing_child_id)
                 if thread is not None and thread.is_alive():
@@ -255,7 +289,7 @@ class DurableContinuationService:
         return values
 
     def _admit(self, request: SubagentRequest, lineage: ChildSessionLineage,
-               parent: DurableChildSession | None) -> None:
+               parent: DurableChildSession | None, *, exclude_child_id: str | None = None) -> None:
         budget = request.budget
         metadata = self._metadata(request)
         role_name = metadata.get("role")
@@ -281,12 +315,21 @@ class DurableContinuationService:
             from ..ports.subagents import validate_child_budget
             validate_child_budget(budget, parent.request.budget)
             children = self._repository.list_all(limit=10_000)
-            direct = sum(1 for item in children if item.request.parent_id == request.parent_id)
+            direct = sum(
+                1
+                for item in children
+                if item.request.parent_id == request.parent_id
+                and item.request.child_id != exclude_child_id
+            )
             if budget.max_children is not None and direct >= budget.max_children:
                 raise InvalidSubagentRequest("subagent child-count budget exhausted")
         with self._lock:
-            active = sum(1 for item in self._repository.list_active()
-                         if item.lineage.chain[0] == root_id)
+            active = sum(
+                1
+                for item in self._repository.list_active()
+                if item.lineage.chain[0] == root_id
+                and item.request.child_id != exclude_child_id
+            )
             active += self._admitted_roots.get(root_id, 0)
             if budget.max_concurrency is not None and active >= budget.max_concurrency:
                 raise InvalidSubagentRequest("subagent concurrency budget exhausted")
