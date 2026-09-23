@@ -116,3 +116,32 @@ def test_open_ended_archive_range_fails_closed_when_history_exceeds_bound(tmp_pa
     with pytest.raises(SessionCompactionError, match="exceeds"):
         SessionCompactionService(repo, max_events=2).archive_context("s1", budget_bytes=1)
     assert repo.search(session_id="s1", event_type="context.archive.created") == ()
+
+
+def test_archiving_same_source_event_is_idempotent_across_repeated_requests(tmp_path):
+    repo = SQLiteSessionRepository(tmp_path / "sessions.db")
+    event = repo.append("s1", "tool.result", {"content": "x" * 500}, event_id="tool")
+    first = SessionContextArchiveService(repo).archive_tool_output(event)
+    second = SessionContextArchiveService(repo).archive_tool_output(event)
+
+    assert second == first
+    assert len(repo.search(session_id="s1", event_type="context.archive.created", limit=10)) == 1
+
+
+def test_repeated_prepare_binds_placeholder_to_persisted_reference(tmp_path):
+    repo = SQLiteSessionRepository(tmp_path / "sessions.db")
+    event = repo.append(
+        "s1", "tool.result", {"content": "x" * 500}, event_id="tool"
+    )
+    service = SessionContextArchiveService(repo)
+    first = service.prepare_context("s1", (event,), budget_bytes=1)
+    second = service.prepare_context("s1", (event,), budget_bytes=1)
+    persisted = repo.search(
+        session_id="s1", event_type="context.archive.created", limit=10
+    )
+
+    assert len(persisted) == 1
+    assert first.references == second.references
+    assert first.placeholders[0]["archive_id"] == persisted[0].payload["archive_id"]
+    assert second.placeholders[0]["archive_id"] == persisted[0].payload["archive_id"]
+    assert persisted[0].payload["archive_id"] in second.placeholders[0]["content"]
