@@ -44,7 +44,8 @@ def test_remember_and_index_tools_use_explicit_scoped_metadata(authoritative_sur
     assert payload["project"] == "repo-a"
     assert payload["entities"][0]["entity_id"] == "parser"
     assert json.loads(payload["decisions"][0]["decision_json"])["value"] == "bounded"
-    assert server.sonder_authoritative_indexes(project="repo-b")
+    with pytest.raises(InvalidInput):
+        server.sonder_authoritative_indexes(project="repo-b")
 
 
 def test_surface_rejects_malformed_metadata_without_text_inference(authoritative_surface):
@@ -68,7 +69,8 @@ def test_surface_refuses_authoritative_scope_widening(authoritative_surface):
         server.sonder_remember_fact(
             "Must stay in repo-a", project="repo-b", entities_json='["parser"]'
         )
-    assert json.loads(server.sonder_authoritative_indexes(project="repo-b"))["entities"] == []
+    with pytest.raises(InvalidInput):
+        server.sonder_authoritative_indexes(project="repo-b")
 
 
 def test_surface_keeps_legacy_fact_calls_without_metadata(authoritative_surface):
