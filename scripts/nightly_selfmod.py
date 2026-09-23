@@ -491,7 +491,7 @@ def _objective_is_actionable(objective: str) -> bool:
     return not text.lower().startswith(("add a docstring", "update the docstring", "fix the comment"))
 
 
-def _objective_is_grounded(objective: str, rationale: str, source: str) -> bool:
+def _objective_target_function(objective: str, rationale: str, source: str) -> str | None:
     """Require an objective to name evidence and one rewritable function.
 
     The proposal model can invent a defect from a plausible description. A
@@ -504,21 +504,21 @@ def _objective_is_grounded(objective: str, rationale: str, source: str) -> bool:
     try:
         tree = ast.parse(source)
     except SyntaxError:
-        return False
+        return None
     functions = [
         node for node in tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     ]
     if not functions:
-        return False
+        return None
     anchors = [match.group(1) or match.group(2) or match.group(3)
                for match in re.finditer(r"`([^`]+)`|'([^']+)'|\"([^\"]+)\"", claim)]
     anchors = [anchor.strip() for anchor in anchors if anchor and len(anchor.strip()) > 1]
     if re.search(r"\bduplicates?\b|\bduplicated\b", claim, re.I):
         if not anchors or any(source.count(anchor) < 2 for anchor in anchors):
-            return False
+            return None
     if len(functions) == 1:
-        return True
+        return functions[0].name
     distinctive = _distinctive(claim)
     matches = []
     for node in functions:
@@ -526,7 +526,12 @@ def _objective_is_grounded(objective: str, rationale: str, source: str) -> bool:
         lowered = segment.casefold()
         if any(token.casefold() in lowered for token in distinctive):
             matches.append(node)
-    return len(matches) == 1
+    return matches[0].name if len(matches) == 1 else None
+
+
+def _objective_is_grounded(objective: str, rationale: str, source: str) -> bool:
+    """Compatibility predicate for callers that only need a yes/no answer."""
+    return _objective_target_function(objective, rationale, source) is not None
 
 
 def _eligible_candidate_files() -> tuple[str, ...]:
@@ -603,7 +608,7 @@ def _ask(server, prompt, num_predict=1200, model="", num_ctx=0, timeout=60):
     return _FENCE.sub("", text).strip()
 
 
-def _splice_function(original: str, reply: str):
+def _splice_function(original: str, reply: str, expected_name: str | None = None):
     """Replace one top-level function in `original` with the model's version.
 
     Returns the new module text, or None when the reply is not a single
@@ -630,6 +635,8 @@ def _splice_function(original: str, reply: str):
     if len(candidate_tree.body) != 1 or len(functions) != 1:
         return None
     candidate = functions[0]
+    if expected_name is not None and candidate.name != expected_name:
+        return None
     originals = {
         node.name: node for node in original_tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -935,8 +942,8 @@ def _discard_workspace(run_id) -> None:
 
 
 def propose_objective(
-    server, log, model="", num_ctx=0, *, deadline=None,
-) -> tuple[str, str] | None:
+    server, log, model="", num_ctx=0, *, deadline=None, return_function=False,
+) -> tuple[str, str] | tuple[str, str, str] | None:
     """Ask the local model for ONE small, concrete improvement.
 
     Grounded in a real file's real contents, never from memory: asked to
@@ -986,13 +993,15 @@ def propose_objective(
             if not _objective_is_actionable(objective):
                 log("  %s: non-executable objective, skipping" % name)
                 continue
-            if not _objective_is_grounded(objective, why, source):
+            function_name = _objective_target_function(objective, why, source)
+            if function_name is None:
                 log("  %s: objective is not grounded in one replaceable function, skipping" % name)
                 continue
             if _too_similar(objective, seen_before):
                 log("  %s: objective restates a previous run, skipping" % name)
                 continue
-            return name, "%s (%s)" % (objective, why or "no rationale given")
+            result = name, "%s (%s)" % (objective, why or "no rationale given")
+            return (*result, function_name) if return_function else result
     return None
 
 
@@ -1025,10 +1034,11 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     proposal_deadline = time.monotonic() + min(300.0, max(60.0, float(test_timeout)))
     proposed = propose_objective(
         server, log, model=model, num_ctx=num_ctx, deadline=proposal_deadline,
+        return_function=True,
     )
     if not proposed:
         return "no objective proposed"
-    target, objective = proposed
+    target, objective, function_name = proposed
     log("  objective: %s" % objective[:160])
 
     run_id = selfmod.create_plan(
@@ -1063,6 +1073,7 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
 
     edited = _ask(server, (
         "Rewrite ONE function from this Python module so that it accomplishes\n"
+        "the objective in the selected function `%s` and no other function:\n"
         "exactly this objective, and nothing else:\n\n    %s\n\n"
         "Rules:\n"
         "- If the function already meets the objective, output exactly NONE.\n"
@@ -1070,7 +1081,7 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
         "  `def` line to its last line. No preface, suffix, or fence.\n"
         "- Keep its name, signature and indentation exactly as they are.\n"
         "- Change executable behavior; a comment-only edit is invalid.\n\n"
-        "=== %s ===\n%s" % (objective, target, original)
+        "=== %s (selected function: %s) ===\n%s" % (objective, function_name, target, original)
     ), num_predict=2000, model=model, num_ctx=num_ctx)
 
     # Splice one function back rather than accepting a whole-file rewrite.
@@ -1084,7 +1095,7 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     # The fix is the one the codegen work arrived at independently: never ask a
     # model to reproduce structure it does not need to touch. It writes one
     # function; the harness owns the file.
-    edited = _splice_function(original, edited)
+    edited = _splice_function(original, edited, expected_name=function_name)
     if edited is None:
         selfmod.cancel(run_id)
         _discard_workspace(run_id)
