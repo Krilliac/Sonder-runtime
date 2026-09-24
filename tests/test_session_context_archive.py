@@ -1,6 +1,9 @@
 """Bounded context archive canaries for issue #510 item 1."""
 from __future__ import annotations
 
+import sqlite3
+import threading
+
 import pytest
 
 from sonder_runtime.adapters.persistence.session_repository import SQLiteSessionRepository
@@ -205,3 +208,113 @@ def test_session_tail_reads_recent_events_with_a_small_adapter_limit(tmp_path):
 
     assert [event.event_id for event in repo.read_tail("s1", limit=2)] == ["e2", "e3"]
     assert [event.event_id for event in repo.read_range("s1", limit=2)] == ["e0", "e1"]
+
+
+def test_complete_recovery_reads_across_adapter_pages_and_proves_tail(tmp_path):
+    repo = SQLiteSessionRepository(tmp_path / "sessions.db", max_read_limit=2)
+    for index in range(5):
+        repo.append("s1", "model.response", {"content": str(index)}, event_id=f"e{index}")
+
+    recovered = repo.read_complete("s1", max_events=8)
+
+    assert [event.event_id for event in recovered] == [f"e{index}" for index in range(5)]
+
+
+def test_complete_recovery_fails_closed_at_bound(tmp_path):
+    repo = SQLiteSessionRepository(tmp_path / "sessions.db", max_read_limit=2)
+    for index in range(3):
+        repo.append("s1", "model.response", {"content": str(index)}, event_id=f"e{index}")
+
+    with pytest.raises(ValueError, match="exceeds recovery bound"):
+        repo.read_complete("s1", max_events=2)
+
+
+@pytest.mark.parametrize("corruption", ["hash", "sequence"])
+def test_complete_recovery_fails_closed_on_mid_page_corruption(tmp_path, corruption):
+    database = tmp_path / "sessions.db"
+    repo = SQLiteSessionRepository(database, max_read_limit=2)
+    for index in range(5):
+        repo.append("s1", "model.response", {"content": str(index)}, event_id=f"e{index}")
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER session_event_no_update")
+        if corruption == "hash":
+            connection.execute(
+                "UPDATE session_event SET event_hash=? WHERE session_id=? AND sequence=?",
+                ("f" * 64, "s1", 3),
+            )
+        else:
+            connection.execute(
+                "UPDATE session_event SET sequence=? WHERE session_id=? AND sequence=?",
+                (9, "s1", 3),
+            )
+
+    with pytest.raises(ValueError, match="(integrity|contiguous)"):
+        repo.read_complete("s1", max_events=8)
+
+
+def test_complete_recovery_rejects_10001_events_without_unbounded_read(tmp_path):
+    database = tmp_path / "sessions.db"
+    repo = SQLiteSessionRepository(database, max_read_limit=256)
+    rows = []
+    previous_hash = None
+    for index in range(10_001):
+        payload = {"call_id": str(index)}
+        payload_json = repo._canonical_payload(payload)
+        event_id = f"e{index}"
+        occurred_at = "2026-01-01T00:00:00Z"
+        event_hash = repo._hash(
+            "s1", index + 1, event_id, "tool.requested", occurred_at,
+            payload_json, previous_hash,
+        )
+        rows.append(("s1", index + 1, event_id, "tool.requested", occurred_at,
+                     payload_json, previous_hash, event_hash))
+        previous_hash = event_hash
+    with sqlite3.connect(database) as connection:
+        connection.executemany("INSERT INTO session_event VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+
+    with pytest.raises(ValueError, match="exceeds recovery bound"):
+        repo.read_complete("s1", max_events=10_000)
+
+
+def test_session_append_rejects_one_oversized_payload(tmp_path):
+    repo = SQLiteSessionRepository(tmp_path / "sessions.db")
+
+    with pytest.raises(ValueError, match="payload exceeds"):
+        repo.append("s1", "tool.result", {"content": "x" * (8 * 1024 * 1024)})
+
+
+def test_complete_recovery_uses_one_snapshot_during_concurrent_append(tmp_path):
+    database = tmp_path / "sessions.db"
+    repo = SQLiteSessionRepository(database, max_read_limit=256)
+    rows = []
+    previous_hash = None
+    payload = {"content": "x" * 300_000}
+    for index in range(200):
+        payload_json = repo._canonical_payload(payload)
+        event_id = f"seed-{index}"
+        occurred_at = "2026-01-01T00:00:00Z"
+        event_hash = repo._hash(
+            "s1", index + 1, event_id, "tool.requested", occurred_at,
+            payload_json, previous_hash,
+        )
+        rows.append(("s1", index + 1, event_id, "tool.requested", occurred_at,
+                     payload_json, previous_hash, event_hash))
+        previous_hash = event_hash
+    with sqlite3.connect(database) as connection:
+        connection.executemany("INSERT INTO session_event VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+
+    def append_more():
+        for index in range(32):
+            repo.append("s1", "tool.requested", payload, event_id=f"append-{index}")
+
+    writer = threading.Thread(target=append_more)
+    writer.start()
+    try:
+        recovered = repo.read_complete("s1", max_events=10_000)
+    except ValueError as exc:
+        assert "payload bytes exceed recovery bound" in str(exc)
+    else:
+        assert sum(len(repo._canonical_payload(event.payload).encode("utf-8")) for event in recovered) <= 64 * 1024 * 1024
+    writer.join(timeout=10)
+    assert not writer.is_alive()

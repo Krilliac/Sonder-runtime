@@ -3,6 +3,7 @@
 from dataclasses import asdict
 
 from ..application.ports.terminal_eligibility import ManagedTerminalEligibility
+from ..application.ports.terminal_eligibility import _issue_host_verifier_authority
 from ..application.ports.lane_continuation import (
     PendingApprovalEvidence,
     PendingVerificationIdentity,
@@ -10,6 +11,28 @@ from ..application.ports.lane_continuation import (
 from ..application.agents.host_turns import require_host_pending_turn
 from ..application.ports.delegated_verification import digest
 from .standalone_continuation import PublishedHostTerminal
+
+
+def _with_authority(
+    value, session, expected_turn, verifier_factory,
+):
+    """Seal the exact decision produced by this boundary into its authority.
+
+    The decision was just derived from the current owner-bound durable turn;
+    consumers resolve that sealed value once instead of re-running
+    publication and manifest capture.  Public fields on copies are ignored
+    because the producer reads only the sealed value.
+    """
+    sealed = {}
+    decision = ManagedTerminalEligibility(
+        value.evidence, value.eligible, value.phase, value.code,
+        value.pending_identity, value.pending_approval, value.published,
+        value.authenticated_worker_id, value.verified_subject_digest,
+        value.verified_failure_receipt,
+        _issue_host_verifier_authority(lambda: sealed["value"], owner=session),
+    )
+    sealed["value"] = decision
+    return decision
 
 
 def terminal_eligibility(session, expected_turn, *, verifier_factory):
@@ -150,7 +173,7 @@ def terminal_eligibility(session, expected_turn, *, verifier_factory):
             return ManagedTerminalEligibility(
                 evidence, False, "unknown", "WORKER_ATTRIBUTION_AMBIGUOUS", identity
             )
-        return ManagedTerminalEligibility(
+        return _with_authority(ManagedTerminalEligibility(
             evidence,
             False,
             "failed",
@@ -161,7 +184,7 @@ def terminal_eligibility(session, expected_turn, *, verifier_factory):
             prepared.children[0][0],
             verified_subject_digest,
             failure,
-        )
+        ), session, expected_turn, verifier_factory)
     if phase != "certified":
         return ManagedTerminalEligibility(
             evidence, False, phase, code, identity, pending
@@ -240,7 +263,7 @@ def terminal_eligibility(session, expected_turn, *, verifier_factory):
     require_host_pending_turn(bound, expected_turn, identity)
     if session.final_evidence(expected_turn) != evidence:
         raise PermissionError("current outward final evidence changed")
-    return ManagedTerminalEligibility(
+    return _with_authority(ManagedTerminalEligibility(
         evidence,
         True,
         "certified" if original_certified else "certified_after_return",
@@ -250,4 +273,4 @@ def terminal_eligibility(session, expected_turn, *, verifier_factory):
         published,
         authenticated_worker_id,
         verified_subject_digest,
-    )
+    ), session, expected_turn, verifier_factory)
