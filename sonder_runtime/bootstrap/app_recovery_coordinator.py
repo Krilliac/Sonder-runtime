@@ -1,6 +1,7 @@
 """One explicitly owned app recovery attempt; never dispatches a model turn."""
 
 from dataclasses import dataclass, field
+import logging
 from threading import RLock
 
 from ..application.ports.app_control import CommandKey, CommandConflict, identifier
@@ -11,6 +12,8 @@ from ..application.ports.lane_continuation import (
 )
 from .app_work_recovery import AppWorkRecoveryHistory
 from .managed_standalone import ManagedStandaloneRecovery, PreparedManagedReattachment
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -47,8 +50,11 @@ class AppWorkRecoveryAttempt:
         approve_attachment,
         approve_verification,
         private_paths,
-        model_writable_roots
+        model_writable_roots,
+        learning=None
     ):
+        if learning is not None and not callable(learning):
+            raise TypeError("host-owned learning recorder must be callable")
         if application is None or not all(
             callable(value)
             for value in (
@@ -72,6 +78,7 @@ class AppWorkRecoveryAttempt:
             approve_verification,
         )
         self._private_paths, self._model_roots = private_paths, model_writable_roots
+        self._learning = learning
         self._history = AppWorkRecoveryHistory(authority)
         self._lock, self._issuer = RLock(), object()
         self._prepared = self._recovery = self._session = None
@@ -221,6 +228,9 @@ class AppWorkRecoveryAttempt:
                 verifier_factory=self._verifier_factory,
             )
             if not eligible.eligible:
+                # A verified failed check is negative learning evidence even
+                # though it can never complete the recovered work.
+                self._record_learning(prepared, eligible)
                 return AppRecoveryView(
                     current, eligible.phase, eligible.code, eligible.pending_approval
                 )
@@ -240,7 +250,18 @@ class AppWorkRecoveryAttempt:
             result = self._complete(
                 prepared, eligible.evidence.result.receipt, completion
             )
+            self._record_learning(prepared, eligible)
             return AppRecoveryView(result, "terminal", eligible.code)
+
+    def _record_learning(self, prepared, eligible):
+        if self._learning is not None and eligible.authority is not None:
+            # The recorder persists the sealed decision this session just
+            # issued (bound to this session and turn) and is fail-closed; it
+            # never changes the recovered work outcome.
+            try:
+                self._learning(self._session, prepared.work.host_turn, eligible)
+            except BaseException:
+                _LOG.warning("managed learning hook failed", exc_info=True)
 
     def _complete(self, prepared, terminal, completion):
         selected = self._selection
