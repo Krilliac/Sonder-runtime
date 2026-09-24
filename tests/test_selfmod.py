@@ -885,3 +885,49 @@ def test_rollback_removes_a_created_file_that_became_a_dangling_symlink(tmp_path
         pytest.skip("symlinks unavailable on this platform/privilege level")
     selfmod_recover.restore(manifest_path)
     assert not link.is_symlink() and not link.exists()
+
+
+def test_tested_bytes_are_persisted_and_required_for_later_human_deploy(isolated):
+    root = repository(isolated)
+    proposed = reviewed(root)
+    run_id = proposed["id"]
+    tested = selfmod.tested_digests(run_id)
+    assert tested and set(tested["files"]) == {"calc.py"}
+    approved = selfmod.approve(run_id, "user:test")
+    assert approved["phase"] == "approved"
+    live_before = (root / "calc.py").read_bytes()
+    # The candidate file changes after testing and human approval.
+    (selfmod.candidate_path(run_id) / "calc.py").write_text(
+        "def add(a, b):\n    return 42\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="differ from tested bytes"):
+        selfmod.deploy(run_id, commit=False)
+    assert (root / "calc.py").read_bytes() == live_before
+
+
+def test_deploy_refuses_a_run_without_a_tested_bytes_record(isolated):
+    root = repository(isolated)
+    proposed = reviewed(root)
+    selfmod.approve(proposed["id"], "user:test")
+    conn = selfmod._connect()
+    try:
+        conn.execute("DELETE FROM selfmod_tested_files WHERE run_id=?", (proposed["id"],))
+        conn.commit()
+    finally:
+        conn.close()
+    live_before = (root / "calc.py").read_bytes()
+    with pytest.raises(RuntimeError, match="tested-bytes record"):
+        selfmod.deploy(proposed["id"], commit=False)
+    assert (root / "calc.py").read_bytes() == live_before
+
+
+def test_review_rejects_bytes_changed_after_testing_began(isolated):
+    root = repository(isolated)
+    selfmod.set_mode("propose")
+    run = prepare(plan(root, ("calc.py",)))
+    selfmod.apply_candidate_changes(run["id"], {"calc.py": "def add(a, b):\n    return a + b\n"})
+    validate(run["id"])
+    (selfmod.candidate_path(run["id"]) / "calc.py").write_text(
+        "def add(a, b):\n    return b + a\n", encoding="utf-8")
+    result = selfmod.review(run["id"])
+    assert result["phase"] in {"rejected", "restored"}
+    assert "changed after testing began" in result["last_error"]

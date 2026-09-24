@@ -218,6 +218,7 @@ def test_known_sensitive_object_cannot_hide_at_innocuous_path():
     }]
 
 
+@pytest.mark.requires_medium_integrity
 def test_shallow_history_fails_closed(tmp_path):
     source = _repo(tmp_path / "source")
     (source / "second.txt").write_text("second\n", encoding="utf-8")
@@ -236,6 +237,7 @@ def test_shallow_history_fails_closed(tmp_path):
     assert "complete Git history is required" in json.loads(result.stdout)["error"]
 
 
+@pytest.mark.requires_medium_integrity
 def test_blobless_partial_clone_remains_inspectable(tmp_path):
     source = _repo(tmp_path / "source")
     _git(source, "config", "uploadpack.allowFilter", "true")
