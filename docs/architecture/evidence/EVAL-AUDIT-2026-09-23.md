@@ -35,7 +35,7 @@ has no implementation; **gap** — the named capability is absent.
 | EVAL-003 Metrics | partial | Cost, tool calls, retries, and resource use are not measured. |
 | EVAL-004 Dimensions | gap | Only provider/model/revision/digest are bound; route, prompt manifest, skill/tool catalog, runtime version, hardware, and environment are not. |
 | EVAL-005 Trajectory replay | partial | Replay takes an arbitrary evaluator; no recorded-side-effect substitution for real sessions. |
-| EVAL-006 Divergence | partial → **closed here** | No "meaningful" filter and no minimization or retention of failures. |
+| EVAL-006 Divergence | partial → **narrowed here** | Before: no "meaningful" filter and no minimization or retention. After: contract and durable adapter exist; no production caller yet. |
 | EVAL-007 Promotion gates | partial → **narrowed here** | Point-estimate thresholds only; no confidence requirement and no per-kind policy. |
 | EVAL-008 Shadow/canary | partial | Observations are recorded; nothing routes live traffic or demotes automatically. |
 | EVAL-009 Proposal lifecycle | partial | States differ from the spec vocabulary (no accepted/implementing/experimental/superseded); no owner or exit-criteria fields. |
@@ -121,7 +121,7 @@ has no implementation; **gap** — the named capability is absent.
 - Before: `ReplayReport.divergences` listed every raw per-step output
   difference, so timing or ID noise was reported as a divergence, and nothing
   minimized or retained failing cases.
-- Closed in this change: see
+- Narrowed in this change (no production caller yet, so still unverified): see
   [`EVAL-006-DIVERGENCE-MINIMIZATION-2026-09-23.md`](EVAL-006-DIVERGENCE-MINIMIZATION-2026-09-23.md).
 
 ### EVAL-007 — Promotion gates
@@ -159,21 +159,23 @@ has no implementation; **gap** — the named capability is absent.
   superseded states are absent, and proposals carry no owner or exit
   criteria.
 
-## Gaps closed or narrowed in this change
+## Gaps narrowed in this change
 
 1. **EVAL-006** — earliest *meaningful* divergence under an explicit
    decision/noise policy; prefix and differential-ddmin minimization with
-   fresh evaluators per trial; deterministic reproduction check; immutable,
-   digest-verified `MinimizedFailure` records; bounded in-memory and
+   fresh evaluators per trial, anchored to the original divergence;
+   deterministic reproduction check; immutable, integrity-checked (not
+   tamper-proof) `MinimizedFailure` records; bounded in-memory and locked
    file-backed retention; service methods. Tests:
-   `tests/test_eval006_divergence_minimization.py` (11).
+   `tests/test_eval006_divergence_minimization.py` (16).
 2. **EVAL-007** — per-kind gate policies for runtime, prompt, skill, route,
    model, memory, and selfmod promotion with minimum samples, point floors,
    one-sided Wilson lower bounds at a stated confidence, regression and
    pass-rate-drop allowances, replay equivalence, and shadow/canary
-   requirements; the service binds the mechanical decision into
-   `PromotionEvidence`, so `approve` refuses a failed gate. Tests:
-   `tests/test_eval007_promotion_gates.py` (8).
+   requirements; the service recomputes the decision from lifecycle-recorded
+   results under the kind bound at proposal creation, and `approve` refuses
+   anything else for kind-bound proposals. Tests:
+   `tests/test_eval007_promotion_gates.py` (15).
 
 Both use deterministic in-process fakes only, which the requirement text
 allows because neither capability depends on model behavior: divergence and
@@ -192,3 +194,15 @@ arithmetic over recorded counts.
   the open bootstrap pull requests land.
 - EVAL-007 follow-through: route selfmod and model promotion decisions through
   `EvaluationApplicationService.evaluate_promotion_gate`.
+
+## Review revision
+
+Independent review of pull request #546 blocked an initial `verified` record
+for EVAL-006: the capability had no production caller, which the master
+specification's completion rule excludes. EVAL-006 revision 5 returns it to
+`implemented_unverified`. The same review found and this change fixes: `state`
+offered as a decision field it could never observe; minimization that could
+substitute a different bug; an evaluation budget that could be exceeded;
+integrity wording that overstated tamper resistance; a racy, non-cleaning file
+store; duplicate or unrelated results inflating gate samples; and a service
+that trusted caller-built gate decisions.
