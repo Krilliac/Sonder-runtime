@@ -894,9 +894,9 @@
     },
     {
       "checked": false,
-      "claim": "Composed authoritative fact writes now require an acyclic same-source and same-project supersession link, and scoped entity and decision indexes hide the predecessor after the successor becomes effective across restart and journal rebuild.",
+      "claim": "Live authoritative activation pays full journal authentication only on first claim and keeps a bounded indexed invariant per unit of work, and the replication receiver fails fast at startup instead of retrying peer fact batches rejected by an authoritatively owned scope.",
       "requirement_id": "MEM-004",
-      "revision": 7,
+      "revision": 9,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "693d4ef5d2f411afa9429fd0d1b0ef397c6ba34e4f11f41879505eded07fecf3",
+    "ledger_sha256": "bb00c98ff75d73d1685c774f9f12171b988075697e11770a67e0c399159c13d6",
     "spec_sha256": "ed5ab01393d72681fc4eb4b9581e832d3d07ee95595b8b58dfe094c9e7dbf4fa"
   }
 }
