@@ -180,16 +180,16 @@
     },
     {
       "checked": false,
-      "claim": "Agent budgets are admitted and enforced at the application boundary.",
+      "claim": "Revisions 2 and 3 still apply; additionally, when codegen_build_loop clamps a caller-supplied attempt count, its report states the requested and applied values.",
       "requirement_id": "AGENT-007",
-      "revision": 2,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Delegated workspaces are isolated and bounded by parent context.",
+      "claim": "Revision 2 delegated-workspace isolation still applies; additionally, host-driven Git mutations (harness git tools and runtime-source update/stash) are serialized per working tree; an overlapping mutation or a foreign index.lock is refused without running Git and without deleting the lock, and the refusal directs re-inspection instead of a blind retry.",
       "requirement_id": "AGENT-008",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -859,9 +859,9 @@
     },
     {
       "checked": false,
-      "claim": "Transport retries are bounded and fenced to loop cancellation and idempotency evidence.",
+      "claim": "Revision 2 transport-retry bounds and the revision 3 web-repeat canary still apply. The codegen no-progress guard, corrected from revision 3, stops regenerating a file only when two consecutive comparable attempts produce an identical failing outcome (sorted error lines with duplicates kept) without a score improvement. Attempts whose errors are a host placeholder, truncated output, or masked by count_unreliable reset the streak and never count toward a stall.",
       "requirement_id": "LOOP-007",
-      "revision": 2,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "81f697006065e8e4c9a2f89c8bcfd656be9f584716f5c61a176210d776f4dabb",
+    "ledger_sha256": "932c049071a6738497c880aa1d0479795059ad400b9f0188e21c8dacaf86efe9",
     "spec_sha256": "ed5ab01393d72681fc4eb4b9581e832d3d07ee95595b8b58dfe094c9e7dbf4fa"
   }
 }

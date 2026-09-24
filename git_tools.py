@@ -18,6 +18,7 @@ import time
 from datetime import datetime, timezone
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
+from sonder_runtime.adapters.git_mutation_guard import guard_git_mutation
 import sonder_logging
 
 
@@ -423,8 +424,16 @@ def runtime_update(root, *, timeout=MAX_TIMEOUT):
 
     Hooks are disabled and no merge/rebase/conflict resolution is attempted.
     Callers must restart the running process after a successful update.
+    The status probe and the fast-forward run under the per-worktree Git
+    mutation guard, so no concurrent host mutation can change the tree
+    between the check and the act.
     """
     root = Path(root).resolve()
+    with guard_git_mutation(root, "runtime_update"):
+        return _runtime_update_unguarded(root, timeout=timeout)
+
+
+def _runtime_update_unguarded(root, *, timeout):
     top = _require_repository_root(root, timeout=timeout, max_output=16_384)
     if not _trusted_runtime_origin(_runtime_remote_url(top)):
         raise PermissionError("runtime update requires the canonical Sonder origin remote")
@@ -524,6 +533,11 @@ def runtime_stash(root, action, *, timeout=MAX_TIMEOUT):
     selected = str(action or "").strip().lower().replace("_", "-")
     if selected not in {"save", "save-untracked", "pop"}:
         raise ValueError("runtime stash action must be save, save-untracked, or pop")
+    with guard_git_mutation(Path(root).resolve(), "runtime_stash_%s" % selected):
+        return _runtime_stash_unguarded(root, selected, timeout=timeout)
+
+
+def _runtime_stash_unguarded(root, selected, *, timeout):
     top = _require_runtime_checkout(root, timeout=timeout)
     before = runtime_stash_status(top, timeout=timeout)
     if selected.startswith("save"):
