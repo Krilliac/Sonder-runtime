@@ -328,12 +328,19 @@ class DurableJobRegistry:
         *,
         result: Any = None,
         error: str = "",
+        expected_revision: int | None = None,
+        expected_status: JobStatus | None = None,
     ) -> JobRecord:
         """Publish a monotonic state transition for an adapter/worker."""
         if not isinstance(status, JobStatus):
             raise TypeError("status must be a JobStatus")
         with self._lock:
             current = self.poll(job_id)
+            if (
+                (expected_revision is not None and current.revision != expected_revision)
+                or (expected_status is not None and current.status is not expected_status)
+            ):
+                return current
             if current.is_terminal:
                 return current
             if status is JobStatus.SUCCEEDED and error:
