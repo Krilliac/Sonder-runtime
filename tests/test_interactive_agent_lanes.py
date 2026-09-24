@@ -938,7 +938,7 @@ def test_live_request_rejects_forged_extra_summary_fields_and_tampered_modalitie
         service._history(lane)
 
 
-def test_live_request_keeps_bounded_tail_gap_explicit_for_long_sessions(env):
+def test_live_request_keeps_protected_history_overflow_explicit_for_long_sessions(env):
     from sonder_runtime.application.agents.interactive_lanes import ContextHistoryOverflowError
 
     service, _, sessions, _, _, _ = env
@@ -950,13 +950,11 @@ def test_live_request_keeps_bounded_tail_gap_explicit_for_long_sessions(env):
             {"content": f"long-rationale-{index}"}, event_id=f"long-{index}",
         )
 
-    with pytest.raises(ContextHistoryOverflowError, match="canonical session tail omits"):
+    with pytest.raises(ContextHistoryOverflowError, match="protected session history exceeds"):
         service._history(lane)
 
 
-def test_live_request_rejects_tail_gap_hiding_an_earlier_model_decision(env):
-    from sonder_runtime.application.agents.interactive_lanes import ContextHistoryOverflowError
-
+def test_live_request_recovers_early_decision_when_tail_would_have_omitted_it(env):
     service, _, sessions, _, _, _ = env
     lane_id = spawn(env, command="compact-hidden-decision")["lane"]["id"]
     lane = service.store.read_lane(lane_id)
@@ -971,7 +969,40 @@ def test_live_request_rejects_tail_gap_hiding_an_earlier_model_decision(env):
             {"call_id": f"late-{index}"}, event_id=f"late-request-{index}",
         )
 
-    with pytest.raises(ContextHistoryOverflowError, match="canonical session tail omits"):
+    history = service._history(lane)
+    assert any("Accepted decision: preserve the first project rule." in item["content"]
+               for item in history)
+
+
+def test_live_request_fails_closed_when_complete_recovery_exceeds_bound(env, monkeypatch):
+    from sonder_runtime.application.agents.interactive_lanes import ContextHistoryOverflowError
+
+    service, _, sessions, _, _, _ = env
+    lane_id = spawn(env, command="compact-recovery-bound")['lane']['id']
+    lane = service.store.read_lane(lane_id)
+
+    def over_bound(*args, **kwargs):
+        raise ValueError("session history exceeds recovery bound")
+
+    monkeypatch.setattr(sessions, "read_complete", over_bound)
+    with pytest.raises(ContextHistoryOverflowError, match="unavailable or failed integrity"):
+        service._history(lane)
+
+
+def test_live_request_fails_closed_on_many_medium_payloads(env):
+    from sonder_runtime.application.agents.interactive_lanes import ContextHistoryOverflowError
+
+    service, _, sessions, _, _, _ = env
+    lane_id = spawn(env, command="compact-payload-bound")['lane']['id']
+    lane = service.store.read_lane(lane_id)
+    payload = "x" * 300_000
+    for index in range(257):
+        sessions.append(
+            lane["session_id"], "tool.requested",
+            {"call_id": str(index), "content": payload}, event_id=f"medium-{index}",
+        )
+
+    with pytest.raises(ContextHistoryOverflowError, match="unavailable or failed integrity"):
         service._history(lane)
 
 
@@ -1616,3 +1647,69 @@ def test_rejected_known_tool_response_can_be_corrected_without_reparsing_forever
     service.run_pending(lane, context)
     assert len(model.requests) == 2
     assert service.inspect(lane, context)["lane"]["status"] == "completed"
+
+
+def test_live_request_model_context_is_the_verified_snapshot_not_a_second_read(env, monkeypatch):
+    """PR #542 review P3-a: a row tampered after chain verification must not
+    reach the model through a second, unverified range read."""
+    import sqlite3
+
+    service, _, sessions, _, _, root = env
+    lane_id = spawn(env, command="verified-handoff")["lane"]["id"]
+    lane = service.store.read_lane(lane_id)
+    sessions.append(
+        lane["session_id"], "model.response",
+        {"content": "Accepted decision: genuine verified rationale."},
+        event_id="verified-decision",
+    )
+    original = sessions.read_complete
+
+    def read_then_tamper(*args, **kwargs):
+        events = original(*args, **kwargs)
+        with sqlite3.connect(root / "sessions.db") as connection:
+            connection.execute("DROP TRIGGER IF EXISTS session_event_no_update")
+            connection.execute(
+                "UPDATE session_event SET payload_json=? WHERE event_id=?",
+                ('{"content":"FORGED after verification"}', "verified-decision"),
+            )
+        return events
+
+    monkeypatch.setattr(sessions, "read_complete", read_then_tamper)
+    history = service._history(lane)
+    contents = " ".join(str(item.get("content")) for item in history)
+
+    assert "FORGED after verification" not in contents
+    assert "Accepted decision: genuine verified rationale." in contents
+
+
+def test_live_request_with_production_default_compaction_bound_recovers_long_history(tmp_path):
+    """The bootstrap wires SessionCompactionService(repo) with its default
+    1,000-event bound; complete recovery must not be re-bounded by it."""
+    from sonder_runtime.application.compaction import SessionCompactionService
+
+    sessions = SQLiteSessionRepository(tmp_path / "sessions.db")
+    store = SQLiteAgentLaneStore(tmp_path / "fleet.db", sessions)
+    service = AgentLaneService(
+        store, sessions, Model(), auto_start=False,
+        compaction_service=SessionCompactionService(sessions),
+    )
+    context = local_owner_context(correlation_id="test", workspace_roots=(tmp_path,))
+    (tmp_path / "child").mkdir()
+    lane_id = service.spawn(
+        command_id="prod-bound", parent_session_id="parent", task="implement parser",
+        workspace_root=str(tmp_path / "child"), context=context,
+    )["lane"]["id"]
+    lane = store.read_lane(lane_id)
+    sessions.append(
+        lane["session_id"], "model.response",
+        {"content": "Accepted decision: keep the earliest rule."}, event_id="prod-early",
+    )
+    for index in range(1_001):
+        sessions.append(
+            lane["session_id"], "tool.requested",
+            {"call_id": f"prod-{index}"}, event_id=f"prod-request-{index}",
+        )
+
+    history = service._history(lane)
+    assert any("Accepted decision: keep the earliest rule." in str(item.get("content"))
+               for item in history)
