@@ -65,11 +65,20 @@ report 71 passed and 1 skipped (needs a container runtime).
 
 ## Remaining gap (why SEC-009 stays unverified)
 
-`selfmod.py` (3 strings) and `scripts/nightly_selfmod.py` (2 strings) still
-describe backups as "immutable". Open PR #519 owns both files, so this lane
-does not edit them. The ratchet pins exactly those five findings in
-`KNOWN_DEBT`: no other file may add one, and fixing one forces the pin to
-shrink. SEC-009 can be marked verified once `KNOWN_DEBT` is empty.
+The five pinned overclaims are resolved. PR #519 reworded the five backup
+descriptions in `selfmod.py` and `scripts/nightly_selfmod.py` as
+"tamper-evident" or "best-effort". After this
+branch merged `main`, the ratchet failed exactly as designed: it found zero
+where it expected five. `KNOWN_DEBT` is now empty, so any new finding fails
+the test.
+
+What remains is production wiring. No production caller builds
+`FilesystemRecoveryEvidenceRepository` with the live startup
+`--unrestricted-selfmod` capability, and the self-modification recovery path
+(`selfmod.py`, `selfmod_recover.py`) does not emit `RecoveryBoundary`
+assessments. The typed disclosure is therefore proven as a contract, not as
+runtime behavior. SEC-009 stays `implemented_unverified` until that path
+carries the assessment, and a green CI run on the exact SHA proves it.
 
 ## Limitations
 
