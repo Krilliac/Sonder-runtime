@@ -29,13 +29,9 @@ from .divergence import (
     reproduce,
 )
 from .promotion_gates import (
-    DEFAULT_PROMOTION_GATE_POLICIES,
     PromotionGateDecision,
     PromotionGateError,
-    PromotionGatePolicy,
     PromotionKind,
-    evaluate_promotion_gate,
-    validate_policy_table,
 )
 from .proposal_lifecycle import (
     EvaluationMode,
@@ -76,15 +72,11 @@ class EvaluationApplicationService:
         lifecycle: EvaluationLifecyclePort,
         suites: EvaluationSuiteCatalog | None = None,
         failures: MinimizedFailureStore | None = None,
-        gate_policies: Mapping[PromotionKind, PromotionGatePolicy] | None = None,
     ) -> None:
         self._corpus = corpus
         self._lifecycle = lifecycle
         self._suites = suites or InMemoryEvaluationSuiteCatalog()
         self._failures = failures or InMemoryMinimizedFailureStore()
-        self._gate_policies = validate_policy_table(gate_policies or DEFAULT_PROMOTION_GATE_POLICIES)
-        self._kinds: dict[str, PromotionKind] = {}
-        self._gated_evidence: dict[str, str] = {}
 
     def register_suite(self, suite: EvaluationSuite) -> EvaluationSuite:
         return self._suites.register(suite)
@@ -135,9 +127,6 @@ class EvaluationApplicationService:
         """Replay a retained failure; ``None`` means the candidate no longer diverges."""
         return reproduce(self._failures.load(failure_digest), evaluator_factory)
 
-    def gate_policy(self, kind: PromotionKind) -> PromotionGatePolicy:
-        return self._gate_policies[kind]
-
     def promotion_gate_decision(
         self,
         proposal_id: str,
@@ -147,22 +136,13 @@ class EvaluationApplicationService:
     ) -> PromotionGateDecision:
         """Recompute the gate for a proposal from lifecycle-recorded evidence.
 
-        The policy comes from the kind bound when the proposal was created, and
-        the results and shadow/canary observations are the ones the lifecycle
-        accepted for this proposal -- never caller-supplied objects.  The
-        baseline comparison inputs remain caller-supplied and must be stated
-        explicitly (there are no permissive defaults).
+        The gate itself, its policy table, and the kind binding all live in the
+        lifecycle, so every service over the same lifecycle gets the same
+        answer.  ``baseline_pass_rate`` and ``case_regressions`` are stated
+        explicitly; ``None`` fails the baseline gate for kinds that require one.
         """
-        kind = self._kinds.get(proposal_id)
-        if kind is None:
-            raise PromotionGateError(f"proposal {proposal_id!r} has no promotion kind; create it with kind=")
-        return evaluate_promotion_gate(
-            self._gate_policies[kind],
-            results=self._lifecycle.recorded_results(proposal_id),
-            baseline_pass_rate=baseline_pass_rate,
-            case_regressions=case_regressions,
-            shadow=self._lifecycle.recorded_observation(proposal_id, EvaluationMode.SHADOW),
-            canary=self._lifecycle.recorded_observation(proposal_id, EvaluationMode.CANARY),
+        return self._lifecycle.promotion_gate_decision(
+            proposal_id, baseline_pass_rate=baseline_pass_rate, case_regressions=case_regressions,
         )
 
     def gated_promotion_evidence(
@@ -175,27 +155,20 @@ class EvaluationApplicationService:
         rollback_reference: str,
         provenance: tuple[str, ...],
     ) -> PromotionEvidence:
-        """Build promotion evidence whose gates are a recomputed mechanical decision.
+        """Build promotion evidence whose gates are the lifecycle's recomputed decision.
 
-        The service does not accept a decision object: it recomputes one with
-        :meth:`promotion_gate_decision`, so a caller cannot substitute a
-        decision made under a laxer kind or over different results.  The
-        decision's sub-gates become ``gate_results`` and its digest is added
-        to provenance; any failed sub-gate makes the evidence unacceptable and
-        ``approve`` refuses it.
+        No decision object is accepted; the lifecycle recomputes it under the
+        kind bound at creation and records the evidence as gated, which is the
+        only evidence ``approve`` accepts for a kind-bound proposal.
         """
-        decision = self.promotion_gate_decision(
-            proposal_id, baseline_pass_rate=baseline_pass_rate, case_regressions=case_regressions,
-        )
-        evidence = self._lifecycle.build_promotion_evidence(
+        evidence, _decision = self._lifecycle.build_gated_promotion_evidence(
             proposal_id,
-            gate_results=decision.gate_results,
-            replay_equivalent=decision.replay_equivalent,
+            baseline_pass_rate=baseline_pass_rate,
+            case_regressions=case_regressions,
             holdout_passed=holdout_passed,
             rollback_reference=rollback_reference,
-            provenance=tuple(provenance) + (f"promotion-gate:{decision.kind.value}:{decision.digest}",),
+            provenance=provenance,
         )
-        self._gated_evidence[proposal_id] = evidence.digest
         return evidence
 
     def create_proposal(
@@ -207,18 +180,17 @@ class EvaluationApplicationService:
         *,
         kind: PromotionKind | None = None,
     ) -> Proposal:
-        """Create a proposal, optionally binding the promotion kind that gates it.
+        """Create a proposal, binding the promotion kind that gates it.
 
-        A kind-bound proposal can only be approved with evidence from
-        :meth:`gated_promotion_evidence`.  Proposals created without a kind are
-        legacy: they keep the deprecated ungated ``promotion_evidence`` path.
+        The kind is stored on the lifecycle proposal (and, for the durable
+        lifecycle, in the creation event).  Proposals created without a kind are
+        legacy and can be approved only with an explicit ungated opt-in.
         """
         if kind is not None and not isinstance(kind, PromotionKind):
             raise PromotionGateError("kind must be a PromotionKind")
-        proposal = self._lifecycle.create(proposal_id, candidate, baseline, suite)
-        if kind is not None:
-            self._kinds[proposal.proposal_id] = kind
-        return proposal
+        return self._lifecycle.create(
+            proposal_id, candidate, baseline, suite, promotion_kind=kind.value if kind else "",
+        )
 
     def submit(self, proposal_id: str) -> Proposal:
         return self._lifecycle.submit(proposal_id)
@@ -250,20 +222,11 @@ class EvaluationApplicationService:
     ) -> PromotionEvidence:
         """Deprecated ungated path: caller-asserted gate booleans.
 
-        Refused for kind-bound proposals, which must use
-        :meth:`gated_promotion_evidence`.  Retained only for legacy proposals
-        created without a kind, and emits :class:`DeprecationWarning`.
+        The lifecycle refuses it for kind-bound proposals.  For legacy
+        proposals the resulting evidence is approved only with
+        ``approve(..., allow_ungated_legacy=True)``.
         """
-        if proposal_id in self._kinds:
-            raise PromotionGateError(
-                "kind-bound proposals require gated_promotion_evidence; caller-asserted gates are refused",
-            )
-        warnings.warn(
-            "promotion_evidence accepts caller-asserted, ungated gate results; "
-            "create proposals with kind= and use gated_promotion_evidence",
-            DeprecationWarning, stacklevel=2,
-        )
-        return self._lifecycle.build_promotion_evidence(
+        evidence = self._lifecycle.build_promotion_evidence(
             proposal_id,
             gate_results=gate_results,
             replay_equivalent=replay_equivalent,
@@ -271,11 +234,15 @@ class EvaluationApplicationService:
             rollback_reference=rollback_reference,
             provenance=provenance,
         )
+        warnings.warn(
+            "promotion_evidence accepts caller-asserted, ungated gate results; "
+            "create proposals with kind= and use gated_promotion_evidence",
+            DeprecationWarning, stacklevel=2,
+        )
+        return evidence
 
-    def approve(self, proposal_id: str, evidence_digest: str) -> Proposal:
-        if proposal_id in self._kinds and self._gated_evidence.get(proposal_id) != evidence_digest:
-            raise PromotionGateError("kind-bound proposals can only be approved with gated promotion evidence")
-        return self._lifecycle.approve(proposal_id, evidence_digest)
+    def approve(self, proposal_id: str, evidence_digest: str, *, allow_ungated_legacy: bool = False) -> Proposal:
+        return self._lifecycle.approve(proposal_id, evidence_digest, allow_ungated_legacy=allow_ungated_legacy)
 
     def promote(self, proposal_id: str, evidence_digest: str, *, attended: bool = False) -> Proposal:
         return self._lifecycle.promote(proposal_id, evidence_digest, attended=attended)

@@ -82,7 +82,7 @@ def test_promotion_evidence_requires_all_safety_dimensions_and_explicit_approval
         holdout_passed=True, rollback_reference="route:baseline", provenance=("eval-run:r1",),
     )
     assert evidence.accepted is True
-    assert lifecycle.approve("p1", evidence.digest).state is ProposalState.READY_FOR_PROMOTION
+    assert lifecycle.approve("p1", evidence.digest, allow_ungated_legacy=True).state is ProposalState.READY_FOR_PROMOTION
     with pytest.raises(EvaluationLifecycleError, match="attended"):
         lifecycle.promote("p1", evidence.digest)
     assert lifecycle.promote("p1", evidence.digest, attended=True).state is ProposalState.PROMOTED
@@ -96,7 +96,7 @@ def test_failed_gate_cannot_be_approved_and_evidence_is_stable() -> None:
     )
     assert evidence.accepted is False
     with pytest.raises(EvaluationLifecycleError, match="rejected"):
-        lifecycle.approve("p1", evidence.digest)
+        lifecycle.approve("p1", evidence.digest, allow_ungated_legacy=True)
 
 
 def test_invalid_transition_and_immutable_result_id_fail_closed() -> None:
@@ -120,7 +120,7 @@ def test_phase_result_modes_and_attended_rollback_are_explicit() -> None:
         "p1", gate_results={"quality": True}, replay_equivalent=True,
         holdout_passed=True, rollback_reference="route:baseline", provenance=("eval-run:r1",),
     )
-    lifecycle.approve("p1", evidence.digest)
+    lifecycle.approve("p1", evidence.digest, allow_ungated_legacy=True)
     lifecycle.promote("p1", evidence.digest, attended=True)
     with pytest.raises(EvaluationLifecycleError, match="attended"):
         lifecycle.rollback("p1")

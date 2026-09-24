@@ -7,10 +7,19 @@ than replayed.  The digests are integrity checks, not tamper-proofing: anyone
 who can write the directory can recompute them.
 
 Writers are serialized by an exclusive ``.lock`` file created with
-``O_CREAT | O_EXCL``, so the capacity check, the no-overwrite check, and the
-atomic rename happen as one critical section.  A lock older than
-``STALE_LOCK_SECONDS`` is presumed abandoned by a crashed writer and removed;
-temporary files older than ``STALE_TEMPORARY_SECONDS`` are cleaned on write.
+``O_CREAT | O_EXCL`` and holding a random per-acquisition token, so the
+capacity check, the no-overwrite check, and the atomic rename happen as one
+critical section.  Ownership is by token:
+
+* release deletes the lock only if it still holds this writer's token;
+* a lock older than ``STALE_LOCK_SECONDS`` is broken by first renaming it to a
+  unique sidecar (an atomic step only one waiter can win), then checking the
+  sidecar still holds the token that was judged stale.  If a new holder had
+  replaced the lock in between, its lock is restored with a no-overwrite link
+  instead of being discarded.
+
+Temporary files older than ``STALE_TEMPORARY_SECONDS`` are cleaned on write.
+The lock is advisory and assumes cooperating writers on one host.
 """
 from __future__ import annotations
 
@@ -19,6 +28,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import tempfile
 import time
 from typing import Iterator
@@ -69,34 +79,96 @@ class JsonMinimizedFailureStore:
             raise DivergenceError("failure digest must be a lowercase SHA-256 hex digest")
         return self.directory / f"{failure_digest}.json"
 
+    @staticmethod
+    def _read_token(path: Path) -> str | None:
+        try:
+            return path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return None
+
+    def _break_stale_lock(self, lock: Path, observed_token: str | None) -> bool:
+        """Remove ``lock`` only if it still holds ``observed_token``.
+
+        The rename to a unique sidecar is atomic, so of several waiters that
+        judged the same lock stale, exactly one moves it.  The mover then checks
+        the token; if the file it moved is a newer holder's lock, it is put back
+        with a no-overwrite link rather than deleted.
+        """
+        sidecar = lock.with_name(f"{lock.name}.{secrets.token_hex(8)}.stale")
+        try:
+            os.rename(lock, sidecar)
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return False
+        try:
+            if self._read_token(sidecar) == observed_token:
+                return True
+            try:
+                os.link(sidecar, lock)
+            except OSError:
+                pass
+            return False
+        finally:
+            try:
+                sidecar.unlink()
+            except OSError:
+                pass
+
     @contextmanager
     def _locked(self) -> Iterator[None]:
         lock = self.directory / _LOCK_NAME
+        token = secrets.token_hex(16)
         deadline = time.monotonic() + self._lock_timeout
         while True:
             try:
                 descriptor = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-                break
             except FileExistsError:
+                # Only open a lock to read its token once it is stale: on
+                # Windows an open reader makes the holder's unlink fail.
                 try:
-                    if time.time() - lock.stat().st_mtime > STALE_LOCK_SECONDS:
-                        lock.unlink()
-                        continue
+                    stale = time.time() - lock.stat().st_mtime > STALE_LOCK_SECONDS
                 except FileNotFoundError:
                     continue
                 except OSError:
-                    pass
+                    stale = False
+                if stale and self._break_stale_lock(lock, self._read_token(lock)):
+                    continue
                 if time.monotonic() >= deadline:
                     raise DivergenceError("minimized failure store lock is held by another writer") from None
                 time.sleep(0.02)
+                continue
+            try:
+                os.write(descriptor, token.encode("ascii"))
+            finally:
+                os.close(descriptor)
+            break
         try:
-            os.close(descriptor)
             yield
         finally:
+            self._release(lock, token)
+
+    def _release(self, lock: Path, token: str) -> None:
+        """Delete the lock only if it still holds ``token``.
+
+        A concurrent reader (a waiter checking a stale lock) can make the
+        delete fail transiently on Windows, so it is retried for a bounded time
+        rather than silently leaking the lock.
+        """
+        deadline = time.monotonic() + max(self._lock_timeout, 1.0)
+        while True:
+            owner = self._read_token(lock)
+            if owner is not None and owner != token:
+                return
             try:
                 lock.unlink()
-            except OSError:
-                pass
+                return
+            except FileNotFoundError:
+                return
+            except PermissionError:
+                if time.monotonic() >= deadline:
+                    raise DivergenceError("could not release the minimized failure store lock") from None
+                time.sleep(0.01)
 
     def _clean_stale_temporaries(self) -> None:
         now = time.time()

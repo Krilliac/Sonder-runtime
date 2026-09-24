@@ -14,85 +14,85 @@ recorded counts), never a model's subjective pass/fail.
   - `PromotionGatePolicy` binds a kind to a minimum sample size, a point
     pass-rate floor, a one-sided Wilson score lower bound at a stated
     confidence level, a case-regression allowance, a pass-rate-drop allowance
-    against a baseline, replay equivalence, and shadow/canary requirements
-    (including a minimum canary sample count). Policies are digest-bound and
-    reject incoherent settings (a confidence floor above the point floor, a
-    canary without a shadow, out-of-range confidence).
+    against a baseline, a `require_baseline` flag, replay equivalence, and
+    shadow/canary requirements (including a minimum canary sample count).
+    Policies are digest-bound and reject incoherent settings.
   - `DEFAULT_PROMOTION_GATE_POLICIES` covers every kind; `validate_policy_table`
-    refuses a table that omits or mislabels any kind.
+    refuses a table that omits or mislabels any kind. Every kind except SKILL
+    (a new skill may have no predecessor) requires an explicit baseline:
+    `baseline_pass_rate=None` fails the `baseline_comparison` gate instead of
+    silently skipping the pass-rate-drop check.
   - `evaluate_promotion_gate` pools offline results, derives the integral
     success count from `pass_rate x sample_count` (refusing fractional counts
-    or a missing `pass_rate` metric instead of rounding them into a pass), and
-    returns a `PromotionGateDecision` with named sub-gate results, reason
-    codes, and a stable digest. Results must have distinct `result_id`s and
-    share one candidate, baseline, and suite digest, so duplicates cannot
-    inflate the sample count and unrelated results cannot be pooled.
-- `sonder_runtime/application/evaluation/service.py` binds the gate at the
-  service boundary:
-  - `create_proposal(..., kind=)` fixes the promotion kind when the proposal
-    is created.
-  - `promotion_gate_decision` and `gated_promotion_evidence` do not accept a
-    decision object. They recompute it from the lifecycle-recorded results
-    and shadow/canary observations (`ProposalLifecycle.recorded_results` /
-    `recorded_observation`, also exposed by the durable lifecycle service and
-    the port) under that kind's policy. Baseline inputs
-    (`baseline_pass_rate`, `case_regressions`) must be stated explicitly.
-  - The decision's sub-gates become `PromotionEvidence.gate_results` and its
-    digest is added to provenance, so a failed sub-gate makes the evidence
-    unacceptable.
-  - For kind-bound proposals, the ungated `promotion_evidence` path is
-    refused, and `approve` accepts only the digest of evidence the gated path
-    produced (evidence built directly on the lifecycle is refused). Legacy
-    proposals created without a kind keep the ungated path, which now emits
-    `DeprecationWarning`.
+    or a missing `pass_rate` metric), and returns a `PromotionGateDecision`
+    with named sub-gate results, reason codes, and a stable digest. Results
+    must have distinct `result_id`s and share one candidate, baseline, and
+    suite digest.
+  - `PromotionGateEvaluator` freezes a validated policy table for use as the
+    lifecycle's gate.
+- `sonder_runtime/application/evaluation/proposal_lifecycle.py` owns the gate
+  authority, so it cannot be bypassed by constructing another service:
+  - `ProposalLifecycle(promotion_gate=...)` fixes the gate at construction.
+  - `create(..., promotion_kind=)` stores the kind on the proposal itself.
+  - `build_gated_promotion_evidence` runs the construction-time gate over the
+    results and observations this lifecycle recorded, and records the
+    evidence and decision digests as gated.
+  - For kind-bound proposals, caller-asserted `build_promotion_evidence` is
+    refused and `approve` accepts only gated evidence; the legacy opt-in is
+    refused too.
+  - For proposals without a kind, `approve` refuses ungated evidence unless
+    the caller passes `allow_ungated_legacy=True`. The only existing callers of
+    that path are the three legacy-contract test modules, which now opt in
+    explicitly; there are no production callers.
+- `sonder_runtime/application/evaluation/durable_lifecycle.py` persists the
+  authority in the hash-chained lifecycle events: the creation event carries
+  `promotion_kind`, evidence events carry `gated` and `gate_decision_digest`,
+  and the approval event records whether it was gated.
+- `sonder_runtime/application/evaluation/service.py` delegates to the
+  lifecycle (`create_proposal(..., kind=)`, `promotion_gate_decision`,
+  `gated_promotion_evidence`, `approve(..., allow_ungated_legacy=)`); it holds
+  no gate state and accepts no decision object. The ungated
+  `promotion_evidence` path emits `DeprecationWarning` when the lifecycle
+  accepts it.
 
 ## Evidence
 
-`tests/test_eval007_promotion_gates.py` (15 tests, no model or live traffic):
+`tests/test_eval007_promotion_gates.py` (19 tests, no model or live traffic):
 
 - The Wilson bound matches the closed form for 10/10, is pinned at the
-  interior rate 27/30 (0.77450, exercising the `p(1-p)` term), and separates
-  3/3 (about 0.53) from 300/300 (above 0.98).
-- Three copies of one 10/10 result are refused (before the fix they pooled to
-  30 samples and passed the PROMPT gate); results for another candidate or
-  another suite version are refused.
-- A SELFMOD-bound proposal with 40/40 fails `sample_size` because the service
-  applies the bound kind; a caller-built PROMPT decision cannot be passed in;
-  lifecycle-built ungated evidence cannot be approved through the service.
-- Every default policy's sample floor is attainable: a perfect run of
-  `min_samples` clears its own confidence bound.
-- A perfect 3/3 prompt run fails on `sample_size` and
-  `confidence_lower_bound`; a pooled 39/40 run passes all eight named gates,
-  independent of result order.
-- Case regressions, pass-rate drop, missing replay equivalence, a missing or
-  thin canary, an unhealthy shadow, and the absence of offline results each
-  fail with a specific reason code.
-- Through the application service, a gated-but-failing proposal cannot be
-  approved; a passing one is approved and then promoted only with an attended
-  decision.
+  interior rate 27/30 (0.77450), and separates 3/3 from 300/300.
+- Duplicate result IDs and results for another candidate or suite version are
+  refused.
+- A second service over the same lifecycle cannot take the ungated path, and
+  lifecycle-built ungated evidence is refused, so a 3/3 SELFMOD proposal stays
+  in `canary`. Before the fix, a second service moved it to
+  `ready_for_promotion`.
+- Proposals without a kind need the explicit legacy opt-in to be approved.
+- Kind, gated flag, and decision digest are read back from the SQLite event
+  history after reopening; a restarted lifecycle has no proposal state and
+  refuses approval.
+- `baseline_pass_rate=None` fails `baseline_comparison` for PROMPT and passes
+  for SKILL. Before the fix, a 40/40 PROMPT run with no baseline passed.
+- A SELFMOD-bound proposal with 40/40 fails `sample_size`; a caller-built
+  PROMPT decision cannot be passed in.
+- Default sample floors are attainable; small or thin runs, regressions,
+  pass-rate drops, missing replay equivalence, and missing or unhealthy
+  shadow/canary observations each fail with a specific reason code.
 
-Mutation check (local): forcing `confidence_lower_bound` to pass fails the
-small-sample test, so the confidence assertion is load-bearing. Each review
-fix was preceded by a test that failed on the previous code.
-
-Local verification: the 15 tests, the pre-existing evaluation suites,
-`scripts/check_architecture.py`, `scripts/check_requirement_evidence.py
---base-ref origin/main`, `scripts/check_evidence_documents.py`,
-`scripts/check_doc_links.py`, and `git diff --check` passed.
+Each review fix was preceded by a test or reproduction that failed on the
+previous code.
 
 ## Limitations
 
 - The requirement stays `implemented_unverified`: the existing selfmod,
   memory, and model promotion paths (`selfmod.py`, `promotion_eval.py`, and
-  the nightly scripts) do not yet call this gate, so the policy table is
-  defined and enforced for proposals that go through the evaluation service,
-  not yet for every production promotion.
+  the nightly scripts) do not yet call this gate.
+- The durable events record the kind and gate decisions, but the in-memory
+  `ProposalLifecycle` is not rehydrated from them on restart; a restarted
+  lifecycle fails closed (unknown proposal) rather than resuming.
 - The default thresholds are conservative starting values, not calibrated
   against live workload variance.
 - Pooling assumes offline results for one proposal are independent samples of
   the same suite; the gate does not model correlated cases.
-- The kind binding and gated-evidence record live in the service instance;
-  they are not persisted with the durable lifecycle events.
-- `baseline_pass_rate` and `case_regressions` are still caller-stated inputs.
-- `evaluate_promotion_gate` and `PromotionGateDecision` remain public for
-  analysis, but the service never accepts a caller-built decision.
+- `baseline_pass_rate` and `case_regressions` are caller-stated inputs, though
+  they must be stated explicitly.

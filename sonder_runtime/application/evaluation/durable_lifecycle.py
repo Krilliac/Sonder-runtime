@@ -3,7 +3,10 @@
 ``ProposalLifecycle`` remains the fail-closed state machine.  This service
 adds the missing persistence seam: every accepted mutation is recorded as an
 immutable event through the repository port, including the exact promotion
-evidence digest and rollback reference.
+evidence digest and rollback reference.  Gate authority is persisted too: the
+creation event carries the proposal's ``promotion_kind``, evidence events say
+whether the evidence was ``gated`` and carry the gate decision digest, and the
+approval event records whether it was gated or a legacy opt-in.
 """
 from __future__ import annotations
 
@@ -13,6 +16,7 @@ from typing import Mapping, Protocol
 from ..ports.session_repository import SessionEvent
 from .proposal_lifecycle import (
     EvaluationMode,
+    GateDecisionLike,
     EvaluationResult,
     EvaluationSuite,
     Proposal,
@@ -39,10 +43,14 @@ class EvaluationLifecycleService:
         body = {"proposal_id": proposal.proposal_id, "state": proposal.state.value, **payload}
         self.repository.append(proposal.proposal_id, event_type, body)
 
-    def create(self, proposal_id: str, candidate: str, baseline: str, suite: EvaluationSuite) -> Proposal:
-        proposal = self.lifecycle.create(proposal_id, candidate, baseline, suite)
+    def create(
+        self, proposal_id: str, candidate: str, baseline: str, suite: EvaluationSuite,
+        *, promotion_kind: str = "",
+    ) -> Proposal:
+        proposal = self.lifecycle.create(proposal_id, candidate, baseline, suite, promotion_kind=promotion_kind)
         self._record(proposal, "evaluation.proposal.created", candidate=proposal.candidate,
-                     baseline=proposal.baseline, suite_digest=suite.digest)
+                     baseline=proposal.baseline, suite_digest=suite.digest,
+                     promotion_kind=proposal.promotion_kind)
         return proposal
 
     def submit(self, proposal_id: str) -> Proposal:
@@ -87,12 +95,36 @@ class EvaluationLifecycleService:
     def build_promotion_evidence(self, proposal_id: str, **kwargs: object) -> PromotionEvidence:
         evidence = self.lifecycle.build_promotion_evidence(proposal_id, **kwargs)
         self._record(self.lifecycle.get(proposal_id), "evaluation.evidence.attached",
-                     evidence_digest=evidence.digest, evidence=_evidence_payload(evidence))
+                     evidence_digest=evidence.digest, evidence=_evidence_payload(evidence),
+                     gated=False, gate_decision_digest=None)
         return evidence
 
-    def approve(self, proposal_id: str, evidence_digest: str) -> Proposal:
-        proposal = self.lifecycle.approve(proposal_id, evidence_digest)
-        self._record(proposal, "evaluation.proposal.approved", evidence_digest=evidence_digest)
+    def promotion_gate_decision(
+        self, proposal_id: str, *, baseline_pass_rate: float | None, case_regressions: int,
+    ) -> GateDecisionLike:
+        return self.lifecycle.promotion_gate_decision(
+            proposal_id, baseline_pass_rate=baseline_pass_rate, case_regressions=case_regressions,
+        )
+
+    def build_gated_promotion_evidence(
+        self, proposal_id: str, **kwargs: object,
+    ) -> tuple[PromotionEvidence, GateDecisionLike]:
+        evidence, decision = self.lifecycle.build_gated_promotion_evidence(proposal_id, **kwargs)
+        self._record(self.lifecycle.get(proposal_id), "evaluation.evidence.attached",
+                     evidence_digest=evidence.digest, evidence=_evidence_payload(evidence),
+                     gated=True, gate_decision_digest=decision.digest,
+                     promotion_kind=decision.kind_value)
+        return evidence, decision
+
+    def gated_evidence(self, proposal_id: str) -> tuple[str, str] | None:
+        return self.lifecycle.gated_evidence(proposal_id)
+
+    def approve(self, proposal_id: str, evidence_digest: str, *, allow_ungated_legacy: bool = False) -> Proposal:
+        proposal = self.lifecycle.approve(proposal_id, evidence_digest, allow_ungated_legacy=allow_ungated_legacy)
+        gated = self.lifecycle.gated_evidence(proposal_id)
+        self._record(proposal, "evaluation.proposal.approved", evidence_digest=evidence_digest,
+                     gated=bool(gated and gated[0] == evidence_digest),
+                     gate_decision_digest=gated[1] if gated and gated[0] == evidence_digest else None)
         return proposal
 
     def promote(self, proposal_id: str, evidence_digest: str, *, attended: bool = False) -> Proposal:
