@@ -95,6 +95,127 @@ _TASK_FAMILIES = {
 }
 
 
+def observe_workbench_lane(trace, *, lane: dict, memory_service=None):
+    """Observe a durable terminal lane attempt without authorizing replay."""
+    status = lane.get("status")
+    if status not in {"completed", "failed", "awaiting_input"}:
+        return None
+    uncertain = bool(lane.get("pending_effect")) or status == "awaiting_input"
+    run_id = str(lane["id"])
+    attempt_id = str(lane["attempt_id"])
+    project_scope = str(lane["workspace_root"])
+    scope = _digest((run_id, project_scope))
+    error_code = str(lane.get("error") or "")
+    if uncertain:
+        failure_class = FailureClass.UNCERTAIN_SIDE_EFFECT
+        source_code = "LANE_EFFECT_UNRESOLVED"
+    elif status == "failed":
+        failure_class = (
+            FailureClass.PERMISSION_DENIED if error_code == "AUTHORITY_DENIED" else
+            FailureClass.TIME_BUDGET if error_code == "BUDGET_EXHAUSTED" else
+            FailureClass.CONTEXT_EXHAUSTION if error_code == "CONTEXT_HISTORY_OVERFLOW" else
+            FailureClass.ENVIRONMENT_FAILURE
+        )
+        source_code = error_code if error_code in {
+            "AUTHORITY_DENIED", "BUDGET_EXHAUSTED", "CONTEXT_HISTORY_OVERFLOW",
+            "LANE_ATTEMPT_FAILED",
+        } else "LANE_ATTEMPT_FAILED"
+    else:
+        failure_class = None
+        source_code = ""
+    failure = None if failure_class is None else FailureObservation(
+        failure_class, source_code, _digest((error_code, status, uncertain)),
+    )
+    before = ProgressVector(
+        scope, (ProgressMetric("lane_completed", 0, "maximize"),), complete=True,
+    )
+    after = ProgressVector(
+        scope, (ProgressMetric("lane_completed", int(status == "completed"), "maximize"),),
+        complete=not uncertain,
+    )
+    signature = StrategySignature(
+        "patch", _digest((lane.get("task", ""), project_scope)),
+        ("lane:" + scope,), _digest((lane.get("task", ""), lane.get("tier", ""))),
+        "complete host-scoped interactive lane", "lane-completion",
+    )
+    attempt = StrategyAttempt(
+        run_id, attempt_id, signature,
+        "uncertain" if uncertain else "succeeded" if status == "completed" else "failed",
+        failure, before, after, StrategyUsage(attempts=1),
+        model_route=str(lane.get("tier") or "")[:128],
+    )
+    decision = trace.record(
+        attempt, budget=StrategyBudget(attempts=max(1, min(int(lane["max_steps"]), 64))),
+        available_actions=(StrategyAction.INSPECT, StrategyAction.REPAIR, StrategyAction.CRITIC),
+        unresolved_effects=uncertain,
+        policy_blocked=failure_class is FailureClass.PERMISSION_DENIED,
+        transport_replay_safe=False,
+    )
+    if memory_service is not None and attempt.outcome in {"succeeded", "failed"}:
+        memory_service.observe_recorded(
+            run_id, attempt_id, project_scope=project_scope,
+        )
+    return decision
+
+
+_FLEET_FAILURES = {
+    "timeout": FailureClass.TRANSIENT_TRANSPORT,
+    "unavailable": FailureClass.TRANSIENT_TRANSPORT,
+    "transport": FailureClass.TRANSIENT_TRANSPORT,
+    "throttled": FailureClass.RATE_LIMIT,
+    "request_rejected": FailureClass.INVALID_TOOL_ARGUMENT,
+    "task_drift": FailureClass.STALE_EVIDENCE,
+    "unknown": FailureClass.IMPLEMENTATION_FAILURE,
+}
+
+
+def observe_fleet_worker(trace, *, agent_id: str, master_id: str, prompt: str,
+                         master_digest: str, project_scope: str, attempt_number: int,
+                         attempt_limit: int, route: str, accepted: bool,
+                         failure_code: str = "", effects_resolved: bool = False,
+                         transport_replay_safe: bool = False,
+                         memory_service=None):
+    """Observe one delegated model call using host failure and effect facts."""
+    scope = _digest((master_id, agent_id, project_scope))
+    objective = _digest((master_digest, project_scope))
+    signature = StrategySignature(
+        "retrieve" if transport_replay_safe else "delegate", objective,
+        ("fleet:" + scope,), _digest(prompt), "complete bounded delegated worker",
+        "fleet-accepted-result",
+    )
+    unresolved = not accepted and not effects_resolved
+    failure = None if accepted else FailureObservation(
+        _FLEET_FAILURES.get(failure_code, FailureClass.IMPLEMENTATION_FAILURE),
+        "FLEET_" + failure_code.upper() if failure_code in _FLEET_FAILURES else "FLEET_UNKNOWN",
+        _digest((failure_code, attempt_number)),
+    )
+    before = ProgressVector(
+        scope, (ProgressMetric("accepted_result", 0, "maximize"),), complete=True,
+    )
+    after = ProgressVector(
+        scope, (ProgressMetric("accepted_result", int(accepted), "maximize"),),
+        complete=accepted or effects_resolved,
+    )
+    attempt = StrategyAttempt(
+        agent_id, f"{agent_id}-attempt-{attempt_number}", signature,
+        "succeeded" if accepted else "uncertain" if unresolved else "failed",
+        failure, before, after, StrategyUsage(attempts=1, model_calls=1),
+        model_route=str(route or "")[:128],
+    )
+    decision = trace.record(
+        attempt,
+        budget=StrategyBudget(attempts=attempt_limit, model_calls=attempt_limit),
+        available_actions=(StrategyAction.RETRY_TRANSIENT, StrategyAction.INSPECT),
+        unresolved_effects=unresolved,
+        transport_replay_safe=transport_replay_safe and effects_resolved,
+    )
+    if memory_service is not None and attempt.outcome in {"succeeded", "failed"}:
+        memory_service.observe_recorded(
+            agent_id, attempt.attempt_id, project_scope=project_scope,
+        )
+    return decision
+
+
 def observe_autopilot_task(trace, *, run: dict, task: dict, memory_service=None):
     """Observe one durably saved Autopilot task outcome, including crash state."""
     status = task.get("status")
@@ -150,4 +271,5 @@ def observe_autopilot_task(trace, *, run: dict, task: dict, memory_service=None)
     return decision
 
 
-__all__ = ["observe_autopilot_task", "observe_codegen_build"]
+__all__ = ["observe_autopilot_task", "observe_codegen_build", "observe_workbench_lane",
+           "observe_fleet_worker"]

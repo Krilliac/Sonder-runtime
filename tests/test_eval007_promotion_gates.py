@@ -66,7 +66,7 @@ def test_wilson_lower_bound_distinguishes_evidence_volume() -> None:
 def test_default_table_covers_every_promotion_kind_with_attainable_confidence() -> None:
     assert set(DEFAULT_PROMOTION_GATE_POLICIES) == set(PromotionKind)
     assert {kind.value for kind in PromotionKind} == {
-        "runtime", "prompt", "skill", "route", "model", "memory", "selfmod",
+        "runtime", "prompt", "skill", "route", "model", "memory", "selfmod", "strategy",
     }
     validate_policy_table(DEFAULT_PROMOTION_GATE_POLICIES)
     for kind, policy in DEFAULT_PROMOTION_GATE_POLICIES.items():

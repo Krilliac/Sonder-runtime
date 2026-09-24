@@ -75,6 +75,14 @@ class StrategyTraceService:
         _, data = self._restore(run_id)
         return () if data is None else tuple(StrategyAttempt.from_dict(x) for x in data["attempts"])
 
+    def observed_decisions(self, run_id: str) -> tuple[StrategyDecision, ...]:
+        """Read decisions in attempt order from the authenticated checkpoint."""
+        _, data = self._restore(run_id)
+        if data is None:
+            return ()
+        return tuple(self._decision(data["decisions"][entry["attempt_id"]])
+                     for entry in data["attempts"])
+
     def record(self, attempt: StrategyAttempt, *, budget: StrategyBudget,
                available_actions: tuple[StrategyAction, ...], unresolved_effects: bool = False,
                policy_blocked: bool = False, artifacts_ready: bool = True,
@@ -86,6 +94,7 @@ class StrategyTraceService:
         checkpoint, data = self._restore(attempt.run_id)
         entries = [] if data is None else data["attempts"]
         history = tuple(StrategyAttempt.from_dict(x) for x in entries)
+        replay = False
         if data is not None:
             original_budget = StrategyBudget(**data["budget"])
             if not original_budget.allows(budget):
@@ -94,26 +103,35 @@ class StrategyTraceService:
                 if old.attempt_id == attempt.attempt_id:
                     if old != attempt:
                         raise StrategyError("strategy attempt identity reused with different content")
-                    # Preserve the historical observation, but never return an
-                    # actionable stale decision over newly restrictive host facts.
-                    if unresolved_effects:
-                        return StrategyDecision(StrategyAction.RECONCILE, "unresolved_effects")
-                    if policy_blocked:
-                        return StrategyDecision(StrategyAction.PAUSE, "host_policy_requires_operator")
-                    if not artifacts_ready:
-                        return StrategyDecision(StrategyAction.PAUSE, "artifact_not_ready")
-                    return self._decision(data["decisions"][old.attempt_id])
-        history += (attempt,)
+                    replay = True
+                    break
+        if not replay:
+            history += (attempt,)
         usage = StrategyUsage()
         for item in history:
             usage = usage.plus(item.usage)
         state = StrategyState(
-            attempt.signature.objective_digest, history=history, failure=attempt.failure,
+            attempt.signature.objective_digest, history=history, failure=history[-1].failure,
             budget=budget, usage=usage, available_actions=available_actions,
             unresolved_effects=unresolved_effects, policy_blocked=policy_blocked,
             artifacts_ready=artifacts_ready, transport_replay_safe=transport_replay_safe,
         )
         decision = self._controller.decide(state)
+        if replay:
+            # A decision in the checkpoint describes what the host observed at
+            # that time. Replays use current host facts, capabilities and budget;
+            # an older attempt must not resurrect an action after later work.
+            if history[-1].attempt_id != attempt.attempt_id and decision.action not in {
+                    StrategyAction.RECONCILE, StrategyAction.PAUSE, StrategyAction.FAIL}:
+                decision = StrategyDecision(StrategyAction.PAUSE, "historical_attempt_already_recorded")
+            if budget != original_budget:
+                narrowed = {**data, "budget": asdict(budget)}
+                checkpoint = replace(
+                    checkpoint, generation=checkpoint.generation + 1,
+                    decisions={**checkpoint.decisions, "strategy_v1": narrowed},
+                )
+                self._repository.save(checkpoint, expected_generation=checkpoint.generation - 1)
+            return decision
         strategy = {"schema": 1, "mode": "observe", "objective_digest": state.objective_digest,
                     "budget": asdict(budget),
                     "attempts": [*entries, attempt.as_dict()],

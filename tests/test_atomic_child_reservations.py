@@ -1,6 +1,7 @@
 """Cross-instance and hierarchical child reservation regressions."""
 
 from concurrent.futures import ThreadPoolExecutor
+from hashlib import sha256
 from multiprocessing import get_context
 from threading import Barrier, Event
 
@@ -70,6 +71,221 @@ def _reserve_in_process(path, barrier, results, index):
         results.put((index, "rejected", str(error)))
     else:
         results.put((index, "admitted", ""))
+
+
+def _speculative_request(index, lane_id, hypothesis):
+    return SubagentRequest(
+        "root", "one hypothesis", _root_budget(width=2, steps=5, tokens=5, wall=5),
+        f"speculative-{index}", (
+            ("execution_task_scope", "shared-question"),
+            ("execution_speculative_lane", "true"),
+            ("speculative_lane_id", lane_id),
+            ("hypothesis_digest", sha256(hypothesis.encode()).hexdigest()),
+        ),
+    )
+
+
+def _reserve_speculative_in_process(path, barrier, results, index, lane_id, hypothesis):
+    repository = SQLiteDurableContinuationRepository(path)
+    barrier.wait(timeout=10)
+    try:
+        repository.create(DurableChildSession(
+            _speculative_request(index, lane_id, hypothesis), ChildSessionLineage("root"),
+        ))
+    except InvalidSubagentRequest as error:
+        results.put((index, "rejected", str(error)))
+    else:
+        results.put((index, "admitted", ""))
+
+
+def _reserve_owned_root_in_process(path, barrier, results, index):
+    repository = SQLiteDurableContinuationRepository(path)
+    barrier.wait(timeout=10)
+    try:
+        repository.create(DurableChildSession(
+            _child(f"host-child-{index}", parent=f"operation-{index}"),
+            ChildSessionLineage(f"operation-{index}"),
+        ))
+    except InvalidSubagentRequest as error:
+        results.put((index, "rejected", str(error)))
+    else:
+        results.put((index, "admitted", ""))
+
+
+def test_distinct_operation_roots_share_one_owner_parallelism_ceiling(tmp_path):
+    path = tmp_path / "owner-wide.sqlite"
+    service = DurableContinuationService(SQLiteDurableContinuationRepository(path))
+    for index in range(2):
+        service.register_root(f"operation-{index}", _root_budget(width=1), owner_id="host-owner")
+    multiprocessing = get_context("spawn")
+    barrier, results = multiprocessing.Barrier(2), multiprocessing.Queue()
+    processes = [
+        multiprocessing.Process(
+            target=_reserve_owned_root_in_process, args=(path, barrier, results, index),
+        ) for index in range(2)
+    ]
+    for process in processes:
+        process.start()
+    try:
+        for process in processes:
+            process.join(timeout=15)
+        assert all(process.exitcode == 0 for process in processes)
+        outcomes = [results.get(timeout=2) for _ in processes]
+        assert sorted(status for _i, status, _detail in outcomes) == ["admitted", "rejected"]
+        assert "host concurrency" in next(detail for _i, status, detail in outcomes if status == "rejected")
+        admitted_index = next(index for index, status, _detail in outcomes if status == "admitted")
+        rejected_index = 1 - admitted_index
+        repository = SQLiteDurableContinuationRepository(path)
+        assert repository.request_cancel(
+            f"host-child-{admitted_index}", reason="release owner slot",
+            expected_revision=0, unstarted_only=True,
+        )
+        assert repository.create(DurableChildSession(
+            _child(f"host-child-{rejected_index}", parent=f"operation-{rejected_index}"),
+            ChildSessionLineage(f"operation-{rejected_index}"),
+        )).status is SubagentStatus.CREATED
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=2)
+
+
+def test_owner_root_width_changes_after_old_run_quiesces(tmp_path):
+    repository = SQLiteDurableContinuationRepository(tmp_path / "owner-width-change.sqlite")
+    service = DurableContinuationService(repository)
+    service.register_root("old-run", _root_budget(width=1), owner_id="host-owner")
+    repository.create(DurableChildSession(_child("old-child", parent="old-run"),
+                                          ChildSessionLineage("old-run")))
+    service.register_root("new-run", _root_budget(width=2), owner_id="host-owner")
+    with pytest.raises(InvalidSubagentRequest, match="host concurrency"):
+        repository.create(DurableChildSession(
+            _child("new-child-1", parent="new-run"), ChildSessionLineage("new-run"),
+        ))
+    assert repository.request_cancel(
+        "old-child", reason="old run finished", expected_revision=0, unstarted_only=True,
+    )
+    for index in range(2):
+        assert repository.create(DurableChildSession(
+            _child(f"new-child-{index}", parent="new-run", width=2),
+            ChildSessionLineage("new-run"),
+        )).status is SubagentStatus.CREATED
+
+
+def test_paused_old_root_keeps_its_smaller_owner_width_until_claim_released(tmp_path):
+    repository = SQLiteDurableContinuationRepository(tmp_path / "paused-old-owner.sqlite")
+    service = DurableContinuationService(repository)
+    service.register_root("old-run", _root_budget(width=1), owner_id="host-owner")
+    repository.create(DurableChildSession(_child("paused-child", parent="old-run"),
+                                          ChildSessionLineage("old-run")))
+    assert repository.update("paused-child", status=SubagentStatus.FAILED,
+                             recovery_required=True) is not None
+    service.register_root("new-run", _root_budget(width=2), owner_id="host-owner")
+    repository.create(DurableChildSession(
+        _child("one-new", parent="new-run", width=2), ChildSessionLineage("new-run"),
+    ))
+    with pytest.raises(InvalidSubagentRequest, match="host concurrency"):
+        repository.create(DurableChildSession(
+            _child("two-new", parent="new-run", width=2), ChildSessionLineage("new-run"),
+        ))
+    assert repository.update("paused-child", status=SubagentStatus.FAILED,
+                             recovery_required=False) is not None
+    assert repository.create(DurableChildSession(
+        _child("two-new", parent="new-run", width=2), ChildSessionLineage("new-run"),
+    )).status is SubagentStatus.CREATED
+
+
+def test_host_child_limit_remains_per_root_and_other_owner_has_own_width(tmp_path):
+    repository = SQLiteDurableContinuationRepository(tmp_path / "owner-limits.sqlite")
+    service = DurableContinuationService(repository)
+    for root in ("run-a", "run-b"):
+        service.register_root(root, _root_budget(width=5, children=2), owner_id="owner-a")
+        for index in range(2):
+            repository.create(DurableChildSession(
+                _child(f"{root}-child-{index}", parent=root, width=2, children=2),
+                ChildSessionLineage(root),
+            ))
+    with pytest.raises(InvalidSubagentRequest, match="child-count"):
+        repository.create(DurableChildSession(
+            _child("run-a-excess", parent="run-a", width=2, children=2),
+            ChildSessionLineage("run-a"),
+        ))
+    service.register_root("run-c", _root_budget(width=1), owner_id="owner-b")
+    assert repository.create(DurableChildSession(
+        _child("other-owner", parent="run-c"), ChildSessionLineage("run-c"),
+    )).status is SubagentStatus.CREATED
+
+
+def test_cancelled_root_fences_new_descendants_but_prior_worker_can_settle(tmp_path):
+    repository = SQLiteDurableContinuationRepository(tmp_path / "ancestor-cancel.sqlite")
+    service = DurableContinuationService(repository)
+    service.register_root("root", _root_budget(width=2), owner_id="host-owner")
+    started, release = Event(), Event()
+
+    def running(*_):
+        started.set()
+        assert release.wait(3)
+        return "already admitted"
+
+    handle = service.spawn(
+        _child("parent", width=2, steps=8, tokens=8, wall=8), _context("parent"), running,
+    )
+    try:
+        assert started.wait(2)
+        assert service.cancel("root", reason="host operation cancelled")
+        with pytest.raises(InvalidSubagentRequest, match="cancelled ancestor"):
+            repository.create(DurableChildSession(
+                _child("grandchild", parent="parent", tokens=5),
+                ChildSessionLineage("parent", ("root",)),
+            ))
+    finally:
+        release.set()
+    assert handle.result(3).status is SubagentStatus.SUCCEEDED
+
+
+@pytest.mark.parametrize("identities", [
+    (("same-lane", "hypothesis-a"), ("same-lane", "hypothesis-b")),
+    (("lane-a", "same-hypothesis"), ("lane-b", "same-hypothesis")),
+])
+def test_independent_processes_cannot_duplicate_one_speculative_identity(tmp_path, identities):
+    path = tmp_path / "speculative-race.sqlite"
+    DurableContinuationService(SQLiteDurableContinuationRepository(path)).register_root(
+        "root", _root_budget(width=3),
+    )
+    multiprocessing = get_context("spawn")
+    barrier, results = multiprocessing.Barrier(2), multiprocessing.Queue()
+    processes = [
+        multiprocessing.Process(
+            target=_reserve_speculative_in_process,
+            args=(path, barrier, results, index, *identity),
+        ) for index, identity in enumerate(identities)
+    ]
+    for process in processes:
+        process.start()
+    try:
+        for process in processes:
+            process.join(timeout=15)
+        assert all(process.exitcode == 0 for process in processes)
+        outcomes = [results.get(timeout=2) for _ in processes]
+        assert sorted(status for _index, status, _error in outcomes) == ["admitted", "rejected"]
+        assert "speculative hypothesis" in next(
+            error for _i, status, error in outcomes if status == "rejected"
+        )
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=2)
+
+
+def test_distinct_speculative_lanes_under_one_question_can_both_run(tmp_path):
+    repository = SQLiteDurableContinuationRepository(tmp_path / "distinct-lanes.sqlite")
+    DurableContinuationService(repository).register_root("root", _root_budget(width=2))
+    for index, lane in enumerate(("lane-a", "lane-b")):
+        assert repository.create(DurableChildSession(
+            _speculative_request(index, lane, f"hypothesis-{index}"),
+            ChildSessionLineage("root"),
+        )).status is SubagentStatus.CREATED
 
 
 def test_independent_processes_share_one_sqlite_admission_transaction(tmp_path):
@@ -283,15 +499,15 @@ def test_settled_usage_debits_parent_pool_and_cannot_be_reduced(tmp_path):
 def test_parallel_worker_seconds_are_additive_after_terminal_result(tmp_path):
     repository = SQLiteDurableContinuationRepository(tmp_path / "wall-use.sqlite")
     service = DurableContinuationService(repository)
-    service.register_root("root", _root_budget(width=2, wall=.05))
+    service.register_root("root", _root_budget(width=2, wall=.3))
     def runner(*_):
         Event().wait(.03)
         return "done"
 
-    result = service.spawn(_child("first", wall=.04), _context("first"), runner).result(3)
+    result = service.spawn(_child("first", wall=.2), _context("first"), runner).result(3)
     assert result.status is SubagentStatus.SUCCEEDED and result.usage.wall_seconds >= .03
     with pytest.raises(InvalidSubagentRequest, match="max_wall_seconds"):
-        service.spawn(_child("second", wall=.03), _context("second"), lambda *_: "done")
+        service.spawn(_child("second", wall=.28), _context("second"), lambda *_: "done")
 
 
 def test_unknown_terminal_output_usage_keeps_its_original_reservation(tmp_path):
@@ -311,6 +527,40 @@ def test_unknown_terminal_output_usage_keeps_its_original_reservation(tmp_path):
         repository.create(DurableChildSession(
             _child("next", tokens=5), ChildSessionLineage("root"),
         ))
+
+
+def test_short_text_cannot_refund_unmetered_model_tokens(tmp_path):
+    repository = SQLiteDurableContinuationRepository(tmp_path / "underestimated-tokens.sqlite")
+    service = DurableContinuationService(repository)
+    service.register_root("root", _root_budget(width=2, tokens=10))
+    finished = service.spawn(
+        _child("unmetered", tokens=9), _context("token-estimate"), lambda *_: "x",
+    ).result(3)
+    assert finished.status is SubagentStatus.SUCCEEDED
+    assert finished.usage.output_tokens == 1  # Text size does not prove model use.
+    with pytest.raises(InvalidSubagentRequest, match="max_output_tokens"):
+        repository.create(DurableChildSession(
+            _child("next", tokens=2), ChildSessionLineage("root"),
+        ))
+
+
+def test_nested_token_reservation_stays_inside_parent_block_only_once(tmp_path):
+    repository = SQLiteDurableContinuationRepository(tmp_path / "nested-tokens.sqlite")
+    service = DurableContinuationService(repository)
+    service.register_root("root", _root_budget(width=3, tokens=10))
+    assert service.spawn(
+        _child("parent", tokens=8, wall=8, steps=8),
+        _context("parent"), lambda *_: "p",
+    ).result(3).status is SubagentStatus.SUCCEEDED
+    assert service.spawn(
+        _child("grandchild", parent="parent", tokens=6),
+        _context("grandchild"), lambda *_: "c",
+    ).result(3).status is SubagentStatus.SUCCEEDED
+    assert service.spawn(
+        _child("sibling", tokens=2), _context("sibling"), lambda *_: "s",
+    ).result(3).status is SubagentStatus.SUCCEEDED
+    with pytest.raises(InvalidSubagentRequest, match="max_output_tokens"):
+        service.spawn(_child("excess", tokens=1), _context("excess"), lambda *_: "e")
 
 
 def test_terminal_status_without_result_keeps_full_unknown_step_reservation(tmp_path):

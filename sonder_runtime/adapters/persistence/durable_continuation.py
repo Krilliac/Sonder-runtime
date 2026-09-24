@@ -306,7 +306,7 @@ class SQLiteDurableContinuationRepository:
         child_id = session.request.child_id
         if child_id is None:
             raise InvalidSubagentRequest("durable child sessions require a child_id")
-        validate_admission(session, self._admission_records(connection))
+        validate_admission(session, self._admission_records(connection), new_execution=True)
         active = (SubagentStatus.CREATED.value, SubagentStatus.QUEUED.value, SubagentStatus.RUNNING.value)
         if session.request.resume_key:
             duplicate = connection.execute(
@@ -800,7 +800,7 @@ class SQLiteDurableContinuationRepository:
             return None
         validate_admission(
             replace(current, status=SubagentStatus.RUNNING, recovery_required=False, result=None),
-            self._admission_records(connection), resuming=True,
+            self._admission_records(connection), resuming=True, new_execution=True,
         )
         changed = connection.execute(
             "UPDATE durable_child_session SET status=?,revision=revision+1,"

@@ -516,6 +516,24 @@ def build_application(
             )
         return session_repository
 
+    evaluation_service = None
+    evaluation_lock = RLock()
+
+    def get_evaluation_service():
+        nonlocal evaluation_service
+        with evaluation_lock:
+            if evaluation_service is None:
+                from .evaluation import compose_evaluation_service
+                from ..platform.paths import state_path
+
+                # No repository/tool/memory corpus source is silently claimed
+                # as covered; the host must supply bounded readers first.
+                evaluation_service = compose_evaluation_service(
+                    get_session_repository(),
+                    failure_directory=state_path("evaluation/failures"),
+                )
+            return evaluation_service
+
     def get_job_registry() -> JobRegistry:
         nonlocal job_registry
         if job_registry is None:
@@ -886,8 +904,20 @@ def build_application(
                 if not any(root == current.resolve() or current.resolve() in root.parents
                            for current in allowed_roots()):
                     raise PermissionError("configured workspace grant was removed")
+            from .strategy import (
+                compose_workbench_strategy_observer,
+                try_compose_strategy_memory,
+                try_configured_strategy_rollout,
+                try_configured_strategy_trace,
+            )
+            lane_store = SQLiteAgentLaneStore(database_path(), sessions)
+            strategy_rollout = try_configured_strategy_rollout()
+            strategy_trace = try_configured_strategy_trace(strategy_rollout)
+            strategy_memory = try_compose_strategy_memory(
+                strategy_trace, lambda: memory_unit_of_work,
+            )
             interactive_lanes = AgentLaneService(
-                SQLiteAgentLaneStore(database_path(), sessions), sessions, gateway, lane_tools,
+                lane_store, sessions, gateway, lane_tools,
                 authorize_grant=authorize_lane_grant,
                 allowed_tools=tuple(item.name for item in lane_tools.graph.registry.list_all()),
                 context_planning=context_planning,
@@ -896,6 +926,9 @@ def build_application(
                     state_path("agent-effects.db", "SONDER_AGENT_EFFECTS_DB")
                 ),
                 compaction_service=get_compaction_service(),
+                strategy_observer=compose_workbench_strategy_observer(
+                    strategy_trace, strategy_memory, strategy_rollout, lane_store,
+                ),
             )
         return interactive_lanes
 
@@ -933,7 +966,25 @@ def build_application(
                         )
                     ),
                 )
-                delegation = DelegationService(subagent_provider, events, worker_registry)
+                from ..application.ports.subagents import SubagentBudget
+
+                host_capacity = effective_config.capacity
+                host_budget = SubagentBudget(
+                    max_children=host_capacity.delegation_max_children,
+                    max_depth=host_capacity.delegation_max_depth,
+                    max_concurrency=host_capacity.delegation_max_concurrency,
+                    max_steps=host_capacity.delegation_max_steps,
+                    max_output_tokens=host_capacity.delegation_max_output_tokens,
+                    max_wall_seconds=host_capacity.delegation_max_wall_seconds,
+                )
+                provider = subagent_provider
+                delegation = DelegationService(
+                    provider, events, worker_registry,
+                    host_root_budget=host_budget,
+                    register_host_root=lambda root_id, budget, owner_id: provider.register_root(
+                        root_id, budget, owner_id=owner_id,
+                    ),
+                )
                 logger.info("delegation service initialized")
             return delegation
 
@@ -1403,6 +1454,7 @@ def build_application(
         unit_of_work=memory_unit_of_work,
         tool_executor=ToolExecutorAdapter(),
         tools=tools,
+        tool_audit=tool_audit,
         process_probe=ProcessProbeAdapter(),
         events=events,
         clock=SystemClock(),
@@ -1413,6 +1465,7 @@ def build_application(
         evaluation_history=EvaluationHistoryService(
             EvaluationHistoryReaderAdapter()
         ),
+        evaluation_service=get_evaluation_service,
         preferences=PreferenceService(
             LegacyPreferenceRepository(preference_connection_factory),
             PreferenceCodecAdapter(preference_module_provider),

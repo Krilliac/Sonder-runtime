@@ -5,6 +5,7 @@ both database processes. These tests do not start services or accept a DSN.
 """
 
 from concurrent.futures import ThreadPoolExecutor
+from multiprocessing import get_context
 from pathlib import Path
 from threading import Barrier
 import os
@@ -75,6 +76,42 @@ def new_record():
     )
 
 
+def _competing_owner(config, response):
+    from sonder_runtime.adapters.persistence.postgres_binding import PostgresPrivateBinding
+    from sonder_runtime.adapters.persistence.postgres_continuation import PostgreSQLDurableContinuationRepository
+    from sonder_runtime.application.ports.continuation_mutations import ContinuationStorageFailure
+
+    binding = PostgresPrivateBinding(
+        Path(config.binding_file), writable_roots=lambda: (Path(__file__).resolve().parents[1],)
+    )
+    try:
+        try:
+            contender = PostgreSQLDurableContinuationRepository(config, binding)
+        except ContinuationStorageFailure:
+            response.put("fenced")
+        else:
+            contender.close(runners_stopped=True, timeout=5)
+            response.put("unexpected second owner")
+    finally:
+        binding.close()
+
+
+def test_actual_pair_rejects_second_execution_process(repository, storage_config):
+    multiprocessing = get_context("spawn")
+    response = multiprocessing.Queue()
+    contender = multiprocessing.Process(target=_competing_owner, args=(storage_config, response))
+    contender.start()
+    try:
+        contender.join(timeout=12)
+        assert contender.exitcode == 0
+        assert response.get(timeout=2) == "fenced"
+        assert repository.create(new_record()).status.value == "created"
+    finally:
+        if contender.is_alive():
+            contender.terminate()
+            contender.join(timeout=2)
+
+
 def test_actual_pair_serializes_distinct_child_admissions_for_one_root(repository):
     from sonder_runtime.application.ports.subagents import InvalidSubagentRequest
     from sonder_runtime.application.subagents.durable_continuation import DurableContinuationService
@@ -103,6 +140,149 @@ def test_actual_pair_serializes_distinct_child_admissions_for_one_root(repositor
         outcomes = list(executor.map(reserve, range(2)))
     assert sorted(status for status, _ in outcomes) == ["admitted", "rejected"]
     assert "concurrency" in next(value for status, value in outcomes if status == "rejected")
+
+
+def test_actual_pair_serializes_owner_width_across_operation_roots(repository):
+    from sonder_runtime.application.ports.subagents import InvalidSubagentRequest
+    from sonder_runtime.application.subagents.durable_continuation import (
+        DurableContinuationService,
+    )
+
+    roots = ("pg-operation-" + uuid.uuid4().hex, "pg-operation-" + uuid.uuid4().hex)
+    owner = "pg-owner-" + uuid.uuid4().hex
+    service = DurableContinuationService(repository)
+    for root in roots:
+        service.register_root(
+            root, SubagentBudget(max_steps=20, max_children=2,
+                                 max_depth=2, max_concurrency=1), owner_id=owner,
+        )
+    children = tuple(DurableChildSession(
+        SubagentRequest(root, "competing host operation", SubagentBudget(
+            max_steps=5, max_children=2, max_depth=2, max_concurrency=1,
+        ), "pg-owner-child-" + uuid.uuid4().hex), ChildSessionLineage(root),
+    ) for root in roots)
+    barrier = Barrier(2)
+
+    def reserve(child):
+        barrier.wait(timeout=3)
+        try:
+            repository.create(child)
+        except InvalidSubagentRequest as error:
+            return "rejected", str(error)
+        return "admitted", child.request.child_id
+
+    with ThreadPoolExecutor(2) as executor:
+        outcomes = list(executor.map(reserve, children))
+    assert sorted(status for status, _ in outcomes) == ["admitted", "rejected"]
+    assert "host concurrency" in next(value for status, value in outcomes if status == "rejected")
+    admitted = children[next(index for index, (status, _value) in enumerate(outcomes)
+                             if status == "admitted")]
+    rejected = children[next(index for index, (status, _value) in enumerate(outcomes)
+                             if status == "rejected")]
+    assert repository.request_cancel(
+        admitted.request.child_id, reason="release owner reservation",
+        expected_revision=0, unstarted_only=True,
+    )
+    assert repository.create(rejected).status.value == "created"
+
+
+def test_actual_pair_serializes_owned_scope_and_cancellation(repository):
+    from sonder_runtime.application.ports.subagents import InvalidSubagentRequest
+    from sonder_runtime.application.ports.worker_registry import WorkerExecutionContract, WorkerLaunch
+    from sonder_runtime.application.subagents.durable_continuation import DurableContinuationService
+    from sonder_runtime.application.worker_registry.continuation import _request_for
+
+    root_id = "pg-owned-root-" + uuid.uuid4().hex
+    DurableContinuationService(repository).register_root(
+        root_id, SubagentBudget(max_steps=10, max_children=3, max_depth=2, max_concurrency=2),
+    )
+    owned_file = str(Path(__file__).resolve())
+
+    def record(index):
+        key = "pg-owned-key-" + uuid.uuid4().hex
+        launch = WorkerLaunch(
+            "pg-owned-" + uuid.uuid4().hex, root_id, "researcher", "local", "provider", "default",
+            (str(Path(__file__).resolve().parents[1]),), ("research",),
+            {"max_steps": 5, "max_children": 2, "max_depth": 2, "max_concurrency": 2},
+            {"max_attempts": 1}, key, key, "owned PG race", "owner",
+            execution_contract=WorkerExecutionContract(owned_files=(owned_file,)),
+        )
+        return DurableChildSession(_request_for(launch), ChildSessionLineage(root_id))
+
+    left, right = record(0), record(1)
+    barrier = Barrier(2)
+
+    def reserve(item):
+        barrier.wait(timeout=3)
+        try:
+            return repository.create(item)
+        except InvalidSubagentRequest:
+            return None
+
+    with ThreadPoolExecutor(2) as executor:
+        rows = list(executor.map(reserve, (left, right)))
+    assert sum(row is not None for row in rows) == 1
+    winner, loser = (left, right) if rows[0] is not None else (right, left)
+    barrier = Barrier(2)
+
+    def cancel():
+        barrier.wait(timeout=3)
+        return repository.request_cancel(
+            winner.request.child_id, reason="release owned slot",
+            expected_revision=0, unstarted_only=True,
+        )
+
+    def retry():
+        barrier.wait(timeout=3)
+        try:
+            return repository.create(loser)
+        except InvalidSubagentRequest:
+            return None
+
+    with ThreadPoolExecutor(2) as executor:
+        cancelled, admitted = executor.submit(cancel), executor.submit(retry)
+        assert cancelled.result() is True
+        pending = admitted.result()
+    assert repository.get(winner.request.child_id).status.value == "cancelled"
+    assert repository.get(winner.request.child_id).result.error.code == "cancelled_before_start"
+    if pending is None:
+        assert repository.create(loser).request.child_id == loser.request.child_id
+    assert repository.get(loser.request.child_id).status.value == "created"
+
+
+def test_actual_pair_reserves_speculative_hypothesis_once(repository):
+    from sonder_runtime.application.ports.subagents import InvalidSubagentRequest
+    from sonder_runtime.application.subagents.durable_continuation import DurableContinuationService
+
+    root_id = "pg-speculative-root-" + uuid.uuid4().hex
+    DurableContinuationService(repository).register_root(
+        root_id, SubagentBudget(max_steps=10, max_children=3, max_depth=2, max_concurrency=2),
+    )
+    barrier = Barrier(2)
+
+    def reserve(index):
+        child = DurableChildSession(
+            SubagentRequest(
+                root_id, "raced hypothesis", SubagentBudget(
+                    max_steps=5, max_children=2, max_depth=2, max_concurrency=2,
+                ), "pg-speculative-" + uuid.uuid4().hex,
+                (("execution_task_scope", "question"), ("execution_speculative_lane", "true"),
+                 ("speculative_lane_id", f"lane-{index}"),
+                 ("hypothesis_digest", "a" * 64)),
+            ),
+            ChildSessionLineage(root_id),
+        )
+        barrier.wait(timeout=3)
+        try:
+            repository.create(child)
+        except InvalidSubagentRequest as error:
+            return "rejected", str(error)
+        return "admitted", child.request.child_id
+
+    with ThreadPoolExecutor(2) as executor:
+        outcomes = list(executor.map(reserve, range(2)))
+    assert sorted(status for status, _ in outcomes) == ["admitted", "rejected"]
+    assert "speculative hypothesis" in next(value for status, value in outcomes if status == "rejected")
 
 
 def test_actual_pair_keeps_original_logical_receipt(repository):
@@ -243,17 +423,14 @@ def test_actual_application_provider_lineage_and_denied_workspace(
     )
     app = build_application(config=config)
     child = "composed-" + uuid.uuid4().hex
-    root = "root-" + uuid.uuid4().hex
+    context = local_owner_context(
+        correlation_id="pg-composition", workspace_roots=(tmp_path,)
+    )
     try:
         delegation = app.delegation_service()
+        root = delegation.root_id_for_context(context)
         query = app.lineage_query()
         assert isinstance(query._children, PostgreSQLDurableContinuationRepository)
-        delegation._provider.register_root(
-            root,
-            SubagentBudget(
-                max_steps=100, max_output_tokens=10000, max_wall_seconds=300
-            ),
-        )
         preset = resolve_preset("researcher")
         workspace = WorkspaceAssignment((str(tmp_path),), ())
         request = DelegationRequest(
@@ -271,9 +448,6 @@ def test_actual_application_provider_lineage_and_denied_workspace(
             "bounded fixture",
             preset,
             workspace,
-        )
-        context = local_owner_context(
-            correlation_id="pg-composition", workspace_roots=(tmp_path,)
         )
         outside = WorkspaceAssignment((str(tmp_path.parent / "outside"),), ())
         denied = replace(

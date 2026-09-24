@@ -28,6 +28,7 @@ from ..loop_event_classification import DurableSessionFact
 from ..loop_steering import SteeringCommand
 from ..ports.model_gateway import ModelRequest, require_model_text
 from ..ports.model_target import ResolvedModelRoute
+from ...domain.model_routing import is_cloud_model_name
 from ..session.capture import CapturedRequest, SessionCaptureService, _snapshot_payload
 from ..session.archive import ArchiveReference, SessionContextArchiveService
 from ..compaction import SessionCompactionError, SessionCompactionService
@@ -60,6 +61,9 @@ _WAIT_LOCK = threading.Lock()
 _WAIT_OWNERS = {}
 
 _ACTIVE = frozenset({"queued", "running", "interrupt_requested", "cancel_requested"})
+# The existing eight retained lanes cap only concurrency. Keep a separate
+# durable cumulative ceiling across archived lanes in one parent session.
+_MAX_EXPENSIVE_LANES_PER_PARENT = 32
 _LANE_INLINE_TOOL_RESULT_BYTES = 2 * 1024
 # Canonical session history is input to every live lane request. Keep this
 # archive pass bounded independently of the provider token budget.
@@ -116,6 +120,34 @@ def _bounds(cursor, limit):
         raise ValueError("cursor must be a nonnegative integer")
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
         raise ValueError("limit must be between 1 and 100")
+
+
+def _known_expensive_lane_tier(tier):
+    return (
+        tier.casefold() == "reasoning"
+        or tier.casefold().startswith("cloud-")
+        or is_cloud_model_name(tier)
+    )
+
+
+def _expensive_lane_tier(tier, gateway, context):
+    """Classify the host-resolved target, including renamed hosted code tiers."""
+    expensive = _known_expensive_lane_tier(tier)
+    resolve_route = getattr(gateway, "resolve_route", None)
+    if callable(resolve_route):
+        route = resolve_route(ModelRequest("Classify lane admission.", tier=tier), context)
+        if (
+            not isinstance(route, ResolvedModelRoute)
+            or route.tier != tier
+            or type(route.cloud) is not bool
+            or not isinstance(route.tier_label, str)
+            or not route.tier_label.strip()
+        ):
+            raise PermissionError("model route classification is unavailable")
+        if route.cloud and not context.cloud_allowed:
+            raise PermissionError("hosted lane requires cloud consent")
+        expensive = expensive or route.cloud or route.tier_label.casefold() == "reasoning"
+    return expensive
 
 
 class _LaneCancellation:
@@ -207,6 +239,7 @@ class AgentLaneService:
         live_context: LiveAgentContextProducer | None = None,
         effect_journal=None,
         compaction_service: SessionCompactionService | None = None,
+        strategy_observer=None,
     ):
         self.store, self.sessions, self.gateway, self.tools = (
             store,
@@ -265,6 +298,15 @@ class AgentLaneService:
         self._loop_steering_sequence = {}
         self._context_planning = context_planning
         self._live_context = live_context
+        self._strategy_observer = strategy_observer
+
+    def _observe_strategy(self, lane):
+        if self._strategy_observer is None:
+            return
+        try:
+            self._strategy_observer(dict(lane))
+        except Exception as error:  # noqa: BLE001 - observation cannot change lane state
+            _LOG.warning("lane strategy observation failed: %s", type(error).__name__)
 
     @property
     def loop(self):
@@ -802,6 +844,19 @@ class AgentLaneService:
             author=author,
         )
         digest = _digest(args)
+        # A resolver may consult a live model catalog. Perform root admission
+        # and replay lookup before that I/O, outside the writer transaction.
+        if callable(getattr(self.gateway, "resolve_route", None)):
+            with self._transaction(context) as tx:
+                from .lane_continuation import require_root_admission
+
+                require_root_admission(tx, self.store, parent_session_id, context)
+                prior = tx.receipt(context.principal_id, command_id, digest)
+                if prior:
+                    raise _ReplayReceipt(prior)
+            expensive_tier = _expensive_lane_tier(tier, self.gateway, context)
+        else:
+            expensive_tier = _known_expensive_lane_tier(tier)
         with self._transaction(context) as tx:
             from .lane_continuation import require_root_admission
 
@@ -812,6 +867,15 @@ class AgentLaneService:
             if prior:
                 raise _ReplayReceipt(prior)
             root_id = tx.root(parent_session_id, context.principal_id)
+            if (
+                expensive_tier
+                and tx.expensive_spawn_count(
+                    context.principal_id, parent_session_id
+                ) >= _MAX_EXPENSIVE_LANES_PER_PARENT
+            ):
+                raise ValueError(
+                    "expensive lane spawn limit reached for this parent session"
+                )
             depth = 1
             expiry = time.time() + max_wall_seconds
             allowed = (
@@ -867,6 +931,7 @@ class AgentLaneService:
                 attempt_id="attempt-" + uuid.uuid4().hex,
                 workspace_root=str(root),
                 tier=tier,
+                expensive_tier=expensive_tier,
                 principal_id=context.principal_id,
                 auth_level=context.auth_level,
                 mailbox_parent=parent_lane_id or root_id,
@@ -959,6 +1024,7 @@ class AgentLaneService:
             lane = tx.lane(lane_id)
             self._authorize(lane, context)
             result = dict(lane=self._public(lane, tx))
+        self._observe_strategy(lane)
         self.store.flush()
         if transcript:
             events, more = self.store.events(lane_id, cursor, limit)
@@ -981,6 +1047,7 @@ class AgentLaneService:
             self._authorize(lane, context)
             public = self._public(lane, tx)
             messages = tx.messages(lane_id)
+        self._observe_strategy(lane)
         self.store.flush()
         events, more = self.store.events(lane_id, cursor, limit)
         return dict(
@@ -1083,6 +1150,9 @@ class AgentLaneService:
             context.principal_id,
             _admit=lambda tx, lane: self._root_control(tx, lane, context),
         )
+        # Reconcile a previous process's committed terminal state before a
+        # new resume attempt changes the durable attempt identity.
+        self._observe_strategy(self.store.read_lane(lane_id))
         with self._transaction(context) as tx:
             lane = tx.lane(lane_id)
             self._root_control(tx, lane, context)
@@ -1594,10 +1664,31 @@ class AgentLaneService:
                     ModelRequest(prompt, tier=lane["tier"]), context
                 )
             except Exception:
-                # Route resolution is advisory for prefix reuse.  The actual
-                # gateway call remains authoritative and reports its own
-                # provider error; an unknown route must never create a cache.
+                if context.cloud_allowed and not (
+                    lane.get("expensive_tier") is True
+                    or _known_expensive_lane_tier(lane["tier"])
+                ):
+                    raise PermissionError(
+                        "unverified lane route could exceed its spawn budget"
+                    ) from None
+                # With no cloud permission, the gateway cannot legitimately
+                # dispatch a hosted model; its own provider error remains
+                # authoritative when route resolution is unavailable.
                 route = None
+            if route is not None and (
+                not isinstance(route, ResolvedModelRoute)
+                or route.tier != lane["tier"]
+                or type(route.cloud) is not bool
+                or not isinstance(route.tier_label, str)
+            ):
+                raise PermissionError("lane route classification is unavailable")
+            if route is not None and (
+                route.cloud or route.tier_label.casefold() == "reasoning"
+            ) and not (
+                lane.get("expensive_tier") is True
+                or _known_expensive_lane_tier(lane["tier"])
+            ):
+                raise PermissionError("lane route exceeds its spawn budget")
         system = (
             "You are a scoped child agent. Preserve separately authored user constraints; if instructions conflict, "
             "explain the conflict and ask for input. Work only within "
@@ -1985,6 +2076,7 @@ class AgentLaneService:
                     # relabeled as a transport failure.
                     raise
         except Exception as exc:
+            observed_lane = None
             with self.store.transaction() as tx:
                 lane = tx.lane(lane_id)
                 if lane["owner"] == self.owner:
@@ -2015,6 +2107,9 @@ class AgentLaneService:
                         },
                     )
                     tx.save(lane)
+                    observed_lane = dict(lane)
+            if observed_lane is not None:
+                self._observe_strategy(observed_lane)
             self._loop_finish(lane, lane["status"], reason=str(exc))
         finally:
             if managed:
@@ -2075,6 +2170,7 @@ class AgentLaneService:
             tx.emit(lane, "lane.completed", {"attempt_id": lane["attempt_id"]})
             tx.save(lane)
         self._done()
+        self._observe_strategy(lane)
         self._loop_finish(lane, "completed")
         return True
 

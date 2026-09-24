@@ -57,6 +57,25 @@ class StrategyDecision:
     policy_version: str = "strategy-v1"
 
 
+_MINIMUM_ACTION_USAGE = {
+    # These are lower bounds for choosing a next attempt, not reservations or
+    # permission to execute it. Route-specific top-tier and verifier costs
+    # still require the host to filter available_actions before invocation.
+    StrategyAction.RETRY_TRANSIENT: StrategyUsage(attempts=1, model_calls=1, tokens=1),
+    StrategyAction.REPAIR: StrategyUsage(attempts=1, model_calls=1, tokens=1),
+    StrategyAction.CRITIC: StrategyUsage(attempts=1, model_calls=1, tokens=1, critic_calls=1),
+    StrategyAction.REPLAN: StrategyUsage(attempts=1, model_calls=1, tokens=1, replans=1),
+    StrategyAction.SWITCH_MODEL: StrategyUsage(attempts=1, model_calls=1, tokens=1,
+                                               strategy_switches=1),
+    StrategyAction.SWITCH_TOOL: StrategyUsage(attempts=1, tool_calls=1,
+                                              strategy_switches=1),
+    StrategyAction.SPAWN_SPECIALIST: StrategyUsage(attempts=1, model_calls=1, tokens=1,
+                                                   descendants=1),
+    StrategyAction.PARALLEL_HYPOTHESES: StrategyUsage(attempts=1, model_calls=2, tokens=2,
+                                                      descendants=2),
+}
+
+
 class StrategyController:
     """Host policy first. Available actions come from host capability/policy gates."""
 
@@ -110,19 +129,12 @@ class StrategyController:
             choices = (StrategyAction.SWITCH_MODEL, StrategyAction.PAUSE)
         else:
             choices = (StrategyAction.INSPECT, StrategyAction.RETRIEVE)
+        remaining = state.budget.remaining(state.usage)
         for action in choices:
             if action not in state.available_actions:
                 continue
-            limited = {
-                StrategyAction.CRITIC: "critic_calls", StrategyAction.REPLAN: "replans",
-                StrategyAction.SWITCH_MODEL: "strategy_switches", StrategyAction.SWITCH_TOOL: "strategy_switches",
-                StrategyAction.SPAWN_SPECIALIST: "descendants", StrategyAction.PARALLEL_HYPOTHESES: "descendants",
-            }.get(action)
-            if limited and getattr(state.usage, limited) >= getattr(state.budget, limited):
-                continue
-            if action in {StrategyAction.REPAIR, StrategyAction.CRITIC, StrategyAction.SWITCH_MODEL,
-                          StrategyAction.REPLAN, StrategyAction.RETRY_TRANSIENT} and (
-                    state.usage.model_calls >= state.budget.model_calls or state.usage.tokens >= state.budget.tokens):
+            required = _MINIMUM_ACTION_USAGE.get(action, StrategyUsage(attempts=1))
+            if not remaining.allows(required):
                 continue
             return StrategyDecision(action, "materially_different_strategy" if stalled else "host_failure_policy", progress)
         return StrategyDecision(StrategyAction.PAUSE, "no_admissible_strategy", progress)

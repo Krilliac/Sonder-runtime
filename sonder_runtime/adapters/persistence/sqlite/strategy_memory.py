@@ -137,7 +137,13 @@ class SQLiteStrategyExperienceRepository:
             ("outcome", outcome),
         ):
             if requested:
-                conditions.append(name + "=?")
+                # Older sealed attempts had no trusted language metadata and
+                # were indexed as unknown. Include them for compatible scoped
+                # retrieval, but expose their unknown status in each ref.
+                if name == "language" and requested != "unknown":
+                    conditions.append("language IN (?, 'unknown')")
+                else:
+                    conditions.append(name + "=?")
                 values.append(requested)
         rows = self._connection.execute(
             f"SELECT {_COLUMN_NAMES} FROM strategy_experience "

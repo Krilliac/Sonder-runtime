@@ -53,7 +53,7 @@ def test_observation_replay_is_idempotent_and_conflicting_id_is_rejected(tmp_pat
     kwargs = {"budget": StrategyBudget(), "available_actions": (StrategyAction.REPAIR,)}
     first = trace.record(attempt(), **kwargs)
     assert trace.record(attempt(), **kwargs) == first
-    assert trace.record(attempt(), budget=StrategyBudget(), available_actions=()) == first
+    assert trace.record(attempt(), budget=StrategyBudget(), available_actions=()).action is StrategyAction.PAUSE
     assert trace.record(attempt(), unresolved_effects=True, **kwargs).action is StrategyAction.RECONCILE
     assert trace.record(attempt(), policy_blocked=True, **kwargs).action is StrategyAction.PAUSE
     assert trace.record(attempt(), artifacts_ready=False, **kwargs).action is StrategyAction.PAUSE
@@ -67,6 +67,37 @@ def test_budget_cannot_expand_after_restart(tmp_path):
     trace.record(attempt(), budget=StrategyBudget(attempts=2), available_actions=())
     with pytest.raises(StrategyError, match="budget"):
         trace.record(attempt(2), budget=StrategyBudget(attempts=3), available_actions=())
+
+
+def test_replayed_attempt_rechecks_actions_and_persists_budget_reduction(tmp_path):
+    repo = repository(tmp_path)
+    trace = StrategyTraceService(repo)
+    original = trace.record(attempt(), budget=StrategyBudget(attempts=4),
+                            available_actions=(StrategyAction.REPAIR,))
+    assert original.action is StrategyAction.REPAIR
+    restarted = StrategyTraceService(repository(tmp_path))
+    restricted = restarted.record(attempt(), budget=StrategyBudget(attempts=1),
+                                  available_actions=())
+    assert restricted.action is StrategyAction.FAIL
+    saved = repo.restore("run-1").checkpoint
+    assert saved.generation == 1
+    assert saved.decisions["strategy_v1"]["budget"]["attempts"] == 1
+    assert saved.decisions["strategy_v1"]["decisions"]["attempt-1"]["action"] == "repair"
+    assert len(restarted.history("run-1")) == 1
+    with pytest.raises(StrategyError, match="budget"):
+        StrategyTraceService(repository(tmp_path)).record(
+            attempt(2), budget=StrategyBudget(attempts=4), available_actions=())
+
+
+def test_duplicate_old_attempt_cannot_override_later_failure(tmp_path):
+    trace = StrategyTraceService(repository(tmp_path))
+    trace.record(attempt(), budget=StrategyBudget(),
+                 available_actions=(StrategyAction.REPAIR,))
+    trace.record(attempt(2), budget=StrategyBudget(), available_actions=())
+    duplicate = StrategyTraceService(repository(tmp_path)).record(
+        attempt(), budget=StrategyBudget(), available_actions=(StrategyAction.REPAIR,))
+    assert duplicate.action is StrategyAction.PAUSE
+    assert len(trace.history("run-1")) == 2
 
 
 @pytest.mark.parametrize("count", [0, 2])

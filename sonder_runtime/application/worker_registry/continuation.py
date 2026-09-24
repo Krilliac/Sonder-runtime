@@ -463,6 +463,11 @@ class ContinuationWorkerRegistry(WorkerRegistry):
     @staticmethod
     def _project(session: DurableChildSession) -> WorkerRecord:
         metadata = _metadata(session.request)
+        is_root = (
+            session.request.child_id == session.request.parent_id
+            and not session.lineage.ancestors
+            and metadata.get("provider_root") == "true"
+        )
         scope = tuple(filter(None, metadata.get("scope", "").split("|")))
         tools = tuple(filter(None, metadata.get("allowed_tools", "").split("|")))
         max_attempts = int(metadata.get("retry_max_attempts", "1"))
@@ -478,8 +483,11 @@ class ContinuationWorkerRegistry(WorkerRegistry):
             allowed_tools=tools or ("continuation",),
             budgets=_budget_values(session.request.budget),
             retry_policy={"max_attempts": max_attempts},
-            resume_key=session.request.resume_key,
-            idempotency_key=session.request.idempotency_key,
+            # A provider root is a durable admission anchor, not a launch:
+            # its request has no keys, while WorkerLaunch requires nonempty
+            # keys even for a read-only registry projection.
+            resume_key=session.request.resume_key or (session.request.child_id if is_root else ""),
+            idempotency_key=session.request.idempotency_key or (session.request.child_id if is_root else ""),
             prompt=session.request.prompt,
             owner_id=metadata.get("owner_id", ""),
             metadata=tuple(session.request.metadata),

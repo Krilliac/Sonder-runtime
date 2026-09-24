@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 300,
+      "file_count": 301,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -185,6 +185,7 @@
         "sonder_runtime/adapters/model_gateway_factory.py",
         "sonder_runtime/adapters/model_inventory.py",
         "sonder_runtime/adapters/model_inventory_formatting.py",
+        "sonder_runtime/adapters/model_request_admission.py",
         "sonder_runtime/adapters/model_response_metadata.py",
         "sonder_runtime/adapters/model_transport.py",
         "sonder_runtime/adapters/observability/__init__.py",
@@ -349,7 +350,7 @@
       ]
     },
     {
-      "file_count": 340,
+      "file_count": 342,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -365,6 +366,7 @@
         "sonder_runtime/application/agents/lane_continuation.py",
         "sonder_runtime/application/agents/lineage_delegation.py",
         "sonder_runtime/application/agents/presets.py",
+        "sonder_runtime/application/agents/recursive_delegation.py",
         "sonder_runtime/application/agents/workflow_integration.py",
         "sonder_runtime/application/architecture/ownership_catalog.py",
         "sonder_runtime/application/artifacts/__init__.py",
@@ -427,6 +429,7 @@
         "sonder_runtime/application/evaluation/proposal_lifecycle.py",
         "sonder_runtime/application/evaluation/reproducible.py",
         "sonder_runtime/application/evaluation/service.py",
+        "sonder_runtime/application/evaluation/strategy_cases.py",
         "sonder_runtime/application/evaluation/trajectory_replay.py",
         "sonder_runtime/application/evaluation_history/__init__.py",
         "sonder_runtime/application/evaluation_history/use_cases.py",
@@ -695,7 +698,7 @@
       ]
     },
     {
-      "file_count": 56,
+      "file_count": 57,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -724,6 +727,7 @@
         "sonder_runtime/bootstrap/delegated_verification.py",
         "sonder_runtime/bootstrap/doctor_checks.py",
         "sonder_runtime/bootstrap/doctor_formatting.py",
+        "sonder_runtime/bootstrap/evaluation.py",
         "sonder_runtime/bootstrap/lane_tests.py",
         "sonder_runtime/bootstrap/legacy_interfaces.py",
         "sonder_runtime/bootstrap/legacy_mcp.py",

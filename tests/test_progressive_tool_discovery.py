@@ -69,7 +69,8 @@ def test_selection_identity_survives_durable_audit_reopen(tmp_path):
     assert restored["tool_schema_selection"]["selection_id"] == payload["manifest"]["selection"]["selection_id"]
 
 
-def test_native_progressive_transport_refuses_hidden_tools_until_schema_load():
+def test_native_progressive_transport_refuses_hidden_tools_until_schema_load(tmp_path):
+    from sonder_runtime.adapters.persistence.tool_audit import DurableToolAuditRepository
     from sonder_runtime.application.ports.tool_executor import ToolResult
     from sonder_runtime.bootstrap.native_mcp import native_tool_registry, run_native_mcp
 
@@ -90,7 +91,9 @@ def test_native_progressive_transport_refuses_hidden_tools_until_schema_load():
     class Executor:
         def execute(self, call, context):
             return ToolResult(ok=True, output=call.tool + ":ok")
-    app = SimpleNamespace(config=None, tool_executor=Executor())
+    audit_path = tmp_path / "native-tool-audit.jsonl"
+    app = SimpleNamespace(config=None, tool_executor=Executor(),
+                          tool_audit=DurableToolAuditRepository(audit_path))
     run_native_mcp(app, input_stream=stream, output_stream=output, progressive_tools=True)
     replies = [json.loads(row) for row in output.getvalue().splitlines()]
     assert {x["name"] for x in replies[1]["result"]["tools"]} == {"tool_search", "tool_schema"}
@@ -98,3 +101,56 @@ def test_native_progressive_transport_refuses_hidden_tools_until_schema_load():
     assert "inputSchema" not in replies[3]["result"]["output"]
     assert replies[5]["result"]["output"] == "process_list:ok"
     assert replies[6]["result"]["error"] == "tool_not_visible"
+    selected = json.loads(replies[4]["result"]["output"])["manifest"]["digest"]
+    assert replies[5]["result"]["evidence"]["tool_schema_selection"]["selection_id"] == selected
+    records = DurableToolAuditRepository(audit_path).read()
+    loaded = next(row for row in records if row["tool_name"] == "tool_schema")
+    executed = next(row for row in records if row["tool_name"] == "process_list" and row["success"])
+    assert loaded["tool_schema_selection"]["selection_id"] == selected
+    assert executed["tool_schema_selection"]["selection_id"] == selected
+    assert executed["policy_match"] == "native_mcp_compatibility"
+    assert executed["principal_id"] == "owner"
+    assert executed["source"] == "mcp"
+    assert executed["success"] is True
+    assert sum(row["tool_name"] == "process_list" and row["success"] is False for row in records) == 1
+    hidden_typed = next(row for row in records if row["tool_name"] == "file_read")
+    assert hidden_typed["terminal"] == "policy_denied"
+    assert hidden_typed["tool_schema_selection"]["selection_id"] == selected
+
+
+def test_native_progressive_mode_requires_host_durable_audit():
+    from sonder_runtime.bootstrap.native_mcp import run_native_mcp
+    app = SimpleNamespace(config=None, tool_executor=None)
+    with pytest.raises(ValueError, match="durable audit"):
+        run_native_mcp(app, input_stream=io.StringIO(), output_stream=io.StringIO(),
+                       progressive_tools=True)
+
+
+def test_native_schema_load_does_not_publish_without_audit():
+    from sonder_runtime.bootstrap.native_mcp import native_tool_registry, run_native_mcp
+
+    class UnavailableAudit:
+        def append(self, request, receipt):
+            if request.tool_name == "tool_schema":
+                raise OSError("audit unavailable")
+
+    class Executor:
+        def execute(self, call, context):
+            raise AssertionError("unpublished schema must not admit a tool")
+
+    digest = ToolDiscovery(native_tool_registry()).digest
+    messages = [
+        ("initialize", {"protocolVersion": "2.0", "capabilities": {}}),
+        ("tools/call", {"name": "tool_schema", "arguments": {
+            "names": ["process_list"], "inventory_digest": digest}}),
+        ("tools/call", {"name": "process_list", "arguments": {}}),
+    ]
+    output = io.StringIO()
+    stream = io.StringIO("".join(json.dumps({"jsonrpc": "2.0", "id": i, "method": method,
+                                           "params": params}) + "\n"
+                                 for i, (method, params) in enumerate(messages)))
+    run_native_mcp(SimpleNamespace(config=None, tool_executor=Executor(), tool_audit=UnavailableAudit()),
+                   input_stream=stream, output_stream=output, progressive_tools=True)
+    replies = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert "error" in replies[1]
+    assert replies[2]["result"]["error"] == "tool_not_visible"

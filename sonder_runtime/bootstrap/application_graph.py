@@ -25,6 +25,7 @@ from ..application.agents.delegation_service import DelegationService
 from ..application.agents.durable_lineage import DurableLineageQuery
 from ..application.agents.workflow_integration import AgentWorkflowService
 from ..application.evaluation_history import EvaluationHistoryService
+from ..application.evaluation.service import EvaluationApplicationService
 from ..application.inspection import InspectionService
 from ..application.recall import RecallService
 from ..application.memory import MemoryLearningFacade
@@ -46,6 +47,7 @@ from ..application.execution.process_jobs import ProcessJobProvider
 from ..application.ports.process_probe import ProcessProbe
 from ..application.ports.repositories import AutomationRepository, UnitOfWork
 from ..application.ports.tool_executor import ToolExecutor
+from ..application.tools.audit import ToolAuditRepository
 from ..application.runtime_policy.use_cases import RuntimePolicyService
 from ..application.workflows.use_cases import WorkflowService
 from ..application.context_integration import ContextPlanningFacade
@@ -86,6 +88,7 @@ class Application:
     session_http_facade: Callable[[], HttpSessionFacade]
     job_registry: Callable[[], JobRegistry]
     job_service: Callable[[], JobRegistryService]
+    evaluation_service: Callable[[], EvaluationApplicationService] | None = None
     # Fact-only trusted-peer replication is inert until explicitly invoked.
     memory_replication: Any | None = None
     process_job_provider: Callable[[], ProcessJobProvider] | None = None
@@ -128,6 +131,8 @@ class Application:
     close_artifact_mobility: Callable[[], None] | None = field(default=None, repr=False)
     _artifact_mobility_binding: Callable[[], object] | None = field(default=None, repr=False)
     _artifact_mobility_available: Callable[[], bool] | None = field(default=None, repr=False)
+    # Shared with the typed gateway to record native MCP compatibility calls.
+    tool_audit: ToolAuditRepository | None = field(default=None, repr=False)
 
     def operational_capabilities(self):
         from ..domain.operational_capabilities import build_operational_capabilities

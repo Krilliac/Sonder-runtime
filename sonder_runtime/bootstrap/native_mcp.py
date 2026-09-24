@@ -8,9 +8,11 @@ is demonstrated.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import TextIO
@@ -524,9 +526,49 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
     registry = native_tool_registry()
     from ..application.ports.tool_registry import ToolSchemaSelection
     from ..application.tools.discovery import ToolDiscovery
+    from ..application.tools.gateway_contract import (
+        COMPLETED, FAILED, POLICY_DENIED, ToolGatewayRequest, ToolPermission,
+        ToolReceipt, ToolScope,
+    )
     discovery = ToolDiscovery(registry) if progressive_tools else None
+    native_audit = getattr(application, "tool_audit", None) if discovery is not None else None
+    if discovery is not None and not callable(getattr(native_audit, "append", None)):
+        raise ValueError("progressive native tools require the host-composed durable audit")
     visible = ToolSchemaSelection()
     selection_generation = 0
+
+    def audit_native(name, arguments, result, context, selection, *, policy_path, started):
+        """Record compatibility outcomes without claiming typed gateway admission.
+
+        The same repository instance also receives typed gateway receipts. Only
+        digests and scope/selection metadata enter this record; tool output and
+        arguments stay in their original guarded transport and executor paths.
+        """
+        def digest(value):
+            return hashlib.sha256(json.dumps(value, sort_keys=True, default=str,
+                                               separators=(",", ":")).encode()).hexdigest()
+
+        error = str(result.get("error") or "")
+        failed = bool(result.get("isError"))
+        request = ToolGatewayRequest(
+            request_id=context.correlation_id, tool_name=name, arguments=dict(arguments),
+            scope=ToolScope(context.principal_id, tuple(str(root) for root in context.workspace_roots),
+                            source=context.source, auth_level=context.auth_level),
+            permission=ToolPermission(), execution_world="local",
+            schema_selection=selection,
+        )
+        receipt = ToolReceipt(
+            request_id=context.correlation_id, tool_name=name, success=not failed,
+            output="", error_code=error if failed else "", requester_id=context.principal_id,
+            duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+            argument_digest=digest(arguments), result_digest=digest(result),
+            execution_world="local", policy_match=policy_path,
+            terminal=(POLICY_DENIED if error in {"permission_denied", "tool_not_visible"}
+                      else FAILED if failed else COMPLETED),
+            evidence={"inventory_digest": discovery.digest,
+                      "native_compatibility_path": policy_path == "native_mcp_compatibility"},
+        )
+        native_audit.append(request, receipt)
     discovery_tools = InMemoryToolRegistry((
         ToolDescriptor("tool_search", "Find tools by name or purpose; returns bounded summaries only", {
             "type": "object", "properties": {
@@ -675,7 +717,8 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             },
         }
 
-    def typed_result(tools, canonical_name: str, arguments: dict, context) -> dict:
+    def typed_result(tools, canonical_name: str, arguments: dict, context,
+                     selection: ToolSchemaSelection | None) -> dict:
         """Run one workbench file tool through the typed gateway.
 
         The gateway is the single seam: schema, resource policy, the
@@ -707,9 +750,9 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             cancellation=context.cancellation,
             execution_world="local",
             schema_selection=(ToolSchemaSelection(
-                frozenset(_LEGACY_ALIASES.get(name, name) for name in visible.visible_names),
-                selection_id=visible.selection_id,
-            ) if discovery is not None else None),
+                frozenset(_LEGACY_ALIASES.get(name, name) for name in selection.visible_names),
+                selection_id=selection.selection_id,
+            ) if selection is not None else None),
         )
         # The roots a one-shot approval covered are honoured for this call
         # alone, and only once the gateway's evaluator has spent it: the
@@ -754,7 +797,8 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             "evidence": evidence,
         }
 
-    def execute(name: str, arguments: dict) -> dict:
+    def execute_inner(name: str, arguments: dict, *, selected: ToolSchemaSelection | None = None,
+                      operation_context=None) -> dict:
         nonlocal visible, selection_generation
         logger.debug(f"MCP execute tool={name!r}")
         if discovery is not None:
@@ -765,22 +809,34 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                     if name == "tool_search":
                         payload = discovery.search(**arguments)
                     else:
+                        started = time.monotonic()
                         next_visible, payload = discovery.load(
                             arguments["names"], inventory_digest=arguments["inventory_digest"],
                             selection_id=f"mcp-tools:{selection_generation + 1}",
                         )
                         # The selected-schema digest is the request-visible identity.
                         # Loaded schemas confer no permission to execute effects.
-                        visible = ToolSchemaSelection(next_visible.visible_names,
-                                                      selection_id=payload["manifest"]["digest"])
+                        published = ToolSchemaSelection(next_visible.visible_names,
+                                                        selection_id=payload["manifest"]["digest"])
+                        schema_result = {"output": json.dumps(payload, sort_keys=True),
+                                         "isError": False, "error": None,
+                                         "evidence": {"inventory_digest": discovery.digest}}
+                        schema_context = local_owner_context(
+                            correlation_id=uuid.uuid4().hex, source="mcp", workspace_roots=roots,
+                            timeout_seconds=60.0,
+                        )
+                        audit_native(name, arguments, schema_result, schema_context, published,
+                                     policy_path="native_mcp_discovery", started=started)
+                        visible = published
                         selection_generation += 1
                     return {"output": json.dumps(payload, sort_keys=True), "isError": False,
                             "error": None, "evidence": {"inventory_digest": discovery.digest}}
                 except (TypeError, ValueError) as exc:
                     raise McpTransportError(str(exc)) from exc
-            if not visible.allows(name):
+            if not (selected if selected is not None else visible).allows(name):
                 return {"output": "load the tool schema before calling this tool", "isError": True,
-                        "error": "tool_not_visible", "evidence": {"selection": visible.marker()}}
+                        "error": "tool_not_visible", "evidence": {
+                            "selection": (selected if selected is not None else visible).marker()}}
         descriptor = registry.get(name)
         if descriptor is None:
             return {
@@ -797,7 +853,7 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             raise McpTransportError(str(exc)) from exc
         canonical_name = _LEGACY_ALIASES.get(name, name)
         canonical_arguments = dict(arguments)
-        context = local_owner_context(
+        context = operation_context or local_owner_context(
             correlation_id=uuid.uuid4().hex,
             source="mcp",
             workspace_roots=roots,
@@ -891,7 +947,7 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
         typed_tools = getattr(application, "tools", None)
         if canonical_name in _TYPED_TOOL_NAMES and typed_tools is not None:
             logger.debug(f"routing to typed tool gateway: {canonical_name!r}")
-            return typed_result(typed_tools, canonical_name, canonical_arguments, context)
+            return typed_result(typed_tools, canonical_name, canonical_arguments, context, selected)
         if canonical_name in _INSPECTION_NAMES:
             logger.debug(f"routing to inspection service: {canonical_name!r}")
             result = application.inspections.inspect(
@@ -908,6 +964,61 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             "error": result.error_code,
             "evidence": dict(result.evidence or {}),
         }
+
+    def execute(name: str, arguments: dict) -> dict:
+        if discovery is None or name in {"tool_search", "tool_schema"}:
+            return execute_inner(name, arguments)
+        # Each call retains the selection visible when it started. A later
+        # schema load cannot rewrite its audit record or returned identity.
+        selected = visible
+        canonical_name = _LEGACY_ALIASES.get(name, name)
+        typed_tools = getattr(application, "tools", None)
+        typed_admitted = (canonical_name in _TYPED_TOOL_NAMES and typed_tools is not None
+                          and selected.allows(name))
+        if typed_admitted:
+            from ..domain.common.errors import InvalidInput
+            try:
+                validate_tool_call(registry.get(name), RegistryToolCall(
+                    tool_name=name, arguments=dict(arguments)))
+            except (InvalidInput, TypeError, ValueError):
+                # A native preflight refusal never reached the typed gateway's
+                # receipt boundary; record it in the compatibility audit.
+                typed_admitted = False
+        if typed_admitted:
+            result = execute_inner(name, arguments, selected=selected)
+        else:
+            started = time.monotonic()
+            context = local_owner_context(
+                correlation_id=uuid.uuid4().hex, source="mcp", workspace_roots=roots,
+                timeout_seconds=60.0,
+            )
+            try:
+                result = execute_inner(name, arguments, selected=selected,
+                                       operation_context=context)
+            except Exception as exc:
+                failed = {"output": "", "isError": True, "error": type(exc).__name__,
+                          "evidence": {}}
+                try:
+                    audit_native(name, arguments, failed, context, selected,
+                                 policy_path="native_mcp_compatibility", started=started)
+                except Exception as audit_error:
+                    raise McpTransportError(
+                        "native tool audit unavailable; reconcile outcome before retry"
+                    ) from audit_error
+                raise
+            try:
+                audit_native(name, arguments, result, context, selected,
+                             policy_path="native_mcp_compatibility", started=started)
+            except Exception as audit_error:
+                raise McpTransportError(
+                    "native tool audit unavailable; reconcile outcome before retry"
+                ) from audit_error
+        evidence = dict(result.get("evidence") or {})
+        evidence.update({"tool_schema_selection": selected.marker(),
+                         "inventory_digest": discovery.digest})
+        if not typed_admitted:
+            evidence["native_compatibility_path"] = True
+        return {**result, "evidence": evidence}
 
     logger.info(f"native MCP server serving, tool_count={len(registry.list_all())}, capabilities={capabilities!r}")
     logger.debug("starting stdio MCP transport")

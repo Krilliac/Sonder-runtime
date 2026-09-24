@@ -6,7 +6,7 @@ point estimates; it cannot tell 3/3 from 300/300.  This module adds the
 missing statistical floor and a per-kind policy table:
 
 * :class:`PromotionKind` enumerates runtime, prompt, skill, route, model,
-  memory, and selfmod promotion.
+  memory, selfmod, and strategy promotion.
 * :class:`PromotionGatePolicy` binds each kind to a minimum sample size, a
   point pass-rate floor, a one-sided Wilson score lower bound at a stated
   confidence level, baseline regression allowances, replay equivalence, and
@@ -27,6 +27,7 @@ from enum import Enum
 import hashlib
 import json
 import math
+import re
 from statistics import NormalDist
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
@@ -38,6 +39,7 @@ SCHEMA = "sonder.evaluation-promotion-gate.v1"
 PASS_RATE_METRIC = "pass_rate"
 _INTEGRAL_TOLERANCE = 1e-6
 MAX_RESULTS = 256
+_SHA256 = re.compile(r"[a-f0-9]{64}\Z")
 
 
 class PromotionGateError(ValueError):
@@ -52,6 +54,7 @@ class PromotionKind(str, Enum):
     MODEL = "model"
     MEMORY = "memory"
     SELFMOD = "selfmod"
+    STRATEGY = "strategy"
 
 
 def _canonical(value: Any) -> str:
@@ -170,6 +173,8 @@ DEFAULT_PROMOTION_GATE_POLICIES: Mapping[PromotionKind, PromotionGatePolicy] = M
     PromotionKind.MODEL: _policy(PromotionKind.MODEL, 100, 0.90, 0.85, 0.95, max_pass_rate_drop=0.01),
     PromotionKind.MEMORY: _policy(PromotionKind.MEMORY, 30, 0.95, 0.85, 0.95),
     PromotionKind.SELFMOD: _policy(PromotionKind.SELFMOD, 60, 1.0, 0.95, 0.95),
+    PromotionKind.STRATEGY: _policy(PromotionKind.STRATEGY, 30, 0.90, 0.80, 0.95,
+                                     max_pass_rate_drop=0.02),
 })
 
 
@@ -261,13 +266,26 @@ def evaluate_promotion_gate(
         baseline_pass_rate = _rate(baseline_pass_rate, "baseline_pass_rate")
     offline: list[EvaluationResult] = []
     seen: set[str] = set()
+    seen_graphs: set[str] = set()
+    seen_cases: set[str] = set()
+    seen_case_sources: set[str] = set()
     for result in results:
         if not isinstance(result, EvaluationResult):
             raise PromotionGateError("results must be EvaluationResult values")
+        if policy.kind is PromotionKind.STRATEGY:
+            case_id, case_source = _validate_strategy_result_identity(result)
         if result.result_id in seen:
             raise PromotionGateError(f"duplicate result_id {result.result_id!r} would inflate the sample count")
         seen.add(result.result_id)
         if result.mode is EvaluationMode.OFFLINE:
+            if policy.kind is PromotionKind.STRATEGY:
+                if result.trajectory_digest in seen_graphs:
+                    raise PromotionGateError("duplicate strategy attempt graph would inflate samples")
+                seen_graphs.add(result.trajectory_digest)
+                if case_id in seen_cases or case_source in seen_case_sources:
+                    raise PromotionGateError("duplicate strategy held-out case would inflate samples")
+                seen_cases.add(case_id)
+                seen_case_sources.add(case_source)
             offline.append(result)
     if results:
         anchor = results[0]
@@ -299,6 +317,11 @@ def evaluate_promotion_gate(
         "case_regressions": case_regressions <= policy.max_case_regressions,
         "pass_rate_drop": baseline_pass_rate is None or baseline_pass_rate - pass_rate <= policy.max_pass_rate_drop,
     }
+    if policy.kind is PromotionKind.STRATEGY:
+        # Synthetic expected-action agreement is useful for policy regression,
+        # but no verifier of real task completion is composed here. Nothing
+        # in a caller-authored provenance digest can substitute for that port.
+        gates["independent_task_receipts"] = False
     if policy.require_baseline:
         # Without a baseline the drop allowance cannot be checked; for kinds that
         # replace an incumbent that is a failed gate, not a silent pass.
@@ -324,6 +347,54 @@ def evaluate_promotion_gate(
         MappingProxyType(dict(sorted(gates.items()))), reasons,
         tuple(sorted(item.result_id for item in offline)),
     )
+
+
+def _validate_strategy_result_identity(result: EvaluationResult) -> tuple[str, str]:
+    """A strategy policy cannot pool generic or unbound evaluation results."""
+    from sonder_runtime.domain.strategy.models import StrategyError
+    from .strategy_cases import _METRICS, _POLICY, strategy_evidence_class
+
+    dimensions = {item.name: item.value for item in result.dimensions}
+    digested = ("model_roles", "tool_visibility", "memory_selection",
+                "skill_catalog", "runtime_environment")
+    if (result.suite.suite_id != "strategy-orchestration"
+            or set(dimensions) != {*digested, "policy_version", "split"}
+            or result.suite.version != dimensions["policy_version"]
+            or dimensions["split"] != "heldout"
+            or any(not _SHA256.fullmatch(dimensions[name]) for name in digested)
+            or tuple(result.metrics) != _METRICS
+            or result.sample_count != 1
+            or not isinstance(result.trajectory_digest, str)
+            or not _SHA256.fullmatch(result.trajectory_digest)):
+        raise PromotionGateError("strategy result needs bound held-out identity and measurements")
+    def one(prefix: str) -> str:
+        matches = tuple(item[len(prefix):] for item in result.provenance if item.startswith(prefix))
+        if len(matches) != 1:
+            raise PromotionGateError("strategy result is missing its attempt graph or runtime provenance")
+        return matches[0]
+
+    case_id = one("case:")
+    graph = one("attempt_graph:")
+    case_source = one("case_source_digest:")
+    if (
+        not _POLICY.fullmatch(case_id)
+        or graph != result.trajectory_digest
+        or not _SHA256.fullmatch(one("case_digest:"))
+        or not _SHA256.fullmatch(case_source)
+        or not _SHA256.fullmatch(one("strategy_identity:"))
+        or not one("trace_run:").strip()
+        or result.result_id != f"strategy/{case_id}/{result.trajectory_digest[:16]}"
+    ):
+        raise PromotionGateError("strategy result is missing its attempt graph or runtime provenance")
+    try:
+        strategy_evidence_class(result)
+    except StrategyError as error:
+        raise PromotionGateError("strategy result lacks a supported typed evidence class") from error
+    if any(result.metrics[name] != 0.0 for name in (
+        "task_success", "first_attempt_success", "repair_success",
+    )):
+        raise PromotionGateError("synthetic policy canary cannot claim measured task success")
+    return case_id, case_source
 
 
 class PromotionGateEvaluator:

@@ -7,8 +7,11 @@ import server
 from sonder_runtime.adapters.unit_of_work import UnitOfWorkAdapter
 from sonder_runtime.application.ports.runtime_checkpoints import CheckpointError
 from sonder_runtime.bootstrap.strategy import (
+    StrategyRollout,
     compose_strategy_trace,
+    configured_strategy_rollout,
     configured_strategy_trace,
+    try_configured_strategy_rollout,
 )
 
 
@@ -64,11 +67,26 @@ def test_private_key_directory_symlink_is_rejected(tmp_path):
 
 
 def test_strategy_observer_is_disabled_without_host_rollout(monkeypatch):
+    monkeypatch.delenv("SONDER_STRATEGY_MODE", raising=False)
     monkeypatch.delenv("SONDER_STRATEGY_OBSERVE", raising=False)
     assert configured_strategy_trace() is None
     monkeypatch.setenv("SONDER_STRATEGY_OBSERVE", "unexpected")
     with pytest.raises(ValueError):
         configured_strategy_trace()
+
+
+def test_rollout_modes_and_canary_cohort_are_host_bounded(monkeypatch):
+    monkeypatch.setenv("SONDER_STRATEGY_MODE", "canary")
+    monkeypatch.setenv("SONDER_STRATEGY_CANARY_PERCENT", "10")
+    first = configured_strategy_rollout()
+    second = configured_strategy_rollout()
+    assert first == second == StrategyRollout("canary", 10)
+    assert first.selected("durable-fleet-1") == second.selected("durable-fleet-1")
+    assert StrategyRollout("canary", 0).selected("durable-fleet-1") is False
+    assert StrategyRollout("canary", 100).selected("durable-fleet-1") is True
+    assert StrategyRollout("shadow", 100).selected("durable-fleet-1") is False
+    monkeypatch.setenv("SONDER_STRATEGY_CANARY_PERCENT", "101")
+    assert try_configured_strategy_rollout() == StrategyRollout()
 
 
 def test_autopilot_server_composes_observer_at_production_entry(monkeypatch, tmp_path):

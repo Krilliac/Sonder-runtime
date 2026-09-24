@@ -1,6 +1,7 @@
 """Sealed strategy outcomes feed scoped, evidence-ranked memory references."""
 
 import hashlib
+import json
 import sqlite3
 from dataclasses import replace
 
@@ -19,7 +20,10 @@ from sonder_runtime.application.memory.learning_ladder import LearningStage
 from sonder_runtime.application.memory.receipt_observation import (
     ReceiptObservationProducer,
 )
-from sonder_runtime.application.memory.strategy_memory import StrategyMemoryService
+from sonder_runtime.application.memory.strategy_memory import (
+    StrategyMemoryService,
+    language_from_path,
+)
 from sonder_runtime.application.ports.host_final import HostFinalFacts
 from sonder_runtime.application.ports.host_turn_links import (
     FinalizedHostResult,
@@ -74,7 +78,8 @@ def _record(trace, attempt):
 def _plan(tokens=96):
     budgets = dict.fromkeys(CONTEXT_SECTIONS, 0)
     budgets["memories"] = tokens
-    return ContextPlanner().plan(ModelContext("model", 256, 64), {"memories": tokens}, budgets)
+    return ContextPlanner().plan(ModelContext("model", max(256, tokens + 64), 64),
+                                 {"memories": tokens}, budgets)
 
 
 def _verified(run_id, *, principal, project="project-a"):
@@ -167,6 +172,62 @@ def test_failed_reuse_halves_confidence_without_claiming_causality(tmp_path):
                                      plan=_plan(48)).references[0].experience_id == first.experience_id
 
 
+def test_recovery_context_is_selected_before_attempt_and_project_bound(tmp_path):
+    trace, memory, path = _application(tmp_path)
+    previous = _attempt("previous", outcome="failed")
+    _record(trace, previous)
+    stored = memory.observe_recorded("previous", previous.attempt_id, project_scope="project-a")
+
+    context = memory.recovery_context(
+        "recovery", "attempt-1", project_scope="project-a", plan=_plan(192),
+        failure_class=FailureClass.TEST_FAILURE, family="patch", language="py",
+    )
+    assert [ref.experience_id for ref in context.selection.references] == [stored.experience_id]
+    assert context.selection.references[0].provenance == ("attempt:" + stored.attempt_digest,)
+    assert context.selection.references[0].verified is False
+    brief = json.loads(context.prompt_brief)
+    assert brief["authority"] == "advisory_only"
+    assert brief["references"][0]["id"] == stored.experience_id
+    assert brief["references"][0]["stage"] == "candidate"
+    assert len(context.prompt_brief.encode()) <= 192 * 2
+    assert "never-index-this" not in context.prompt_brief
+    assert "private rationale" not in context.prompt_brief
+    assert not memory.recovery_context("empty", "attempt-1", project_scope="project-a",
+                                       plan=_plan(96)).prompt_brief
+    with pytest.raises(ValueError, match="another project"):
+        memory.select_for_attempt("recovery", "attempt-1", project_scope="project-b", plan=_plan(192))
+
+    _record(trace, _attempt("recovery", outcome="failed"))
+    memory.observe_recorded("recovery", "attempt-1", project_scope="project-a")
+    with UnitOfWorkAdapter(str(path)) as scope:
+        assert scope.strategy_experiences.failed_reuses(stored.experience_id) == 1
+
+
+def test_host_language_metadata_indexes_digest_only_codegen_scope_with_legacy_fallback(tmp_path):
+    trace, memory, _ = _application(tmp_path)
+    assert language_from_path("src/module.py") == "py"
+    assert language_from_path("opaque.name") == "unknown"
+    digest_scope = ("project:" + "e" * 64,)
+    older = replace(_attempt("legacy"), signature=replace(_attempt("legacy").signature,
+                                                          target_scope=digest_scope))
+    newer = replace(_attempt("host-indexed"), signature=replace(_attempt("host-indexed").signature,
+                                                                target_scope=digest_scope))
+    _record(trace, older)
+    old_row = memory.observe_recorded("legacy", "attempt-1", project_scope="project-a")
+    assert old_row.language == "unknown"
+    _record(trace, newer)
+    indexed = memory.observe_recorded("host-indexed", "attempt-1", project_scope="project-a",
+                                      language=language_from_path("src/module.py"))
+    assert indexed.language == "py"
+    selected = memory.select_for_attempt("recovery", "attempt-1", project_scope="project-a",
+                                         plan=_plan(96), language="py", family="patch")
+    assert {ref.language for ref in selected.references} == {"unknown", "py"}
+    assert {ref.experience_id for ref in selected.references} == {old_row.experience_id, indexed.experience_id}
+    with pytest.raises(ValueError, match="language"):
+        memory.observe_recorded("host-indexed", "attempt-1", project_scope="project-a",
+                                language="untrusted-language")
+
+
 def test_authenticated_independent_verifiers_advance_only_existing_ladder(tmp_path):
     trace, memory, path = _application(tmp_path)
     indexed = []
@@ -185,6 +246,8 @@ def test_authenticated_independent_verifiers_advance_only_existing_ladder(tmp_pa
     assert {ref.experience_id for ref in selected.references} == {item.experience_id for item in indexed}
     assert all(ref.stage is LearningStage.FACT for ref in selected.references)
     assert all(ref.confidence == .80 for ref in selected.references)
+    assert all(ref.verified and ref.provenance[1].startswith("verifier:observation-")
+               for ref in selected.references)
     # An ordinary verifier receipt is not held-out strategy-policy evaluation.
     assert all(ref.stage < LearningStage.POLICY for ref in selected.references)
 

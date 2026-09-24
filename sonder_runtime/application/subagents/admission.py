@@ -3,8 +3,9 @@
 Steps and output tokens are aggregate parent envelopes. Wall time is billed
 additively in worker-seconds, including time spent by concurrent children.
 Live/recoverable children reserve their full ceilings; a settled child keeps
-its measured use and any outstanding descendant reservations. Unknown use is
-never refunded. Each ancestor owns an independent, recursively nested envelope.
+its measured steps and wall plus outstanding descendants. Output tokens lack
+trusted model telemetry, so terminal children keep their full token reservation
+unless cancelled before starting. Each ancestor owns a nested envelope.
 """
 
 from __future__ import annotations
@@ -48,6 +49,15 @@ def _spent(record: DurableChildSession, field: str) -> int | float | None:
         # Legacy/direct terminal transitions can have no usage receipt at all.
         # A zero-valued default is not evidence that execution used nothing.
         return getattr(record.request.budget, field) or float("inf")
+    if field == "max_output_tokens" and record.status in TERMINAL_SUBAGENT_STATUSES:
+        # The runner's UTF-8 byte/4 estimate limits output length, but cannot
+        # prove the actual model-token count. Never refund its token pool on
+        # that estimate. A prestart cancellation is the one proven zero-use.
+        if (record.status is SubagentStatus.CANCELLED and record.result is not None
+                and record.result.error is not None
+                and record.result.error.code == "cancelled_before_start"):
+            return 0
+        return record.request.budget.max_output_tokens or float("inf")
     if field == "max_steps":
         checkpoint = record.checkpoint.sequence + 1 if record.checkpoint else 0
         return max(record.usage.steps, checkpoint)
@@ -80,7 +90,7 @@ def _ownership(record: DurableChildSession) -> WorkerExecutionContract:
 
 def validate_admission(
     candidate: DurableChildSession, existing: Iterable[DurableChildSession],
-    *, resuming: bool = False,
+    *, resuming: bool = False, new_execution: bool = False,
 ) -> None:
     """Validate the projected state with one canonical storage snapshot.
 
@@ -106,12 +116,31 @@ def validate_admission(
             raise InvalidSubagentRequest("register the provider root before admitting children")
         return
 
+    metadata = dict(candidate.request.metadata)
     claimed = _ownership(candidate)
-    if candidate.status in _ACTIVE and (claimed.owned_files or claimed.task_scope):
+    lane_id = metadata.get("speculative_lane_id", "")
+    hypothesis = metadata.get("hypothesis_digest", "")
+    if claimed.speculative_lane and (
+        ("speculative_lane_id" in metadata and not lane_id)
+        or ("hypothesis_digest" in metadata and not hypothesis)
+    ):
+        raise InvalidSubagentRequest("speculative identity must be non-empty")
+    if candidate.status in _ACTIVE and (
+        claimed.owned_files or claimed.task_scope
+        or (claimed.speculative_lane and (lane_id or hypothesis))
+    ):
         for record in records.values():
             if record.request.child_id == child_id or record.status not in _ACTIVE:
                 continue
-            conflict = claimed.conflicts_with(_ownership(record))
+            other = _ownership(record)
+            if (claimed.speculative_lane and other.speculative_lane
+                    and claimed.task_scope == other.task_scope
+                    and candidate.lineage.chain[0] == record.lineage.chain[0]):
+                other_metadata = dict(record.request.metadata)
+                if ((lane_id and lane_id == other_metadata.get("speculative_lane_id"))
+                        or (hypothesis and hypothesis == other_metadata.get("hypothesis_digest"))):
+                    raise InvalidSubagentRequest("active speculative hypothesis is already reserved")
+            conflict = claimed.conflicts_with(other)
             if conflict:
                 raise InvalidSubagentRequest(conflict)
 
@@ -120,12 +149,45 @@ def validate_admission(
         expected_ancestors = () if _provider_root(parent) else parent.lineage.chain
         if candidate.lineage.ancestors != expected_ancestors:
             raise InvalidSubagentRequest("child lineage does not match durable parent")
-        if parent.cancellation_requested or parent.status is SubagentStatus.CANCELLED:
+        if new_execution and (
+            parent.cancellation_requested or parent.status is SubagentStatus.CANCELLED
+        ):
             raise InvalidSubagentRequest("cancelled parent cannot admit children")
         validate_child_budget(candidate.request.budget, parent.request.budget)
 
     projected = dict(records)
     projected[child_id] = candidate
+    # Correlation IDs intentionally create separate durable operation roots.
+    # Their immutable host owner still has one shared live-worker ceiling:
+    # otherwise concurrent requests each obtain the complete host width.
+    root_record = projected.get(candidate.lineage.chain[0])
+    if root_record is not None and _provider_root(root_record):
+        host_owner = dict(root_record.request.metadata).get("owner_id", "")
+        if host_owner:
+            host_roots = {
+                record.request.child_id: record for record in projected.values()
+                if _provider_root(record)
+                and dict(record.request.metadata).get("owner_id") == host_owner
+            }
+            claiming = {
+                record.lineage.chain[0] for record in projected.values()
+                if record.request.child_id not in host_roots
+                and record.lineage.chain[0] in host_roots
+                and (record.status in _ACTIVE or record.recovery_required)
+            }
+            owner_active = sum(
+                record.status in _ACTIVE for record in projected.values()
+                if record.request.child_id not in host_roots
+                and record.lineage.chain[0] in host_roots
+            )
+            ceilings = [
+                root.request.budget.max_concurrency
+                for root_id, root in host_roots.items()
+                if (root_id in claiming or root_id == candidate.lineage.chain[0])
+                and root.request.budget.max_concurrency is not None
+            ]
+            if ceilings and owner_active > min(ceilings):
+                raise InvalidSubagentRequest("host concurrency budget exhausted")
     children: dict[str, list[DurableChildSession]] = {}
     descendants: dict[str, list[DurableChildSession]] = {}
     for record in projected.values():
@@ -173,14 +235,23 @@ def validate_admission(
                 spent = 0
             else:
                 spent = bound if bound is not None else float("inf")
-        return spent + sum(
+        delegated = sum(
             liability(child, field, seen | {node_id}) for child in children.get(node_id, ())
         )
+        if field == "max_output_tokens" and record.status in TERMINAL_SUBAGENT_STATUSES:
+            # The retained parent block already contains the child blocks.
+            # Adding them again would charge descendants twice at the root.
+            return max(spent, delegated)
+        return spent + delegated
 
     for ancestor_id in ancestry + (child_id,):
         ancestor = projected.get(ancestor_id)
         if ancestor is None:
             continue  # Implicit external legacy ancestor, not a fabricated pool.
+        if new_execution and ancestor_id != child_id and (
+            ancestor.cancellation_requested or ancestor.status is SubagentStatus.CANCELLED
+        ):
+            raise InvalidSubagentRequest("cancelled ancestor cannot admit children")
         ceiling = ancestor.request.budget
         if ancestor_id != child_id and ceiling.max_depth is not None and len(ancestry) > ceiling.max_depth:
             raise InvalidSubagentRequest("subagent depth budget exhausted")
@@ -204,5 +275,11 @@ def validate_admission(
                 liability(item, field, frozenset({ancestor_id}))
                 for item in children.get(ancestor_id, ())
             )
-            if spent + committed > limit:
+            accounted = (
+                max(spent, committed)
+                if field == "max_output_tokens"
+                and ancestor.status in TERMINAL_SUBAGENT_STATUSES
+                else spent + committed
+            )
+            if accounted > limit:
                 raise InvalidSubagentRequest(f"parent {field} resource budget exhausted")

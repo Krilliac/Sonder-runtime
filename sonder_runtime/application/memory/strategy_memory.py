@@ -11,7 +11,7 @@ import hashlib
 import json
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from sonder_runtime.application.context_planner import ContextPlan
@@ -40,6 +40,19 @@ from sonder_runtime.domain.strategy.models import (
 
 MAX_LOOKUP = 32
 REF_COST_TOKENS = 48
+RECOVERY_HEADER_TOKENS = 32
+RECOVERY_RENDER_TOKENS = 128
+MAX_RECOVERY_REFS = 8
+LANGUAGES = frozenset({"unknown", "py", "rs", "js", "ts", "go", "java", "cs",
+                       "cpp", "c", "rb"})
+
+
+def language_from_path(path: str) -> str:
+    """Only a trusted host filename extension can supply language metadata."""
+    if not isinstance(path, str) or not 1 <= len(path) <= 4096:
+        return "unknown"
+    suffix = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    return suffix if suffix in LANGUAGES - {"unknown"} else "unknown"
 
 
 def _digest(value: object) -> str:
@@ -87,7 +100,7 @@ class StrategyExperience:
             or self.family not in FAMILIES
             or self.outcome not in {"succeeded", "failed"}
             or (self.failure_class and self.failure_class not in {item.value for item in FailureClass})
-            or self.language not in {"unknown", "py", "rs", "js", "ts", "go", "java", "cs", "cpp", "c", "rb"}
+            or self.language not in LANGUAGES
             or self.progress not in {item.value for item in ProgressAssessment}
             or not isinstance(self.usage, StrategyUsage)
             or not isinstance(self.evidence_digests, tuple)
@@ -102,12 +115,13 @@ class StrategyExperience:
 
     @classmethod
     def from_attempt(cls, attempt: StrategyAttempt, *, project_scope: str,
-                     verifier_observation_id: str = "") -> StrategyExperience:
+                     verifier_observation_id: str = "", language: str | None = None) -> StrategyExperience:
         suffixes = {part.rsplit(".", 1)[-1].lower() for part in attempt.signature.target_scope
                     if "." in part}
-        language = next(iter(suffixes)) if len(suffixes) == 1 and next(iter(suffixes)) in {
-            "py", "rs", "js", "ts", "go", "java", "cs", "cpp", "c", "rb",
-        } else "unknown"
+        inferred = next(iter(suffixes)) if len(suffixes) == 1 and next(iter(suffixes)) in LANGUAGES else "unknown"
+        if language is not None and language not in LANGUAGES:
+            raise ValueError("unknown host language metadata")
+        selected_language = inferred if language is None else language
         return cls(
             _digest((attempt.run_id, attempt.attempt_id)), _digest(attempt.run_id),
             _digest(attempt.attempt_id),
@@ -116,7 +130,7 @@ class StrategyExperience:
             attempt.outcome, "" if attempt.failure is None else attempt.failure.classification.value,
             "" if attempt.failure is None else attempt.failure.evidence_digest,
             (attempt.failure.evidence_digest if attempt.failure and attempt.failure.evidence_digest
-             else _digest(attempt.signature.verifier_target)), language,
+             else _digest(attempt.signature.verifier_target)), selected_language,
             _digest(attempt.signature.target_scope),
             assess_progress(attempt.progress_before, attempt.progress_after).value,
             attempt.usage, tuple(sorted(ref.digest for ref in attempt.evidence)),
@@ -135,12 +149,23 @@ class StrategyMemoryRef:
     confidence: float
     stage: LearningStage
     evidence_digests: tuple[str, ...]
+    verified: bool = False
+    provenance: tuple[str, ...] = ()
+    language: str = "unknown"
 
 
 @dataclass(frozen=True, slots=True)
 class StrategyMemorySelection:
     references: tuple[StrategyMemoryRef, ...]
     context_selection: Selection
+
+
+@dataclass(frozen=True)
+class StrategyRecoveryContext:
+    """Host-selected, budgeted experience references exposed before a retry."""
+
+    selection: StrategyMemorySelection
+    prompt_brief: str
 
 
 class StrategyExperienceStore(Protocol):
@@ -167,7 +192,8 @@ class StrategyMemoryService:
         self._ladder = ladder or LearningLadder()
 
     def observe_recorded(self, run_id: str, attempt_id: str, *, project_scope: str,
-                         verifier_observation_id: str | None = None) -> StrategyExperience:
+                         verifier_observation_id: str | None = None,
+                         language: str | None = None) -> StrategyExperience:
         """Re-read a sealed attempt; reject caller-supplied verdicts and proof."""
         attempts = tuple(item for item in self._trace.history(run_id) if item.attempt_id == attempt_id)
         if len(attempts) != 1:
@@ -196,12 +222,13 @@ class StrategyMemoryService:
             experience = StrategyExperience.from_attempt(
                 attempt, project_scope=project_scope,
                 verifier_observation_id=verifier_observation_id or "",
+                language=language,
             )
             stored = scope.strategy_experiences.append(experience)
             scope.strategy_experiences.complete(run_id, attempt_id, attempt.outcome)
             return stored
 
-    def _assessment(self, scope, experience: StrategyExperience) -> tuple[LearningStage, float]:
+    def _assessment(self, scope, experience: StrategyExperience) -> tuple[LearningStage, float, bool]:
         rows = scope.strategy_experiences.by_signature(
             experience.project_digest, experience.signature_digest, limit=10_001,
         )
@@ -251,7 +278,7 @@ class StrategyMemoryService:
         stage = decisions[0].stage if decisions else LearningStage.OBSERVATION
         baseline = (0.80 if verified else 0.30) if experience.outcome == "succeeded" else 0.40
         confidence = baseline * (0.5 ** scope.strategy_experiences.failed_reuses(experience.experience_id))
-        return stage, confidence
+        return stage, confidence, verified
 
     def select_for_attempt(self, run_id: str, attempt_id: str, *, project_scope: str,
                            plan: ContextPlan, failure_class: FailureClass | None = None,
@@ -278,6 +305,8 @@ class StrategyMemoryService:
                 rows = tuple(store.get(identity) for identity in existing)
                 if any(row is None for row in rows):
                     raise ValueError("selected strategy experience is missing")
+                if any(row.project_digest != _scope(project_scope) for row in rows):
+                    raise ValueError("strategy selection belongs to another project")
             else:
                 rows = store.relevant(
                     _scope(project_scope), failure_class="" if failure_class is None else failure_class.value,
@@ -295,6 +324,11 @@ class StrategyMemoryService:
                     row.experience_id, row.signature_digest, row.family, row.outcome,
                     row.failure_class, row.progress, assessments[row.experience_id][1],
                     assessments[row.experience_id][0], row.evidence_digests,
+                    assessments[row.experience_id][2],
+                    ("attempt:" + row.attempt_digest,)
+                    + (("verifier:" + row.verifier_observation_id,)
+                       if assessments[row.experience_id][2] else ()),
+                    row.language,
                 ) for row in ranked
             }
             candidates = tuple(ContextItem(
@@ -312,6 +346,52 @@ class StrategyMemoryService:
                 store.select(run_id, attempt_id, selected_ids)
             return StrategyMemorySelection(tuple(refs[identity] for identity in selected_ids), selected)
 
+    def recovery_context(self, run_id: str, attempt_id: str, *, project_scope: str,
+                         plan: ContextPlan, failure_class: FailureClass | None = None,
+                         family: str = "", verifier_fingerprint: str = "", language: str = "",
+                         subsystem_digest: str = "", outcome: str = "") -> StrategyRecoveryContext:
+        """Select first, then render only content-free references within the host plan.
+
+        The model sees past outcomes as observations, never instructions or
+        authority. Selection is durable before a model call and later failed
+        exposure is attributed only to these exact selected references.
+        """
+        if not isinstance(plan, ContextPlan):
+            raise TypeError("host context plan is required")
+        budget = plan.budget_for("memories")
+        maximum = min(MAX_RECOVERY_REFS, max(0, (budget - RECOVERY_HEADER_TOKENS)
+                                         // RECOVERY_RENDER_TOKENS))
+        selection_plan = replace(
+            plan,
+            section_budgets={**plan.section_budgets, "memories": maximum * REF_COST_TOKENS},
+            total_section_tokens=plan.total_section_tokens - budget + maximum * REF_COST_TOKENS,
+        )
+        selection = self.select_for_attempt(
+            run_id, attempt_id, project_scope=project_scope, plan=selection_plan,
+            failure_class=failure_class, family=family,
+            verifier_fingerprint=verifier_fingerprint, language=language,
+            subsystem_digest=subsystem_digest, outcome=outcome,
+        )
+        if not selection.references:
+            return StrategyRecoveryContext(selection, "")
+        brief = json.dumps({
+            "kind": "past_strategy_observations", "authority": "advisory_only",
+            "references": [{
+                "id": ref.experience_id, "outcome": ref.outcome,
+                "failure": ref.failure_class, "stage": ref.stage.name.lower(),
+                "confidence": round(ref.confidence, 2), "verified": ref.verified,
+                "language": ref.language,
+            } for ref in selection.references],
+        }, sort_keys=True, separators=(",", ":"))
+        prompt_brief = "\n\n" + brief
+        # These fields are ASCII-only and bounded; this conservative byte
+        # envelope is a second check. The host still plans the entire prompt
+        # against the selected provider's actual context window.
+        if len(prompt_brief.encode("utf-8")) > budget * 2:
+            raise ValueError("rendered strategy references exceed the host memory budget")
+        return StrategyRecoveryContext(selection, prompt_brief)
+
 
 __all__ = ["StrategyExperience", "StrategyExperienceStore", "StrategyMemoryRef",
-           "StrategyMemorySelection", "StrategyMemoryService"]
+           "StrategyMemorySelection", "StrategyRecoveryContext", "StrategyMemoryService",
+           "language_from_path"]

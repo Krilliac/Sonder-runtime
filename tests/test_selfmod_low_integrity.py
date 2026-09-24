@@ -234,7 +234,10 @@ def test_record_test_routes_regression_and_held_out_through_low_runner(tmp_path,
 
     def isolated(command, **kwargs):
         calls.append((tuple(command), kwargs))
-        return {"exit_code": 0, "output": "ok", "passed": True}
+        return {
+            "exit_code": 0, "output": "ok", "passed": True,
+            "job": {"integrity": "low"},
+        }
 
     class Connection:
         def execute(self, *_args):

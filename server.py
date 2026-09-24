@@ -165,6 +165,7 @@ import autopilot_controller
 from sonder_runtime.adapters.persistence import fanout_store
 import fanout_prompt_vault
 from sonder_runtime.adapters.model_transport import ModelCallError
+from sonder_runtime.adapters.model_request_admission import host_model_request_admission
 from sonder_runtime.application.session.provider_attempts import (
     complete_scoped_provider_request, deferred_provider_request_scope, dispatch_provider,
 )
@@ -1179,6 +1180,7 @@ def configure_capacity(
 
 _SESSION_TURN_LOCKS_LOCK = threading.Lock()
 _SESSION_TURN_LOCKS = {}
+_HOST_MODEL_REQUEST_ADMISSION = host_model_request_admission()
 _SESSION_TURN_CLAIM_WAIT_SECONDS = max(
     0, min(30, _env_int_option("SONDER_SESSION_CLAIM_WAIT_SECONDS", 5) or 0)
 )
@@ -4573,6 +4575,15 @@ def _post_model(
                 transient=True,
                 attempts=attempt_index,
                 cloud=cloud,
+            )
+        # Admit the actual provider attempt, including each bounded retry.
+        # The host snapshots its optional velocity settings once at startup.
+        admission = _HOST_MODEL_REQUEST_ADMISSION.try_acquire()
+        if admission is not None and not admission.allowed:
+            raise ModelCallError(
+                "rate", "host model request rate limit reached",
+                attempts=attempt_index, cloud=cloud,
+                retry_after_seconds=admission.retry_after,
             )
         attempt_index = attempt
         failure = None
@@ -9848,6 +9859,26 @@ def master_orchestrate(
         )
         return result["output"]
     if mode in ("delegate", "delegated", "agents", "parallel", "fleet", "swarm", "fanout"):
+        from sonder_runtime.bootstrap.strategy import (
+            compose_fleet_strategy_observer,
+            try_compose_strategy_memory,
+            try_configured_strategy_rollout,
+            try_configured_strategy_trace,
+        )
+
+        strategy_rollout = try_configured_strategy_rollout()
+        strategy_trace = try_configured_strategy_trace(strategy_rollout)
+        strategy_memory = try_compose_strategy_memory(
+            strategy_trace, lambda: _application().unit_of_work,
+        )
+        # This is the host's nonlearning text worker above. Repository agent
+        # workers and learning workers may cause effects outside a model call,
+        # so their controller suggestions are observation only.
+        pure_model_worker = not needs_repo_tools and not learn
+        strategy_observer = compose_fleet_strategy_observer(
+            strategy_trace, strategy_memory, strategy_rollout,
+            pure_model=pure_model_worker, event_sink=master_orchestrator._event,
+        )
         run_fleet_in_background = mode in ("fleet", "swarm", "fanout")
         if run_fleet_in_background and not worker_cap:
             agents = master_orchestrator.clamp_agent_count(
@@ -9881,6 +9912,7 @@ def master_orchestrate(
             },
             project=project_scope,
             worker_cap=worker_cap,
+            strategy_observer=strategy_observer,
         )
         if run_fleet_in_background:
             return "\n".join([

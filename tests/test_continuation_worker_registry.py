@@ -328,7 +328,7 @@ def test_delegation_service_consumes_continuation_backed_reservation(tmp_path):
     root = tmp_path / "repo"
     workspace = WorkspaceAssignment((str(root),), (str(root / "write"),))
     preset = resolve_preset("researcher")
-    lineage = LineageRecord("line-1", "root-1", "parent-1", "child-1", 1, preset.name, preset.role, workspace)
+    lineage = LineageRecord("line-1", "parent-1", "parent-1", "child-1", 1, preset.name, preset.role, workspace)
     request = DelegationRequest("delegation-1", lineage, "research the change", preset, workspace)
     repository.create(DurableChildSession(
         SubagentRequest("parent-1", "provider root", SubagentBudget(max_steps=30, max_output_tokens=6000, max_wall_seconds=600), "parent-1", (("provider_root", "true"),)),
@@ -362,7 +362,7 @@ def test_delegation_restart_reuses_terminal_by_key_with_new_child_id(tmp_path):
     root = tmp_path / "repo"
     preset = resolve_preset("researcher")
     workspace = WorkspaceAssignment((str(root),), (str(root / "write"),))
-    lineage = LineageRecord("line-1", "root-1", "parent-1", "child-1", 1, preset.name, preset.role, workspace)
+    lineage = LineageRecord("line-1", "parent-1", "parent-1", "child-1", 1, preset.name, preset.role, workspace)
     request = DelegationRequest("delegation-1", lineage, "research the change", preset, workspace)
     root_request = SubagentRequest(
         "parent-1", "provider root", SubagentBudget(max_steps=30, max_output_tokens=6000, max_wall_seconds=600),
@@ -406,7 +406,7 @@ def test_execution_contract_is_durable_and_integration_is_a_fail_closed_gate(tmp
         success_criteria=("tests pass", "report emitted"),
         verification_commands=(("python", "-m", "pytest", "tests/test_target.py"),),
     )
-    lineage = LineageRecord("line-1", "root-1", "parent-1", "child-1", 1, preset.name, preset.role, workspace)
+    lineage = LineageRecord("line-1", "parent-1", "parent-1", "child-1", 1, preset.name, preset.role, workspace)
     request = DelegationRequest("delegation-1", lineage, "research the change", preset, workspace, execution_contract=contract)
     repository = SQLiteDurableContinuationRepository(database)
     repository.create(DurableChildSession(
@@ -439,7 +439,7 @@ def test_execution_contract_command_mismatch_cannot_certify_restarted_child(tmp_
     preset = resolve_preset("researcher")
     workspace = WorkspaceAssignment((str(root),), ())
     contract = WorkerExecutionContract(("tests pass",), (("python", "-m", "pytest", "tests/test_target.py"),))
-    lineage = LineageRecord("line-1", "root-1", "parent-1", "child-1", 1, preset.name, preset.role, workspace)
+    lineage = LineageRecord("line-1", "parent-1", "parent-1", "child-1", 1, preset.name, preset.role, workspace)
     request = DelegationRequest("delegation-1", lineage, "research", preset, workspace, execution_contract=contract)
     repository = SQLiteDurableContinuationRepository(database)
     repository.create(DurableChildSession(

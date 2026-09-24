@@ -374,6 +374,7 @@ class PostgreSQLDurableContinuationRepository:
                     validate_admission(
                         next_record, self._admission_records(connection),
                         resuming=prepared.kind == "claim_resume",
+                        new_execution=True,
                     )
                 if (next_record is not None and prepared.kind == "update"
                         and next_record.status is SubagentStatus.SUCCEEDED

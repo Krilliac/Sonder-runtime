@@ -122,7 +122,9 @@ def test_sequential_roles_share_durable_parent_and_can_use_independent_presets(t
     repository = SQLiteDurableContinuationRepository(tmp_path / "roles.sqlite")
     child_service = DurableContinuationService(repository)
     child_service.register_root(
-        "root", SubagentBudget(max_steps=30, max_output_tokens=8000, max_wall_seconds=900)
+        # This legacy runner has no measured output-token receipt; settled
+        # children retain their full token reservations.
+        "root", SubagentBudget(max_steps=30, max_output_tokens=14000, max_wall_seconds=900)
     )
     provider = RunnerBoundSubagentProvider(child_service, lambda state, save, control: "observed")
     workflow = AgentWorkflowService(

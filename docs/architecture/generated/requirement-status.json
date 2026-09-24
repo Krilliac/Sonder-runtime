@@ -180,9 +180,9 @@
     },
     {
       "checked": false,
-      "claim": "Root counting and reused-reservation admission are corrected; child deadline/elapsed checks and sequential workflow parent lineage preserve inherited budgets.",
+      "claim": "Transactional SQLite and PostgreSQL admission conserves hierarchical step, output-token and additive worker-time envelopes, root child/depth limits, owner-wide active concurrency across operations, ownership and distinct active speculative hypotheses. Terminal unmetered token usage retains its complete reservation.",
       "requirement_id": "AGENT-007",
-      "revision": 6,
+      "revision": 7,
       "status": "implemented_unverified"
     },
     {
@@ -194,9 +194,9 @@
     },
     {
       "checked": false,
-      "claim": "Delegated verification is bound to the canonical complete terminal result, including output/error/usage/status; conflicting terminal receipts fail and identical receipts are idempotent.",
+      "claim": "Typed specialist proposals use the existing durable delegation service with owner-bound roots and inherited finite budgets; result verification binds the complete canonical terminal result and artifact fan-in recomputes specification/output/readiness identity.",
       "requirement_id": "AGENT-009",
-      "revision": 4,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -649,9 +649,9 @@
     },
     {
       "checked": false,
-      "claim": "Evaluation results bind provider, model, revision, provider digest, and scenario-fixture digest only; the remaining required dimensions are not yet bound.",
+      "claim": "Strategy canaries bind sealed attempt graph and policy, role, tool, memory, skill, runtime and case-manifest identities; evaluator composition uses actual existing corpus/session/failure ports and refuses missing sources.",
       "requirement_id": "EVAL-004",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -670,9 +670,9 @@
     },
     {
       "checked": false,
-      "claim": "Every promotion kind (runtime, prompt, skill, route, model, memory, selfmod) has a digest-bound gate policy with sample, point pass-rate, one-sided Wilson confidence, regression, explicit-baseline, replay, and shadow/canary requirements; the proposal lifecycle owns the gate fixed at construction and the kind bound at creation, recomputes decisions from its recorded results, persists kind and gate decision digests in durable events, and approves kind-bound proposals only with gated evidence.",
+      "claim": "Strategy promotion explicitly excludes synthetic controller agreement from task-success scoring and fails the independent-task-receipt gate even with thirty passing canaries and caller-stated rollout health; changed source inventories and duplicate cases are rejected.",
       "requirement_id": "EVAL-007",
-      "revision": 5,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
@@ -957,9 +957,9 @@
     },
     {
       "checked": false,
-      "claim": "Capability routing remains an injected typed policy seam at the model facade.",
+      "claim": "Explicit strict capability routing binds persisted passed nonsynthetic conformance to the exact concrete provider/model digest, quantization, backend/version, tokenizer/template, context window and hardware; routing and in-flight response checks reject unknown, stale, failed or mismatched identity.",
       "requirement_id": "MODEL-005",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1272,9 +1272,9 @@
     },
     {
       "checked": false,
-      "claim": "Automatic low-risk selfmod gates reject unsupported low-integrity hosts and require host-recorded isolation provenance before auto approval; old unverified test rows and forged stdout cannot authorize host approval.",
+      "claim": "Selfmod execution refuses unsupported automatic low-integrity hosts and records actual host isolation provenance, while parent-side filtered test runs remain manual-review only because candidate code can forge the child result frame.",
       "requirement_id": "SELFMOD-002",
-      "revision": 7,
+      "revision": 8,
       "status": "implemented_unverified"
     },
     {
@@ -1461,9 +1461,9 @@
     },
     {
       "checked": false,
-      "claim": "Typed tool requests retain immutable schema selection and durable audit records retain the selected-schema identity for replay inspection.",
+      "claim": "Native progressive schema loads, hidden-call refusals and compatibility calls share the application durable audit; receipts preserve immutable call-begin schema selection, outcome and compatibility authority without inventing typed gateway approval.",
       "requirement_id": "TOOL-007",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "9572c47faa294acf422b6ea6052e1444a29b55b89766a0a0275ed339063aaba1",
+    "ledger_sha256": "81746a1358e37152b7ef2ddf62a06e22cb8ed0ab8dd110dcec960e42fde7e071",
     "spec_sha256": "d11b5664c594bb79042c358a0510393d1ee0dd6d718830332a6362ed652c9bc5"
   }
 }
