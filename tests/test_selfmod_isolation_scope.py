@@ -76,6 +76,7 @@ def test_deploy_refuses_bytes_that_differ_from_tested_digests(monkeypatch, tmp_p
     monkeypatch.setattr(selfmod, "_atomic_copy", lambda *a, **k: copies.append(a))
     monkeypatch.setattr(selfmod, "_phase", lambda *a, **k: phases.append(a))
     monkeypatch.setattr(selfmod, "restore", lambda *a, **k: None)
+    monkeypatch.setattr(selfmod, "tested_digests", lambda _run_id: {"files": tested, "diff_sha256": "d"})
 
     import pytest
     with pytest.raises(RuntimeError, match="differ from tested bytes"):

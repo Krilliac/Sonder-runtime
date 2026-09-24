@@ -265,6 +265,9 @@ def _bounded(value, default: int, ceiling: int, name: str) -> int:
 # MAX_PATH, and CreateProcess then failed with ERROR_DIRECTORY (267). Keep the
 # root short and refuse to run from a root that is not.
 MAX_WORK_ROOT_CHARS = 48
+# CreateProcess requires the current directory to be shorter than MAX_PATH
+# (260) including a trailing separator and terminator.
+MAX_CHILD_CWD_CHARS = 258
 
 
 def _short_work_dir() -> Path:
@@ -309,6 +312,15 @@ def run_isolated(
     or .git, and a Job object does not contain what it can start through
     WMI or the Task Scheduler.
     """
+    cwd_text = str(Path(cwd).resolve())
+    if len(cwd_text) > MAX_CHILD_CWD_CHARS:
+        # CreateProcessAsUser rejects a current directory at or beyond
+        # MAX_PATH with ERROR_DIRECTORY (267), which otherwise surfaces as an
+        # opaque isolation failure.
+        raise ValueError(
+            "child working directory is %d characters; Windows requires at most "
+            "%d (ERROR_DIRECTORY 267): %s" % (len(cwd_text), MAX_CHILD_CWD_CHARS, cwd_text[:80] + "...")
+        )
     process_memory_mb = _bounded(process_memory_mb, DEFAULT_PROCESS_MEMORY_MB, _MAX_PROCESS_MEMORY_MB, "process_memory_mb")
     job_memory_mb = _bounded(job_memory_mb, DEFAULT_JOB_MEMORY_MB, _MAX_JOB_MEMORY_MB, "job_memory_mb")
     active_processes = _bounded(active_processes, DEFAULT_ACTIVE_PROCESSES, _MAX_ACTIVE_PROCESSES, "active_processes")
