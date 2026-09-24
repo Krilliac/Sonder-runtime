@@ -866,9 +866,9 @@
     },
     {
       "checked": false,
-      "claim": "Live agent tools and composed process, compute, local subagent, and self-mod worker adapters persist host-owned effect intents and outcomes; checkpoint restore validates journal high-water and unresolved effects.",
+      "claim": "Corrects revisions 12 and 13 after an independent review of 3d22e670. Concurrent effects in one shared run now always commit their terminal outcome and checkpoint only the settled high-water prefix; restore accepts later effects only when every effect in the run is terminal and reports journal_high_water, so restart succeeds after verified reconciliation; reconcile clears the run-wide recovery fence once nothing is unresolved; checkpoint writes require the current unfenced owner epoch and idempotent outcome replays append no generation; checkpoint generations are bounded per run; the process-start verifier reports an attached launch as completed with the live {job_id}:{pid} receipt shape.",
       "requirement_id": "LOOP-008",
-      "revision": 4,
+      "revision": 15,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "39b41cd85aaa44a5de3f65288b1236e1a9c64b0348bac563054771e1213228a2",
+    "ledger_sha256": "e421cfbc80109c44f40b333073ce53fb863f42dc5ebba1501ead847634cd9931",
     "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
   }
 }
