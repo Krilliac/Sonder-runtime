@@ -42,14 +42,23 @@ DEFAULT_REPEAT_LIMIT = 2
 _WHITESPACE = re.compile(r"\s+")
 
 
+def requested_attempts(value, default: int = 2) -> int:
+    """The integer a caller's attempt value means, before any clamping.
+
+    Booleans and unparseable values fall back to ``default``; floats and
+    numeric strings are truncated by ``int``.
+    """
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def bounded_attempts(value, default: int = 2) -> int:
     """Clamp a requested attempt count to ``1..MAX_VERIFICATION_ATTEMPTS``."""
-    if isinstance(value, bool):
-        value = default
-    try:
-        attempts = int(value)
-    except (TypeError, ValueError):
-        attempts = default
+    attempts = requested_attempts(value, default)
     return max(1, min(attempts, MAX_VERIFICATION_ATTEMPTS))
 
 

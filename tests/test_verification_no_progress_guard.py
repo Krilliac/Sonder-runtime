@@ -9,6 +9,8 @@ default two-attempt contract are untouched.
 """
 from __future__ import annotations
 
+import pytest
+
 import server
 from sonder_runtime.domain import verification_progress as vp
 
@@ -221,3 +223,25 @@ def test_unclamped_attempt_count_is_not_reported(monkeypatch, tmp_path):
     )
 
     assert "attempts clamped" not in out
+
+
+@pytest.mark.parametrize("requested", [2, 2.0, "2", True])
+def test_equivalent_attempt_values_are_not_reported_as_clamped(monkeypatch, tmp_path, requested):
+    _prepare(monkeypatch, tmp_path, lambda n: (False, "main.c:1: error: same"))
+
+    out = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build", attempts=requested,
+    )
+
+    assert "attempts clamped" not in out
+
+
+@pytest.mark.parametrize("requested,applied", [(0, 1), (-3, 1), (7.9, 6), (1000, 6)])
+def test_out_of_range_attempt_values_are_reported_as_clamped(monkeypatch, tmp_path, requested, applied):
+    _prepare(monkeypatch, tmp_path, lambda n: (False, "main.c:%d: error: moving %d" % (n, n)))
+
+    out = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build", attempts=requested,
+    )
+
+    assert "attempts clamped: requested %s, ran at most %d" % (requested, applied) in out

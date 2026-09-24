@@ -24741,7 +24741,9 @@ def codegen_build_loop(
     # an unbounded caller-supplied count is a runaway loop, not a knob.
     attempt_limit = verification_progress.bounded_attempts(attempts)
     clamp_note = ""
-    if str(attempts).strip() != str(attempt_limit):
+    # Compare integers after the same coercion bounded_attempts applies, so
+    # an equivalent value such as 2.0 or True is not reported as clamped.
+    if verification_progress.requested_attempts(attempts) != attempt_limit:
         clamp_note = (
             "NOTE: attempts clamped: requested %s, ran at most %d per file "
             "(allowed range 1..%d)."
