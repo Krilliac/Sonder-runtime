@@ -39,6 +39,24 @@ import json
 from .ports.compaction import CompactionSummary, SessionHistoryEvent
 
 
+# ---------------------------------------------------------------------------
+# SCHEMA BUMP RULE -- read before changing anything in this module or in the
+# schema-2 branch of ``application/compaction.py::_summary_from``.
+#
+# A persisted summary is accepted on replay only if it EXACTLY equals the
+# canonical projection re-derived from its source events for its recorded
+# ``summary_schema``.  Every constant and classifier below (field lists,
+# failed statuses, nesting containers, inline/reference thresholds, bounded
+# value sizes, truncation text, message types) is part of that projection.
+# Changing any of them in place silently invalidates every schema-2 summary
+# already in session logs: lanes replaying them fail closed.
+#
+# To change the projection: increment SUMMARY_SCHEMA_VERSION, keep the old
+# version re-derivable (``canonical_summary(request, schema=<old>)``), accept
+# the new value in ``SessionCompactionService.validate_persisted_event``, and
+# add a new golden in ``tests/test_compaction_summary_schema_golden.py``
+# (never edit an existing golden to make it pass).
+# ---------------------------------------------------------------------------
 SUMMARY_SCHEMA_VERSION = 2
 """Top-level ``summary_schema`` of compaction events written by this engine."""
 

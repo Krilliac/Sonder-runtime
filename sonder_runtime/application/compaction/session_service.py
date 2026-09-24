@@ -1,6 +1,7 @@
 """Durable session compaction application service."""
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
@@ -559,7 +560,10 @@ class SessionCompactionService:
         candidates = self._complete_search(session_id, text=needle)
         if candidates is None:
             candidates = self._scan(session_id)
-        literal = []
+        # Candidates arrive oldest-first (search rows and scan pages are both
+        # in sequence order), so a bounded deque retains exactly the newest
+        # ``limit`` matches without holding every match of a broad query.
+        newest: deque[SessionEvent] = deque(maxlen=limit)
         for event in candidates:
             if event.event_type in {"compaction.completed", "context.archive.created"}:
                 continue
@@ -568,8 +572,8 @@ class SessionCompactionService:
                 sort_keys=True, separators=(",", ":"),
             )
             if needle in stored:
-                literal.append(event)
-        literal.sort(key=lambda event: event.sequence, reverse=True)
+                newest.append(event)
+        literal = sorted(newest, key=lambda event: event.sequence, reverse=True)
         return tuple(
             CompactedMatch(
                 event,
@@ -579,7 +583,7 @@ class SessionCompactionService:
                     None,
                 ),
             )
-            for event in literal[:limit]
+            for event in literal
         )
 
     @staticmethod

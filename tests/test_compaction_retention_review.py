@@ -305,3 +305,52 @@ def test_message_emitted_plain_text_collapses_and_constrained_text_is_kept():
     constrained = _event("message.emitted", {"text": "x", "constraints": ["C"]})
     assert summarized_modality(plain) is None
     assert summarized_modality(constrained) is constrained
+
+
+# ---------------------------------------------------------------- re-review 1
+
+
+class _ScanOnlyRepository:
+    """Full-page searches force the keyset scan; events are tracked weakly."""
+
+    _max_read_limit = 10
+
+    def __init__(self, count):
+        self.count = count
+        self.live = 0
+        self.peak_alive = 0
+
+    def _released(self):
+        self.live -= 1
+
+    def search(self, *, session_id=None, event_type=None, text=None, limit=None):
+        if event_type == "compaction.completed":
+            return ()
+        return tuple(self._event(sequence) for sequence in range(1, limit + 1))
+
+    def read_range(self, session_id, *, start_sequence=1, end_sequence=None, limit=1000):
+        self.peak_alive = max(self.peak_alive, self.live)
+        last = min(self.count, start_sequence + limit - 1)
+        return tuple(self._event(sequence) for sequence in range(start_sequence, last + 1))
+
+    def _event(self, sequence):
+        from sonder_runtime.application.ports.session_repository import SessionEvent
+
+        event = SessionEvent("s", sequence, f"e{sequence}", "message.received", "t",
+                             {"text": f"needle {sequence}"}, None, "h")
+        import weakref
+
+        self.live += 1
+        weakref.finalize(event, self._released)
+        return event
+
+
+def test_broad_search_retains_only_the_newest_limit_matches_while_scanning():
+    repo = _ScanOnlyRepository(count=500)
+    service = SessionCompactionService(repo)
+
+    hits = service.search_compacted("s", "needle", limit=3)
+
+    assert [hit.event.sequence for hit in hits] == [500, 499, 498]
+    # Bounded by the result limit plus one page, not by the 500 matches.
+    assert repo.peak_alive <= 3 + repo._max_read_limit * 2

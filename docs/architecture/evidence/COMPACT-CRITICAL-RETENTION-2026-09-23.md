@@ -133,6 +133,32 @@ Mutation checks: removing each of these makes at least one test fail:
 - the stderr tail;
 - `message.emitted`.
 
+## Re-review fixes (PR #547)
+
+- **Bounded search memory.** `search_compacted` keeps only the newest
+  `limit` matches while it scans. Candidates arrive oldest-first, so it uses
+  `deque(maxlen=limit)`. Before this fix, a broad query kept every match of
+  the scan in memory (up to 100,000 events). The test
+  `test_broad_search_retains_only_the_newest_limit_matches_while_scanning`
+  searches 500 matching events with `limit=3` and tracks how many events are
+  alive. Before the fix, 500 were alive at peak. After it, the peak is at
+  most `limit` plus two pages.
+- **Schema-2 golden.**
+  `tests/test_compaction_summary_schema_golden.py` pins the exact schema-2
+  output for a representative fixture that covers these cases:
+  - constrained and plain user and assistant text;
+  - structured fields and confidence;
+  - rationale;
+  - a failed tool;
+  - a bulky lane result with `success: False`;
+  - a bulky capture-shaped nested failure with a stderr tail;
+  - a bulky success;
+  - an inline tool completion.
+
+  A prominent comment on `SUMMARY_SCHEMA_VERSION` gives the bump rule. The
+  golden fails when any of these three is changed in place: the `success`
+  status field, the 2 KiB inline threshold, or `message.emitted`.
+
 ## Rollback note
 
 Code before this PR does not know `summary_schema`. It recomputes every
@@ -164,16 +190,17 @@ LOSSY_ACCEPTED False
 ```
 
 ```text
-python -m pytest -q tests/test_compaction_continue_canary.py tests/test_compaction_retention_review.py
-39 passed
+python -m pytest -q tests/test_compaction_continue_canary.py tests/test_compaction_retention_review.py tests/test_compaction_summary_schema_golden.py
+41 passed
 
-python -m pytest -q -n 8 <118 compaction/session/context/lane/replay/archive test files>
-2036 passed, 1 warning in 125.97s
+python -m pytest -q -n 8 <119 compaction/session/context/lane/replay/archive test files>
+2038 passed, 1 warning (three consecutive runs)
 ```
 
-In one earlier parallel run, `test_agent_lane_http_wiring.py::test_agent_routes_require_auth_before_service_access[None]`
-failed once. The file passes on its own, both with and without this change,
-and the whole set passed on the rerun.
+Two earlier parallel runs each had one intermittent failure. The first was
+`test_agent_lane_http_wiring.py::test_agent_routes_require_auth_before_service_access[None]`.
+That file passes on its own, both with and without this change. The second
+failure was not captured. The next three consecutive full runs passed.
 
 ## Limitations
 
