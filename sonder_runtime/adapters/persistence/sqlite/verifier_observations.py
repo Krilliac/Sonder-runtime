@@ -6,7 +6,12 @@ import sqlite3
 from contextlib import contextmanager
 
 from ....application.memory.learning_ladder import LearningObservation
-from ....application.memory.receipt_observation import VerifierReceipt
+from ....application.memory.receipt_observation import (
+    VerifierReceipt,
+    _ObservationAuthorization,
+    _observation_payload,
+    _receipt_payload,
+)
 
 
 _TABLE_DDL = """CREATE TABLE IF NOT EXISTS verifier_learning_observations (
@@ -24,21 +29,18 @@ _DELETE_TRIGGER_DDL = """CREATE TRIGGER IF NOT EXISTS verifier_learning_observat
 BEFORE DELETE ON verifier_learning_observations BEGIN
     SELECT RAISE(ABORT, 'verifier learning observations are immutable');
 END;"""
+# Subject-scoped reads use this expression index so promotion never loads
+# unrelated projects or subjects under its write snapshot.
+_SUBJECT_INDEX_DDL = """CREATE INDEX IF NOT EXISTS verifier_learning_observations_subject
+ON verifier_learning_observations(
+    json_extract(receipt_json, '$.project_scope'),
+    json_extract(receipt_json, '$.workspace_scope'),
+    json_extract(observation_json, '$.content')
+);"""
 
 
 def _json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
-
-
-def _receipt_payload(receipt: VerifierReceipt) -> dict:
-    return {name: getattr(receipt, name) for name in receipt.__dataclass_fields__}
-
-
-def _observation_payload(observation: LearningObservation) -> dict:
-    value = {name: getattr(observation, name) for name in observation.__dataclass_fields__}
-    value["observed_at"] = observation.observed_at.isoformat()
-    value["provenance"] = list(observation.provenance)
-    return value
 
 
 def _observation(value: dict) -> LearningObservation:
@@ -52,10 +54,58 @@ def _observation(value: dict) -> LearningObservation:
 class SQLiteVerifierObservationRepository:
     """Persist and replay receipt/observation pairs on one caller-owned connection."""
 
+    _SUBJECT_QUERY = (
+        "SELECT receipt_json, observation_json FROM verifier_learning_observations "
+        "WHERE json_extract(receipt_json, '$.project_scope')=? "
+        "AND json_extract(receipt_json, '$.workspace_scope')=? "
+        "AND json_extract(observation_json, '$.content')=? "
+        "ORDER BY rowid LIMIT ?"
+    )
+
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
-        for statement in (_TABLE_DDL, _UPDATE_TRIGGER_DDL, _DELETE_TRIGGER_DDL):
+        for statement in (
+            _TABLE_DDL, _UPDATE_TRIGGER_DDL, _DELETE_TRIGGER_DDL, _SUBJECT_INDEX_DDL,
+        ):
             self._connection.execute(statement)
+
+    _NEGATIVE_QUERY = (
+        "SELECT receipt_json, observation_json FROM verifier_learning_observations "
+        "WHERE json_extract(receipt_json, '$.project_scope')=? "
+        "AND json_extract(receipt_json, '$.workspace_scope')=? "
+        "AND json_extract(observation_json, '$.content')=? "
+        "AND json_extract(receipt_json, '$.verifier_outcome')='failed' "
+        "AND json_extract(observation_json, '$.positive')=0 "
+        "ORDER BY rowid LIMIT ?"
+    )
+
+    def list_subject_negative_pairs(
+        self, project_scope: str, content: str, *, limit: int = 16,
+    ) -> tuple[tuple[VerifierReceipt, LearningObservation], ...]:
+        """Read verified-negative rows for one subject regardless of volume."""
+        if type(limit) is not int or not 1 <= limit <= 256:
+            raise ValueError("limit must be between 1 and 256")
+        rows = self._connection.execute(
+            self._NEGATIVE_QUERY, (project_scope, project_scope, content, limit)
+        ).fetchall()
+        return tuple(
+            (VerifierReceipt(**json.loads(row[0])), _observation(json.loads(row[1])))
+            for row in rows
+        )
+
+    def list_subject_pairs(
+        self, project_scope: str, content: str, *, limit: int = 10_001,
+    ) -> tuple[tuple[VerifierReceipt, LearningObservation], ...]:
+        """Read one project's rows for one exact subject token (indexed)."""
+        if type(limit) is not int or not 1 <= limit <= 10_001:
+            raise ValueError("limit must be between 1 and 10001")
+        rows = self._connection.execute(
+            self._SUBJECT_QUERY, (project_scope, project_scope, content, limit)
+        ).fetchall()
+        return tuple(
+            (VerifierReceipt(**json.loads(row[0])), _observation(json.loads(row[1])))
+            for row in rows
+        )
 
     @contextmanager
     def _transaction(self):
@@ -94,6 +144,18 @@ class SQLiteVerifierObservationRepository:
                 if row[2] != receipt_payload or row[3] != observation_payload:
                     raise ValueError("conflicting verifier receipt replay")
                 return _observation(json.loads(row[3]))
+            authorization = getattr(receipt, "authorization", None)
+            # Exact private type first: a duck-typed stand-in whose matches()
+            # returns True must never reach the insert.
+            if (
+                type(receipt) is not VerifierReceipt
+                or type(observation) is not LearningObservation
+                or type(authorization) is not _ObservationAuthorization
+                or not authorization.matches(receipt, observation)
+            ):
+                raise PermissionError(
+                    "first verifier observation insert requires host producer authorization"
+                )
             try:
                 self._connection.execute(
                     "INSERT INTO verifier_learning_observations"
@@ -112,6 +174,20 @@ class SQLiteVerifierObservationRepository:
         if row is None:
             return None
         return VerifierReceipt(**json.loads(row[0])), _observation(json.loads(row[1]))
+
+    def list_pairs(self, *, limit: int = 10_001) -> tuple[tuple[VerifierReceipt, LearningObservation], ...]:
+        """Read a bounded complete snapshot, or let callers fail closed."""
+        if type(limit) is not int or not 1 <= limit <= 10_001:
+            raise ValueError("limit must be between 1 and 10001")
+        rows = self._connection.execute(
+            "SELECT receipt_json, observation_json "
+            "FROM verifier_learning_observations ORDER BY rowid LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return tuple(
+            (VerifierReceipt(**json.loads(row[0])), _observation(json.loads(row[1])))
+            for row in rows
+        )
 
     def list(self, *, limit: int = 256) -> tuple[LearningObservation, ...]:
         if type(limit) is not int or not 1 <= limit <= 10_000:

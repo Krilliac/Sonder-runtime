@@ -108,6 +108,37 @@ def _copy_tree(source: Path, target: Path, *, ignore=None) -> None:
             shutil.copy2(source_file, target_file)
 
 
+def _active_runtime_contract_lines() -> list[str]:
+    """Return exact pins whose PEP 508 markers apply to this platform."""
+    contract = ROOT / "requirements-runtime.txt"
+    active: list[str] = []
+    for raw in contract.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        pin, separator, marker = line.partition(";")
+        pin = pin.strip()
+        if separator:
+            if Requirement is not None:
+                try:
+                    parsed = Requirement(line)
+                except InvalidRequirement as exc:
+                    raise ValueError(f"{contract} contains an invalid platform marker") from exc
+                if parsed.marker is None or not parsed.marker.evaluate():
+                    continue
+            else:
+                # Minimal host Python may not have packaging yet.  Keep this
+                # fallback deliberately narrow rather than silently including
+                # a platform-specific wheel in the wrong sealed runtime.
+                normalized = marker.strip().replace("'", '"')
+                if normalized != 'sys_platform == "win32"':
+                    raise ValueError(f"{contract} contains an unsupported platform marker")
+                if sys.platform != "win32":
+                    continue
+        active.append(pin)
+    return active
+
+
 def _runtime_contract_names() -> list[str]:
     """Top-level distributions pinned by ``requirements-runtime.txt``.
 
@@ -116,18 +147,14 @@ def _runtime_contract_names() -> list[str]:
     depend on. The runtime contract is the declared truth about what the
     runtime needs, so it seeds the closure alongside ``mcp``.
     """
-    contract = ROOT / "requirements-runtime.txt"
     names: list[str] = []
-    for line in contract.read_text(encoding="utf-8").splitlines():
-        line = line.split("#", 1)[0].strip()
-        if not line or line.startswith("-"):
-            continue
+    for line in _active_runtime_contract_lines():
         match = _REQUIREMENT_NAME.match(line)
         if match:
             names.append(match.group(1))
     if not names:
         raise ValueError(
-            f"{contract} names no distributions; the sealed runtime would ship "
+            f"{ROOT / 'requirements-runtime.txt'} names no distributions; the sealed runtime would ship "
             "whatever mcp's dependency graph happens to reach"
         )
     return names
@@ -239,10 +266,7 @@ def _runtime_contract_pins() -> dict[str, str]:
     """
     contract = ROOT / "requirements-runtime.txt"
     pins: dict[str, str] = {}
-    for line in contract.read_text(encoding="utf-8").splitlines():
-        line = line.split("#", 1)[0].strip()
-        if not line or line.startswith("-"):
-            continue
+    for line in _active_runtime_contract_lines():
         name, separator, version = line.partition("==")
         if not separator or not version.strip():
             raise ValueError(

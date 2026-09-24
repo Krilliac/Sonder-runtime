@@ -7,8 +7,8 @@ file listing: a document is authoritative only for the scope named here.
 ## Authority order
 
 1. `SONDER-MASTER-IMPLEMENTATION-SPEC.md` is authoritative for the unfinished
-   requirement list and checkbox state. This pass intentionally leaves all
-   formal checkboxes unchanged.
+   requirement list and checkbox state. A checkbox changes only in the same
+   change that adds its verified ledger revision and evidence (DOC-006).
 2. The focused contract documents below are authoritative for current product
    boundaries, subject to the master specification where the two conflict.
 3. Requirement evidence and generated status projections are authoritative for
@@ -36,6 +36,37 @@ The focused documents describe current contracts, but a sentence using
 “planned”, “proposed”, “future”, or “not implemented” is not evidence that its
 corresponding master-spec requirement is complete.
 
+Each of the six root focused contracts (`ARCHITECTURE.md` through
+`MOBILE_HOST_CONTROL.md`) links the master specification within its first
+twelve lines and ends its current-behavior description with one
+`## Behavior status` table. Unfinished work appears there only as a
+`Proposed` row that cites an open master-spec requirement ID, so the
+specification remains the single home of unfinished implementation work.
+
+## Documentation status vocabulary
+
+Product documentation is the root `README.md` plus the six focused contracts
+above. Each product document carries exactly one `## Behavior status` table
+with the columns `Behavior | Status | Boundary`. The status cell uses exactly
+one of these labels:
+
+| Label | Meaning |
+|---|---|
+| Implemented | Current behavior in this repository, subject to the boundary stated in the row and the surrounding contract. |
+| Experimental | Shipped but opt-in, prerelease, lab-only, or default-off; interfaces and results may change and are not release-qualified. |
+| Proposed | End-state behavior required by the master specification that is not a current contract. The row must cite at least one unchecked, unverified master-spec requirement; partial foundations may exist but must not be relied on. |
+| Degraded | Available with a documented reduction: it fails closed, falls back, or is less reliable in a named configuration. |
+| Unsupported | Deliberately not provided; the request is rejected, the capability is absent, or the configuration is outside the supported deployment. |
+
+`scripts/check_documentation_authority.py` enforces the vocabulary: unknown
+labels, unknown requirement IDs, and `Proposed` rows whose cited requirements
+are all checked or verified fail the gate, so completing a requirement forces
+the corresponding promise to be restated as current behavior. Forward-looking
+phrases such as “coming soon”, “in a future”, “future backend”, or “not yet
+available” are rejected outside the status table, and WP implementation slice
+logs are rejected in product documentation; those belong in historical
+records such as [`WP1-README-SLICE-LOG.md`](WP1-README-SLICE-LOG.md).
+
 ## Historical and superseded documents
 
 The following are intentionally retained for traceability and are labeled here
@@ -50,6 +81,7 @@ so their imperative language cannot be mistaken for current authority:
 | `WP1-*.md` through `WP9-*.md` | implementation history | Slice/work-package evidence |
 | `REMAINING-*.md` | planning/contract evidence | Partial or isolated follow-up slices |
 | `REQUIREMENT-AUDIT-NEXT.md` | audit snapshot | Requirement audit, not completion proof |
+| `WP1-README-SLICE-LOG.md` | implementation history | WP1 slice notes relocated verbatim from the root README |
 
 Historical documents must not be used to infer current status without checking
 the master specification and the latest evidence record.
@@ -100,4 +132,6 @@ DOC-001 through DOC-003 are checked with separate verified authority,
 historical-label, and ADR-namespace evidence. DOC-005 is checked with
 generated references for all six named families, a direct CI freshness gate,
 and linked exact-head and post-merge evidence. DOC-006 is checked with its
-separate verified ledger revision. DOC-004 and DOC-007 remain open.
+separate verified ledger revision. DOC-004 is checked with the focused-contract
+linkage and status-table gate, and DOC-007 with the product-document status
+vocabulary gate; both link separate evidence records.

@@ -82,6 +82,8 @@ def test_default_adapter_output_uses_sonder_namespace():
     or importlib.util.find_spec("peft") is None,
     reason="training-only dependencies are not installed",
 )
+# Peak ~2.2 GiB (torch + PEFT); selfmod runs it in the heavy-memory low gate.
+@pytest.mark.heavy_memory
 def test_installed_trainer_stack_builds_real_peft_trainer(tmp_path):
     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
     from transformers import (

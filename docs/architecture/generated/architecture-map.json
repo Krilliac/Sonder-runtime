@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 297,
+      "file_count": 298,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -135,6 +135,7 @@
         "sonder_runtime/adapters/filesystem/workspace_manifest.py",
         "sonder_runtime/adapters/git/__init__.py",
         "sonder_runtime/adapters/git_discovery.py",
+        "sonder_runtime/adapters/git_mutation_guard.py",
         "sonder_runtime/adapters/goal_formatting.py",
         "sonder_runtime/adapters/host_terminal_projection.py",
         "sonder_runtime/adapters/host_terminal_result.py",
@@ -346,7 +347,7 @@
       ]
     },
     {
-      "file_count": 332,
+      "file_count": 334,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -388,6 +389,7 @@
         "sonder_runtime/application/compaction/append_service.py",
         "sonder_runtime/application/compaction/legacy.py",
         "sonder_runtime/application/compaction/session_service.py",
+        "sonder_runtime/application/compaction_retention.py",
         "sonder_runtime/application/compute_fabric/__init__.py",
         "sonder_runtime/application/compute_fabric/artifact_spool.py",
         "sonder_runtime/application/compute_fabric/capacity.py",
@@ -603,6 +605,7 @@
         "sonder_runtime/application/scenario_validation/github.py",
         "sonder_runtime/application/scenario_validation/runner.py",
         "sonder_runtime/application/security/__init__.py",
+        "sonder_runtime/application/security/bounded_archives.py",
         "sonder_runtime/application/security/credential_broker.py",
         "sonder_runtime/application/security/path_archive_safety.py",
         "sonder_runtime/application/security/prompt_provenance.py",
@@ -684,7 +687,7 @@
       ]
     },
     {
-      "file_count": 53,
+      "file_count": 54,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -724,6 +727,7 @@
         "sonder_runtime/bootstrap/managed_conversation.py",
         "sonder_runtime/bootstrap/managed_http.py",
         "sonder_runtime/bootstrap/managed_http_runtime.py",
+        "sonder_runtime/bootstrap/managed_learning.py",
         "sonder_runtime/bootstrap/managed_runtime_owner.py",
         "sonder_runtime/bootstrap/managed_standalone.py",
         "sonder_runtime/bootstrap/managed_terminal_eligibility.py",
@@ -743,11 +747,12 @@
       ]
     },
     {
-      "file_count": 187,
+      "file_count": 189,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
         "sonder_runtime/domain/adaptive_batcher.py",
+        "sonder_runtime/domain/adaptive_concurrency.py",
         "sonder_runtime/domain/agent_escalation_identity.py",
         "sonder_runtime/domain/agent_help_parsing.py",
         "sonder_runtime/domain/agent_mutation_policy.py",
@@ -930,6 +935,7 @@
         "sonder_runtime/domain/updates/models.py",
         "sonder_runtime/domain/updates/runtime_update_formatting.py",
         "sonder_runtime/domain/updates/stash_formatting.py",
+        "sonder_runtime/domain/verification_progress.py",
         "sonder_runtime/domain/work_stealing.py",
         "sonder_runtime/domain/worker_capacity.py",
         "sonder_runtime/domain/worker_epoch_fence.py"

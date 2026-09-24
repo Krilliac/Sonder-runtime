@@ -13,10 +13,19 @@ import sys
 import tarfile
 import tempfile
 import time
+import unicodedata
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
+from sonder_runtime.application.security.bounded_archives import (
+    TarMetadataLimitError,
+    ZipCentralDirectoryLimitError,
+    is_tarfile_bounded,
+    open_bounded,
+    require_zip_entry_bound,
+    zip_central_directory,
+)
 
 
 CHUNK_BYTES = 64 * 1024
@@ -43,10 +52,15 @@ NESTED_ARCHIVE_SUFFIXES = (
     ".tar.xz", ".txz",
 )
 WINDOWS_DEVICES = frozenset({
-    "con", "prn", "aux", "nul",
-    *("com%d" % index for index in range(1, 10)),
-    *("lpt%d" % index for index in range(1, 10)),
+    "con", "prn", "aux", "nul", "conin$", "conout$",
+    *("com%s" % suffix for suffix in "0123456789¹²³"),
+    *("lpt%s" % suffix for suffix in "0123456789¹²³"),
 })
+
+
+def _collision_key(value: str) -> str:
+    """Key under which case-folding and normalizing filesystems collide."""
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", value).casefold())
 
 
 class ArchiveRejected(ValueError):
@@ -180,7 +194,8 @@ def _portable_member_path(raw_name: str, *, is_directory: bool, max_depth: int) 
             raise ArchiveRejected("archive entry contains control or colon syntax: %r" % raw_name)
         if part.rstrip(" .") != part:
             raise ArchiveRejected("archive entry has a trailing dot/space component: %r" % raw_name)
-        stem = part.split(".", 1)[0].casefold()
+        # Windows ignores trailing spaces before the extension ("CON .txt").
+        stem = part.split(".", 1)[0].rstrip(" ").casefold()
         if stem in WINDOWS_DEVICES:
             raise ArchiveRejected("archive entry uses a reserved device name: %r" % raw_name)
     normalized = "/".join(parts)
@@ -287,7 +302,7 @@ def _validate_entries(entries: list[dict], limits: dict, source_bytes: int) -> N
         path = row["path"]
         if path in exact:
             raise ArchiveRejected("duplicate archive entry path: %s" % path)
-        key = path.casefold()
+        key = _collision_key(path)
         if key in folded:
             raise ArchiveRejected(
                 "case-colliding archive entries: %s and %s" % (folded[key], path)
@@ -298,7 +313,7 @@ def _validate_entries(entries: list[dict], limits: dict, source_bytes: int) -> N
         parts = path.split("/")
         for index in range(1, len(parts) + 1):
             prefix = "/".join(parts[:index])
-            prefix_key = prefix.casefold()
+            prefix_key = _collision_key(prefix)
             previous = folded_components.get(prefix_key)
             if previous is not None and previous != prefix:
                 raise ArchiveRejected(
@@ -310,15 +325,18 @@ def _validate_entries(entries: list[dict], limits: dict, source_bytes: int) -> N
         parts = path.split("/")
         for index in range(1, len(parts)):
             parent = "/".join(parts[:index])
-            if folded_types.get(parent.casefold()) == "file":
+            if folded_types.get(_collision_key(parent)) == "file":
                 raise ArchiveRejected("file entry is an ancestor of another entry: %s" % parent)
 
 
 def _archive_kind(source: Path) -> str:
     if zipfile.is_zipfile(source):
         return "zip"
-    if tarfile.is_tarfile(source):
-        return "tar"
+    try:
+        if is_tarfile_bounded(source):
+            return "tar"
+    except TarMetadataLimitError as exc:
+        raise ArchiveRejected(str(exc)) from None
     raise ArchiveRejected("source is not a supported ZIP or TAR archive")
 
 
@@ -372,25 +390,11 @@ def _plan(source: Path, limits: dict, *, deadline: float | None = None) -> dict:
     if time.monotonic() > deadline:
         raise ArchiveRejected("archive prevalidation exceeded time ceiling")
     entries = []
-    if kind == "zip":
-        with zipfile.ZipFile(source, "r") as archive:
-            infos = archive.infolist()
-            if len(infos) > limits["max_entries"]:
-                raise ArchiveRejected("archive exceeds entry ceiling")
-            for info in infos:
-                if time.monotonic() > deadline:
-                    raise ArchiveRejected("archive prevalidation exceeded time ceiling")
-                entries.append(_zip_entry(info, limits))
-    else:
-        with tarfile.open(source, "r:*") as archive:
-            if archive.pax_headers:
-                raise ArchiveRejected("TAR global PAX special metadata is not allowed")
-            for info in archive:
-                if time.monotonic() > deadline:
-                    raise ArchiveRejected("archive prevalidation exceeded time ceiling")
-                entries.append(_tar_entry(info, limits))
-                if len(entries) > limits["max_entries"]:
-                    raise ArchiveRejected("archive exceeds entry ceiling")
+    try:
+        _plan_entries(source, kind, limits, deadline, entries)
+    except (TarMetadataLimitError, ZipCentralDirectoryLimitError) as exc:
+        # Parser-bound violations are policy rejections, not corrupt input.
+        raise ArchiveRejected(str(exc)) from None
     _require_same_source(source, signature, deadline=deadline)
     _validate_entries(entries, limits, source.stat().st_size)
     entries.sort(key=lambda row: row["path"])
@@ -401,6 +405,46 @@ def _plan(source: Path, limits: dict, *, deadline: float | None = None) -> dict:
         "entries": entries, "valid": True, "errors": [],
         "source_signature": signature,
     }
+
+
+def _plan_entries(
+    source: Path, kind: str, limits: dict, deadline: float, entries: list,
+) -> None:
+    if kind == "zip":
+        # The end-of-central-directory record is read first, so the entry
+        # ceiling applies before zipfile builds one ZipInfo per entry.
+        declared, _directory_bytes = zip_central_directory(source)
+        if declared > limits["max_entries"]:
+            raise ArchiveRejected("archive exceeds entry ceiling")
+        require_zip_entry_bound(source, limits["max_entries"])
+        with zipfile.ZipFile(source, "r") as archive:
+            infos = archive.infolist()
+            if len(infos) > limits["max_entries"]:
+                raise ArchiveRejected("archive exceeds entry ceiling")
+            for info in infos:
+                if time.monotonic() > deadline:
+                    raise ArchiveRejected("archive prevalidation exceeded time ceiling")
+                entries.append(_zip_entry(info, limits))
+    else:
+        with open_bounded(source) as archive:
+            if archive.pax_headers:
+                raise ArchiveRejected("TAR global PAX special metadata is not allowed")
+            # Reaching the next header of a compressed TAR decompresses the
+            # previous payload, so the aggregate *payload* budget is checked
+            # per member rather than after every header was read.  Header
+            # metadata (long names, PAX records) is bounded separately by
+            # open_bounded before tarfile reads it.
+            walked_bytes = 0
+            for info in archive:
+                if time.monotonic() > deadline:
+                    raise ArchiveRejected("archive prevalidation exceeded time ceiling")
+                entry = _tar_entry(info, limits)
+                entries.append(entry)
+                if len(entries) > limits["max_entries"]:
+                    raise ArchiveRejected("archive exceeds entry ceiling")
+                walked_bytes += entry["bytes"]
+                if walked_bytes > limits["max_total_bytes"]:
+                    raise ArchiveRejected("archive exceeds aggregate byte ceiling")
 
 
 def list_archive(
@@ -475,7 +519,7 @@ def _extract_tar(source: Path, stage: Path, plan: dict, deadline: float) -> None
         "max_total": plan["limits"]["max_total_bytes"],
     }
     by_offset = {row["source_index"]: row for row in plan["entries"]}
-    with tarfile.open(source, "r:*") as archive:
+    with open_bounded(source) as archive:
         for info in archive:
             row = by_offset[info.offset]
             target = stage.joinpath(*row["path"].split("/"))

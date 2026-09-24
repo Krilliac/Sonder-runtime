@@ -5,8 +5,8 @@ Generated from the authoritative specification and evidence ledger.
 | Metric | Value |
 |---|---:|
 | Requirements | 204 |
-| Checked | 6 |
-| Verified evidence | 6 |
+| Checked | 9 |
+| Verified evidence | 9 |
 
 | Family | Total | Checked | Verified |
 |---|---:|---:|---:|
@@ -17,7 +17,7 @@ Generated from the authoritative specification and evidence ledger.
 | CORE | 10 | 0 | 0 |
 | CTX | 10 | 0 | 0 |
 | DATA | 7 | 0 | 0 |
-| DOC | 7 | 5 | 5 |
+| DOC | 7 | 7 | 7 |
 | EVAL | 9 | 0 | 0 |
 | EXEC | 6 | 0 | 0 |
 | EXT | 7 | 0 | 0 |
@@ -28,7 +28,7 @@ Generated from the authoritative specification and evidence ledger.
 | OPS | 6 | 0 | 0 |
 | REPO | 7 | 0 | 0 |
 | SEAM | 16 | 0 | 0 |
-| SEC | 9 | 0 | 0 |
+| SEC | 9 | 1 | 1 |
 | SELFMOD | 6 | 1 | 1 |
 | SESSION | 10 | 0 | 0 |
 | SKILL | 6 | 0 | 0 |

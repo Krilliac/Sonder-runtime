@@ -2048,6 +2048,10 @@ def delete_path(
 
 INSPECT_PREVIEW_ITEMS = 20
 INSPECT_PREVIEW_CHARS = 2000
+# Walking a compressed TAR decompresses every payload to reach the next
+# header; previews stop at these bounds and report counts as floors.
+INSPECT_MAX_ARCHIVE_MEMBERS = 10_000
+INSPECT_MAX_ARCHIVE_SCAN_BYTES = 64 * 1024 * 1024
 
 
 class _InspectSizeError(Exception):
@@ -2188,9 +2192,39 @@ def _inspect_sqlite(p: Path) -> dict:
     }
 
 
+class ArchivePreviewRejected(ValueError):
+    """An archive preview stopped because the archive exceeds a reader bound."""
+
+
 def _inspect_zip(p: Path) -> dict:
     import zipfile
 
+    from sonder_runtime.application.security.bounded_archives import (
+        ZipCentralDirectoryLimitError,
+        require_zip_entry_bound,
+        zip_central_directory,
+    )
+
+    # Read only the end-of-central-directory record first: zipfile builds
+    # one ZipInfo per declared entry when it opens the archive.
+    declared, _directory_bytes = zip_central_directory(p)
+    if declared > INSPECT_MAX_ARCHIVE_MEMBERS:
+        return {
+            "kind": "zip",
+            "members": declared,
+            "expanded_bytes": None,
+            "truncated": True,
+            "text": "(central directory declares %d entries; preview limit is %d)"
+            % (declared, INSPECT_MAX_ARCHIVE_MEMBERS),
+        }
+    # Also bound the central-directory size (names, extra fields, comments)
+    # before zipfile parses it; raises ZipCentralDirectoryLimitError.
+    try:
+        require_zip_entry_bound(p, INSPECT_MAX_ARCHIVE_MEMBERS)
+    except ZipCentralDirectoryLimitError as exc:
+        raise ArchivePreviewRejected(
+            "zip preview rejected: central directory exceeds reader bound: %s" % exc
+        ) from None
     with zipfile.ZipFile(p) as archive:
         names = archive.namelist()
         total = sum(info.file_size for info in archive.infolist())
@@ -2201,23 +2235,50 @@ def _inspect_zip(p: Path) -> dict:
         "kind": "zip",
         "members": len(names),
         "expanded_bytes": total,
+        "truncated": False,
         "text": listing,
     }
 
 
 def _inspect_tar(p: Path) -> dict:
-    import tarfile
+    from sonder_runtime.application.security.bounded_archives import (
+        TarMetadataLimitError,
+        open_bounded,
+    )
 
-    with tarfile.open(p) as archive:
-        members = archive.getmembers()
-    names = [m.name for m in members]
+    names = []
+    expanded = 0
+    truncated = False
+    try:
+        with open_bounded(p) as archive:
+            # Iterate instead of getmembers(): stop before decompressing past
+            # the scan budget or collecting an unbounded member list.
+            for member in archive:
+                names.append(member.name)
+                expanded += max(0, int(member.size))
+                if (
+                    len(names) >= INSPECT_MAX_ARCHIVE_MEMBERS
+                    or expanded >= INSPECT_MAX_ARCHIVE_SCAN_BYTES
+                ):
+                    # Do not peek at the next header: reaching it would
+                    # decompress this member's payload.  Stopping here means
+                    # the counts may be incomplete, so they are floors.
+                    truncated = True
+                    break
+    except TarMetadataLimitError as exc:
+        raise ArchivePreviewRejected(
+            "tar preview rejected: metadata exceeds reader bound: %s" % exc
+        ) from None
     listing = "\n".join(names[:INSPECT_PREVIEW_ITEMS])
     if len(names) > INSPECT_PREVIEW_ITEMS:
         listing += "\n… (%d more)" % (len(names) - INSPECT_PREVIEW_ITEMS)
+    if truncated:
+        listing += "\n… (scan stopped at preview bound; counts are floors)"
     return {
         "kind": "tar",
         "members": len(names),
-        "expanded_bytes": sum(m.size for m in members),
+        "expanded_bytes": expanded,
+        "truncated": truncated,
         "text": listing,
     }
 

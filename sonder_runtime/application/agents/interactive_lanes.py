@@ -243,9 +243,9 @@ class AgentLaneService:
         self._scheduled_dirty = {}
         self._capacity_waiters = {}
         self._capture = SessionCaptureService(sessions)
-        self._archive = SessionContextArchiveService(sessions)
+        self._archive = SessionContextArchiveService(sessions, max_items=10_000)
         self._compaction = compaction_service or SessionCompactionService(
-            sessions, max_events=256, archive_service=self._archive,
+            sessions, max_events=10_000, archive_service=self._archive,
         )
         if loop is not None and loop_factory is not None:
             raise ValueError("loop and loop_factory are mutually exclusive")
@@ -1356,32 +1356,24 @@ class AgentLaneService:
                 for m in tx.messages(lane["id"])
                 if m["delivery_state"] == "handled"
             }
-        read_tail = getattr(self.sessions, "read_tail", None)
-        if not callable(read_tail):
-            raise RuntimeError("canonical session repository lacks bounded tail reads")
         try:
-            events = read_tail(
-                lane["session_id"],
-                limit=min(256, getattr(self.sessions, "_max_read_limit", 256)),
-            )
+            read_complete = getattr(self.sessions, "read_complete", None)
+            if not callable(read_complete):
+                raise RuntimeError("canonical session lacks complete bounded recovery")
+            events = read_complete(lane["session_id"], max_events=10_000)
         except (AttributeError, TypeError, ValueError) as exc:
-            raise RuntimeError("canonical session tail is unavailable") from exc
-        if events and events[0].sequence > 1:
-            # A bounded tail cannot prove whether an omitted earlier event
-            # carried a user constraint, decision, or failure. Stop before
-            # presenting an apparently complete continuation to the model.
             raise ContextHistoryOverflowError(
-                "canonical session tail omits earlier events; "
-                "resume after operator-led compaction"
-            )
+                "canonical session history is unavailable or failed integrity verification"
+            ) from exc
         # Use the durable compaction seam immediately before provider request
         # assembly. Only tool results are eligible for eviction; model/user
         # events, including decisions and failures, stay in the source range.
+        # The chain-verified snapshot itself is archived: a second range read
+        # here would let a row changed after verification reach the model.
         try:
-            archived = self._compaction.archive_context(
+            archived = self._compaction.archive_verified_context(
                 lane["session_id"],
-                start_sequence=events[0].sequence,
-                end_sequence=events[-1].sequence,
+                events,
                 budget_bytes=_LANE_CANONICAL_HISTORY_BYTES,
             ) if events else None
         except SessionCompactionError:

@@ -353,7 +353,7 @@ class GuardedLegacySelfmodService:
         governance = self._governance.approve(run_id)
         backup_digest = _receipt_digest({"manifest": run.get("backup_manifest"), "run_id": run_id})
         lifecycle = self._lifecycle.record_backup(
-            run_id, BackupRecord(f"{run_id}:backup", True, backup_digest, "legacy immutable backup verified"),
+            run_id, BackupRecord(f"{run_id}:backup", True, backup_digest, "legacy hash-verified backup"),
         )
         return SelfmodIntegrationState(run, governance, lifecycle)
 

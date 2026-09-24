@@ -15,8 +15,9 @@ description: >-
 Selfmod is the machinery by which Sonder Runtime edits its own source: a
 host-controlled state machine in `selfmod.py` that builds an isolated candidate,
 grades it with deterministic checks, and only then atomically replaces live
-files — with an immutable backup, a rehearsed rollback, and an append-only audit
-ledger. The candidate model's output is one untrusted input. It can edit only an
+files — with a hash-verified backup, a rehearsed rollback, and an append-only
+(through the public API) audit ledger. None of these is a security boundary
+against a process started with `--unrestricted-selfmod`. The candidate model's output is one untrusted input. It can edit only an
 isolated workspace; it cannot approve itself, decide that tests passed, deploy,
 edit backups, or start another run (`SELFMOD.md:3-7`, recursion guard at
 `selfmod.py:1883-1885` via the `SONDER_SELFMOD_ACTIVE` env var).
@@ -92,7 +93,7 @@ Tables (`selfmod.py:72-117`): `selfmod_runs` (full run row incl. phase, budgets,
 owner lease, `git_status_start`, test inventories), `selfmod_backups`,
 `selfmod_tests` (every gate execution with argv, exit code, output),
 `selfmod_deployed_files` (post-deploy hash of every changed path),
-`selfmod_events` (append-only audit), `selfmod_deployment_lock` (single row).
+`selfmod_events` (append-only audit through the public API; evidence only), `selfmod_deployment_lock` (single row).
 
 Budgets (`selfmod.py:57-67`): 8 files changed max, 600 lines changed max, 900 s
 per test, 1800 s per run, among others. Oversize diffs are rejected at

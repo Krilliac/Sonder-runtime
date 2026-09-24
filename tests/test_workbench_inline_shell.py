@@ -71,8 +71,8 @@ INLINE_CASES = [
 # (program, script-filename, script-body, expected stdout substring) — each must
 # run normally: the inline guard must NOT fire for a plain script-file argv.
 SCRIPT_CASES = [
-    ("bash", "ok.sh", "echo SCRIPT_OK\n", "SCRIPT_OK"),
-    ("sh", "ok.sh", "echo SCRIPT_OK\n", "SCRIPT_OK"),
+    pytest.param("bash", "ok.sh", "echo SCRIPT_OK\n", "SCRIPT_OK", marks=pytest.mark.requires_medium_integrity),
+    pytest.param("sh", "ok.sh", "echo SCRIPT_OK\n", "SCRIPT_OK", marks=pytest.mark.requires_medium_integrity),
     ("dash", "ok.sh", "echo SCRIPT_OK\n", "SCRIPT_OK"),
     ("python3", "ok.py", "print('SCRIPT_OK')\n", "SCRIPT_OK"),
     ("node", "ok.js", "console.log('SCRIPT_OK')\n", "SCRIPT_OK"),
