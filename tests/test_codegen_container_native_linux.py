@@ -12,7 +12,7 @@ from sonder_runtime.adapters.execution import codegen_container_build as build
 from sonder_runtime.bootstrap.strategy import compose_isolated_codegen_build
 
 pytestmark = pytest.mark.skipif(
-    sys.platform != "linux" or not os.environ.get("SONDER_CODEGEN_NATIVE_IMAGE"),
+    sys.platform != "linux" or not os.environ.get("CODEGEN_NATIVE_IMAGE_ID"),
     reason="requires the locally built, pinned Docker qualification image",
 )
 
@@ -31,7 +31,7 @@ def configured(monkeypatch, tmp_path):
     (project / "private.txt").write_text("project-secret-not-granted")
     monkeypatch.setenv(build.PROJECT_ENV, str(project))
     monkeypatch.setenv(build.STAGING_ENV, str(stage))
-    monkeypatch.setenv(build.IMAGE_ENV, os.environ["SONDER_CODEGEN_NATIVE_IMAGE"])
+    monkeypatch.setenv(build.IMAGE_ENV, os.environ["CODEGEN_NATIVE_IMAGE_ID"])
     monkeypatch.setenv(build.SOURCES_ENV, '["main.c"]')
     monkeypatch.setenv(isolated_runner.ROOTS_ENV, str(stage))
     monkeypatch.setenv(isolated_runner.RUNTIME_ENV, "docker")

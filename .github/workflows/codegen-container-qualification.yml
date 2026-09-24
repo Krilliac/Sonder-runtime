@@ -35,11 +35,12 @@ jobs:
           docker build --pull=false --no-cache -t sonder-codegen-qualification:local "$RUNNER_TEMP/codegen-image"
           image_id=$(docker image inspect --format '{{.Id}}' sonder-codegen-qualification:local)
           [[ "$image_id" =~ ^sha256:[a-f0-9]{64}$ ]]
-          echo "SONDER_CODEGEN_NATIVE_IMAGE=$image_id" >> "$GITHUB_ENV"
+          # Root conftest.py clears SONDER_* deployment inputs before test
+          # collection. Pass this CI-built fixture identifier via a test-only
+          # key so collection still proves all four native probes ran.
+          echo "CODEGEN_NATIVE_IMAGE_ID=$image_id" >> "$GITHUB_ENV"
       - name: Prove real container boundary and refuse any skipped probe
         shell: bash
-        env:
-          SONDER_ISOLATED_RUNTIME: docker
         run: |
           set -euo pipefail
           python -m pytest -q -s -rs tests/test_codegen_container_native_linux.py \
