@@ -372,12 +372,15 @@ def test_child_wall_budget_and_parent_deadline_determine_terminal_result(tmp_pat
     budget = _budget(wall=child_wall)
     service.register_root("root", _budget(wall=1))
     captured = []
+    runner_elapsed = []
 
     def factory(_request, context):
         captured.append(context.deadline_monotonic)
 
         def runner(*_):
+            runner_started = monotonic()
             Event().wait(delay)
+            runner_elapsed.append(monotonic() - runner_started)
             return "completed"
 
         return runner
@@ -391,7 +394,19 @@ def test_child_wall_budget_and_parent_deadline_determine_terminal_result(tmp_pat
     assert captured[0] is not None
     assert captured[0] <= started + min(child_wall, parent_wall or child_wall) + .03
     assert result.status is expected
-    assert result.usage.wall_seconds is not None and result.usage.wall_seconds >= delay
+    assert result.usage.wall_seconds is not None and result.usage.wall_seconds >= 0
+    if runner_elapsed:
+        # Account for the work that actually ran, including a timed-out
+        # attempt that reached its runner before the deadline elapsed.
+        assert result.usage.wall_seconds >= runner_elapsed[0]
+    else:
+        # A .01-second deadline may expire during durable admission before
+        # runner entry. It must still record an explicit timeout, not success.
+        assert result.status is SubagentStatus.TIMED_OUT
+    if result.status is SubagentStatus.TIMED_OUT:
+        assert result.error.code == "deadline_exceeded"
+    else:
+        assert runner_elapsed
     assert repository.get("child").usage.wall_seconds == result.usage.wall_seconds
     assert provider.close(2)
 

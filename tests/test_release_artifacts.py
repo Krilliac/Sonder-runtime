@@ -262,9 +262,14 @@ def test_release_workflow_stamps_and_gates_artifacts():
     assert "integrity:\n    needs: [android, linux, windows, macos]" in workflow
     assert "python-gate:" in workflow
     assert "uses: ./.github/workflows/ci.yml" in workflow
-    assert "needs: [integrity, analyze, python-gate]" in workflow
+    assert "managed-runtime-profile-gate:" in workflow
+    assert "uses: ./.github/workflows/managed-runtime-profile.yml" in workflow
     release_block = workflow.split("\n  release:\n", 1)[1]
-    assert "needs: [integrity, analyze, python-gate]" in release_block
+    assert "needs: [integrity, analyze, python-gate, managed-runtime-profile-gate]" in release_block
+    managed = (
+        Path(__file__).resolve().parents[1] / ".github/workflows/managed-runtime-profile.yml"
+    ).read_text(encoding="utf-8")
+    assert "workflow_call:" in managed
     assert (
         "scripts/check_release_version.py --require-release --json" in release_block
     )

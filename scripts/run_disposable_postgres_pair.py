@@ -24,6 +24,15 @@ REPO = Path(__file__).resolve().parents[1]
 STANDBY_NAME = "lab_standby"
 
 
+def _reviewed_postgres_version(output: str) -> bool:
+    """Match the actual `postgres --version` line, including a distro suffix."""
+    match = re.fullmatch(
+        r"postgres \(PostgreSQL\) (\d+)\.(\d+)(?: \([^()\n]*\))?",
+        output.strip(),
+    )
+    return match is not None and int(match[1]) == 18 and int(match[2]) >= 6
+
+
 def _run(*argv: str | Path, timeout: int = 30, env: dict[str, str] | None = None) -> None:
     completed = subprocess.run(
         tuple(map(str, argv)), capture_output=True, text=True, timeout=timeout,
@@ -92,8 +101,7 @@ class DisposablePair:
             [str(self.binary("postgres")), "--version"],
             capture_output=True, text=True, check=True,
         ).stdout
-        match = re.search(r"PostgreSQL\s+(\d+)\.(\d+)", version)
-        if match is None or int(match[1]) != 18 or int(match[2]) < 6:
+        if not _reviewed_postgres_version(version):
             raise RuntimeError("disposable pair requires reviewed PostgreSQL 18.6 or newer")
         self.sockets.mkdir(mode=0o700)
         with PrivateDirectoryAnchor.open_base(self.private, require_new=True):

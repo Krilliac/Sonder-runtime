@@ -183,7 +183,11 @@ def test_two_services_claim_one_resumed_worker(tmp_path):
             for future in futures:
                 try:
                     outcomes.append(future.result(timeout=3))
-                except RuntimeError as error:
+                except (RuntimeError, InvalidSubagentRequest) as error:
+                    assert str(error) in {
+                        "child session is not recoverable",
+                        "child session state changed before launch",
+                    }
                     outcomes.append(error)
         assert entered.wait(3)
         handles = [value for value in outcomes if not isinstance(value, Exception)]
