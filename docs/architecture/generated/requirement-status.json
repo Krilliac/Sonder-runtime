@@ -180,9 +180,9 @@
     },
     {
       "checked": false,
-      "claim": "Revisions 2 and 3 still apply; additionally, when codegen_build_loop clamps a caller-supplied attempt count, its report states the requested and applied values.",
+      "claim": "The live delegated-fleet dispatcher enforces its static worker-slot ceiling through an ownership-aware adaptive lane scheduler: overlapping write claims are serialized while readers and independent lanes stay parallel, and retry storms, target churn, or host memory pressure shrink the live concurrency cap with hysteresis before it regrows on sustained healthy outcomes.",
       "requirement_id": "AGENT-007",
-      "revision": 4,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "51494f9be516b3705becb833d166587488f78dcc4d975563563e99a82d6c94eb",
+    "ledger_sha256": "6bb8ba75843579146bc2a4f5466b9f827e85ba1d9d95b07da6f6274058b4f388",
     "spec_sha256": "ed5ab01393d72681fc4eb4b9581e832d3d07ee95595b8b58dfe094c9e7dbf4fa"
   }
 }
