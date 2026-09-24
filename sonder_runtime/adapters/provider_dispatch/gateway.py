@@ -40,13 +40,31 @@ class ProviderDispatchGateway:
         self._embedding_provider = embedding_provider
         self._route_issuer = object()
 
+    def _provider_for_request(self, request: ModelRequest) -> str:
+        provider = self._tier_providers.get(request.tier)
+        if provider is None and request.tier == "sonder":
+            provider = self._default_generation_provider
+        if provider is None:
+            raise InvalidInput("no provider binding for tier %r" % request.tier)
+        return provider
+
+    def generate_strict_alias(
+        self, request: ModelRequest, context: OperationContext,
+    ) -> ModelResponse:
+        """Serve an operator-selected local alias via the configured Ollama gate.
+
+        This is an explicit ChatService route; user-supplied ModelRequest
+        metadata cannot override the normal provider binding.
+        """
+        if request.tier != "sonder" or "ollama" not in self._providers:
+            raise InvalidInput("strict chat alias requires a configured local Ollama provider")
+        if "_resolved_route" in (request.options or {}) or request._resolved_route is not None:
+            raise InvalidInput("strict alias route cannot accept a supplied model route")
+        return self._providers["ollama"].generate(request, context)
+
     def resolve_route(self, request: ModelRequest, context: OperationContext):
         """Delegate route identity to the same provider used for generation."""
-        provider_name = self._tier_providers.get(request.tier)
-        if provider_name is None and request.tier == "sonder":
-            provider_name = self._default_generation_provider
-        if provider_name is None:
-            raise InvalidInput("no provider binding for tier %r" % request.tier)
+        provider_name = self._provider_for_request(request)
         resolver = getattr(self._providers[provider_name], "resolve_route", None)
         if not callable(resolver):
             return None
@@ -67,11 +85,7 @@ class ProviderDispatchGateway:
     def generate(
         self, request: ModelRequest, context: OperationContext
     ) -> ModelResponse:
-        provider = self._tier_providers.get(request.tier)
-        if provider is None and request.tier == "sonder":
-            provider = self._default_generation_provider
-        if provider is None:
-            raise InvalidInput("no provider binding for tier %r" % request.tier)
+        provider = self._provider_for_request(request)
         if "_resolved_route" in (request.options or {}):
             raise InvalidInput("resolved routes cannot be supplied as model options")
         if request._resolved_route is not None:

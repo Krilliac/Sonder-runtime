@@ -84,6 +84,9 @@ def test_injected_openai_transport_records_probe_outcomes_as_synthetic():
         record.results[2].capability,
     })
     assert len(calls) == 2
+    with pytest.raises(ValueError, match="cannot certify live inference"):
+        run_gateway_probes(gateway, backend="openai-compatible", model="contract-model",
+                           synthetic=False)
 
 
 def test_gateway_probe_rejects_unbounded_timeout():

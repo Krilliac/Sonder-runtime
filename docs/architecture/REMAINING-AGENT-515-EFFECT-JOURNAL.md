@@ -43,9 +43,9 @@ until the unresolved effect is explicitly reconciled. Advancing the owner
 epoch does not clear that fence; this slice has no automatic reconciliation
 clear path and therefore remains fail-closed. The journal accepts an immutable
 operation-family verifier registry only during trusted bootstrap construction;
-there is no post-construction registration method. Production bootstrap
-currently supplies no verifier, so its fences cannot be positively cleared
-until a real provider composition exists. A configured verifier runs outside
+there is no post-construction registration method. The original bootstrap supplied no verifier. Production composition now
+supplies the bounded process-start and local compute verifiers described below;
+unknown operation families remain fenced. A configured verifier runs outside
 the journal write transaction under a bounded timeout and must return a typed
 `ReconciliationProof` containing
 the exact intent, operation, external receipt, outcome digest, verifier id,
@@ -75,7 +75,9 @@ start of the process. The job's exit status is not that effect's outcome.
 Pending, missing, malformed, unattached, or otherwise unknown registry state
 produces no proof and leaves the fence set. The
 verifier never uses process output, caller text, or an in-memory process handle
-as authority. Other worker families remain unsupported and fenced.
+as authority. Local compute-submit and its nested process-start also have the bounded
+attachment proof described in the continuation section below. Other unknown
+worker families remain unsupported and fenced.
 
 Trust boundary: this is a cooperative host-process API, not an in-process
 Python authentication boundary. Any code that can open the effects database
@@ -306,3 +308,35 @@ Remaining limits:
   verifier, so their fences can be cleared only by future trusted composition.
 - A full hosted regression and deployment receipt are still required before
   LOOP-008 can be promoted to `verified`.
+
+
+## Continuation qualification on 2026-09-24
+
+Supported native and legacy typed file mutations now declare canonical
+`write_files`/`delete_files` effects. Trusted edge permissions carry those
+host-owned descriptors into ToolGateway; caller restrictions and ordinary
+resource policy remain enforced. Real writes create completed journal entries;
+reads and denied calls create none. A subprocess crash immediately after an
+actual typed append but before receipt leaves one uncertain intent after
+restart and refuses a second append (`test_typed_file_effect_crash.py`).
+
+`test_tool_gateway_effect_crash_matrix.py` separately covers gateway crash cuts,
+overlapping effects, settled-prefix checkpoint recovery, and failures during
+redaction/receipt publication after the physical effect. Failed uncertainty
+publication preserves the original error and does not certify completion.
+
+Production composition adds local compute-submit and nested process-start
+verifiers bound to the durable process registry. Exact job/worker/controller,
+idempotency, scope, attached PID and both request digests are required. A terminal
+failed/cancelled workload can prove that its launch occurred; it cannot prove
+successful workload execution. Missing, legacy, running, unattached, or mismatched
+records produce no proof. Real child-process crash tests cover both receipt
+boundaries and assert stale-owner refusal and no second launch.
+
+Issue #515 remains open. Child-session checkpoint generations still lack a
+journal-high-water saga; whole-child fencing is not proof of safe continuation
+from every child checkpoint. Compute cancel, subagent and self-mod status text
+cannot supply independent effect receipts, and legacy self-mod intermediate
+stages are outside the currently qualified deploy/rollback boundary. These gaps
+must remain explicit rather than being hidden by the passing direct-worker
+matrix.

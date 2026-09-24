@@ -25,13 +25,14 @@ def test_rate_policy_is_disabled_without_explicit_host_startup_config():
 
 
 def test_physical_post_attempts_are_bounded_even_across_independent_calls(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ):
     now = [100.0]
     policy = model_request_admission.HostModelRequestAdmission.from_environ(
         {"SONDER_MODEL_REQUEST_BURST": "2",
          "SONDER_MODEL_REQUESTS_PER_MINUTE": "1"},
         clock=lambda: now[0],
+        db_path=tmp_path / "rate.db",
     )
     monkeypatch.setattr(server, "_HOST_MODEL_REQUEST_ADMISSION", policy)
     monkeypatch.setattr(server, "_require_ollama_endpoint", lambda **_: None)
@@ -59,11 +60,12 @@ def test_physical_post_attempts_are_bounded_even_across_independent_calls(
     assert len(requests) == 3
 
 
-def test_fanout_target_generator_obeys_host_request_admission(monkeypatch):
+def test_fanout_target_generator_obeys_host_request_admission(monkeypatch, tmp_path):
     policy = model_request_admission.HostModelRequestAdmission.from_environ(
         {"SONDER_MODEL_REQUEST_BURST": "1",
          "SONDER_MODEL_REQUESTS_PER_MINUTE": "1"},
         clock=lambda: 100.0,
+        db_path=tmp_path / "rate.db",
     )
     monkeypatch.setattr(server, "_HOST_MODEL_REQUEST_ADMISSION", policy)
     monkeypatch.setattr(server, "_require_ollama_endpoint", lambda **_: None)
@@ -83,11 +85,12 @@ def test_fanout_target_generator_obeys_host_request_admission(monkeypatch):
     assert len(requests) == 1
 
 
-def test_provider_retry_is_charged_as_another_physical_request(monkeypatch):
+def test_provider_retry_is_charged_as_another_physical_request(monkeypatch, tmp_path):
     policy = model_request_admission.HostModelRequestAdmission.from_environ(
         {"SONDER_MODEL_REQUEST_BURST": "1",
          "SONDER_MODEL_REQUESTS_PER_MINUTE": "1"},
         clock=lambda: 100.0,
+        db_path=tmp_path / "rate.db",
     )
     monkeypatch.setattr(server, "_HOST_MODEL_REQUEST_ADMISSION", policy)
     monkeypatch.setattr(server, "_require_ollama_endpoint", lambda **_: None)

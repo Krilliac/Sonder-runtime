@@ -32,6 +32,8 @@ def test_live_turn_bridge_commits_and_reopens_typed_session(tmp_path, monkeypatc
         "model.requested", "user.message", "model.response",
     ]
     assert events[0].payload["request_id"] == "legacy-interaction-1"
+    expected_route = {"lane": "chat", "reason": "ordinary conversation"}
+    assert events[0].payload["routing_metadata"] == expected_route
 
     bootstrap_app.reset_for_tests()
     reopened = bootstrap_app.build_application()
@@ -45,6 +47,7 @@ def test_live_turn_bridge_commits_and_reopens_typed_session(tmp_path, monkeypatc
         tier="sonder",
         system="system boundary",
         history=(({"role": "user", "content": "earlier"}),),
+        routing_metadata=expected_route,
     )
     assert replay.replay.transcript[-1].content == "durable answer"
 

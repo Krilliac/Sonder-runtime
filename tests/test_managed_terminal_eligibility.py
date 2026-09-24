@@ -131,6 +131,9 @@ def test_current_host_attachment_accepts_only_the_durable_failed_check_receipt(
             return None
 
     class Bound:
+        def _scope(self):
+            from contextlib import nullcontext
+            return nullcontext(SimpleNamespace(principal_id="owner"))
         def pending_verification(self): return identity
         def verification_view(self, *args, **kwargs): return view
         def prepared_verification(self, supplied):

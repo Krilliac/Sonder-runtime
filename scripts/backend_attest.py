@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Produce recent, non-synthetic capability evidence for one model route."""
+"""Record diagnostic model probes; independent deployment identity is unbound."""
 
 from __future__ import annotations
 
@@ -18,6 +18,9 @@ if str(ROOT) not in sys.path:
 from sonder_runtime.adapters.inference.openai_compat_gateway import (
     OpenAICompatibleConfig,
     OpenAICompatibleGateway,
+)
+from sonder_runtime.adapters.inference.openai_protocol_probe import (
+    OpenAICompatibleProtocolProbe,
 )
 from sonder_runtime.application.routing.backend_conformance import (
     RecentCapabilityEvidence,
@@ -39,6 +42,8 @@ def attest(
     cloud_allowed: bool = False,
     dry_run: bool = False,
     identity: BackendIdentity | None = None,
+    protocol_probes: bool = False,
+    identity_reader=None,
 ) -> dict[str, object]:
     """Run one bounded probe or return a non-invasive plan without probing."""
     if dry_run:
@@ -49,19 +54,28 @@ def attest(
             "timeout_seconds": float(timeout_seconds),
             "cloud_allowed": bool(cloud_allowed),
             "dry_run": True,
+            "protocol_probes": bool(protocol_probes),
         }
-    record = run_gateway_probes(
-        gateway,
-        backend=backend,
-        model=model,
-        timeout_seconds=timeout_seconds,
-        cloud_allowed=cloud_allowed,
-        identity=identity,
-        synthetic=not (
-            type(gateway) is OpenAICompatibleGateway
-            and gateway._transport is None  # only this gateway's actual transport is live
-        ),
-    )
+    if protocol_probes:
+        if (backend != "openai-compatible" or identity is None
+                or identity.backend != backend or identity.model != model
+                or identity_reader is None or identity_reader() != identity):
+            raise ValueError("protocol probes require an unchanged host-owned OpenAI identity")
+        record = OpenAICompatibleProtocolProbe(
+            gateway, identity_reader=identity_reader, cloud_allowed=cloud_allowed,
+        ).run(timeout_seconds=timeout_seconds)
+    else:
+        record = run_gateway_probes(
+            gateway,
+            backend=backend,
+            model=model,
+            timeout_seconds=timeout_seconds,
+            cloud_allowed=cloud_allowed,
+            identity=identity,
+            # A supplied identity file and a request-derived ModelResponse.model
+            # cannot attest the serving model weights or backend environment.
+            synthetic=True,
+        )
     RecentCapabilityEvidence(evidence_path).save(record)
     return {
         "backend": record.backend,
@@ -71,7 +85,8 @@ def attest(
         "passed": sorted(item.capability.value for item in record.results if item.passed is True),
         "failed": sorted(item.capability.value for item in record.results if item.passed is False),
         "unknown": sorted(item.capability.value for item in record.results if item.passed is None),
-        "identity_bound": record.identity is not None,
+        "identity_bound": record.identity is not None and not record.synthetic,
+        "identity_declared": record.identity is not None,
         "synthetic": record.synthetic,
         "reasons": {item.capability.value: item.reason_code for item in record.results},
         "evidence_path": str(Path(evidence_path).expanduser()),
@@ -109,11 +124,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allow-cloud", action="store_true", help="explicitly allow a non-loopback OpenAI-compatible endpoint")
     parser.add_argument("--dry-run", action="store_true", help="show the bounded local attestation plan without contacting a provider")
     parser.add_argument("--identity-file", help="host-owned JSON with the current model/backend identity and exact digests")
+    parser.add_argument("--protocol-probes", action="store_true", help="run diagnostic JSON-shape checks; unbound tool protocols stay unknown; requires --identity-file")
     args = parser.parse_args(argv)
     if not args.base_url or not args.model:
         parser.error("--base-url and --model are required (or set SONDER_OPENAI_BASE_URL and SONDER_OPENAI_MODEL)")
     if not 0.0 < args.timeout <= 300.0:
         parser.error("--timeout must be between 0 and 300 seconds")
+    if args.protocol_probes and not args.identity_file and not args.dry_run:
+        parser.error("--protocol-probes requires --identity-file")
     try:
         parsed = urlsplit(args.base_url)
         host = parsed.hostname
@@ -151,6 +169,8 @@ def main(argv: list[str] | None = None) -> int:
         cloud_allowed=args.allow_cloud,
         dry_run=args.dry_run,
         identity=identity,
+        protocol_probes=args.protocol_probes,
+        identity_reader=(lambda: _read_host_identity(args.identity_file)) if args.identity_file else None,
     )
     print(json.dumps(result, sort_keys=True))
     return 0 if args.dry_run or not result.get("failed") else 1

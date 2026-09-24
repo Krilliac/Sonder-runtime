@@ -130,6 +130,10 @@ jobs:
           tests/test_selfmod_verification_lifecycle.py
           tests/test_runtime_lifecycle_graceful_drain_bridge.py
           tests/test_application_lifecycle_adapter.py
+          tests/test_shared_model_request_admission.py
+          tests/test_host_model_request_admission.py
+          tests/test_openai_host_model_admission.py
+          tests/test_control_plane_inventory.py
       - name: Exercise Windows release smoke script
         if: ${{ !cancelled() && steps.install-focused-venv.outcome == 'success' }}
         env:

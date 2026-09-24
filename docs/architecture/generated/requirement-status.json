@@ -516,9 +516,9 @@
     },
     {
       "checked": false,
-      "claim": "Live tool-enabled agent-lane requests keep the per-turn tool selection id outside the reusable prefix, so turns of one lane and independent worker processes on the same project derive one deterministic prefix identity; a bounded two-process loopback Ollama probe observed provider-reported prompt-cache reuse through the production gateway.",
+      "claim": "Actual tool-enabled agent requests persist exact sections and prefix manifests and replay in a fresh interpreter after project inputs change; a new request observes refreshed rules/skills, and provider/artifact identity changes invalidate reuse.",
       "requirement_id": "CTX-009",
-      "revision": 7,
+      "revision": 8,
       "status": "implemented_unverified"
     },
     {
@@ -859,16 +859,16 @@
     },
     {
       "checked": false,
-      "claim": "Production codegen repair receives bounded prior source, exact diagnostics and progress; explicit distinct-route policy allows a scoped critic then model rotation; the strategy controller applies bounded no-progress and host-policy precedence.",
+      "claim": "Explicit physical model request limits share a SQLite bucket across host processes. An OS creation lock and fsynced first-use marker prevent cold-start races and missing-database restart resets. Clock rollback and mixed settings cannot increase capacity; ordinary tools cannot mutate admission state.",
       "requirement_id": "LOOP-007",
-      "revision": 5,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Corrects revisions 12 and 13 after an independent review of 3d22e670. Concurrent effects in one shared run now always commit their terminal outcome and checkpoint only the settled high-water prefix; restore accepts later effects only when every effect in the run is terminal and reports journal_high_water, so restart succeeds after verified reconciliation; reconcile clears the run-wide recovery fence once nothing is unresolved; checkpoint writes require the current unfenced owner epoch and idempotent outcome replays append no generation; checkpoint generations are bounded per run; the process-start verifier reports an attached launch as completed with the live {job_id}:{pid} receipt shape.",
+      "claim": "ToolGateway marks post-invoke redaction/receipt failures uncertain while retaining definitive committed outcomes. Persisted subprocess crash cuts cover gateway and overlapping-effect recovery. Real supported typed file mutations now carry canonical descriptor effects into journal intents; reads and denied/restricted calls do not. A real typed append crash refuses duplicate mutation after restart. Local compute submit and nested process launch reconcile only from terminal attached registry records with exact identity and request digests.",
       "requirement_id": "LOOP-008",
-      "revision": 15,
+      "revision": 16,
       "status": "implemented_unverified"
     },
     {
@@ -887,16 +887,16 @@
     },
     {
       "checked": false,
-      "claim": "Production Codegen and Autopilot select content-free typed recovery references before local model dispatch using actual context-window budgets; host filename language preserves compatible unknown history. Failed reuse is credited only after a host-observed model response, with durable Autopilot attribution surviving restart.",
+      "claim": "The failed managed-receipt boundary now attaches its current owner. Real authenticated principals and composed authoritative persistence prove repeated-principal non-promotion, second-principal fact promotion, failed-check demotion, and reopen. Same-project irrelevant-family controls exercise pre-model Autopilot memory selection.",
       "requirement_id": "MEM-003",
-      "revision": 8,
+      "revision": 9,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Live authoritative activation pays full journal authentication only on first claim and keeps a bounded indexed invariant per unit of work, and the replication receiver fails fast at startup instead of retrying peer fact batches rejected by an authoritatively owned scope.",
+      "claim": "Replication scope validation now accepts bounded POSIX, drive, and UNC workspace spellings as opaque exact identities, allowing actual managed receipts to use composed authoritative persistence without forging a token-only scope.",
       "requirement_id": "MEM-004",
-      "revision": 9,
+      "revision": 10,
       "status": "implemented_unverified"
     },
     {
@@ -943,9 +943,9 @@
     },
     {
       "checked": false,
-      "claim": "The model facade exposes stable logical-role route bindings rather than transport-specific role names.",
+      "claim": "Chat is a policy lane mapped to general by default through existing tiers and gateway dispatch. Typed and HTTP paths preserve strict local aliases and explicit tier/model pins across mixed provider configurations; selected route and content-free lane metadata survive canonical replay. HTTP work handoffs persist owner-scoped source/admission/return event references and truthful JSON/SSE handler-outcome receipts with restart/idempotency coverage.",
       "requirement_id": "MODEL-003",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -957,9 +957,9 @@
     },
     {
       "checked": false,
-      "claim": "Explicit strict capability routing binds persisted passed nonsynthetic conformance to the exact concrete provider/model digest, quantization, backend/version, tokenizer/template, context window and hardware; routing and in-flight response checks reject unknown, stale, failed or mismatched identity.",
+      "claim": "Corrects diagnostic authority: generic callbacks cannot request nonsynthetic conformance, and both OpenAI-compatible CLI modes persist synthetic diagnostics even with a real transport and declared identity file. Those records cannot authorize capability routing.",
       "requirement_id": "MODEL-005",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -1272,9 +1272,9 @@
     },
     {
       "checked": false,
-      "claim": "Native Windows MIC canaries and unsupported-host refusal are qualified at published revision 6dcd99246a1a8dca5ae6aaff63bb94c7f2180a9d; the Windows suite passed 20 MIC tests with one explicitly deselected Git Bash case. Automatic approval remains blocked because neither low MIC nor parent-filtered candidate output provides an independent grader.",
+      "claim": "An opt-in Linux Codegen adapter stages exact host-granted sources into a pinned local container with read-only input, bounded disposable build storage, network denial and verified cleanup. Source/root replacement races and uncertain launcher exits refuse; default and Windows profiles stay closed.",
       "requirement_id": "SELFMOD-002",
-      "revision": 9,
+      "revision": 10,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "9edfd7a80bc4b4b2a8dd3a7c2dd57edcb21686e500c3c91c4810bcc42dd6c309",
-    "spec_sha256": "d11b5664c594bb79042c358a0510393d1ee0dd6d718830332a6362ed652c9bc5"
+    "ledger_sha256": "0944c0e0bcff2154e4af17173905de7a17cb8d80db5513d0e09c1fdcbba8b609",
+    "spec_sha256": "1d7da49c5910bcf0bd5099ef1858312a8491a0429a4df33895d8088942278e33"
   }
 }

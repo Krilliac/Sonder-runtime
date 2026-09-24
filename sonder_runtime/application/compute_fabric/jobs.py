@@ -20,7 +20,7 @@ from threading import RLock
 from typing import Any, Callable, Mapping
 
 from ..execution.process_jobs import ProcessJobProvider, ProcessJobRequest
-from ..execution.worker_bindings import AuthenticatedWorkerBinding, journaled_effect
+from ..execution.worker_bindings import AuthenticatedWorkerBinding, journaled_effect, _digest as _effect_request_digest
 from ..ports.jobs import JobIdentity
 from ...domain.common.errors import CapacityExceeded, Conflict, DependencyUnavailable, InvalidInput, NotFound
 from ...domain.compute_fabric import WorkloadKind
@@ -735,6 +735,10 @@ class ComputeJobWorker:
                 ("compute_worker_id", self.worker_id),
                 ("compute_controller_job_id", envelope.controller_job_id),
                 ("compute_request_sha256", envelope.request_sha256),
+                # Persist the *journal* request identity independently of the
+                # envelope's canonical transport digest. A verifier must bind
+                # the actual admitted intent to this durable process record.
+                ("compute_effect_request_digest", _effect_request_digest(envelope)),
                 ("compute_catalog_entry_id", envelope.catalog_entry_id),
                 ("compute_workspace_mapping", envelope.workspace_mapping),
                 ("compute_relative_cwd", envelope.relative_cwd),

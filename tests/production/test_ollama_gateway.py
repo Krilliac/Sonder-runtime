@@ -80,7 +80,7 @@ def test_generate_returns_domain_response(monkeypatch):
 def test_resolved_route_pins_provider_identity_and_prevents_reresolution():
     calls = []
 
-    def resolve(tier, strict=False):
+    def resolve(tier, strict=None):
         calls.append((tier, strict))
         return ModelTarget(
             "resolved-model", False, "code", True,
@@ -112,7 +112,10 @@ def test_resolved_route_pins_provider_identity_and_prevents_reresolution():
         _context(),
     )
     assert response.text == "pinned"
-    assert calls == [("code", False)]
+    # Gateway resolution inherits the operator's strict default. A pinned
+    # concrete tier remains pinned by the target resolver, while a logical
+    # alias must not silently opt out of strict mode.
+    assert calls == [("code", None)]
 
 
 def test_caller_options_cannot_forge_a_resolved_model_route():

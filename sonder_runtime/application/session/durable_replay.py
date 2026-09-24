@@ -123,8 +123,10 @@ def reconstruct_model_visible_request(
     payload = selected.payload
     history = payload.get("history", ())
     options = payload.get("options", {})
-    if not isinstance(history, (list, tuple)) or not isinstance(options, Mapping):
-        raise IntegrityFailure("request snapshot has invalid history or options")
+    routing_metadata = payload.get("routing_metadata", {})
+    if (not isinstance(history, (list, tuple)) or not isinstance(options, Mapping)
+            or not isinstance(routing_metadata, Mapping)):
+        raise IntegrityFailure("request snapshot has invalid history, options, or routing metadata")
     stream = payload.get("stream", False)
     if not isinstance(stream, bool):
         raise IntegrityFailure("request snapshot stream is invalid")
@@ -136,7 +138,8 @@ def reconstruct_model_visible_request(
     request = ModelRequest(
         prompt=_text(payload, "prompt"), tier=_text(payload, "tier"),
         system=_text(payload, "system", required=False), history=tuple(history),
-        options=MappingProxyType(dict(options)), stream=stream,
+        options=MappingProxyType(dict(options)),
+        routing_metadata=MappingProxyType(dict(routing_metadata)), stream=stream,
         prefix_manifest=payload.get("prefix_manifest"),
         replay_manifest=payload.get("replay_manifest"),
         prefix_cache_observation=payload.get("prefix_cache_observation"),

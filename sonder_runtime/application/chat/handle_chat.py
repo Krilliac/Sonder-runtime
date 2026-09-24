@@ -19,14 +19,18 @@ logger = logging.getLogger(__name__)
 from ..ports.model_gateway import InferenceTelemetry, ModelGateway, ModelRequest
 from ..session.capture import CapturedTurn, SessionCaptureService
 from ..session.provider_attempts import ProviderCaptureFailure, provider_attempt_scope
-from ...domain.common.errors import IntegrityFailure, InternalFailure, SonderError
+from ...domain.common.errors import IntegrityFailure, InternalFailure, InvalidInput, SonderError
 from ...domain.common.ids import SessionId, TurnId, new_id
 
 
 @dataclass(frozen=True)
 class ChatCommand:
     content: str
+    # ``sonder`` resolves the chat lane's current policy tier at dispatch.
+    # An explicitly requested tier remains pinned to the caller's choice.
     tier: str = "sonder"
+    lane: str = "chat"
+    routing_reason: str = "ordinary conversation"
     system: str = ""
     history: tuple = ()
     temperature: float | None = None
@@ -46,6 +50,8 @@ class ChatResult:
     tokens_out: int | None = None
     telemetry: InferenceTelemetry | None = None
     capture: CapturedTurn | None = None
+    lane: str = "chat"
+    routing_reason: str = "ordinary conversation"
 
 
 class ChatService:
@@ -55,12 +61,16 @@ class ChatService:
         session_capture_service: SessionCaptureService | None = None,
         *,
         session_capture_factory: Callable[[], SessionCaptureService] | None = None,
+        chat_default_tier: Callable[[], str] | None = None,
+        strict_alias_provider_available: bool = True,
     ) -> None:
         if session_capture_service is not None and session_capture_factory is not None:
             raise ValueError("provide a session capture service or factory, not both")
         self._gateway = model_gateway
         self._capture = session_capture_service
         self._capture_factory = session_capture_factory
+        self._chat_default_tier = chat_default_tier
+        self._strict_alias_provider_available = strict_alias_provider_available
 
     def complete(
         self, command: ChatCommand, context: OperationContext
@@ -73,12 +83,31 @@ class ChatService:
             options["num_predict"] = command.num_predict
         if command.num_ctx is not None:
             options["num_ctx"] = command.num_ctx
+        if command.lane != "chat":
+            raise ValueError("ChatService accepts only the chat routing lane")
+        if not isinstance(command.routing_reason, str) or not command.routing_reason.strip():
+            raise ValueError("chat routing reason must be non-empty text")
+        # The logical default must resolve before mixed-provider dispatch;
+        # otherwise the dispatcher picks its backend default instead of the
+        # provider bound to the operator-selected chat tier.
+        tier = (
+            self._chat_default_tier()
+            if command.tier == "sonder" and self._chat_default_tier is not None
+            else command.tier
+        )
+        strict_alias = command.tier == "sonder" and tier == "sonder" and self._chat_default_tier is not None
+        if strict_alias and not self._strict_alias_provider_available:
+            raise InvalidInput("strict chat alias requires a configured local Ollama provider")
         request = ModelRequest(
             prompt=command.content,
-            tier=command.tier,
+            tier=tier,
             system=command.system,
             history=tuple(command.history),
             options=options,
+            routing_metadata={
+                "lane": command.lane,
+                "reason": command.routing_reason.strip()[:240],
+            },
         )
         capture_service = self._capture
         if capture_service is None and self._capture_factory is not None:
@@ -97,7 +126,12 @@ class ChatService:
         logger.debug(f"ChatService.complete: sending request to gateway, tier={command.tier!r}")
         try:
             with provider_attempt_scope(capture_service, pending):
-                response = self._gateway.generate(request, context)
+                local_alias = getattr(self._gateway, "generate_strict_alias", None)
+                response = (
+                    local_alias(request, context)
+                    if strict_alias and callable(local_alias)
+                    else self._gateway.generate(request, context)
+                )
         except Exception as model_error:
             if isinstance(model_error, ProviderCaptureFailure):
                 raise
@@ -128,4 +162,6 @@ class ChatService:
             tokens_out=response.tokens_out,
             telemetry=getattr(response, "telemetry", None),
             capture=capture,
+            lane=command.lane,
+            routing_reason=command.routing_reason.strip()[:240],
         )

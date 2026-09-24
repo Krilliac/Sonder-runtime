@@ -34,6 +34,7 @@ from ..application.protocol.mcp_compatibility import (
     McpCompatibility,
 )
 from ..application.protocol.mcp_tasks import McpTaskHandler
+from ..domain.tools.descriptors import ToolEffect
 from ..interfaces.mcp.transport import McpTransportError, StdioMcpTransport
 
 _PATH = {"type": "string", "minLength": 1}
@@ -126,6 +127,7 @@ _NATIVE_TOOLS = (
         {"type": "object", "properties": {
             "path": _PATH, "parents": {"type": "boolean"}, "extra_roots": _ROOT,
         }, "required": ["path"], "additionalProperties": False},
+        effects=frozenset({ToolEffect.WRITE_FILES}),
     ),
     ToolDescriptor(
         "edit_file", "Apply a bounded text edit",
@@ -133,6 +135,7 @@ _NATIVE_TOOLS = (
             "path": _PATH, "old": {"type": "string"}, "new": {"type": "string"},
             "count": {"type": "integer"}, "extra_roots": _ROOT,
         }, "required": ["path", "old", "new"], "additionalProperties": False},
+        effects=frozenset({ToolEffect.WRITE_FILES}),
     ),
     ToolDescriptor(
         "file_edit", "Legacy alias for a bounded text edit",
@@ -140,6 +143,7 @@ _NATIVE_TOOLS = (
             "path": _PATH, "old": {"type": "string"}, "new": {"type": "string"},
             "count": {"type": "integer"}, "extra_roots": _ROOT,
         }, "required": ["path", "old", "new"], "additionalProperties": False},
+        effects=frozenset({ToolEffect.WRITE_FILES}),
     ),
     ToolDescriptor(
         "file_batch_write", "Transactionally create or overwrite bounded files",
@@ -147,12 +151,14 @@ _NATIVE_TOOLS = (
             "operations": {"type": "array"}, "operations_json": {"type": "string"},
             "extra_roots": _ROOT,
         }, "additionalProperties": False},
+        effects=frozenset({ToolEffect.WRITE_FILES}),
     ),
     ToolDescriptor(
         "file_copy", "Copy one bounded binary-safe file",
         {"type": "object", "properties": {
             "source": _PATH, "destination": _PATH, "overwrite": _BOOL, "extra_roots": _ROOT,
         }, "required": ["source", "destination"], "additionalProperties": False},
+        effects=frozenset({ToolEffect.WRITE_FILES}),
     ),
     ToolDescriptor(
         "file_delete", "Delete a guarded path only after explicit confirmation",
@@ -160,6 +166,7 @@ _NATIVE_TOOLS = (
             "path": _PATH, "recursive": _BOOL, "dry_run": _BOOL,
             "confirm": {"type": "string"}, "extra_roots": _ROOT,
         }, "required": ["path"], "additionalProperties": False},
+        effects=frozenset({ToolEffect.DELETE_FILES}),
     ),
     ToolDescriptor(
         "file_find", "Find files under allowed roots",
@@ -174,6 +181,7 @@ _NATIVE_TOOLS = (
         {"type": "object", "properties": {
             "source": _PATH, "destination": _PATH, "overwrite": _BOOL, "extra_roots": _ROOT,
         }, "required": ["source", "destination"], "additionalProperties": False},
+        effects=frozenset({ToolEffect.WRITE_FILES, ToolEffect.DELETE_FILES}),
     ),
     ToolDescriptor(
         "file_read", "Read a UTF-8-ish text file inside allowed roots",
@@ -194,6 +202,7 @@ _NATIVE_TOOLS = (
             "mode": {"type": "string", "enum": ["create", "overwrite", "append"]},
             "extra_roots": _ROOT,
         }, "required": ["path", "content"], "additionalProperties": False},
+        effects=frozenset({ToolEffect.WRITE_FILES}),
     ),
     ToolDescriptor(
         "json_patch", "Preview or atomically apply a bounded JSON patch",
@@ -203,6 +212,7 @@ _NATIVE_TOOLS = (
             "mode": {"type": "string", "enum": ["preview", "apply"]},
             "extra_roots": _ROOT,
         }, "required": ["path"], "additionalProperties": False},
+        effects=frozenset({ToolEffect.WRITE_FILES}),
     ),
     ToolDescriptor(
         "image_inspect", "Inspect bounded image metadata and hash",
@@ -214,6 +224,7 @@ _NATIVE_TOOLS = (
         {"type": "object", "properties": {
             "path": _PATH, "parents": {"type": "boolean"}, "extra_roots": _ROOT,
         }, "required": ["path"], "additionalProperties": False},
+        effects=frozenset({ToolEffect.WRITE_FILES}),
     ),
     ToolDescriptor(
         "read_file", "Read a bounded file",
@@ -274,6 +285,7 @@ _NATIVE_TOOLS = (
             "root": _PATH, "patch": {"type": "string", "minLength": 1},
             "apply": _BOOL, "extra_roots": _ROOT,
         }, "required": ["root", "patch"], "additionalProperties": False},
+        effects=frozenset({ToolEffect.WRITE_FILES}),
     ),
     ToolDescriptor(
         "workspace_run", "Run a program as a bounded argv list",
@@ -290,6 +302,7 @@ _NATIVE_TOOLS = (
             "mode": {"type": "string", "enum": ["create", "overwrite", "append"]},
             "extra_roots": _ROOT,
         }, "required": ["path", "content"], "additionalProperties": False},
+        effects=frozenset({ToolEffect.WRITE_FILES}),
     ),
     ToolDescriptor(
         "archive_extract", "Extract a bounded archive transactionally without replacing a destination",
@@ -739,6 +752,13 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
         )
         from ..domain.common.errors import Cancelled, DeadlineExceeded, Forbidden
 
+        descriptor = registry.get(canonical_name)
+        if descriptor is None:
+            raise ValueError("typed tool is absent from the native registry")
+        # Only the host registry declares effects. Native input supplies tool
+        # arguments, never a scope grant or permission effect list.
+        effects = frozenset(effect.name.lower() for effect in descriptor.effects)
+
         request = ToolGatewayRequest(
             request_id=context.correlation_id,
             tool_name=canonical_name,
@@ -746,10 +766,11 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             scope=ToolScope(
                 principal_id=context.principal_id,
                 workspace_roots=tuple(str(root) for root in roots),
+                allowed_effects=effects,
                 source="mcp",
                 auth_level=context.auth_level,
             ),
-            permission=ToolPermission(),
+            permission=ToolPermission(effects),
             deadline_monotonic=context.deadline_monotonic,
             cancellation=context.cancellation,
             execution_world="local",

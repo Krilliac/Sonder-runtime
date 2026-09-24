@@ -18,10 +18,10 @@ from typing import Mapping
 
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
-# Project scopes are opaque, exact identities.  They may contain a bounded
-# Windows workspace spelling, but this grammar does not normalize or equate
-# slash and backslash variants.
-_PROJECT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:\\/\\-]{0,255}\Z")
+# Project scopes are opaque, exact identities.  They may be POSIX absolute,
+# Windows drive, or UNC workspace spellings, but this grammar never resolves,
+# canonicalizes, or equates filesystem paths.
+_PROJECT = re.compile(r"(?:[A-Za-z0-9]|/|\\\\)[A-Za-z0-9._:\\/\\-]{0,255}\Z")
 _KINDS = frozenset({"fact", "interaction", "outcome", "preference", "lesson_decision"})
 _OPERATIONS = frozenset({"upsert", "delete"})
 _MAX_PAYLOAD_BYTES = 64 * 1024
