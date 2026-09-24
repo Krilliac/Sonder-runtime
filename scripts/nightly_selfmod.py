@@ -8,7 +8,7 @@ store had grown by 4213 interactions and the code had not changed by one line.
 Meanwhile the machinery to change it already existed and was simply never
 called. `selfmod` creates a detached Git worktree, applies a candidate there,
 runs real test commands against it, and on deploy copies the files back and
-records `git commit -m "selfmod: <objective>"`, with an immutable backup and a
+records `git commit -m "selfmod: <objective>"`, with a tamper-evident backup and a
 rollback path. Five runs had been created by hand; none ever deployed. One of
 them -- "permission_rules.load silently degrades to default rules" -- named a
 real defect that a human later fixed independently, which is the clearest
@@ -31,12 +31,31 @@ WHY THERE ARE TWO TEST GATES
   Measured 2026-08-08: an agent lane produced four plausible fixes whose tests
   had never been executed, and running them revealed that one broke an
   architecture rule. The regression gate covers the repository suite except
-  for a target-specific held-out suite. The held-out gate runs a best-effort,
-  tamper-evident snapshot outside the candidate's editable files. It is not a
-  privilege boundary: a same-user candidate may be able to alter and restore
-  the snapshot, so this gate cannot claim security-grade isolation. If no
-  matching suite exists, the evaluator is unavailable and the candidate is
-  rejected.
+  for a target-specific held-out suite and the tests that cannot run below
+  medium integrity. The held-out gate runs a tamper-evident snapshot outside
+  the candidate's editable files.
+
+WHAT THE GATES DO AND DO NOT PROVE
+  - Every verdict is the exit code of a process that runs candidate code.
+    A candidate that controls what pytest imports can influence that exit
+    code; the held-out snapshot and the digest manifest make tampering with
+    the evaluator's own files evident, not impossible to attempt.
+  - On Windows, every candidate check runs through the low-integrity
+    supervisor inside a Job. Low integrity bounds WRITES: the candidate cannot
+    modify medium-integrity files (the evaluator snapshot, the candidate
+    workspace, the selfmod database, the live checkout, .git). It does NOT
+    bound reads or network access, so confidentiality of anything the user
+    can read is not covered.
+  - Tests marked requires_medium_integrity (Git for Windows' MSYS2 cannot
+    start below medium integrity) are NOT run against the candidate. They are
+    recorded as not evaluated, and a run with unevaluated tests can never be
+    approved or deployed unattended; it stops for human review.
+  - The parent records SHA-256 digests of every changed file and of the diff
+    before the first gate and re-verifies them before review, before the
+    branch commit and before deployment. A mismatch rejects the candidate.
+  - On unsupported hosts the isolation helper fails closed for the
+    unattended check. If no matching held-out suite exists, the evaluator is
+    unavailable and the candidate is rejected.
 """
 from __future__ import annotations
 
@@ -44,6 +63,7 @@ import ast
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -62,6 +82,10 @@ import selfmod  # noqa: E402
 
 _HELD_OUT_MAX_FILES = 2048
 _HELD_OUT_MAX_BYTES = 32 * 1024 * 1024
+# This suite is the medium-integrity supervisor's own boundary test. Running
+# it inside the low-integrity candidate would recursively ask a low process to
+# create a medium-integrity evaluator manifest, which Windows correctly denies.
+_LOW_SUPERVISOR_TESTS = ("tests/test_selfmod_low_integrity.py",)
 
 # Files the nightly stage may propose changes to. Every entry is a module
 # with its own test file, small enough that one function is a meaningful
@@ -177,19 +201,137 @@ def _ruff_command(py: str) -> list[str] | None:
     return [py, "-m", "ruff"] if probe.returncode == 0 else None
 
 
-def _regression_command(py: str, *, ignore_paths=()) -> list[str]:
-    """Use bounded xdist when installed; keep a portable serial fallback."""
+# The regression suite is partitioned by marker. Both gated partitions run
+# candidate code only at low integrity and are required:
+#   regression         low integrity, parallel workers inside one Job
+#   regression_heavy   low integrity, one process, larger Job memory limit
+# Tests marked requires_medium_integrity are deliberately NOT run against the
+# candidate: running candidate code at medium integrity would let it rewrite
+# its own tested bytes, the selfmod database, .git hooks or the live
+# checkout. They are recorded as not evaluated and block unattended
+# promotion (see UNEVALUATED_PARTITION and run()).
+_MEDIUM_MARK = "requires_medium_integrity"
+_HEAVY_MARK = "heavy_memory"
+_REGRESSION_PARTITIONS = (
+    ("regression", "not %s and not %s" % (_MEDIUM_MARK, _HEAVY_MARK)),
+    ("regression_heavy", "%s and not %s" % (_HEAVY_MARK, _MEDIUM_MARK)),
+)
+REGRESSION_KINDS = tuple(kind for kind, _ in _REGRESSION_PARTITIONS)
+UNEVALUATED_PARTITION = (
+    "regression_medium",
+    "tests marked %s were not run against the candidate (they need medium "
+    "integrity, which would give candidate code write access to the "
+    "evaluator); requires human review" % _MEDIUM_MARK,
+)
+# Every partition is required. A partition whose marked tests are missing
+# exits 5 (no tests collected) and rejects the candidate: removing the marked
+# tests is not a way to shrink the gate. Tests whose optional dependencies are
+# absent are still collected and reported as skips.
+
+
+_WORKER_COMMIT_MB = 4096  # per-worker Job process limit, see _regression_isolation
+
+
+def _commit_headroom_mb() -> int | None:
+    """Available commit charge in MiB (Windows), or None when unknown."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+
+        class _MemoryStatus(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = _MemoryStatus()
+        status.dwLength = ctypes.sizeof(_MemoryStatus)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None
+        return int(status.ullAvailPageFile // (1024 * 1024))
+    except Exception:
+        return None
+
+
+def _regression_workers() -> int:
+    """Parallel workers for the low regression partition (bounded).
+
+    The default is sized from available commit charge, not a fixed count:
+    each worker may reach its 4 GiB Job process limit, and a quarter of the
+    headroom is reserved for the rest of the host. Unknown headroom falls
+    back to two workers.
+    """
+    raw = os.environ.get("SONDER_SELFMOD_REGRESSION_WORKERS", "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return min(int(raw), 12)
+    cpu_cap = max(1, min(8, (os.cpu_count() or 2) // 2))
+    headroom = _commit_headroom_mb()
+    if headroom is None:
+        return min(2, cpu_cap)
+    return max(1, min(cpu_cap, int(headroom * 0.75) // _WORKER_COMMIT_MB))
+
+
+def _regression_isolation(kind: str, workers: int) -> dict:
+    """Job limits and integrity level for one regression partition."""
+    if kind == "regression":
+        # A long-lived xdist worker accumulates memory across thousands of
+        # tests: in the 2026-09-23 baseline one worker reached the 2 GiB
+        # per-process limit at 99% and died ("unable to start watchdog
+        # thread"). Give each worker 4 GiB and scale the job budget with the
+        # worker count, bounded by the supervisor's ceilings.
+        return {"process_memory_mb": 4096,
+                "job_memory_mb": min(24576, max(6144, 4096 * workers + 2048)),
+                "active_processes": min(128, 32 + 8 * workers)}
+    if kind == "regression_heavy":
+        return {"process_memory_mb": 6144, "job_memory_mb": 8192}
+    return {}
+
+
+def _regression_command(py: str, *, ignore_paths=(), kind: str = "regression",
+                        workers: int | None = None) -> list[str]:
+    """Build one partition's pytest command; xdist only for the low partition."""
+    marks = dict(_REGRESSION_PARTITIONS)[kind]
     probe = subprocess.run(
         [py, "-c", "import xdist"],
         capture_output=True, stdin=subprocess.DEVNULL, check=False,
         timeout=10,
     )
-    command = [py, "-m", "pytest", "-q"]
-    if probe.returncode == 0:
-        command.extend(["-n", "4", "--dist", "load"])
+    # A single failing regression is enough to reject this candidate. Stop
+    # promptly instead of spending the entire nightly budget collecting the
+    # same infrastructure failure thousands of times.
+    # Verbose collection/test progress is intentional: the low-integrity
+    # supervisor retains only a bounded tail, and quiet xdist output left a
+    # 900-second timeout with no indication whether pytest had started.
+    command = [py, "-m", "pytest", "-vv", "--maxfail=1", "-p", "no:cacheprovider",
+               "-m", marks]
+    workers = _regression_workers() if workers is None else workers
+    if kind == "regression" and probe.returncode == 0 and workers > 1:
+        command.extend(["-n", str(workers), "--dist", "load"])
+    ignored = list(_LOW_SUPERVISOR_TESTS)
     for path in ignore_paths:
+        if str(path) not in ignored:
+            ignored.append(str(path))
+    for path in ignored:
         command.extend(["--ignore", str(path)])
     return command
+
+
+def _record_candidate_test(run_id, kind, command, *, timeout, protected_paths=(),
+                           isolation=None):
+    """Run one unattended gate with isolation selected explicitly.
+
+    Keeping this choice at the nightly call site prevents the ordinary
+    selfmod API from inheriting a process-global security mode.
+    """
+    return selfmod.record_test(
+        run_id, kind, command, timeout=timeout,
+        protected_paths=protected_paths, low_integrity=True,
+        isolation=isolation,
+    )
 
 
 # The selfmod model sees only the candidate module. These suites are selected
@@ -435,7 +577,11 @@ def _prepare_held_out(target: str, workspace: Path, timeout: int):
         "timeout": max(1, min(int(timeout), 900)),
     }
     command = [_test_python(), "-c", _HELD_OUT_RUNNER, json.dumps(payload, sort_keys=True)]
-    return {"command": command, "source_paths": tuple(selected_source_paths), "cleanup": snapshot}
+    return {
+        "command": command, "source_paths": tuple(selected_source_paths),
+        "protected_paths": tuple(item["path"] for item in copied),
+        "cleanup": snapshot,
+    }
 
 
 def _module_name_for_target(target: str) -> str | None:
@@ -460,6 +606,66 @@ def _objective_is_actionable(objective: str) -> bool:
     if not text or _NON_EXECUTABLE_OBJECTIVE.search(text):
         return False
     return not text.lower().startswith(("add a docstring", "update the docstring", "fix the comment"))
+
+
+def _objective_target_function(objective: str, rationale: str, source: str) -> str | None:
+    """Require an objective to name evidence and one rewritable function.
+
+    The proposal model can invent a defect from a plausible description. A
+    concrete duplicate claim therefore needs a quoted/path-like anchor that
+    occurs at least twice in the actual module. Any proposal also needs one
+    top-level function that can receive the single-function rewrite contract;
+    declarative-only modules and ambiguous multi-function targets are skipped.
+    """
+    claim = "%s\n%s" % (objective or "", rationale or "")
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    functions = [
+        node for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    if not functions:
+        return None
+    anchors = [match.group(1) or match.group(2) or match.group(3)
+               for match in re.finditer(r"`([^`]+)`|'([^']+)'|\"([^\"]+)\"", claim)]
+    anchors = [anchor.strip() for anchor in anchors if anchor and len(anchor.strip()) > 1]
+    if re.search(r"\bduplicates?\b|\bduplicated\b", claim, re.I):
+        if not anchors or any(source.count(anchor) < 2 for anchor in anchors):
+            return None
+    if len(functions) == 1:
+        return functions[0].name
+    distinctive = _distinctive(claim)
+    matches = []
+    for node in functions:
+        segment = ast.get_source_segment(source, node) or ""
+        lowered = segment.casefold()
+        if any(token.casefold() in lowered for token in distinctive):
+            matches.append(node)
+    return matches[0].name if len(matches) == 1 else None
+
+
+def _proposal_function_inventory(source: str) -> str:
+    """Return compact top-level function names for the proposal prompt.
+
+    Proposal failures were often caused by asking a small local model to find
+    a target in a large module without giving it a stable target vocabulary.
+    This is only guidance: the existing source-grounding and splice checks
+    remain authoritative.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return "(module has no parseable top-level functions)"
+    names = [node.name for node in tree.body
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    return ", ".join(names) or "(module has no top-level functions)"
+
+
+def _objective_is_grounded(objective: str, rationale: str, source: str) -> bool:
+    """Compatibility predicate for callers that only need a yes/no answer."""
+    return _objective_target_function(objective, rationale, source) is not None
 
 
 def _eligible_candidate_files() -> tuple[str, ...]:
@@ -494,7 +700,7 @@ def _local_catalog_model(server, selected: str) -> str | None:
     return None
 
 
-def _ask(server, prompt, num_predict=1200, model="", num_ctx=0):
+def _ask(server, prompt, num_predict=1200, model="", num_ctx=0, timeout=60):
     # An explicit model is a catalog selector, not a temporary tier mutation.
     # The server refreshes its persisted runtime policy at every request, so
     # changing ``server.TIERS['code']`` in a caller is overwritten before the
@@ -516,7 +722,7 @@ def _ask(server, prompt, num_predict=1200, model="", num_ctx=0):
             raise RuntimeError("model unavailable: local model gateway is unavailable")
         reply = factory(
             resolved, "", 0.2, num_predict, num_ctx,
-            cloud=False, timeout=60,
+            cloud=False, timeout=timeout,
         )(prompt)
     else:
         kwargs = {
@@ -536,7 +742,7 @@ def _ask(server, prompt, num_predict=1200, model="", num_ctx=0):
     return _FENCE.sub("", text).strip()
 
 
-def _splice_function(original: str, reply: str):
+def _splice_function(original: str, reply: str, expected_name: str | None = None):
     """Replace one top-level function in `original` with the model's version.
 
     Returns the new module text, or None when the reply is not a single
@@ -563,6 +769,8 @@ def _splice_function(original: str, reply: str):
     if len(candidate_tree.body) != 1 or len(functions) != 1:
         return None
     candidate = functions[0]
+    if expected_name is not None and candidate.name != expected_name:
+        return None
     originals = {
         node.name: node for node in original_tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -609,6 +817,46 @@ def _splice_function(original: str, reply: str):
     if last is None or first < 0 or last > len(lines):
         return None
     return "".join(lines[:first]) + body.rstrip() + "\n" + "".join(lines[last:])
+
+
+def _rewrite_reply_objection(reply: str) -> str | None:
+    """Classify non-executable rewrite replies before AST splicing.
+
+    A model can satisfy the rewrite prompt syntactically while returning only
+    comments or ``NONE``.  These are explicit no-change outcomes, never
+    candidate source.  Classifying them before workspace testing keeps the
+    rejection reason deterministic and prevents future parser changes from
+    treating commentary as an executable edit.
+    """
+    cleaned = _FENCE.sub("", str(reply or "")).strip()
+    if not cleaned:
+        return "empty rewrite reply"
+    if cleaned.casefold() == "none":
+        return "model reported no executable change"
+    code_lines = [
+        line for line in cleaned.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if not code_lines:
+        return "comment-only rewrite reply"
+    return None
+
+
+def _rewrite_prompt(objective: str, target: str, function_name: str, source: str) -> str:
+    """Build the selected-function rewrite prompt without positional drift."""
+    return (
+        "Rewrite ONE function from this Python module so that it accomplishes\n"
+        "the objective in the selected function `%s` and no other function:\n"
+        "exactly this objective, and nothing else:\n\n    %s\n\n"
+        "Rules:\n"
+        "- If the function already meets the objective, output exactly NONE.\n"
+        "  Otherwise output ONLY that single function, complete, from its\n"
+        "  `def` line to its last line. No preface, suffix, or fence.\n"
+        "- Keep its name, signature and indentation exactly as they are.\n"
+        "- Change executable behavior; a comment-only edit is invalid.\n\n"
+        "=== %s (selected function: %s) ===\n%s"
+        % (function_name, objective, target, function_name, source)
+    )
 
 
 def _diff_objection(original: str, edited: str):
@@ -867,7 +1115,27 @@ def _discard_workspace(run_id) -> None:
         pass
 
 
-def propose_objective(server, log, model="", num_ctx=0) -> tuple[str, str] | None:
+def _cancel_and_discard(run_id) -> bool:
+    """Cancel one failed plan and report whether cleanup left residue."""
+    cleanup_failed = False
+    try:
+        selfmod.cancel(run_id)
+    except BaseException:
+        cleanup_failed = True
+    try:
+        _discard_workspace(run_id)
+    except BaseException:
+        cleanup_failed = True
+    try:
+        cleanup_failed = bool(selfmod.candidate_path(run_id).exists()) or cleanup_failed
+    except BaseException:
+        cleanup_failed = True
+    return cleanup_failed
+
+
+def propose_objective(
+    server, log, model="", num_ctx=0, *, deadline=None, return_function=False,
+) -> tuple[str, str] | tuple[str, str, str] | None:
     """Ask the local model for ONE small, concrete improvement.
 
     Grounded in a real file's real contents, never from memory: asked to
@@ -882,10 +1150,15 @@ def propose_objective(server, log, model="", num_ctx=0) -> tuple[str, str] | Non
 
     candidates = _eligible_candidate_files()
     for name in random.sample(candidates, k=len(candidates)):
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            log("  objective proposal deadline reached")
+            return None
         path = REPO / name
         source = path.read_text(encoding="utf-8", errors="replace")
         if len(source) > 60_000:
             continue
+        visible_source = source[:60_000]
         answer = _ask(server, (
             "Here is one Python module from a local AI runtime.\n\n"
             "Find ONE small, concrete defect or clear improvement in it. Good\n"
@@ -893,12 +1166,17 @@ def propose_objective(server, log, model="", num_ctx=0) -> tuple[str, str] | Non
             "is reported as a total when it is really a bounded window, a\n"
             "a missing edge case. Do not propose docstrings, comments, formatting,\n"
             "imports, or style-only changes; the proposal must alter executable behavior.\n\n"
-            "Reply with exactly two lines and nothing else:\n"
+            "The replaceable top-level functions are:\n"
+            "%s\n"
+            "Choose one function from that list and mention its exact name in\n"
+            "the OBJECTIVE or WHY line. Reply with exactly two lines and\n"
+            "nothing else:\n"
             "OBJECTIVE: <one sentence, imperative>\n"
             "WHY: <one sentence naming the concrete wrong behaviour>\n\n"
             "If the module has no such defect, reply exactly: NONE\n\n"
-            "=== %s ===\n%s" % (name, source[:60_000])
-        ), num_predict=300, model=model, num_ctx=num_ctx)
+            "=== %s ===\n%s" % (name, _proposal_function_inventory(visible_source), visible_source)
+        ), num_predict=300, model=model, num_ctx=num_ctx,
+            timeout=min(60, max(1, int(remaining))) if remaining is not None else 60)
         if answer.strip().upper().startswith("NONE"):
             log("  %s: model reports no defect" % name)
             continue
@@ -912,11 +1190,67 @@ def propose_objective(server, log, model="", num_ctx=0) -> tuple[str, str] | Non
             if not _objective_is_actionable(objective):
                 log("  %s: non-executable objective, skipping" % name)
                 continue
+            function_name = _objective_target_function(objective, why, source)
+            if function_name is None:
+                log("  %s: objective is not grounded in one replaceable function, skipping" % name)
+                continue
             if _too_similar(objective, seen_before):
                 log("  %s: objective restates a previous run, skipping" % name)
                 continue
-            return name, "%s (%s)" % (objective, why or "no rationale given")
+            result = name, "%s (%s)" % (objective, why or "no rationale given")
+            return (*result, function_name) if return_function else result
     return None
+
+
+def _candidate_binding(workspace: Path, changed_files, diff_text: str) -> dict:
+    """SHA-256 of every changed candidate file and of the diff text."""
+    files = {}
+    for rel in sorted(str(item) for item in changed_files):
+        path = Path(workspace) / rel
+        files[rel] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+    return {
+        "files": files,
+        "diff_sha256": hashlib.sha256(str(diff_text).encode("utf-8", "surrogatepass")).hexdigest(),
+    }
+
+
+def _binding_mismatch(run_id, workspace: Path, binding: dict) -> str | None:
+    """Re-derive the binding from disk; describe any difference."""
+    try:
+        diff = selfmod.inspect_diff(run_id)
+        current = _candidate_binding(workspace, diff.get("changed_files") or (), diff.get("diff") or "")
+    except Exception as exc:
+        return "binding could not be re-derived (%s)" % type(exc).__name__
+    if current == binding:
+        return None
+    changed = sorted(
+        rel for rel in set(current["files"]) | set(binding["files"])
+        if current["files"].get(rel) != binding["files"].get(rel)
+    )
+    if changed:
+        return "tested bytes changed for %s" % ", ".join(changed)
+    return "diff changed after testing"
+
+
+def _committed_digests(workspace: Path, expected_files: dict) -> dict:
+    """SHA-256 of each bound file as recorded in the candidate's HEAD commit."""
+    result = {}
+    for rel in expected_files:
+        completed = subprocess.run(
+            ["git", "show", "HEAD:%s" % rel], cwd=str(workspace),
+            capture_output=True, stdin=subprocess.DEVNULL, check=False, timeout=30,
+        )
+        result[rel] = hashlib.sha256(completed.stdout).hexdigest() if completed.returncode == 0 else None
+    return result
+
+
+def _reject_unbound(run_id, stage: str, mismatch: str) -> str:
+    """Fail closed when promoted bytes are not the tested bytes."""
+    try:
+        selfmod.reject(run_id, reason="binding mismatch %s: %s" % (stage, mismatch))
+    finally:
+        _discard_workspace(run_id)
+    return "candidate rejected: %s (%s)" % (mismatch, stage)
 
 
 def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
@@ -945,10 +1279,14 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
         return ("working tree dirty (%d path(s)); a run started here could not "
                 "be committed, so none was started" % len(status.splitlines()))
 
-    proposed = propose_objective(server, log, model=model, num_ctx=num_ctx)
+    proposal_deadline = time.monotonic() + min(300.0, max(60.0, float(test_timeout)))
+    proposed = propose_objective(
+        server, log, model=model, num_ctx=num_ctx, deadline=proposal_deadline,
+        return_function=True,
+    )
     if not proposed:
         return "no objective proposed"
-    target, objective = proposed
+    target, objective, function_name = proposed
     log("  objective: %s" % objective[:160])
 
     run_id = selfmod.create_plan(
@@ -968,7 +1306,7 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
         criteria=["the full test suite passes", "Python syntax compiles"],
         risk="low",
         expected_benefit="nightly autonomous improvement",
-        rollback_plan="selfmod rollback restores the immutable backup",
+        rollback_plan="selfmod rollback restores the best-effort backup",
     )
     run_id = run_id["id"] if isinstance(run_id, dict) else run_id
     log("  run: %s  target: %s" % (run_id, target))
@@ -981,16 +1319,24 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     workspace = selfmod.candidate_path(run_id)
     original = (workspace / target).read_text(encoding="utf-8", errors="replace")
 
-    edited = _ask(server, (
-        "Rewrite ONE function from this Python module so that it accomplishes\n"
-        "exactly this objective, and nothing else:\n\n    %s\n\n"
-        "Rules:\n"
-        "- Output ONLY that single function, complete, from its `def` line to\n"
-        "  its last line. Nothing before it, nothing after it, no fence.\n"
-        "- Keep its name, signature and indentation exactly as they are.\n"
-        "- Add a brief comment where you changed something, saying WHY.\n\n"
-        "=== %s ===\n%s" % (objective, target, original)
-    ), num_predict=2000, model=model, num_ctx=num_ctx)
+    try:
+        edited = _ask(
+            server,
+            _rewrite_prompt(objective, target, function_name, original),
+            num_predict=2000, model=model, num_ctx=num_ctx,
+        )
+    except Exception as error:
+        cleanup_failed = _cancel_and_discard(run_id)
+        suffix = "; cleanup failed" if cleanup_failed else ""
+        return "candidate rejected: rewrite request failed (%s)%s" % (
+            type(error).__name__, suffix,
+        )
+
+    reply_objection = _rewrite_reply_objection(edited)
+    if reply_objection:
+        cleanup_failed = _cancel_and_discard(run_id)
+        suffix = "; cleanup failed" if cleanup_failed else ""
+        return "candidate rejected: %s%s" % (reply_objection, suffix)
 
     # Splice one function back rather than accepting a whole-file rewrite.
     #
@@ -1003,7 +1349,7 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     # The fix is the one the codegen work arrived at independently: never ask a
     # model to reproduce structure it does not need to touch. It writes one
     # function; the harness owns the file.
-    edited = _splice_function(original, edited)
+    edited = _splice_function(original, edited, expected_name=function_name)
     if edited is None:
         selfmod.cancel(run_id)
         _discard_workspace(run_id)
@@ -1032,6 +1378,9 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
         return "candidate made no change"
 
     selfmod.begin_testing(run_id)
+    # Bind the bytes that will be tested to the bytes that may be promoted.
+    # Computed here, in the parent, before any candidate process runs.
+    binding = _candidate_binding(workspace, diff.get("changed_files") or (), diff.get("diff") or "")
     py = _test_python()
     results = []
     # The required kinds are "syntax" and "regression" for this unattended
@@ -1045,15 +1394,23 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     else:
         log("  lint: Ruff unavailable; Python compilation is the syntax gate")
     held_out = _prepare_held_out(target, workspace, test_timeout)
-    checks.append(("regression", _regression_command(py, ignore_paths=held_out["source_paths"])))
+    workers = _regression_workers()
+    for kind in REGRESSION_KINDS:
+        checks.append((kind, _regression_command(
+            py, ignore_paths=held_out["source_paths"], kind=kind, workers=workers)))
     checks.append(("held_out", held_out["command"]))
+    unevaluated_kind, unevaluated_reason = UNEVALUATED_PARTITION
+    log("  %s: NOT EVALUATED -- %s" % (unevaluated_kind, unevaluated_reason))
     try:
         for kind, command in checks:
             # cwd is deliberately NOT passed: the default is the candidate
             # workspace, which keeps imports and pytest collection grounded in
             # the isolated checkout.
-            outcome = selfmod.record_test(
-                run_id, kind, command, timeout=test_timeout)
+            outcome = _record_candidate_test(
+                run_id, kind, command, timeout=test_timeout,
+                protected_paths=held_out.get("protected_paths", ()) if kind == "held_out" else (),
+                isolation=_regression_isolation(kind, workers) if kind in REGRESSION_KINDS else None,
+            )
             passed = bool(outcome.get("passed")) if isinstance(outcome, dict) else bool(outcome)
             results.append((kind, passed))
             log("  %s: %s" % (kind, "pass" if passed else "FAIL"))
@@ -1077,7 +1434,13 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     # were dead code for the branch deliverable. (They fired on nothing real
     # only because two of review's checks were also structurally unsatisfiable,
     # both fixed in selfmod.py alongside this.)
-    reviewed = selfmod.review(run_id, require_kinds={"syntax", "regression", "held_out"})
+    mismatch = _binding_mismatch(run_id, workspace, binding)
+    if mismatch:
+        return _reject_unbound(run_id, "before review", mismatch)
+    reviewed = selfmod.review(
+        run_id, require_kinds={"syntax", "held_out", *REGRESSION_KINDS},
+        unevaluated=("%s: %s" % UNEVALUATED_PARTITION,),
+    )
     # A PASS lands on reviewing and may auto-advance to approved under
     # auto-low-risk; a FAIL lands on rejected/restored with last_error set.
     # Key on the failure states, not one success phase -- an earlier version
@@ -1097,6 +1460,9 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
         # deleted without touching anything. `deploy` remains the path that
         # actually installs a change; this path only makes one reviewable.
         name = "selfmod/%s" % run_id
+        mismatch = _binding_mismatch(run_id, workspace, binding)
+        if mismatch:
+            return _reject_unbound(run_id, "before commit", mismatch)
         code, out = selfmod._git(workspace, "checkout", "-B", name)
         if code:
             return "candidate tested but branch checkout failed: %s" % out[:160]
@@ -1107,16 +1473,32 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
             workspace, "commit", "-m", "selfmod: %s" % objective[:100])
         if code:
             return "candidate tested but commit failed: %s" % out[:160]
+        committed = _committed_digests(workspace, binding["files"])
+        if committed != binding["files"]:
+            # Never leave a branch whose bytes were not the tested bytes.
+            selfmod._git(workspace, "checkout", "--detach")
+            selfmod._git(workspace, "branch", "-D", name)
+            return _reject_unbound(
+                run_id, "after commit",
+                "committed bytes differ from tested bytes on %s (branch deleted)" % name)
         _, sha = selfmod._git(workspace, "rev-parse", "--short", "HEAD")
-        return "COMMITTED %s to %s (%s) -- review: git log -p %s" % (
-            sha.strip(), name, target, name)
+        return ("COMMITTED %s to %s (%s) -- %s NOT EVALUATED, human review "
+                "required: git log -p %s" % (sha.strip(), name, target,
+                                             unevaluated_kind, name))
 
-    if mode != "auto-low-risk":
-        return ("candidate READY for review: %s -- %s | approve with "
-                "/selfmod approve %s" % (run_id, target, run_id))
+    # Unattended promotion requires every partition to have been evaluated.
+    # The medium-integrity partition never is, so this stage stops for a
+    # human regardless of mode.
+    if mode != "auto-low-risk" or unevaluated_kind:
+        return ("candidate READY for review: %s -- %s | %s NOT EVALUATED | "
+                "approve with /selfmod approve %s" % (
+                    run_id, target, unevaluated_kind, run_id))
 
+    mismatch = _binding_mismatch(run_id, workspace, binding)
+    if mismatch:
+        return _reject_unbound(run_id, "before deploy", mismatch)
     selfmod.approve(run_id, approver="nightly")
-    selfmod.deploy(run_id)
+    selfmod.deploy(run_id, expected_digests=binding["files"])
     run = selfmod.get_run(run_id)
     return "DEPLOYED %s to %s (commit %s)" % (
         run_id, target, (run.get("deployed_commit") or "")[:10] or "none")

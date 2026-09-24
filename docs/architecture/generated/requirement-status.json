@@ -1272,9 +1272,9 @@
     },
     {
       "checked": false,
-      "claim": "Isolated candidate execution is wired through the live typed selfmod bridge and rejects a candidate workspace that resolves to the live repository.",
+      "claim": "Tested-bytes digests are persisted in the selfmod database when testing begins. Review rejects runs whose bytes differ from the record, and every deploy (unattended or later human approval) requires the record and verifies the candidate bytes before the copy and the installed bytes after it. A committed-blob mismatch rejects the run and deletes its branch. An overlong child working directory is refused up front.",
       "requirement_id": "SELFMOD-002",
-      "revision": 2,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "66790e96e6aeda17f4d36a3e9a5095571e68adb404eed8803df3fe5b35afc884",
+    "ledger_sha256": "b6a5e472c2dd2e803ca47a3251b3bf6573f74daca73c36bf83a1cfeef660ce8d",
     "spec_sha256": "ed5ab01393d72681fc4eb4b9581e832d3d07ee95595b8b58dfe094c9e7dbf4fa"
   }
 }

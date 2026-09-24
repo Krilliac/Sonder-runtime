@@ -12,6 +12,15 @@ import engine_bundle
 from scripts import assemble_engine_bundle as assembler
 
 
+def test_runtime_contract_filters_platform_marked_wheels():
+    pins = assembler._runtime_contract_pins()
+    names = assembler._runtime_contract_names()
+    assert ("pywin32" in pins) is (sys.platform == "win32")
+    assert ("pywin32" in names) is (sys.platform == "win32")
+    if sys.platform == "win32":
+        assert pins["pywin32"] == "312"
+
+
 def _model(store: Path, name: str, seed: bytes) -> None:
     manifest_rel = assembler._model_manifest_relative(name)
     config = b"config-" + seed
