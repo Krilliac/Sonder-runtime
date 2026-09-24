@@ -247,4 +247,3 @@ pass now (10 new tests, red before and green after):
 The full-baseline numbers above were measured at `1eb3ee25`. Because the
 medium partition no longer runs against the candidate, its "24 passed" row
 describes the trusted checkout only. It is not candidate evidence.
-
