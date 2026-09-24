@@ -4,7 +4,10 @@ All evaluators here are deterministic in-process fakes; no model is invoked.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import time
 
 import pytest
 
@@ -174,7 +177,7 @@ def test_minimized_failure_round_trips_and_rejects_tampering() -> None:
 
 def test_budget_exhaustion_is_reported_and_nondeterminism_is_refused() -> None:
     expected = _recorded_session()
-    partial = minimize_failure(expected, _candidate, baseline_factory=_fixed_candidate, max_evaluations=2)
+    partial = minimize_failure(expected, _candidate, baseline_factory=_fixed_candidate, max_evaluations=4)
     assert not partial.one_minimal and partial.strategy == STRATEGY_DIFFERENTIAL
     assert reproduce(partial, _candidate) is not None
 
@@ -197,8 +200,17 @@ def test_policy_validation_fails_closed() -> None:
         DivergencePolicy(ignored_paths=("a..b",))
     with pytest.raises(DivergenceError):
         DivergencePolicy(decision_paths=("y", "y"))
-    policy = DivergencePolicy(fields=("output", "state"), ignored_paths=("meta.ts",))
+    policy = DivergencePolicy(ignored_paths=("meta.ts",))
     assert DivergencePolicy.from_dict(policy.as_dict()) == policy
+
+
+def test_state_is_not_offered_as_a_decision_field() -> None:
+    # Replay copies recorded step state into the candidate, so a state
+    # "divergence" could never be observed; offering it would be a silent no-op.
+    with pytest.raises(DivergenceError):
+        DivergencePolicy(fields=("state",))
+    with pytest.raises(DivergenceError):
+        DivergencePolicy(fields=("output", "state"))
 
 
 def test_json_store_retains_reloads_and_refuses_tampered_records(tmp_path) -> None:
@@ -243,3 +255,84 @@ def test_service_minimizes_retains_and_replays_regressions(tmp_path) -> None:
     assert service.retained_failures() == (failure.digest,)
     assert service.reproduce_retained_failure(failure.digest, _candidate) == failure.divergence
     assert service.reproduce_retained_failure(failure.digest, _fixed_candidate) is None
+
+
+def _record_digest(payload) -> str:
+    unsigned = {key: value for key, value in payload.items() if key != "failure_digest"}
+    encoded = json.dumps(unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def test_load_rechecks_the_divergence_against_the_stored_steps() -> None:
+    # The record digest is plain SHA-256: an editor can recompute it.  Loading
+    # must still refuse a divergence that the stored steps do not support.
+    failure = minimize_failure(_recorded_session(), _candidate, baseline_factory=_fixed_candidate)
+    payload = json.loads(json.dumps(failure.as_dict()))
+    payload["divergence"]["expected_digest"] = "0" * 64
+    payload["failure_digest"] = _record_digest(payload)
+    with pytest.raises(DivergenceError, match="divergence"):
+        MinimizedFailure.from_dict(payload)
+    payload = json.loads(json.dumps(failure.as_dict()))
+    payload["divergence"]["index"] = 0
+    payload["failure_digest"] = _record_digest(payload)
+    with pytest.raises(DivergenceError, match="divergence"):
+        MinimizedFailure.from_dict(payload)
+
+
+def test_evaluation_budget_is_a_hard_ceiling_including_checks() -> None:
+    expected = _recorded_session()
+    for budget in (4, 5, 8, 64):
+        failure = minimize_failure(expected, _candidate, baseline_factory=_fixed_candidate, max_evaluations=budget)
+        assert failure.evaluations <= budget
+    assert minimize_failure(expected, _candidate, max_evaluations=3).evaluations <= 3
+    with pytest.raises(DivergenceError, match="max_evaluations"):
+        minimize_failure(expected, _candidate, baseline_factory=_fixed_candidate, max_evaluations=3)
+    with pytest.raises(DivergenceError, match="max_evaluations"):
+        minimize_failure(expected, _candidate, max_evaluations=2)
+
+
+class _TwoBugSession(_KeyValueSession):
+    """Also answers a missing key with a sentinel: a second, unrelated bug."""
+
+    def __call__(self, request):
+        result = super().__call__(request)
+        if request["op"] == "get" and result.get("value") is None:
+            return {"value": "MISSING"}
+        return result
+
+
+def test_minimization_preserves_the_originally_reported_divergence() -> None:
+    expected = _recorded_session()
+    candidate = lambda: _TwoBugSession(truncate=True)  # noqa: E731
+    original = replay_divergence(expected, candidate)
+    assert original is not None and original.index == 6
+    failure = minimize_failure(expected, candidate, baseline_factory=_fixed_candidate)
+    # Dropping the put would surface the unrelated missing-key bug at the same
+    # step; the minimizer must keep reproducing the truncation instead.
+    assert failure.source_indexes == (0, 3, 6)
+    assert failure.source_indexes[-1] == original.index
+    assert (failure.divergence.expected_digest, failure.divergence.actual_digest) == (
+        original.expected_digest, original.actual_digest,
+    )
+
+
+def test_file_store_cleans_stale_temporaries_and_serializes_writers(tmp_path) -> None:
+    directory = tmp_path / "failures"
+    directory.mkdir()
+    stale = directory / ("a" * 64 + ".json.orphan.tmp")
+    stale.write_text("partial", encoding="utf-8")
+    old = time.time() - 3_600
+    os.utime(stale, (old, old))
+    fresh = directory / ("b" * 64 + ".json.inflight.tmp")
+    fresh.write_text("partial", encoding="utf-8")
+    store = JsonMinimizedFailureStore(directory, lock_timeout_seconds=0.2)
+    failure = minimize_failure(_recorded_session(), _candidate, baseline_factory=_fixed_candidate)
+    store.retain(failure)
+    assert not stale.exists(), "stale temporary files must be cleaned"
+    assert fresh.exists(), "a recent temporary may belong to a live writer"
+
+    other = minimize_failure(_noisy_trajectory(), _noisy_candidate, DivergencePolicy(ignored_paths=("latency_ms",)))
+    (directory / ".lock").write_text("held", encoding="utf-8")
+    with pytest.raises(DivergenceError, match="lock"):
+        store.retain(other)
+    assert store.digests() == (failure.digest,)

@@ -12,6 +12,7 @@ from typing import Mapping, Protocol
 
 from ..ports.session_repository import SessionEvent
 from .proposal_lifecycle import (
+    EvaluationMode,
     EvaluationResult,
     EvaluationSuite,
     Proposal,
@@ -76,6 +77,12 @@ class EvaluationLifecycleService:
                      observation_id=observation.observation_id, mode=observation.mode.value,
                      healthy=observation.healthy)
         return observation
+
+    def recorded_results(self, proposal_id: str) -> tuple[EvaluationResult, ...]:
+        return self.lifecycle.recorded_results(proposal_id)
+
+    def recorded_observation(self, proposal_id: str, mode: EvaluationMode) -> ShadowCanaryObservation | None:
+        return self.lifecycle.recorded_observation(proposal_id, mode)
 
     def build_promotion_evidence(self, proposal_id: str, **kwargs: object) -> PromotionEvidence:
         evidence = self.lifecycle.build_promotion_evidence(proposal_id, **kwargs)

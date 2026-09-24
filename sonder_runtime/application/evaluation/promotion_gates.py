@@ -232,7 +232,14 @@ def evaluate_promotion_gate(
 
     Offline results must carry a ``pass_rate`` metric whose product with
     ``sample_count`` is an integral success count; anything else is refused
-    rather than rounded into a pass.  Samples are pooled across results.
+    rather than rounded into a pass.  Samples are pooled across results, so
+    every result must have a distinct ``result_id`` and share one candidate,
+    baseline, and suite digest.
+
+    This function trusts its inputs.  Promotion callers should use
+    ``EvaluationApplicationService.gated_promotion_evidence``, which recomputes
+    the decision from lifecycle-recorded results under the kind bound at
+    proposal creation instead of accepting a caller-built decision.
     """
     if not isinstance(policy, PromotionGatePolicy):
         raise PromotionGateError("policy is invalid")
@@ -242,11 +249,22 @@ def evaluate_promotion_gate(
     if baseline_pass_rate is not None:
         baseline_pass_rate = _rate(baseline_pass_rate, "baseline_pass_rate")
     offline: list[EvaluationResult] = []
+    seen: set[str] = set()
     for result in results:
         if not isinstance(result, EvaluationResult):
             raise PromotionGateError("results must be EvaluationResult values")
+        if result.result_id in seen:
+            raise PromotionGateError(f"duplicate result_id {result.result_id!r} would inflate the sample count")
+        seen.add(result.result_id)
         if result.mode is EvaluationMode.OFFLINE:
             offline.append(result)
+    if results:
+        anchor = results[0]
+        for result in results[1:]:
+            if result.candidate != anchor.candidate or result.baseline != anchor.baseline:
+                raise PromotionGateError("results for different candidates or baselines cannot be pooled")
+            if result.suite.digest != anchor.suite.digest:
+                raise PromotionGateError("results from different suite digests cannot be pooled")
     samples = 0
     successes = 0
     for result in offline:

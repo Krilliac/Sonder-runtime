@@ -157,9 +157,40 @@ def test_policy_and_table_validation() -> None:
         )
 
 
-def _proposal_through_canary(service: EvaluationApplicationService, proposal_id: str, offline):
+def test_wilson_lower_bound_is_pinned_at_an_interior_rate() -> None:
+    # p = 0.9 exercises the p(1 - p) term, which vanishes at p = 1.
+    assert math.isclose(wilson_lower_bound(27, 30, 0.95), 0.77450, abs_tol=5e-6)
+
+
+def test_duplicate_result_ids_cannot_inflate_samples() -> None:
+    policy = DEFAULT_PROMOTION_GATE_POLICIES[PromotionKind.PROMPT]
+    copies = [_result("r1", 10, 10)] * 3
+    with pytest.raises(PromotionGateError, match="duplicate"):
+        evaluate_promotion_gate(policy, results=copies, shadow=SHADOW, canary=CANARY)
+
+
+def test_results_for_other_candidates_or_suites_are_not_pooled() -> None:
+    policy = DEFAULT_PROMOTION_GATE_POLICIES[PromotionKind.PROMPT]
+    other = EvaluationResult(
+        "r2", SUITE, "someone-else", "baseline", EvaluationMode.OFFLINE, SUITE.dimensions,
+        {"pass_rate": 1.0}, True, 20, replay_equivalent=True,
+    )
+    with pytest.raises(PromotionGateError, match="candidate"):
+        evaluate_promotion_gate(policy, results=[_result("r1", 20, 20), other], shadow=SHADOW, canary=CANARY)
+    suite_b = EvaluationSuite("prompt-quality", "v2", (EvaluationDimension("split", "holdout"),), ("pass_rate",))
+    moved = EvaluationResult(
+        "r3", suite_b, "candidate", "baseline", EvaluationMode.OFFLINE, suite_b.dimensions,
+        {"pass_rate": 1.0}, True, 20, replay_equivalent=True,
+    )
+    with pytest.raises(PromotionGateError, match="suite"):
+        evaluate_promotion_gate(policy, results=[_result("r1", 20, 20), moved], shadow=SHADOW, canary=CANARY)
+
+
+def _proposal_through_canary(
+    service: EvaluationApplicationService, proposal_id: str, offline, kind: PromotionKind | None = PromotionKind.PROMPT,
+):
     service.register_suite(SUITE)
-    service.create_proposal(proposal_id, "candidate", "baseline", SUITE)
+    service.create_proposal(proposal_id, "candidate", "baseline", SUITE, kind=kind)
     service.submit(proposal_id)
     service.begin_evaluation(proposal_id)
     for result in offline:
@@ -170,26 +201,86 @@ def _proposal_through_canary(service: EvaluationApplicationService, proposal_id:
     service.record_observation(proposal_id, CANARY)
 
 
-def test_service_binds_the_mechanical_decision_into_promotion_approval() -> None:
-    service = EvaluationApplicationService(corpus=BoundedEvaluationCorpusScanner([]), lifecycle=ProposalLifecycle())
+def _service() -> EvaluationApplicationService:
+    return EvaluationApplicationService(corpus=BoundedEvaluationCorpusScanner([]), lifecycle=ProposalLifecycle())
 
-    thin = [_result("thin", 5, 5)]
-    _proposal_through_canary(service, "p-thin", thin)
-    refused = service.evaluate_promotion_gate(PromotionKind.PROMPT, results=thin, shadow=SHADOW, canary=CANARY)
-    evidence = service.gated_promotion_evidence(
-        "p-thin", refused, holdout_passed=True, rollback_reference="baseline", provenance=("ci",),
+
+def _gate(service: EvaluationApplicationService, proposal_id: str):
+    return service.gated_promotion_evidence(
+        proposal_id, baseline_pass_rate=None, case_regressions=0,
+        holdout_passed=True, rollback_reference="baseline", provenance=("ci",),
     )
-    assert not evidence.accepted
-    assert evidence.provenance[-1] == f"promotion-gate:prompt:{refused.digest}"
+
+
+def test_service_recomputes_the_gate_from_lifecycle_recorded_results() -> None:
+    service = _service()
+    _proposal_through_canary(service, "p-thin", [_result("thin", 5, 5)])
+    evidence = _gate(service, "p-thin")
+    decision = service.promotion_gate_decision("p-thin", baseline_pass_rate=None, case_regressions=0)
+    assert not evidence.accepted and not decision.passed
+    assert decision.result_ids == ("thin",)
+    assert evidence.provenance[-1] == f"promotion-gate:prompt:{decision.digest}"
     with pytest.raises(EvaluationLifecycleError, match="rejected"):
         service.approve("p-thin", evidence.digest)
 
-    ample = [_result("ample", 40, 40)]
-    _proposal_through_canary(service, "p-ample", ample)
-    accepted = service.evaluate_promotion_gate(PromotionKind.PROMPT, results=ample, shadow=SHADOW, canary=CANARY)
-    evidence = service.gated_promotion_evidence(
-        "p-ample", accepted, holdout_passed=True, rollback_reference="baseline", provenance=("ci",),
-    )
+    _proposal_through_canary(service, "p-ample", [_result("ample", 40, 40)])
+    evidence = _gate(service, "p-ample")
     assert evidence.accepted
     assert service.approve("p-ample", evidence.digest).state is ProposalState.READY_FOR_PROMOTION
     assert service.promote("p-ample", evidence.digest, attended=True).state is ProposalState.PROMOTED
+
+
+def test_gate_uses_the_kind_bound_at_proposal_creation() -> None:
+    # 40/40 clears the PROMPT policy but not SELFMOD (60 samples, 0.95 bound).
+    # The caller cannot choose a laxer kind at evidence time.
+    service = _service()
+    _proposal_through_canary(service, "p-self", [_result("ample", 40, 40)], kind=PromotionKind.SELFMOD)
+    decision = service.promotion_gate_decision("p-self", baseline_pass_rate=None, case_regressions=0)
+    assert decision.kind is PromotionKind.SELFMOD
+    assert "gate_failed:sample_size" in decision.reason_codes
+    assert not _gate(service, "p-self").accepted
+
+
+def test_a_caller_constructed_decision_cannot_back_promotion() -> None:
+    service = _service()
+    _proposal_through_canary(service, "p-self", [_result("ample", 40, 40)], kind=PromotionKind.SELFMOD)
+    forged = evaluate_promotion_gate(
+        DEFAULT_PROMOTION_GATE_POLICIES[PromotionKind.PROMPT], results=[_result("ample", 40, 40)],
+        shadow=SHADOW, canary=CANARY,
+    )
+    assert forged.passed
+    with pytest.raises(TypeError):
+        service.gated_promotion_evidence(  # type: ignore[call-arg]
+            "p-self", forged, holdout_passed=True, rollback_reference="baseline", provenance=("ci",),
+        )
+
+
+def test_kind_bound_proposals_refuse_the_ungated_evidence_path() -> None:
+    service = _service()
+    lifecycle = ProposalLifecycle()
+    service = EvaluationApplicationService(corpus=BoundedEvaluationCorpusScanner([]), lifecycle=lifecycle)
+    _proposal_through_canary(service, "p1", [_result("ample", 40, 40)])
+    with pytest.raises(PromotionGateError, match="gated"):
+        service.promotion_evidence(
+            "p1", gate_results={"quality": True}, replay_equivalent=True,
+            holdout_passed=True, rollback_reference="baseline", provenance=("ci",),
+        )
+    bypass = lifecycle.build_promotion_evidence(
+        "p1", gate_results={"quality": True}, replay_equivalent=True,
+        holdout_passed=True, rollback_reference="baseline", provenance=("ci",),
+    )
+    assert bypass.accepted
+    with pytest.raises(PromotionGateError, match="gated"):
+        service.approve("p1", bypass.digest)
+
+
+def test_legacy_unkinded_proposals_warn_on_the_ungated_path() -> None:
+    service = _service()
+    _proposal_through_canary(service, "legacy", [_result("ample", 40, 40)], kind=None)
+    with pytest.warns(DeprecationWarning, match="ungated"):
+        service.promotion_evidence(
+            "legacy", gate_results={"quality": True}, replay_equivalent=True,
+            holdout_passed=True, rollback_reference="baseline", provenance=("ci",),
+        )
+    with pytest.raises(PromotionGateError, match="kind"):
+        _gate(service, "legacy")
