@@ -146,6 +146,18 @@ class ManagedConversationLifetime:
                 repository=repository,
             )
 
+    def persist_learning_observation_durable(
+        self, expected_turn, *, verifier_factory, eligibility=None,
+    ):
+        with self._lock:
+            self._require_current()
+            if self._owner is None:
+                raise PermissionError("current attached host owner required")
+            return self._owner.persist_learning_observation_durable(
+                expected_turn, verifier_factory=verifier_factory,
+                eligibility=eligibility,
+            )
+
     def close(self):
         with self._lock:
             if self._released:
