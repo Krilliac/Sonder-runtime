@@ -62,6 +62,10 @@ class SessionRepository(Protocol):
         self, session_id: str, *, limit: int = 1_000
     ) -> tuple[SessionEvent, ...]: ...
 
+    def read_complete(
+        self, session_id: str, *, max_events: int = 10_000
+    ) -> tuple[SessionEvent, ...]: ...
+
     def search(
         self,
         *,
