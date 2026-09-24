@@ -1,5 +1,11 @@
 # Adaptive weight training in Sonder Runtime
 
+> **Contract scope:** this focused contract describes current behavior. Unfinished
+> implementation work is tracked in the
+> [master implementation specification](docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md); the
+> [behavior status](#behavior-status) table labels what is implemented,
+> experimental, proposed, degraded, or unsupported.
+
 Sonder Runtime can orchestrate real local LoRA adapter training, but Sonder is
 not a foundation model and does not contain base-model weights. The components
 have separate responsibilities:
@@ -99,9 +105,9 @@ dataset bounds violations abort the run instead of silently dropping examples.
 current bitsandbytes/Trainer backend rejects it. Hugging Face documents the
 available `device_map="auto"` mechanism as an inference-only path, so Sonder
 Runtime does not present it as safe QLoRA training or silently attempt it.
-Select a smaller GPU-resident plan instead. CPU offload can be enabled in a
-future backend only after that backend has a supported implementation and
-attended validation coverage.
+Select a smaller GPU-resident plan instead. CPU-offloaded training is
+unsupported; the planner reports the offload request as rejected rather than
+approximating it.
 
 Training dependencies are intentionally separate:
 
@@ -255,3 +261,21 @@ training-state commit. A process stop restores the prior policy unless the state
 contains the matching commit witness; ordinary policy writers cannot interleave
 between those two commits. Rollback intentionally leaves the personal model and
 all training artifacts in place for diagnosis or redeployment.
+
+## Behavior status
+
+Labels follow the [documentation status vocabulary](docs/architecture/DOCUMENT-AUTHORITY-INDEX.md#documentation-status-vocabulary). Unfinished
+implementation work is tracked only in the
+[master implementation specification](docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md).
+
+| Behavior | Status | Boundary |
+|---|---|---|
+| Attended QLoRA adapter training | Implemented | Explicit foreground command only; never started by bootstrap, Autopilot, cron, or a fleet (CORE-007). |
+| Qwen adapter GGUF conversion, evaluation canary, and Ollama deployment | Implemented | Pinned llama.cpp commit and bounded held-out canary; not a general capability benchmark. |
+| Native Windows bitsandbytes training | Degraded | Supported but less reliable than WSL2. |
+| CPU offload during training (`--allow-cpu-offload`) | Unsupported | The current bitsandbytes/Trainer backend rejects it. |
+| Full-parameter (dense) training start | Unsupported | `--full-finetune` produces a feasibility report only. |
+| Importing arbitrary external adapters through `--adapter-dir` | Unsupported | Only the adapter bound to the current trusted training state is accepted. |
+| Silent CPU training | Unsupported | Training refuses to fall back to CPU. |
+| Local QLoRA without a supported NVIDIA CUDA runtime | Unsupported | The bitsandbytes path is disabled on other GPU vendors and CPU-only hosts. |
+| Task, project, and personalization adapter catalog with explicit composition rules | Proposed | TRAIN-007; deterministic catalog compatibility checks are a foundation, not the complete contract. |
