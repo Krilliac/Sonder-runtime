@@ -829,3 +829,104 @@ def test_p3_kill_switch_documented_off_values(monkeypatch, value, caplog):
     with caplog.at_level("WARNING"):
         assert master_orchestrator.adaptive_concurrency_enabled() is False
     assert caplog.text == ""
+
+
+# --- re-review fixes (PR #552 @ 2943664d): each failed before its fix -------
+
+
+def test_rr1_lane_admitted_but_never_submitted_is_abandoned(monkeypatch):
+    real_pool = master_orchestrator.ThreadPoolExecutor
+
+    class BrokenPool(real_pool):
+        submits = 0
+
+        def submit(self, *args, **kwargs):
+            BrokenPool.submits += 1
+            if BrokenPool.submits == 2:
+                raise RuntimeError("cannot schedule new futures after shutdown")
+            return super().submit(*args, **kwargs)
+
+    monkeypatch.setattr(master_orchestrator, "ThreadPoolExecutor", BrokenPool)
+    scheduler = _scheduler([LaneClaim(name) for name in ("a", "b", "c")], 2)
+    abandoned = []
+
+    with pytest.raises(RuntimeError, match="cannot schedule"):
+        master_orchestrator.dispatch_lanes(
+            scheduler, 2, lambda lane, sink: lane, lambda lane, result: None,
+            lambda lane, exc: None, on_abandon=abandoned.append,
+        )
+
+    # b was admitted (marked running) but never got a future; c never started.
+    assert abandoned == ["b", "c"]
+
+
+def test_rr2_error_handler_failure_is_logged_counted_and_lane_closed(caplog):
+    scheduler = _scheduler([LaneClaim("a"), LaneClaim("b")], 1)
+    abandoned = []
+
+    def run_lane(lane_id, _sink):
+        if lane_id == "a":
+            raise RuntimeError("worker boom")
+        return "ok"
+
+    def on_error(_lane, _exc):
+        raise OSError("fleet store down: database is locked\n" + "x" * 5000)
+
+    with caplog.at_level("WARNING"):
+        master_orchestrator.dispatch_lanes(
+            scheduler, 1, run_lane, lambda lane, result: None, on_error,
+            on_abandon=abandoned.append,
+        )
+
+    assert abandoned == ["a"]
+    assert scheduler.summary()["handler_failures"] == 1
+    record = next(r for r in caplog.records if "fleet lane a" in r.getMessage())
+    message = record.getMessage()
+    assert "fleet store down: database is locked" in message
+    assert "\n" not in message and len(message) < 400
+
+
+def test_rr2_collect_failure_is_counted_but_worker_closed_row_is_not_reclosed(caplog):
+    scheduler = _scheduler([LaneClaim("a")], 1)
+    abandoned = []
+
+    def collect(_lane, _result):
+        raise ValueError("bad readiness record")
+
+    with caplog.at_level("WARNING"):
+        master_orchestrator.dispatch_lanes(
+            scheduler, 1, lambda lane, sink: "ok", collect,
+            lambda lane, exc: None, on_abandon=abandoned.append,
+        )
+
+    assert abandoned == []
+    assert scheduler.summary()["handler_failures"] == 1
+    assert "bad readiness record" in caplog.text
+
+
+def test_rr2_run_delegated_releases_reserved_slot_when_store_stays_down(monkeypatch):
+    monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda requested: 1)
+    real_finish = master_orchestrator._finish
+    doomed = {}
+
+    def worker(prompt):
+        if "subagent 1/" in prompt:
+            raise ValueError("permanent worker failure")
+        return "ok"
+
+    def finish(agent_id, *args, **kwargs):
+        if kwargs.get("error") and not doomed:
+            doomed["id"] = agent_id
+        if doomed.get("id") == agent_id:
+            raise OSError("fleet store down")
+        return real_finish(agent_id, *args, **kwargs)
+
+    monkeypatch.setattr(master_orchestrator, "_finish", finish)
+    before = master_orchestrator.reserved_slot_count()
+    result = master_orchestrator.run_delegated(
+        "fan out", worker_fn=worker, audit_fn=lambda prompt: "merged", agents=3,
+    )
+
+    assert result["output"] == "merged"
+    assert result["concurrency"]["handler_failures"] == 1
+    assert master_orchestrator.reserved_slot_count() == before
