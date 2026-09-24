@@ -169,6 +169,41 @@ def _runtime_layout(runtime_venv=None):
             Path(runtime_venv) / "Lib" / "site-packages", profile)
 
 
+def base_runtime_files(base):
+    """Inventory base binaries, omitting only known aliases of inventoried files.
+
+    setup-python's Windows CPython exposes python3.exe as a reparse alias of
+    python.exe. The owner launches the ordinary interpreter directly; hashing
+    the target covers those bytes. An unrelated alias must not widen the
+    trusted runtime closure or silently escape it.
+    """
+    base = Path(base)
+    result = []
+    aliases = {"python3.exe": "python.exe", "python3w.exe": "pythonw.exe"}
+    for path in sorted(base.iterdir()):
+        if path.suffix.lower() not in (".dll", ".exe", ".zip"):
+            continue
+        info = path.lstat()
+        if path.is_symlink() or getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+            target_name = aliases.get(path.name.lower())
+            target = base / target_name if target_name else None
+            try:
+                recognized = (target is not None
+                              and path.resolve(strict=True) == target.resolve(strict=True))
+            except (OSError, RuntimeError):
+                recognized = False
+            if not recognized:
+                raise OwnerRefused("runtime artifact contains an unrecognized reparse path")
+            if not stat.S_ISREG(plain(target).st_mode):
+                raise OwnerRefused("runtime interpreter alias target is not an ordinary file")
+            continue
+        if stat.S_ISREG(info.st_mode):
+            result.append(path)
+        else:
+            raise OwnerRefused("runtime base binary is not an ordinary file")
+    return tuple(result)
+
+
 class RuntimePayload:
     def __init__(self, root, *, create=False, writable_roots=(), runtime_venv=None):
         self.root = Path(root).absolute()
@@ -206,7 +241,7 @@ class RuntimePayload:
                 raise OwnerRefused("pywin32 system directory is not a directory")
             dll_paths.append(str(system_dll.resolve()))
         external = [(str(base / "Lib"), True), (str(base / "DLLs"), False), (str(dependencies), False)]
-        external += [(str(path), False) for path in sorted(base.iterdir()) if path.is_file() and path.suffix.lower() in (".dll", ".exe", ".zip")]
+        external += [(str(path), False) for path in base_runtime_files(base)]
         if not any(Path(path) == executable for path, _ in external):
             raise OwnerRefused("interpreter is outside declared closure")
         disjoint((source, base, dependencies, *((runtime_venv,) if runtime_venv else ())), writable_roots)

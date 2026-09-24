@@ -8,7 +8,12 @@ on:
       - 'sonder_runtime/adapters/execution/managed_runtime_*'
       - 'tests/test_managed_runtime_*'
       - 'tests/test_runtime_payload_budget.py'
+      - 'tests/_managed_runtime_layout.py'
+      - 'requirements-runtime.txt'
+      - 'requirements-dev.txt'
       - '.github/workflows/managed-runtime-profile.yml'
+      - '.github/workflows/build-apps.yml'
+  workflow_call:
   workflow_dispatch:
 
 permissions:

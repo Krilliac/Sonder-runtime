@@ -46,11 +46,7 @@ def require_bounded_real_runtime_closure():
     dependencies = Path(sys.prefix).resolve() / "Lib" / "site-packages"
     external = [(str(base / "Lib"), True), (str(base / "DLLs"), False),
                 (str(dependencies), False)]
-    external.extend(
-        (str(path), False)
-        for path in base.iterdir()
-        if path.is_file() and path.suffix.lower() in (".dll", ".exe", ".zip")
-    )
+    external.extend((str(path), False) for path in runtime_payload.base_runtime_files(base))
     try:
         planned = runtime_payload.preflight(external)
     except OwnerRefused as exc:

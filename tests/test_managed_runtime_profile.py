@@ -1,6 +1,7 @@
 """The dedicated managed profile is selected and validated by the host."""
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -29,7 +30,10 @@ def _installation(tmp_path):
         f"home = {base}\ninclude-system-site-packages = false\n",
         encoding="utf-8",
     )
-    for name, version in (("mcp", "2.0.0"), ("cryptography", "50.0.0")):
+    packages = (("mcp", "2.0.0"), ("cryptography", "50.0.0"))
+    if sys.platform == "win32":
+        packages += (("pywin32", "312"),)
+    for name, version in packages:
         dist = site / f"{name}-{version}.dist-info"
         dist.mkdir()
         (dist / "METADATA").write_text(
@@ -44,9 +48,10 @@ def test_sealed_profile_rejects_later_package_changes(tmp_path):
     kwargs = {"source": source, "base": base, "executable": executable}
     marker = runtime_profile.seal_installed_profile(root=root, **kwargs)
     assert runtime_profile.profile_files(root, **kwargs)[0] == str(marker)
-    assert json.loads(marker.read_text(encoding="utf-8"))["packages"] == {
-        "cryptography": "50.0.0", "mcp": "2.0.0",
-    }
+    expected = {"cryptography": "50.0.0", "mcp": "2.0.0"}
+    if sys.platform == "win32":
+        expected["pywin32"] = "312"
+    assert json.loads(marker.read_text(encoding="utf-8"))["packages"] == expected
     extra = site / "torch-9.0.dist-info"
     extra.mkdir()
     (extra / "METADATA").write_text("Name: torch\nVersion: 9.0\n", encoding="utf-8")

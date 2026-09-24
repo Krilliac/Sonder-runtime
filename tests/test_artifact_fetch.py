@@ -17,11 +17,13 @@ Windows Authenticode shell-out (so the publisher checks run on any host).
 from __future__ import annotations
 
 import http.server
+import io
 import json
 import ntpath
 import os
 import threading
 import urllib.parse
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -39,7 +41,10 @@ pytestmark = pytest.mark.unit
 
 
 PE_BODY = b"MZ\x90\x00\x03\x00\x00\x00" + b"\x00" * 500 + b"PE\x00\x00" + b"\xcc" * 2048
-ZIP_BODY = b"PK\x03\x04" + b"\x00" * 600
+_zip_fixture = io.BytesIO()
+with zipfile.ZipFile(_zip_fixture, "w", compression=zipfile.ZIP_STORED) as _archive:
+    _archive.writestr("fixture.bin", bytes(1024))
+ZIP_BODY = _zip_fixture.getvalue()
 PNG_BODY = b"\x89PNG\r\n\x1a\n" + b"\x00" * 4096
 
 AKAMAI_BLOCK = (
@@ -166,33 +171,33 @@ def _failed(result, check):
 # --- happy path -----------------------------------------------------------
 
 
-def test_good_binary_download_verifies_and_writes_provenance(
+def test_good_archive_download_verifies_and_writes_provenance(
     fixture_server, tmp_path,
 ):
-    url = fixture_server.route("/setup.exe", body=PE_BODY)
-    dest = tmp_path / "setup.exe"
+    url = fixture_server.route("/setup.zip", body=ZIP_BODY)
+    dest = tmp_path / "setup.zip"
 
-    result = artifact_fetch.fetch_artifact(url, str(dest), expect_type="pe")
+    result = artifact_fetch.fetch_artifact(url, str(dest), expect_type="zip")
 
     assert result["ok"], result["failures"]
     assert result["verdict"] == "verified"
     assert dest.exists()
-    assert dest.read_bytes() == PE_BODY
-    assert result["bytes"] == len(PE_BODY)
-    assert result["detected_type"] == "pe"
+    assert dest.read_bytes() == ZIP_BODY
+    assert result["bytes"] == len(ZIP_BODY)
+    assert result["detected_type"] == "zip"
     assert result["sha256"] == artifact_fetch.file_sha256(dest)
     assert not artifact_fetch._part_path(dest).exists()
 
     sidecar = Path(result["provenance_path"])
-    assert sidecar.name == "setup.exe.provenance.json"
+    assert sidecar.name == "setup.zip.provenance.json"
     record = json.loads(sidecar.read_text(encoding="utf-8"))
     assert record["url"] == url
     assert record["final_url"] == url
     assert record["sha256"] == result["sha256"]
-    assert record["bytes"] == len(PE_BODY)
+    assert record["bytes"] == len(ZIP_BODY)
     assert record["http_status"] == 200
     assert record["content_type"] == "application/octet-stream"
-    assert record["detected_type"] == "pe"
+    assert record["detected_type"] == "zip"
     assert record["verified"] is True
     assert record["verdict"] == "verified"
     assert "signature_status" in record and "publisher" in record
@@ -626,16 +631,16 @@ def test_authenticode_process_ignores_inherited_powershell_module_path(monkeypat
 
 
 def test_redirect_chain_is_recorded(fixture_server, tmp_path):
-    final = fixture_server.route("/cdn/final.exe", body=PE_BODY)
+    final = fixture_server.route("/cdn/final.zip", body=ZIP_BODY)
     middle = fixture_server.route(
-        "/mirror.exe", status=302, body=b"", headers={"Location": final},
+        "/mirror.zip", status=302, body=b"", headers={"Location": final},
     )
     start = fixture_server.route(
-        "/download.exe", status=301, body=b"", headers={"Location": middle},
+        "/download.zip", status=301, body=b"", headers={"Location": middle},
     )
-    dest = tmp_path / "download.exe"
+    dest = tmp_path / "download.zip"
 
-    result = artifact_fetch.fetch_artifact(start, str(dest), expect_type="pe")
+    result = artifact_fetch.fetch_artifact(start, str(dest), expect_type="zip")
 
     assert result["ok"], result["failures"]
     assert result["final_url"] == final
@@ -664,45 +669,45 @@ def test_redirect_without_location_is_rejected(fixture_server, tmp_path):
 
 
 def test_resume_appends_to_an_existing_partial(fixture_server, tmp_path):
-    url = fixture_server.route("/resume.exe", body=PE_BODY)
-    dest = tmp_path / "resume.exe"
+    url = fixture_server.route("/resume.zip", body=ZIP_BODY)
+    dest = tmp_path / "resume.zip"
     part = artifact_fetch._part_path(dest)
-    part.write_bytes(PE_BODY[:1000])
+    part.write_bytes(ZIP_BODY[:100])
 
-    result = artifact_fetch.fetch_artifact(url, str(dest), expect_type="pe")
+    result = artifact_fetch.fetch_artifact(url, str(dest), expect_type="zip")
 
     assert result["ok"], result["failures"]
-    assert result["resumed_from"] == 1000
-    assert dest.read_bytes() == PE_BODY
+    assert result["resumed_from"] == 100
+    assert dest.read_bytes() == ZIP_BODY
     assert result["sha256"] == artifact_fetch.file_sha256(dest)
 
 
 def test_rerunning_a_completed_fetch_is_safe(fixture_server, tmp_path):
-    url = fixture_server.route("/idempotent.exe", body=PE_BODY)
-    dest = tmp_path / "idempotent.exe"
+    url = fixture_server.route("/idempotent.zip", body=ZIP_BODY)
+    dest = tmp_path / "idempotent.zip"
 
-    first = artifact_fetch.fetch_artifact(url, str(dest), expect_type="pe")
-    second = artifact_fetch.fetch_artifact(url, str(dest), expect_type="pe")
+    first = artifact_fetch.fetch_artifact(url, str(dest), expect_type="zip")
+    second = artifact_fetch.fetch_artifact(url, str(dest), expect_type="zip")
 
     assert first["ok"] and second["ok"]
     assert second["reused"] is True
     assert second["action"] == "reused"
     assert second["sha256"] == first["sha256"]
-    assert dest.read_bytes() == PE_BODY
+    assert dest.read_bytes() == ZIP_BODY
     assert sorted(p.name for p in tmp_path.iterdir()) == [
-        "idempotent.exe", "idempotent.exe.provenance.json",
+        "idempotent.zip", "idempotent.zip.provenance.json",
     ]
 
 
 def test_rerun_re_reports_a_destination_that_no_longer_verifies(
     fixture_server, tmp_path,
 ):
-    url = fixture_server.route("/drifted.exe", body=PE_BODY)
-    dest = tmp_path / "drifted.exe"
-    artifact_fetch.fetch_artifact(url, str(dest), expect_type="pe")
+    url = fixture_server.route("/drifted.zip", body=ZIP_BODY)
+    dest = tmp_path / "drifted.zip"
+    artifact_fetch.fetch_artifact(url, str(dest), expect_type="zip")
     dest.write_bytes(PLAIN_HTML)
 
-    again = artifact_fetch.fetch_artifact(url, str(dest), expect_type="pe")
+    again = artifact_fetch.fetch_artifact(url, str(dest), expect_type="zip")
 
     assert not again["ok"]
     assert again["action"] == "reused"
@@ -710,30 +715,30 @@ def test_rerun_re_reports_a_destination_that_no_longer_verifies(
 
 
 def test_overwrite_forces_a_fresh_download(fixture_server, tmp_path):
-    url = fixture_server.route("/refresh.exe", body=PE_BODY)
-    dest = tmp_path / "refresh.exe"
+    url = fixture_server.route("/refresh.zip", body=ZIP_BODY)
+    dest = tmp_path / "refresh.zip"
     dest.write_bytes(b"stale")
 
     result = artifact_fetch.fetch_artifact(
-        url, str(dest), expect_type="pe", overwrite=True,
+        url, str(dest), expect_type="zip", overwrite=True,
     )
 
     assert result["ok"], result["failures"]
-    assert dest.read_bytes() == PE_BODY
+    assert dest.read_bytes() == ZIP_BODY
 
 
 # --- verify_artifact against files already on disk ------------------------
 
 
-def test_verify_artifact_accepts_a_good_on_disk_binary(tmp_path):
-    target = tmp_path / "already-here.exe"
-    target.write_bytes(PE_BODY)
+def test_verify_artifact_accepts_a_good_on_disk_archive(tmp_path):
+    target = tmp_path / "already-here.zip"
+    target.write_bytes(ZIP_BODY)
 
-    result = artifact_fetch.verify_artifact(str(target), expect_type="pe")
+    result = artifact_fetch.verify_artifact(str(target), expect_type="zip")
 
     assert result["ok"], result["failures"]
-    assert result["detected_type"] == "pe"
-    assert result["bytes"] == len(PE_BODY)
+    assert result["detected_type"] == "zip"
+    assert result["bytes"] == len(ZIP_BODY)
     assert result["sha256"] == artifact_fetch.file_sha256(target)
     assert "VERIFIED" in artifact_fetch.format_verify_result(result)
 
@@ -782,14 +787,15 @@ def test_verify_artifact_reports_a_missing_file(tmp_path):
 def test_verify_artifact_surfaces_the_recorded_provenance(
     fixture_server, tmp_path,
 ):
-    url = fixture_server.route("/traced.exe", body=PE_BODY)
-    dest = tmp_path / "traced.exe"
-    artifact_fetch.fetch_artifact(url, str(dest), expect_type="pe")
+    url = fixture_server.route("/traced.zip", body=ZIP_BODY)
+    dest = tmp_path / "traced.zip"
+    fetched = artifact_fetch.fetch_artifact(url, str(dest), expect_type="zip")
+    assert fetched["ok"], fetched["failures"]
 
-    result = artifact_fetch.verify_artifact(str(dest), expect_type="pe")
+    result = artifact_fetch.verify_artifact(str(dest), expect_type="zip")
 
     assert result["ok"], result["failures"]
-    assert result["provenance_path"].endswith("traced.exe.provenance.json")
+    assert result["provenance_path"].endswith("traced.zip.provenance.json")
     assert artifact_fetch.read_provenance(dest)["url"] == url
 
 

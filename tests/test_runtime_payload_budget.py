@@ -1,6 +1,7 @@
 """The runtime closure must be cheap to refuse and expensive to counterfeit."""
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -46,3 +47,41 @@ def test_declared_closure_limit_refuses_sparse_files_without_hashing(
         stream.truncate(runtime_payload.MAX_BYTES + 1)
     with pytest.raises(OwnerRefused, match="dedicated runtime environment"):
         runtime_payload.inventory(((str(tmp_path), False),))
+
+
+def test_base_python_alias_inventories_only_its_ordinary_target(tmp_path):
+    interpreter = tmp_path / "python.exe"
+    interpreter.write_bytes(b"MZ ordinary interpreter")
+    try:
+        (tmp_path / "python3.exe").symlink_to(interpreter)
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows runner lacks the privilege to create test symlinks")
+        raise
+    (tmp_path / "python312.dll").write_bytes(b"DLL")
+
+    paths = runtime_payload.base_runtime_files(tmp_path)
+
+    assert paths == (interpreter, tmp_path / "python312.dll")
+    assert [row[0] for row in runtime_payload.inventory((str(path), False) for path in paths)] == [
+        str(interpreter), str(tmp_path / "python312.dll"),
+    ]
+
+
+@pytest.mark.parametrize("alias,target", [
+    ("python3.exe", "unrelated.exe"),
+    ("tool.exe", "python.exe"),
+    ("helper.dll", "python.exe"),
+])
+def test_base_python_rejects_other_reparse_binaries(tmp_path, alias, target):
+    (tmp_path / "python.exe").write_bytes(b"MZ ordinary interpreter")
+    (tmp_path / "unrelated.exe").write_bytes(b"MZ unrelated tool")
+    try:
+        (tmp_path / alias).symlink_to(Path(target))
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows runner lacks the privilege to create test symlinks")
+        raise
+
+    with pytest.raises(OwnerRefused, match="unrecognized reparse"):
+        runtime_payload.base_runtime_files(tmp_path)

@@ -178,6 +178,7 @@ def test_sequential_roles_still_obey_parent_budget(tmp_path):
         InvalidSubagentRequest,
         SubagentBudget,
     )
+    from sonder_runtime.application.ports.worker_registry import WorkerRegistryError
     from sonder_runtime.application.subagents.durable_continuation import (
         DurableContinuationService,
     )
@@ -203,8 +204,14 @@ def test_sequential_roles_still_obey_parent_budget(tmp_path):
         workflow_id="bounded", root_id="root", parent_id="root", prompt="inspect",
         workspace=WorkspaceAssignment((str(root),), ()), context=context,
     )
-    with pytest.raises(InvalidSubagentRequest, match="widens parent max_steps"):
+    with pytest.raises((WorkerRegistryError, InvalidSubagentRequest)) as rejected:
         workflow.advance(dispatch, dispatch.handle.result(timeout=2), context=context)
+    cause = (rejected.value if isinstance(rejected.value, InvalidSubagentRequest)
+             else rejected.value.__cause__)
+    assert isinstance(cause, InvalidSubagentRequest)
+    assert "widens parent max_steps" in str(cause)
+    assert len([row for row in repository.list_all() if row.request.parent_id == "root"
+                and row.request.child_id != "root"]) == 1
 
 
 def test_failed_role_result_is_terminal_and_does_not_dispatch_later_roles(tmp_path):

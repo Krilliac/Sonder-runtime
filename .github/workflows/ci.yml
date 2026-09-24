@@ -113,6 +113,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies in a fresh Windows venv
+        id: install-focused-venv
         run: |
           python -m venv "$env:RUNNER_TEMP\sonder-ci-venv"
           & "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe" -m pip install -r requirements-dev.txt
@@ -129,6 +130,7 @@ jobs:
           tests/test_runtime_lifecycle_graceful_drain_bridge.py
           tests/test_application_lifecycle_adapter.py
       - name: Exercise Windows release smoke script
+        if: ${{ !cancelled() && steps.install-focused-venv.outcome == 'success' }}
         env:
           SONDER_PYTHON: ${{ runner.temp }}\sonder-ci-venv\Scripts\python.exe
           SONDER_HOME: ${{ runner.temp }}\sonder-windows-smoke
@@ -136,6 +138,7 @@ jobs:
           & "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe" -m pytest -q
           tests/test_release_smoke.py::test_ps1_smoke_check_passes_on_this_development_checkout
       - name: Exercise native low-integrity selfmod canaries
+        if: ${{ !cancelled() && steps.install-focused-venv.outcome == 'success' }}
         # Git Bash location and launch exit status vary across hosted images;
         # the remaining tests cover actual Windows token, Job Object, and MIC.
         run: >-
