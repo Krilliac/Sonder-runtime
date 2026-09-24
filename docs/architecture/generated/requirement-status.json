@@ -516,9 +516,9 @@
     },
     {
       "checked": false,
-      "claim": "Actual tool-enabled agent requests persist exact sections and prefix manifests and replay in a fresh interpreter after project inputs change; a new request observes refreshed rules/skills, and provider/artifact identity changes invalidate reuse.",
+      "claim": "Live tool-enabled agent requests retain deterministic stable sections and exact durable replay manifests. Scoped live skill discovery now refuses malformed, truncated or oversized metadata and absent configured roots instead of silently claiming completeness; partial refresh retains last-good records marked incomplete and makes no cache claim. Higher-precedence damage cannot select a lower-precedence fallback.",
       "requirement_id": "CTX-009",
-      "revision": 8,
+      "revision": 9,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "0944c0e0bcff2154e4af17173905de7a17cb8d80db5513d0e09c1fdcbba8b609",
+    "ledger_sha256": "7a79ddc199c5ff6c7a82299c05e2e2b0d65113d15eed75296fca6d59cbdc1607",
     "spec_sha256": "1d7da49c5910bcf0bd5099ef1858312a8491a0429a4df33895d8088942278e33"
   }
 }

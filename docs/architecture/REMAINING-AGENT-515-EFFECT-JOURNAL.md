@@ -340,3 +340,45 @@ cannot supply independent effect receipts, and legacy self-mod intermediate
 stages are outside the currently qualified deploy/rollback boundary. These gaps
 must remain explicit rather than being hidden by the passing direct-worker
 matrix.
+
+### Concrete child-checkpoint blocker and next implementation
+
+`LocalSubagentProvider` currently wraps the entire runner in one
+`subagent-run:{child_id}` effect. That first intent stays unresolved while the
+runner saves child checkpoints and completes inner tool effects in the same
+run. Consequently, even a journal containing a completed inner mutation has a
+settled high-water of zero until the outer runner returns. Copying zero into a
+child checkpoint would not establish a resumable effect prefix.
+
+`test_child_effect_checkpoint_crash.py` reproduces this with two persisted
+databases and a real interpreter exit after one fsynced mutation and a child
+checkpoint. The inner effect has a completed receipt, the outer intent has none,
+and reopening both stores refuses duplicate work. This qualifies the existing
+fence, not checkpoint-based continuation.
+
+The child checkpoint CAS in `application/subagents/durable_continuation.py`
+stores no journal provenance. Existing restart paths correctly require owner
+cleanup and fence the unresolved outer effect. They prevent duplicate execution
+but cannot continue from the saved child state. The next implementation needs:
+
+1. A bounded dispatch effect whose receipt proves exact durable child admission,
+   with an identity and request digest, rather than completion of the entire
+   runner. Crashes across dispatch must still refuse an unproven second start.
+2. Host-stamped checkpoint provenance binding child sequence/state digest,
+   journal identity, run, worker, owner epoch, and settled position to the child
+   CAS. SQLite child storage, PostgreSQL snapshots, and the continuation codec
+   all need compatible handling; legacy rows without provenance must refuse.
+3. A cross-store commit protocol that records journal proof before child CAS.
+   Resume must clean up the old owner, claim/reconcile the journal epoch, and
+   validate bounded `effects_since` pages against the checkpoint. The runner
+   must consume already-settled receipts or block; merely returning them is
+   insufficient to prevent replay. Production currently composes the effect
+   binding around spawn, and exposes no bound child resume adapter. A future
+   resume entry point must validate that binding before claiming the child;
+   calling the bare continuation service cannot establish journal authority.
+4. Real crash cuts around dispatch, inner mutation, both checkpoint stores, and
+   terminal publication, including stale epochs, missing or swapped journals,
+   truncated receipt pages, and overlapping unresolved intents.
+
+This is a coordinated lifecycle and persistence change, not an extra checkpoint
+field. Terminal child status text is not a substitute for a dispatch receipt.

@@ -22,6 +22,7 @@ import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 
 DEFAULT_TIMEOUT = 30
 MAX_TIMEOUT = 120
@@ -153,6 +154,68 @@ def _probe(argv, timeout=5):
         return None
 
 
+class _ReaderAdmissionFailure(RuntimeError):
+    def __init__(self, cause, *, cli_reaped, readers_stopped):
+        super().__init__(type(cause).__name__)
+        self.cli_reaped = cli_reaped
+        self.readers_stopped = readers_stopped
+
+
+def _start_readers(proc, drain):
+    """Start owned readers only after both admissions can complete.
+
+    A second admission may fail after the first reader starts. Gate actual
+    reads until both are live so refusal can close streams without blocking
+    on a pipe inherited by a CLI descendant.
+    """
+    readers = []
+    ready = threading.Event()
+    cancelled = threading.Event()
+
+    def gated_drain(label, stream):
+        # A partially admitted pair must never enter a blocking pipe read.
+        ready.wait()
+        if not cancelled.is_set():
+            drain(label, stream)
+
+    try:
+        for label, stream in (("stdout", proc.stdout), ("stderr", proc.stderr)):
+            reader = owned_runtime_thread(
+                target=gated_drain, args=(label, stream),
+                name=f"sonder-isolated-{label}-reader", daemon=False,
+            )
+            readers.append(reader)
+            reader.start()
+    except BaseException as error:
+        cancelled.set()
+        ready.set()
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=3)
+            cli_reaped = True
+        except (OSError, subprocess.TimeoutExpired):
+            cli_reaped = False
+        for reader in readers:
+            if reader.is_alive():
+                reader.join(timeout=1)
+        readers_stopped = not any(reader.is_alive() for reader in readers)
+        for stream in (proc.stdout, proc.stderr):
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+        if isinstance(error, (OSError, RuntimeError)):
+            raise _ReaderAdmissionFailure(
+                error, cli_reaped=cli_reaped, readers_stopped=readers_stopped,
+            ) from error
+        raise
+    ready.set()
+    return readers
+
+
 def _bounded_probe(argv, timeout=5, output_limit=MAX_PROBE_OUTPUT_BYTES):
     """Run one metadata-only CLI query with hard combined output/time caps."""
     try:
@@ -182,12 +245,10 @@ def _bounded_probe(argv, timeout=5, output_limit=MAX_PROBE_OUTPUT_BYTES):
                     exceeded.set()
                     return
 
-    readers = [
-        threading.Thread(target=drain, args=(label, stream), daemon=False)
-        for label, stream in (("stdout", proc.stdout), ("stderr", proc.stderr))
-    ]
-    for reader in readers:
-        reader.start()
+    try:
+        readers = _start_readers(proc, drain)
+    except (OSError, RuntimeError):
+        return None
     deadline = time.monotonic() + timeout
     failed = False
     while proc.poll() is None:
@@ -659,12 +720,38 @@ def _run_bounded(
                         output_exceeded.set()
                         return
 
-        readers = [
-            threading.Thread(target=drain, args=(label, stream), daemon=False)
-            for label, stream in (("stdout", proc.stdout), ("stderr", proc.stderr))
-        ]
-        for reader in readers:
-            reader.start()
+        try:
+            readers = _start_readers(proc, drain)
+        except (OSError, RuntimeError) as error:
+            # A child may have registered a daemon-side container before the
+            # host ran out of owned readers. Only exact removal proves it is
+            # safe to discard a read-only Codegen source snapshot.
+            cleanup_status = _cleanup(
+                runtime_name, runtime_path, runtime_prefix, container_name,
+            )
+            cli_reaped = (
+                not isinstance(error, _ReaderAdmissionFailure) or error.cli_reaped
+            )
+            readers_stopped = (
+                not isinstance(error, _ReaderAdmissionFailure) or error.readers_stopped
+            )
+            # Container absence does not establish that the invoking CLI or
+            # its mandatory owned reader has exited; preserve source leases.
+            if not cli_reaped or not readers_stopped:
+                cleanup_status = "uncertain-cli-or-reader-teardown"
+            return {
+                "ok": False, "returncode": None, "stdout": "", "stderr": "",
+                "error": (
+                    "isolated output reader unavailable: "
+                    + (str(error) if isinstance(error, _ReaderAdmissionFailure)
+                       else type(error).__name__)
+                    + ("; container CLI did not exit after kill" if not cli_reaped else "")
+                    + ("; output reader teardown uncertain" if not readers_stopped else "")
+                    + ("; container removal could not be verified"
+                       if cleanup_status == "uncertain-container-removal" else "")
+                ),
+                "cleanup": cleanup_status,
+            }
         reason = ""
         try:
             _verify_project_unchanged(project, expected_identity)

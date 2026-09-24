@@ -42,6 +42,16 @@ artifact identity changes invalidate the prefix, including unavailable identity.
 These tests use provider doubles and establish request identity and replay,
 not live provider cache performance or a shared process-independent cache.
 
+The acceptance audit reproduced a truncated `SKILL.md` being silently omitted
+while the live prefix still claimed completeness. Scoped live discovery now
+requires every selected skill manifest to have valid, complete metadata within
+16 KiB. Invalid initial discovery or partial refresh exposes a content-free
+diagnostic and makes no prefix-cache claim. Last-good records remain available
+as incomplete state, and higher-precedence damage cannot silently select an
+older lower-precedence skill. Missing explicitly configured roots also refuse;
+intentional individual-manifest removal still refreshes normally. Generic skill
+discovery keeps its permissive behavior for callers outside the live producer.
+
 Same-project, irrelevant task-family memory is excluded through retrieval and
 the actual Autopilot pre-model callback. Only the selected reference receives
 response-bound attribution; a refusal before a response does not penalize it.

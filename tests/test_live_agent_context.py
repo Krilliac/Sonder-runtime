@@ -248,6 +248,108 @@ def test_stale_project_rules_are_retained_but_not_injected_as_authoritative(tmp_
     assert planner.prefix_cache_telemetry.writes == 1
 
 
+@pytest.mark.parametrize("previously_valid", (False, True))
+@pytest.mark.parametrize("invalid_manifest", (
+    "---\nname: play\ndescription: partially written skill",
+    "---\nname: play\ndescription: " + "x" * 20_000 + "\n---\n",
+))
+def test_incomplete_scoped_skill_cannot_claim_live_prefix(
+    tmp_path, previously_valid, invalid_manifest,
+):
+    project = _project(tmp_path, name="alpha", rule="ALPHA RULE")
+    sessions = SQLiteSessionRepository(tmp_path / "sessions.db")
+    store = SQLiteAgentLaneStore(tmp_path / "lanes.db", sessions)
+    producer = LiveAgentContextProducer()
+    planner = ContextPlanningFacade()
+    service = AgentLaneService(
+        store, sessions, _Model(), auto_start=False,
+        context_planning=planner, live_context=producer,
+    )
+    context = local_owner_context(correlation_id="partial-skill", workspace_roots=(tmp_path,))
+    lane_id = service.spawn(
+        command_id="spawn-partial-skill", parent_session_id="parent", task="inspect",
+        workspace_root=str(project), context=context,
+    )["lane"]["id"]
+    lane = store.read_lane(lane_id)
+    if previously_valid:
+        first = service._request(lane, (), request_id="before-truncation", context=context)
+        assert "Scoped scenario validation skill" in first.system
+        assert first.prefix_manifest is not None
+
+    # An interrupted write leaves plausible metadata without the closing
+    # delimiter. Publishing an empty complete catalog would invent a new
+    # stable prefix whose missing skill was never an intentional policy edit.
+    (project / "play" / "SKILL.md").write_text(
+        invalid_manifest, encoding="utf-8",
+    )
+    partial = producer.refresh(project)
+    assert not partial.complete
+    assert partial.reason == (
+        "last_good:SkillManifestIncomplete" if previously_valid
+        else "SkillManifestIncomplete"
+    )
+    if previously_valid:
+        assert "Scoped scenario validation skill" in partial.records[-1].content
+    else:
+        assert partial.records == ()
+
+    request = service._request(lane, (), request_id="after-truncation", context=context)
+    assert request.prefix_manifest is None
+    assert request.prefix_cache_observation is None
+    assert request.replay_manifest is None
+    assert "partially written skill" not in request.system
+    assert "Scoped scenario validation skill" not in request.system
+    assert "Live stable context unavailable: " + partial.reason in request.system
+    assert planner.prefix_cache_telemetry.writes == int(previously_valid)
+
+
+def test_missing_explicit_source_is_incomplete(tmp_path):
+    project = _project(tmp_path, name="alpha", rule="ALPHA RULE")
+    configured = tmp_path / "configured"
+    configured.mkdir()
+    producer = LiveAgentContextProducer(skill_roots={"configured": (configured,)})
+    assert producer.refresh(project).complete
+
+    offline = configured.rename(tmp_path / "offline")
+    stale = producer.refresh(project)
+    assert not stale.complete
+    assert stale.reason == "last_good:ValueError"
+    assert "Scoped scenario validation skill" in stale.records[-1].content
+    fresh = LiveAgentContextProducer(skill_roots={"configured": (configured,)})
+    missing = fresh.refresh(project)
+    assert not missing.complete and missing.reason == "ValueError"
+    assert missing.records == ()
+    offline.rename(configured)
+    assert producer.refresh(project).complete
+
+
+def test_truncated_high_precedence_skill_does_not_silently_fall_back(tmp_path):
+    project = _project(tmp_path, name="alpha", rule="ALPHA RULE")
+    configured = tmp_path / "configured"
+    selected = configured / "play" / "SKILL.md"
+    selected.parent.mkdir(parents=True)
+    selected.write_text(
+        "---\nname: play\ndescription: Configured skill\n---\n", encoding="utf-8",
+    )
+    producer = LiveAgentContextProducer(skill_roots={"configured": (configured,)})
+    first = producer.refresh(project)
+    assert first.complete and "Configured skill" in first.records[-1].content
+    assert "Scoped scenario validation skill" not in first.records[-1].content
+
+    selected.write_text("---\nname: play\n", encoding="utf-8")
+    partial = producer.refresh(project)
+    assert not partial.complete and partial.reason == "last_good:SkillManifestIncomplete"
+    assert partial.records == first.records
+
+    # Deleting an individual manifest is an intentional catalog change; only
+    # the interrupted/malformed refresh blocks a complete replacement.
+    selected.unlink()
+    removed = producer.refresh(project)
+    assert removed.complete
+    assert "Scoped scenario validation skill" in removed.records[-1].content
+    assert "Configured skill" not in removed.records[-1].content
+
+
 def test_empty_project_catalog_is_a_complete_live_prefix(tmp_path):
     project = tmp_path / "empty"
     project.mkdir()
