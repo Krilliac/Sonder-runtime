@@ -157,6 +157,10 @@ jobs:
           tests/test_process_cancellation_reaping.py
           tests/test_process_completion_race.py
           tests/test_process_group_absence.py
+          tests/test_process_tree_supervisor.py
+          tests/test_api003_subprocess_provider.py
+          tests/test_api003_restart_recovery.py
+          tests/test_runtime_owner_windows_containment.py
           tests/test_start_selfmod_launcher.py
           tests/test_command_recovery.py
           tests/test_curriculum_store_durability.py

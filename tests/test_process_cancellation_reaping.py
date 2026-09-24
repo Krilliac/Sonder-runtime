@@ -78,7 +78,7 @@ def _request(job_id):
     )
 
 
-def _provider(process, cleanup, *, max_concurrent_processes=None):
+def _provider(process, cleanup, *, max_concurrent_processes=None, platform_name="posix"):
     timers = []
 
     def timer_factory(delay, callback, args=()):
@@ -92,7 +92,7 @@ def _provider(process, cleanup, *, max_concurrent_processes=None):
         launcher=lambda *args, **kwargs: process,
         memory_limiter=_MemoryLimiter(),
         process_identity_resolver=lambda _pid: "owned-process",
-        platform_name="posix",
+        platform_name=platform_name,
         max_concurrent_processes=max_concurrent_processes,
         timer_factory=timer_factory,
     )
@@ -155,6 +155,41 @@ def test_incomplete_cleanup_retries_and_releases_capacity_after_proof():
     assert second.records[-1].status is JobStatus.CANCELLED
     assert provider._test_timers[-1].cancelled
     provider.start(_request("after-retry"))
+
+
+def test_windows_taskkill_success_does_not_release_unproven_job_capacity():
+    from types import SimpleNamespace
+
+    from sonder_runtime.adapters.process_liveness import PROCESS_ALIVE
+    from sonder_runtime.adapters.process_termination import ProcessTreeSupervisor
+
+    calls = []
+    subprocess_api = SimpleNamespace(
+        DEVNULL=subprocess.DEVNULL,
+        SubprocessError=subprocess.SubprocessError,
+        run=lambda argv, **kwargs: calls.append(argv) or SimpleNamespace(returncode=0),
+    )
+    cleanup = ProcessTreeSupervisor(
+        platform_name="nt",
+        subprocess_module=subprocess_api,
+        process_probe=lambda _pid, identity: (PROCESS_ALIVE, identity),
+    )
+    process = _ExitedProcess(exit_code=1)
+    provider = _provider(
+        process, cleanup, max_concurrent_processes=1, platform_name="nt"
+    )
+    started = provider.start(_request("windows-unproven"))
+    job_id = started.record.identity.job_id
+    provider._registry.request_cancellation(job_id, reason="operator cancellation")
+
+    waited = provider.wait(job_id)
+
+    assert waited.record.status is JobStatus.CANCELLATION_REQUESTED
+    assert calls == [["taskkill", "/PID", str(process.pid), "/T", "/F"]]
+    assert job_id in provider._processes
+    assert provider._test_timers[-1].started
+    with pytest.raises(RuntimeError, match="capacity exhausted"):
+        provider.start(_request("blocked-by-unproven-windows-tree"))
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires native POSIX process groups")
