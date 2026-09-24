@@ -544,7 +544,7 @@ def _assert_all_readers_reject(workspace, tmp_path, source):
     assert _within_budget(peak, elapsed), ("safe_extract", peak, elapsed)
 
     peak, elapsed, error = _measure(lambda: file_ops._inspect_tar(source))
-    assert isinstance(error, tarfile.TarError), repr(error)
+    assert isinstance(error, file_ops.ArchivePreviewRejected), repr(error)
     assert _within_budget(peak, elapsed), ("inspect", peak, elapsed)
 
 
@@ -655,9 +655,7 @@ def test_path_archive_safety_inspect_tar_uses_bounded_reader(tmp_path):
         _pax_sparse_10_tar_gz(tmp_path / "sparse.tar.gz", 2_000_000),
     ):
         peak, elapsed, error = _measure(lambda: path_archive_safety.inspect_tar(source))
-        assert isinstance(
-            error, (tarfile.TarError, path_archive_safety.ArchiveLimitError),
-        ), repr(error)
+        assert isinstance(error, path_archive_safety.ArchiveLimitError), repr(error)
         assert _within_budget(peak, elapsed), (source.name, peak, elapsed)
 
 
@@ -699,7 +697,7 @@ def _assert_rejected_early(workspace, tmp_path, source, peak_budget):
         ("safe_extract", lambda: safe_extract(
             source, tmp_path / "stage", max_expanded_bytes=1 << 30,
         ), ExtractionError),
-        ("inspect", lambda: file_ops._inspect_tar(source), tarfile.TarError),
+        ("inspect", lambda: file_ops._inspect_tar(source), file_ops.ArchivePreviewRejected),
         ("archive_extract", lambda: archive_tools.extract_archive(
             name, "out", developer_authorized=True,
         ), archive_tools.ArchiveRejected),
@@ -710,7 +708,7 @@ def _assert_rejected_early(workspace, tmp_path, source, peak_budget):
     from sonder_runtime.application.security import path_archive_safety
 
     peak, elapsed, error = _measure(lambda: path_archive_safety.inspect_tar(source))
-    assert isinstance(error, (tarfile.TarError, path_archive_safety.ArchiveLimitError)), repr(error)
+    assert isinstance(error, path_archive_safety.ArchiveLimitError), repr(error)
     assert peak < peak_budget and elapsed < WALL_BUDGET_SECONDS, ("path_safety", peak, elapsed)
     listed = archive_tools.list_archive(name)
     assert listed["valid"] is False
@@ -775,7 +773,7 @@ def test_zip_central_directory_size_is_checked_before_parsing(workspace, monkeyp
 
     monkeypatch.setattr(zipfile.ZipFile, "_RealGetContents", counting)
 
-    with pytest.raises(zipfile.BadZipFile):
+    with pytest.raises(file_ops.ArchivePreviewRejected, match="central directory"):
         file_ops._inspect_zip(source)
 
     from sonder_runtime.adapters import artifact_grounding
@@ -786,3 +784,50 @@ def test_zip_central_directory_size_is_checked_before_parsing(workspace, monkeyp
 
     assert archive_tools.list_archive("fat.zip")["valid"] is False
     assert parsed == [], "a ZIP reader parsed an oversized central directory"
+
+
+# ---------------------------------------------------------------------------
+# Review round 4 (PR #548 @ 82daa944): reader-specific messages, deadline
+# ---------------------------------------------------------------------------
+
+
+def test_safe_extract_names_metadata_bound_not_corruption(tmp_path):
+    source = _chained_metadata_tar_gz(tmp_path / "chain.tar.gz", b"L", 3_000)
+    with pytest.raises(ExtractionError) as caught:
+        safe_extract(source, tmp_path / "stage", max_expanded_bytes=1 << 20)
+    message = str(caught.value)
+    assert "metadata" in message and "bound" in message, message
+    assert "corrupt" not in message, message
+
+
+def test_preview_reports_metadata_bound_as_its_own_rejection(tmp_path):
+    source = _chained_metadata_tar_gz(tmp_path / "chain.tar.gz", b"L", 3_000)
+    with pytest.raises(file_ops.ArchivePreviewRejected) as caught:
+        file_ops._inspect_tar(source)
+    assert "metadata" in str(caught.value) and "bound" in str(caught.value)
+
+
+def test_path_archive_safety_maps_metadata_bound_to_archive_limit_error(tmp_path):
+    from sonder_runtime.application.security import path_archive_safety
+
+    source = _chained_metadata_tar_gz(tmp_path / "chain.tar.gz", b"L", 3_000)
+    with pytest.raises(path_archive_safety.ArchiveLimitError, match="metadata"):
+        path_archive_safety.inspect_tar(source)
+
+
+def test_safe_extract_enforces_a_wall_clock_deadline(tmp_path, monkeypatch):
+    import sonder_runtime.adapters.updates.service as service
+
+    archive = _tar(tmp_path / "many.tar", [("f%03d" % i, b"x") for i in range(20)])
+    ticks = iter(range(10_000))
+    monkeypatch.setattr(service.time, "monotonic", lambda: float(next(ticks)))
+    with pytest.raises(ExtractionError, match="time"):
+        safe_extract(archive, tmp_path / "out", max_expanded_bytes=1 << 20, max_seconds=5)
+    assert _tree(tmp_path / "out") == []
+
+
+def test_safe_extract_default_deadline_is_finite():
+    import inspect as _inspect
+
+    default = _inspect.signature(safe_extract).parameters["max_seconds"].default
+    assert isinstance(default, (int, float)) and 0 < default <= 600

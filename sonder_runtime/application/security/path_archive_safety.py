@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .bounded_archives import (
+    TarMetadataLimitError,
     ZipCentralDirectoryLimitError,
     open_bounded,
     require_zip_entry_bound,
@@ -150,8 +151,11 @@ def inspect_tar(path: str | os.PathLike[str], limits: ArchiveLimits = ArchiveLim
     # Iterate lazily through the bounded reader: validate_archive_members
     # stops at the entry limit, and open_bounded bounds metadata records,
     # chains, and sparse maps before tarfile parses them.
-    with open_bounded(path) as archive:
-        return validate_archive_members(
-            ((item.name, item.size, item.issym() or item.islnk()) for item in archive),
-            limits,
-        )
+    try:
+        with open_bounded(path) as archive:
+            return validate_archive_members(
+                ((item.name, item.size, item.issym() or item.islnk()) for item in archive),
+                limits,
+            )
+    except TarMetadataLimitError as exc:
+        raise ArchiveLimitError("archive metadata exceeds reader bound: %s" % exc) from None
