@@ -7,11 +7,14 @@ certificate and its bound authority scope.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 import hashlib
 import json
 
-from ..ports.terminal_eligibility import ManagedTerminalEligibility
+from ..ports.terminal_eligibility import (
+    ManagedTerminalEligibility,
+    _HostVerifierAuthority,
+)
 from .learning_ladder import LearningObservation
 
 
@@ -19,6 +22,58 @@ def _digest(value: object) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
     ).hexdigest()
+
+
+_OBSERVATION_AUTH_SEAL = object()
+
+
+def _receipt_payload(receipt) -> dict:
+    """Return the immutable receipt fields, excluding its live capability."""
+    return {
+        name: getattr(receipt, name)
+        for name in receipt.__dataclass_fields__
+        if name != "authorization"
+    }
+
+
+def _observation_payload(observation) -> dict:
+    value = {
+        name: getattr(observation, name)
+        for name in observation.__dataclass_fields__
+    }
+    value["observed_at"] = observation.observed_at.isoformat()
+    value["provenance"] = list(observation.provenance)
+    return value
+
+
+def _authorization_digest(receipt, observation) -> str:
+    return _digest({
+        "receipt": _receipt_payload(receipt),
+        "observation": _observation_payload(observation),
+    })
+
+
+class _ObservationAuthorization:
+    __slots__ = ("_binding_digest",)
+
+    def __init__(self, binding_digest, seal):
+        if seal is not _OBSERVATION_AUTH_SEAL:
+            raise TypeError("observation authorization is private")
+        self._binding_digest = binding_digest
+
+    def matches(self, receipt, observation) -> bool:
+        return (
+            type(receipt) is VerifierReceipt
+            and type(observation) is LearningObservation
+            and self._binding_digest == _authorization_digest(receipt, observation)
+        )
+
+
+def _issue_observation_authorization(receipt, observation):
+    return _ObservationAuthorization(
+        _authorization_digest(receipt, observation),
+        _OBSERVATION_AUTH_SEAL,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +91,7 @@ class VerifierReceipt:
     subject_digest: str
     receipt_digest: str
     authority_scope: str
+    authorization: object | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         for name in (
@@ -76,7 +132,28 @@ class ReceiptObservationProducer:
     def from_terminal_eligibility(cls, eligibility: ManagedTerminalEligibility) -> tuple[VerifierReceipt, LearningObservation]:
         if type(eligibility) is not ManagedTerminalEligibility:
             raise TypeError("verified terminal eligibility is required")
-        if eligibility.phase in {"certified", "certified_after_return"}:
+        authority = eligibility.authority
+        resolver = getattr(authority, "resolve", None)
+        if type(authority) is not _HostVerifierAuthority or not callable(resolver):
+            raise PermissionError(
+                "owner-bound managed verifier authority is required"
+            )
+        # Do not trust any fields on the public eligibility value.  The
+        # authority returns the sealed snapshot the managed boundary derived
+        # (it does not re-read the turn), so a copied or modified dataclass
+        # cannot mint a trusted observation.  Owner and turn binding are
+        # checked by the managed session before this producer runs.
+        eligibility = resolver()
+        if type(eligibility) is not ManagedTerminalEligibility:
+            raise PermissionError("owner-bound managed verifier result is invalid")
+        if eligibility.phase == "certified_after_return":
+            # The outward final did not carry the certificate identity, so the
+            # host receipt cannot bind this certificate as learning evidence.
+            raise PermissionError(
+                "certified_after_return is not learning evidence: the original "
+                "outward final carries no certificate identity"
+            )
+        if eligibility.phase == "certified":
             if eligibility.eligible is not True:
                 raise PermissionError("current certified terminal eligibility is required")
         elif eligibility.phase == "failed":
@@ -159,9 +236,12 @@ class ReceiptObservationProducer:
             observation_id="observation-" + receipt.receipt_id,
             content=claim,
             source=cls.SOURCE,
+            # Independence is per authenticated principal and scope: one
+            # principal running several child lanes over the same source is a
+            # single source of evidence, never two.
             independent_key=_digest({
-                "worker_id": eligibility.authenticated_worker_id,
-                "authority_scope": receipt.authority_scope,
+                "principal_id": turn.principal_id,
+                "workspace_scope": facts.project_scope,
             }),
             provenance=(
                 "receipt:" + receipt.receipt_id,
@@ -179,7 +259,131 @@ class ReceiptObservationProducer:
             evaluation_passed=outcome == "passed",
             trusted_source=outcome in {"passed", "failed"},
         )
-        return receipt, observation
+        return replace(
+            receipt,
+            authorization=_issue_observation_authorization(receipt, observation),
+        ), observation
 
 
-__all__ = ["ReceiptObservationProducer", "VerifierReceipt"]
+class VerifiedSubjectFactPromotion:
+    """Promote only canonical verifier subjects through the live fact source.
+
+    The request names observation IDs, never semantic fact text.  The fact
+    content is derived from the persisted producer observation, and the
+    authoritative source is supplied by the application composition root.
+    """
+
+    def __init__(self, *, ladder=None) -> None:
+        from .learning_ladder import LearningLadder
+        self._ladder = ladder or LearningLadder()
+
+    @staticmethod
+    def fact_id_for_subject(content: str) -> str:
+        if (
+            not isinstance(content, str)
+            or not content.startswith("verified-subject:")
+            or len(content) != len("verified-subject:") + 64
+            or any(char not in "0123456789abcdef" for char in content.split(":", 1)[1])
+        ):
+            raise PermissionError("canonical verifier subject identity is required")
+        return "verified-subject-fact-" + content.split(":", 1)[1]
+
+    def apply(self, *, project, fact_id, observation_ids, repository, fact_source, connection):
+        if not isinstance(project, str) or not project.strip():
+            raise ValueError("fact project is required")
+        if not isinstance(fact_id, str) or not fact_id.strip():
+            raise ValueError("fact identity is required")
+        if type(observation_ids) is not tuple or not 1 <= len(observation_ids) <= 16:
+            raise ValueError("observation identities are required")
+        if len(set(observation_ids)) != len(observation_ids):
+            raise ValueError("observation identities must be unique")
+        if not callable(getattr(repository, "get", None)):
+            raise TypeError("verifier observation repository is required")
+        if not callable(getattr(fact_source, "upsert_fact", None)) or not callable(
+            getattr(fact_source, "delete_fact", None)
+        ):
+            raise TypeError("authoritative fact source is required")
+        if not bool(getattr(connection, "in_transaction", False)):
+            raise PermissionError("promotion requires an active observation snapshot transaction")
+        selected = tuple(repository.get(item) for item in observation_ids)
+        if any(pair is None for pair in selected):
+            raise PermissionError("authenticated observation is unavailable")
+        selected_observations = tuple(pair[1] for pair in selected)
+        if len({observation.content_key for observation in selected_observations}) != 1:
+            raise PermissionError("observations must describe one verified subject")
+        content = selected_observations[0].content
+        expected_fact_id = self.fact_id_for_subject(content)
+        if fact_id != expected_fact_id:
+            raise PermissionError("fact identity is reserved for the verified subject")
+        existing = connection.execute(
+            "SELECT project, text FROM facts WHERE id=?",
+            (fact_id,),
+        ).fetchone()
+        if existing is not None and (existing[0] != project or existing[1] != content):
+            raise PermissionError("reserved verifier subject fact identity is occupied")
+        list_subject_pairs = getattr(repository, "list_subject_pairs", None)
+        list_negatives = getattr(repository, "list_subject_negative_pairs", None)
+        if not callable(list_subject_pairs) or not callable(list_negatives):
+            raise TypeError("subject-scoped verifier observation snapshot is required")
+
+        def authenticated(pair):
+            receipt, observation = pair
+            return (
+                receipt.project_scope == project
+                and receipt.workspace_scope == project
+                and receipt.verifier_outcome in {"passed", "failed"}
+                and observation.source == ReceiptObservationProducer.SOURCE
+                and observation.trusted_source is True
+                and observation.content == content
+            )
+
+        # A persisted authenticated negative demotes before any completeness
+        # or snapshot check, so volume can never shield a contradicted fact.
+        negatives = tuple(
+            pair for pair in list_negatives(project, content, limit=16)
+            if authenticated(pair)
+            and pair[0].verifier_outcome == "failed"
+            and pair[1].positive is False
+        )
+        if negatives:
+            evaluated = {
+                pair[1].observation_id: pair[1] for pair in (*selected, *negatives)
+            }
+            decision = self._ladder.evaluate(tuple(evaluated.values()))[0]
+            mutation = fact_source.delete_fact(connection, fact_id, project)
+            return "demoted" if mutation else "unchanged", decision
+        # Indexed read of this project's rows for this exact subject token only.
+        subject_pairs = tuple(
+            pair for pair in list_subject_pairs(project, content, limit=10_001)
+            if pair[1].content_key == selected_observations[0].content_key
+        )
+        if len(subject_pairs) > 10_000:
+            raise PermissionError("verifier observation snapshot is incomplete")
+        if not subject_pairs:
+            raise PermissionError("authenticated subject observations are unavailable")
+        persisted_ids = {pair[1].observation_id for pair in subject_pairs}
+        if not set(observation_ids).issubset(persisted_ids):
+            raise PermissionError("observation snapshot changed")
+        pairs = subject_pairs
+        observations = tuple(pair[1] for pair in pairs)
+        if not all(authenticated(pair) for pair in pairs):
+            raise PermissionError("only scoped authenticated verifier observations may promote")
+        content_keys = {observation.content_key for observation in observations}
+        if len(content_keys) != 1:
+            raise PermissionError("observations must describe one verified subject")
+        decisions = self._ladder.evaluate(observations)
+        if len(decisions) != 1:
+            raise PermissionError("observations must describe one verified subject")
+        decision = decisions[0]
+        if any(not observation.positive for observation in observations):
+            mutation = fact_source.delete_fact(connection, fact_id, project)
+            return "demoted" if mutation else "unchanged", decision
+        if not decision.promotable:
+            return "candidate", decision
+        mutation = fact_source.upsert_fact(
+            connection, fact_id, project, content,
+        )
+        return "promoted", decision
+
+
+__all__ = ["ReceiptObservationProducer", "VerifierReceipt", "VerifiedSubjectFactPromotion"]

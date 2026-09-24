@@ -159,6 +159,35 @@ Mutation checks: removing each of these makes at least one test fail:
   golden fails when any of these three is changed in place: the `success`
   status field, the 2 KiB inline threshold, or `message.emitted`.
 
+## Merge with main after #542 (verified snapshots)
+
+In #542 the live lane builds its context from `read_complete`, which returns
+one chain-verified snapshot of the whole session. It passes those verified
+events to `archive_verified_context` and to `validate_persisted_event`.
+
+The retention gate, the schema-2 projection, and the lossless replay of
+legacy summaries all run inside `validate_persisted_event`. They operate only
+on the events the caller passes in and never re-read storage, so the model
+still sees only chain-verified events.
+
+`recover_source` now slices its range from `read_complete` when the
+repository offers it. The test
+`test_recover_source_uses_the_chain_verified_snapshot` alters a plain-chatter
+row out of band. That row is not critical, so the summary check alone cannot
+catch it. Before this change the altered row was returned. After it, the call
+fails with an integrity error.
+
+Ledger rows from this PR were renumbered above the revisions already on
+main:
+
+| Requirement | Revision |
+|---|---|
+| COMPACT-001 | 5 |
+| COMPACT-002 | 5 |
+| COMPACT-003 | 5 |
+| COMPACT-004 | 7 |
+| COMPACT-005 | 4 |
+
 ## Rollback note
 
 Code before this PR does not know `summary_schema`. It recomputes every
@@ -190,11 +219,11 @@ LOSSY_ACCEPTED False
 ```
 
 ```text
-python -m pytest -q tests/test_compaction_continue_canary.py tests/test_compaction_retention_review.py tests/test_compaction_summary_schema_golden.py
-41 passed
+python -m pytest -q tests/test_compaction_continue_canary.py tests/test_compaction_retention_review.py tests/test_compaction_summary_schema_golden.py tests/test_session_complete_recovery_adversarial.py
+73 passed
 
-python -m pytest -q -n 8 <119 compaction/session/context/lane/replay/archive test files>
-2038 passed, 1 warning (three consecutive runs)
+python -m pytest -q -n 8 <120 compaction/session/context/lane/replay/archive test files, after merging main>
+2122 passed, 1 skipped, 1 warning
 ```
 
 Two earlier parallel runs each had one intermittent failure. The first was
