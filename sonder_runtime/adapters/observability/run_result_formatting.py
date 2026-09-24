@@ -19,6 +19,17 @@ def format_run_result(title: str, data: dict) -> str:
     # the stdout marker and need this field to distinguish no-run failures.
     if data.get("error"):
         lines.append("  error: %s" % data["error"])
+    # A host guard refusal carries its own bounded recovery advice; an MCP
+    # caller that only sees this rendering must see it too.
+    if data.get("guard"):
+        reason = data.get("guard_reason")
+        lines.append(
+            "  guard: %s%s" % (data["guard"], " (%s)" % reason if reason else "")
+        )
+    if data.get("holder"):
+        lines.append("  holder: %s" % data["holder"])
+    if data.get("recovery"):
+        lines.append("  recovery: %s" % data["recovery"])
     if data.get("stdout"):
         lines.extend(["stdout:", data["stdout"].rstrip()])
     if data.get("stderr"):
