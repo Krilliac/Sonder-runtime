@@ -153,6 +153,9 @@ jobs:
           tests/test_control_plane_inventory.py
           tests/test_control_plane_deleted_paths.py
           tests/test_process_wait_hardening.py
+          tests/test_job004_process_provider.py
+          tests/test_process_cancellation_reaping.py
+          tests/test_process_group_absence.py
           tests/test_start_selfmod_launcher.py
           tests/test_command_recovery.py
           tests/test_curriculum_store_durability.py
