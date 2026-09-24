@@ -11,6 +11,11 @@ The requirement-wide audit is in [SEC-AUDIT-2026-09-23.md](SEC-AUDIT-2026-09-23.
 > unbounded parser work through GNU sparse members and uncaught recursion
 > through chained metadata records. Revision 5 re-verifies at `cf83cb18`,
 > which contains fixes 1 to 10 below. The CI receipt is under Evidence.
+> Revision 6 withdrew that again after a round-3 re-review at `774c8965`
+> measured global PAX (`g`) keys accumulating into every later member and
+> per-member PAX (`x`) keys retained per member without an archive-wide
+> budget. The checkbox is cleared until the fix has a green CI run on its
+> exact SHA.
 
 ## Production archive readers
 
