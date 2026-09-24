@@ -516,9 +516,9 @@
     },
     {
       "checked": false,
-      "claim": "A bounded local Ollama probe through the live AgentLaneService path observed scoped skill refresh invalidating the application prefix while preserving provider model identity and forwarding provider cache telemetry.",
+      "claim": "Live tool-enabled agent-lane requests keep the per-turn tool selection id outside the reusable prefix, so turns of one lane and independent worker processes on the same project derive one deterministic prefix identity; a bounded two-process loopback Ollama probe observed provider-reported prompt-cache reuse through the production gateway.",
       "requirement_id": "CTX-009",
-      "revision": 6,
+      "revision": 7,
       "status": "implemented_unverified"
     },
     {
@@ -866,9 +866,9 @@
     },
     {
       "checked": false,
-      "claim": "Live agent tools and composed process, compute, local subagent, and self-mod worker adapters persist host-owned effect intents and outcomes; checkpoint restore validates journal high-water and unresolved effects.",
+      "claim": "Corrects revisions 12 and 13 after an independent review of 3d22e670. Concurrent effects in one shared run now always commit their terminal outcome and checkpoint only the settled high-water prefix; restore accepts later effects only when every effect in the run is terminal and reports journal_high_water, so restart succeeds after verified reconciliation; reconcile clears the run-wide recovery fence once nothing is unresolved; checkpoint writes require the current unfenced owner epoch and idempotent outcome replays append no generation; checkpoint generations are bounded per run; the process-start verifier reports an attached launch as completed with the live {job_id}:{pid} receipt shape.",
       "requirement_id": "LOOP-008",
-      "revision": 4,
+      "revision": 15,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "55d3f537436c463a8a8c70ded317bef8384af89689c278f2f79d1d9651189ffb",
+    "ledger_sha256": "d6a58075f763faf0f586f609e7a199d75eb1da727f26b71c62e4a2bd68f16719",
     "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
   }
 }
