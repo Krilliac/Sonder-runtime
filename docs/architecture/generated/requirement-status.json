@@ -180,9 +180,9 @@
     },
     {
       "checked": false,
-      "claim": "Revision 2 application-boundary budget admission still applies; additionally, codegen_build_loop clamps caller-supplied attempts to a fixed ceiling, and the selfmod candidate tool-call and runtime budgets are proven by deliberate-trigger canaries.",
+      "claim": "Revisions 2 and 3 still apply; additionally, when codegen_build_loop clamps a caller-supplied attempt count, its report states the requested and applied values.",
       "requirement_id": "AGENT-007",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -859,9 +859,9 @@
     },
     {
       "checked": false,
-      "claim": "Revision 2 transport-retry bounds still apply; additionally, the codegen generate-build-repair loop stops regenerating a file after two consecutive identical failing build outcomes and reports the stall fingerprint; the agent loop's identical successful web-call refusal has a deliberate-trigger canary.",
+      "claim": "Revision 2 transport-retry bounds and the revision 3 web-repeat canary still apply. The codegen no-progress guard, corrected from revision 3, stops regenerating a file only when two consecutive comparable attempts produce an identical failing outcome (sorted error lines with duplicates kept) without a score improvement. Attempts whose errors are a host placeholder, truncated output, or masked by count_unreliable reset the streak and never count toward a stall.",
       "requirement_id": "LOOP-007",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "6f3959a7046c2f3b50ccd553e3c7ae938ade98336f6f866b79d39b40908b2b6e",
+    "ledger_sha256": "39b41cd85aaa44a5de3f65288b1236e1a9c64b0348bac563054771e1213228a2",
     "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
   }
 }

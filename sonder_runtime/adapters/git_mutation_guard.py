@@ -23,9 +23,10 @@ The guard is deliberately small:
   typed :class:`ConcurrentGitMutation` naming the holder, so the caller's
   recovery is materially different from the blocked action: re-inspect the
   tree (``repo_status``) after the holder finishes, then decide again;
-* a pre-existing ``index.lock`` left by some *other* process is reported as
-  its own refusal reason instead of being deleted -- the host never removes a
-  lock it did not create.
+* an ``index.lock`` held by some *other* Git process (possibly a concurrent
+  read such as ``repo_status``, which holds it briefly, or a crashed process
+  that left it behind) is reported as its own refusal reason instead of being
+  deleted -- the host never removes a lock it did not create.
 
 Limitations (recorded in the Issue #510 guard inventory): the slot is
 per-process.  Two separate Sonder processes mutating the same tree are only
@@ -172,10 +173,12 @@ def guard_git_mutation(root, operation, *, wait_seconds=None):
             with _state_lock:
                 _stats["refused"] += 1
             raise ConcurrentGitMutation(
-                "HOST GUARD: refused %s: %s exists, so another Git process is "
-                "using this working tree (or crashed and left the lock). The "
-                "host does not delete locks it did not create; confirm no Git "
-                "process is running before removing it manually."
+                "HOST GUARD: refused %s: another git process holds index.lock "
+                "(possibly a concurrent read or a crashed process): %s. A "
+                "concurrent read such as repo_status releases it within "
+                "moments; retry after re-inspecting. The host never deletes a "
+                "lock it did not create; remove a stale one manually only "
+                "after confirming no Git process is running."
                 % (operation, lock_file),
                 key=key, operation=operation, reason="foreign_index_lock",
             )
