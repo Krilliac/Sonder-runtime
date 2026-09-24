@@ -1,5 +1,11 @@
 # Mobile host control for Sonder Runtime
 
+> **Contract scope:** this focused contract describes current behavior. Unfinished
+> implementation work is tracked in the
+> [master implementation specification](docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md); the
+> [behavior status](#behavior-status) table labels what is implemented,
+> experimental, proposed, degraded, or unsupported.
+
 The Sonder Runtime Flutter app uses the same System page on desktop, Android,
 iOS, and other client-only builds. A phone cannot create a process on a
 powered-off or listener-free computer, so the host runs a small independent
@@ -206,3 +212,19 @@ If the launcher is reachable but server startup fails, inspect the launcher
 response and the main server log under Sonder Runtime's per-user `run`
 directory. The usual cause is a missing Ollama model/runtime dependency or a
 LAN main-server bind without a strong `SONDER_API_KEY`.
+
+## Behavior status
+
+Labels follow the [documentation status vocabulary](docs/architecture/DOCUMENT-AUTHORITY-INDEX.md#documentation-status-vocabulary). Unfinished
+implementation work is tracked only in the
+[master implementation specification](docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md).
+
+| Behavior | Status | Boundary |
+|---|---|---|
+| Launcher status, start, stop, and restart of `sonder_headless.py` | Implemented | Four fixed operations only; no commands, paths, setup, updates, or training. |
+| Durable command acknowledgement protocol | Implemented | Admission and replay journal; polling still observes the terminal state. |
+| Automatic retry of an `uncertain` command receipt | Unsupported | Reconcile it manually from the durable operation ledger. |
+| Wake-on-LAN | Unsupported | The host must be powered on with the launcher already running. |
+| Automatic operating-system firewall changes | Unsupported | Open only the TLS proxy and launcher ports yourself. |
+| Setup engine, Git updates, or local training from client-only devices | Unsupported | These operations require direct host file access. |
+| Mobile stream resume and desktop-equivalent durable state | Proposed | API-007; bounded reconnect shares the typed protocol graph, but full parity is not a current contract. |
