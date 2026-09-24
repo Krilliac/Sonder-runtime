@@ -32,7 +32,10 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import sonder_runtime.adapters.persistence.migrations as sonder_migrations
-from sonder_runtime.application.security.bounded_archives import open_bounded
+from sonder_runtime.application.security.bounded_archives import (
+    TarMetadataLimitError,
+    open_bounded,
+)
 import sonder_runtime.platform.version as sonder_version
 
 MANIFEST_SCHEMA_VERSION = 1
@@ -675,6 +678,10 @@ def _read_pointer(link: Path) -> str | None:
 
 
 MAX_EXTRACT_MEMBERS = 50_000
+# Wall-clock ceiling for one staging call (validation walk plus writes).
+# Walking the 50,000-member cap costs tens of seconds of CPU; the deadline
+# keeps a hostile but trust-verified bundle from holding the updater longer.
+MAX_EXTRACT_SECONDS = 300.0
 MAX_MEMBER_NAME_CHARS = 1_024
 _WINDOWS_DEVICE_STEMS = frozenset({
     "con", "prn", "aux", "nul", "conin$", "conout$",
@@ -694,25 +701,34 @@ def safe_extract(
     *,
     max_expanded_bytes: int,
     max_members: int = MAX_EXTRACT_MEMBERS,
+    max_seconds: float = MAX_EXTRACT_SECONDS,
 ) -> int:
     """Extract a tar archive refusing traversal, links, devices, non-portable
-    names, duplicates, more than ``max_members`` members, and expansion beyond
-    ``max_expanded_bytes``.  Every member is validated before any byte is
-    written.  Returns bytes written."""
+    names, duplicates, more than ``max_members`` members, expansion beyond
+    ``max_expanded_bytes``, and work beyond ``max_seconds`` of wall time.
+    Every member is validated before any byte is written.  Returns bytes
+    written."""
     if type(max_members) is not int or max_members < 1:
         raise ValueError("max_members must be a positive integer")
+    if isinstance(max_seconds, bool) or not isinstance(max_seconds, (int, float)) or not max_seconds > 0:
+        raise ValueError("max_seconds must be a positive number")
+    deadline = time.monotonic() + float(max_seconds)
     dest = Path(destination).resolve()
     try:
         tar = open_bounded(archive_path)
+    except TarMetadataLimitError as exc:
+        raise ExtractionError(f"archive metadata exceeds reader bound: {exc}") from None
     except (OSError, EOFError, tarfile.TarError) as exc:
         raise ExtractionError(f"cannot open archive: {exc}") from None
     try:
         with tar:
-            plan = _plan_members(tar, max_expanded_bytes, max_members)
+            plan = _plan_members(tar, max_expanded_bytes, max_members, deadline)
             dest.mkdir(parents=True, exist_ok=True)
-            written = _extract_members(tar, dest, plan)
+            written = _extract_members(tar, dest, plan, deadline)
     except ExtractionError:
         raise
+    except TarMetadataLimitError as exc:
+        raise ExtractionError(f"archive metadata exceeds reader bound: {exc}") from None
     except (OSError, EOFError, tarfile.TarError) as exc:
         raise ExtractionError(f"corrupt or truncated archive: {exc}") from None
     return written
@@ -761,7 +777,14 @@ def _portable_member_parts(name: object) -> tuple[str, ...]:
     return parts
 
 
-def _plan_members(tar, max_expanded_bytes: int, max_members: int) -> list:
+def _require_before(deadline: float) -> None:
+    if time.monotonic() > deadline:
+        raise ExtractionError("archive staging exceeded its time ceiling")
+
+
+def _plan_members(
+    tar, max_expanded_bytes: int, max_members: int, deadline: float,
+) -> list:
     """Validate every member (and the aggregate) before extraction starts.
 
     Walking a compressed TAR decompresses each payload to reach the next
@@ -775,6 +798,7 @@ def _plan_members(tar, max_expanded_bytes: int, max_members: int) -> list:
     folded_types: dict[str, str] = {}
     folded_components: dict[str, str] = {}
     for member in tar:
+        _require_before(deadline)
         if len(plan) >= max_members:
             raise ExtractionError(
                 f"archive exceeds the {max_members} member bound"
@@ -832,9 +856,10 @@ def _plan_members(tar, max_expanded_bytes: int, max_members: int) -> list:
     return plan
 
 
-def _extract_members(tar, dest: Path, plan: list) -> int:
+def _extract_members(tar, dest: Path, plan: list, deadline: float) -> int:
     written = 0
     for member, parts in plan:
+        _require_before(deadline)
         name = member.name
         path = Path(*parts)
         if member.isdir():

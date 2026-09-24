@@ -2192,10 +2192,15 @@ def _inspect_sqlite(p: Path) -> dict:
     }
 
 
+class ArchivePreviewRejected(ValueError):
+    """An archive preview stopped because the archive exceeds a reader bound."""
+
+
 def _inspect_zip(p: Path) -> dict:
     import zipfile
 
     from sonder_runtime.application.security.bounded_archives import (
+        ZipCentralDirectoryLimitError,
         require_zip_entry_bound,
         zip_central_directory,
     )
@@ -2214,7 +2219,12 @@ def _inspect_zip(p: Path) -> dict:
         }
     # Also bound the central-directory size (names, extra fields, comments)
     # before zipfile parses it; raises ZipCentralDirectoryLimitError.
-    require_zip_entry_bound(p, INSPECT_MAX_ARCHIVE_MEMBERS)
+    try:
+        require_zip_entry_bound(p, INSPECT_MAX_ARCHIVE_MEMBERS)
+    except ZipCentralDirectoryLimitError as exc:
+        raise ArchivePreviewRejected(
+            "zip preview rejected: central directory exceeds reader bound: %s" % exc
+        ) from None
     with zipfile.ZipFile(p) as archive:
         names = archive.namelist()
         total = sum(info.file_size for info in archive.infolist())
@@ -2231,26 +2241,34 @@ def _inspect_zip(p: Path) -> dict:
 
 
 def _inspect_tar(p: Path) -> dict:
-    from sonder_runtime.application.security.bounded_archives import open_bounded
+    from sonder_runtime.application.security.bounded_archives import (
+        TarMetadataLimitError,
+        open_bounded,
+    )
 
     names = []
     expanded = 0
     truncated = False
-    with open_bounded(p) as archive:
-        # Iterate instead of getmembers(): stop before decompressing past
-        # the scan budget or collecting an unbounded member list.
-        for member in archive:
-            names.append(member.name)
-            expanded += max(0, int(member.size))
-            if (
-                len(names) >= INSPECT_MAX_ARCHIVE_MEMBERS
-                or expanded >= INSPECT_MAX_ARCHIVE_SCAN_BYTES
-            ):
-                # Do not peek at the next header: reaching it would
-                # decompress this member's payload.  Stopping here means the
-                # counts may be incomplete, so they are reported as floors.
-                truncated = True
-                break
+    try:
+        with open_bounded(p) as archive:
+            # Iterate instead of getmembers(): stop before decompressing past
+            # the scan budget or collecting an unbounded member list.
+            for member in archive:
+                names.append(member.name)
+                expanded += max(0, int(member.size))
+                if (
+                    len(names) >= INSPECT_MAX_ARCHIVE_MEMBERS
+                    or expanded >= INSPECT_MAX_ARCHIVE_SCAN_BYTES
+                ):
+                    # Do not peek at the next header: reaching it would
+                    # decompress this member's payload.  Stopping here means
+                    # the counts may be incomplete, so they are floors.
+                    truncated = True
+                    break
+    except TarMetadataLimitError as exc:
+        raise ArchivePreviewRejected(
+            "tar preview rejected: metadata exceeds reader bound: %s" % exc
+        ) from None
     listing = "\n".join(names[:INSPECT_PREVIEW_ITEMS])
     if len(names) > INSPECT_PREVIEW_ITEMS:
         listing += "\n… (%d more)" % (len(names) - INSPECT_PREVIEW_ITEMS)

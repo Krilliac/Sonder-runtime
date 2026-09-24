@@ -117,10 +117,24 @@ The requirement-wide audit is in [SEC-AUDIT-2026-09-23.md](SEC-AUDIT-2026-09-23.
     The `inspect_data` preview and OOXML validation now also apply
     `require_zip_entry_bound`, which checks the central-directory size, as
     `archive_tools` and `path_archive_safety` already did.
+14. **Clear rejection messages and a staging deadline** (review round 4;
+    the bounds themselves are unchanged). Each reader now reports a
+    metadata-bound violation as its own rejection with a clear message:
+    - `safe_extract` raises `ExtractionError` ("archive metadata exceeds
+      reader bound") instead of "corrupt or truncated archive";
+    - the `inspect_data` preview raises `ArchivePreviewRejected` for TAR
+      metadata and for oversized ZIP central directories;
+    - `path_archive_safety.inspect_tar` raises `ArchiveLimitError`;
+    - `archive_tools` already raised `ArchiveRejected`.
+
+    `safe_extract` also takes `max_seconds` (default 300 s). It checks the
+    deadline before each member in both the validation walk and the write
+    loop, because walking the 50,000-member cap can cost tens of seconds of
+    CPU.
 
 ## Evidence
 
-`tests/test_sec004_archive_adversarial.py`: 54 cases across all three
+`tests/test_sec004_archive_adversarial.py`: 59 cases across all three
 untrusted readers, including the update-staging name corpus, duplicate and
 case collisions, the member bound, validation before any write, hard links,
 FIFOs, and block devices, overlapping ZIP entries, ZIP declared-size lies in
@@ -213,6 +227,10 @@ Regression checks from the same worktree (Windows, Python 3.12.10), round 0:
   manifest-trust, and architecture suites: 158 passed, 6 skipped;
   `scripts/check_architecture.py` passed.
 
+- Round 4: the 5 new message and deadline cases failed before fix 14
+  and pass after it. The earlier-round cases now assert the reader-specific
+  rejection types; 59 of 59 pass. SEC-004 revision 7 still holds, because
+  fix 14 changes no bound.
 - Round 3: archive, update, data-inspect, update-engine,
   manifest-trust, artifact-grounding, architecture, SEC-004, and SEC-009
   suites: 265 passed, 6 skipped; `scripts/check_architecture.py` passed.
@@ -251,9 +269,9 @@ pull request's final head.
 The corpus is hand-built adversarial cases, not a coverage-guided fuzz
 campaign; that belongs to SEC-008. Name portability is judged against
 Windows, macOS, and Linux rules, not every filesystem. The update extractor
-bounds members and bytes but has no wall-clock deadline of its own; it
-relies on trust verification running first and on the manifest hash check
-afterwards. The llama.cpp converter `extractall` reads only a sealed,
+bounds members, bytes, and wall time (default 300 s). It relies on trust
+verification running first and on the manifest hash check afterwards. The
+revision-7 ledger limitation that says it has no deadline predates fix 14. The llama.cpp converter `extractall` reads only a sealed,
 hash-pinned tree and was not re-hardened. Collision keys use NFC plus case
 folding. That matches Windows, macOS, and default Linux behavior, but not
 every filesystem's exact folding tables. The 64 KiB metadata cap, the
