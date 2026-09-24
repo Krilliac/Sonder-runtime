@@ -4,6 +4,8 @@ from __future__ import annotations
 from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 
 import os
+import hashlib
+import json
 import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
@@ -12,7 +14,10 @@ from typing import Any, Callable
 
 from ...application.capabilities.jobs import JobCancellationResult, JobRegistryService
 from ...application.execution.process_jobs import ProcessJobRequest, ProcessJobStart, ProcessJobWait
-from ...application.execution.worker_bindings import AuthenticatedWorkerBinding, journaled_effect
+from ...application.execution.effect_journal import (
+    EffectIntent, EffectState, ReconciliationProof,
+)
+from ...application.execution.worker_bindings import AuthenticatedWorkerBinding, journaled_effect, _digest
 from ...application.jobs.durable_registry import ProcessTreeCleanupContract
 from ...application.jobs.session_lifecycle import JobRegistryLifecycleAdapter
 from ...application.execution.world_control import OutputStream
@@ -24,6 +29,82 @@ from ..extensions.memory_limits import (
     PreparedProcessContainment,
     ProcessContainmentResult,
 )
+
+
+class DurableProcessEffectVerifier:
+    """Host-composed verifier for process-start effects.
+
+    It reads only the durable job registry. Process output, caller text, and
+    an in-memory process handle are never accepted as reconciliation evidence.
+    """
+
+    verifier_id = "durable-process-job-registry-v1"
+    operation_ids = frozenset({"process-start"})
+
+    def __init__(self, registry_getter: Callable[[], Any]) -> None:
+        if not callable(registry_getter):
+            raise TypeError("registry_getter must be callable")
+        self._registry_getter = registry_getter
+
+    def verify(self, intent: EffectIntent) -> ReconciliationProof | None:
+        prefix, separator, job_id = intent.operation_id.partition(":")
+        if prefix != "process-start" or not separator or not job_id.strip():
+            return None
+        registry = self._registry_getter()
+        view = getattr(registry, "view", lambda _job_id: None)(job_id)
+        record = getattr(view, "record", None)
+        metadata = getattr(view, "metadata", None) or {}
+        if record is None:
+            record = getattr(registry, "poll", lambda _job_id: None)(job_id)
+        identity = getattr(record, "identity", None)
+        status = getattr(getattr(record, "status", None), "value", None)
+        revision = getattr(record, "revision", None)
+        if (
+            identity is None or getattr(identity, "job_id", None) != job_id
+            or getattr(identity, "kind", None) != "process"
+            or not isinstance(getattr(identity, "operation_id", None), str)
+            or not getattr(identity, "operation_id", "").strip()
+            or getattr(identity, "idempotency_key", None) != intent.idempotency_key
+            or metadata.get("process_request_digest") != intent.request_digest
+            or status not in {"succeeded", "failed", "cancelled"}
+            or type(revision) is not int or revision < 1
+        ):
+            return None
+        # The journaled effect is the *start*, not the job.  Only a durable
+        # attach record (launch_state "attached" plus a positive process id)
+        # proves the process was launched; the job's later exit status does
+        # not change that.  A terminal job without an attach record may have
+        # failed before launch or crashed between launch and attach, so it
+        # yields no proof and the fence stays set.
+        process_id = getattr(view, "process_id", None)
+        if (
+            metadata.get("launch_state") != "attached"
+            or isinstance(process_id, bool) or not isinstance(process_id, int)
+            or process_id <= 0
+        ):
+            return None
+        canonical = {
+            "job_id": job_id,
+            "kind": getattr(identity, "kind", ""),
+            "operation_id": getattr(identity, "operation_id", ""),
+            "idempotency_key": getattr(identity, "idempotency_key", ""),
+            "process_id": process_id,
+            "status": status,
+            "revision": revision,
+        }
+        outcome_digest = hashlib.sha256(
+            json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return ReconciliationProof(
+            intent_id=intent.intent_id,
+            operation_id=intent.operation_id,
+            # Same receipt shape as the live start path: "{job_id}:{pid}".
+            receipt_key=f"{job_id}:{process_id}",
+            outcome_digest=outcome_digest,
+            state=EffectState.COMPLETED,
+            verifier_id=self.verifier_id,
+            external_reference=f"job-registry:{job_id}:{revision}",
+        )
 
 
 class _ProcessSlotLease:
@@ -225,6 +306,7 @@ class SubprocessJobProvider:
             ).isoformat()
         persisted_metadata = dict(request.metadata)
         persisted_metadata.update({
+            "process_request_digest": _digest(request),
             "hard_deadline_at": deadline_at,
             "max_descendants": request.max_descendants,
             "memory_limit_bytes": request.memory_limit_bytes,
@@ -1087,4 +1169,4 @@ class SubprocessJobProvider:
         return isinstance(exit_code, int) and not isinstance(exit_code, bool)
 
 
-__all__ = ["SubprocessJobProvider"]
+__all__ = ["DurableProcessEffectVerifier", "SubprocessJobProvider"]
