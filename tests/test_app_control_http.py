@@ -233,7 +233,10 @@ def test_private_inventory_scope_rejects_changed_control_source(control, monkeyp
         binding._fleet_path = original
 
 
-def test_private_scope_rebind_keeps_only_admission_lease_live(control):
+@pytest.mark.parametrize("rebuild_equal_config", (False, True))
+def test_private_scope_rebind_keeps_only_admission_lease_live(
+    control, monkeypatch, rebuild_equal_config
+):
     """A broader current request retains only its exact active admission lease."""
     binding, _, _, _, _, _ = control
     additional = ControlPlanePaths(
@@ -242,6 +245,9 @@ def test_private_scope_rebind_keeps_only_admission_lease_live(control):
     with binding._private_inventory_scope():
         capability = binding._private_capability()
         lease = binding._private_admission_lease(capability)
+        if rebuild_equal_config:
+            original_config = binding._config_provider()
+            monkeypatch.setattr(binding, "_config_provider", lambda: replace(original_config))
         expanded = binding._private(requirements=additional)
         assert expanded.covers(binding._private_requirements(
             binding._config_provider(), additional

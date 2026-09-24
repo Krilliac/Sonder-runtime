@@ -128,6 +128,10 @@ def test_request_rejects_unbounded_or_invalid_values():
     for kwargs in (
         {"reason": ""},
         {"deadline_seconds": 0},
+        {"deadline_seconds": float("nan")},
+        {"deadline_seconds": float("inf")},
+        {"deadline_seconds": "5"},
+        {"deadline_seconds": True},
         {"max_records": 0},
         {"max_process_descendants": 0},
     ):
