@@ -105,6 +105,7 @@ class PromotionGatePolicy:
     require_shadow: bool = True
     require_canary: bool = True
     min_canary_samples: int = 1
+    require_baseline: bool = True
     schema: str = SCHEMA
 
     def __post_init__(self) -> None:
@@ -122,7 +123,7 @@ class PromotionGatePolicy:
             raise PromotionGateError("the confidence lower bound cannot exceed the point pass-rate floor")
         _count(self.max_case_regressions, "max_case_regressions")
         _count(self.min_canary_samples, "min_canary_samples", minimum=1)
-        for name in ("require_replay_equivalence", "require_shadow", "require_canary"):
+        for name in ("require_replay_equivalence", "require_shadow", "require_canary", "require_baseline"):
             if type(getattr(self, name)) is not bool:
                 raise PromotionGateError(f"{name} must be boolean")
         if self.require_canary and not self.require_shadow:
@@ -142,6 +143,7 @@ class PromotionGatePolicy:
             "require_shadow": self.require_shadow,
             "require_canary": self.require_canary,
             "min_canary_samples": self.min_canary_samples,
+            "require_baseline": self.require_baseline,
         }
 
     @property
@@ -161,7 +163,9 @@ def _policy(kind: PromotionKind, samples: int, floor: float, bound: float, confi
 DEFAULT_PROMOTION_GATE_POLICIES: Mapping[PromotionKind, PromotionGatePolicy] = MappingProxyType({
     PromotionKind.RUNTIME: _policy(PromotionKind.RUNTIME, 60, 0.98, 0.95, 0.95),
     PromotionKind.PROMPT: _policy(PromotionKind.PROMPT, 30, 0.90, 0.80, 0.95, max_pass_rate_drop=0.02),
-    PromotionKind.SKILL: _policy(PromotionKind.SKILL, 30, 0.90, 0.80, 0.95, max_pass_rate_drop=0.02),
+    # A new skill may have no predecessor to compare against; every other kind
+    # replaces an incumbent and must state the baseline pass rate explicitly.
+    PromotionKind.SKILL: _policy(PromotionKind.SKILL, 30, 0.90, 0.80, 0.95, max_pass_rate_drop=0.02, require_baseline=False),
     PromotionKind.ROUTE: _policy(PromotionKind.ROUTE, 30, 0.90, 0.80, 0.95, max_pass_rate_drop=0.02),
     PromotionKind.MODEL: _policy(PromotionKind.MODEL, 100, 0.90, 0.85, 0.95, max_pass_rate_drop=0.01),
     PromotionKind.MEMORY: _policy(PromotionKind.MEMORY, 30, 0.95, 0.85, 0.95),
@@ -197,6 +201,10 @@ class PromotionGateDecision:
     @property
     def passed(self) -> bool:
         return not self.reason_codes and all(self.gate_results.values())
+
+    @property
+    def kind_value(self) -> str:
+        return self.kind.value
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -236,10 +244,13 @@ def evaluate_promotion_gate(
     every result must have a distinct ``result_id`` and share one candidate,
     baseline, and suite digest.
 
-    This function trusts its inputs.  Promotion callers should use
-    ``EvaluationApplicationService.gated_promotion_evidence``, which recomputes
-    the decision from lifecycle-recorded results under the kind bound at
-    proposal creation instead of accepting a caller-built decision.
+    ``baseline_pass_rate=None`` means "no incumbent to compare with"; for a
+    policy with ``require_baseline`` that fails the ``baseline_comparison``
+    gate.
+
+    This function trusts its inputs.  Promotion uses
+    :class:`PromotionGateEvaluator` inside ``ProposalLifecycle``, which runs it
+    over lifecycle-recorded results under the kind bound at proposal creation.
     """
     if not isinstance(policy, PromotionGatePolicy):
         raise PromotionGateError("policy is invalid")
@@ -288,6 +299,10 @@ def evaluate_promotion_gate(
         "case_regressions": case_regressions <= policy.max_case_regressions,
         "pass_rate_drop": baseline_pass_rate is None or baseline_pass_rate - pass_rate <= policy.max_pass_rate_drop,
     }
+    if policy.require_baseline:
+        # Without a baseline the drop allowance cannot be checked; for kinds that
+        # replace an incumbent that is a failed gate, not a silent pass.
+        gates["baseline_comparison"] = baseline_pass_rate is not None
     if policy.require_replay_equivalence:
         gates["replay_equivalence"] = replay_equivalent
     if policy.require_shadow:
@@ -307,8 +322,41 @@ def evaluate_promotion_gate(
     )
 
 
+class PromotionGateEvaluator:
+    """Policy-table gate for ``ProposalLifecycle(promotion_gate=...)``.
+
+    The table is validated and frozen at construction, so every service that
+    wraps the same lifecycle applies the same thresholds.
+    """
+
+    def __init__(self, policies: Mapping[PromotionKind, PromotionGatePolicy] = DEFAULT_PROMOTION_GATE_POLICIES) -> None:
+        self._policies = validate_policy_table(policies)
+
+    def policy(self, kind: PromotionKind | str) -> PromotionGatePolicy:
+        try:
+            return self._policies[PromotionKind(kind)]
+        except ValueError as exc:
+            raise PromotionGateError(f"unknown promotion kind {kind!r}") from exc
+
+    def __call__(
+        self,
+        kind: str,
+        *,
+        results: Sequence[EvaluationResult],
+        baseline_pass_rate: float | None,
+        case_regressions: int,
+        shadow: ShadowCanaryObservation | None,
+        canary: ShadowCanaryObservation | None,
+    ) -> PromotionGateDecision:
+        return evaluate_promotion_gate(
+            self.policy(kind), results=results, baseline_pass_rate=baseline_pass_rate,
+            case_regressions=case_regressions, shadow=shadow, canary=canary,
+        )
+
+
 __all__ = [
     "DEFAULT_PROMOTION_GATE_POLICIES", "PromotionGateDecision", "PromotionGateError",
+    "PromotionGateEvaluator",
     "PromotionGatePolicy", "PromotionKind", "evaluate_promotion_gate",
     "validate_policy_table", "wilson_lower_bound",
 ]

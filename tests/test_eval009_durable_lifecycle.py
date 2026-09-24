@@ -40,7 +40,7 @@ def _ready(service: EvaluationLifecycleService) -> str:
     evidence = service.build_promotion_evidence("p1", gate_results={"quality": True},
         replay_equivalent=True, holdout_passed=True, rollback_reference="baseline",
         provenance=("eval:local",))
-    service.approve("p1", evidence.digest)
+    service.approve("p1", evidence.digest, allow_ungated_legacy=True)
     return evidence.digest
 
 

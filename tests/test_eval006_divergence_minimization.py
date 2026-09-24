@@ -336,3 +336,73 @@ def test_file_store_cleans_stale_temporaries_and_serializes_writers(tmp_path) ->
     with pytest.raises(DivergenceError, match="lock"):
         store.retain(other)
     assert store.digests() == (failure.digest,)
+
+
+def test_lock_release_never_deletes_another_writers_lock(tmp_path) -> None:
+    store = JsonMinimizedFailureStore(tmp_path)
+    lock = tmp_path / ".lock"
+    with store._locked():
+        # Simulate our lock being broken as stale and re-acquired by another
+        # writer while we were still inside the critical section.
+        lock.write_text("another-writer-token", encoding="utf-8")
+    assert lock.read_text(encoding="utf-8") == "another-writer-token"
+
+
+def test_stale_lock_break_never_removes_a_fresh_lock(tmp_path) -> None:
+    store = JsonMinimizedFailureStore(tmp_path)
+    lock = tmp_path / ".lock"
+    # A waiter judged the *old* holder's lock stale, but a new holder has since
+    # replaced it: the break must leave the new holder's lock in place.
+    lock.write_text("fresh-holder", encoding="utf-8")
+    assert store._break_stale_lock(lock, "old-holder") is False
+    assert lock.read_text(encoding="utf-8") == "fresh-holder"
+
+    lock.write_text("old-holder", encoding="utf-8")
+    assert store._break_stale_lock(lock, "old-holder") is True
+    assert not lock.exists()
+    assert not list(tmp_path.glob(".lock.*")), "no sidecar files may be left behind"
+
+
+def test_a_stale_lock_is_broken_and_the_write_proceeds(tmp_path) -> None:
+    lock = tmp_path / ".lock"
+    lock.write_text("crashed-writer", encoding="utf-8")
+    old = time.time() - 3_600
+    os.utime(lock, (old, old))
+    store = JsonMinimizedFailureStore(tmp_path, lock_timeout_seconds=0.5)
+    failure = minimize_failure(_recorded_session(), _candidate, baseline_factory=_fixed_candidate)
+    assert store.retain(failure) == failure.digest
+    assert not lock.exists()
+
+
+def test_concurrent_writers_respect_the_capacity_bound(tmp_path) -> None:
+    import threading
+
+    policy = DivergencePolicy(ignored_paths=("latency_ms",))
+    failures = []
+    for number in range(6):
+        steps = tuple(
+            TrajectoryStep(index, {"x": index}, {"y": index * 2, "latency_ms": 1})
+            for index in range(10)
+        )
+        record = TrajectoryRecord.from_steps(f"noisy-{number}", steps)
+        failures.append(minimize_failure(record, _noisy_candidate, policy))
+    store = JsonMinimizedFailureStore(tmp_path, max_failures=4, lock_timeout_seconds=10)
+    outcomes: list[str] = []
+    barrier = threading.Barrier(len(failures))
+
+    def write(failure) -> None:
+        barrier.wait()
+        try:
+            store.retain(failure)
+            outcomes.append("ok")
+        except DivergenceError as exc:
+            outcomes.append(str(exc))
+
+    threads = [threading.Thread(target=write, args=(failure,)) for failure in failures]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert outcomes.count("ok") == 4
+    assert len(store.digests()) == 4
+    assert not (tmp_path / ".lock").exists()

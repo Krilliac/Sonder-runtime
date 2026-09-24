@@ -40,9 +40,12 @@ superseded by revision 5 after independent review of pull request #546.
     retained step, with an expected digest matching that stored step.
 - `sonder_runtime/adapters/evaluation_failure_corpus.py`:
   `JsonMinimizedFailureStore` writes `<sha256>.json` under an exclusive
-  `O_CREAT | O_EXCL` lock (capacity check, no-overwrite check, and atomic
-  rename in one critical section), removes abandoned locks and temporary
-  files by age, and re-verifies records on load.
+  `O_CREAT | O_EXCL` lock holding a random per-acquisition token (capacity
+  check, no-overwrite check, and atomic rename in one critical section).
+  Release deletes the lock only if it still holds this writer's token. A
+  stale lock is broken by an atomic rename to a unique sidecar, and is kept
+  if the sidecar turns out to hold a newer holder's token. Abandoned
+  temporary files are removed by age, and records are re-verified on load.
 - `sonder_runtime/application/evaluation/service.py`:
   `earliest_divergence`, `minimize_and_retain_failure`, `retained_failures`,
   and `reproduce_retained_failure`; the store is injected through the
@@ -50,7 +53,7 @@ superseded by revision 5 after independent review of pull request #546.
 
 ## Evidence
 
-`tests/test_eval006_divergence_minimization.py` (16 tests, deterministic
+`tests/test_eval006_divergence_minimization.py` (20 tests, deterministic
 in-process fakes only — no model):
 
 - Noise versus decision: raw comparison diverges at step 0 on
@@ -71,6 +74,13 @@ in-process fakes only — no model):
 - Prefix strategy, unfaithful baseline, non-divergent and nondeterministic
   candidates, JSON round trip, tampering, bounded stores, stale temporary
   cleanup, held-lock timeout, and service-level retain/reproduce are covered.
+- Lock ownership: release leaves another writer's lock in place; a stale-lock
+  break leaves a fresh holder's lock in place; a crashed writer's stale lock
+  is broken. Six concurrent writers against a capacity of four retain exactly
+  four. This test first failed 2 of 3 runs on Windows, where a waiter reading
+  the lock made the holder's unlink fail silently and leak the lock. Waiters
+  now read the token only once a lock is stale, and release retries the
+  unlink for a bounded time.
 
 Each review fix was preceded by a test that failed on the previous code.
 

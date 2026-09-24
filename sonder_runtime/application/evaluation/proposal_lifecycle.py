@@ -8,13 +8,13 @@ never promotes a proposal implicitly.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 import hashlib
 import json
 import math
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol
 
 
 SCHEMA = "sonder.evaluation-proposal-lifecycle.v1"
@@ -323,10 +323,51 @@ class Proposal:
     state: ProposalState = ProposalState.DRAFT
     result_ids: tuple[str, ...] = ()
     evidence_digest: str = ""
+    promotion_kind: str = ""
+
+
+class GateDecisionLike(Protocol):
+    """The parts of a promotion-gate decision the lifecycle relies on."""
+
+    @property
+    def gate_results(self) -> Mapping[str, bool]: ...
+
+    @property
+    def replay_equivalent(self) -> bool: ...
+
+    @property
+    def digest(self) -> str: ...
+
+    @property
+    def kind_value(self) -> str: ...
+
+
+class PromotionGate(Protocol):
+    """Mechanical gate fixed when the lifecycle is constructed."""
+
+    def __call__(
+        self,
+        kind: str,
+        *,
+        results: tuple[EvaluationResult, ...],
+        baseline_pass_rate: float | None,
+        case_regressions: int,
+        shadow: ShadowCanaryObservation | None,
+        canary: ShadowCanaryObservation | None,
+    ) -> GateDecisionLike: ...
 
 
 class ProposalLifecycle:
-    """Explicit, non-persistent proposal state machine for evaluation callers."""
+    """Explicit, non-persistent proposal state machine for evaluation callers.
+
+    Gate authority lives here, not in any service wrapping it.  A proposal
+    created with a ``promotion_kind`` is *kind-bound*: its evidence can only be
+    built by :meth:`build_gated_promotion_evidence`, which runs the
+    ``promotion_gate`` fixed at construction over the results and observations
+    this lifecycle recorded, and :meth:`approve` accepts only that gated
+    evidence.  Proposals without a kind are legacy; their caller-asserted
+    evidence is approved only with an explicit ``allow_ungated_legacy=True``.
+    """
 
     _allowed = {
         ProposalState.DRAFT: {ProposalState.SUBMITTED, ProposalState.WITHDRAWN},
@@ -341,17 +382,31 @@ class ProposalLifecycle:
         ProposalState.ROLLED_BACK: set(),
     }
 
-    def __init__(self) -> None:
+    def __init__(self, *, promotion_gate: PromotionGate | None = None) -> None:
+        if promotion_gate is not None and not callable(promotion_gate):
+            raise EvaluationLifecycleError("promotion_gate must be callable")
+        self._gate = promotion_gate
+        self._gated: dict[str, tuple[str, str]] = {}
         self._proposals: dict[str, Proposal] = {}
         self._results: dict[str, EvaluationResult] = {}
         self._observations: dict[str, dict[EvaluationMode, ShadowCanaryObservation]] = {}
         self._evidence: dict[str, PromotionEvidence] = {}
 
-    def create(self, proposal_id: str, candidate: str, baseline: str, suite: EvaluationSuite) -> Proposal:
+    def create(
+        self, proposal_id: str, candidate: str, baseline: str, suite: EvaluationSuite,
+        *, promotion_kind: str = "",
+    ) -> Proposal:
         proposal_id = _text(proposal_id, "proposal_id")
         if proposal_id in self._proposals:
             raise EvaluationLifecycleError(f"proposal {proposal_id!r} already exists")
-        proposal = Proposal(proposal_id, _text(candidate, "candidate"), _text(baseline, "baseline"), suite)
+        if not isinstance(promotion_kind, str):
+            raise EvaluationLifecycleError("promotion_kind must be a string")
+        if promotion_kind and self._gate is None:
+            raise EvaluationLifecycleError("kind-bound proposals require a lifecycle constructed with a promotion_gate")
+        proposal = Proposal(
+            proposal_id, _text(candidate, "candidate"), _text(baseline, "baseline"), suite,
+            promotion_kind=promotion_kind.strip(),
+        )
         self._proposals[proposal_id] = proposal
         self._observations[proposal_id] = {}
         return proposal
@@ -375,7 +430,7 @@ class ProposalLifecycle:
         current = self.get(proposal_id)
         if target not in self._allowed[current.state]:
             raise EvaluationLifecycleError(f"cannot transition {current.state.value} to {target.value}")
-        updated = Proposal(current.proposal_id, current.candidate, current.baseline, current.suite, target, current.result_ids, current.evidence_digest)
+        updated = replace(current, state=target)
         self._proposals[proposal_id] = updated
         return updated
 
@@ -415,7 +470,7 @@ class ProposalLifecycle:
             raise EvaluationLifecycleError("result IDs are immutable")
         self._results[result.result_id] = result
         if result.result_id not in proposal.result_ids:
-            self._proposals[proposal_id] = Proposal(proposal.proposal_id, proposal.candidate, proposal.baseline, proposal.suite, proposal.state, proposal.result_ids + (result.result_id,), proposal.evidence_digest)
+            self._proposals[proposal_id] = replace(proposal, result_ids=proposal.result_ids + (result.result_id,))
         return result
 
     def record_observation(self, proposal_id: str, observation: ShadowCanaryObservation) -> ShadowCanaryObservation:
@@ -430,6 +485,76 @@ class ProposalLifecycle:
         return observation
 
     def build_promotion_evidence(
+        self,
+        proposal_id: str,
+        *,
+        gate_results: Mapping[str, bool],
+        replay_equivalent: bool,
+        holdout_passed: bool,
+        rollback_reference: str,
+        provenance: tuple[str, ...],
+    ) -> PromotionEvidence:
+        """Legacy, caller-asserted evidence; refused for kind-bound proposals."""
+        if self.get(proposal_id).promotion_kind:
+            raise EvaluationLifecycleError(
+                "kind-bound proposals require gated promotion evidence; caller-asserted gates are refused",
+            )
+        self._gated.pop(proposal_id, None)
+        return self._build_evidence(
+            proposal_id, gate_results=gate_results, replay_equivalent=replay_equivalent,
+            holdout_passed=holdout_passed, rollback_reference=rollback_reference, provenance=provenance,
+        )
+
+    def promotion_gate_decision(
+        self, proposal_id: str, *, baseline_pass_rate: float | None, case_regressions: int,
+    ) -> GateDecisionLike:
+        """Run the construction-time gate over this lifecycle's recorded evidence."""
+        proposal = self.get(proposal_id)
+        if not proposal.promotion_kind or self._gate is None:
+            raise EvaluationLifecycleError(f"proposal {proposal_id!r} has no promotion kind to gate")
+        decision = self._gate(
+            proposal.promotion_kind,
+            results=self.recorded_results(proposal_id),
+            baseline_pass_rate=baseline_pass_rate,
+            case_regressions=case_regressions,
+            shadow=self._observations[proposal_id].get(EvaluationMode.SHADOW),
+            canary=self._observations[proposal_id].get(EvaluationMode.CANARY),
+        )
+        if decision.kind_value != proposal.promotion_kind:
+            raise EvaluationLifecycleError("promotion gate returned a decision for a different kind")
+        return decision
+
+    def build_gated_promotion_evidence(
+        self,
+        proposal_id: str,
+        *,
+        baseline_pass_rate: float | None,
+        case_regressions: int,
+        holdout_passed: bool,
+        rollback_reference: str,
+        provenance: tuple[str, ...],
+    ) -> tuple[PromotionEvidence, GateDecisionLike]:
+        """Build evidence whose gates are this lifecycle's own recomputed decision."""
+        decision = self.promotion_gate_decision(
+            proposal_id, baseline_pass_rate=baseline_pass_rate, case_regressions=case_regressions,
+        )
+        evidence = self._build_evidence(
+            proposal_id,
+            gate_results=decision.gate_results,
+            replay_equivalent=decision.replay_equivalent,
+            holdout_passed=holdout_passed,
+            rollback_reference=rollback_reference,
+            provenance=tuple(provenance) + (f"promotion-gate:{decision.kind_value}:{decision.digest}",),
+        )
+        self._gated[proposal_id] = (evidence.digest, decision.digest)
+        return evidence, decision
+
+    def gated_evidence(self, proposal_id: str) -> tuple[str, str] | None:
+        """(evidence digest, gate decision digest) of the latest gated evidence."""
+        self.get(proposal_id)
+        return self._gated.get(proposal_id)
+
+    def _build_evidence(
         self,
         proposal_id: str,
         *,
@@ -455,13 +580,23 @@ class ProposalLifecycle:
         self._evidence[proposal_id] = evidence
         return evidence
 
-    def approve(self, proposal_id: str, evidence_digest: str) -> Proposal:
+    def approve(self, proposal_id: str, evidence_digest: str, *, allow_ungated_legacy: bool = False) -> Proposal:
         proposal = self.get(proposal_id)
+        gated = self._gated.get(proposal_id)
+        if proposal.promotion_kind:
+            if allow_ungated_legacy:
+                raise EvaluationLifecycleError("kind-bound proposals cannot use the ungated legacy opt-in")
+            if gated is None or gated[0] != evidence_digest:
+                raise EvaluationLifecycleError("kind-bound proposals can only be approved with gated promotion evidence")
+        elif not allow_ungated_legacy:
+            raise EvaluationLifecycleError(
+                "ungated approval of a proposal without a promotion kind requires allow_ungated_legacy=True",
+            )
         evidence = self._evidence.get(proposal_id)
         if evidence is None or evidence.digest != evidence_digest or not evidence.accepted:
             raise EvaluationLifecycleError("promotion evidence is absent, stale, or rejected")
         updated = self._transition(proposal_id, ProposalState.READY_FOR_PROMOTION)
-        self._proposals[proposal_id] = Proposal(updated.proposal_id, updated.candidate, updated.baseline, updated.suite, updated.state, updated.result_ids, evidence.digest)
+        self._proposals[proposal_id] = replace(updated, evidence_digest=evidence.digest)
         return self._proposals[proposal_id]
 
     def promote(self, proposal_id: str, evidence_digest: str, *, attended: bool = False) -> Proposal:
@@ -486,6 +621,6 @@ class ProposalLifecycle:
 
 __all__ = [
     "EvaluationDimension", "EvaluationLifecycleError", "EvaluationMode", "EvaluationResult",
-    "EvaluationSuite", "Proposal", "ProposalLifecycle", "ProposalState",
+    "EvaluationSuite", "GateDecisionLike", "Proposal", "ProposalLifecycle", "PromotionGate", "ProposalState",
     "PromotionEvidence", "ShadowCanaryObservation",
 ]

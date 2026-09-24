@@ -670,9 +670,9 @@
     },
     {
       "checked": false,
-      "claim": "Every promotion kind (runtime, prompt, skill, route, model, memory, selfmod) has a digest-bound gate policy with sample, point pass-rate, one-sided Wilson confidence, regression, replay, and shadow/canary requirements; the evaluation service binds the kind at proposal creation, recomputes the decision from lifecycle-recorded results, refuses duplicate or unrelated results, and approves kind-bound proposals only with gated evidence.",
+      "claim": "Every promotion kind (runtime, prompt, skill, route, model, memory, selfmod) has a digest-bound gate policy with sample, point pass-rate, one-sided Wilson confidence, regression, explicit-baseline, replay, and shadow/canary requirements; the proposal lifecycle owns the gate fixed at construction and the kind bound at creation, recomputes decisions from its recorded results, persists kind and gate decision digests in durable events, and approves kind-bound proposals only with gated evidence.",
       "requirement_id": "EVAL-007",
-      "revision": 4,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "fbb80eac49eedb154b96c33f0f4896f5151676169bf688db733bdb7602aa6561",
+    "ledger_sha256": "e472ae7bdf455d05a03282c84838a7d63f458586dbf163e4f719bcd2fbd7b69f",
     "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
   }
 }
