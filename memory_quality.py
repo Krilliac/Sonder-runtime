@@ -220,8 +220,10 @@ def contradiction_findings(conn, sim_threshold=None, limit=20):
             continue
         conflicts = lesson_decay.detect_contradictions(
             candidates,
-            lambda a, b: sum(
-                x * y for x, y in zip(unit_by_text[a], unit_by_text[b])
+            # Bind this group's table explicitly: the similarity callable is
+            # consumed synchronously, but must not depend on loop scoping.
+            lambda a, b, units=unit_by_text: sum(
+                x * y for x, y in zip(units[a], units[b])
             ),
             sim_threshold=threshold,
         )

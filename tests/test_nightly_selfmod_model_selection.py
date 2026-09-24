@@ -1,6 +1,7 @@
 """Focused contract tests for the bounded selfmod worker's model pin."""
 
 import json
+import os
 import sys
 import subprocess
 import hashlib
@@ -720,6 +721,12 @@ def test_held_out_snapshot_rejects_symlink_outside_test_tree(tmp_path, monkeypat
 
 
 def test_held_out_snapshot_rejects_candidate_mutation(tmp_path, monkeypatch):
+    # The snapshot's protection is read-only file modes; root bypasses them,
+    # so the candidate's write succeeds and the integrity check (correctly)
+    # fails the run. That is the tamper-evident fallback working, not the
+    # write-prevention this test asserts, which only a non-root user can see.
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root bypasses the snapshot's read-only permissions")
     monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_reflection.py").write_text(

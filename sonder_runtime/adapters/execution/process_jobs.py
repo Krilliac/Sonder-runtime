@@ -18,7 +18,7 @@ from ...application.execution.effect_journal import (
     EffectIntent, EffectState, ReconciliationProof,
 )
 from ...application.execution.worker_bindings import AuthenticatedWorkerBinding, journaled_effect, _digest
-from ...application.jobs.durable_registry import ProcessTreeCleanupContract
+from ...application.jobs.durable_registry import DurableJobRegistry, ProcessTreeCleanupContract
 from ...application.jobs.session_lifecycle import JobRegistryLifecycleAdapter
 from ...application.execution.world_control import OutputStream
 from .durable_output import DurableExecutionOutput

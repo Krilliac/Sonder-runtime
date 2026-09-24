@@ -1148,6 +1148,13 @@ from sonder_runtime.adapters.runtime_readiness_formatting import (
     format_model_readiness as _runtime_model_readiness_lines,
 )
 from sonder_runtime.adapters.goal_formatting import format_goal as _format_goal
+from sonder_runtime.adapters.inference.residency_feedback import ResidencyFeedback as _ResidencyFeedback
+from sonder_runtime.domain import kv_budget as _kv_budget
+from sonder_runtime.application.goals import (
+    GoalCommandFailed as _GoalCommandFailed,
+    GoalCommandPorts as _GoalCommandPorts,
+    run_goal_command as _run_goal_command,
+)
 from sonder_runtime.adapters.learning_tier_formatting import (
     format_learning_tiers,
 )
@@ -1549,6 +1556,11 @@ _MODEL_CONTEXT_CACHE_TTL = 300.0
 # fallback; keep that verdict short-lived so a transient provider hiccup does
 # not undersize a large model's window for the full positive TTL.
 _MODEL_CONTEXT_CACHE_NEGATIVE_TTL = 30.0
+# Attention geometry parsed from the same /api/show response, guarded by
+# _MODEL_CONTEXT_CACHE_LOCK; None records "not modelled", not a failure.
+_MODEL_GEOMETRY_CACHE = {}
+_RESIDENCY_FEEDBACK = None
+_RESIDENCY_FEEDBACK_LOCK = threading.Lock()
 
 _MODEL_PROMPT_IDENTITY_CACHE = {}
 _MODEL_PROMPT_IDENTITY_CACHE_LOCK = threading.Lock()
@@ -1677,6 +1689,8 @@ def _model_context_metadata(model):
             count = info.get("general.parameter_count")
             if count:
                 parameter_size = float(count) / 1_000_000_000.0
+        with _MODEL_CONTEXT_CACHE_LOCK:
+            _MODEL_GEOMETRY_CACHE[key] = _kv_budget.geometry_from_model_info(info)
     except Exception:
         # Metadata is an optimization and cannot make an otherwise valid model
         # unavailable. The deterministic context-policy fallback remains safe.
@@ -1686,10 +1700,52 @@ def _model_context_metadata(model):
     return context_length, parameter_size
 
 
+def _residency_feedback():
+    """Return the process residency tracker, or ``None`` when unsound.
+
+    ``/api/ps`` describes one server.  Like reusable prompt prefixes, the
+    feedback is only attributable when exactly one Ollama origin is
+    configured; with a worker pool the probe could read a different host than
+    the one that served the request.  ``SONDER_RESIDENCY_FEEDBACK=0`` opts out.
+    """
+    global _RESIDENCY_FEEDBACK
+    if str(os.environ.get("SONDER_RESIDENCY_FEEDBACK", "1")).strip().lower() in (
+        "0", "false", "no", "off",
+    ):
+        return None
+    try:
+        primary = ollama_policy.normalize(BASE).rstrip("/")
+        if tuple(OLLAMA_POOL.configured_origins) != (primary,):
+            return None
+    except Exception:
+        return None
+    with _RESIDENCY_FEEDBACK_LOCK:
+        if _RESIDENCY_FEEDBACK is None or _RESIDENCY_FEEDBACK.origin != primary:
+            _RESIDENCY_FEEDBACK = _ResidencyFeedback(
+                lambda: _get("/api/ps"), minimum_context=context_policy.MIN_CONTEXT, origin=primary,
+            )
+        return _RESIDENCY_FEEDBACK
+
+
 def _auto_model_context(model):
-    """Select a native window for the resolved model when no pin was supplied."""
+    """Select a native window for the resolved model when no pin was supplied.
+
+    Metadata and the declared KV cache type give the starting window; a
+    measured spill to system RAM (``/api/ps``) lowers it until the model is
+    GPU-resident again.  See ``adapters.inference.residency_feedback``.
+    """
     context_length, parameter_size = _model_context_metadata(model)
-    return context_policy.auto_context(context_length, parameter_size)
+    feedback = None if _is_cloud_model_name(model) else _residency_feedback()
+    if feedback is None:
+        return context_policy.auto_context(context_length, parameter_size)
+    with _MODEL_CONTEXT_CACHE_LOCK:
+        geometry = _MODEL_GEOMETRY_CACHE.get(str(model or "").strip().casefold())
+    feedback.refresh(model, geometry=geometry, kv_type=context_policy.kv_cache_type()[0])
+    chosen = context_policy.auto_context(
+        context_length, parameter_size, feedback.ceiling(model),
+    )
+    feedback.note_selection(model, chosen)
+    return chosen
 
 
 def _make_generate(
@@ -2991,117 +3047,26 @@ def refresh_goal_proposals(scope: str = "") -> dict:
     return {"proposed": proposed, "skipped": skipped, "error": ""}
 
 
-def _goal_command(arg: str, request_owner: str = "") -> str:
-    """User-facing goal bookkeeping.
-
-    Slash commands originate only from the user's own chat input, so this
-    layer is authorized to pass actor="user"; goal_store independently
-    enforces that closure and adoption can never come from model output.
-    """
+def _goal_command(arg: str, request_owner: str = "", project: str = "") -> str:
+    """User-facing goal bookkeeping; see ``application.goals.command``."""
     import goal_store
 
-    text = str(arg or "show").strip() or "show"
-    action, _, rest = text.partition(" ")
-    action = action.lower()
-    rest = rest.strip()
-
     try:
-        if action in ("show", "status"):
-            return _format_goal(goal_store.get_active())
-        if action == "set":
-            auto = False
-            plan = False
-            tokens = rest
-            while tokens.startswith("--"):
-                option, _, tokens = tokens.partition(" ")
-                if option == "--auto":
-                    auto = True
-                elif option == "--plan":
-                    plan = True
-                elif option == "--criteria":
-                    tokens = "--criteria " + tokens
-                    break
-                else:
-                    return "unknown goal option '%s'." % option
-                tokens = tokens.strip()
-            objective, _, criteria = tokens.partition("--criteria")
-            if not objective.strip():
-                return "usage: /goal set [--auto] [--plan] <objective> [--criteria a; b; c]"
-            goal = goal_store.set_goal(
-                objective.strip(), criteria.strip(), origin="user",
-            )
-            lines = ["goal set", _format_goal(goal)]
-            if plan and goal.get("criteria"):
-                plan_result = _composition.goal_to_plan(goal)
-                if plan_result.get("error"):
-                    lines.append("plan: %s" % plan_result["error"])
-                else:
-                    lines.append("plan: %d steps decomposed" % plan_result["step_count"])
-            if auto:
-                ap = _composition.goal_to_autopilot(
-                    goal, project=_resolve_project(project) if 'project' in dir() else "",
-                    request_owner=request_owner,
-                )
-                if ap.get("error"):
-                    lines.append("autopilot: %s" % ap["error"])
-                else:
-                    _launch_autopilot(ap["run_id"])
-                    lines.append(
-                        "autopilot: %s started (use /autopilot status %s)"
-                        % (ap["run_id"], ap["run_id"])
-                    )
-            return "\n".join(lines)
-        if action == "note":
-            if not rest:
-                return "usage: /goal note <progress note>"
-            return "noted\n" + _format_goal(goal_store.add_note(rest))
-        if action in ("done", "complete"):
-            goal = goal_store.complete(rest, actor="user")
-            return "goal completed: %s" % goal["objective"]
-        if action in ("abandon", "drop"):
-            goal = goal_store.abandon(rest, actor="user")
-            return "goal abandoned: %s" % goal["objective"]
-        if action == "refresh":
-            result = refresh_goal_proposals()
-            if result.get("error"):
-                return "ERROR: %s" % result["error"]
-            return (
-                "goal proposals refreshed: %d new, %d skipped "
-                "(review with /goal proposals)"
-                % (result["proposed"], result["skipped"])
-            )
-        if action == "proposals":
-            rows = goal_store.proposals()
-            if not rows:
-                return "no pending goal proposals"
-            listing = "\n".join(
-                "%s  %s" % (row["id"], row["objective"][:120]) for row in rows
-            )
-            return listing + (
-                "\n(adopt with /goal adopt <id>; dismiss with "
-                "/goal decline <id>)"
-            )
-        if action == "adopt":
-            return "adopted\n" + _fmt(goal_store.adopt(rest, actor="user"))
-        if action == "decline":
-            goal = goal_store.decline(rest, actor="user")
-            return "declined proposal %s" % goal["id"]
-        if action == "history":
-            rows = goal_store.history()
-            if not rows:
-                return "no closed goals"
-            return "\n".join(
-                "%s [%s] %s" % (
-                    row["id"], row["status"], row["objective"][:100],
-                )
-                for row in rows
-            )
-        return (
-            "usage: /goal [show|set <objective> [--criteria a; b]|"
-            "note <text>|done [reason]|abandon [reason]|refresh|"
-            "proposals|adopt <id>|decline <id>|history]"
+        return _run_goal_command(
+            _GoalCommandPorts(
+                goal_store=goal_store,
+                format_goal=_format_goal,
+                goal_to_plan=_composition.goal_to_plan,
+                goal_to_autopilot=_composition.goal_to_autopilot,
+                launch_autopilot=_launch_autopilot,
+                refresh_proposals=refresh_goal_proposals,
+                resolve_project=_resolve_project,
+            ),
+            arg,
+            project=project,
+            request_owner=request_owner,
         )
-    except goal_store.GoalError as exc:
+    except _GoalCommandFailed as exc:
         return "ERROR: %s" % exc
 
 
@@ -3475,7 +3440,9 @@ def control_command(prompt: str, history=None, session="", project="",
     if cmd == "/approve":
         return _approve_command(arg, operator_approved=bool(operator_approved))
     if cmd in ("/goal", "/goals"):
-        return _goal_command(arg, request_owner=autopilot_request_owner or "")
+        return _goal_command(
+            arg, request_owner=autopilot_request_owner or "", project=project,
+        )
     if cmd in ("/mission",):
         return _mission_command(arg, project=project, request_owner=autopilot_request_owner or "")
     if cmd in ("/ensemble",):
@@ -17477,7 +17444,7 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
     return ""
 
 
-_AGENT_DECISION_REPAIR_LIMIT = 2
+
 def _agent_generate_decision(
     gen,
     step_prompt,

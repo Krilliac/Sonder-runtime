@@ -1,3 +1,5 @@
 -r requirements-runtime.txt
 pytest
 pytest-xdist
+# Exact pin: the lint gate's findings, and so its baseline, are version-specific.
+ruff==0.16.9

@@ -19,7 +19,7 @@ def load_config_or_none():
     try:
         from sonder_runtime.platform import config as sonder_config
     except Exception as exc:
-        logger.error(f"platform config module import failed, falling back to defaults", exc_info=True)
+        logger.error("platform config module import failed, falling back to defaults", exc_info=True)
         logger.warning(f"configuration unavailable, falling back to defaults: platform config import failed ({type(exc).__name__})")
         logger.debug(f"load_config_or_none: platform config import failed: {exc}")
         return None
@@ -29,7 +29,7 @@ def load_config_or_none():
         logger.debug(f"load_config_or_none: config loaded, profile={getattr(cfg, 'profile', '?')!r}")
         return cfg
     except Exception as exc:
-        logger.error(f"configuration load failed, falling back to defaults", exc_info=True)
+        logger.error("configuration load failed, falling back to defaults", exc_info=True)
         logger.warning(f"configuration unavailable, falling back to defaults: config load raised {type(exc).__name__}")
         logger.debug(f"load_config_or_none: config load raised: {exc}")
         return None
@@ -44,25 +44,25 @@ def check_config():
             validated_config_check,
         )
     except Exception as exc:
-        logger.error(f"config validation imports failed, doctor config check will be skipped", exc_info=True)
+        logger.error("config validation imports failed, doctor config check will be skipped", exc_info=True)
         logger.warning(f"config validation check unavailable, doctor will skip: {type(exc).__name__}")
         logger.debug(f"check_config: import failed, returning skipped: {exc}")
-        return lambda: {
-            "status": "skipped",
-            "detail": "sonder_config unavailable (%s)" % exc,
-        }
+        # ``exc`` is unbound when the except block exits (PEP 3110), so the
+        # returned closure must capture the rendered detail, not the name.
+        detail = "sonder_config unavailable (%s)" % exc
+        return lambda: {"status": "skipped", "detail": detail}
 
     def check():
         logger.debug("check_config: executing config validation")
         try:
             config = sonder_config.load_config()
         except sonder_config.ConfigError as exc:
-            logger.error(f"configuration is invalid, doctor check reports failure", exc_info=True)
+            logger.error("configuration is invalid, doctor check reports failure", exc_info=True)
             logger.warning(f"configuration is invalid: {exc}")
             logger.debug(f"check_config: config invalid: {exc}")
             return {"status": "fail", "detail": "config invalid: %s" % exc}
         except Exception as exc:
-            logger.error(f"configuration load failed during doctor check", exc_info=True)
+            logger.error("configuration load failed during doctor check", exc_info=True)
             logger.warning(f"configuration load failed during doctor check: {type(exc).__name__}")
             logger.debug(f"check_config: config load failed: {exc}")
             return {"status": "skipped", "detail": "config load failed (%s)" % exc}

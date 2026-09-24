@@ -50,7 +50,7 @@ def _positive(name: str, value: int, maximum: int) -> int:
     return value
 
 
-def _redact(value: Any, redactor: Redactor) -> Any:
+def _redact(value: Any, redactor: TelemetryRedactor) -> Any:
     if isinstance(value, str):
         return redactor.redact(value)
     if isinstance(value, Mapping):

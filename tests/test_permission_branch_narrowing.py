@@ -145,7 +145,9 @@ def test_the_bare_forms_narrowed_here_are_the_reads_their_branches_run():
 
     assert 'str(arg or "status")' in inspect.getsource(server._selfmod_command)
     assert 'str(arg or "status")' in inspect.getsource(server._mcp_command)
-    assert 'str(arg or "show")' in inspect.getsource(server._goal_command)
+    from sonder_runtime.application.goals import command as goal_command
+
+    assert 'str(arg or "show")' in inspect.getsource(goal_command.run_goal_command)
     assert 'command_text(text or "plan")' in inspect.getsource(server._training_command)
     bare_lists = 'if not text or text.lower() in ("list", "ls"):'
     for module in (sonder_repl, sonder_serve):

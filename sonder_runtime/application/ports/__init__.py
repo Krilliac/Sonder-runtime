@@ -86,7 +86,7 @@ from .jobs import (
     WorkflowStep,
 )
 from .execution_world import (
-    CleanupResult,
+    CleanupResult as ExecutionWorldCleanupResult,
     ExecutionHandle,
     ExecutionResult,
     ExecutionWorld,
@@ -209,7 +209,7 @@ __all__ = [
     "JobWorkflowRepository",
     "WorkflowResume",
     "WorkflowStep",
-    "CleanupResult",
+    "ExecutionWorldCleanupResult",
     "ExecutionHandle",
     "ExecutionResult",
     "ExecutionWorld",
