@@ -261,7 +261,14 @@ class EphemeralExperimentManager:
                 experiment.host = None
                 experiment.state = ExperimentState.STOPPED
                 experiment.stops += 1
-        shutil.rmtree(self._root, ignore_errors=True)
+        # A just-stopped child can hold directory handles briefly (seen
+        # intermittently under the low-integrity selfmod runner), so use the
+        # same bounded handle-release retry as delete() before the best-effort
+        # fallback.
+        try:
+            _remove_experiment_tree(self._root)
+        except OSError:
+            shutil.rmtree(self._root, ignore_errors=True)
 
     def __enter__(self) -> "EphemeralExperimentManager":
         return self

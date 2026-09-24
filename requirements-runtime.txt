@@ -5,6 +5,9 @@
 # MCPServer. Sonder imports the 2.x names; 1.x will not satisfy this file.
 mcp==2.0.0
 cryptography==50.0.0
+# Unattended Windows self-mod checks require restricted tokens, MIC labels,
+# and kill-on-close Job Objects through the tested pywin32 bindings.
+pywin32==312; sys_platform == "win32"
 # No pydantic-settings pin: MCP 2.x's server Settings is a plain BaseModel, so
 # the generic-lifespan forward reference that made pydantic-settings 2.15 warn
 # under MCP 1.x is gone, and nothing in Sonder imports pydantic_settings
