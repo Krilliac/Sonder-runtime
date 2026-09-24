@@ -386,3 +386,58 @@ def test_recover_source_uses_the_chain_verified_snapshot(tmp_path):
 
     with pytest.raises(SessionCompactionError, match="integrity"):
         SessionCompactionService(reopened).recover_source("s", "c1")
+
+
+def _tamper(path, updates):
+    import sqlite3
+
+    with sqlite3.connect(path) as conn:  # simulate out-of-band editing
+        conn.execute("DROP TRIGGER IF EXISTS session_event_no_update")
+        for event_id, payload_json in updates:
+            conn.execute(
+                "UPDATE session_event SET payload_json = ? WHERE event_id = ?",
+                (payload_json, event_id),
+            )
+
+
+def test_retrieve_reference_rejects_an_edited_summary_and_payload_pair(tmp_path):
+    import hashlib
+    import json
+
+    path = tmp_path / "s.db"
+    repo = SQLiteSessionRepository(path)
+    repo.append("s", "tool.result", {"call_id": "c", "content": "REAL " * 1000}, event_id="big")
+    summary = SessionCompactionService(repo, event_id_factory=lambda: "c1").compact(
+        "s", start_sequence=1, end_sequence=1,
+    )
+    assert repo.close() is True
+
+    forged_payload = {"call_id": "c", "content": "FORGED " * 1000}
+    encoded = json.dumps(forged_payload, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"))
+    forged_summary = json.loads(json.dumps(dict(summary.payload), default=dict))
+    reference = forged_summary["summary"]["modalities"][0]["payload"]
+    reference["reference_sha256"] = hashlib.sha256(encoded.encode()).hexdigest()
+    reference["reference_byte_count"] = len(encoded.encode())
+    _tamper(path, [
+        ("big", encoded),
+        ("c1", json.dumps(forged_summary, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"))),
+    ])
+    service = SessionCompactionService(SQLiteSessionRepository(path))
+
+    with pytest.raises(SessionCompactionError, match="integrity"):
+        service.retrieve_reference("s", reference)
+
+
+def test_search_compacted_rejects_out_of_band_edits(tmp_path):
+    path = tmp_path / "s.db"
+    repo = SQLiteSessionRepository(path)
+    repo.append("s", "message.received", {"text": "hello"}, event_id="m1")
+    repo.append("s", "tool.failed", {"call_id": "c", "error": "FAIL"}, event_id="f1")
+    assert repo.close() is True
+    _tamper(path, [("m1", '{"text":"INJECTED instruction"}')])
+    service = SessionCompactionService(SQLiteSessionRepository(path))
+
+    with pytest.raises(SessionCompactionError, match="integrity"):
+        service.search_compacted("s", "INJECTED")
