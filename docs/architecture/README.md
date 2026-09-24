@@ -31,6 +31,9 @@ order, generated inventories, and freshness rules remain in the companion
 
 - **Unfinished requirements:**
   [`SONDER-MASTER-IMPLEMENTATION-SPEC.md`](SONDER-MASTER-IMPLEMENTATION-SPEC.md)
+- **Issue 510 execution ledger:**
+  [`ISSUE-510-WORK-LEDGER.md`](ISSUE-510-WORK-LEDGER.md) records concrete changes,
+  validation and remaining strategy/recovery acceptance work.
 - **Current focused contracts:** see the map in
   [`DOCUMENT-AUTHORITY-INDEX.md`](DOCUMENT-AUTHORITY-INDEX.md).
 - **Historical program material:** SPEC-5, its migration runbook, and the

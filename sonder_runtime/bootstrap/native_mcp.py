@@ -21,17 +21,18 @@ from ..application.context import local_owner_context
 from ..application.ports.tool_executor import ToolCall
 from ..application.ports.tool_registry import (
     InMemoryToolRegistry,
-    ToolCall as RegistryToolCall,
     ToolDescriptor,
     validate_tool_call,
 )
+from ..application.ports.tool_registry import (
+    ToolCall as RegistryToolCall,
+)
 from ..application.protocol.mcp_compatibility import (
-    McpCompatibility,
     SUPPORTED_MCP_PROTOCOL_VERSIONS,
+    McpCompatibility,
 )
 from ..application.protocol.mcp_tasks import McpTaskHandler
 from ..interfaces.mcp.transport import McpTransportError, StdioMcpTransport
-
 
 _PATH = {"type": "string", "minLength": 1}
 _ROOT = {"type": "string"}
@@ -458,7 +459,10 @@ _NATIVE_TOOLS += _INSPECTION_TOOLS + _COMPUTE_TOOLS + (_AGENT_LANE_TOOL,)
 # inspections for presentation, but they run through the packaged executor;
 # routing them by group sent nine native tools to a service that answered
 # "unsupported read-only inspection" for every one of them.
-from ..adapters.inspection_executor import SUPPORTED_INSPECTIONS as _INSPECTION_NAMES  # noqa: E402
+from ..adapters.inspection_executor import (
+    SUPPORTED_INSPECTIONS as _INSPECTION_NAMES,  # noqa: E402
+)
+
 _VISION_NAMES = frozenset({"vision_analyze"})
 _COMPUTE_NAMES = frozenset(item.name for item in _COMPUTE_TOOLS)
 
@@ -506,7 +510,8 @@ def native_tool_registry() -> InMemoryToolRegistry:
 
 def run_native_mcp(application, *, input_stream: TextIO | None = None,
                    output_stream: TextIO | None = None,
-                   task_handler=None, close_compute_on_exit: bool = False) -> int:
+                   task_handler=None, close_compute_on_exit: bool = False,
+                   progressive_tools: bool = False) -> int:
     """Serve native MCP over stdio using the application tool port."""
     logger.info("native MCP server starting")
     logger.debug("run_native_mcp starting")
@@ -517,6 +522,25 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
     )
     logger.debug(f"workspace roots={len(roots)}")
     registry = native_tool_registry()
+    from ..application.ports.tool_registry import ToolSchemaSelection
+    from ..application.tools.discovery import ToolDiscovery
+    discovery = ToolDiscovery(registry) if progressive_tools else None
+    visible = ToolSchemaSelection()
+    selection_generation = 0
+    discovery_tools = InMemoryToolRegistry((
+        ToolDescriptor("tool_search", "Find tools by name or purpose; returns bounded summaries only", {
+            "type": "object", "properties": {
+                "query": {"type": "string", "maxLength": 512},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+            }, "required": ["query"], "additionalProperties": False,
+        }),
+        ToolDescriptor("tool_schema", "Load up to eight tool schemas, replacing the current visible selection", {
+            "type": "object", "properties": {
+                "names": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 8},
+                "inventory_digest": {"type": "string"},
+            }, "required": ["names", "inventory_digest"], "additionalProperties": False,
+        }),
+    ))
     if task_handler is None:
         job_service_factory = getattr(application, "job_service", None)
         if callable(job_service_factory):
@@ -530,8 +554,15 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
     logger.debug(f"MCP capabilities={capabilities!r}")
 
     def compute_result(name: str, arguments: dict) -> dict:
-        from ..application.compute_fabric.jobs import DigestBoundInput, RemoteJobEnvelope
-        from ..domain.compute_fabric import PlacementPolicy, WorkloadKind, WorkloadRequest
+        from ..application.compute_fabric.jobs import (
+            DigestBoundInput,
+            RemoteJobEnvelope,
+        )
+        from ..domain.compute_fabric import (
+            PlacementPolicy,
+            WorkloadKind,
+            WorkloadRequest,
+        )
 
         service_factory = getattr(application, "compute_service", None)
         if not callable(service_factory):
@@ -655,7 +686,9 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
         shape; a permission refusal reports the decision, call id included.
         """
         from ..application.tools.gateway_contract import (
-            ToolGatewayRequest, ToolPermission, ToolScope,
+            ToolGatewayRequest,
+            ToolPermission,
+            ToolScope,
         )
         from ..domain.common.errors import Cancelled, DeadlineExceeded, Forbidden
 
@@ -673,6 +706,10 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             deadline_monotonic=context.deadline_monotonic,
             cancellation=context.cancellation,
             execution_world="local",
+            schema_selection=(ToolSchemaSelection(
+                frozenset(_LEGACY_ALIASES.get(name, name) for name in visible.visible_names),
+                selection_id=visible.selection_id,
+            ) if discovery is not None else None),
         )
         # The roots a one-shot approval covered are honoured for this call
         # alone, and only once the gateway's evaluator has spent it: the
@@ -718,7 +755,32 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
         }
 
     def execute(name: str, arguments: dict) -> dict:
+        nonlocal visible, selection_generation
         logger.debug(f"MCP execute tool={name!r}")
+        if discovery is not None:
+            if name in {"tool_search", "tool_schema"}:
+                descriptor = discovery_tools.get(name)
+                try:
+                    validate_tool_call(descriptor, RegistryToolCall(tool_name=name, arguments=dict(arguments)))
+                    if name == "tool_search":
+                        payload = discovery.search(**arguments)
+                    else:
+                        next_visible, payload = discovery.load(
+                            arguments["names"], inventory_digest=arguments["inventory_digest"],
+                            selection_id=f"mcp-tools:{selection_generation + 1}",
+                        )
+                        # The selected-schema digest is the request-visible identity.
+                        # Loaded schemas confer no permission to execute effects.
+                        visible = ToolSchemaSelection(next_visible.visible_names,
+                                                      selection_id=payload["manifest"]["digest"])
+                        selection_generation += 1
+                    return {"output": json.dumps(payload, sort_keys=True), "isError": False,
+                            "error": None, "evidence": {"inventory_digest": discovery.digest}}
+                except (TypeError, ValueError) as exc:
+                    raise McpTransportError(str(exc)) from exc
+            if not visible.allows(name):
+                return {"output": "load the tool schema before calling this tool", "isError": True,
+                        "error": "tool_not_visible", "evidence": {"selection": visible.marker()}}
         descriptor = registry.get(name)
         if descriptor is None:
             return {
@@ -744,7 +806,10 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
         if canonical_name == "agent_lane":
             from ..adapters.security.permission_policy import permission_policy
             from ..domain.common.errors import SonderError
-            from ..interfaces.agent_lane_entrypoint import lane_approval_arguments, execute_lane_command
+            from ..interfaces.agent_lane_entrypoint import (
+                execute_lane_command,
+                lane_approval_arguments,
+            )
             try:
                 safe = lane_approval_arguments(application, context, canonical_arguments)
                 decision = permission_policy.decide_for_caller(
@@ -854,7 +919,7 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             supported_versions=SUPPORTED_MCP_PROTOCOL_VERSIONS,
             capabilities=capabilities,
         ),
-        tool_catalog=registry,
+        tool_catalog=discovery_tools if discovery is not None else registry,
         tool_handler=execute,
         task_handler=task_handler,
     )

@@ -11,6 +11,7 @@ from __future__ import annotations
 from sonder_runtime.application.ports.runtime_threads import Thread as owned_runtime_thread
 
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from threading import Event, Lock, Thread
 from time import monotonic, sleep
 import os
@@ -58,7 +59,9 @@ class DurableContinuationRepository(Protocol):
     def claim_resume(self, child_id: str, *, expected_revision: int) -> DurableChildSession | None:
         """Atomically claim eligible recovery as RUNNING, clearing its old result."""
         ...
-    def request_cancel(self, child_id: str, *, reason: str) -> bool: ...
+    def request_cancel(self, child_id: str, *, reason: str,
+                       expected_revision: int | None = None,
+                       unstarted_only: bool = False) -> bool: ...
     def list_active(self) -> tuple[DurableChildSession, ...]: ...
 
     def list_all(self, *, limit: int = 1000) -> tuple[DurableChildSession, ...]: ...
@@ -113,7 +116,6 @@ class DurableContinuationService:
         self._lock = Lock()
         self._spawn_lock = Lock()
         self._contexts: dict[str, OperationContext] = {}
-        self._admitted_roots: dict[str, int] = {}
         self._storage_failures: dict[str, ContinuationStorageFailure] = {}
         # A reservation is consumable only by the provider instance that
         # created it.  This is deliberately process-scoped; restart recovery
@@ -133,6 +135,17 @@ class DurableContinuationService:
     @property
     def owner_host(self) -> str:
         return self._owner_host
+
+    @staticmethod
+    def bounded_context(context: OperationContext, budget: SubagentBudget, *,
+                        started_at: float | None = None) -> OperationContext:
+        """Narrow an attempt to its wall budget and the parent deadline."""
+        if budget.max_wall_seconds is None:
+            return context
+        deadline = (monotonic() if started_at is None else started_at) + budget.max_wall_seconds
+        if context.deadline_monotonic is not None:
+            deadline = min(deadline, context.deadline_monotonic)
+        return replace(context, deadline_monotonic=deadline)
 
     def _write(self, method, *args, _settlement_timeout=0.0, **kwargs):
         value = args[0]
@@ -253,7 +266,6 @@ class DurableContinuationService:
                         request,
                         existing.lineage,
                         parent,
-                        exclude_child_id=existing_child_id,
                     )
                     return self._start(existing_child_id, context, runner)
                 with self._lock:
@@ -291,24 +303,23 @@ class DurableContinuationService:
             parent = self._repository.get(request.parent_id)
             # A provider root is an admission anchor whose own id is already the
             # requested parent; it must not be duplicated in a child's ancestors.
-            parent_is_root = parent is not None and dict(parent.request.metadata).get("provider_root") == "true"
+            parent_is_root = (
+                parent is not None
+                and parent.request.child_id == parent.request.parent_id
+                and dict(parent.request.metadata).get("provider_root") == "true"
+            )
             lineage = ChildSessionLineage(
                 request.parent_id,
                 () if parent_is_root else (parent.lineage.chain if parent else ()),
             )
             self._admit(request, lineage, parent)
-            try:
-                self._write("create", DurableChildSession(request, lineage))
-            except Exception:
-                self._release(lineage.chain[0])
-                raise
-            try:
-                return self._start(child_id, context, runner)
-            except Exception:
-                self._release(lineage.chain[0])
-                raise
+            # The canonical repository counts this reservation and every
+            # registry-created reservation under its cross-process writer lock.
+            self._write("create", DurableChildSession(request, lineage))
+            return self._start(child_id, context, runner)
 
-    def register_root(self, root_id: str, budget: SubagentBudget) -> DurableChildSession:
+    def register_root(self, root_id: str, budget: SubagentBudget, *,
+                      owner_id: str = "") -> DurableChildSession:
         """Publish the provider-owned parent required for local children.
 
         A root is a durable admission anchor, not an executable child.  Keeping
@@ -317,16 +328,40 @@ class DurableContinuationService:
         """
         if not isinstance(root_id, str) or not root_id.strip():
             raise InvalidSubagentRequest("root_id must be non-empty")
+        if (not isinstance(owner_id, str) or len(owner_id) > 256
+                or owner_id and not owner_id.strip()):
+            raise InvalidSubagentRequest("root owner_id must be bounded text")
         request = SubagentRequest(
             parent_id=root_id,
             prompt="local provider root",
             budget=budget,
             child_id=root_id,
-            metadata=(("provider_root", "true"),),
+            metadata=(("provider_root", "true"),) + (
+                (("owner_id", owner_id),) if owner_id else ()
+            ),
         )
-        return self._write("create",
-            DurableChildSession(request, ChildSessionLineage(root_id))
-        )
+        def existing_root() -> DurableChildSession | None:
+            record = self._repository.get(root_id)
+            if record is None:
+                return None
+            if (record.request != request or record.lineage != ChildSessionLineage(root_id)
+                    or record.status is not SubagentStatus.CREATED
+                    or record.cancellation_requested):
+                raise InvalidSubagentRequest("registered root owner or budget differs")
+            return record
+
+        existing = existing_root()
+        if existing is not None:
+            return existing
+        try:
+            return self._write("create", DurableChildSession(request, ChildSessionLineage(root_id)))
+        except InvalidSubagentRequest:
+            # Another service can publish the same root after our read. Only
+            # an exact immutable match makes that race idempotent.
+            existing = existing_root()
+            if existing is not None:
+                return existing
+            raise
 
     def require_parent(self, parent_id: str) -> DurableChildSession:
         """Return a durable parent or raise the typed unknown-id error."""
@@ -342,7 +377,7 @@ class DurableContinuationService:
         return values
 
     def _admit(self, request: SubagentRequest, lineage: ChildSessionLineage,
-               parent: DurableChildSession | None, *, exclude_child_id: str | None = None) -> None:
+               parent: DurableChildSession | None) -> None:
         budget = request.budget
         metadata = self._metadata(request)
         role_name = metadata.get("role")
@@ -361,40 +396,11 @@ class DurableContinuationService:
                 value, ceiling = getattr(budget, field), getattr(role_limit, role_field)
                 if value is None or ceiling is not None and value > ceiling:
                     raise InvalidSubagentRequest(f"role budget does not admit {field}")
-        root_id = lineage.chain[0]
         if budget.max_depth is not None and len(lineage.chain) > budget.max_depth:
             raise InvalidSubagentRequest("subagent depth budget exhausted")
         if parent is not None:
             from ..ports.subagents import validate_child_budget
             validate_child_budget(budget, parent.request.budget)
-            children = self._repository.list_all(limit=10_000)
-            direct = sum(
-                1
-                for item in children
-                if item.request.parent_id == request.parent_id
-                and item.request.child_id != exclude_child_id
-            )
-            if budget.max_children is not None and direct >= budget.max_children:
-                raise InvalidSubagentRequest("subagent child-count budget exhausted")
-        with self._lock:
-            active = sum(
-                1
-                for item in self._repository.list_active()
-                if item.lineage.chain[0] == root_id
-                and item.request.child_id != exclude_child_id
-            )
-            active += self._admitted_roots.get(root_id, 0)
-            if budget.max_concurrency is not None and active >= budget.max_concurrency:
-                raise InvalidSubagentRequest("subagent concurrency budget exhausted")
-            self._admitted_roots[root_id] = self._admitted_roots.get(root_id, 0) + 1
-
-    def _release(self, root_id: str) -> None:
-        with self._lock:
-            remaining = self._admitted_roots.get(root_id, 0) - 1
-            if remaining > 0:
-                self._admitted_roots[root_id] = remaining
-            else:
-                self._admitted_roots.pop(root_id, None)
 
     def _start(self, child_id: str, context: OperationContext, runner: Runner, *,
                resuming: bool = False) -> SubagentHandle:
@@ -407,6 +413,14 @@ class DurableContinuationService:
             raise InvalidSubagentRequest("child session is not recoverable")
         if record.cancellation_requested:
             raise InvalidSubagentRequest("cancelled child session cannot be started")
+        budget = record.request.budget
+        if budget.max_wall_seconds is not None:
+            remaining = budget.max_wall_seconds - (record.usage.wall_seconds or 0)
+            if remaining <= 0:
+                raise InvalidSubagentRequest("subagent wall budget exhausted")
+            budget = replace(budget, max_wall_seconds=remaining)
+        started_at = monotonic()
+        context = self.bounded_context(context, budget, started_at=started_at)
         if resuming:
             try:
                 updated = self._write("claim_resume", child_id, expected_revision=record.revision)
@@ -431,7 +445,7 @@ class DurableContinuationService:
         )
         with self._lock:
             self._controls[child_id] = control
-            thread = owned_runtime_thread(target=self._run, args=(child_id, context, runner, control, record.lineage.chain[0]), daemon=True)
+            thread = owned_runtime_thread(target=self._run, args=(child_id, context, runner, control, started_at), daemon=True)
             self._threads[child_id] = thread
         with self._lock:
             self._contexts[child_id] = context
@@ -470,22 +484,39 @@ class DurableContinuationService:
             getattr(context, "cancellation", None), "cancelled", False
         )
 
-    def _run(self, child_id, context, runner, control, root_id):
+    def _run(self, child_id, context, runner, control, started_at):
         try:
-            self._run_body(child_id, context, runner, control)
+            self._run_body(child_id, context, runner, control, started_at)
         except ContinuationStorageFailure as error:
             self._storage_failures[child_id] = error
             control._event.set()
         finally:
-            self._release(root_id)
             with self._lock:
                 self._contexts.pop(child_id, None)
 
-    def _run_body(self, child_id: str, context: OperationContext, runner: Runner, control: DurableCancellation) -> None:
+    def _run_body(self, child_id: str, context: OperationContext, runner: Runner,
+                  control: DurableCancellation, started_at: float) -> None:
         record = self._require(child_id)
         checkpoint = record.checkpoint
         expected = checkpoint.sequence if checkpoint else -1
         state: dict[str, object] = dict(checkpoint.state) if checkpoint else {}
+
+        def usage(output: str | None = None) -> SubagentUsage:
+            output_tokens = record.usage.output_tokens
+            if output_tokens is None and record.usage.wall_seconds is None:
+                output_tokens = 0
+            if output is not None and (
+                record.usage.wall_seconds is None or record.usage.output_tokens is not None
+            ):
+                output_tokens = (record.usage.output_tokens or 0) + (len(output.encode("utf-8")) + 3) // 4
+            return SubagentUsage(
+                steps=max(expected + 1, record.usage.steps, 0),
+                # Output tokens use the provider's conservative four-byte
+                # estimate. Unknown consumption on a prior failed attempt
+                # stays unknown; it cannot silently return parent capacity.
+                output_tokens=output_tokens,
+                wall_seconds=(record.usage.wall_seconds or 0.0) + max(0.0, monotonic() - started_at),
+            )
 
         def save(next_state: Mapping[str, object], cursor: str | None = None) -> ContinuableCheckpoint:
             nonlocal expected, state
@@ -504,6 +535,7 @@ class DurableContinuationService:
             expected, state = candidate.sequence, dict(candidate.state)
             return fresh.checkpoint  # type: ignore[return-value]
 
+        output: str | None = None
         try:
             if context.expired:
                 raise TimeoutError("operation deadline expired")
@@ -514,36 +546,58 @@ class DurableContinuationService:
                 raise self._storage_failures[child_id]
             if control.cancelled or context.cancellation.cancelled:
                 raise _Cancelled(control.reason)
-            usage = SubagentUsage(steps=max(expected + 1, 0))
-            result = SubagentResult(child_id, record.request.parent_id, SubagentStatus.SUCCEEDED, output=output, usage=usage)
-            self._write("update", child_id, status=result.status, usage=usage, result=result, recovery_required=False)
+            if context.expired:
+                raise TimeoutError("subagent wall budget or operation deadline expired")
+            elapsed = usage(output if isinstance(output, str) else None)
+            ceiling = record.request.budget.max_output_tokens
+            if ceiling is not None and elapsed.output_tokens is not None and elapsed.output_tokens > ceiling:
+                raise TimeoutError("subagent output budget exhausted")
+            result = SubagentResult(child_id, record.request.parent_id, SubagentStatus.SUCCEEDED, output=output, usage=elapsed)
+            settled = self._write("update", child_id, status=result.status, usage=elapsed, result=result, recovery_required=False)
+            if settled is None:
+                current = self._require(child_id)
+                if current.cancellation_requested:
+                    raise _Cancelled(current.cancellation_reason or "cancellation requested")
+                raise RuntimeError("child session state changed before success was recorded")
         except ContinuationStorageFailure as error:
             self._storage_failures[child_id] = error
             control._event.set()
         except _Cancelled as exc:
-            usage = SubagentUsage(steps=max(expected + 1, 0))
+            elapsed = usage()
             result = SubagentResult(child_id, record.request.parent_id, SubagentStatus.CANCELLED,
-                                    error=SubagentError("cancelled", str(exc)), usage=usage)
+                                    error=SubagentError("cancelled", str(exc)), usage=elapsed)
             self._write(
                 "update",
                 child_id,
                 status=result.status,
-                usage=usage,
+                usage=elapsed,
                 result=result,
                 _settlement_timeout=_CANCELLATION_SETTLEMENT_GRACE_SECONDS,
             )
+        except InvalidSubagentRequest as exc:
+            if output is None:
+                status, code, recoverable = SubagentStatus.FAILED, "runner_failed", True
+            else:
+                status, code, recoverable = SubagentStatus.TIMED_OUT, "budget_exhausted", False
+            result = SubagentResult(child_id, record.request.parent_id, status,
+                                    error=SubagentError(code, str(exc), recoverable), usage=usage(output))
+            self._write("update", child_id, status=status, usage=result.usage,
+                        result=result, recovery_required=recoverable)
         except TimeoutError as exc:
             result = SubagentResult(child_id, record.request.parent_id, SubagentStatus.TIMED_OUT,
                                     error=SubagentError("deadline_exceeded", str(exc), True),
-                                    usage=SubagentUsage(steps=max(expected + 1, 0)))
+                                    usage=usage())
             self._write("update", child_id, status=result.status, usage=result.usage, result=result, recovery_required=True)
         except Exception as exc:
             result = SubagentResult(child_id, record.request.parent_id, SubagentStatus.FAILED,
                                     error=SubagentError("runner_failed", str(exc), True),
-                                    usage=SubagentUsage(steps=max(expected + 1, 0)))
+                                    usage=usage())
             self._write("update", child_id, status=result.status, usage=result.usage, result=result, recovery_required=True)
 
     def resume(self, child_id: str, context: OperationContext, runner: Runner) -> SubagentHandle:
+        record = self._require(child_id)
+        parent = self._repository.get(record.request.parent_id)
+        self._admit(record.request, record.lineage, parent)
         return self._start(child_id, context, runner, resuming=True)
 
     def recover_after_restart(self) -> tuple[str, ...]:
@@ -568,6 +622,14 @@ class DurableContinuationService:
     def cancel(self, child_id: str, *, reason: str = "cancellation requested") -> bool:
         self._require(child_id)
         return self._write("request_cancel", child_id, reason=reason)
+
+    def cancel_unstarted(self, child_id: str, *, expected_revision: int,
+                         reason: str = "cancellation requested") -> bool:
+        """Close one reserved child only if this exact prestart revision remains."""
+        return self._write(
+            "request_cancel", child_id, reason=reason,
+            expected_revision=expected_revision, unstarted_only=True,
+        )
 
     def snapshot(self, child_id: str) -> SubagentSnapshot:
         record = self._require(child_id)

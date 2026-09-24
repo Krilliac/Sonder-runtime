@@ -9,9 +9,9 @@ containment, and result evidence cannot be bypassed by the workflow.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,6 @@ from sonder_runtime.application.ports.subagents import (
     SubagentResult,
 )
 from sonder_runtime.domain.agents.roles import AgentRole
-
 
 MAX_WORKFLOW_ID_CHARS = 128
 MAX_WORKFLOW_PROMPT_CHARS = 16_000
@@ -218,7 +217,10 @@ class AgentWorkflowService:
         logger.info(f"agent workflow advancing: workflow_id={state.workflow_id!r}, next_role={next_role.value!r}, step={len(results)+1}/{len(state.roles)}")
         logger.debug(f"AgentWorkflowService.advance: workflow {state.workflow_id!r} advancing to next_role={next_role.value!r}, step={len(results)+1}/{len(state.roles)}")
         next_dispatch = self._dispatch(
-            next_state, parent_id=result.child_id, prompt=next_prompt,
+            next_state,
+            parent_id=dispatch.request.lineage.parent_id,
+            depth=dispatch.request.lineage.depth,
+            prompt=next_prompt,
             workspace=dispatch.request.workspace, context=context,
         )
         return WorkflowAdvance(next_dispatch.state, completed, next_dispatch)
@@ -228,6 +230,7 @@ class AgentWorkflowService:
         state: AgentWorkflowState,
         *,
         parent_id: str,
+        depth: int = 1,
         prompt: str,
         workspace: WorkspaceAssignment,
         context: OperationContext,
@@ -241,7 +244,7 @@ class AgentWorkflowService:
         delegation_id = f"{state.workflow_id}:delegation:{len(state.results) + 1}"
         lineage = LineageRecord(
             f"{state.workflow_id}:lineage:{len(state.results) + 1}",
-            state.root_id, parent_id, child_id, len(state.results) + 1,
+            state.root_id, parent_id, child_id, depth,
             preset.name, role, workspace, sequence=len(state.results),
         )
         request = DelegationRequest(

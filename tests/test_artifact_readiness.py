@@ -33,6 +33,48 @@ def test_barrier_accepts_complete_digest_bound_fanin():
     assert [item.producer_id for item in joined] == ["worker-a", "worker-b"]
 
 
+def test_fanin_receipt_binds_artifact_size_and_source_task_revision():
+    now = datetime.now(timezone.utc)
+    outputs = {"worker-a": "alpha", "worker-b": "bravo"}
+    revisions = {"worker-a": "a" * 64, "worker-b": "b" * 64}
+    receipts = tuple(
+        ArtifactReadiness.from_content(
+            producer, "run-1", content, timestamp=now,
+            source_revision=revisions[producer],
+        )
+        for producer, content in outputs.items()
+    )
+    barrier = ArtifactReadinessBarrier()
+    joined = barrier.join(
+        receipts, run_id="run-1", expected_producers=outputs,
+        content_by_producer=outputs, expected_source_revisions=revisions, now=now,
+    )
+    assert [(item.artifact_id, item.size_bytes) for item in joined] == [
+        ("run-1/worker-a", 5), ("run-1/worker-b", 5),
+    ]
+    with pytest.raises(ValueError, match="size"):
+        barrier.join(
+            (replace(receipts[0], size_bytes=0), receipts[1]),
+            run_id="run-1", expected_producers=outputs,
+            content_by_producer=outputs, expected_source_revisions=revisions, now=now,
+        )
+    with pytest.raises(ValueError, match="source revision"):
+        barrier.join(
+            receipts, run_id="run-1", expected_producers=outputs,
+            content_by_producer=outputs,
+            expected_source_revisions={**revisions, "worker-a": "c" * 64}, now=now,
+        )
+
+
+def test_verifier_receipts_need_independent_expected_values():
+    artifacts, contents, now = _pair()
+    with pytest.raises(ValueError, match="independent expected values"):
+        ArtifactReadinessBarrier().join(
+            artifacts, run_id="run-1", expected_producers=contents,
+            content_by_producer=contents, now=now, require_verifier_receipt=True,
+        )
+
+
 @pytest.mark.parametrize("mutator", [
     lambda item: replace(item, completion_marker="partial"),
     lambda item: replace(item, validation_result="failed"),
@@ -122,7 +164,16 @@ def test_deterministic_verifier_is_optional_but_fail_closed_when_declared():
         )
 
 
-def test_delegated_fanin_blocks_mutated_producer_manifest(monkeypatch):
+@pytest.mark.parametrize("field,value", [
+    ("completion_marker", "partial"),
+    ("source_revision", "0" * 64),
+    ("source_revision", 42),
+    ("size_bytes", 0),
+    ("size_bytes", True),
+    ("verifier_receipt", "0" * 64),
+    ("verifier_receipt", 42),
+])
+def test_delegated_fanin_blocks_mutated_producer_manifest(monkeypatch, field, value):
     original = master_orchestrator._run_worker
     audited = []
 
@@ -131,7 +182,7 @@ def test_delegated_fanin_blocks_mutated_producer_manifest(monkeypatch):
     def mutate_manifest(*args, **kwargs):
         result = original(*args, **kwargs)
         if isinstance(result, master_orchestrator.ReadyWorkerOutput):
-            broken = replace(result.readiness, completion_marker="partial")
+            broken = replace(result.readiness, **{field: value})
             return master_orchestrator.ReadyWorkerOutput(result.output, broken)
         return result
 

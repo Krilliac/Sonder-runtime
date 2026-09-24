@@ -37,7 +37,7 @@ class ManagedRuntimeOwner(DisposableRuntimeOwner, ChildMigrationActivation):
     process_type = WindowsManagedRuntimeProcess
     command_type = PreparedManagedOwnerOperation
 
-    def __init__(self, path, *, writable_roots):
+    def __init__(self, path, *, writable_roots, runtime_venv=None):
         super().__init__(path, writable_roots=writable_roots)
         self._application = self._repository = None
         self._tracked = 0
@@ -51,7 +51,8 @@ class ManagedRuntimeOwner(DisposableRuntimeOwner, ChildMigrationActivation):
             from ..adapters.execution.runtime_payload import RuntimePayload
 
             self._payload = RuntimePayload(
-                self.path, create=True, writable_roots=self._roots()
+                self.path, create=True, writable_roots=self._roots(),
+                runtime_venv=runtime_venv,
             )
             self._process.bind_payload(self._payload, self._roots)
             self._selection = SQLiteChildMigrationStore(self.path / "children.sqlite")
@@ -68,6 +69,17 @@ class ManagedRuntimeOwner(DisposableRuntimeOwner, ChildMigrationActivation):
                 finally:
                     DisposableRuntimeOwner.close(self)
             raise
+
+    @classmethod
+    def workstation_local(cls, path, *, writable_roots):
+        """Use the dedicated profile provisioned by install_workstation_local.ps1.
+
+        This host-only entrypoint is explicit: ordinary owner construction
+        still uses the caller's current interpreter closure.
+        """
+        checkout = Path(__file__).resolve().parents[2]
+        return cls(path, writable_roots=writable_roots,
+                   runtime_venv=checkout / "venv-managed")
 
     @property
     def selected_store(self):

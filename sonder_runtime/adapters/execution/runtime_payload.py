@@ -4,18 +4,22 @@ The supported threat boundary excludes changes by another trusted same-user
 host administrator during execution. Hashes and directory anchors do not deny
 such writes. Model-writable roots must be disjoint from every closure root.
 """
-from hashlib import sha256
 import json
 import os
-from pathlib import Path
 import shutil
 import stat
 import sys
+from hashlib import sha256
+from pathlib import Path
 
-from ...application.ports.runtime_owner import OwnerRefused, canonical
 from ...application.compute_fabric.artifact_spool import PrivateDirectoryAnchor
+from ...application.ports.runtime_owner import OwnerRefused, canonical
 from ..filesystem.atomic_json import write_json_atomic
 
+# The existing supported size/count envelope remains unchanged. Preflight
+# refuses out-of-bounds closures before reading their contents. Each admission
+# still hashes all bytes, including once in the child; metadata cannot prove
+# content integrity. A host can select the installer-owned lean runtime venv.
 MAX_FILES = 50000
 MAX_BYTES = 4 * 1024**3
 MAX_MANIFEST = 32 * 1024**2
@@ -84,8 +88,7 @@ def _declared_site_package_paths(site_packages):
             raise OwnerRefused("dependency path file is unreadable") from exc
         for raw in lines:
             line = raw.strip()
-            if (not line or line.startswith("#")
-                    or line.startswith(("import ", "import\t"))):
+            if not line or line.startswith(("#", "import ", "import\t")):
                 continue
             entry_count += 1
             if entry_count > MAX_PTH_ENTRIES:
@@ -109,33 +112,70 @@ def _declared_site_package_paths(site_packages):
     return tuple(paths)
 
 
-def inventory(roots):
-    rows, total = [], 0
+def preflight(roots):
+    """Reject an oversized closure before reading any dependency content.
+
+    The returned metadata is used only to detect changes during the ensuing
+    digest pass. Every validation still hashes every file's bytes afresh.
+    """
+    planned, total = [], 0
     for root, exclude_site in roots:
         root = Path(root)
         for path in files(root, exclude_site=exclude_site):
             metadata = plain(path)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise OwnerRefused("runtime artifact is not an ordinary file")
             total += metadata.st_size
-            if len(rows) >= MAX_FILES or total > MAX_BYTES:
-                raise OwnerRefused("runtime dependency closure exceeds bounds")
-            digest = sha256()
-            with path.open("rb") as stream:
-                while chunk := stream.read(1024 * 1024):
-                    digest.update(chunk)
-            after = plain(path)
-            if (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
-                raise OwnerRefused("runtime artifact changed during inspection")
-            rows.append([str(path), metadata.st_dev, metadata.st_ino, metadata.st_size, digest.hexdigest()])
+            if len(planned) >= MAX_FILES or total > MAX_BYTES:
+                raise OwnerRefused(
+                    "runtime dependency closure exceeds verification budget "
+                    f"({MAX_FILES} files / {MAX_BYTES // 1024**2} MiB); "
+                    "use a dedicated runtime environment with requirements-runtime.txt"
+                )
+            planned.append((path, metadata))
+    return planned
+
+
+def inventory(roots):
+    planned = preflight(roots)
+    rows = []
+    for path, metadata in planned:
+        before = plain(path)
+        if (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns) != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
+            raise OwnerRefused("runtime artifact changed during inspection")
+        digest = sha256()
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+        after = plain(path)
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+            raise OwnerRefused("runtime artifact changed during inspection")
+        rows.append([str(path), before.st_dev, before.st_ino, before.st_size, digest.hexdigest()])
     return rows
 
 
+def _runtime_layout(runtime_venv=None):
+    """Base interpreter and selected dependency closure (private test seam)."""
+    source = Path(__file__).resolve().parents[3]
+    base = Path(sys.base_prefix).resolve()
+    executable = Path(sys._base_executable).resolve()
+    if runtime_venv is None:
+        return (source, base, executable,
+                Path(sys.prefix).resolve() / "Lib" / "site-packages", ())
+    from .runtime_profile import profile_files
+
+    profile = profile_files(runtime_venv, source=source, base=base, executable=executable)
+    return (source, base, executable,
+            Path(runtime_venv) / "Lib" / "site-packages", profile)
+
+
 class RuntimePayload:
-    def __init__(self, root, *, create=False, writable_roots=()):
+    def __init__(self, root, *, create=False, writable_roots=(), runtime_venv=None):
         self.root = Path(root).absolute()
         self.path = self.root / "runtime-payload"
         self.anchor = None
         if create:
-            self._create(tuple(writable_roots))
+            self._create(tuple(writable_roots), runtime_venv=runtime_venv)
         else:
             try:
                 self.anchor = PrivateDirectoryAnchor(self.path)
@@ -144,20 +184,17 @@ class RuntimePayload:
                 if len(raw) > MAX_MANIFEST:
                     raise OwnerRefused("runtime artifact manifest exceeds bounds")
                 self.manifest = json.loads(raw)
-                if type(self.manifest) is not dict or set(self.manifest) != {"schema", "payload", "executable", "paths", "dll_paths", "source", "roots", "files", "python"}:
+                if type(self.manifest) is not dict or set(self.manifest) != {"schema", "payload", "executable", "paths", "dll_paths", "source", "roots", "files", "python", "profile"}:
                     raise OwnerRefused("exact runtime artifact manifest required")
             except BaseException:
                 self.close()
                 raise
         self.digest = sha256(canonical(self.manifest)).hexdigest()
 
-    def _create(self, writable_roots):
+    def _create(self, writable_roots, *, runtime_venv=None):
         if os.name != "nt" or sys.version_info[:2] != (3, 12):
             raise OwnerRefused("managed artifact profile requires Windows CPython 3.12")
-        source = Path(__file__).resolve().parents[3]
-        base = Path(sys.base_prefix).resolve()
-        executable = Path(sys._base_executable).resolve()
-        dependencies = Path(sys.prefix).resolve() / "Lib" / "site-packages"
+        source, base, executable, dependencies, profile_roots = _runtime_layout(runtime_venv)
         if executable.parent != base or any(base.glob("*._pth")):
             raise OwnerRefused("unknown Python runtime path configuration")
         site_paths = _declared_site_package_paths(dependencies)
@@ -172,7 +209,10 @@ class RuntimePayload:
         external += [(str(path), False) for path in sorted(base.iterdir()) if path.is_file() and path.suffix.lower() in (".dll", ".exe", ".zip")]
         if not any(Path(path) == executable for path, _ in external):
             raise OwnerRefused("interpreter is outside declared closure")
-        disjoint((source, base, dependencies), writable_roots)
+        disjoint((source, base, dependencies, *((runtime_venv,) if runtime_venv else ())), writable_roots)
+        # In particular, detect training stacks that would exceed the
+        # supported closure before copying the private application payload.
+        preflight(external)
         self.anchor = PrivateDirectoryAnchor.open_base(self.path, require_new=True)
         try:
             sources = [source / "sonder_runtime", source / "migrations", source / "seed"]
@@ -190,12 +230,16 @@ class RuntimePayload:
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(original, destination)
             (self.root / "python-cache").mkdir()
-            roots = [(str(self.path), False), *external]
-            self.manifest = dict(schema=1, payload=str(self.path), executable=str(executable),
-                paths=[str(self.path), str(base / "Lib"), str(base / "DLLs"),
-                       *(str(path) for path in site_paths)],
-                dll_paths=dll_paths, source=str(source), roots=roots,
-                files=inventory(roots), python=[3, 12])
+            roots = [(str(self.path), False), *external,
+                     *((path, False) for path in profile_roots)]
+            self.manifest = {
+                "schema": 2, "payload": str(self.path), "executable": str(executable),
+                "paths": [str(self.path), str(base / "Lib"), str(base / "DLLs"),
+                          *(str(path) for path in site_paths)],
+                "dll_paths": dll_paths, "source": str(source), "roots": roots,
+                "files": inventory(roots), "python": [3, 12],
+                "profile": str(runtime_venv) if runtime_venv else "",
+            }
             if len(canonical(self.manifest)) > MAX_MANIFEST:
                 raise OwnerRefused("runtime artifact manifest exceeds bounds")
             write_json_atomic(self.root / "runtime-artifacts.json", self.manifest)
@@ -208,9 +252,10 @@ class RuntimePayload:
         value = self.manifest
         if expected is not None and self.digest != expected:
             raise OwnerRefused("runtime artifact digest changed")
-        if value["schema"] != 1 or value["python"] != [3, 12] or value["payload"] != str(self.path):
+        if value["schema"] != 2 or value["python"] != [3, 12] or value["payload"] != str(self.path):
             raise OwnerRefused("runtime artifact profile changed")
-        disjoint((value["source"], *value["paths"], *value["dll_paths"], value["executable"]), tuple(writable_roots))
+        disjoint((value["source"], *value["paths"], *value["dll_paths"], value["executable"],
+                  *((value["profile"],) if value["profile"] else ())), tuple(writable_roots))
         if inventory(value["roots"]) != value["files"]:
             raise OwnerRefused("runtime artifact content or identity changed")
 

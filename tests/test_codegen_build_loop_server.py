@@ -6,8 +6,15 @@ guard that needs the current file silently no-opped), and it derived
 BUILD SUCCEEDED from "no line matched the error regex" while throwing away
 the build process's own exit status.
 """
+import sqlite3
+from types import SimpleNamespace
+
+import pytest
 import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
 import server
+from sonder_runtime.adapters.unit_of_work import UnitOfWorkAdapter
+from sonder_runtime.bootstrap.strategy import compose_strategy_trace
+from sonder_runtime.domain.strategy.models import FailureClass
 
 
 def _build(ok=True, stdout="", stderr="", timed_out=False):
@@ -31,6 +38,338 @@ def _prepare(monkeypatch, tmp_path, run_program):
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
     monkeypatch.setattr(server.workbench, "run_program", run_program)
+
+
+def _enable_strategy(monkeypatch, home):
+    monkeypatch.setenv("SONDER_HOME", str(home))
+    monkeypatch.setenv("SONDER_STRATEGY_OBSERVE", "1")
+    monkeypatch.setattr(
+        server, "_application",
+        lambda: SimpleNamespace(
+            unit_of_work=lambda: UnitOfWorkAdapter(str(home / "memory.db")),
+        ),
+    )
+
+
+def test_second_attempt_repairs_from_bounded_compiler_feedback(monkeypatch, tmp_path):
+    diagnostic = "main.c:1: error: unknown type name 'widget'"
+    broken = "int main(void) { return widget; }"
+    fixed = "int main(void) { return 0; }"
+
+    def build(*args, **kwargs):
+        source = tmp_path / "main.c"
+        if source.exists() and source.read_text(encoding="utf-8").strip() == fixed:
+            return _build(ok=True, stdout="build complete")
+        return _build(ok=False, stdout=diagnostic)
+
+    _prepare(monkeypatch, tmp_path, build)
+    prompts = []
+
+    def generate(prompt, **kwargs):
+        prompts.append(prompt)
+        return fixed if diagnostic in prompt and broken in prompt else broken
+
+    monkeypatch.setattr(server, "ensemble_answer", generate)
+    report = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build", attempts=4,
+    )
+
+    assert len(prompts) == 2
+    assert diagnostic in prompts[1]
+    assert broken in prompts[1]
+    assert "BUILD SUCCEEDED" in report
+    assert (tmp_path / "main.c").read_text(encoding="utf-8").strip() == fixed
+
+
+def test_observed_codegen_attempts_restore_without_source_or_diagnostics(monkeypatch, tmp_path):
+    diagnostic = "main.c:1: error: unknown type name 'private_widget'"
+    broken = "int main(void) { return private_widget; }"
+    fixed = "int main(void) { return 0; }"
+
+    def build(*args, **kwargs):
+        source = tmp_path / "main.c"
+        if source.exists() and source.read_text(encoding="utf-8").strip() == fixed:
+            return _build(ok=True, stdout="build complete")
+        return _build(ok=False, stdout=diagnostic)
+
+    _prepare(monkeypatch, tmp_path, build)
+    home = tmp_path / "home"
+    _enable_strategy(monkeypatch, home)
+    monkeypatch.setattr(
+        server, "ensemble_answer",
+        lambda prompt, **kwargs: fixed if diagnostic in prompt and broken in prompt else broken,
+    )
+
+    report = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build", attempts=4,
+    )
+
+    assert "BUILD SUCCEEDED" in report
+    database = home / "strategy" / "checkpoints.db"
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT run_id, payload_json FROM runtime_checkpoint ORDER BY generation"
+        ).fetchall()
+    assert len(rows) == 2
+    assert all(row[0] == rows[0][0] for row in rows)
+    assert all(diagnostic not in row[1] and broken not in row[1] for row in rows)
+
+    restored = compose_strategy_trace(
+        db_path=database, key_path=home / "strategy-private" / "checkpoint.key",
+    ).history(rows[0][0])
+    assert [attempt.outcome for attempt in restored] == ["failed", "succeeded"]
+    assert [attempt.usage.attempts for attempt in restored] == [1, 1]
+    assert restored[0].failure.classification is FailureClass.BUILD_FAILURE
+    assert restored[0].progress_after.metrics[0].value == 1
+    assert restored[1].progress_after.metrics[0].value == 0
+    assert restored[0].progress_after.scope_digest == restored[1].progress_before.scope_digest
+    with sqlite3.connect(home / "memory.db") as connection:
+        indexed = connection.execute(
+            "SELECT outcome, project_digest FROM strategy_experience ORDER BY rowid"
+        ).fetchall()
+    assert [outcome for outcome, _digest in indexed] == ["failed", "succeeded"]
+    assert all(str(tmp_path) not in digest for _outcome, digest in indexed)
+
+
+def test_explicit_distinct_tiers_enable_scoped_critic_then_rotation(monkeypatch, tmp_path):
+    diagnostic = "main.c:1: error: unknown type name 'widget'"
+    broken = "int main(void) { return widget; }"
+    fixed = "int main(void) { return 0; }"
+    def build(*args, **kwargs):
+        path = tmp_path / "main.c"
+        green = path.exists() and path.read_text(encoding="utf-8").strip() == fixed
+        return _build(ok=green, stdout="build complete" if green else diagnostic)
+
+    _prepare(monkeypatch, tmp_path, build)
+    home = tmp_path / "home"
+    _enable_strategy(monkeypatch, home)
+    monkeypatch.setattr(
+        server, "_ensemble_targets",
+        lambda tiers: ([("code", "coder"), ("reasoning", "critic")], []),
+    )
+    calls = []
+    critic = []
+
+    def diagnose(prompt, **options):
+        critic.append(prompt)
+        assert options["tier"] == "reasoning" and options["model"] == "critic"
+        return "The widget name is undefined; return 0 instead."
+
+    def answer(prompt, **options):
+        calls.append((prompt, options))
+        if options["tiers"] == "reasoning":
+            return fixed
+        return broken
+
+    monkeypatch.setattr(server, "_codegen_critic_generation", diagnose)
+    monkeypatch.setattr(server, "ensemble_answer", answer)
+    report = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build",
+        tiers="code,reasoning", attempts=4,
+    )
+    generation = [opts["tiers"] for _, opts in calls if opts["mode"] == "code"]
+    assert generation == ["code", "code", "code", "reasoning"]
+    assert len(critic) == 1
+    assert "an entry point" in critic[0]
+    assert diagnostic in critic[0] and broken in critic[0]
+    assert "The widget name is undefined" in calls[2][0]
+    assert "BUILD SUCCEEDED" in report
+    with sqlite3.connect(home / "strategy" / "checkpoints.db") as connection:
+        run_id = connection.execute(
+            "SELECT run_id FROM runtime_checkpoint LIMIT 1"
+        ).fetchone()[0]
+    history = compose_strategy_trace(
+        db_path=home / "strategy" / "checkpoints.db",
+        key_path=home / "strategy-private" / "checkpoint.key",
+    ).history(run_id)
+    assert [item.usage.model_calls for item in history] == [1, 1, 2, 1]
+    assert [item.usage.critic_calls for item in history] == [0, 0, 1, 0]
+    assert [item.usage.strategy_switches for item in history] == [0, 0, 0, 1]
+
+
+def test_same_model_alias_keeps_no_progress_stop_without_critic(monkeypatch, tmp_path):
+    diagnostic = "main.c:1: error: unknown type name 'widget'"
+    _prepare(monkeypatch, tmp_path, lambda *args, **kwargs: _build(ok=False, stdout=diagnostic))
+    monkeypatch.setattr(
+        server, "_ensemble_targets",
+        lambda tiers: ([("code", "same-model")], []),
+    )
+    calls = []
+
+    def answer(prompt, **options):
+        calls.append(options)
+        return "int main(void) { return widget; }"
+
+    monkeypatch.setattr(server, "ensemble_answer", answer)
+    report = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build",
+        tiers="code,reasoning", attempts=4,
+    )
+    assert len(calls) == 2
+    assert all(options["mode"] == "code" for options in calls)
+    assert "no progress" in report
+
+
+def test_failed_critic_degrades_to_feedback_and_policy_still_bounds_rotation(
+    monkeypatch, tmp_path,
+):
+    diagnostic = "main.c:1: error: unknown type name 'widget'"
+    broken = "int main(void) { return widget; }"
+    fixed = "int main(void) { return 0; }"
+
+    def build(*args, **kwargs):
+        path = tmp_path / "main.c"
+        green = path.exists() and path.read_text(encoding="utf-8").strip() == fixed
+        return _build(ok=green, stdout="ok" if green else diagnostic)
+
+    _prepare(monkeypatch, tmp_path, build)
+    monkeypatch.setattr(
+        server, "_ensemble_targets",
+        lambda tiers: ([("code", "coder"), ("reasoning", "critic")], []),
+    )
+    calls = []
+
+    def answer(prompt, **options):
+        calls.append((prompt, options))
+        return fixed if options["tiers"] == "reasoning" else broken
+
+    def unavailable(prompt, **options):
+        raise RuntimeError("critic unavailable")
+
+    monkeypatch.setattr(server, "_codegen_critic_generation", unavailable)
+    monkeypatch.setattr(server, "ensemble_answer", answer)
+    report = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build",
+        tiers="code,reasoning", attempts=4,
+    )
+    assert [opts["tiers"] for _, opts in calls if opts["mode"] == "code"] == [
+        "code", "code", "code", "reasoning",
+    ]
+    assert "critic unavailable" in report
+    assert "Independent critic suggestion" not in calls[2][0]
+    assert "BUILD SUCCEEDED" in report
+
+
+def test_incomplete_build_evidence_does_not_trigger_critic(monkeypatch, tmp_path):
+    _prepare(
+        monkeypatch, tmp_path,
+        lambda *args, **kwargs: {
+            **_build(ok=False, stdout="main.c:1: error: visible part"),
+            "stdout_truncated": True,
+        },
+    )
+    monkeypatch.setattr(
+        server, "_ensemble_targets",
+        lambda tiers: ([("code", "coder"), ("reasoning", "critic")], []),
+    )
+    calls = []
+    monkeypatch.setattr(
+        server, "_codegen_critic_generation",
+        lambda *args, **kwargs: pytest.fail("critic must not run"),
+    )
+
+    def answer(prompt, **options):
+        calls.append(options)
+        return "int main(void) { return widget; }"
+
+    monkeypatch.setattr(server, "ensemble_answer", answer)
+    report = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build",
+        tiers="code,reasoning", attempts=4,
+    )
+    assert len(calls) == 4
+    assert all(item["mode"] == "code" and item["tiers"] == "code" for item in calls)
+    assert "BUILD SUCCEEDED" not in report
+
+
+def test_staged_repair_still_stops_after_distinct_critic_and_rotation_fail(
+    monkeypatch, tmp_path,
+):
+    diagnostic = "main.c:1: error: unknown type name 'widget'"
+    _prepare(monkeypatch, tmp_path, lambda *args, **kwargs: _build(ok=False, stdout=diagnostic))
+    monkeypatch.setattr(
+        server, "_ensemble_targets",
+        lambda tiers: ([("code", "coder"), ("reasoning", "critic")], []),
+    )
+    calls = []
+    critic = []
+
+    def diagnose(prompt, **options):
+        critic.append(prompt)
+        return "Try a different type"
+
+    def answer(prompt, **options):
+        calls.append(options)
+        return "int main(void) { return widget; }"
+
+    monkeypatch.setattr(server, "_codegen_critic_generation", diagnose)
+    monkeypatch.setattr(server, "ensemble_answer", answer)
+    report = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build",
+        tiers="code,reasoning", attempts=6,
+    )
+    assert [item["tiers"] for item in calls if item["mode"] == "code"] == [
+        "code", "code", "code", "reasoning",
+    ]
+    assert len(critic) == 1
+    assert "no progress" in report
+
+
+def test_repair_restores_best_candidate_after_worse_followup(monkeypatch, tmp_path):
+    better = "int main(void) { return widget; }"
+    worse = "int main(void) { return nonsense; }"
+
+    def build(*args, **kwargs):
+        path = tmp_path / "main.c"
+        if path.exists() and path.read_text(encoding="utf-8").strip() == worse:
+            return _build(ok=False, stdout="main.c:1: error: x\nmain.c:2: error: y")
+        return _build(ok=False, stdout="main.c:1: error: x")
+
+    _prepare(monkeypatch, tmp_path, build)
+    candidates = iter((better, worse))
+    monkeypatch.setattr(server, "ensemble_answer", lambda *args, **kwargs: next(candidates))
+    report = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build", attempts=2,
+    )
+    assert "BUILD FAILED" in report
+    assert (tmp_path / "main.c").read_text(encoding="utf-8").strip() == better
+
+
+def test_staged_repair_stops_after_rotation_regresses_without_stall_fingerprint(
+    monkeypatch, tmp_path,
+):
+    builds = []
+
+    def build(*args, **kwargs):
+        builds.append(1)
+        n = len(builds)
+        return _build(ok=False, stdout=f"main.c:{n}: error: changing failure {n}")
+
+    _prepare(monkeypatch, tmp_path, build)
+    monkeypatch.setattr(
+        server, "_ensemble_targets",
+        lambda tiers: ([("code", "coder"), ("reasoning", "critic")], []),
+    )
+    calls = []
+    critic = []
+
+    def diagnose(prompt, **options):
+        critic.append(prompt)
+        return "Try changing the declaration"
+
+    def answer(prompt, **options):
+        calls.append(options)
+        return "int main(void) { return widget; }"
+
+    monkeypatch.setattr(server, "_codegen_critic_generation", diagnose)
+    monkeypatch.setattr(server, "ensemble_answer", answer)
+    report = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build",
+        tiers="code,reasoning", attempts=6,
+    )
+    assert len([item for item in calls if item["mode"] == "code"]) == 4
+    assert len(critic) == 1
+    assert "no measured build improvement" in report
 
 
 def test_an_existing_clean_file_is_read_from_disk_and_not_regenerated(

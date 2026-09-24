@@ -4,6 +4,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import ctypes
+import hashlib
 import itertools
 import json
 import logging
@@ -1326,6 +1327,23 @@ def _finish(
     return final
 
 
+def _readiness_verifier_receipt(
+    agent_id: str, run_id: str, delegated_task_digest: str,
+    output: str, verification: dict,
+) -> str:
+    """Digest the host's completion/provenance checks for an artifact join."""
+    payload = {
+        "run_id": run_id,
+        "producer_id": agent_id,
+        "source_task_digest": delegated_task_digest,
+        "completed_output_digest": fleet_provenance.task_digest(output),
+        "verification": verification,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def _run_worker(
     agent_id: str,
     prompt: str,
@@ -1460,9 +1478,17 @@ def _run_worker(
     completed = output if isinstance(output, RepositoryWorkerResult) else final
     if not run_id:
         return completed
+    verifier_receipt = _readiness_verifier_receipt(
+        agent_id, run_id, delegated_task_digest, stored_output,
+        metrics if objectives else {"worker_finished": True},
+    )
     return ReadyWorkerOutput(
         output=completed,
-        readiness=ArtifactReadiness.from_content(agent_id, run_id, stored_output),
+        readiness=ArtifactReadiness.from_content(
+            agent_id, run_id, stored_output,
+            source_revision=delegated_task_digest,
+            verifier_receipt=verifier_receipt,
+        ),
     )
 
 
@@ -2223,6 +2249,23 @@ def run_delegated(
             run_id=master_id,
             expected_producers=rendered_outputs,
             content_by_producer=rendered_outputs,
+            expected_source_revisions={
+                agent_id: fleet_provenance.task_digest(lane_inputs[agent_id][0])
+                for agent_id in rendered_outputs
+            },
+            expected_verifier_receipts={
+                agent_id: _readiness_verifier_receipt(
+                    agent_id, master_id,
+                    fleet_provenance.task_digest(lane_inputs[agent_id][0]),
+                    rendered_outputs[agent_id],
+                    fleet_provenance.validate_result(
+                        rendered_outputs[agent_id], lane_inputs[agent_id][1],
+                        project=project_scope,
+                    ) if lane_inputs[agent_id][1] else {"worker_finished": True},
+                )
+                for agent_id in rendered_outputs
+            },
+            require_verifier_receipt=True,
         )
     except ValueError as exc:
         error = "artifact readiness barrier rejected fan-in: %s" % exc

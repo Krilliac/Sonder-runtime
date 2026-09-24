@@ -1,11 +1,14 @@
 import os
 import socket
+import sys
 import urllib.request
+from pathlib import Path
 
 import pytest
 
 from sonder_runtime.bootstrap.managed_runtime_owner import ManagedRuntimeOwner
 from sonder_runtime.application.ports.runtime_owner import OwnerRefused, OwnerUnsupported
+from tests._managed_runtime_layout import require_bounded_real_runtime_closure
 
 
 def port():
@@ -16,6 +19,7 @@ def port():
 
 @pytest.mark.skipif(os.name != "nt", reason="actual Windows containment required")
 def test_full_manifest_owned_http_and_relaunch(tmp_path, monkeypatch):
+    require_bounded_real_runtime_closure()
     owner = ManagedRuntimeOwner(tmp_path / "owner", writable_roots=lambda: ())
     try:
         configuration = owner.register_configuration(port=port())
@@ -76,5 +80,33 @@ def test_full_manifest_owned_http_and_relaunch(tmp_path, monkeypatch):
             assert owner.execute(owner.prepare("migrated-stop", "stop", {}))["state"] == "STOPPED_CLEAN"
         with pytest.raises(OwnerUnsupported):
             ManagedRuntimeOwner(owner.path, writable_roots=lambda: ())
+    finally:
+        owner.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows managed process required")
+def test_workstation_profile_launches_with_only_its_pinned_site(tmp_path):
+    from sonder_runtime.adapters.execution.runtime_profile import PROFILE_NAME
+
+    checkout = Path(__file__).resolve().parents[1]
+    profile = checkout / "venv-managed"
+    if not (profile / PROFILE_NAME).is_file():
+        if os.environ.get("SONDER_REQUIRE_MANAGED_RUNTIME_PROFILE") == "1":
+            pytest.fail("managed runtime installer did not provision its profile")
+        pytest.skip("run install_workstation_local.ps1 -ManagedRuntime first")
+    owner = ManagedRuntimeOwner.workstation_local(
+        tmp_path / "owner", writable_roots=lambda: ()
+    )
+    try:
+        manifest = owner._payload.manifest
+        assert manifest["profile"] == str(profile)
+        assert str(profile / "Lib" / "site-packages") in manifest["paths"]
+        host_site = Path(sys.prefix).resolve() / "Lib" / "site-packages"
+        if host_site != profile / "Lib" / "site-packages":
+            assert str(host_site) not in manifest["paths"]
+        selected = owner.register_configuration(port=port())
+        owner.execute(owner.prepare("select", "select", {"config": selected}))
+        assert owner.execute(owner.prepare("launch", "launch", {}))["state"] == "RUNNING"
+        assert owner.execute(owner.prepare("stop", "stop", {}))["state"] == "STOPPED_CLEAN"
     finally:
         owner.close()

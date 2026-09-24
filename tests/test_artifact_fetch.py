@@ -18,13 +18,18 @@ from __future__ import annotations
 
 import http.server
 import json
+import ntpath
+import os
 import threading
 import urllib.parse
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import sonder_runtime.adapters.artifact_fetch as artifact_fetch
+
+REAL_AUTHENTICODE_SIGNATURE = artifact_fetch._authenticode_signature
 
 
 pytestmark = pytest.mark.unit
@@ -191,6 +196,7 @@ def test_good_binary_download_verifies_and_writes_provenance(
     assert record["verified"] is True
     assert record["verdict"] == "verified"
     assert "signature_status" in record and "publisher" in record
+    assert record["signature_verified"] is False
     assert any(row["check"] == "magic" for row in record["checks"])
 
 
@@ -426,6 +432,7 @@ def test_expect_publisher_match_is_accepted_case_insensitively(
     )
     assert record["publisher_common_name"] == "NVIDIA Corporation"
     assert record["signature_status"] == "Valid"
+    assert record["signature_verified"] is True
 
 
 def test_unsigned_binary_fails_an_expected_publisher(
@@ -461,6 +468,158 @@ def test_publisher_cannot_be_confirmed_without_a_verifier(
 
     assert not result["ok"]
     assert "cannot confirm publisher" in _failed(result, "publisher")[0]["detail"]
+
+
+@pytest.mark.parametrize("filename,body", [
+    ("unverifiable.exe", PE_BODY),
+    ("unverifiable.msi", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + bytes(2048)),
+    ("unverifiable.cab", b"MSCF" + bytes(64)),
+])
+def test_windows_unavailable_verifier_rejects_signable_fetch_without_publisher(
+    fixture_server, tmp_path, monkeypatch, filename, body,
+):
+    url = fixture_server.route("/" + filename, body=body)
+    dest = tmp_path / filename
+    with monkeypatch.context() as windows:
+        windows.setattr(
+            artifact_fetch, "os", SimpleNamespace(name="nt", replace=os.replace),
+        )
+        windows.setattr(
+            artifact_fetch, "_authenticode_signature",
+            _signature(status="verifier_failed", supported=False),
+        )
+        result = artifact_fetch.fetch_artifact(url, str(dest))
+
+    assert not result["ok"]
+    assert result["verdict"] == "rejected"
+    assert not dest.exists()
+    assert not (tmp_path / (filename + ".provenance.json")).exists()
+    assert _failed(result, "signature")
+
+
+def test_unsupported_non_windows_signature_is_explicitly_unverified(
+    tmp_path, monkeypatch,
+):
+    target = tmp_path / "foreign.exe"
+    target.write_bytes(PE_BODY)
+    with monkeypatch.context() as non_windows:
+        non_windows.setattr(artifact_fetch, "os", SimpleNamespace(name="posix"))
+        result = artifact_fetch.verify_artifact(str(target), expect_type="pe")
+
+    assert result["ok"]
+    assert result["signature_verified"] is False
+    assert result["signature"]["status"] == "unsupported_platform"
+    assert any("no signer authentication" in row["detail"] for row in result["checks"])
+
+
+@pytest.mark.parametrize("status", ["NotSigned", "UnknownError"])
+def test_windows_invalid_signature_rejects_without_publisher(
+    tmp_path, monkeypatch, status,
+):
+    target = tmp_path / "bad.exe"
+    target.write_bytes(PE_BODY)
+    with monkeypatch.context() as windows:
+        windows.setattr(artifact_fetch, "os", SimpleNamespace(name="nt"))
+        windows.setattr(artifact_fetch, "_authenticode_signature", _signature(status=status))
+        result = artifact_fetch.verify_artifact(str(target), expect_type="pe")
+
+    assert not result["ok"]
+    assert result["signature_verified"] is False
+    assert status in _failed(result, "signature")[0]["detail"]
+
+
+@pytest.mark.parametrize("subject", [
+    "CN=Acme Application, O=Acme LLC, OU=Compatible with Microsoft Corporation, C=US",
+    "CN=Not Microsoft Corporation, O=Not Microsoft Corporation, C=US",
+    "CN=Microsoft Corporation, OU=Compatible with Microsoft Corporation, C=US",
+    "CN=Acme Application, O=Microsoft Corporation, O=Acme LLC, C=US",
+    "CN=Acme Application, O=Microsoft Corporation, OU=\"unterminated, C=US",
+])
+def test_publisher_pin_rejects_misleading_or_malformed_subject(
+    tmp_path, monkeypatch, subject,
+):
+    target = tmp_path / "misleading.exe"
+    target.write_bytes(PE_BODY)
+    monkeypatch.setattr(
+        artifact_fetch, "_authenticode_signature",
+        _signature(publisher=subject),
+    )
+
+    result = artifact_fetch.verify_artifact(
+        str(target), expect_type="pe", expect_publisher="Microsoft Corporation",
+    )
+
+    assert not result["ok"]
+    assert _failed(result, "publisher")
+
+
+def test_publisher_pin_accepts_exact_normalized_organization(
+    tmp_path, monkeypatch,
+):
+    target = tmp_path / "signed.exe"
+    target.write_bytes(PE_BODY)
+    monkeypatch.setattr(
+        artifact_fetch, "_authenticode_signature",
+        _signature(publisher="CN=Microsoft Windows, O=MICROSOFT Corporation, C=US"),
+    )
+
+    result = artifact_fetch.verify_artifact(
+        str(target), expect_type="pe", expect_publisher=" microsoft corporation ",
+    )
+
+    assert result["ok"]
+    assert result["signature_verified"] is True
+
+
+def test_publisher_pin_accepts_quoted_organization_with_a_comma(tmp_path, monkeypatch):
+    target = tmp_path / "quoted.exe"
+    target.write_bytes(PE_BODY)
+    monkeypatch.setattr(
+        artifact_fetch, "_authenticode_signature",
+        _signature(publisher='CN=Example App, O="Example, Incorporated", C=US'),
+    )
+
+    result = artifact_fetch.verify_artifact(
+        str(target), expect_type="pe", expect_publisher="Example, Incorporated",
+    )
+
+    assert result["ok"]
+    assert result["signature_verified"] is True
+
+
+def test_authenticode_process_ignores_inherited_powershell_module_path(monkeypatch):
+    environment = {
+        "SystemRoot": r"C:\Windows",
+        "WINDIR": r"C:\Windows",
+        "PATH": r"C:\Windows\System32",
+        "TEMP": r"C:\Temp",
+        "PSModulePath": r"C:\Untrusted\Modules",
+        "PYTHONPATH": r"C:\Untrusted\Python",
+    }
+    captured = {}
+
+    def run(argv, **kwargs):
+        captured.update(argv=argv, **kwargs)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"Status": "Valid", "Subject": "O=Trusted LLC", "Thumbprint": "AA"}),
+            stderr="",
+        )
+
+    with monkeypatch.context() as windows:
+        windows.setattr(
+            artifact_fetch, "os",
+            SimpleNamespace(name="nt", environ=environment, path=ntpath),
+        )
+        windows.setattr(artifact_fetch, "_authenticode_signature", REAL_AUTHENTICODE_SIGNATURE)
+        windows.setattr(artifact_fetch.subprocess, "run", run)
+        signature = artifact_fetch._authenticode_signature(r"C:\Temp\signed.exe")
+
+    assert signature["status"] == "Valid"
+    assert captured["argv"][0] == r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+    assert captured["env"]["SystemRoot"] == environment["SystemRoot"]
+    assert "PSModulePath" not in captured["env"]
+    assert "PYTHONPATH" not in captured["env"]
 
 
 # --- redirects, resume, idempotency --------------------------------------

@@ -77,12 +77,21 @@ trust, so a hostile mirror can at worst withhold or corrupt a release
 The `build-apps` workflow gates its Android, Linux, Windows, and macOS
 artifacts through `scripts/release_artifacts.py` before a tagged release can
 publish. The gate requires exactly one artifact for every supported platform,
-opens each archive (including the Android APK's nested local-system payload),
-and refuses the release if `LICENSE` is absent. The release job depends on
-that integrity job and then runs
-`scripts/check_release_version.py --require-release --json` before invoking
-the GitHub Release publisher. A tag, runtime version, Flutter version, or full
-commit mismatch therefore cannot publish assets.
+checks required application binaries and the license, reads all archive
+members, and verifies each bundled `local-system` file against its package
+manifest (including the nested `local-system.zip` in Flutter assets). It also
+checks the bundled build stamp against the tag's runtime version and full SHA.
+The macOS bundle contains valid framework symlinks; their targets must stay
+within the application bundle. The release job requires this integrity job,
+Flutter analysis/tests, and the reusable Python CI job at the tag's exact
+commit. Python CI runs the version-policy plus runtime smoke gate on tags,
+followed by the normal documentation, evaluation, and test gates; its separate
+Windows job checks managed runtime ownership, artifact verification, lifecycle
+regressions, and native low-integrity selfmod canaries in a fresh environment.
+The release job then repeats
+`scripts/check_release_version.py --require-release --json`
+before invoking the GitHub Release publisher. A failed test, smoke check,
+archive check, or version/commit match therefore blocks publication.
 
 Tagged publishing also runs
 `scripts/check_history_privacy.py --require-clean --json` against a complete,

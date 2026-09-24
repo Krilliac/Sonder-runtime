@@ -61,6 +61,18 @@ def test_installer_validates_minimum_python_version_without_embedded_quote_bug()
     assert '"%d' not in text
 
 
+def test_installer_provisions_a_separate_opt_in_managed_runtime_profile():
+    text = _text()
+
+    assert "[switch] $ManagedRuntime" in text
+    assert "sys.version_info[:2] == (3, 12)" in text
+    assert "Join-Path $repo 'venv-managed'" in text
+    assert "'-r', $requirementsFile" in text
+    assert "'sonder_runtime.adapters.execution.runtime_profile', 'seal'" in text
+    assert "'sonder_runtime.adapters.execution.runtime_profile', 'verify'" in text
+    assert "ManagedRuntimeOwner.workstation_local" in text
+
+
 @pytest.mark.skipif(os.name != "nt", reason="PowerShell installer for Windows checkouts")
 def test_installer_runs_end_to_end_and_reuses_the_venv_on_a_second_run(tmp_path):
     venv_path = tmp_path / "venv"

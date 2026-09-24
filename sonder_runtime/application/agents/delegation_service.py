@@ -2,22 +2,65 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
 from sonder_runtime.application.agents.lineage_delegation import (
-    DelegationRequest, DelegationStatus, IntegrationError, ResultEvidence,
+    DelegationRequest,
+    DelegationStatus,
+    IntegrationError,
+    ResultEvidence,
     delegation_digest,
 )
 from sonder_runtime.application.context import OperationContext
+from sonder_runtime.application.ports.continuation_mutations import (
+    ContinuationStorageFailure,
+)
 from sonder_runtime.application.ports.event_sink import EventSink
 from sonder_runtime.application.ports.subagents import (
-    SubagentBudget, SubagentHandle, SubagentProvider, SubagentRequest, SubagentResult,
+    SubagentBudget,
+    SubagentHandle,
+    SubagentProvider,
+    SubagentRequest,
+    SubagentResult,
 )
-from sonder_runtime.application.ports.worker_registry import WorkerLaunch, WorkerRegistry
+from sonder_runtime.application.ports.worker_registry import (
+    WorkerLaunch,
+    WorkerRecord,
+    WorkerRegistry,
+    WorkerStatus,
+)
+
+
+@runtime_checkable
+class TerminalChildWorkerRegistry(WorkerRegistry, Protocol):
+    """Registry able to prove one delegated result against durable child state."""
+
+    def terminal_result(self, worker_id: str) -> SubagentResult | None: ...
+
+    def record_verification(
+        self, worker_id: str, verification: Mapping[str, object], *, expected_revision: int,
+    ) -> WorkerRecord | None: ...
+
+
+@runtime_checkable
+class ReservationProvenanceWorkerRegistry(WorkerRegistry, Protocol):
+    """Distinguish a new reservation from an idempotently returned one."""
+
+    def admit_with_creation(self, launch: WorkerLaunch) -> tuple[WorkerRecord, bool]: ...
+
+
+@runtime_checkable
+class UnstartedCancellationProvider(SubagentProvider, Protocol):
+    """Cancel only an unchanged reservation that has never started."""
+
+    def cancel_unstarted(
+        self, child_id: str, *, expected_revision: int, reason: str = "cancellation requested"
+    ) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -85,6 +128,8 @@ class DelegationService:
             resume_key=request.delegation_id,
             idempotency_key=request.delegation_id,
         )
+        admitted: WorkerRecord | None = None
+        created_reservation = False
         if self._worker_registry is not None:
             # The continuation-backed registry performs the durable duplicate
             # check before provider threads are created.  The provider then
@@ -136,7 +181,10 @@ class DelegationService:
             # The provider receives the exact metadata retained by the
             # continuation reservation, so the CAS admission cannot be
             # confused with a caller that merely reused the same key.
-            admitted = self._worker_registry.admit(worker_launch)
+            if isinstance(self._worker_registry, ReservationProvenanceWorkerRegistry):
+                admitted, created_reservation = self._worker_registry.admit_with_creation(worker_launch)
+            else:
+                admitted = self._worker_registry.admit(worker_launch)
             canonical_launch = getattr(admitted, "launch", worker_launch)
             child_request = SubagentRequest(
                 child_request.parent_id, child_request.prompt, child_request.budget,
@@ -144,7 +192,26 @@ class DelegationService:
                 child_request.resume_key, child_request.idempotency_key,
             )
         logger.debug(f"DelegationService.dispatch: spawning child_id={request.lineage.child_id!r}, parent_id={request.lineage.parent_id!r}")
-        handle = self._provider.spawn(child_request, context)
+        try:
+            handle = self._provider.spawn(child_request, context)
+        except Exception as error:
+            if (
+                created_reservation
+                and admitted is not None
+                and admitted.status is WorkerStatus.QUEUED
+                and isinstance(self._provider, UnstartedCancellationProvider)
+                and not isinstance(error, ContinuationStorageFailure)
+            ):
+                # A factory or adapter can fail after admission but before
+                # spawn. The revision/state fence protects a runner that
+                # already started; provenance protects another caller's
+                # idempotently returned reservation.
+                self._provider.cancel_unstarted(
+                    admitted.launch.worker_id,
+                    expected_revision=admitted.revision,
+                    reason="provider launch failed",
+                )
+            raise
         logger.info(f"agent delegated: delegation_id={request.delegation_id!r}, preset={request.preset.name!r}, role={request.preset.role.value!r}, child_id={handle.child_id!r}")
         logger.debug(f"DelegationService.dispatch: child spawned, handle.child_id={handle.child_id!r}")
         if self._events:
@@ -175,14 +242,18 @@ class DelegationService:
             raise IntegrationError(
                 "execution contract requires a durable worker registry"
             )
+        registry = self._worker_registry
+        if registry is not None:
+            if not isinstance(registry, TerminalChildWorkerRegistry):
+                raise IntegrationError("durable worker registry cannot prove a terminal child result")
+            authoritative = registry.terminal_result(result.child_id)
+            if authoritative is None or authoritative != result:
+                raise IntegrationError("result does not match the durable terminal result")
         succeeded = result.status.value == "succeeded"
         verification_values = tuple(verification)
         command_values = tuple(tuple(command) for command in verification_commands)
-        if (self._worker_registry is not None and succeeded) or contract_requested:
-            get_record = getattr(self._worker_registry, "get", None)
-            if not callable(get_record):
-                raise IntegrationError("execution contract requires registry lookup")
-            record = get_record(result.child_id)
+        if registry is not None:
+            record = registry.get(result.child_id)
             if record is None:
                 raise IntegrationError("worker registry record disappeared before execution gate")
             contract = record.launch.execution_contract
@@ -211,37 +282,38 @@ class DelegationService:
             None if succeeded else output,
             usage_steps=result.usage.steps,
         )
-        if self._worker_registry is not None:
-            get_record = getattr(self._worker_registry, "get", None)
-            record_verification = getattr(self._worker_registry, "record_verification", None)
-            if contract_requested and not callable(record_verification):
-                raise IntegrationError("execution contract requires durable verification recording")
-            if callable(get_record) and callable(record_verification):
-                record = get_record(result.child_id)
-                if record is None:
-                    raise IntegrationError("worker registry record disappeared before verification")
-                persisted = record_verification(
-                    result.child_id,
-                    {
-                        "status": evidence.status.value,
-                        "output_digest": evidence.output_digest,
-                        "verification": evidence.verification,
-                        "success_criteria": record.launch.execution_contract.success_criteria,
-                        "verification_commands": record.launch.execution_contract.verification_commands,
-                        "context_policy": record.launch.execution_contract.context_policy.value,
-                        "context_inputs": tuple(
-                            (item.reference, item.sha256)
-                            for item in record.launch.execution_contract.context_inputs
-                        ),
-                        "inherited_context_sha256": record.launch.execution_contract.inherited_context_sha256,
-                        "owned_files": record.launch.execution_contract.owned_files,
-                        "task_scope": record.launch.execution_contract.task_scope,
-                        "artifacts": evidence.artifacts,
+        if registry is not None:
+            persisted = registry.record_verification(
+                result.child_id,
+                {
+                    "status": evidence.status.value,
+                    "terminal_status": result.status.value,
+                    "output_digest": evidence.output_digest,
+                    "usage_steps": result.usage.steps,
+                    "usage": {
+                        "steps": result.usage.steps,
+                        "output_tokens": result.usage.output_tokens,
+                        "wall_seconds": result.usage.wall_seconds,
                     },
-                    expected_revision=record.revision,
-                )
-                if persisted is None:
-                    raise IntegrationError("worker registry verification compare-and-set failed")
+                    "error_code": result.error.code if result.error else "",
+                    "error_message": result.error.message if result.error else "",
+                    "verification": evidence.verification,
+                    "success_criteria": record.launch.execution_contract.success_criteria,
+                    "verification_commands": record.launch.execution_contract.verification_commands,
+                    "context_policy": record.launch.execution_contract.context_policy.value,
+                    "context_inputs": tuple(
+                        (item.reference, item.sha256)
+                        for item in record.launch.execution_contract.context_inputs
+                    ),
+                    "inherited_context_sha256": record.launch.execution_contract.inherited_context_sha256,
+                    "owned_files": record.launch.execution_contract.owned_files,
+                    "task_scope": record.launch.execution_contract.task_scope,
+                    "artifacts": evidence.artifacts,
+                },
+                expected_revision=record.revision,
+            )
+            if persisted is None:
+                raise IntegrationError("worker registry verification compare-and-set failed")
         logger.info(f"delegation integrated: delegation_id={request.delegation_id!r}, status={evidence.status.value!r}, child_id={result.child_id!r}, usage_steps={evidence.usage_steps}")
         logger.debug(f"DelegationService.integrate: evidence_status={evidence.status.value!r}, usage_steps={evidence.usage_steps}")
         return DelegatedResult(delegation_digest(request), result, evidence)

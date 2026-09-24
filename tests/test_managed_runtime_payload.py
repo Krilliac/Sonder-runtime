@@ -7,6 +7,9 @@ from sonder_runtime.bootstrap.managed_runtime_owner import ManagedRuntimeOwner
 from sonder_runtime.application.ports.runtime_owner import OwnerRefused
 
 
+pytest_plugins = ("tests._managed_runtime_layout",)
+
+
 def test_declared_site_package_paths_ignore_executable_pth_lines(tmp_path):
     from sonder_runtime.adapters.execution.runtime_payload import (
         _declared_site_package_paths,
@@ -64,6 +67,7 @@ def test_invalid_manifest_open_releases_its_anchor(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows payload profile required")
+@pytest.mark.usefixtures("small_managed_runtime_layout")
 def test_mutable_checkout_grant_is_refused_and_constructor_anchors_close(tmp_path):
     root = tmp_path / "owner"
     source = Path(__file__).resolve().parents[1]
@@ -74,6 +78,7 @@ def test_mutable_checkout_grant_is_refused_and_constructor_anchors_close(tmp_pat
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows payload profile required")
+@pytest.mark.usefixtures("small_managed_runtime_layout")
 def test_live_grant_and_payload_changes_refuse_before_any_launch_effect(tmp_path, monkeypatch):
     roots = []
     owner = ManagedRuntimeOwner(tmp_path / "owner", writable_roots=lambda: tuple(roots))

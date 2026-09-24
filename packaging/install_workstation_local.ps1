@@ -29,6 +29,12 @@
 .PARAMETER Force
   Delete and recreate an existing venv instead of reusing it.
 
+.PARAMETER ManagedRuntime
+  Also provision <repo>\venv-managed, a separate Windows CPython 3.12 venv
+  containing only the pinned runtime dependency install. Seal its interpreter
+  identity and installed package set for ManagedRuntimeOwner.workstation_local.
+  Reruns verify the seal; -Force deliberately recreates both environments.
+
 .PARAMETER SkipModelAlias
   Skip creating the sonder:latest Ollama alias. Use this when Ollama is not
   installed yet, or when the alias already exists; preflight/migrate do not
@@ -41,6 +47,7 @@
 .EXAMPLE
   powershell -NoProfile -File packaging\install_workstation_local.ps1
   powershell -NoProfile -File packaging\install_workstation_local.ps1 -SkipModelAlias
+  powershell -NoProfile -File packaging\install_workstation_local.ps1 -ManagedRuntime -SkipModelAlias
   powershell -NoProfile -File packaging\install_workstation_local.ps1 -Force -BaseModel qwen2.5-coder:14b
 #>
 [CmdletBinding()]
@@ -48,6 +55,7 @@ param(
   [string] $Python = '',
   [string] $VenvPath = '',
   [switch] $Force,
+  [switch] $ManagedRuntime,
   [switch] $SkipModelAlias,
   [string] $BaseModel = ''
 )
@@ -69,6 +77,7 @@ if (-not (Test-Path -LiteralPath $requirementsFile -PathType Leaf) -or
     -not (Test-Path -LiteralPath (Join-Path $repo 'sonder_version.py') -PathType Leaf)) {
   throw "this script must run from packaging\ inside a Sonder Runtime checkout (expected $requirementsFile)"
 }
+Set-Location -LiteralPath $repo
 
 if ([string]::IsNullOrWhiteSpace($VenvPath)) {
   $VenvPath = Join-Path $repo 'venv'
@@ -100,6 +109,12 @@ $versionText = (& $py @pyArgs --version 2>&1) -join ' '
 if ($LASTEXITCODE -ne 0) {
   throw "Python 3.11+ is required; $py reports: $versionText"
 }
+if ($ManagedRuntime) {
+  & $py @pyArgs -c "import sys; sys.exit(0 if sys.version_info[:2] == (3, 12) and sys.implementation.name == 'cpython' else 1)"
+  if ($LASTEXITCODE -ne 0) {
+    throw "managed runtime requires Windows CPython 3.12; $py reports: $versionText"
+  }
+}
 Write-Host "[sonder] using $versionText ($py $($pyArgs -join ' '))"
 
 if (Test-Path -LiteralPath $VenvPath) {
@@ -125,6 +140,27 @@ if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
 Invoke-Step -Description 'upgrading pip' -FilePath $venvPython -Arguments @('-m', 'pip', 'install', '--quiet', '--upgrade', 'pip')
 Invoke-Step -Description 'installing runtime dependencies' -FilePath $venvPython -Arguments @('-m', 'pip', 'install', '--quiet', '-r', $requirementsFile)
 
+if ($ManagedRuntime) {
+  # This opt-in owner has its own interpreter environment. Reusing the main
+  # venv would include optional train/dev distributions in every launch hash.
+  $managedVenv = Join-Path $repo 'venv-managed'
+  $managedPython = Join-Path $managedVenv 'Scripts\python.exe'
+  if ((Test-Path -LiteralPath $managedVenv) -and $Force) {
+    Write-Host "[sonder] removing managed runtime venv at $managedVenv (-Force)..."
+    Remove-Item -LiteralPath $managedVenv -Recurse -Force
+  }
+  if (-not (Test-Path -LiteralPath $managedVenv)) {
+    Invoke-Step -Description "creating dedicated managed runtime venv at $managedVenv" -FilePath $py -Arguments (@($pyArgs) + @('-m', 'venv', $managedVenv))
+    Invoke-Step -Description 'installing managed runtime pins' -FilePath $managedPython -Arguments @('-m', 'pip', 'install', '--quiet', '-r', $requirementsFile)
+    Invoke-Step -Description 'sealing managed runtime profile' -FilePath $managedPython -Arguments @('-m', 'sonder_runtime.adapters.execution.runtime_profile', 'seal')
+  } else {
+    if (-not (Test-Path -LiteralPath $managedPython -PathType Leaf)) {
+      throw "managed runtime profile is incomplete at $managedVenv (pass -Force to recreate)"
+    }
+    Invoke-Step -Description 'verifying managed runtime profile' -FilePath $managedPython -Arguments @('-m', 'sonder_runtime.adapters.execution.runtime_profile', 'verify')
+  }
+}
+
 if (-not $SkipModelAlias) {
   Write-Host '[sonder] creating the sonder:latest Ollama alias (needs Ollama running)...'
   $aliasArgs = @((Join-Path $repo 'setup_alias.py'))
@@ -146,6 +182,9 @@ Write-Host ''
 Write-Host 'Next steps:'
 Write-Host "  1. Start the API:  $venvPython -m sonder_runtime serve"
 Write-Host "     or the REPL:    $venvPython -m sonder_runtime repl"
+if ($ManagedRuntime) {
+  Write-Host "     Managed owner: use ManagedRuntimeOwner.workstation_local(...) with $managedVenv"
+}
 Write-Host '  2. State lives under %LOCALAPPDATA%\sonder (override with SONDER_HOME).'
 if ($SkipModelAlias) {
   Write-Host "  3. Create a model alias when ready: $venvPython $(Join-Path $repo 'setup_alias.py')"

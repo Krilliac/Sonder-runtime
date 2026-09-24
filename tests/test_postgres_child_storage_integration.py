@@ -75,6 +75,36 @@ def new_record():
     )
 
 
+def test_actual_pair_serializes_distinct_child_admissions_for_one_root(repository):
+    from sonder_runtime.application.ports.subagents import InvalidSubagentRequest
+    from sonder_runtime.application.subagents.durable_continuation import DurableContinuationService
+
+    root_id = "pg-root-" + uuid.uuid4().hex
+    DurableContinuationService(repository).register_root(
+        root_id, SubagentBudget(max_steps=10, max_children=2, max_depth=2, max_concurrency=1),
+    )
+    barrier = Barrier(2)
+
+    def reserve(index):
+        record = DurableChildSession(
+            SubagentRequest(root_id, "raced child", SubagentBudget(
+                max_steps=5, max_children=2, max_depth=2, max_concurrency=1,
+            ), "pg-raced-" + uuid.uuid4().hex),
+            ChildSessionLineage(root_id),
+        )
+        barrier.wait(timeout=3)
+        try:
+            repository.create(record)
+        except InvalidSubagentRequest as error:
+            return "rejected", str(error)
+        return "admitted", record.request.child_id
+
+    with ThreadPoolExecutor(2) as executor:
+        outcomes = list(executor.map(reserve, range(2)))
+    assert sorted(status for status, _ in outcomes) == ["admitted", "rejected"]
+    assert "concurrency" in next(value for status, value in outcomes if status == "rejected")
+
+
 def test_actual_pair_keeps_original_logical_receipt(repository):
     from dataclasses import replace
     from sonder_runtime.application.ports.subagents import InvalidSubagentRequest

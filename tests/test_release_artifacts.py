@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import stat
 import tarfile
 import zipfile
 from pathlib import Path
@@ -9,32 +10,92 @@ import pytest
 
 from scripts import release_artifacts as release
 
+REVISION = "b" * 40
 
-def _zip(path: Path, *, license_file: bool = True, nested: bool = False) -> None:
+
+def _system_files(*, license_file: bool = True,
+                  build_stamp_padding: int = 0) -> dict[str, bytes]:
+    files = {
+        "server.py": b"print('ready')\n",
+        "bootstrap-engine.sh": b"#!/bin/sh\n",
+        "bootstrap-engine.cmd": b"@echo off\r\n",
+        "requirements-runtime.txt": b"# stdlib\n",
+        "sonder_build.json": json.dumps({"version": "1.2.3", "commit_sha": REVISION}).encode()
+        + b" " * build_stamp_padding,
+    }
+    if license_file:
+        files["LICENSE"] = b"Apache 2.0\n"
+    manifest = {
+        "schema": 1,
+        "files": [
+            {"path": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest(), "mode": 0o644}
+            for name, data in sorted(files.items())
+        ],
+    }
+    files["PACKAGE-MANIFEST.json"] = json.dumps(manifest).encode()
+    return files
+
+
+def _nested_system(files: dict[str, bytes]) -> bytes:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        for name, data in files.items():
+            archive.writestr("local-system/" + name, data)
+    return output.getvalue()
+
+
+def _zip(path: Path, *, license_file: bool = True, app_file: bool = True,
+         invalid_nested: bool = False, build_stamp_padding: int = 0) -> None:
+    files = _system_files(license_file=license_file, build_stamp_padding=build_stamp_padding)
+    nested = b"invalid nested ZIP" if invalid_nested else _nested_system(files)
     path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path, "w") as archive:
-        if nested:
-            payload = io.BytesIO()
-            with zipfile.ZipFile(payload, "w") as local_system:
-                if license_file:
-                    local_system.writestr("local-system/LICENSE", "Apache 2.0\n")
-            archive.writestr("assets/local-system.zip", payload.getvalue())
-        elif license_file:
-            archive.writestr("bundle/local-system/LICENSE", "Apache 2.0\n")
-        archive.writestr("payload.bin", b"payload")
+        if path.name.endswith(".apk"):
+            archive.writestr("AndroidManifest.xml", b"manifest")
+            archive.writestr("classes.dex", b"dex")
+            if app_file:
+                archive.writestr("lib/arm64-v8a/libapp.so", b"app")
+            archive.writestr("assets/flutter_assets/assets/local-system.zip", nested)
+        elif "windows" in path.name:
+            if app_file:
+                archive.writestr("sonder.exe", b"app")
+            archive.writestr("flutter_windows.dll", b"flutter")
+            archive.writestr("data/flutter_assets/assets/local-system.zip", nested)
+            for name, data in files.items():
+                archive.writestr("local-system/" + name, data)
+        else:
+            prefix = "Sonder Runtime.app/Contents/"
+            if app_file:
+                archive.writestr(prefix + "MacOS/sonder", b"app")
+            archive.writestr(prefix + "Info.plist", b"plist")
+            archive.writestr(prefix + "Frameworks/App.framework/Versions/A/App", b"framework")
+            link = zipfile.ZipInfo(prefix + "Frameworks/App.framework/App")
+            link.create_system = 3
+            link.external_attr = (stat.S_IFLNK | 0o777) << 16
+            archive.writestr(link, "Versions/Current/App")
+            current = zipfile.ZipInfo(prefix + "Frameworks/App.framework/Versions/Current")
+            current.create_system = 3
+            current.external_attr = (stat.S_IFLNK | 0o777) << 16
+            archive.writestr(current, "A")
+            archive.writestr(prefix + "Frameworks/App.framework/Versions/A/Resources/flutter_assets/assets/local-system.zip", nested)
+            for name, data in files.items():
+                archive.writestr(prefix + "Resources/local-system/" + name, data)
 
 
 def _artifacts(root: Path) -> None:
-    _zip(root / "android" / "sonder-runtime-android.apk", nested=True)
+    _zip(root / "android" / "sonder-runtime-android.apk")
     _zip(root / "windows" / "sonder-runtime-windows-x64.zip")
     _zip(root / "macos" / "sonder-runtime-macos.zip")
     linux = root / "linux" / "sonder-runtime-linux-x64.tar.gz"
     linux.parent.mkdir(parents=True)
-    data = b"Apache 2.0\n"
-    info = tarfile.TarInfo("local-system/LICENSE")
-    info.size = len(data)
     with tarfile.open(linux, "w:gz") as archive:
-        archive.addfile(info, io.BytesIO(data))
+        payload = _system_files()
+        payload.update({"sonder": b"app", "lib/libapp.so": b"flutter", "data/flutter_assets/assets/local-system.zip": _nested_system(_system_files())})
+        for name, data in payload.items():
+            name = name if not name.startswith(("server.py", "LICENSE", "bootstrap-engine", "requirements-runtime", "sonder_build.json", "PACKAGE-MANIFEST.json")) else "local-system/" + name
+            info = tarfile.TarInfo("./" + name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
 
 
 def test_generates_checksums_sbom_and_provenance(tmp_path):
@@ -86,7 +147,7 @@ def test_fails_closed_when_artifact_is_missing(tmp_path):
         release.generate_metadata(
             tmp_path,
             version="1.2.3",
-            revision="c" * 40,
+            revision=REVISION,
             source_uri="source",
             workflow_uri="workflow",
             invocation_id="run",
@@ -99,6 +160,85 @@ def test_fails_closed_when_license_is_missing(tmp_path):
     _zip(tmp_path / "windows" / "sonder-runtime-windows-x64.zip", license_file=False)
     with pytest.raises(ValueError, match="LICENSE is missing"):
         release.discover_artifacts(tmp_path)
+
+
+def test_rejects_outer_license_that_hides_corrupt_android_payload(tmp_path):
+    _artifacts(tmp_path)
+    path = tmp_path / "android" / "sonder-runtime-android.apk"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("LICENSE", "decoy outer license")
+        archive.writestr("AndroidManifest.xml", b"manifest")
+        archive.writestr("classes.dex", b"dex")
+        archive.writestr("lib/arm64-v8a/libapp.so", b"app")
+        archive.writestr("assets/flutter_assets/assets/local-system.zip", b"invalid nested ZIP")
+    with pytest.raises(ValueError, match="local-system.zip"):
+        release.discover_artifacts(tmp_path)
+
+
+@pytest.mark.parametrize("platform,name,missing", [
+    ("android", "sonder-runtime-android.apk", "libapp.so"),
+    ("windows", "sonder-runtime-windows-x64.zip", "sonder.exe"),
+    ("macos", "sonder-runtime-macos.zip", "MacOS/sonder"),
+])
+def test_rejects_archive_without_application_binary_despite_license(tmp_path, platform, name, missing):
+    _artifacts(tmp_path)
+    _zip(tmp_path / platform / name, app_file=False)
+    with pytest.raises(ValueError, match=missing):
+        release.discover_artifacts(tmp_path)
+
+
+def test_rejects_mac_framework_symlink_escape(tmp_path):
+    _artifacts(tmp_path)
+    path = tmp_path / "macos" / "sonder-runtime-macos.zip"
+    with zipfile.ZipFile(path, "a") as archive:
+        link = zipfile.ZipInfo("Sonder Runtime.app/Contents/Frameworks/escape")
+        link.create_system = 3
+        link.external_attr = (stat.S_IFLNK | 0o777) << 16
+        archive.writestr(link, "../../../../outside")
+    with pytest.raises(ValueError, match="symlink escapes"):
+        release.discover_artifacts(tmp_path)
+
+
+def test_rejects_linux_tar_without_app_executable(tmp_path):
+    _artifacts(tmp_path)
+    path = tmp_path / "linux" / "sonder-runtime-linux-x64.tar.gz"
+    with tarfile.open(path, "w:gz") as archive:
+        data = b"Apache 2.0\n"
+        info = tarfile.TarInfo("./local-system/LICENSE")
+        info.size = len(data)
+        archive.addfile(info, io.BytesIO(data))
+    with pytest.raises(ValueError, match="sonder"):
+        release.discover_artifacts(tmp_path)
+
+
+def test_rejects_truncated_linux_gzip_trailer(tmp_path):
+    _artifacts(tmp_path)
+    path = tmp_path / "linux" / "sonder-runtime-linux-x64.tar.gz"
+    path.write_bytes(path.read_bytes()[:-8])
+    with pytest.raises(ValueError, match="release archive"):
+        release.discover_artifacts(tmp_path)
+
+
+def test_rejects_local_system_manifest_mismatch(tmp_path):
+    _artifacts(tmp_path)
+    path = tmp_path / "android" / "sonder-runtime-android.apk"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("AndroidManifest.xml", b"manifest")
+        archive.writestr("classes.dex", b"dex")
+        archive.writestr("lib/arm64-v8a/libapp.so", b"app")
+        files = _system_files()
+        files["server.py"] = b"tampered"
+        archive.writestr("assets/flutter_assets/assets/local-system.zip", _nested_system(files))
+    with pytest.raises(ValueError, match="server.py"):
+        release.discover_artifacts(tmp_path)
+
+
+def test_rejects_oversized_build_stamp_before_parsing(tmp_path):
+    _artifacts(tmp_path)
+    _zip(tmp_path / "android" / "sonder-runtime-android.apk",
+         build_stamp_padding=release.MAX_BUILD_STAMP_BYTES)
+    with pytest.raises(ValueError, match="build identity exceeds size bound"):
+        release.discover_artifacts(tmp_path, version="1.2.3", revision=REVISION)
 
 
 def test_rejects_noncanonical_revision(tmp_path):
@@ -120,8 +260,11 @@ def test_release_workflow_stamps_and_gates_artifacts():
     ).read_text(encoding="utf-8")
     assert "SONDER_BUILD_REVISION: ${{ github.sha }}" in workflow
     assert "integrity:\n    needs: [android, linux, windows, macos]" in workflow
+    assert "python-gate:" in workflow
+    assert "uses: ./.github/workflows/ci.yml" in workflow
+    assert "needs: [integrity, analyze, python-gate]" in workflow
     release_block = workflow.split("\n  release:\n", 1)[1]
-    assert "needs: [integrity]" in release_block
+    assert "needs: [integrity, analyze, python-gate]" in release_block
     assert (
         "scripts/check_release_version.py --require-release --json" in release_block
     )
@@ -135,3 +278,14 @@ def test_release_workflow_stamps_and_gates_artifacts():
     for output in release.OUTPUTS:
         assert f"dist/{output}" in workflow
         assert output in release_block
+
+    ci = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "workflow_call:" in ci
+    assert "Run tag-time runtime smoke" in ci
+    assert "scripts/release_smoke.sh --tag" in ci
+    assert "  windows-focused:\n    runs-on: windows-latest" in ci
+    assert "python -m venv" in ci
+    assert "tests/test_managed_runtime_payload.py" in ci
+    assert "tests/test_managed_runtime_owner.py" in ci
+    assert "tests/test_artifact_fetch.py" in ci
+    assert "tests/test_selfmod_low_integrity.py" in ci

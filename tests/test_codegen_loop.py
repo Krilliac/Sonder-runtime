@@ -8,6 +8,14 @@ import codegen_loop as cg
 import pytest
 
 
+def test_repair_brief_bounds_source_and_diagnostics_without_claiming_completeness():
+    brief = cg.repair_brief("c" * 50_000, ["e" * 500] * 100, "improved")
+    assert len(brief) < 25_000
+    assert "source excerpt is incomplete" in brief
+    assert "more diagnostic lines omitted" in brief
+    assert "improved" in brief
+
+
 def test_shrink_rejects_an_amputation():
     """44% and 13% were real repair responses to two- and one-character fixes."""
     original = "x" * 1000

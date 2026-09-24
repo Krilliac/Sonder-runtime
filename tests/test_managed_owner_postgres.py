@@ -16,6 +16,7 @@ from sonder_runtime.adapters.persistence.postgres_continuation import (
 from sonder_runtime.application.ports.continuation_mutations import (
     ContinuationStorageFailure,
 )
+from tests._managed_runtime_layout import require_bounded_real_runtime_closure
 
 
 def binding(config):
@@ -181,6 +182,7 @@ def test_exact_selected_policy_rejects_before_owner_claim(storage_config, tmp_pa
 
 
 def test_contained_application_selected_pg_and_reverse(storage_config, tmp_path):
+    require_bounded_real_runtime_closure()
     import urllib.request
     from sonder_runtime.bootstrap.managed_runtime_owner import ManagedRuntimeOwner
     from sonder_runtime.adapters.persistence.child_migration import (

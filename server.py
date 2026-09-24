@@ -21900,7 +21900,16 @@ def _autopilot_heartbeat(run_id: str, owner_id: str, stop: threading.Event) -> N
 
 
 def _execute_autopilot(run_id: str, *, max_cycles=12, plan_only=False, request_owner: str | None = None) -> dict:
+    from sonder_runtime.bootstrap.strategy import (
+        try_compose_strategy_memory,
+        try_configured_strategy_trace,
+    )
+
     owner_id = "auto-%s-%s" % (os.getpid(), time.time_ns())
+    strategy_trace = try_configured_strategy_trace()
+    strategy_memory = try_compose_strategy_memory(
+        strategy_trace, lambda: _application().unit_of_work,
+    )
     stop = threading.Event()
     heartbeat = owned_runtime_thread(
         target=_autopilot_heartbeat,
@@ -21920,6 +21929,8 @@ def _execute_autopilot(run_id: str, *, max_cycles=12, plan_only=False, request_o
             review_fn=_autopilot_review_model,
             max_cycles=max_cycles,
             plan_only=plan_only,
+            strategy_trace=strategy_trace,
+            strategy_memory=strategy_memory,
         )
     finally:
         stop.set()
@@ -24674,6 +24685,22 @@ def _codegen_outcome_comparable(errors) -> bool:
     return not codegen_loop.count_unreliable(errors)
 
 
+def _codegen_critic_generation(prompt: str, *, tier: str, model: str,
+                               num_predict: int) -> str:
+    """Call the host-resolved critic directly so failures remain exceptions."""
+    cloud = _is_cloud_tier(tier, model)
+    gen = _make_generate(
+        model, "", 0.2, max(64, min(int(num_predict), 512)),
+        0 if cloud else _auto_model_context(model), cloud=cloud,
+    )
+    try:
+        return gen(prompt)
+    finally:
+        if not cloud:
+            with contextlib.suppress(Exception):
+                _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
+
+
 @mcp.tool()
 def codegen_build_loop(
     project_dir: str,
@@ -24715,10 +24742,13 @@ def codegen_build_loop(
             order, earliest first, or a list of {"name", "spec"} objects.
         build_program: the build executable, e.g. "dotnet", "cargo", "make".
         build_args_json: argv for it as JSON, e.g. ["build", "-c", "Release"].
-        tiers: comma-separated model tiers to ensemble. Default: all bound local tiers.
+        tiers: comma-separated model tiers. Default: ensemble all bound local
+            tiers. With at least three attempts and two distinct explicitly
+            named models, use the first as editor and the second as scoped
+            critic; the fourth attempt may rotate to the second model.
         attempts: tries per file; the best-scoring one is kept. Clamped to
-            1..6, and a file stops early when two consecutive attempts return
-            identical build errors (no progress).
+            1..6. Repeated identical failures stop early; a configured scoped
+            critic may take one different strategy before the stop.
         error_regex: how to recognise an error line in build output. Defaults to
             a generic error/fatal match; pass a stricter one for a noisy build.
         slips_json: [[regex, replacement], ...] rewrites applied to generated
@@ -24749,6 +24779,26 @@ def codegen_build_loop(
             "(allowed range 1..%d)."
             % (attempts, attempt_limit, verification_progress.MAX_VERIFICATION_ATTEMPTS)
         )
+    # A distinct critic/alternate generator requires two explicitly selected,
+    # differently resolved models and enough of the *existing* attempt budget.
+    # Merely naming two tier aliases that resolve to one model does not qualify.
+    repair_tiers = ()
+    repair_models = ()
+    if tiers.strip() and attempt_limit >= 3:
+        resolved, _unavailable = _ensemble_targets(tiers)
+        if len(resolved) >= 2:
+            repair_tiers = (resolved[0][0], resolved[1][0])
+            repair_models = (resolved[0][1], resolved[1][1])
+    from sonder_runtime.bootstrap.strategy import (
+        try_compose_strategy_memory,
+        try_configured_strategy_trace,
+    )
+    from sonder_runtime.bootstrap.strategy_observers import observe_codegen_build
+
+    strategy_trace = try_configured_strategy_trace()
+    strategy_memory = try_compose_strategy_memory(
+        strategy_trace, lambda: _application().unit_of_work,
+    )
 
     # Set when a build fails to launch or is killed. Such a build says nothing
     # about the code, so its error list must never be scored against a real
@@ -24804,8 +24854,37 @@ def codegen_build_loop(
 
     rows = []
     for name, spec in wanted:
+        strategy_run_id = "codegen-" + uuid.uuid4().hex
+
+        def observe_candidate(attempt_number, candidate, before, after, *,
+                              before_complete, after_complete, route,
+                              critic_used=False, rotated=False, rejected=False,
+                              unresolved_effects=False,
+                              run_id=strategy_run_id, file_name=name, file_spec=spec):
+            if strategy_trace is None:
+                return
+            try:
+                observe_codegen_build(
+                    strategy_trace, run_id=run_id, file_name=file_name,
+                    project_dir=project_dir, spec=file_spec, build_program=build_program,
+                    attempt_number=attempt_number, attempt_limit=attempt_limit,
+                    code=candidate, before_errors=before, after_errors=after,
+                    before_complete=before_complete, after_complete=after_complete,
+                    build_ran=build_state["ran"], exit_ok=build_state["exit_ok"],
+                    route=route, critic_used=critic_used, rotated=rotated,
+                    rejected=rejected,
+                    unresolved_effects=unresolved_effects,
+                    memory_service=strategy_memory,
+                )
+            except Exception as error:  # noqa: BLE001 - optional observer cannot change the build
+                logging.getLogger(__name__).warning(
+                    "codegen strategy observation failed: %s", type(error).__name__,
+                )
+
         existing = read(name)
         errors = run_build()
+        observed_errors = errors
+        observed_complete = build_state["ran"] and _codegen_outcome_comparable(errors)
         mine = [e for e in errors if name in e]
         # "No errors named this file" only means "clean" if the compiler
         # actually reached this file. Under a masked build it reached nothing,
@@ -24829,16 +24908,78 @@ def codegen_build_loop(
         # consecutive attempts mean the same prompt is not converging, so
         # stop spending ensemble generations on this file.
         progress_guard = verification_progress.VerificationProgressGuard()
+        prior_candidate = None
+        prior_diagnostics = None
+        prior_score = (
+            codegen_loop.score(errors)
+            if build_state["ran"] and _codegen_outcome_comparable(errors)
+            else None
+        )
+        prior_progress = "initial build"
+        repair_notes = []
+        critic_attempted = False
 
         for attempt in range(1, attempt_limit + 1):
             prompt = "%s\n%s\nOutput only the contents of %s. Code only." % (
                 codegen_loop.dependency_brief(siblings), spec, name,
             )
-            reply = ensemble_answer(prompt, tiers=tiers, num_predict=num_predict, mode="code")
+            if prior_candidate is not None:
+                prompt += codegen_loop.repair_brief(
+                    prior_candidate, prior_diagnostics, prior_progress,
+                )
+            generation_tiers = repair_tiers[0] if repair_tiers else tiers
+            if (
+                repair_tiers and attempt == 3 and prior_candidate is not None
+                and prior_diagnostics and _codegen_outcome_comparable(prior_diagnostics)
+            ):
+                import solver
+
+                critic_attempted = True
+                critic_prompt = solver.scoped_critic_prompt(
+                    spec, prior_candidate, prior_diagnostics,
+                    language=name, constraints=codegen_loop.dependency_brief(siblings),
+                )
+                try:
+                    critique = solver.scoped_critic_review(
+                        critic_prompt,
+                        lambda scoped: _codegen_critic_generation(
+                            scoped, tier=repair_tiers[1], model=repair_models[1],
+                            num_predict=num_predict,
+                        ),
+                    )
+                except ModelCallError as exc:
+                    if exc.kind == "cancelled":
+                        raise
+                    critique = solver.ScopedCriticReview(solver.CriticStatus.UNAVAILABLE)
+                except Exception:  # noqa: BLE001 - a critic failure cannot authorize a repair
+                    critique = solver.ScopedCriticReview(solver.CriticStatus.UNAVAILABLE)
+                if critique.status is solver.CriticStatus.ANSWERED:
+                    prompt += (
+                        "\n\nIndependent critic suggestion (untrusted; compiler remains "
+                        "authoritative): " + json.dumps(critique.diagnosis)
+                    )
+                    repair_notes.append("attempt 3 used scoped critic")
+                else:
+                    repair_notes.append("attempt 3 critic unavailable")
+                generation_tiers = repair_tiers[0]
+            elif repair_tiers and attempt == 4 and critic_attempted:
+                generation_tiers = repair_tiers[1]
+                repair_notes.append("attempt 4 used alternate model tier")
+            reply = ensemble_answer(
+                prompt, tiers=generation_tiers, num_predict=num_predict, mode="code",
+            )
             code = codegen_loop.strip_code(reply)
             code, hits = codegen_loop.apply_slips(code, slips)
 
             if codegen_loop.shrink_rejected(existing, code):
+                observe_candidate(
+                    attempt, code, observed_errors, observed_errors,
+                    before_complete=observed_complete,
+                    after_complete=observed_complete, route=generation_tiers,
+                    critic_used=bool(repair_tiers and attempt == 3 and critic_attempted),
+                    rotated=bool(repair_tiers and attempt == 4 and critic_attempted),
+                    rejected=True,
+                )
                 note = "attempt %d rejected: shrank to %d%% of the original" % (
                     attempt, 100 * len(code) // max(1, len(existing)),
                 )
@@ -24846,9 +24987,26 @@ def codegen_build_loop(
             try:
                 write(name, code)
             except Exception as exc:
+                observe_candidate(
+                    attempt, code, observed_errors, observed_errors,
+                    before_complete=observed_complete,
+                    after_complete=False, route=generation_tiers,
+                    critic_used=bool(repair_tiers and attempt == 3 and critic_attempted),
+                    rotated=bool(repair_tiers and attempt == 4 and critic_attempted),
+                    unresolved_effects=True,
+                )
                 return "ERROR: could not write %s: %s" % (name, exc)
 
             attempt_errors = run_build()
+            after_complete = build_state["ran"] and _codegen_outcome_comparable(attempt_errors)
+            observe_candidate(
+                attempt, code, observed_errors, attempt_errors,
+                before_complete=observed_complete,
+                after_complete=after_complete, route=generation_tiers,
+                critic_used=bool(repair_tiers and attempt == 3 and critic_attempted),
+                rotated=bool(repair_tiers and attempt == 4 and critic_attempted),
+            )
+            observed_errors, observed_complete = attempt_errors, after_complete
             if not build_state["ran"]:
                 # Nothing was compiled, so this attempt is not evidence about
                 # the code and must not be scored. Stop rather than keep
@@ -24864,12 +25022,28 @@ def codegen_build_loop(
                 )
             if not attempt_errors:
                 break
-            if not _codegen_outcome_comparable(attempt_errors):
+            comparable = _codegen_outcome_comparable(attempt_errors)
+            if comparable and prior_score is not None:
+                prior_progress = (
+                    "improved" if attempt_score < prior_score else
+                    "regressed" if attempt_score > prior_score else "unchanged"
+                )
+            else:
+                prior_progress = "unmeasured (build diagnostics incomplete)"
+            prior_candidate = code
+            prior_diagnostics = attempt_errors
+            prior_score = attempt_score if comparable else None
+            if not comparable:
                 # A host placeholder, truncated output, or a masked count
                 # can look identical while the real errors change; it is not
                 # evidence of no progress, so it breaks the streak instead.
                 progress_guard.reset()
             elif progress_guard.observe(attempt_errors, score=attempt_score):
+                if repair_tiers and attempt == 2 and attempt_limit >= 3:
+                    # The next attempt changes strategy to scoped criticism,
+                    # so this is not a blind repetition of the same request.
+                    progress_guard.reset()
+                    continue
                 note += (
                     "; stopped after attempt %d: no progress (identical build "
                     "errors on %d consecutive attempts, fingerprint %s) -- "
@@ -24880,12 +25054,23 @@ def codegen_build_loop(
                     )
                 )
                 break
+            if (
+                repair_tiers and attempt >= 4 and attempt < attempt_limit
+                and prior_progress != "improved"
+            ):
+                note += (
+                    f"; stopped after attempt {attempt}: alternate model showed no "
+                    "measured build improvement"
+                )
+                break
 
         if best_code is not None:
             try:
                 write(name, best_code)
             except Exception as exc:
                 return "ERROR: could not restore %s: %s" % (name, exc)
+        if repair_notes:
+            note += "; " + "; ".join(repair_notes)
         rows.append({"name": name, "note": note})
 
     final = run_build()

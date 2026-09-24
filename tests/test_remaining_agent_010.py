@@ -6,13 +6,21 @@ from pathlib import Path
 import pytest
 
 from sonder_runtime.application.agents.delegation_service import DelegationService
-from sonder_runtime.application.agents.lineage_delegation import IntegrationError, WorkspaceAssignment
+from sonder_runtime.application.agents.lineage_delegation import (
+    IntegrationError,
+    WorkspaceAssignment,
+)
 from sonder_runtime.application.agents.workflow_integration import (
-    AgentWorkflowService, AgentWorkflowStatus, WorkflowDispatch,
+    AgentWorkflowService,
+    AgentWorkflowStatus,
+    WorkflowDispatch,
 )
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.subagents import (
-    SubagentError, SubagentResult, SubagentStatus, SubagentUsage,
+    SubagentError,
+    SubagentResult,
+    SubagentStatus,
+    SubagentUsage,
 )
 from sonder_runtime.domain.agents.roles import AgentRole
 
@@ -91,10 +99,112 @@ def test_full_role_workflow_routes_presets_and_builds_durable_lineage(tmp_path):
         preset_by_role[role] for role in expected
     )
     assert requests[0].parent_id == "root-session"
-    assert all(left.child_id == right.parent_id for left, right in zip(requests, requests[1:]))
+    assert all(request.parent_id == "root-session" for request in requests)
+    assert all(request.child_id != request.parent_id for request in requests)
     assert tuple(request.child_id for request in requests) == tuple(
         f"wf-010:{index}:{role.value}" for index, role in enumerate(expected, 1)
     )
+
+
+def test_sequential_roles_share_durable_parent_and_can_use_independent_presets(tmp_path):
+    from sonder_runtime.adapters.persistence.durable_continuation import (
+        SQLiteDurableContinuationRepository,
+    )
+    from sonder_runtime.adapters.subagents import RunnerBoundSubagentProvider
+    from sonder_runtime.application.ports.subagents import SubagentBudget
+    from sonder_runtime.application.subagents.durable_continuation import (
+        DurableContinuationService,
+    )
+    from sonder_runtime.application.worker_registry.continuation import (
+        ContinuationWorkerRegistry,
+    )
+
+    repository = SQLiteDurableContinuationRepository(tmp_path / "roles.sqlite")
+    child_service = DurableContinuationService(repository)
+    child_service.register_root(
+        "root", SubagentBudget(max_steps=30, max_output_tokens=8000, max_wall_seconds=900)
+    )
+    provider = RunnerBoundSubagentProvider(child_service, lambda state, save, control: "observed")
+    workflow = AgentWorkflowService(
+        DelegationService(provider, worker_registry=ContinuationWorkerRegistry(repository)),
+        roles=(AgentRole.EXPLORER, AgentRole.ARCHITECT, AgentRole.EDITOR),
+    )
+    root = tmp_path / "repo"
+    context = local_owner_context(correlation_id="sequential", workspace_roots=(root,))
+    dispatch = workflow.start(
+        workflow_id="sequential", root_id="root", parent_id="root", prompt="inspect",
+        workspace=WorkspaceAssignment((str(root),), ()), context=context,
+    )
+    seen = []
+    while dispatch is not None:
+        seen.append(dispatch.request.lineage)
+        advance = workflow.advance(dispatch, dispatch.handle.result(timeout=2), context=context)
+        dispatch = advance.next_dispatch
+    assert advance.state.status is AgentWorkflowStatus.SUCCEEDED
+    assert [row.depth for row in seen] == [1, 1, 1]
+    assert [row.parent_id for row in seen] == ["root", "root", "root"]
+    assert [repository.get(row.child_id).lineage.chain for row in seen] == [
+        ("root",), ("root",), ("root",),
+    ]
+    assert [repository.get(row.child_id).request.budget.max_steps for row in seen] == [8, 12, 20]
+
+
+def test_sequential_roles_preserve_nested_workflow_parent(tmp_path):
+    provider = _Provider()
+    workflow = AgentWorkflowService(
+        DelegationService(provider), roles=(AgentRole.EXPLORER, AgentRole.ARCHITECT)
+    )
+    root = tmp_path / "repo"
+    context = local_owner_context(correlation_id="nested", workspace_roots=(root,))
+    dispatch = workflow.start(
+        workflow_id="nested", root_id="original-root", parent_id="registered-parent",
+        prompt="inspect", workspace=WorkspaceAssignment((str(root),), ()), context=context,
+    )
+    following = workflow.advance(dispatch, _success(dispatch, "evidence"), context=context).next_dispatch
+    assert following is not None
+    assert [request.parent_id for request, _ in provider.requests] == [
+        "registered-parent", "registered-parent",
+    ]
+    assert following.request.lineage.root_id == "original-root"
+    assert following.request.lineage.depth == dispatch.request.lineage.depth == 1
+
+
+def test_sequential_roles_still_obey_parent_budget(tmp_path):
+    from sonder_runtime.adapters.persistence.durable_continuation import (
+        SQLiteDurableContinuationRepository,
+    )
+    from sonder_runtime.adapters.subagents import RunnerBoundSubagentProvider
+    from sonder_runtime.application.ports.subagents import (
+        InvalidSubagentRequest,
+        SubagentBudget,
+    )
+    from sonder_runtime.application.subagents.durable_continuation import (
+        DurableContinuationService,
+    )
+    from sonder_runtime.application.worker_registry.continuation import (
+        ContinuationWorkerRegistry,
+    )
+
+    repository = SQLiteDurableContinuationRepository(tmp_path / "bounded.sqlite")
+    service = DurableContinuationService(repository)
+    service.register_root(
+        "root", SubagentBudget(max_steps=8, max_output_tokens=2000, max_wall_seconds=120)
+    )
+    workflow = AgentWorkflowService(
+        DelegationService(
+            RunnerBoundSubagentProvider(service, lambda state, save, control: "done"),
+            worker_registry=ContinuationWorkerRegistry(repository),
+        ),
+        roles=(AgentRole.EXPLORER, AgentRole.ARCHITECT),
+    )
+    root = tmp_path / "repo"
+    context = local_owner_context(correlation_id="bounded", workspace_roots=(root,))
+    dispatch = workflow.start(
+        workflow_id="bounded", root_id="root", parent_id="root", prompt="inspect",
+        workspace=WorkspaceAssignment((str(root),), ()), context=context,
+    )
+    with pytest.raises(InvalidSubagentRequest, match="widens parent max_steps"):
+        workflow.advance(dispatch, dispatch.handle.result(timeout=2), context=context)
 
 
 def test_failed_role_result_is_terminal_and_does_not_dispatch_later_roles(tmp_path):
