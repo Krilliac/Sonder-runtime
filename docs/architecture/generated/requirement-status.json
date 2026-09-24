@@ -36,9 +36,9 @@
       "verified": 0
     },
     "DOC": {
-      "checked": 5,
+      "checked": 7,
       "total": 7,
-      "verified": 5
+      "verified": 7
     },
     "EVAL": {
       "checked": 0,
@@ -127,13 +127,13 @@
     }
   },
   "overall": {
-    "checked": 6,
+    "checked": 8,
     "statuses": {
-      "implemented_unverified": 198,
-      "verified": 6
+      "implemented_unverified": 196,
+      "verified": 8
     },
     "total": 204,
-    "verified": 6
+    "verified": 8
   },
   "requirements": [
     {
@@ -599,11 +599,11 @@
       "status": "verified"
     },
     {
-      "checked": false,
-      "claim": "Focused contracts are documented in the generated inventory and architecture references.",
+      "checked": true,
+      "claim": "The six root focused contracts link the master specification within their first twelve lines and each carry one gated Behavior status table whose Proposed rows must cite open master-spec requirements, so unfinished work lives only in the specification. Revision 4 re-verifies after correcting the CLIENT.md standalone-client claim.",
       "requirement_id": "DOC-004",
-      "revision": 2,
-      "status": "implemented_unverified"
+      "revision": 4,
+      "status": "verified"
     },
     {
       "checked": true,
@@ -620,11 +620,11 @@
       "status": "verified"
     },
     {
-      "checked": false,
-      "claim": "Documentation authority checks detect stale promises and out-of-date generated references.",
+      "checked": true,
+      "claim": "Product documentation (root README and the six focused contracts) labels behavior with the Implemented, Experimental, Proposed, Degraded, and Unsupported vocabulary, and a CI gate rejects unknown labels, stale Proposed rows, unlabeled forward-looking prose, and implementation slice logs. Revision 4 re-verifies after the CLIENT.md correction and the widened stale-promise and Implemented-citation checks.",
       "requirement_id": "DOC-007",
-      "revision": 2,
-      "status": "implemented_unverified"
+      "revision": 4,
+      "status": "verified"
     },
     {
       "checked": false,
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "61a8a8cd1533e49194f7841ef4a91a1662571a847003fd93336e55833b011a99",
-    "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
+    "ledger_sha256": "66790e96e6aeda17f4d36a3e9a5095571e68adb404eed8803df3fe5b35afc884",
+    "spec_sha256": "ed5ab01393d72681fc4eb4b9581e832d3d07ee95595b8b58dfe094c9e7dbf4fa"
   }
 }
