@@ -81,7 +81,7 @@ def test_boundary_exposes_explicit_shadow_canary_evidence_and_attended_promotion
         holdout_passed=True, rollback_reference="baseline", provenance=("test",),
     )
     assert evidence.accepted
-    assert service.approve("p1", evidence.digest).state is ProposalState.READY_FOR_PROMOTION
+    assert service.approve("p1", evidence.digest, allow_ungated_legacy=True).state is ProposalState.READY_FOR_PROMOTION
     with pytest.raises(ValueError, match="attended"):
         service.promote("p1", evidence.digest)
     assert service.promote("p1", evidence.digest, attended=True).state is ProposalState.PROMOTED
