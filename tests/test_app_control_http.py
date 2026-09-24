@@ -469,6 +469,33 @@ def test_private_snapshot_rejects_changed_private_source(control):
         binding._private()
 
 
+def test_private_snapshot_accepts_equal_distinct_config_but_rejects_changed(control):
+    binding, _, _, _, _, _ = control
+    original = binding._config_provider()
+    equivalent = replace(original)
+    changed = replace(
+        original,
+        private_source_paths=(str(binding._account_path()) + ".changed",),
+    )
+    assert equivalent is not original and equivalent == original
+
+    with binding._private_inventory_scope():
+        capability = binding._private_capability()
+        lease = binding._private_admission_lease(capability)
+        binding._config_provider = lambda: equivalent
+        assert binding._private_capability() is capability
+        assert binding._require_private_capability(capability).exact_files
+        assert binding._require_private_admission_lease(lease).exact_files
+        assert binding._private().exact_files
+        binding._config_provider = lambda: changed
+        with pytest.raises(PermissionError, match="private inventory"):
+            binding._require_private_capability(capability)
+        with pytest.raises(PermissionError, match="private inventory"):
+            binding._require_private_admission_lease(lease)
+        with pytest.raises(PermissionError, match="private inventory"):
+            binding._private()
+
+
 def test_real_enrollment_retry_and_binding_lifecycle(control):
     binding, token, *_ = control
     status, body = invoke(
@@ -1222,3 +1249,43 @@ def test_wire_does_not_publish_second_response_after_writer_failure(control):
         handler, "POST", fake, deployment_authorized=lambda *_: True
     )
     assert len(replies) == 1 and handler.close_connection and scopes == [marker]
+
+
+def test_account_sidecar_can_disappear_when_sqlite_commits(control, monkeypatch):
+    binding, _, _, account_open, _, _ = control
+    expected = binding._source()
+    journal = Path(str(binding._account_path()) + "-journal")
+    connection = account_open()
+    original_lstat = Path.lstat
+    raced = []
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("CREATE TABLE source_race_probe(value INTEGER)")
+        assert journal.is_file()
+
+        def committed_before_lstat(path, *args, **kwargs):
+            if path == journal and not raced:
+                connection.commit()
+                raced.append(True)
+            return original_lstat(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "lstat", committed_before_lstat)
+        assert binding._source() == expected
+        assert raced == [True]
+        assert not journal.exists()
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("kind", ("directory", "hardlink"))
+def test_account_source_rejects_unsafe_existing_sidecar(control, kind):
+    binding, _, _, _, _, _ = control
+    sidecar = Path(str(binding._account_path()) + "-journal")
+    if kind == "directory":
+        sidecar.mkdir()
+    else:
+        target = sidecar.with_name("separate-file")
+        target.write_bytes(b"not a journal")
+        sidecar.hardlink_to(target)
+    with pytest.raises(PermissionError, match="private account sidecar changed"):
+        binding._source()

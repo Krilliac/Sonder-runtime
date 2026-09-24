@@ -346,11 +346,15 @@ class ToolGateway:
                 )
             try:
                 result = self._invoker.invoke(request)
-            except Exception as exc:
+            except BaseException as exc:
                 if journal_binding is not None and journal_intent is not None:
-                    journal_binding.mark_uncertain(
-                        journal_intent, detail=f"invoker raised {type(exc).__name__}"
-                    )
+                    try:
+                        journal_binding.mark_uncertain(
+                            journal_intent, detail=f"invoker raised {type(exc).__name__}"
+                        )
+                    except BaseException as uncertainty_error:  # noqa: BLE001 - preserve original interrupt
+                        _LOG.error("tool effect uncertainty publication failed: %s",
+                                   type(uncertainty_error).__name__)
                 raise
             # The executor returned the terminal outcome of an already admitted
             # effect. Preserve that truth even if cancellation/deadline arrived
@@ -402,6 +406,10 @@ class ToolGateway:
                           else FAILED),
                 evidence=safe_evidence if isinstance(safe_evidence, Mapping) else {},
             )
+            # Durable audit publication is part of the effect receipt. Keep
+            # the journal unresolved until it succeeds, so an audit failure
+            # cannot certify an effect that a retry could repeat.
+            self._publish(request, receipt)
             if journal_binding is not None and journal_intent is not None:
                 journal_binding.complete(
                     journal_intent,
@@ -426,7 +434,6 @@ class ToolGateway:
                     _LOG.error("tool effect uncertainty publication failed: %s",
                                type(recovery_error).__name__)
             raise
-        self._publish(request, receipt)
         return receipt
 
     def _early_receipt(self, request: ToolGatewayRequest, exc: BaseException,

@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 305,
+      "file_count": 306,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -130,6 +130,7 @@
         "sonder_runtime/adapters/filesystem/__init__.py",
         "sonder_runtime/adapters/filesystem/atomic_json.py",
         "sonder_runtime/adapters/filesystem/child_migration_bundle.py",
+        "sonder_runtime/adapters/filesystem/durable_locks.py",
         "sonder_runtime/adapters/filesystem/file_ops.py",
         "sonder_runtime/adapters/filesystem/json_patch.py",
         "sonder_runtime/adapters/filesystem/text_patch.py",

@@ -50,13 +50,16 @@ import argparse
 import io
 import json
 import os
+import socket
 import sys
 import time
+import uuid
 from contextlib import redirect_stdout
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
+_HELD_NIGHTLY_LOCKS = {}
 
 _WORKSPACE_CONFIG_FILES = (
     ("SONDER_EMOTION_VECTORS", "emotion_vectors.json"),
@@ -364,35 +367,12 @@ def _run_backend_attestation(args, sonder_paths):
     )
 
 
-def _pid_state(pid: int) -> str:
+def _pid_state(pid: int, expected_identity: str | None = None) -> str:
     """Inspect a lock owner without sending a signal on Windows."""
-    if os.name == "nt":
-        # Python's os.kill(pid, 0) calls TerminateProcess on Windows.
-        import ctypes
-        from ctypes import wintypes
+    from sonder_runtime.adapters.process_liveness import probe_process
 
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-        kernel32.OpenProcess.restype = wintypes.HANDLE
-        kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
-        kernel32.WaitForSingleObject.restype = wintypes.DWORD
-        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
-        kernel32.CloseHandle.restype = wintypes.BOOL
-        handle = kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
-        if not handle:
-            return "gone" if ctypes.get_last_error() == 87 else "unknown"
-        try:
-            status = kernel32.WaitForSingleObject(handle, 0)
-        finally:
-            kernel32.CloseHandle(handle)
-        return "running" if status == 258 else "gone" if status == 0 else "unknown"
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return "gone"
-    except OSError:
-        return "unknown"
-    return "running"
+    state, _ = probe_process(pid, expected_identity)
+    return {"alive": "running", "dead": "gone"}.get(state, "unknown")
 
 
 def _claim_lock(path, log) -> bool | None:
@@ -401,36 +381,81 @@ def _claim_lock(path, log) -> bool | None:
     A stale lock older than six hours is reclaimed: a killed run must not
     silently disable every later night.
     """
+    from durable_locks import exclusive_file_lock, LockTimeout
+    from sonder_runtime.adapters.process_liveness import process_identity
+
+    key = str(path.resolve())
+    guard = exclusive_file_lock(str(path) + ".guard", timeout=0, purpose="nightly self-improvement")
+    held = False
     try:
+        guard.__enter__()
+        held = True
         if path.exists():
             age = time.time() - path.stat().st_mtime
-            if age < 6 * 3600:
-                log("another nightly run holds the lock (%.0fm old); exiting"
-                    % (age / 60))
-                return False
             try:
-                owner_pid = int(path.read_text(encoding="utf-8").strip())
+                owner = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(owner, int):
+                    owner = {"pid": owner}
+                owner_pid = int(owner["pid"])
                 if owner_pid > 0:
-                    state = _pid_state(owner_pid)
+                    if owner.get("host") not in (None, "", socket.gethostname()):
+                        log("nightly lock belongs to foreign host; holder=%r" % owner)
+                        return False
+                    identity = owner.get("process_identity")
+                    state = _pid_state(owner_pid, identity) if identity else _pid_state(owner_pid)
                     if state == "unknown":
-                        log("stale lock owner %s is not inspectable; refusing reclaim" % owner_pid)
+                        log("nightly lock owner is not inspectable; refusing reclaim; holder=%r" % owner)
                         return False
                     if state == "running":
-                        log("stale lock owner %s is still alive; refusing reclaim" % owner_pid)
+                        log("nightly lock owner is still alive; refusing reclaim; holder=%r" % owner)
                         return False
-            except (OSError, ValueError):
-                pass
+            except (OSError, ValueError, KeyError, TypeError):
+                if age < 6 * 3600:
+                    log("nightly lock has unreadable owner (%.0fm old); refusing reclaim" % (age / 60))
+                    return False
             log("reclaiming a stale lock (%.1fh old)" % (age / 3600))
             path.unlink(missing_ok=True)
+        owner = {
+            "pid": os.getpid(), "host": socket.gethostname(),
+            "process_identity": process_identity(os.getpid()),
+            "started": time.time(), "purpose": "nightly self-improvement",
+            "token": uuid.uuid4().hex,
+        }
         with path.open("x", encoding="utf-8") as handle:
-            handle.write(str(os.getpid()))
+            json.dump(owner, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _HELD_NIGHTLY_LOCKS[key] = (guard, owner)
+        held = False  # Ownership transfers to _release_lock.
         return True
+    except LockTimeout as exc:
+        log("another nightly run holds the lock; %s" % exc)
+        return False
     except FileExistsError:
         log("another nightly run claimed the lock first; exiting")
         return False
     except OSError as exc:
         log("lock unavailable (%s); refusing nightly run" % str(exc)[:80])
         return None
+    finally:
+        if held:
+            guard.__exit__(None, None, None)
+
+
+def _release_lock(path):
+    claimed = _HELD_NIGHTLY_LOCKS.pop(str(path.resolve()), None)
+    if claimed is None:
+        return
+    guard, owner = claimed
+    try:
+        try:
+            current = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(current, dict) and current.get("token") == owner["token"]:
+                path.unlink()
+        except (FileNotFoundError, ValueError):
+            pass
+    finally:
+        guard.__exit__(None, None, None)
 
 
 def _winml_vitisai_check(log):
@@ -610,7 +635,7 @@ def main() -> int:
         result = 1
     finally:
         try:
-            lock.unlink(missing_ok=True)
+            _release_lock(lock)
         except OSError as exc:
             log("nightly lock cleanup failed: %s" % str(exc)[:120])
         sink.close()

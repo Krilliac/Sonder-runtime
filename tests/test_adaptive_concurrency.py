@@ -459,6 +459,77 @@ def test_dispatch_lanes_reports_worker_exceptions_as_failures():
     assert scheduler.running == frozenset() and scheduler.pending == ()
 
 
+def test_dispatch_lanes_surfaces_stalled_lane_without_waiting_for_executor_shutdown(
+    monkeypatch, caplog,
+):
+    monkeypatch.setenv("SONDER_FLEET_PROGRESS_DEADLINE_SECONDS", "0.1")
+    scheduler = _scheduler([LaneClaim("hung")], 1)
+    release = threading.Event()
+    errors = {}
+
+    def run_lane(_lane_id, _sink):
+        release.wait(5)
+        return "late"
+
+    stalled = []
+    with caplog.at_level("WARNING"), pytest.raises(master_orchestrator.FleetStalledError):
+        master_orchestrator.dispatch_lanes(
+            scheduler, 1, run_lane, lambda _lane, _result: None,
+            lambda lane, exc: errors.__setitem__(lane, str(exc)),
+            on_stall=stalled.extend,
+        )
+    release.set()
+
+    assert stalled == ["hung"]
+    assert not errors
+    assert scheduler.running == frozenset({"hung"})
+    assert "fleet lanes stalled" in caplog.text and "hung" in caplog.text
+
+
+def test_run_delegated_stall_is_uncertain_and_retains_child_capacity(monkeypatch):
+    monkeypatch.setenv("SONDER_FLEET_PROGRESS_DEADLINE_SECONDS", "0.1")
+    monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda requested: 1)
+    release = threading.Event()
+    entered = threading.Event()
+    audited = threading.Event()
+    result_box = {}
+
+    def worker(_prompt):
+        entered.set()
+        release.wait(5)
+        return "late"
+
+    def audit(_prompt):
+        audited.set()
+        return "false success"
+
+    thread = threading.Thread(
+        target=lambda: result_box.setdefault(
+            "result", master_orchestrator.run_delegated(
+                "fan out", worker_fn=worker, audit_fn=audit, agents=1,
+            ),
+        ),
+    )
+    thread.start()
+    try:
+        assert entered.wait(5)
+        thread.join(5)
+        assert not thread.is_alive()
+        result = result_box["result"]
+        assert result["stalled"] is True
+        assert result["uncertain"] is True
+        assert result["output"].startswith("STALLED:")
+        assert not audited.is_set()
+        assert master_orchestrator.reserved_slot_count() == 1
+    finally:
+        release.set()
+    for _ in range(50):
+        if master_orchestrator.reserved_slot_count() == 0:
+            break
+        threading.Event().wait(0.1)
+    assert master_orchestrator.reserved_slot_count() == 0
+
+
 def test_delegated_lane_claims_keep_read_fanout_unserialized():
     objective = type("Objective", (), {"path": "src/app.py"})()
     claims = master_orchestrator.delegated_lane_claims(

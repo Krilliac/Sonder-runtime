@@ -30,6 +30,7 @@ import sonder_runtime.adapters.runtime_policy as runtime_policy
 import promotion_eval
 from sonder_runtime.adapters.inference import ollama_endpoint
 from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
+from sonder_runtime.adapters.process_liveness import PROCESS_DEAD, probe_process, process_identity
 from sonder_runtime.platform import system_profile
 import sonder_paths
 import training_data
@@ -740,11 +741,14 @@ def _start_training_locked(plan, *, confirmed=False, dry_run=False, resume=False
         claim = run_dir / ".launch-claimed"
         if claim.exists():
             try:
-                claimed_pid = int(claim.read_text(encoding="ascii").strip())
+                claim_owner = _read_training_claim(claim)
             except (OSError, TypeError, ValueError):
                 return False, "Training resume launch owner is unreadable."
-            if _pid_alive(claimed_pid):
-                return False, "Training resume blocked: the prior training child is still running."
+            if _training_claim_alive(claim_owner):
+                return False, (
+                    "Training resume blocked: the prior training child is still running "
+                    "or its identity is unknown; holder=%r" % claim_owner
+                )
             with contextlib.suppress(OSError):
                 claim.unlink()
     else:
@@ -1416,7 +1420,12 @@ def _clear_shared_alias_transition(deployment_id, policy_token):
 def _claim_shared_alias_transition(deployment_id, policy_token):
     paths = _shared_alias_paths()
     if paths["transition"].exists():
-        raise RuntimeError("another policy owns an unfinished personal-alias transition")
+        record = _read_shared_alias_record("transition") or {}
+        raise RuntimeError(
+            "another policy owns an unfinished personal-alias transition; "
+            "created_ts=%s policy_path=%s; recover using that policy's training rollback"
+            % (record.get("created_ts"), record.get("policy_path"))
+        )
     payload = {
         "schema": 1,
         "origin": paths["origin"],
@@ -1426,6 +1435,8 @@ def _claim_shared_alias_transition(deployment_id, policy_token):
         "policy_token": policy_token,
         "phase": "claiming",
         "created_ts": int(time.time()),
+        "pid": os.getpid(), "host": socket.gethostname(),
+        "process_identity": process_identity(os.getpid()),
     }
     _write_json_atomic(paths["transition"], payload)
     return payload
@@ -1467,7 +1478,11 @@ def _prepare_shared_alias_lifecycle(*, require_owner=False):
     if os.path.normcase(str(record.get("policy_path") or "")) != os.path.normcase(
         current_policy
     ):
-        return False, "unfinished personal-alias transition belongs to another runtime policy"
+        return False, (
+            "unfinished personal-alias transition belongs to another runtime policy; "
+            "created_ts=%s policy_path=%s; recover using that policy's training rollback"
+            % (record.get("created_ts"), record.get("policy_path"))
+        )
     journal_path = Path(str(record.get("journal_path") or ""))
     if journal_path == _deployment_journal_path() and journal_path.exists():
         return True, ""
@@ -2111,49 +2126,50 @@ def _recorded_training_child_alive(lock_payload):
     try:
         state_file = Path(lock_payload["state_path"])
         state = json.loads(state_file.read_text(encoding="utf-8"))
+        if not isinstance(state, dict) or not state.get("run_dir"):
+            return False
         claim = Path(state["run_dir"]) / ".launch-claimed"
-        child_pid = int(claim.read_text(encoding="ascii").strip())
-    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        owner = _read_training_claim(claim)
+    except FileNotFoundError:
         return False
-    return _pid_alive(child_pid)
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        # A partial claim may be a live child's interrupted ownership write.
+        # Absence is different from unreadable evidence; do not launch over it.
+        return True
+    return _training_claim_alive(owner)
+
+
+def _read_training_claim(path):
+    with Path(path).open(encoding="ascii") as stream:
+        raw = stream.read(4096).strip()
+    value = json.loads(raw)
+    if isinstance(value, int):
+        return {"pid": value}  # Legacy records remain conservative until exit.
+    if not isinstance(value, dict) or not isinstance(value.get("pid"), int):
+        raise ValueError("invalid training child identity")
+    return value
+
+
+def _training_claim_alive(owner):
+    if owner.get("host") not in (None, "", socket.gethostname()):
+        return True
+    state, _ = probe_process(owner["pid"], expected_identity=owner.get("process_identity"))
+    return state != PROCESS_DEAD
 
 
 @contextlib.contextmanager
 def _exclusive_byte_lock(path):
+    from durable_locks import LockTimeout, exclusive_file_lock
+
     path = Path(path).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    handle = path.open("a+b")
-    acquired = False
     try:
-        if handle.seek(0, os.SEEK_END) == 0:
-            handle.write(b"\0")
-            handle.flush()
-        handle.seek(0)
-        try:
-            if os.name == "nt":
-                import msvcrt
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            acquired = True
-        except OSError as exc:
-            raise RuntimeError(
-                "another training lifecycle operation is already running"
-            ) from exc
-        yield
-    finally:
-        if acquired:
-            handle.seek(0)
-            if os.name == "nt":
-                import msvcrt
-                with contextlib.suppress(OSError):
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-                with contextlib.suppress(OSError):
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
+        with exclusive_file_lock(path, timeout=0, purpose="training lifecycle"):
+            yield
+    except LockTimeout as exc:
+        raise RuntimeError(
+            "another training lifecycle operation is already running; %s" % exc
+        ) from exc
 
 
 @contextlib.contextmanager
@@ -2168,11 +2184,20 @@ def _deployment_lock():
         {home_lock, policy_lock, state_lock, alias_lock},
         key=lambda value: os.path.normcase(str(value)),
     )
-    owner_path = home_lock.with_name(home_lock.name + ".owner.json")
+    owner_path = home_lock.with_name(home_lock.name + ".lifecycle-owner.json")
+    # The shared lock primitive owns .owner.json; preserve older lifecycle
+    # metadata separately so an orphaned training child is still discovered.
+    try:
+        legacy_owner = _json_object(
+            home_lock.with_name(home_lock.name + ".owner.json"), "training lifecycle owner",
+        )
+    except ValueError:
+        legacy_owner = {}
     token = uuid.uuid4().hex
     payload = {
         "token": token, "pid": os.getpid(), "host": socket.gethostname(),
         "created_ts": time.time(),
+        "process_identity": process_identity(os.getpid()),
         "state_path": str(state_path()),
     }
     with contextlib.ExitStack() as stack:
@@ -2181,13 +2206,17 @@ def _deployment_lock():
         try:
             old_owner = _json_object(owner_path, "training lifecycle owner")
         except ValueError:
-            old_owner = {}
+            old_owner = legacy_owner
         current_owner = {"state_path": str(state_path())}
         if (
             (old_owner and _recorded_training_child_alive(old_owner))
             or _recorded_training_child_alive(current_owner)
         ):
-            raise RuntimeError("an orphaned training child is still running")
+            raise RuntimeError(
+                "an orphaned training child is still running or its identity is unknown; "
+                "state_path=%s prior_state_path=%s"
+                % (current_owner["state_path"], old_owner.get("state_path", "unknown"))
+            )
         _write_json_atomic(owner_path, payload)
         try:
             yield

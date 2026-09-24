@@ -20,6 +20,7 @@ from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sq
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import secrets
 import socket
@@ -31,6 +32,9 @@ from pathlib import Path
 
 from sonder_runtime.domain.automation import state_machine as _sm
 from sonder_runtime.platform import paths as _platform_paths
+from sonder_runtime.adapters.process_liveness import (
+    PROCESS_DEAD, probe_process, process_identity,
+)
 
 
 # SPEC-3 Phase 6: canonical fleet status classification in the domain layer.
@@ -38,6 +42,7 @@ ACTIVE_STATUSES = _sm.FLEET_ACTIVE
 TERMINAL_STATUSES = _sm.FLEET_TERMINAL
 DEFAULT_STALE_SECONDS = 60
 DEFAULT_STALE_GRACE_SECONDS = 10
+DEFAULT_PROGRESS_DEADLINE_SECONDS = 120
 DEFAULT_FINISHED_RETENTION = 500
 DEFAULT_EVENT_RETENTION = 2000
 MAX_TASK_CHARS = 32_000
@@ -67,6 +72,7 @@ MAX_RETRY_LEASE_SECONDS = 3600
 RETRYABLE_STATUSES = frozenset(("interrupted", "failed", "cancelled", "task_drift"))
 
 _SCHEMA_LOCK = threading.RLock()
+logger = logging.getLogger(__name__)
 # Cache the database identity, not merely its pathname.  A recovered or
 # restored fleet ledger may replace the database while this process remains
 # alive; its schema must be rechecked before it is used.
@@ -79,6 +85,7 @@ CREATE TABLE IF NOT EXISTS fleet_owners (
     host TEXT NOT NULL,
     started_ts REAL NOT NULL,
     heartbeat_ts REAL NOT NULL,
+    process_identity TEXT DEFAULT '',
     stale_seen_ts REAL,
     closed_ts REAL
 );
@@ -356,6 +363,15 @@ def _ensure_schema(path: str) -> None:
                     "task_drift": "INTEGER DEFAULT 0",
                     "drift_metrics_json": "TEXT DEFAULT '{}'",
                 }
+                owner_columns = {
+                    row[1] for row in conn.execute(
+                        "PRAGMA table_info(fleet_owners)"
+                    ).fetchall()
+                }
+                if "process_identity" not in owner_columns:
+                    conn.execute(
+                        "ALTER TABLE fleet_owners ADD COLUMN process_identity TEXT DEFAULT ''"
+                    )
                 for name, definition in agent_columns.items():
                     if name in columns:
                         continue
@@ -464,6 +480,43 @@ def _row_dict(row) -> dict | None:
     return data
 
 
+def progress_deadline_seconds() -> float:
+    """Return the independent worker-progress deadline.
+
+    This is deliberately separate from the owner heartbeat lease: a healthy
+    coordinator can keep heartbeating while one of its model/tool calls is
+    wedged.  Operators may shorten it for tests or a latency-sensitive host.
+    """
+    raw = os.environ.get(
+        "SONDER_FLEET_PROGRESS_DEADLINE_SECONDS",
+        str(DEFAULT_PROGRESS_DEADLINE_SECONDS),
+    ).strip()
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = float(DEFAULT_PROGRESS_DEADLINE_SECONDS)
+    return max(0.1, min(value, 24 * 60 * 60))
+
+
+def _annotate_progress(row: dict, *, now: float, deadline: float) -> dict:
+    """Add read-only progress health to one public fleet row."""
+    if row.get("status") not in ACTIVE_STATUSES:
+        row["progress_age_seconds"] = 0.0
+        row["stalled"] = False
+        row["stalled_reason"] = ""
+        return row
+    updated = float(row.get("updated_ts") or now)
+    age = max(0.0, now - updated)
+    stalled = age >= deadline
+    row["progress_age_seconds"] = round(age, 3)
+    row["stalled"] = stalled
+    row["stalled_reason"] = (
+        "no progress for %.1fs (deadline %.1fs)" % (age, deadline)
+        if stalled else ""
+    )
+    return row
+
+
 def _event_dict(row) -> dict:
     data = dict(row)
     try:
@@ -479,20 +532,23 @@ def _event_dict(row) -> dict:
 def register_owner(owner_id: str, pid: int, started_ts: float | None = None) -> None:
     now = time.time()
     started = float(started_ts or now)
+    identity = process_identity(pid) or ""
     with _write_transaction() as conn:
         conn.execute(
             """
             INSERT INTO fleet_owners(
-                owner_id, pid, host, started_ts, heartbeat_ts, stale_seen_ts, closed_ts
-            ) VALUES (?, ?, ?, ?, ?, NULL, NULL)
+                owner_id, pid, host, started_ts, heartbeat_ts, process_identity,
+                stale_seen_ts, closed_ts
+            ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)
             ON CONFLICT(owner_id) DO UPDATE SET
                 pid=excluded.pid,
                 host=excluded.host,
                 heartbeat_ts=excluded.heartbeat_ts,
+                process_identity=excluded.process_identity,
                 stale_seen_ts=NULL,
                 closed_ts=NULL
             """,
-            (owner_id, int(pid), socket.gethostname(), started, now),
+            (owner_id, int(pid), socket.gethostname(), started, now, identity),
         )
 
 
@@ -565,10 +621,11 @@ def reconcile_stale_owners(
     suspects = 0
     interrupted = 0
     owners = []
+    identity_mismatches = []
     with _write_transaction() as conn:
         rows = conn.execute(
             """
-            SELECT owner_id, stale_seen_ts
+            SELECT owner_id, pid, host, process_identity, stale_seen_ts
             FROM fleet_owners
             WHERE closed_ts IS NULL AND heartbeat_ts < ?
             """,
@@ -576,6 +633,18 @@ def reconcile_stale_owners(
         ).fetchall()
         for row in rows:
             owner_id = row["owner_id"]
+            # A stale heartbeat is not enough to reclaim a live process.  When
+            # the owner is local, verify the recorded process instance before
+            # fencing its rows; PID reuse must never be treated as ownership.
+            if row["host"] != socket.gethostname():
+                continue  # A local PID probe cannot establish remote death.
+            state, observed = probe_process(row["pid"], row["process_identity"] or None)
+            if state != PROCESS_DEAD:
+                # Legacy PID-only rows and failed inspection remain live or
+                # unknown. Neither permits reclaiming actual work capacity.
+                continue
+            if row["process_identity"] and observed and observed != row["process_identity"]:
+                identity_mismatches.append(owner_id)
             stale_seen = row["stale_seen_ts"]
             if stale_seen is None:
                 conn.execute(
@@ -604,7 +673,14 @@ def reconcile_stale_owners(
                 "UPDATE fleet_owners SET closed_ts=? WHERE owner_id=?",
                 (current, owner_id),
             )
-    return {"suspect_owners": suspects, "interrupted": interrupted, "owners": owners}
+    result = {
+        "suspect_owners": suspects,
+        "interrupted": interrupted,
+        "owners": owners,
+    }
+    if identity_mismatches:
+        result["identity_mismatches"] = identity_mismatches
+    return result
 
 
 def create_agent(
@@ -1498,6 +1574,8 @@ def add_event(agent_id: str, owner_id: str, stamp: str, message: str) -> None:
 
 def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
     reconcile = reconcile_stale_owners()
+    captured_at = time.time()
+    deadline = progress_deadline_seconds()
     conn = _connect()
     try:
         where = "" if include_finished else "WHERE status IN ('queued', 'running')"
@@ -1542,6 +1620,23 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
             FROM fleet_events ORDER BY event_id DESC LIMIT 80
             """
         ).fetchall()
+        stalled_total = conn.execute(
+            "SELECT COUNT(*) FROM fleet_agents "
+            "WHERE status IN ('queued','running') AND updated_ts <= ?",
+            (captured_at - deadline,),
+        ).fetchone()[0]
+        public_rows = [
+            _annotate_progress(_row_dict(row), now=captured_at, deadline=deadline)
+            for row in rows
+        ]
+        stalled_rows = [row for row in public_rows if row.get("stalled")]
+        if stalled_rows:
+            for row in stalled_rows:
+                logger.warning(
+                    "fleet agent %s stalled: %s activity=%r updated_ts=%.3f",
+                    row.get("id"), row.get("stalled_reason"),
+                    row.get("activity", ""), float(row.get("updated_ts") or 0),
+                )
         return {
             "active_agents": int(totals["active_agents"] or 0),
             "running_agents": int(totals["running_agents"] or 0),
@@ -1552,7 +1647,13 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
             "task_drift_agents": int(totals["task_drift_agents"] or 0),
             "total_agents": int(totals["total_agents"] or 0),
             "total_listed": len(rows),
-            "agents": [_row_dict(row) for row in rows],
+            "agents": public_rows,
+            "stalled_agents": stalled_rows,
+            "stalled_agent_count": int(stalled_total or 0),
+            "stalled_agent_total": int(stalled_total or 0),
+            "stalled_agent_listed_count": len(stalled_rows),
+            "progress_deadline_seconds": deadline,
+            "captured_at": captured_at,
             "events": [_event_dict(row) for row in reversed(events)],
             "tokens_in": int(totals["tokens_in"] or 0),
             "tokens_out": int(totals["tokens_out"] or 0),

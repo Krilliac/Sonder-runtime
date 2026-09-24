@@ -81,6 +81,7 @@ class SQLiteEffectJournal:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._max_detail = max_detail
         self._lock = Lock()
+        self._live_latches: set[str] = set()
         # This registry is immutable after construction. Production bootstrap
         # intentionally supplies none until a real provider verifier exists.
         self._reconciliation_verifiers = MappingProxyType(dict(reconciliation_verifiers or {}))
@@ -196,13 +197,24 @@ class SQLiteEffectJournal:
                 raise EffectJournalError("intent identity conflicts with durable record")
             return replace(existing, replayed=True)
 
-    @staticmethod
-    def _ensure_owner_in_transaction(connection, run_id: str, worker_id: str, owner_epoch: int) -> None:
+    def _ensure_owner_in_transaction(self, connection, run_id: str, worker_id: str, owner_epoch: int) -> None:
+        if run_id in self._live_latches:
+            raise EffectJournalError(
+                "worker owner recovery is required; unresolved effects require reconciliation before admitting new effects"
+            )
         row = connection.execute(
             "SELECT owner_epoch,recovery_required FROM effect_owner WHERE run_id=? AND worker_id=?",
             (run_id, worker_id),
         ).fetchone()
         if row is None:
+            latched = connection.execute(
+                "SELECT 1 FROM effect_owner WHERE run_id=? AND recovery_required=1 LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            if latched is not None:
+                raise EffectJournalError(
+                    "worker owner recovery is required; unresolved effects require reconciliation before admitting new effects"
+                )
             connection.execute(
                 "INSERT INTO effect_owner(run_id,worker_id,owner_epoch) VALUES(?,?,?)",
                 (run_id, worker_id, owner_epoch),
@@ -366,6 +378,8 @@ class SQLiteEffectJournal:
                     "UPDATE effect_owner SET recovery_required=0 WHERE run_id=?",
                     (current.run_id,),
                 )
+                connection.commit()  # Commit recovery before releasing the live fence.
+                self._live_latches.discard(current.run_id)
             return self._row(connection.execute(
                 "SELECT intent_id,run_id,worker_id,operation_id,scope,owner_epoch,"
                 "idempotency_key,request_digest,reconciliation,sequence,state,"
@@ -405,6 +419,7 @@ class SQLiteEffectJournal:
                 if (current.state, current.outcome_digest, current.receipt_key) != (
                     outcome.state, outcome.outcome_digest, outcome.receipt_key):
                     raise EffectJournalError("terminal effect outcome conflict")
+                self._commit_settled_run(connection, current.run_id)
                 return current
             if current.state is EffectState.UNCERTAIN:
                 raise EffectJournalError(
@@ -416,12 +431,33 @@ class SQLiteEffectJournal:
                 (outcome.state.value, outcome.outcome_digest, outcome.receipt_key,
                  outcome.detail[:self._max_detail], outcome.intent_id, current.state.value),
             )
-            return self._row(connection.execute(
+            result = self._row(connection.execute(
                 "SELECT intent_id,run_id,worker_id,operation_id,scope,owner_epoch,"
                 "idempotency_key,request_digest,reconciliation,sequence,state,"
                 "outcome_digest,receipt_key,detail FROM effect_journal WHERE intent_id=?",
                 (outcome.intent_id,),
             ).fetchone())
+
+            self._commit_settled_run(connection, current.run_id)
+            return result
+
+    def _commit_settled_run(self, connection, run_id: str) -> None:
+        """Release an outage fence only after every effect is durably terminal.
+
+        Called with the admission lock held, after all writes in the caller's
+        transaction. A pending sibling keeps the whole run fenced.
+        """
+        if run_id not in self._live_latches:
+            return
+        unresolved = connection.execute(
+            "SELECT 1 FROM effect_journal WHERE run_id=? AND state IN (?,?) LIMIT 1",
+            (run_id, EffectState.INTENT.value, EffectState.UNCERTAIN.value),
+        ).fetchone()
+        if unresolved is not None:
+            return
+        connection.execute("UPDATE effect_owner SET recovery_required=0 WHERE run_id=?", (run_id,))
+        connection.commit()
+        self._live_latches.discard(run_id)
 
     def _apply_outcome_in_transaction(self, connection, outcome: EffectOutcome) -> EffectIntent:
         current = self._row(connection.execute(
@@ -482,31 +518,57 @@ class SQLiteEffectJournal:
         if int(row[1]):
             raise EffectJournalError("recovery is required before writing a checkpoint")
 
-    def uncertain(self, intent_id: str, *, detail: str) -> EffectIntent:
+    def uncertain(self, intent_id: str, *, detail: str, run_id: str | None = None) -> EffectIntent:
+        return self._record_uncertainty(intent_id, detail=detail, run_id=run_id)
+
+    def latch_uncertainty(self, intent_id: str, *, detail: str, run_id: str | None = None) -> EffectIntent:
+        """Retain the same admission fence if normal publication failed."""
+        return self._record_uncertainty(intent_id, detail=detail, run_id=run_id)
+
+    def _record_uncertainty(self, intent_id: str, *, detail: str, run_id: str | None) -> EffectIntent:
         if not detail.strip():
             raise EffectJournalError("uncertain effect requires detail")
-        with self._lock, self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            current = self._row(connection.execute(
-                "SELECT intent_id,run_id,worker_id,operation_id,scope,owner_epoch,"
-                "idempotency_key,request_digest,reconciliation,sequence,state,"
-                "outcome_digest,receipt_key,detail FROM effect_journal WHERE intent_id=?",
-                (intent_id,),
-            ).fetchone())
-            if current is None:
-                raise KeyError(intent_id)
-            if current.state in {EffectState.COMPLETED, EffectState.FAILED}:
-                return current
-            connection.execute(
-                "UPDATE effect_journal SET state=?,detail=? WHERE intent_id=?",
-                (EffectState.UNCERTAIN.value, detail[:self._max_detail], intent_id),
-            )
-            return self._row(connection.execute(
-                "SELECT intent_id,run_id,worker_id,operation_id,scope,owner_epoch,"
-                "idempotency_key,request_digest,reconciliation,sequence,state,"
-                "outcome_digest,receipt_key,detail FROM effect_journal WHERE intent_id=?",
-                (intent_id,),
-            ).fetchone())
+        with self._lock:
+            # The authenticated binding supplies run_id before any storage
+            # access. Keep this fence even if connect/BEGIN/SELECT/commit fail;
+            # begin() uses this same lock and cannot admit between these steps.
+            was_latched = run_id in self._live_latches
+            if run_id is not None:
+                self._live_latches.add(run_id)
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                current = self._row(connection.execute(
+                    "SELECT intent_id,run_id,worker_id,operation_id,scope,owner_epoch,"
+                    "idempotency_key,request_digest,reconciliation,sequence,state,"
+                    "outcome_digest,receipt_key,detail FROM effect_journal WHERE intent_id=?",
+                    (intent_id,),
+                ).fetchone())
+                if current is None:
+                    raise KeyError(intent_id)
+                if run_id is not None and current.run_id != run_id:
+                    raise EffectJournalError("uncertainty run identity conflict")
+                if current.state in {EffectState.COMPLETED, EffectState.FAILED}:
+                    # An acknowledgement can fail after a definitive commit.
+                    # Undo only this call's provisional fence, never a fence
+                    # already raised by another unresolved effect.
+                    if run_id is not None and not was_latched:
+                        self._live_latches.discard(run_id)
+                    return current
+                self._live_latches.add(current.run_id)
+                connection.execute(
+                    "UPDATE effect_journal SET state=?,detail=? WHERE intent_id=?",
+                    (EffectState.UNCERTAIN.value, detail[:self._max_detail], intent_id),
+                )
+                connection.execute(
+                    "UPDATE effect_owner SET recovery_required=1 WHERE run_id=?",
+                    (current.run_id,),
+                )
+                return self._row(connection.execute(
+                    "SELECT intent_id,run_id,worker_id,operation_id,scope,owner_epoch,"
+                    "idempotency_key,request_digest,reconciliation,sequence,state,"
+                    "outcome_digest,receipt_key,detail FROM effect_journal WHERE intent_id=?",
+                    (intent_id,),
+                ).fetchone())
 
     def high_water(self, run_id: str) -> int:
         with self._connect() as connection:
@@ -669,10 +731,13 @@ class SQLiteEffectJournal:
                 connection, stored.run_id, outcome.worker_id, int(outcome.owner_epoch),
             )
             if stored.replayed:
+                self._commit_settled_run(connection, stored.run_id)
                 return None
-            return self._append_checkpoint_in_transaction(
+            checkpoint = self._append_checkpoint_in_transaction(
                 connection, stored.run_id, state, encoded,
             )
+            self._commit_settled_run(connection, stored.run_id)
+            return checkpoint
 
     def append_checkpoint(
         self, run_id: str, state: object, *, worker_id: str, owner_epoch: int,
@@ -810,6 +875,7 @@ class SQLiteEffectJournal:
                      EffectState.INTENT.value, EffectState.UNCERTAIN.value),
                 )
             if orphaned:
+                self._live_latches.add(run_id)
                 connection.execute(
                     "UPDATE effect_owner SET recovery_required=1 WHERE run_id=?",
                     (run_id,),

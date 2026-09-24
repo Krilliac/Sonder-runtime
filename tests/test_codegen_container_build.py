@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import io
 import os
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -15,6 +16,10 @@ import pytest
 import isolated_runner
 from sonder_runtime.adapters.execution import codegen_container_build as build
 from sonder_runtime.bootstrap.strategy import compose_isolated_codegen_build
+
+linux_build = pytest.mark.skipif(
+    sys.platform != "linux", reason="production container build and descriptor snapshots are Linux-only",
+)
 
 
 @pytest.fixture
@@ -47,6 +52,7 @@ def test_disabled_without_exact_host_grants_and_linux(monkeypatch, configured):
     assert compose_isolated_codegen_build(project_dir=str(project), declared_sources=("src/main.c",)) is None
 
 
+@linux_build
 def test_snapshot_contains_only_declared_files_and_extra_host_input(monkeypatch, configured):
     project, stage_root = configured
     (project / "src").mkdir()
@@ -77,6 +83,7 @@ def test_private_or_ambiguous_sources_cannot_be_granted(configured, path):
         build._relative_file(path)
 
 
+@linux_build
 def test_link_and_hardlink_cannot_enter_snapshot(configured):
     project, stage = configured
     (project / "src").mkdir()
@@ -98,6 +105,7 @@ def test_link_and_hardlink_cannot_enter_snapshot(configured):
     assert list(stage.iterdir()) == []
 
 
+@linux_build
 def test_same_size_change_with_restored_mtime_refuses_snapshot(monkeypatch, configured):
     project, _stage = configured
     source = project / "main.c"
@@ -128,6 +136,7 @@ def test_same_size_change_with_restored_mtime_refuses_snapshot(monkeypatch, conf
         os.close(descriptor)
 
 
+@linux_build
 def test_project_replacement_between_path_check_and_open_refuses(monkeypatch, configured):
     project, stage = configured
     (project / "src").mkdir()
@@ -151,6 +160,7 @@ def test_project_replacement_between_path_check_and_open_refuses(monkeypatch, co
     assert list(stage.iterdir()) == []
 
 
+@linux_build
 def test_staging_root_replacement_before_descriptor_open_refuses(monkeypatch, configured):
     project, stage = configured
     (project / "src").mkdir()
@@ -173,6 +183,7 @@ def test_staging_root_replacement_before_descriptor_open_refuses(monkeypatch, co
     assert list(moved.iterdir()) == []
 
 
+@linux_build
 def test_uncertain_teardown_retains_disposable_stage_and_rejects(monkeypatch, configured):
     project, stage_root = configured
     (project / "src").mkdir()
@@ -196,6 +207,7 @@ def test_uncertain_teardown_retains_disposable_stage_and_rejects(monkeypatch, co
     (143, "could not run", False), (-9, "could not run", False),
     (True, "could not run", False),
 ])
+@linux_build
 def test_reserved_or_signal_like_status_never_becomes_compiler_feedback(
     monkeypatch, configured, status, expected_report, okay,
 ):
@@ -219,6 +231,7 @@ def test_state_inside_project_blocks_composition_even_with_exact_source_grant(mo
     assert compose_isolated_codegen_build(project_dir=str(project), declared_sources=("src/main.c",)) is None
 
 
+@linux_build
 def test_project_or_private_staging_root_replacement_refuses_before_engine(monkeypatch, configured):
     project, stage_root = configured
     runner = compose_isolated_codegen_build(project_dir=str(project), declared_sources=("src/main.c",))

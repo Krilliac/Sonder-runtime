@@ -21,6 +21,7 @@ from sonder_runtime.adapters.persistence.sqlite.effect_journal import (
 )
 from sonder_runtime.application.execution.effect_journal import (
     EffectJournalError,
+    EffectOutcome,
     EffectState,
     ReconciliationProof,
     bound,
@@ -55,7 +56,7 @@ def _physical_effects(root: Path) -> str:
     return marker.read_text(encoding="utf-8") if marker.exists() else ""
 
 
-def _gateway(invoke):
+def _gateway(invoke, *, audit=None):
     class Schema:
         def validate(self, *_args):
             return None
@@ -80,7 +81,9 @@ def _gateway(invoke):
         def record(self, _receipt):
             return None
 
-    return ToolGateway(Schema(), Permissions(), Approval(), Invoker(), Redactor(), Receipts())
+    return ToolGateway(
+        Schema(), Permissions(), Approval(), Invoker(), Redactor(), Receipts(), audit=audit,
+    )
 
 
 def _request(identifier: str) -> ToolGatewayRequest:
@@ -270,6 +273,164 @@ def test_redactor_failure_after_physical_effect_requires_reconciliation(tmp_path
     assert journal.recover("run", live_workers={"worker": 1}).action == "reconcile"
 
 
+def test_audit_failure_keeps_effect_uncertain_before_completion(tmp_path):
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    binding = AuthenticatedWorkerBinding(journal, "run", "worker", 1, str(tmp_path))
+    assert binding.recover_before_restart().action == "resume"
+
+    class BrokenAudit:
+        def append(self, _request, _receipt):
+            raise OSError("audit unavailable")
+
+    gateway = _gateway(
+        lambda _request: _append(tmp_path, "x") or ToolInvocationOutput(True, "ok"),
+        audit=BrokenAudit(),
+    )
+    with bound(binding.binding()), pytest.raises(OSError, match="audit unavailable"):
+        gateway.execute(_request("tool-1"))
+    assert _physical_effects(tmp_path) == "x"
+    assert journal.get("run:tool-1").state is EffectState.UNCERTAIN
+
+
+def test_total_storage_outage_latches_before_connect_and_blocks_new_request(tmp_path):
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    binding = AuthenticatedWorkerBinding(journal, "run", "worker", 1, str(tmp_path))
+    assert binding.recover_before_restart().action == "resume"
+    connect = journal._connect
+
+    def unavailable():
+        raise OSError("storage offline")
+
+    class Audit:
+        def append(self, _request, _receipt):
+            journal._connect = unavailable
+            raise OSError("audit unavailable")
+
+    gateway = _gateway(lambda _request: _append(tmp_path, "x") or ToolInvocationOutput(True, "ok"), audit=Audit())
+    try:
+        with bound(binding.binding()), pytest.raises(OSError, match="audit unavailable"):
+            gateway.execute(_request("tool-1"))
+    finally:
+        journal._connect = connect
+    assert journal.get("run:tool-1").state is EffectState.INTENT
+    with bound(binding.binding()), pytest.raises(EffectJournalError, match="recovery"):
+        _gateway(lambda _: _append(tmp_path, "y") or ToolInvocationOutput(True, "ok")).execute(_request("new-id"))
+    assert _physical_effects(tmp_path) == "x"
+
+
+@pytest.mark.parametrize("pending_sibling", [False, True])
+@pytest.mark.parametrize("checkpoint", [False, True])
+def test_confirmed_outcome_replay_releases_only_fully_settled_run(tmp_path, pending_sibling, checkpoint):
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    binding = AuthenticatedWorkerBinding(journal, "run", "worker", 1, str(tmp_path)).binding()
+    journal.claim_owner("run", "worker", 1)
+    intent = binding.begin_request(operation_id="first", idempotency_key="first", request_digest="a" * 64)
+    outcome = EffectOutcome(intent.intent_id, EffectState.COMPLETED, "b" * 64, "receipt", "", "worker", 1)
+    journal.outcome(outcome)
+    if pending_sibling:
+        binding.begin_request(operation_id="pending", idempotency_key="pending", request_digest="c" * 64)
+    connect = journal._connect
+    journal._connect = lambda: (_ for _ in ()).throw(OSError("storage unavailable"))
+    try:
+        with pytest.raises(OSError):
+            journal.latch_uncertainty(intent.intent_id, detail="acknowledgement lost", run_id="run")
+    finally:
+        journal._connect = connect
+    if checkpoint:
+        assert journal.outcome_and_checkpoint(outcome, {}) is None
+    else:
+        assert journal.outcome(outcome).state is EffectState.COMPLETED
+    if pending_sibling:
+        with pytest.raises(EffectJournalError, match="recovery"):
+            binding.begin_request(operation_id="next", idempotency_key="next", request_digest="d" * 64)
+    else:
+        assert binding.begin_request(operation_id="next", idempotency_key="next", request_digest="d" * 64)
+
+
+def test_uncertainty_fence_precedes_competing_admission_during_failed_connect(tmp_path):
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    binding = AuthenticatedWorkerBinding(journal, "run", "worker", 1, str(tmp_path))
+    assert binding.recover_before_restart().action == "resume"
+    intent = binding.binding().begin_request(
+        operation_id="tool-1", idempotency_key="tool-1", request_digest="a" * 64,
+    )
+    connect = journal._connect
+    entered, release, attempted = Event(), Event(), Event()
+    errors = []
+
+    def unavailable():
+        entered.set()
+        assert release.wait(5)
+        raise OSError("storage offline")
+
+    def fail_uncertainty():
+        try:
+            journal.uncertain(intent.intent_id, detail="effect interrupted", run_id="run")
+        except OSError:
+            pass
+
+    def compete():
+        attempted.set()
+        try:
+            binding.binding().begin_request(
+                operation_id="new-id", idempotency_key="new-id", request_digest="b" * 64,
+            )
+        except EffectJournalError as exc:
+            errors.append(str(exc))
+
+    journal._connect = unavailable
+    failing = Thread(target=fail_uncertainty)
+    contender = Thread(target=compete)
+    failing.start()
+    try:
+        assert entered.wait(3)
+        journal._connect = connect
+        contender.start()
+        assert attempted.wait(3)
+    finally:
+        release.set()
+        failing.join(3)
+        if contender.ident is not None:
+            contender.join(3)
+        journal._connect = connect
+    assert not failing.is_alive() and not contender.is_alive()
+    assert len(errors) == 1 and "recovery" in errors[0]
+    assert journal.get("run:new-id") is None
+
+
+def test_base_exception_after_admission_is_fenced(tmp_path):
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    binding = AuthenticatedWorkerBinding(journal, "run", "worker", 1, str(tmp_path))
+    assert binding.recover_before_restart().action == "resume"
+
+    class Halt(BaseException):
+        pass
+
+    with bound(binding.binding()), pytest.raises(Halt):
+        _gateway(lambda _request: (_ for _ in ()).throw(Halt())).execute(
+            _request("tool-1")
+        )
+    assert journal.get("run:tool-1").state is EffectState.UNCERTAIN
+
+
+def test_base_exception_survives_uncertainty_storage_failure(tmp_path):
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    binding = AuthenticatedWorkerBinding(journal, "run", "worker", 1, str(tmp_path))
+    assert binding.recover_before_restart().action == "resume"
+
+    class Halt(BaseException):
+        pass
+
+    journal.uncertain = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        OSError("journal unavailable")
+    )
+    with bound(binding.binding()), pytest.raises(Halt):
+        _gateway(lambda _request: (_ for _ in ()).throw(Halt())).execute(
+            _request("tool-1")
+        )
+    assert journal.get("run:tool-1").state is EffectState.UNCERTAIN
+
+
 @pytest.mark.parametrize("committed", [False, True])
 def test_receipt_failure_preserves_original_error_and_durable_effect_state(tmp_path, committed):
     journal = SQLiteEffectJournal(tmp_path / "effects.db")
@@ -294,6 +455,11 @@ def test_receipt_failure_preserves_original_error_and_durable_effect_state(tmp_p
     assert journal.recover("run", live_workers={"worker": 1}).action == (
         "resume" if committed else "reconcile"
     )
+    if committed:
+        journal.outcome = original
+        with bound(binding.binding()):
+            receipt = _gateway(lambda _: ToolInvocationOutput(True, "next")).execute(_request("next-id"))
+        assert receipt is not None
 
 
 def test_uncertainty_write_failure_preserves_original_post_invoke_error(tmp_path):
@@ -305,7 +471,7 @@ def test_uncertainty_write_failure_preserves_original_post_invoke_error(tmp_path
     def failed_redaction(_tool, _value):
         raise RuntimeError("redaction unavailable")
 
-    def failed_uncertainty(_intent_id, *, detail):
+    def failed_uncertainty(_intent_id, *, detail, run_id=None):
         raise OSError("journal unavailable")
 
     gateway._redactor.redact = failed_redaction
@@ -313,14 +479,22 @@ def test_uncertainty_write_failure_preserves_original_post_invoke_error(tmp_path
     with bound(binding.binding()), pytest.raises(RuntimeError, match="redaction unavailable"):
         gateway.execute(_request("tool-1"))
     assert _physical_effects(tmp_path) == "x"
-    # A storage fault can prevent marking uncertainty immediately; the
-    # unresolved durable intent still blocks the next worker owner's restart.
-    assert journal.get("run:tool-1").state is EffectState.INTENT
+    # The fallback latch makes the unresolved effect fail closed even though
+    # the ordinary uncertainty publication failed.
+    assert journal.get("run:tool-1").state is EffectState.UNCERTAIN
+    with bound(binding.binding()), pytest.raises(EffectJournalError):
+        _gateway(lambda _request: ToolInvocationOutput(True, "slip")).execute(
+            _request("tool-2")
+        )
+    other = AuthenticatedWorkerBinding(journal, "run", "other", 1, str(tmp_path))
+    with bound(other.binding()), pytest.raises(EffectJournalError):
+        _gateway(lambda _request: ToolInvocationOutput(True, "slip")).execute(
+            _request("tool-3")
+        )
     with pytest.raises(EffectJournalError, match="reconciliation"):
         AuthenticatedWorkerBinding(
             journal, "run", "worker", 2, str(tmp_path),
         ).recover_before_restart()
-    assert journal.get("run:tool-1").state is EffectState.UNCERTAIN
 
 
 if __name__ == "__main__":

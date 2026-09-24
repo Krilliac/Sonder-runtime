@@ -223,6 +223,28 @@ surfaces; no adapter is enabled from these probes.
 
 ## Completion gate
 
+### 2026-09-24 stalled-chat recovery and added hardening workload
+
+The continuation resumes PR #555 from `ce0291bf`, preserving its published
+history. The final effect-receipt review fix described in the stalled chat was
+not present on that branch and is being recovered with fresh verification.
+The operator added bounded lock waits, holder diagnostics, progress-aware
+fleet stalls, process-identity checks, migration deadlines, a verified selfmod
+pidfile, and personal-alias recovery diagnostics. The
+[site-by-site workload and incident evidence](evidence/STALL-RECOVERY-2026-09-24.md)
+separate observed publication interruption from the unavailable backend cause.
+Completion requires the integrated suite and exact-head hosted checks; prior
+chat-reported tests do not qualify reconstructed code.
+
+The reconstructed working tree passed the complete Linux suite: 17,503 passed,
+167 skipped, three warnings and four subtests (288.88 seconds), plus the six
+repository gates and golden lanes (4/4 smoke, 33/33 policy). The expanded native
+Windows focused cohort passed 533 tests with 12 explicit skips; account-control
+passed 43 tests and recovery HTTP passed both tests after config-snapshot and
+SQLite sidecar-race fixes. DATA-003–007 and
+OPS-006 gained bounded real-file/process qualification without promotion of
+the broader master requirements. Exact-head hosted evidence is still pending.
+
 #510 remains open until its definition of done is evidenced: common recovery
 semantics across Workbench/Autopilot/Fleet, restart-safe strategy/effect/child
 state, materially different recovery, conserved recursive resources, measured

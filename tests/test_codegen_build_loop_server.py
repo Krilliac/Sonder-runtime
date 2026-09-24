@@ -7,7 +7,9 @@ BUILD SUCCEEDED from "no line matched the error regex" while throwing away
 the build process's own exit status.
 """
 import hashlib
+import os
 import sqlite3
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -100,8 +102,9 @@ def _enable_real_isolated_codegen_canary(monkeypatch, root, project, allowed_sou
 
 
 def _project_guard(tmp_path):
+    project_identity = os.path.normcase(os.path.realpath(tmp_path))
     scope = "codegen-scope-" + hashlib.sha256(
-        str(tmp_path.resolve()).encode(),
+        os.fsencode(project_identity),
     ).hexdigest()
     return compose_strategy_trace().scope_guard(scope)
 
@@ -194,6 +197,7 @@ def test_codegen_production_canary_requires_isolated_build_before_any_effect(mon
     assert "isolated build authority unavailable" in _canary_call(tmp_path)
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="native isolated build qualification is Linux-only")
 def test_codegen_server_composes_isolated_build_from_host_project_and_sources(
     monkeypatch, tmp_path,
 ):

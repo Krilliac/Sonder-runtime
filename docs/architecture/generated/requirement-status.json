@@ -544,37 +544,37 @@
     },
     {
       "checked": false,
-      "claim": "Typed record and outbox writes share one caller-owned SQLite transaction.",
+      "claim": "Production SQLiteOutboxCASRepository state and outbox writes commit atomically in one transaction across every repository in the typed persistence graph; a child crash immediately before the real outbox INSERT leaves no partial state or event.",
       "requirement_id": "DATA-003",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Revision compare-and-set is enforced by the SQLite persistence adapter.",
+      "claim": "Production SQLite compare-and-set admits exactly one winner under four-process contention for each typed persistence-graph repository; stale revision losers leave no state or outbox event, and a fresh reader observes the committed result.",
       "requirement_id": "DATA-004",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Migration and ownership operations remain explicit typed persistence boundaries with fail-closed validation.",
+      "claim": "Real-file migration rehearsal and production bridge entrypoint preserve a verified pre-migration backup across process crash/resume; checksum-refusal helpers reject tampered backup files before source writes, with restore proof over real SQLite files.",
       "requirement_id": "DATA-005",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Epoch/adoption coordination remains represented by explicit persistence graph and CAS seams.",
+      "claim": "The production epoch-2 admission entrypoint reopens supported state without changing main database bytes and rejects future epoch 3 before writes across every database in its EPOCH2_DATABASES catalog; the separately owned UpdateRepository reopens supported update state and refuses an unknown future migration ledger row before writes.",
       "requirement_id": "DATA-006",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Immutable artifact manifests use deterministic canonical hashes at the persistence boundary.",
+      "claim": "Real producer-to-consumer qualification binds update/generated-deliverable, training, selfmod, durable spill/session attachment, and signed update admission to persisted full hashes/manifests; same-path byte, manifest, signature, and post-review candidate tampering is rejected before effect or activation.",
       "requirement_id": "DATA-007",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -866,9 +866,9 @@
     },
     {
       "checked": false,
-      "claim": "ToolGateway marks post-invoke redaction/receipt failures uncertain while retaining definitive committed outcomes. Persisted subprocess crash cuts cover gateway and overlapping-effect recovery. Real supported typed file mutations now carry canonical descriptor effects into journal intents; reads and denied/restricted calls do not. A real typed append crash refuses duplicate mutation after restart. Local compute submit and nested process launch reconcile only from terminal attached registry records with exact identity and request digests.",
+      "claim": "ToolGateway publishes its durable audit receipt before definitive effect completion. Post-effect interruptions and audit/storage failures fence the run under the same admission lock before further storage access. A new request ID cannot bypass the fence; replay of a proven durable outcome releases it only when every sibling effect is settled. Real SQLite, filesystem and subprocess tests cover receipt cuts, total storage outage, competing admission, and settled-outcome replay.",
       "requirement_id": "LOOP-008",
-      "revision": 16,
+      "revision": 17,
       "status": "implemented_unverified"
     },
     {
@@ -1013,9 +1013,9 @@
     },
     {
       "checked": false,
-      "claim": "The live lifecycle projects typed readiness, dependency, drain, recovery, admission, and bounded telemetry state into its health snapshot.",
+      "claim": "Fleet snapshots distinguish owner process heartbeat from per-agent progress, report full-table stalled counts with paginated details, and verify local process-instance identity before stale-owner reclamation. Dispatch has bounded progress waits, reports uncertainty without fan-in, requests cooperative cancellation, and retains a live worker's reservation until it exits. Shared locks expose bounded owner diagnostics, and command-journal and legacy migration waits have deadlines.",
       "requirement_id": "OPS-003",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1034,9 +1034,9 @@
     },
     {
       "checked": false,
-      "claim": "Live operation telemetry is bounded, redacted, and exposed only as a local diagnostic snapshot.",
+      "claim": "Real local activity producers omit synthetic prompt, secret and artifact sentinels from default public projections. Overflow retains exactly the bounded per-owner history, evicts the oldest owner beyond the owner limit, and caps global feed events and bytes with explicit truncation.",
       "requirement_id": "OPS-006",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "7a79ddc199c5ff6c7a82299c05e2e2b0d65113d15eed75296fca6d59cbdc1607",
+    "ledger_sha256": "08c2e844d31f93f734940c1ea3434dfad47730e8dcd8d80a093b4833f64d7ed4",
     "spec_sha256": "1d7da49c5910bcf0bd5099ef1858312a8491a0429a4df33895d8088942278e33"
   }
 }

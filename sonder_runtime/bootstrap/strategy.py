@@ -115,7 +115,8 @@ def _private_key(path: Path) -> bytes:
             raise CheckpointError("strategy key directory is not private")
         if directory.st_uid != os.getuid():
             raise CheckpointError("strategy key directory has another owner")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    binary = getattr(os, "O_BINARY", 0)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | binary | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags, 0o600)
@@ -135,7 +136,7 @@ def _private_key(path: Path) -> bytes:
                 os.fsync(directory)
             finally:
                 os.close(directory)
-    read_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    read_flags = os.O_RDONLY | binary | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, read_flags)
     try:
         info = os.fstat(descriptor)

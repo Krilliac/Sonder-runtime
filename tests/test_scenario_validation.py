@@ -15,6 +15,7 @@ from sonder_runtime.application.scenario_validation import (
     Scenario,
     build_publish_plan,
 )
+from sonder_runtime.adapters.filesystem.durable_locks import exclusive_file_lock
 from sonder_runtime.adapters.scenario_validation import ProcessAdapter
 
 
@@ -130,6 +131,21 @@ def test_github_publisher_is_dry_run_and_does_not_call_gh():
     assert "stdout" not in plan.issue_body
 
 
+def test_github_publisher_requires_lock_provider_for_live_publish():
+    report = ScenarioValidationRunner(ProcessAdapter()).run(
+        [Scenario("smoke", "works", (sys.executable, "-c", "pass"))],
+        commit_sha="a" * 40,
+    )[0]
+    plan = build_publish_plan(report, repository="x/y")
+
+    class Adapter:
+        def run(self, command):
+            raise AssertionError("lock failure must precede GitHub calls")
+
+    with pytest.raises(RuntimeError, match="lock provider"):
+        GitHubPublisher(dry_run=False, adapter=Adapter()).publish(plan)
+
+
 def test_github_body_redacts_query_credentials():
     scenario = Scenario("body", "claim?token=ghp_" + "x" * 30, (sys.executable, "-c", "print('pass')"), artifact_refs=("https://example.test/a?token=secret", "safe-artifact.json"))
     report = ScenarioValidationRunner(ProcessAdapter()).run([scenario], commit_sha="a" * 40)[0]
@@ -165,7 +181,7 @@ def test_github_publisher_deduplicates_by_marker_without_creating_issue():
     class Adapter:
         def run(self, command):
             return fake_gh(command)
-    result = GitHubPublisher(dry_run=False, adapter=Adapter()).publish(plan)
+    result = GitHubPublisher(dry_run=False, adapter=Adapter(), lock_factory=exclusive_file_lock).publish(plan)
     assert result["deduplicated_issue"] is True
     assert len(calls) == 1
     assert calls[0][calls[0].index("--state") + 1] == "all"
@@ -187,7 +203,7 @@ def test_github_publisher_requires_exact_marker_body_before_deduplication():
                 }]), "")
             return subprocess.CompletedProcess(command, 0, "https://example.test/issues/10", "")
 
-    result = GitHubPublisher(dry_run=False, adapter=Adapter()).publish(plan)
+    result = GitHubPublisher(dry_run=False, adapter=Adapter(), lock_factory=exclusive_file_lock).publish(plan)
     assert result["deduplicated_issue"] is False
     assert calls[-1][:3] == ("gh", "issue", "create")
 
@@ -211,7 +227,7 @@ def test_github_publisher_deduplicates_merged_pr_by_exact_marker():
                 }]), "")
             raise AssertionError("merged PR must not be recreated")
 
-    result = GitHubPublisher(dry_run=False, adapter=Adapter()).publish(
+    result = GitHubPublisher(dry_run=False, adapter=Adapter(), lock_factory=exclusive_file_lock).publish(
         plan, create_issue=False, create_pr=True,
     )
     assert result["deduplicated_pr"] is True

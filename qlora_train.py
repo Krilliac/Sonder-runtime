@@ -28,11 +28,13 @@ import hashlib
 import hmac
 import json
 import os
+import socket
 import sys
 import time
 from pathlib import Path
 
 import training_data
+from sonder_runtime.adapters.process_liveness import process_identity
 
 # ---------------------------------------------------------------------------
 # Configuration (override via env vars; kept as simple constants on purpose)
@@ -137,7 +139,13 @@ def authorize_launch(now=None):
     except FileExistsError as exc:
         raise RuntimeError("training launch authorization was already claimed") from exc
     with os.fdopen(claim_fd, "w", encoding="ascii") as stream:
-        stream.write(str(os.getpid()))
+        json.dump({
+            "pid": os.getpid(), "host": socket.gethostname(),
+            "process_identity": process_identity(os.getpid()),
+            "started": time.time(), "purpose": "QLoRA training child",
+        }, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
