@@ -2,7 +2,9 @@
 
 The authoritative plan for unfinished architecture and implementation work is
 [`docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md`](docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md).
-This document describes Sonder's current product boundary and high-level behavior.
+This document describes Sonder's current product boundary and high-level behavior;
+the [behavior status](#behavior-status) table labels what is implemented,
+experimental, proposed, degraded, or unsupported.
 
 ## What Sonder is
 
@@ -115,3 +117,19 @@ Hugging Face/PEFT training stack.
 
 See [TRAINING.md](TRAINING.md), [MOBILE_HOST_CONTROL.md](MOBILE_HOST_CONTROL.md),
 and [SELFMOD.md](SELFMOD.md) for the guarded lifecycle details.
+
+## Behavior status
+
+Labels follow the [documentation status vocabulary](docs/architecture/DOCUMENT-AUTHORITY-INDEX.md#documentation-status-vocabulary). Unfinished
+implementation work is tracked only in the
+[master implementation specification](docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md).
+
+| Behavior | Status | Boundary |
+|---|---|---|
+| Local-first orchestration around an Ollama model server | Implemented | Sonder is not a foundation model and ships no base weights (CORE-001). |
+| Hosted or cloud model tiers | Implemented | Opt-in only; a cloud-tier prompt leaves the machine only after `SONDER_ALLOW_CLOUD=1` (CORE-004). |
+| NPU utility accelerator (`npu` modes `shadow` and `prefer`) | Experimental | Default off, below the generative tiers, and every miss falls back to the local path (MODEL-010). |
+| AMD VitisAI NPU execution | Degraded | Target-unverified; not labeled NPU acceleration without effective-device evidence. |
+| Windows ML or DirectML as NPU execution | Unsupported | Windows ML is descriptor-only and DirectML is not claimed as an NPU. |
+| Adapter training inside Ollama | Unsupported | Ollama serves the deployed result; the Hugging Face/PEFT stack trains the adapter. |
+| One packaged implementation path with no root-level business modules or compatibility shims | Proposed | ARCH-002, ARCH-003, and CORE-005 track removal of the remaining root modules and aliases. |
