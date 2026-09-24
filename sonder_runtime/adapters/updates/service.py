@@ -26,11 +26,16 @@ import sqlite3
 import sys
 import tarfile
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import sonder_runtime.adapters.persistence.migrations as sonder_migrations
+from sonder_runtime.application.security.bounded_archives import (
+    TarMetadataLimitError,
+    open_bounded,
+)
 import sonder_runtime.platform.version as sonder_version
 
 MANIFEST_SCHEMA_VERSION = 1
@@ -672,60 +677,198 @@ def _read_pointer(link: Path) -> str | None:
     return None
 
 
+MAX_EXTRACT_MEMBERS = 50_000
+# Wall-clock ceiling for one staging call (validation walk plus writes).
+# Walking the 50,000-member cap costs tens of seconds of CPU; the deadline
+# keeps a hostile but trust-verified bundle from holding the updater longer.
+MAX_EXTRACT_SECONDS = 300.0
+MAX_MEMBER_NAME_CHARS = 1_024
+_WINDOWS_DEVICE_STEMS = frozenset({
+    "con", "prn", "aux", "nul", "conin$", "conout$",
+    *("com%s" % suffix for suffix in "0123456789¹²³"),
+    *("lpt%s" % suffix for suffix in "0123456789¹²³"),
+})
+
+
+def _collision_key(value: str) -> str:
+    """Key under which case-folding and normalizing filesystems collide."""
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", value).casefold())
+
+
 def safe_extract(
     archive_path: str | os.PathLike,
     destination: str | os.PathLike,
     *,
     max_expanded_bytes: int,
+    max_members: int = MAX_EXTRACT_MEMBERS,
+    max_seconds: float = MAX_EXTRACT_SECONDS,
 ) -> int:
-    """Extract a tar archive refusing traversal, symlinks, devices, and
-    expansion beyond ``max_expanded_bytes``.  Returns bytes written."""
+    """Extract a tar archive refusing traversal, links, devices, non-portable
+    names, duplicates, more than ``max_members`` members, expansion beyond
+    ``max_expanded_bytes``, and work beyond ``max_seconds`` of wall time.
+    Every member is validated before any byte is written.  Returns bytes
+    written."""
+    if type(max_members) is not int or max_members < 1:
+        raise ValueError("max_members must be a positive integer")
+    if isinstance(max_seconds, bool) or not isinstance(max_seconds, (int, float)) or not max_seconds > 0:
+        raise ValueError("max_seconds must be a positive number")
+    deadline = time.monotonic() + float(max_seconds)
     dest = Path(destination).resolve()
-    dest.mkdir(parents=True, exist_ok=True)
-    written = 0
     try:
-        tar = tarfile.open(archive_path, "r:*")
+        tar = open_bounded(archive_path)
+    except TarMetadataLimitError as exc:
+        raise ExtractionError(f"archive metadata exceeds reader bound: {exc}") from None
     except (OSError, EOFError, tarfile.TarError) as exc:
         raise ExtractionError(f"cannot open archive: {exc}") from None
     try:
         with tar:
-            written = _extract_members(tar, dest, max_expanded_bytes)
+            plan = _plan_members(tar, max_expanded_bytes, max_members, deadline)
+            dest.mkdir(parents=True, exist_ok=True)
+            written = _extract_members(tar, dest, plan, deadline)
     except ExtractionError:
         raise
+    except TarMetadataLimitError as exc:
+        raise ExtractionError(f"archive metadata exceeds reader bound: {exc}") from None
     except (OSError, EOFError, tarfile.TarError) as exc:
         raise ExtractionError(f"corrupt or truncated archive: {exc}") from None
     return written
 
 
-def _extract_members(tar, dest: Path, max_expanded_bytes: int) -> int:
-    written = 0
+def _portable_member_parts(name: object) -> tuple[str, ...]:
+    """Return the POSIX components of a member name valid on every host.
+
+    Names are judged by the strictest host: Windows drive-relative
+    (``C:x``), UNC, backslash, alternate-data-stream (``a:b``), reserved
+    device, and trailing dot/space spellings are rejected even on POSIX so a
+    bundle stages identically everywhere.
+    """
+    if not isinstance(name, str) or not name or len(name) > MAX_MEMBER_NAME_CHARS:
+        raise ExtractionError(f"archive member name is empty or too long: {name!r}")
+    if "\x00" in name or "\\" in name:
+        raise ExtractionError(f"archive path uses NUL or backslash syntax: {name!r}")
+    trimmed = name[:-1] if name.endswith("/") else name
+    windows = PureWindowsPath(trimmed)
+    if (
+        not trimmed
+        or trimmed.startswith("/")
+        or PurePosixPath(trimmed).is_absolute()
+        or windows.is_absolute()
+        or windows.drive
+        or windows.anchor
+    ):
+        raise ExtractionError(f"archive path escapes staging: {name!r}")
+    parts = tuple(trimmed.split("/"))
+    if any(part in {"", ".", ".."} for part in parts):
+        raise ExtractionError(f"archive path escapes staging: {name!r}")
+    for part in parts:
+        if ":" in part or any(ord(char) < 32 for char in part):
+            raise ExtractionError(
+                f"archive path uses colon or control syntax: {name!r}"
+            )
+        if part.rstrip(" .") != part:
+            raise ExtractionError(
+                f"archive path has a trailing dot/space component: {name!r}"
+            )
+        # Windows ignores trailing spaces before the extension ("CON .txt").
+        if part.split(".", 1)[0].rstrip(" ").casefold() in _WINDOWS_DEVICE_STEMS:
+            raise ExtractionError(
+                f"archive path uses a reserved device name: {name!r}"
+            )
+    return parts
+
+
+def _require_before(deadline: float) -> None:
+    if time.monotonic() > deadline:
+        raise ExtractionError("archive staging exceeded its time ceiling")
+
+
+def _plan_members(
+    tar, max_expanded_bytes: int, max_members: int, deadline: float,
+) -> list:
+    """Validate every member (and the aggregate) before extraction starts.
+
+    Walking a compressed TAR decompresses each payload to reach the next
+    header, so the member-count and payload-byte bounds are checked per
+    member.  Header metadata (long names, PAX records) is bounded
+    separately by ``open_bounded`` before ``tarfile`` reads it.
+    """
+    plan: list = []
+    total = 0
+    exact: set[str] = set()
+    folded_types: dict[str, str] = {}
+    folded_components: dict[str, str] = {}
     for member in tar:
+        _require_before(deadline)
+        if len(plan) >= max_members:
+            raise ExtractionError(
+                f"archive exceeds the {max_members} member bound"
+            )
         name = member.name
-        path = Path(name)
-        if path.is_absolute() or ".." in path.parts or name.startswith("/"):
-            raise ExtractionError(f"archive path escapes staging: {name!r}")
+        parts = _portable_member_parts(name)
         if member.issym() or member.islnk():
             raise ExtractionError(f"archive contains a link: {name!r}")
         if member.isdev() or member.isfifo():
             raise ExtractionError(
                 f"archive contains a device/fifo: {name!r}"
             )
-        if member.isdir():
-            (dest / path).mkdir(parents=True, exist_ok=True)
-            continue
-        if not member.isfile():
+        is_directory = member.isdir()
+        if not is_directory and not member.isfile():
             raise ExtractionError(
                 f"archive contains unsupported member type: {name!r}"
             )
         if member.size < 0:
             raise ExtractionError(f"negative member size: {name!r}")
-        written += member.size
-        if written > max_expanded_bytes:
+        normalized = "/".join(parts)
+        folded = _collision_key(normalized)
+        if not is_directory:
+            if normalized in exact or folded in folded_types:
+                raise ExtractionError(
+                    f"archive has duplicate or case-colliding member: {name!r}"
+                )
+            exact.add(normalized)
+            total += member.size
+            if total > max_expanded_bytes:
+                raise ExtractionError(
+                    f"archive expands beyond the {max_expanded_bytes} byte "
+                    "budget"
+                )
+        elif folded_types.get(folded) == "file":
             raise ExtractionError(
-                f"archive expands beyond the {max_expanded_bytes} byte "
-                "budget"
+                f"archive has duplicate or case-colliding member: {name!r}"
             )
+        folded_types[folded] = "directory" if is_directory else "file"
+        for index in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:index])
+            previous = folded_components.setdefault(_collision_key(prefix), prefix)
+            if previous != prefix:
+                raise ExtractionError(
+                    f"archive has case-colliding path components: {name!r}"
+                )
+        plan.append((member, parts))
+    for normalized in exact:
+        parts = normalized.split("/")
+        for index in range(1, len(parts)):
+            if folded_types.get(_collision_key("/".join(parts[:index]))) == "file":
+                raise ExtractionError(
+                    "archive file member is an ancestor of another: "
+                    f"{normalized!r}"
+                )
+    return plan
+
+
+def _extract_members(tar, dest: Path, plan: list, deadline: float) -> int:
+    written = 0
+    for member, parts in plan:
+        _require_before(deadline)
+        name = member.name
+        path = Path(*parts)
+        if member.isdir():
+            (dest / path).mkdir(parents=True, exist_ok=True)
+            continue
+        written += member.size
         target = dest / path
+        if not target.resolve().is_relative_to(dest):
+            raise ExtractionError(f"archive path escapes staging: {name!r}")
         target.parent.mkdir(parents=True, exist_ok=True)
         source = tar.extractfile(member)
         if source is None:
