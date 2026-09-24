@@ -151,6 +151,7 @@ jobs:
           tests/test_host_model_request_admission.py
           tests/test_openai_host_model_admission.py
           tests/test_control_plane_inventory.py
+          tests/test_control_plane_deleted_paths.py
           tests/test_process_wait_hardening.py
           tests/test_start_selfmod_launcher.py
           tests/test_command_recovery.py

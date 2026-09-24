@@ -54,7 +54,21 @@ def _canonical(value):
         raise ValueError("private path encoding is unavailable") from None
     if len(encoded) > 4096:
         raise ValueError("private path exceeds bound")
-    return _normalize_windows_extended_final_path(path.resolve())
+    for _ in range(3):
+        resolved = _normalize_windows_extended_final_path(path.resolve())
+        # NTFS may move a concurrently deleted, still-open SQLite sidecar to
+        # this volume-root namespace while Path.resolve holds its handle. It
+        # is not the stable name of the requested private resource. Re-resolve
+        # the original path; never substitute its unresolved spelling or use
+        # the tombstone as authority. Persistent churn remains fail-closed.
+        if (
+            os.name != "nt"
+            or len(resolved.drive) != 2
+            or tuple(part.casefold() for part in resolved.parts[1:3])
+            != ("$extend", "$deleted")
+        ):
+            return resolved
+    raise ValueError("private path resolution is unstable")
 
 
 def _normal_windows_components(value: str, *, minimum: int = 0) -> tuple[str, ...]:
