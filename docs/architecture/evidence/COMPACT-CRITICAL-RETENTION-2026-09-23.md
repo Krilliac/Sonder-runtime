@@ -177,6 +177,15 @@ row out of band. That row is not critical, so the summary check alone cannot
 catch it. Before this change the altered row was returned. After it, the call
 fails with an integrity error.
 
+`retrieve_reference` and `search_compacted` also read from the same
+verified snapshot. In `test_retrieve_reference_rejects_an_edited_summary_and_payload_pair`,
+both a bulky payload and the digest reference inside its summary are edited
+out of band so that they still agree with each other. In
+`test_search_compacted_rejects_out_of_band_edits`, text is injected into a
+row. Before the change, both cases were accepted. After it, both fail with an
+integrity error. Repositories without `read_complete` keep the earlier bounded,
+unverified reads.
+
 Ledger rows from this PR were renumbered above the revisions already on
 main:
 
@@ -220,10 +229,10 @@ LOSSY_ACCEPTED False
 
 ```text
 python -m pytest -q tests/test_compaction_continue_canary.py tests/test_compaction_retention_review.py tests/test_compaction_summary_schema_golden.py tests/test_session_complete_recovery_adversarial.py
-73 passed
+75 passed
 
 python -m pytest -q -n 8 <120 compaction/session/context/lane/replay/archive test files, after merging main>
-2122 passed, 1 skipped, 1 warning
+2124 passed, 1 skipped, 1 warning
 ```
 
 Two earlier parallel runs each had one intermittent failure. The first was
@@ -243,5 +252,20 @@ failure was not captured. The next three consecutive full runs passed.
   Reference payloads are flat and avoid it.
 - The emergency overflow retry (`domain/context/compaction.py`) still drops
   whole old turns.
+- **Cost of verified recovery.** `recover_source`, `recall_critical`,
+  `retrieve_reference`, and `search_compacted` read and hash-chain-verify the
+  whole session through `read_complete` on every call. That is up to 100,000
+  events or 64 MiB of payload, and the snapshot is held in memory; with a
+  verified repository, the search `deque` bounds only the result set, not the
+  read.
+- **Fails closed above the recovery bound.** A session larger than the
+  recovery bound fails closed. It raises
+  `session history is unavailable or failed integrity verification` and does
+  not return unverified data. This is the same bound the live lane already
+  enforces.
+- **Why the prefix isn't verified from here.** Verifying only the chain prefix
+  up to `end` would need the adapter's private hash function and a
+  prefix-bounded `read_complete`, so it is not done in this application
+  service.
 - Hosted CI, a production lane run, and master-spec checkbox promotion are
   still pending.
