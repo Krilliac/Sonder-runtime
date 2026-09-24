@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
+import sys
+import time
+
+import pytest
 
 from sonder_runtime.adapters.persistence.sqlite.effect_journal import SQLiteEffectJournal
 from sonder_runtime.application.compute_fabric.jobs import ComputeJobWorker
@@ -66,6 +71,9 @@ def test_process_provider_journals_launch_before_return(tmp_path):
     assert stored.owner_epoch == 4
     assert stored.receipt_key.startswith("journaled-process:")
     assert started.process_id > 0
+    checkpoint = journal.restore_checkpoint("process-run")
+    assert checkpoint is not None
+    assert checkpoint["state"]["effect"]["receipt_key"] == stored.receipt_key
     provider.wait("journaled-process")
 
 
@@ -136,3 +144,59 @@ def test_composition_root_supplies_host_owned_bindings(tmp_path):
     assert selfmod_binding.worker_id.startswith("selfmod:")
     assert selfmod_binding.scope == "selfmod-mutation"
     assert selfmod_binding.run_id == "selfmod:run-1"
+
+
+def test_real_process_boundary_crash_keeps_effect_uncertain_and_unreplayed(tmp_path):
+    from dataclasses import replace
+
+    from sonder_runtime.adapters.execution.process_jobs import SubprocessJobProvider
+    from sonder_runtime.application.jobs.durable_registry import DurableJobRegistry
+    from tests.test_job004_process_provider import _Cleanup, _MemoryLimiter, _request
+
+    marker = tmp_path / "side-effect-count.txt"
+    script = (
+        "from pathlib import Path; import time; "
+        f"p=Path({str(marker)!r}); p.write_text(p.read_text() + 'x' if p.exists() else 'x'); "
+        "time.sleep(30)"
+    )
+    request = replace(
+        _request("crash-at-process-port"),
+        argv=(sys.executable, "-c", script), cwd=tmp_path,
+    )
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    binding = AuthenticatedWorkerBinding(
+        journal, "process-run", "process-worker", 4, "/workspace",
+    )
+    launched = []
+
+    def launch_then_crash(*args, **kwargs):
+        process = subprocess.Popen(*args, **kwargs)
+        launched.append(process)
+        raise RuntimeError("worker crashed after process launch")
+
+    provider = SubprocessJobProvider(
+        DurableJobRegistry(), process_cleanup=_Cleanup(complete=True),
+        launcher=launch_then_crash, memory_limiter=_MemoryLimiter(),
+        process_identity_resolver=lambda _pid: "stable", platform_name="posix",
+        effect_binding=binding,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="worker crashed"):
+            provider.start(request)
+        for _ in range(50):
+            if marker.exists():
+                break
+            time.sleep(0.1)
+        assert marker.read_text() == "x"
+        stored = journal.get("process-run:process-start:crash-at-process-port")
+        assert stored is not None and stored.state.value == "uncertain"
+        with pytest.raises(ValueError, match="reconciliation"):
+            AuthenticatedWorkerBinding(
+                journal, "process-run", "process-worker", 5, "/workspace",
+            ).recover_before_restart()
+        assert marker.read_text() == "x"
+    finally:
+        for process in launched:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
