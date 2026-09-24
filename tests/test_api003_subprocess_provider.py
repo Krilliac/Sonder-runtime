@@ -181,6 +181,50 @@ def test_subprocess_timeout_preserves_incomplete_cleanup_receipt():
     assert "could not be verified" in provider.cleanup_receipt.detail
 
 
+def test_windows_taskkill_success_stays_incomplete_after_mcp_child_reaping():
+    import subprocess
+    from types import SimpleNamespace
+
+    from sonder_runtime.adapters.process_termination import ProcessTreeSupervisor
+
+    class Process:
+        pid = 4321
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -1
+
+        def communicate(self, timeout):
+            assert self.returncode == -1
+            return "", ""
+
+    process = Process()
+    cleanup = ProcessTreeSupervisor(
+        platform_name="nt",
+        subprocess_module=SimpleNamespace(
+            DEVNULL=subprocess.DEVNULL,
+            SubprocessError=subprocess.SubprocessError,
+            run=lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+        ),
+    )
+    events = []
+    provider = McpSubprocessProvider(
+        ["test-provider"], cleanup=cleanup, platform_name="nt", observer=events.append
+    )
+    provider._process = process
+
+    provider.close()
+
+    assert process.returncode == -1
+    assert provider.cleanup_receipt is not None
+    assert not provider.cleanup_receipt.complete
+    assert "unproven" in provider.cleanup_receipt.detail
+    assert events[-1].cleanup_receipt == provider.cleanup_receipt
+
+
 def test_new_provider_instance_can_restart_after_previous_bounded_timeout():
     first = McpSubprocessProvider(
         [sys.executable, "-c", "import time; time.sleep(30)"],

@@ -111,10 +111,15 @@ class ProcessTreeSupervisor:
                 request.job_id, True, complete=False,
                 detail=f"taskkill failed: {type(exc).__name__}",
             )
-        complete = getattr(result, "returncode", 1) == 0
+        # taskkill has no retained containment handle or descendant census.
+        # Native Job Object owners provide their proof outside this fallback.
         return ProcessTreeCleanupReceipt(
-            request.job_id, True, complete=complete,
-            detail="taskkill tree completed" if complete else "taskkill did not confirm tree termination",
+            request.job_id, True, complete=False,
+            detail=(
+                "taskkill returned success; Windows tree absence remains unproven"
+                if getattr(result, "returncode", 1) == 0
+                else "taskkill did not confirm tree termination"
+            ),
         )
 
     def _posix_cleanup(self, request: ProcessTreeCleanupRequest) -> ProcessTreeCleanupReceipt:

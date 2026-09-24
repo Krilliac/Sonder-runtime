@@ -834,6 +834,11 @@ class SubprocessJobProvider:
                     elif self._owns_cleanup_resources(job_id):
                         self.cancel(job_id, reason="terminal job resource cleanup retry")
                 return
+            if record.status is JobStatus.CANCELLATION_REQUESTED:
+                # Root exit after an incomplete cancellation is not proof that
+                # its descendants were cleaned up, including after restart.
+                self.cancel(job_id, reason=record.error or "process deadline exceeded")
+                return
             process = self._processes.get(job_id)
             if process is not None:
                 poll = getattr(process, "poll", None)
