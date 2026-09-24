@@ -5,12 +5,16 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import hashlib
 import json
+import logging
 from threading import RLock, Lock
 
 from ..application.ports.app_control import CommandConflict, NotFound, identifier
 from ..application.ports.app_control_http import ControlError
 from .app_recovery_coordinator import AppWorkRecoveryAttempt, AppRecoveryView
 from .app_work_recovery import AppWorkRecoveryHistory
+
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass
@@ -228,10 +232,17 @@ class AppWorkRecoveryRegistry:
                             result.code,
                         )
                         entry.approval = result.approval
-        except BaseException:
+        except BaseException as error:
+            # State must stay uncertain even if a diagnostic handler fails.
             with self._lock:
                 entry.uncertain = True
                 entry.phase, entry.code = "unknown", "ACTION_OUTCOME_UNKNOWN"
+            _LOG.error(
+                "app recovery action failed: action=%s attempt_id=%s error_type=%s",
+                action,
+                entry.identity,
+                type(error).__name__,
+            )
         finally:
             with self._lock:
                 if entry.uncertain and action != "close" and entry.phase != "unknown":

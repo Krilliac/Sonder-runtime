@@ -6,13 +6,21 @@ from concurrent.futures import ThreadPoolExecutor
 from tests.test_app_managed_authority import managed, control
 
 
-def test_unknown_preparation_can_close_without_replaying(managed):
+@pytest.mark.parametrize("broken_logging", (False, True))
+def test_unknown_preparation_can_close_without_replaying(managed, monkeypatch, broken_logging):
     import time
     from sonder_runtime.bootstrap.app_work_recovery_registry import (
         AppWorkRecoveryRegistry,
     )
     from sonder_runtime.bootstrap.app_recovery_coordinator import AppWorkRecoveryAttempt
 
+    if broken_logging:
+        from sonder_runtime.bootstrap import app_work_recovery_registry as module
+
+        def fail_log(*args, **kwargs):
+            raise OSError("diagnostic sink unavailable")
+
+        monkeypatch.setattr(module._LOG, "error", fail_log)
     authority, selection, *_ = managed
     application = object()
     called = []
