@@ -12,7 +12,7 @@ from sonder_runtime.domain.strategy.models import FailureClass
 
 @pytest.fixture
 def fleet_state(monkeypatch, tmp_path):
-    import sonder_runtime.adapters.persistence.fleet_store as fleet_store
+    from sonder_runtime.adapters.persistence import fleet_store
 
     monkeypatch.setenv("SONDER_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("SONDER_FLEET_DB", str(tmp_path / "fleet.db"))

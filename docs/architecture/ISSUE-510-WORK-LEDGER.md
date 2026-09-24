@@ -15,7 +15,7 @@ this ledger. Existing implementations are extended instead of being duplicated.
 
 | Item | Implementation and meaningful verification | Qualification |
 |---|---|---|
-| W1 Artifact signature/publisher trust | Windows signable artifacts reject unavailable verification; exact normalized publisher organization matching; verifier environment stripped; non-Windows results explicitly disclose absent signature verification. `tests/test_artifact_fetch_tools.py`, `tests/test_runtime_artifact_adapters.py`. | Implemented; real signed Windows positive fixture still required. |
+| W1 Artifact signature/publisher trust | Windows signable artifacts reject unavailable verification; exact normalized publisher organization matching; verifier environment stripped; non-Windows results explicitly disclose absent signature verification. `tests/test_artifact_fetch_tools.py`, `tests/test_runtime_artifact_adapters.py`. | Implemented; a real OS-signed PowerShell positive canary is included in Windows CI and awaits qualification. |
 | W2 Root/concurrency counting | Root anchor is excluded; transactional SQLite/PostgreSQL admission conserves nested resources and owner-wide active slots across operation roots. Reused reservations count once. | SQLite multi-process races pass; disposable primary/standby PostgreSQL qualification is pending CI. |
 | W3 Cancellation and reserved workers | Transactional cancellation fence prevents late success; cancelled ancestors prevent new descendants; pre-start cancellation terminalizes the record; resume clears stale verification. Provider launch failure releases only a newly created unstarted row with its expected revision. | Implemented; race and reused-reservation canaries pass. |
 | W4 Wall budget | Child deadline and measured elapsed time reject success after budget exhaustion. | Implemented; deterministic late-success test. |
@@ -58,17 +58,17 @@ The series IDs below are from issue comment
 | A1 Contracts | Implemented in `domain/strategy/models.py`: bounded typed attempts, signatures, references, resource usage and budgets. | Integrate every host producer; no raw payload duplication. |
 | A2 Failure vocabulary | Typed source-independent failure classes and conservative host safety properties. | Every host's source-specific projection must retain its evidence. |
 | A3 Progress | Typed comparable vectors; incomplete/scope-mismatched evidence is incomparable; regressions take precedence. | General research/debugging projections and measured accuracy. |
-| A4 Trace | Existing sealed checkpoint port; immutable attempt IDs; CAS; restart; exact attempt charge; budgets cannot expand. Codegen/Autopilot callers exist behind explicit opt-in. | Remaining host observations and crash cuts; native secure-key qualification. |
+| A4 Trace | Existing sealed checkpoint port; immutable attempt IDs, CAS, restart, exact charges and nonexpanding budgets. Pending action reservations and project guards retain uncertain execution across reinvocation. Codegen/Autopilot observers are explicit opt-in. | Codegen active canary refuses on the current same-user build profile: candidate builds can access the seal key. A supported lower-privilege build adapter remains required; the observation store is not an effect journal. |
 | B1 Feedback repair | Codegen production loop passes actual previous candidate and compiler diagnostics. | Live compiler/model quality evaluation. |
 | B2 Scoped critic | Critic receives source/task/verifier facts and constraints, excluding implementer rationale. | Measure marginal critic benefit with held-out ablations. |
 | B3 Model rotation | Explicit route policy; independent resolved model; bounded escalation following repeated comparable failure. | Measured capability eligibility and role-resource qualification. |
 | B4 Best candidate | Improving/verified candidate retained; no blind overwrite on later regression. | Cross-host candidate restoration. |
 | C1 Controller | Pure deterministic bounded decisions; effect uncertainty and host policy precede replay/repair. Success reaches the host completion gate even on the final budgeted attempt. | Authority remains with existing host gates; promoted active recovery needs equivalence evidence. |
-| C2 Autopilot | Production observe adapter and durable attempt backfill. | Active shared-policy migration and fault matrix. |
+| C2 Autopilot | Production observe adapter, durable backfill and pre-task bounded memory retrieval; response receipts gate reuse attribution. | Active shared-policy migration and fault matrix. |
 | C3 Workbench | Production terminal observer, durable backfill and explicit rollout controls use existing agent/effect/context boundaries. | Active recovery cannot bypass explicit resume authority or effect reconciliation. |
 | C4 Fleet | Production per-attempt observer, shadow comparison and deterministic pure-text canary may suppress legacy retries. Repository workers remain observe-only. | Controlled live quality/equivalence evaluation and wider safe action migration. |
 | D1 Structured results | Existing AGENT-009 plus exact durable terminal result binding and typed specialist/delegation proposals. | Cross-host live qualification. |
-| D2 Reservations | Atomic hierarchical step/token/worker-time reservations, depth/child limits, owner-wide concurrency and ownership admission; unknown token usage retains its complete reservation. | PostgreSQL primary/standby native qualification. |
+| D2 Reservations | Atomic hierarchical step/token/worker-time reservations, depth/child limits, owner-wide concurrency and ownership admission; unknown token usage retains its complete reservation. | PostgreSQL primary/standby qualification in progress: the registry lookup and atomic duplicate-key admission are fixed; latest native run passed 20 tests with one invalid fixture budget being corrected. Zero-test/skip-only runs are rejected. |
 | D3 Specialist proposals | Canonical delegation service accepts bounded typed specialist proposals under an owner-bound operation root and inherited finite budgets. | Native platform and live-model quality qualification. |
 | D4 Hypotheses | Canonical transactional admission rejects duplicate active speculative lanes or hypothesis digests within the root task scope. | Live search diversity and marginal-benefit evaluation. |
 | D5 Evidence synthesis | Fan-in rechecks canonical child outputs, artifact ID/size/source specification and host verifier metrics; recursive proposals retain scoped evidence. | Independent verifier authority and complete live exhausted-search qualification. |
@@ -76,22 +76,22 @@ The series IDs below are from issue comment
 | E2 Profile persistence | Persisted typed backend identity binds model digest/quantization, backend/version, tokenizer/template, context and hardware. | Host-measured native provider coverage; unsupported protocols remain unknown. |
 | E3 Eligibility | Opt-in production routing refuses unknown/stale/failed/synthetic/mismatched evidence; exact concrete provider identity is checked before and after chat, role and embedding calls. | Live measured identities and wider protocol qualification. |
 | E4 Escalation | Bounded codegen policy and existing logical route tiers. | Recent measured capability and separate role budgets. |
-| E5 Attribution | Strategy observations include resolved route and measured usage. | Evaluation of whether escalation helped, including negative controls. |
+| E5 Attribution | Observers retain host-provided route/tier and available counters. Codegen records model/critic/build counts; Workbench and Autopilot currently record attempts only. | Exact resolved-model and full cost attribution; evaluation of whether escalation helped, including negative controls. |
 | F1 ToolSearch | Implemented bounded deterministic summary search over an immutable, host-granted inventory. | Additional host surfaces beyond native MCP. |
 | F2 Lazy schemas | `mcp --native --progressive-tools` exposes search/load tools, loads at most eight schemas and refuses calls before visibility. | Broader model request integration and resource evaluation. |
 | F3 Skills | Existing ProgressiveSkillRegistry / LiveAgentContextProducer is summary-first and lazy. | Strategy-selected procedural skills still cross current policy/TDD gates. |
 | F4 Schema replay identity | Loaded schema manifest binds inventory and selected schemas; typed request carries immutable selection; durable tool audit records it. | Native typed and compatibility calls share the existing durable audit, including schema loads/refusals and immutable call-begin selection; compatibility receipts explicitly retain their narrower authority. |
 | F5 Cache telemetry | CTX-009, merged #531/#537/#545, selected schema identity in stable prefix. | Measure native progressive discovery's real prefix reuse. |
 | G1 Experience | Content-free projection of sealed strategy attempts into canonical memory UoW. | Cross-host crash recovery integration. |
-| G2 Failure retrieval | Scope/failure/family/language/verifier filters; bounded pre-attempt ContextPlanner projection with typed provenance and cross-project replay refusal. | Actual host caller integration and held-out irrelevant-memory controls. |
-| G3 Attribution | Selected strategy-memory reference required for reuse credit; failed reuse lowers confidence. | Source attribution where mixed evidence is actually distinguishable. |
+| G2 Failure retrieval | Scope/failure/family/language/verifier filters; bounded pre-attempt ContextPlanner projection with typed provenance and cross-project replay refusal. | Codegen and Autopilot select before local model calls using actual context plans and attribute recorded outcomes only after a response; held-out irrelevant-memory controls remain required. |
+| G3 Attribution | Selected strategy-memory reference plus host-observed model response required for reuse credit; failed reuse lowers confidence. Transport refusal before a response leaves selection unpenalized. | Source attribution where mixed evidence is actually distinguishable. |
 | G4 Heuristics | Existing authenticated LearningLadder used; ordinary verifiers cannot promote policy. | Evaluated candidate heuristic production. |
 | G5 Procedural skills | Existing Skill TDD/promotion retained. | Conversion of repeated verified patterns through held-out evaluation. |
-| H1 Scenarios | Thirteen deterministic strategy canaries run through sealed trace storage/readback and bind a case manifest; #546 divergence minimization retained. | Independent real-task held-out suite; synthetic canaries cannot authorize promotion. |
+| H1 Scenarios | Thirteen deterministic synthetic policy canaries replay through sealed trace storage/readback and bind case input/source digests; #546 divergence minimization retained. | No independently owned evaluation case manifest or real-task held-out corpus is attached; synthetic canaries cannot authorize promotion. |
 | H2 Cost | Strategy evaluation binds attempt graph, policy/role/tool/memory/skill/runtime identities and resource metrics. | Independent real-task receipt authority and measured live cost. |
 | H3 Ablations | No measured critic/delegation/rotation lift claimed. | Independent controlled comparisons. |
 | H4 Promotion | #546 kind-bound lifecycle gates; new results invalidate stale evidence; retained divergence blocks promotion. | Independent real-task score/receipt authority; synthetic agreement is not task success. |
-| H5 Rollout | Default off; explicit observe/shadow/deterministic canary controls and rollback preserve existing host authority. Fleet pure-text canary can suppress retry. | Live promotion evidence and common safe recovery migration; no default-on claim. |
+| H5 Rollout | Default off; explicit observe/shadow/deterministic canary controls preserve host authority. Fleet pure-text canary can suppress retry; Codegen canary refuses without independently isolated build execution. | Build isolation, independent task grades and live promotion evidence remain required; no default-on claim. |
 
 ## Admission and recovery policy
 
@@ -119,18 +119,22 @@ The series IDs below are from issue comment
 - Second broad Linux run: 17,148 passed, 153 skipped, 2 failed. The installer
   documentation and earlier budget-refusal expectations were corrected; later
   focused checks pass. This is not yet a passing full-suite result at final head.
+- Third broad Linux run at `5f2a3f22`: 17,255 passed, 157 skipped, 1 obsolete
+  release-gate expectation failed; corrected in `f6f21879`. Its focused suite
+  subsequently passed (77 passed, 1 skipped). Later integrations still need CI.
 - Integrated recursive admission/memory/native discovery/evaluation selection:
   78 passed. Further integrations require exact-revision validation.
-- Full Ruff initially reported 10,897 diagnostics. Baseline comparison later
-  found no new diagnostic groups (10,889 baseline / 10,869 integrated); inherited
-  lint debt remains. Repeat comparison at final head before claiming the ratchet.
+- Full Ruff initially reported 10,897 diagnostics. Baseline comparison is repeated after integration; inherited lint debt
+  remains. Diagnostic line-number mentions are normalized for comparison; this
+  is not a full-tree lint pass.
 - PR #546 merged after required CI and application builds passed. Promotion
   evidence staleness and retained-divergence regressions have dedicated tests.
 - PR #554 revision `94c1a7119ce385cd6d5777e8e8d0bf37c3513864`:
   installer-owned Windows profile and real launch: 19 passed; Windows
   owner/artifact/lifecycle suite: 193 passed, 6 skipped; release smoke: 1 passed.
-  Native MIC: 19 passed, 1 failed mocked attestation fixture, 1 Git Bash test
-  intentionally deselected. The fixture is corrected and awaits rerun. Artifact
+  Native MIC initially had one stale mocked attestation fixture. After its
+  correction, revision `9c2bb9a7` passed 20 MIC tests (1 Git Bash test intentionally
+  deselected), 193 Windows owner/artifact/lifecycle tests and release smoke. Artifact
   signature fixtures do not establish a real signed-PE positive verification.
 - Live PostgreSQL, provider/model quality and independent task/held-out grading
   remain distinct qualifications. Concrete PostgreSQL and native Windows jobs

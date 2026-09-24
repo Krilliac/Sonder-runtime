@@ -193,7 +193,8 @@ class StrategyMemoryService:
 
     def observe_recorded(self, run_id: str, attempt_id: str, *, project_scope: str,
                          verifier_observation_id: str | None = None,
-                         language: str | None = None) -> StrategyExperience:
+                         language: str | None = None,
+                         complete_selection: bool = True) -> StrategyExperience:
         """Re-read a sealed attempt; reject caller-supplied verdicts and proof."""
         attempts = tuple(item for item in self._trace.history(run_id) if item.attempt_id == attempt_id)
         if len(attempts) != 1:
@@ -225,7 +226,8 @@ class StrategyMemoryService:
                 language=language,
             )
             stored = scope.strategy_experiences.append(experience)
-            scope.strategy_experiences.complete(run_id, attempt_id, attempt.outcome)
+            if complete_selection:
+                scope.strategy_experiences.complete(run_id, attempt_id, attempt.outcome)
             return stored
 
     def _assessment(self, scope, experience: StrategyExperience) -> tuple[LearningStage, float, bool]:
@@ -392,6 +394,12 @@ class StrategyMemoryService:
         return StrategyRecoveryContext(selection, prompt_brief)
 
 
-__all__ = ["StrategyExperience", "StrategyExperienceStore", "StrategyMemoryRef",
-           "StrategyMemorySelection", "StrategyRecoveryContext", "StrategyMemoryService",
-           "language_from_path"]
+__all__ = [
+    "StrategyExperience",
+    "StrategyExperienceStore",
+    "StrategyMemoryRef",
+    "StrategyMemorySelection",
+    "StrategyMemoryService",
+    "StrategyRecoveryContext",
+    "language_from_path",
+]

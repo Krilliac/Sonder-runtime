@@ -350,7 +350,7 @@
       ]
     },
     {
-      "file_count": 342,
+      "file_count": 343,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -649,6 +649,7 @@
         "sonder_runtime/application/skills/procedural_publication.py",
         "sonder_runtime/application/skills/registry.py",
         "sonder_runtime/application/strategy/__init__.py",
+        "sonder_runtime/application/strategy/codegen_result.py",
         "sonder_runtime/application/strategy/controller.py",
         "sonder_runtime/application/strategy/tracing.py",
         "sonder_runtime/application/subagents/__init__.py",

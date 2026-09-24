@@ -11,20 +11,31 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from sonder_runtime.adapters.evaluation_corpus import (
-    BoundedEvaluationCorpusScanner, EvaluationCorpusSource,
+    BoundedEvaluationCorpusScanner,
+    EvaluationCorpusSource,
 )
 from sonder_runtime.adapters.evaluation_failure_corpus import JsonMinimizedFailureStore
-from sonder_runtime.adapters.evaluation_lifecycle import SessionEvaluationLifecycleRepository
-from sonder_runtime.application.evaluation.durable_lifecycle import EvaluationLifecycleService
-from sonder_runtime.application.evaluation.promotion_gates import PromotionGateEvaluator
-from sonder_runtime.application.evaluation.promotion_gates import PromotionKind
-from sonder_runtime.application.evaluation.proposal_lifecycle import (
-    EvaluationLifecycleError, EvaluationResult, ProposalLifecycle, ShadowCanaryObservation,
+from sonder_runtime.adapters.evaluation_lifecycle import (
+    SessionEvaluationLifecycleRepository,
 )
-from sonder_runtime.application.evaluation.strategy_cases import (
-    StrategyEvidenceClass, strategy_evidence_class,
+from sonder_runtime.application.evaluation.durable_lifecycle import (
+    EvaluationLifecycleService,
+)
+from sonder_runtime.application.evaluation.promotion_gates import (
+    PromotionGateEvaluator,
+    PromotionKind,
+)
+from sonder_runtime.application.evaluation.proposal_lifecycle import (
+    EvaluationLifecycleError,
+    EvaluationResult,
+    ProposalLifecycle,
+    ShadowCanaryObservation,
 )
 from sonder_runtime.application.evaluation.service import EvaluationApplicationService
+from sonder_runtime.application.evaluation.strategy_cases import (
+    StrategyEvidenceClass,
+    strategy_evidence_class,
+)
 from sonder_runtime.application.ports.session_repository import SessionRepository
 from sonder_runtime.domain.strategy.models import StrategyError
 

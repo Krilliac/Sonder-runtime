@@ -537,7 +537,8 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
     visible = ToolSchemaSelection()
     selection_generation = 0
 
-    def audit_native(name, arguments, result, context, selection, *, policy_path, started):
+    def audit_native(name, arguments, result, context, selection, *, policy_path, started,
+                     selection_at_start=None):
         """Record compatibility outcomes without claiming typed gateway admission.
 
         The same repository instance also receives typed gateway receipts. Only
@@ -563,9 +564,12 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             duration_ms=max(0, int((time.monotonic() - started) * 1000)),
             argument_digest=digest(arguments), result_digest=digest(result),
             execution_world="local", policy_match=policy_path,
-            terminal=(POLICY_DENIED if error in {"permission_denied", "tool_not_visible"}
+            terminal=(POLICY_DENIED if error in {
+                          "permission_denied", "tool_not_visible", "tool_schema_refused",
+                      }
                       else FAILED if failed else COMPLETED),
             evidence={"inventory_digest": discovery.digest,
+                      "selection_at_start": (selection_at_start or selection).marker(),
                       "native_compatibility_path": policy_path == "native_mcp_compatibility"},
         )
         native_audit.append(request, receipt)
@@ -803,13 +807,20 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
         logger.debug(f"MCP execute tool={name!r}")
         if discovery is not None:
             if name in {"tool_search", "tool_schema"}:
+                from ..domain.common.errors import InvalidInput
                 descriptor = discovery_tools.get(name)
+                started = time.monotonic()
+                selection_at_start = selected if selected is not None else visible
+                discovery_context = operation_context or local_owner_context(
+                    correlation_id=uuid.uuid4().hex, source="mcp", workspace_roots=roots,
+                    timeout_seconds=60.0,
+                )
                 try:
                     validate_tool_call(descriptor, RegistryToolCall(tool_name=name, arguments=dict(arguments)))
                     if name == "tool_search":
                         payload = discovery.search(**arguments)
+                        published = selection_at_start
                     else:
-                        started = time.monotonic()
                         next_visible, payload = discovery.load(
                             arguments["names"], inventory_digest=arguments["inventory_digest"],
                             selection_id=f"mcp-tools:{selection_generation + 1}",
@@ -818,21 +829,35 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                         # Loaded schemas confer no permission to execute effects.
                         published = ToolSchemaSelection(next_visible.visible_names,
                                                         selection_id=payload["manifest"]["digest"])
-                        schema_result = {"output": json.dumps(payload, sort_keys=True),
-                                         "isError": False, "error": None,
-                                         "evidence": {"inventory_digest": discovery.digest}}
-                        schema_context = local_owner_context(
-                            correlation_id=uuid.uuid4().hex, source="mcp", workspace_roots=roots,
-                            timeout_seconds=60.0,
-                        )
-                        audit_native(name, arguments, schema_result, schema_context, published,
-                                     policy_path="native_mcp_discovery", started=started)
-                        visible = published
-                        selection_generation += 1
-                    return {"output": json.dumps(payload, sort_keys=True), "isError": False,
-                            "error": None, "evidence": {"inventory_digest": discovery.digest}}
-                except (TypeError, ValueError) as exc:
+                except (InvalidInput, TypeError, ValueError) as exc:
+                    # Keep caller text out of the durable audit. An invalid
+                    # schema request must not replace the previous selection.
+                    refused = {"output": "", "isError": True,
+                               "error": ("tool_schema_refused" if name == "tool_schema"
+                                         else "tool_search_invalid"), "evidence": {}}
+                    try:
+                        audit_native(name, arguments, refused, discovery_context,
+                                     selection_at_start, policy_path="native_mcp_discovery",
+                                     started=started, selection_at_start=selection_at_start)
+                    except Exception as audit_error:
+                        raise McpTransportError(
+                            "native tool audit unavailable; reconcile outcome before retry"
+                        ) from audit_error
                     raise McpTransportError(str(exc)) from exc
+                result = {"output": json.dumps(payload, sort_keys=True), "isError": False,
+                          "error": None, "evidence": {"inventory_digest": discovery.digest}}
+                try:
+                    audit_native(name, arguments, result, discovery_context, published,
+                                 policy_path="native_mcp_discovery", started=started,
+                                 selection_at_start=selection_at_start)
+                except Exception as audit_error:
+                    raise McpTransportError(
+                        "native tool audit unavailable; reconcile outcome before retry"
+                    ) from audit_error
+                if name == "tool_schema":
+                    visible = published
+                    selection_generation += 1
+                return result
             if not (selected if selected is not None else visible).allows(name):
                 return {"output": "load the tool schema before calling this tool", "isError": True,
                         "error": "tool_not_visible", "evidence": {

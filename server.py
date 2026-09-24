@@ -1697,6 +1697,7 @@ def _make_generate(
     cancel_check=None, accept_native_tool_calls=False,
     compact_cloud_reasoning=False, schema=None, allow_cloud_fallback=True,
     think=None, reasoning_continuation=False, reasoning_total_tokens=None,
+    single_send=False,
 ):
     """Build a generate(prompt, history) closure for `model`.
 
@@ -1720,6 +1721,8 @@ def _make_generate(
         raise ValueError("hosted-model thinking is controlled by provider policy")
     if cloud and reasoning_continuation:
         raise ValueError("reasoning continuation is available only for local models")
+    if single_send and (cloud or reasoning_continuation or think is not False):
+        raise ValueError("single_send requires a local, non-thinking, single-segment call")
     if think is False and reasoning_continuation:
         raise ValueError("reasoning continuation requires model thinking")
     if reasoning_continuation:
@@ -1803,7 +1806,9 @@ def _make_generate(
                     timeout=timeout,
                     cancel_check=cancel_check,
                     accept_native_tool_calls=accept_native_tool_calls,
-                    idempotent=True,
+                    idempotent=not single_send,
+                    local_only=single_send,
+                    single_send=single_send,
                     **local_chat_options,
                 )
             tokens_in = _model_usage_count(out.get("prompt_eval_count"))
@@ -4498,6 +4503,7 @@ def _post_model(
     cancel_check=None,
     idempotent: bool = False,
     local_only: bool = False,
+    single_send: bool = False,
 ) -> tuple[dict, int]:
     """POST one logical model request with a narrow loopback-only retry policy.
 
@@ -4525,6 +4531,8 @@ def _post_model(
     cloud = bool(cloud or _is_cloud_model_name(model))
     if local_only and cloud:
         raise ValueError("local_only and cloud are mutually exclusive")
+    if single_send and (cloud or not local_only or idempotent):
+        raise ValueError("single_send requires a non-idempotent local-only route")
     if cloud and not _cloud_allowed_policy(os.environ):
         raise ModelCallError(
             "configuration",
@@ -4550,7 +4558,7 @@ def _post_model(
     request_timeout = _bound_request_timeout(timeout, TIMEOUT)
     deadline = time.monotonic() + request_timeout
     max_attempts = (
-        1 if cloud or remote_endpoint else 1 + _local_model_retries_policy()
+        1 if single_send or cloud or remote_endpoint else 1 + _local_model_retries_policy()
     )
 
     # Bumped by exactly one if a classified context overflow earns a compaction
@@ -4664,7 +4672,7 @@ def _post_model(
 
         detail = embedded_detail or (failure.detail if failure is not None else "")
         status = None if embedded_detail else (failure.status if failure is not None else None)
-        if not compaction_spent:
+        if not single_send and not compaction_spent:
             verdict = context_overflow.classify(detail, status=status)
             compacted = None
             if verdict.overflow and _overflow_retry_allowed(
@@ -4695,7 +4703,8 @@ def _post_model(
         # fallback under ``not compaction_spent`` or that second failure leaks
         # to the caller instead of retrying once without the optional field.
         if (
-            not think_option_fallback_spent
+            not single_send
+            and not think_option_fallback_spent
             and not cloud
             and not remote_endpoint
             and "think" in payload
@@ -4865,6 +4874,7 @@ def _chat_request(
     accept_native_tool_calls: bool = False,
     idempotent: bool = False,
     local_only: bool = False,
+    single_send: bool = False,
     _budget_retried: bool = False,
     reasoning_continuation: bool = False,
     reasoning_total_tokens: int | None = None,
@@ -4875,6 +4885,8 @@ def _chat_request(
 ) -> tuple[dict, str]:
     if not isinstance(reasoning_continuation, bool):
         raise ValueError("reasoning_continuation must be a boolean")
+    if single_send and (cloud or reasoning_continuation or payload.get("think") is not False):
+        raise ValueError("single_send requires a local, non-thinking, single-segment call")
     if cloud and reasoning_continuation:
         raise ValueError("reasoning continuation is available only for local models")
     if reasoning_continuation:
@@ -4918,6 +4930,7 @@ def _chat_request(
         cancel_check=cancel_check,
         idempotent=idempotent,
         local_only=local_only,
+        single_send=single_send,
     )
     if not isinstance(out, dict):
         raise ModelCallError(
@@ -19852,6 +19865,7 @@ def _agent_turn(
     system: str | None = None,
     cancel_check=None,
     session: str | None = None,
+    pre_model_context=None,
 ) -> str:
     """Run a Claude-like local agent loop that can call tools.
 
@@ -19969,12 +19983,18 @@ def _agent_turn(
     agent_num_predict = (
         _CLOUD_AGENT_NUM_PREDICT if cloud else _LOCAL_AGENT_NUM_PREDICT
     )
+    # A host-owned pre-model context producer needs the same resolved window
+    # the generator actually uses. Pin it for this turn rather than observing
+    # one window and silently dispatching with another after metadata refresh.
+    agent_num_ctx = (
+        _auto_model_context(model) if pre_model_context is not None and not cloud else 0
+    )
     cloud_budget_state = (
         {"spent": 0, "total": _CLOUD_AGENT_OUTPUT_BUDGET}
         if cloud else None
     )
     gen = _make_generate(
-        model, system, 0.1, agent_num_predict, 0, cloud=cloud,
+        model, system, 0.1, agent_num_predict, agent_num_ctx, cloud=cloud,
         cancel_check=cancel_check,
         accept_native_tool_calls=True,
         compact_cloud_reasoning=True,
@@ -20127,6 +20147,18 @@ def _agent_turn(
             % "\n- ".join(sorted(allowed_tools))
         )
     transcript += "\n\n" + _agent_verification_standing_notice()
+    pre_model_context_rendered = False
+    pre_model_context_response_observed = False
+    if pre_model_context is not None:
+        # The pre-model callback runs after route, project scope, system text,
+        # and visible tools are resolved, but before the first provider call.
+        # Any persistent reference selection must be bound to the text actually
+        # appended here, never to an earlier guess at the eventual prompt.
+        context_text = pre_model_context(
+            model, cloud, system, transcript, agent_num_predict, agent_num_ctx,
+        )
+        pre_model_context_rendered = bool(context_text)
+        transcript += context_text
 
     def ensure_not_cancelled():
         if cancel_check is not None and _cancel_requested(cancel_check):
@@ -20367,6 +20399,7 @@ def _agent_turn(
                 validation_attempted=validation_attempted,
                 validation_passed=validated,
                 project_scope=project_scope,
+                pre_model_context_response_observed=pre_model_context_response_observed,
                 **certificate_fields,
             )
         return final
@@ -20401,6 +20434,7 @@ def _agent_turn(
                 validation_attempted=validation_attempted,
                 validation_passed=_work_validated(),
                 project_scope=project_scope,
+                pre_model_context_response_observed=pre_model_context_response_observed,
             )
         return text
 
@@ -20555,6 +20589,8 @@ def _agent_turn(
                 )
         _spec_decision_t0 = time.monotonic()
         decision, raw, decision_error = _agent_generate_decision(gen, step_prompt)
+        if pre_model_context_rendered and raw:
+            pre_model_context_response_observed = True
         _predictor.observe_decision_latency(time.monotonic() - _spec_decision_t0)
         if decision is None:
             if isinstance(decision_error, ModelCallError):
@@ -20838,6 +20874,8 @@ def _agent_turn(
                     forced, _forced_raw, _forced_error = _agent_generate_decision(
                         gen, finalize_prompt,
                     )
+                    if pre_model_context_rendered and _forced_raw:
+                        pre_model_context_response_observed = True
                     forced_final = str(forced.get("final") or "") if isinstance(forced, dict) else ""
                     if forced_final and not _AGENT_NEGATIVE_CLAIM_RE.search(forced_final):
                         return finish_final(forced_final)
@@ -21178,6 +21216,8 @@ def _agent_turn(
         final_decision, raw, final_error = _agent_generate_decision(
             gen, final_prompt, require_final=True,
         )
+        if pre_model_context_rendered and raw:
+            pre_model_context_response_observed = True
         if final_decision is None:
             if isinstance(final_error, ModelCallError):
                 if auto_checklist:
@@ -21877,7 +21917,7 @@ def _autopilot_evidence_has(output: str, tools) -> bool:
 
 
 def _autopilot_work_model(
-    run: dict, task: dict, prior: str
+    run: dict, task: dict, prior: str, *, strategy_memory=None,
 ) -> autopilot_controller.HostTaskResult | str:
     allowed = _autopilot_allowed_tools(run)
     prompt = (
@@ -21898,6 +21938,49 @@ def _autopilot_work_model(
         criteria="\n".join("- " + item for item in (run.get("criteria") or [])),
         prior=prior or "(none yet)",
     )
+    def pre_model_context(model, cloud, system, transcript, output_tokens, context_window):
+        # Hosted tiers do not expose a measured input window to this caller.
+        # Never assume the local model's window for an unrelated provider.
+        if cloud or not isinstance(context_window, int):
+            return ""
+        from sonder_runtime.application.context_planner import (
+            CONTEXT_SECTIONS,
+            ContextPlanner,
+            ModelContext,
+        )
+
+        # Byte counts bound the token cost of the actual first-turn text,
+        # including the generated tool inventory and mutable system profile.
+        # Reserve the model's output and host framing independently. Later
+        # tool observations use the agent's existing context handling.
+        system_cost = len(system.encode("utf-8"))
+        transcript_cost = len(transcript.encode("utf-8"))
+        framing = 256 + len(b"\n\nChoose the next tool call or final answer.")
+        remaining = context_window - output_tokens - framing - system_cost - transcript_cost
+        memory_budget = min(512, max(0, remaining))
+        if memory_budget < 160:
+            return ""
+        budgets = dict.fromkeys(CONTEXT_SECTIONS, 0)
+        budgets.update(stable_instructions=system_cost, recent_history=transcript_cost,
+                       memories=memory_budget)
+        plan = ContextPlanner().plan(
+            ModelContext(model, context_window, output_tokens + framing),
+            budgets, budgets,
+        )
+        kinds = {
+            "inspect": "inspect", "research": "retrieve", "implement": "patch",
+            "validate": "diagnose", "report": "diagnose",
+        }
+        recovery = strategy_memory.recovery_context(
+            str(run["id"]),
+            f"{task['id']}-attempt-{int(task['attempts'])}",
+            project_scope=str(run.get("project") or "run:" + str(run["id"])),
+            plan=plan, family=kinds.get(task.get("kind"), ""),
+            # No trusted filename exists in the Autopilot task schema.
+            language="",
+        )
+        return recovery.prompt_brief
+
     unsafe = unsafe_lab.active()
     # The run record is already fenced by the lease (every progress write is
     # conditional on ownership); this fences the task's *effects* the same
@@ -21921,6 +22004,8 @@ def _autopilot_work_model(
             tool_allowlist=allowed,
             tool_policy=_autopilot_tool_policy(run),
             return_host_receipt=True,
+            **({"pre_model_context": pre_model_context}
+               if strategy_memory is not None else {}),
         )
     return output
 
@@ -21951,13 +22036,18 @@ def _execute_autopilot(run_id: str, *, max_cycles=12, plan_only=False, request_o
     )
     heartbeat.start()
     try:
+        work_fn = (
+            (lambda run, task, prior: _autopilot_work_model(
+                run, task, prior, strategy_memory=strategy_memory,
+            )) if strategy_memory is not None else _autopilot_work_model
+        )
         return autopilot_controller.execute_run(
             run_id,
             owner_id,
             owner_pid=os.getpid(),
             request_owner=request_owner,
             plan_fn=_autopilot_plan_model,
-            work_fn=_autopilot_work_model,
+            work_fn=work_fn,
             review_fn=_autopilot_review_model,
             max_cycles=max_cycles,
             plan_only=plan_only,
@@ -24718,12 +24808,16 @@ def _codegen_outcome_comparable(errors) -> bool:
 
 
 def _codegen_critic_generation(prompt: str, *, tier: str, model: str,
-                               num_predict: int) -> str:
+                               num_predict: int, num_ctx: int | None = None,
+                               single_send: bool = False,
+                               timeout: int | None = None) -> str:
     """Call the host-resolved critic directly so failures remain exceptions."""
     cloud = _is_cloud_tier(tier, model)
     gen = _make_generate(
         model, "", 0.2, max(64, min(int(num_predict), 512)),
-        0 if cloud else _auto_model_context(model), cloud=cloud,
+        0 if cloud else num_ctx if num_ctx is not None else _auto_model_context(model),
+        cloud=cloud, think=False if single_send else None,
+        single_send=single_send, timeout=timeout,
     )
     try:
         return gen(prompt)
@@ -24731,6 +24825,32 @@ def _codegen_critic_generation(prompt: str, *, tier: str, model: str,
         if not cloud:
             with contextlib.suppress(Exception):
                 _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
+
+
+def _codegen_pinned_generation(prompt: str, *, model: str,
+                               num_predict: int, num_ctx: int,
+                               timeout: int | None = None) -> str:
+    """Dispatch exactly one pre-reserved local model call for active canaries."""
+    gen = _make_generate(
+        model, "", 0.2, max(64, num_predict), num_ctx,
+        think=False, single_send=True, timeout=timeout,
+    )
+    try:
+        return gen(prompt)
+    finally:
+        with contextlib.suppress(Exception):
+            _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
+
+
+def _codegen_observed_generation(prompt: str, *, model: str,
+                                 num_predict: int, num_ctx: int) -> str:
+    """Keep a typed provider result when durable memory refs entered a prompt."""
+    gen = _make_generate(model, "", 0.2, max(64, num_predict), num_ctx)
+    try:
+        return gen(prompt)
+    finally:
+        with contextlib.suppress(Exception):
+            _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
 
 
 @mcp.tool()
@@ -24816,21 +24936,107 @@ def codegen_build_loop(
     # Merely naming two tier aliases that resolve to one model does not qualify.
     repair_tiers = ()
     repair_models = ()
-    if tiers.strip() and attempt_limit >= 3:
-        resolved, _unavailable = _ensemble_targets(tiers)
-        if len(resolved) >= 2:
-            repair_tiers = (resolved[0][0], resolved[1][0])
-            repair_models = (resolved[0][1], resolved[1][1])
+    explicit_targets = ()
+    if tiers.strip():
+        explicit_targets, _unavailable = _ensemble_targets(tiers)
+        if attempt_limit >= 3 and len(explicit_targets) >= 2:
+            repair_tiers = (explicit_targets[0][0], explicit_targets[1][0])
+            repair_models = (explicit_targets[0][1], explicit_targets[1][1])
+    from sonder_runtime.application.context_planner import (
+        CONTEXT_SECTIONS,
+        ContextPlanner,
+        ModelContext,
+    )
+    from sonder_runtime.application.memory.strategy_memory import language_from_path
+    from sonder_runtime.application.strategy.codegen_result import (
+        CodegenCanaryStop,
+        render_codegen_canary_stop,
+    )
     from sonder_runtime.bootstrap.strategy import (
+        IsolatedCodegenBuild,
+        compose_isolated_codegen_build,
+        existing_strategy_trace,
         try_compose_strategy_memory,
+        try_configured_strategy_rollout,
         try_configured_strategy_trace,
     )
-    from sonder_runtime.bootstrap.strategy_observers import observe_codegen_build
+    from sonder_runtime.bootstrap.strategy_observers import (
+        codegen_attempt_id,
+        codegen_objective_digest,
+        observe_codegen_build,
+    )
+    from sonder_runtime.domain.strategy.models import (
+        FailureClass,
+        StrategyAction,
+        StrategyBudget,
+        StrategyUsage,
+    )
 
-    strategy_trace = try_configured_strategy_trace()
+    strategy_rollout = try_configured_strategy_rollout()
+    project_identity = os.path.normcase(os.path.realpath(project_dir))
+    scope_run_id = "codegen-scope-" + hashlib.sha256(
+        os.fsencode(project_identity),
+    ).hexdigest()
+    operation_id = "codegen-" + uuid.uuid4().hex
+    member_run_ids = tuple(
+        f"{operation_id}-file-{index}" for index in range(len(wanted))
+    )
+    canary_route = bool(explicit_targets) and (
+        bool(repair_tiers) or len(explicit_targets) == 1
+    ) and all(not _is_cloud_tier(tier, model)
+              for tier, model in explicit_targets[:2])
+    canary_route = canary_route and type(num_predict) is int and 1 <= num_predict <= 8192
+    active_operation = strategy_rollout.selected(scope_run_id) and canary_route
+    # A previous selected operation may have left uncertain project effects.
+    # Read its sealed guard even after an operator changes rollout to off.
+    try:
+        prior_trace = existing_strategy_trace()
+        if prior_trace is not None and prior_trace.scope_guard(scope_run_id) is not None:
+            return render_codegen_canary_stop(CodegenCanaryStop.PRIOR_EFFECT)
+    except Exception as error:  # noqa: BLE001 - absent seal cannot authorize a build
+        logging.getLogger(__name__).warning(
+            "codegen project guard unavailable: %s", type(error).__name__,
+        )
+        return render_codegen_canary_stop(CodegenCanaryStop.TRACE_UNAVAILABLE)
+    isolated_build = compose_isolated_codegen_build() if active_operation else None
+    if active_operation and not isinstance(isolated_build, IsolatedCodegenBuild):
+        return render_codegen_canary_stop(CodegenCanaryStop.ISOLATION_UNAVAILABLE)
+    strategy_trace = try_configured_strategy_trace(strategy_rollout)
+    if active_operation and strategy_trace is None:
+        return render_codegen_canary_stop(CodegenCanaryStop.TRACE_UNAVAILABLE)
     strategy_memory = try_compose_strategy_memory(
         strategy_trace, lambda: _application().unit_of_work,
     )
+    if active_operation:
+        try:
+            strategy_trace.acquire_scope_guard(
+                scope_run_id, operation_id,
+                objective_digest=hashlib.sha256(json.dumps(
+                    [project_identity, wanted, build_program, build_args_json],
+                    sort_keys=True, ensure_ascii=True,
+                ).encode("ascii")).hexdigest(),
+                member_run_ids=member_run_ids,
+            )
+        except Exception as error:  # noqa: BLE001 - no baseline build without a seal
+            logging.getLogger(__name__).warning(
+                "codegen project guard reservation failed: %s", type(error).__name__,
+            )
+            return render_codegen_canary_stop(CodegenCanaryStop.RESERVATION)
+    # The host bounds both the project and each candidate's paid phase. The
+    # isolated runner contract must honor the remaining timeout it receives.
+    operation_deadline = time.monotonic() + 900 if active_operation else None
+    attempt_deadline = None
+    attempt_wall_ceiling = max(1, (900 - 2 * 120) // attempt_limit)
+
+    def remaining_canary_seconds():
+        deadlines = [value for value in (operation_deadline, attempt_deadline)
+                     if value is not None]
+        if not deadlines:
+            return None
+        remaining = min(deadlines) - time.monotonic()
+        if remaining < 1.0:
+            raise TimeoutError("codegen canary wall deadline exhausted")
+        return max(1, int(remaining))
 
     # Set when a build fails to launch or is killed. Such a build says nothing
     # about the code, so its error list must never be scored against a real
@@ -24840,8 +25046,12 @@ def codegen_build_loop(
     build_state = {"ran": True, "exit_ok": True}
 
     def run_build():
-        out, exit_ok = _codegen_build(build_program, build_args_json, project_dir,
-                                      timeout, token, approval, extra_roots)
+        build = isolated_build.run if active_operation else _codegen_build
+        build_timeout = timeout if not active_operation else min(
+            timeout, remaining_canary_seconds(),
+        )
+        out, exit_ok = build(build_program, build_args_json, project_dir,
+                             build_timeout, token, approval, extra_roots)
         build_state["ran"] = codegen_loop.build_ran(out)
         build_state["exit_ok"] = exit_ok
         errors = codegen_loop.count_errors(out, error_regex)
@@ -24877,6 +25087,8 @@ def codegen_build_loop(
             return ""
 
     def write(name, content):
+        if active_operation:
+            remaining_canary_seconds()
         return file_ops.write_file(
             os.path.join(project_dir, name), content, mode="overwrite",
             extra_roots=extra_roots,
@@ -24885,18 +25097,66 @@ def codegen_build_loop(
         )
 
     rows = []
-    for name, spec in wanted:
-        strategy_run_id = "codegen-" + uuid.uuid4().hex
+    for file_index, (name, spec) in enumerate(wanted):
+        strategy_run_id = (
+            member_run_ids[file_index] if active_operation else "codegen-" + uuid.uuid4().hex
+        )
+        # A live canary needs a known single-model generation route so a sealed
+        # reservation can cover every paid request before dispatch. The
+        # default multi-model ensemble has variable fanout and stays observed.
+        active_canary = active_operation
+        canary_budget = None
+        generation_context_window = critic_context_window = alternate_context_window = 0
+        generation_token_ceiling = critic_token_ceiling = alternate_token_ceiling = 0
+        if active_canary:
+            base_model = repair_models[0] if repair_models else explicit_targets[0][1]
+            generation_context_window = max(1, int(_auto_model_context(base_model)))
+            generation_token_ceiling = generation_context_window + max(64, num_predict)
+            if repair_models:
+                critic_context_window = max(1, int(_auto_model_context(repair_models[1])))
+                critic_token_ceiling = critic_context_window + max(64, min(num_predict, 512))
+                alternate_context_window = critic_context_window
+                alternate_token_ceiling = alternate_context_window + max(64, num_predict)
+            canary_budget = StrategyBudget(
+                attempts=attempt_limit, model_calls=2 * attempt_limit,
+                tool_calls=2 * attempt_limit, verifier_calls=attempt_limit,
+                tokens=attempt_limit * (
+                    max(generation_token_ceiling, alternate_token_ceiling)
+                    + critic_token_ceiling
+                ),
+                critic_calls=int(bool(repair_tiers)),
+                strategy_switches=int(bool(repair_tiers)),
+                top_tier_calls=2 * attempt_limit,
+                wall_seconds=attempt_wall_ceiling * attempt_limit,
+            )
+        canary_observation_failed = False
+
+        def canary_actions(number, *, comparable, rejected=False, unresolved=False,
+                           critic_used=False, selected=active_canary):
+            if not selected:
+                return None
+            if number >= attempt_limit or not comparable or rejected or unresolved:
+                return (StrategyAction.INSPECT,)
+            actions = [StrategyAction.REPAIR, StrategyAction.INSPECT]
+            if repair_tiers and number == 2:
+                actions.append(StrategyAction.CRITIC)
+            if repair_tiers and number == 3 and critic_used:
+                actions.append(StrategyAction.SWITCH_MODEL)
+            return tuple(actions)
 
         def observe_candidate(attempt_number, candidate, before, after, *,
                               before_complete, after_complete, route,
                               critic_used=False, rotated=False, rejected=False,
-                              unresolved_effects=False,
-                              run_id=strategy_run_id, file_name=name, file_spec=spec):
+                              unresolved_effects=False, no_progress=False,
+                              reserved_usage=None, reserved_action=None,
+                              run_id=strategy_run_id, file_name=name, file_spec=spec,
+                              selected=active_canary, budget=canary_budget):
+            nonlocal canary_observation_failed
             if strategy_trace is None:
-                return
+                canary_observation_failed = selected
+                return None
             try:
-                observe_codegen_build(
+                return observe_codegen_build(
                     strategy_trace, run_id=run_id, file_name=file_name,
                     project_dir=project_dir, spec=file_spec, build_program=build_program,
                     attempt_number=attempt_number, attempt_limit=attempt_limit,
@@ -24907,16 +25167,33 @@ def codegen_build_loop(
                     rejected=rejected,
                     unresolved_effects=unresolved_effects,
                     memory_service=strategy_memory,
+                    no_progress=no_progress,
+                    available_actions=canary_actions(
+                        attempt_number, comparable=after_complete,
+                        rejected=rejected, unresolved=unresolved_effects,
+                        critic_used=critic_used,
+                    ),
+                    reserved_usage=reserved_usage, reserved_budget=budget,
+                    reserved_action=reserved_action,
                 )
             except Exception as error:  # noqa: BLE001 - optional observer cannot change the build
+                canary_observation_failed = selected
                 logging.getLogger(__name__).warning(
                     "codegen strategy observation failed: %s", type(error).__name__,
                 )
+                return None
 
         existing = read(name)
-        errors = run_build()
+        try:
+            errors = run_build()
+        except TimeoutError:
+            if not active_canary:
+                raise
+            return render_codegen_canary_stop(CodegenCanaryStop.BUILD_UNCERTAIN)
         observed_errors = errors
         observed_complete = build_state["ran"] and _codegen_outcome_comparable(errors)
+        if active_canary and not observed_complete:
+            return render_codegen_canary_stop(CodegenCanaryStop.BUILD_UNCERTAIN)
         mine = [e for e in errors if name in e]
         # "No errors named this file" only means "clean" if the compiler
         # actually reached this file. Under a masked build it reached nothing,
@@ -24950,8 +25227,13 @@ def codegen_build_loop(
         prior_progress = "initial build"
         repair_notes = []
         critic_attempted = False
+        canary_next_action = StrategyAction.REPAIR
 
         for attempt in range(1, attempt_limit + 1):
+            if active_canary:
+                attempt_deadline = min(
+                    operation_deadline, time.monotonic() + attempt_wall_ceiling,
+                )
             prompt = "%s\n%s\nOutput only the contents of %s. Code only." % (
                 codegen_loop.dependency_brief(siblings), spec, name,
             )
@@ -24959,11 +25241,117 @@ def codegen_build_loop(
                 prompt += codegen_loop.repair_brief(
                     prior_candidate, prior_diagnostics, prior_progress,
                 )
-            generation_tiers = repair_tiers[0] if repair_tiers else tiers
-            if (
-                repair_tiers and attempt == 3 and prior_candidate is not None
-                and prior_diagnostics and _codegen_outcome_comparable(prior_diagnostics)
+            memory_exposed = False
+            memory_model = ""
+            memory_window = 0
+            critic_this_attempt = bool(
+                repair_tiers and prior_candidate is not None and prior_diagnostics
+                and _codegen_outcome_comparable(prior_diagnostics)
+                and ((active_canary and canary_next_action is StrategyAction.CRITIC)
+                     or (not active_canary and attempt == 3))
+            )
+            rotated_this_attempt = bool(
+                repair_tiers and
+                ((active_canary and canary_next_action is StrategyAction.SWITCH_MODEL)
+                 or (not active_canary and attempt == 4 and critic_attempted))
+            )
+            # Only a host-resolved single local route has a knowable input
+            # window. Count the full prompt in bytes as a conservative token
+            # ceiling, including sibling APIs and prior compiler evidence.
+            # Leave space for the bounded critic suggestion before requesting
+            # any advisory memory references.
+            if strategy_memory is not None and prior_candidate is not None and (
+                active_canary or len(explicit_targets) == 1
+            ) and prior_diagnostics and _codegen_outcome_comparable(prior_diagnostics):
+                memory_model = (
+                    repair_models[1] if rotated_this_attempt else
+                    repair_models[0] if repair_models else explicit_targets[0][1]
+                )
+                memory_tier = (
+                    repair_tiers[1] if rotated_this_attempt else
+                    repair_tiers[0] if repair_tiers else explicit_targets[0][0]
+                )
+                if not _is_cloud_tier(memory_tier, memory_model):
+                    memory_window = int(_platform_local_model_options(
+                        0.2, max(64, num_predict), _auto_model_context(memory_model),
+                        native_context=context_policy.native, environ=os.environ,
+                    )["num_ctx"])
+                    output_reserve = max(64, num_predict)
+                    prompt_cost = len(prompt.encode("utf-8")) + (
+                        18150 if critic_this_attempt else 0
+                    )
+                    available_memory = memory_window - output_reserve - prompt_cost - 64
+                    if available_memory >= 320:
+                        # Recovery rendering may use two bytes per planned
+                        # memory token, so reserve that full byte envelope.
+                        memory_tokens = min(512, available_memory // 2)
+                        requests = dict.fromkeys(CONTEXT_SECTIONS, 0)
+                        requests["working_files"] = prompt_cost
+                        requests["memories"] = memory_tokens
+                        try:
+                            plan = ContextPlanner().plan(
+                                ModelContext(memory_model, memory_window, output_reserve),
+                                requests, requests,
+                            )
+                            recovery = strategy_memory.recovery_context(
+                                strategy_run_id, codegen_attempt_id(name, attempt),
+                                project_scope=project_dir, plan=plan,
+                                failure_class=FailureClass.BUILD_FAILURE,
+                                family="patch", language=language_from_path(name),
+                            )
+                            prompt += recovery.prompt_brief
+                            memory_exposed = bool(recovery.prompt_brief)
+                        except Exception as error:  # noqa: BLE001 - canary must not misattribute prior refs
+                            logging.getLogger(__name__).warning(
+                                "codegen memory selection failed: %s", type(error).__name__,
+                            )
+                            if active_canary:
+                                return render_codegen_canary_stop(CodegenCanaryStop.RESULT_UNSEALED)
+            if active_canary and (
+                canary_next_action not in {
+                    StrategyAction.REPAIR, StrategyAction.CRITIC,
+                    StrategyAction.SWITCH_MODEL,
+                }
+                or (canary_next_action is StrategyAction.CRITIC and not critic_this_attempt)
+                or (canary_next_action is StrategyAction.SWITCH_MODEL and not rotated_this_attempt)
             ):
+                note += f"; strategy canary paused before attempt {attempt}"
+                break
+            generation_tiers = (
+                repair_tiers[1] if rotated_this_attempt else
+                repair_tiers[0] if repair_tiers else tiers
+            )
+            reserved_usage = None
+            if active_canary:
+                reserved_usage = StrategyUsage(
+                    attempts=1, model_calls=1 + int(critic_this_attempt),
+                    tool_calls=2, verifier_calls=1,
+                    tokens=(alternate_token_ceiling if rotated_this_attempt else
+                            generation_token_ceiling) + (
+                        critic_token_ceiling if critic_this_attempt else 0
+                    ),
+                    critic_calls=int(critic_this_attempt),
+                    strategy_switches=int(rotated_this_attempt),
+                    top_tier_calls=1 + int(critic_this_attempt),
+                    wall_seconds=attempt_wall_ceiling,
+                )
+                try:
+                    if strategy_trace is None:
+                        raise RuntimeError("sealed strategy trace unavailable")
+                    strategy_trace.reserve_next(
+                        strategy_run_id, codegen_attempt_id(name, attempt),
+                        objective_digest=codegen_objective_digest(
+                            project_dir, spec, build_program,
+                        ),
+                        action=canary_next_action, usage=reserved_usage,
+                        budget=canary_budget,
+                    )
+                except Exception as error:  # noqa: BLE001 - no model dispatch without a seal
+                    logging.getLogger(__name__).warning(
+                        "codegen canary reservation failed: %s", type(error).__name__,
+                    )
+                    return render_codegen_canary_stop(CodegenCanaryStop.RESERVATION)
+            if critic_this_attempt:
                 import solver
 
                 critic_attempted = True
@@ -24974,9 +25362,14 @@ def codegen_build_loop(
                 try:
                     critique = solver.scoped_critic_review(
                         critic_prompt,
-                        lambda scoped: _codegen_critic_generation(
+                        lambda scoped, _active=active_canary,
+                               _context=critic_context_window: _codegen_critic_generation(
                             scoped, tier=repair_tiers[1], model=repair_models[1],
                             num_predict=num_predict,
+                            **({"num_ctx": _context} if _active else {}),
+                            single_send=_active,
+                            **({"timeout": remaining_canary_seconds()}
+                               if _active else {}),
                         ),
                     )
                 except ModelCallError as exc:
@@ -24993,28 +25386,66 @@ def codegen_build_loop(
                     repair_notes.append("attempt 3 used scoped critic")
                 else:
                     repair_notes.append("attempt 3 critic unavailable")
-                generation_tiers = repair_tiers[0]
-            elif repair_tiers and attempt == 4 and critic_attempted:
-                generation_tiers = repair_tiers[1]
+            elif rotated_this_attempt:
                 repair_notes.append("attempt 4 used alternate model tier")
-            reply = ensemble_answer(
-                prompt, tiers=generation_tiers, num_predict=num_predict, mode="code",
-            )
+            if active_canary:
+                try:
+                    reply = _codegen_pinned_generation(
+                        prompt,
+                        model=(repair_models[1] if rotated_this_attempt else
+                               repair_models[0] if repair_models else explicit_targets[0][1]),
+                        num_predict=num_predict,
+                        num_ctx=(alternate_context_window if rotated_this_attempt else
+                                 generation_context_window),
+                        timeout=remaining_canary_seconds(),
+                    )
+                except ModelCallError as error:
+                    if error.kind == "cancelled":
+                        raise
+                    return render_codegen_canary_stop(CodegenCanaryStop.MODEL_FAILURE)
+                except Exception:  # noqa: BLE001 - pending liability must remain after failure
+                    return render_codegen_canary_stop(CodegenCanaryStop.MODEL_FAILURE)
+            else:
+                if memory_exposed:
+                    try:
+                        reply = _codegen_observed_generation(
+                            prompt, model=memory_model, num_predict=num_predict,
+                            num_ctx=memory_window,
+                        )
+                    except ModelCallError as error:
+                        if error.kind == "cancelled":
+                            raise
+                        # No generation response: the durable memory selection
+                        # remains pending and cannot count as a failed reuse.
+                        return _format_model_call_error(error)
+                else:
+                    reply = ensemble_answer(
+                        prompt, tiers=generation_tiers, num_predict=num_predict, mode="code",
+                    )
             code = codegen_loop.strip_code(reply)
             code, hits = codegen_loop.apply_slips(code, slips)
 
             if codegen_loop.shrink_rejected(existing, code):
-                observe_candidate(
+                decision = observe_candidate(
                     attempt, code, observed_errors, observed_errors,
                     before_complete=observed_complete,
                     after_complete=observed_complete, route=generation_tiers,
-                    critic_used=bool(repair_tiers and attempt == 3 and critic_attempted),
-                    rotated=bool(repair_tiers and attempt == 4 and critic_attempted),
-                    rejected=True,
+                    critic_used=critic_this_attempt, rotated=rotated_this_attempt,
+                    rejected=True, reserved_usage=reserved_usage,
+                    reserved_action=canary_next_action if active_canary else None,
                 )
+                if canary_observation_failed:
+                    return render_codegen_canary_stop(CodegenCanaryStop.RESULT_UNSEALED)
                 note = "attempt %d rejected: shrank to %d%% of the original" % (
                     attempt, 100 * len(code) // max(1, len(existing)),
                 )
+                if active_canary and decision.action not in {
+                    StrategyAction.REPAIR, StrategyAction.CRITIC, StrategyAction.SWITCH_MODEL,
+                }:
+                    note += "; strategy canary paused"
+                    break
+                if active_canary:
+                    canary_next_action = decision.action
                 continue
             try:
                 write(name, code)
@@ -25023,21 +25454,39 @@ def codegen_build_loop(
                     attempt, code, observed_errors, observed_errors,
                     before_complete=observed_complete,
                     after_complete=False, route=generation_tiers,
-                    critic_used=bool(repair_tiers and attempt == 3 and critic_attempted),
-                    rotated=bool(repair_tiers and attempt == 4 and critic_attempted),
-                    unresolved_effects=True,
+                    critic_used=critic_this_attempt, rotated=rotated_this_attempt,
+                    unresolved_effects=True, reserved_usage=reserved_usage,
+                    reserved_action=canary_next_action if active_canary else None,
                 )
                 return "ERROR: could not write %s: %s" % (name, exc)
 
-            attempt_errors = run_build()
+            try:
+                attempt_errors = run_build()
+            except TimeoutError:
+                if not active_canary:
+                    raise
+                return render_codegen_canary_stop(CodegenCanaryStop.BUILD_UNCERTAIN)
             after_complete = build_state["ran"] and _codegen_outcome_comparable(attempt_errors)
-            observe_candidate(
+            no_progress = bool(
+                attempt >= 2 and observed_complete and after_complete
+                and prior_diagnostics and
+                verification_progress.outcome_fingerprint(observed_errors)
+                == verification_progress.outcome_fingerprint(attempt_errors)
+            )
+            decision = observe_candidate(
                 attempt, code, observed_errors, attempt_errors,
                 before_complete=observed_complete,
                 after_complete=after_complete, route=generation_tiers,
-                critic_used=bool(repair_tiers and attempt == 3 and critic_attempted),
-                rotated=bool(repair_tiers and attempt == 4 and critic_attempted),
+                critic_used=critic_this_attempt, rotated=rotated_this_attempt,
+                no_progress=no_progress, reserved_usage=reserved_usage,
+                reserved_action=canary_next_action if active_canary else None,
             )
+            if canary_observation_failed:
+                return render_codegen_canary_stop(CodegenCanaryStop.RESULT_UNSEALED)
+            if active_canary and not after_complete:
+                return render_codegen_canary_stop(CodegenCanaryStop.BUILD_UNCERTAIN)
+            if active_canary:
+                canary_next_action = decision.action
             observed_errors, observed_complete = attempt_errors, after_complete
             if not build_state["ran"]:
                 # Nothing was compiled, so this attempt is not evidence about
@@ -25065,6 +25514,12 @@ def codegen_build_loop(
             prior_candidate = code
             prior_diagnostics = attempt_errors
             prior_score = attempt_score if comparable else None
+            if active_canary and canary_next_action not in {
+                StrategyAction.REPAIR, StrategyAction.CRITIC,
+                StrategyAction.SWITCH_MODEL,
+            }:
+                note += f"; strategy canary paused after attempt {attempt}"
+                break
             if not comparable:
                 # A host placeholder, truncated output, or a masked count
                 # can look identical while the real errors change; it is not
@@ -25101,11 +25556,29 @@ def codegen_build_loop(
                 write(name, best_code)
             except Exception as exc:
                 return "ERROR: could not restore %s: %s" % (name, exc)
+        attempt_deadline = None
         if repair_notes:
             note += "; " + "; ".join(repair_notes)
         rows.append({"name": name, "note": note})
 
-    final = run_build()
+    try:
+        final = run_build()
+    except TimeoutError:
+        if not active_operation:
+            raise
+        return render_codegen_canary_stop(CodegenCanaryStop.BUILD_UNCERTAIN)
+    if active_operation:
+        if not build_state["ran"] or not _codegen_outcome_comparable(final):
+            return render_codegen_canary_stop(CodegenCanaryStop.BUILD_UNCERTAIN)
+        try:
+            strategy_trace.release_scope_guard(
+                scope_run_id, operation_id, member_run_ids=member_run_ids,
+            )
+        except Exception as error:  # noqa: BLE001 - project completion remains pending
+            logging.getLogger(__name__).warning(
+                "codegen project completion failed to seal: %s", type(error).__name__,
+            )
+            return render_codegen_canary_stop(CodegenCanaryStop.PROJECT_UNSEALED)
     report = codegen_loop.format_report(
         rows, final,
         ok=not final and build_state["ran"] and build_state["exit_ok"],

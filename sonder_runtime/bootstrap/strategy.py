@@ -14,6 +14,7 @@ import hashlib
 import logging
 import os
 import stat
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,23 @@ from sonder_runtime.application.strategy.tracing import StrategyTraceService
 from sonder_runtime.platform.paths import state_path
 
 _LOG = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class IsolatedCodegenBuild:
+    """Host-owned runner whose process cannot read strategy key or checkpoints.
+
+    Only a concrete lower-privilege build adapter may construct this for
+    production. A caller-provided command, option, or environment value is not
+    evidence of that filesystem separation.
+    """
+
+    run: Callable[..., tuple[str, bool]]
+
+
+def compose_isolated_codegen_build() -> IsolatedCodegenBuild | None:
+    """No supported isolated Codegen build adapter is installed yet."""
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +153,21 @@ def compose_strategy_trace(*, db_path: str | Path | None = None,
     key = _private_key(key_file)
     repository = SQLiteRuntimeCheckpointRepository(database, seal_key=key)
     return StrategyTraceService(repository)
+
+
+def existing_strategy_trace() -> StrategyTraceService | None:
+    """Open prior sealed state for effect guards, even when rollout is now off.
+
+    Absence does not create a new key or database. An existing database with a
+    missing key is deliberately left to the strict composer to reject.
+    """
+    database = Path(state_path("strategy/checkpoints.db", "SONDER_STRATEGY_CHECKPOINT_DB"))
+    key_file = Path(state_path("strategy-private/checkpoint.key"))
+    if not os.path.lexists(database):
+        if os.path.lexists(key_file):
+            raise CheckpointError("strategy seal key exists without checkpoint database")
+        return None
+    return compose_strategy_trace(db_path=database)
 
 
 def configured_strategy_trace(rollout: StrategyRollout | None = None) -> StrategyTraceService | None:
@@ -259,7 +292,14 @@ def compose_fleet_strategy_observer(trace, memory, rollout: StrategyRollout, *,
     return observe
 
 
-__all__ = ["StrategyRollout", "compose_fleet_strategy_observer", "compose_strategy_trace",
-           "compose_workbench_strategy_observer", "configured_strategy_rollout",
-           "configured_strategy_trace", "try_compose_strategy_memory",
-           "try_configured_strategy_rollout", "try_configured_strategy_trace"]
+__all__ = [
+    "StrategyRollout",
+    "compose_fleet_strategy_observer",
+    "compose_strategy_trace",
+    "compose_workbench_strategy_observer",
+    "configured_strategy_rollout",
+    "configured_strategy_trace",
+    "try_compose_strategy_memory",
+    "try_configured_strategy_rollout",
+    "try_configured_strategy_trace",
+]

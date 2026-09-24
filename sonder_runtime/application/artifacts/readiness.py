@@ -121,11 +121,11 @@ class ArtifactReadiness:
             self.verifier_receipt and not _SHA256.fullmatch(self.verifier_receipt)
         ):
             raise ValueError("artifact readiness verifier receipt is invalid")
-        if expected_verifier_receipt is not None:
-            if (not isinstance(expected_verifier_receipt, str)
+        if expected_verifier_receipt is not None and (
+                not isinstance(expected_verifier_receipt, str)
                 or not _SHA256.fullmatch(expected_verifier_receipt)
                 or self.verifier_receipt != expected_verifier_receipt):
-                raise ValueError("artifact readiness verifier receipt mismatch")
+            raise ValueError("artifact readiness verifier receipt mismatch")
         if require_verifier_receipt and not self.verifier_receipt:
             raise ValueError("artifact readiness verifier receipt is missing")
         if not isinstance(self.timestamp, datetime) or self.timestamp.tzinfo is None:

@@ -6,20 +6,29 @@ independent grader for a candidate with access to the expected actions.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from enum import Enum
 import hashlib
 import json
 import re
+from collections.abc import Callable, Mapping
+from dataclasses import asdict, dataclass
+from enum import Enum
 from types import MappingProxyType
-from typing import Callable, Mapping
 
 from sonder_runtime.application.strategy.tracing import StrategyTraceService
 from sonder_runtime.domain.strategy.models import (
-    StrategyAction, StrategyAttempt, StrategyBudget, StrategyError, StrategyUsage,
+    StrategyAction,
+    StrategyAttempt,
+    StrategyBudget,
+    StrategyError,
+    StrategyUsage,
 )
-from .proposal_lifecycle import EvaluationDimension, EvaluationMode, EvaluationResult, EvaluationSuite
 
+from .proposal_lifecycle import (
+    EvaluationDimension,
+    EvaluationMode,
+    EvaluationResult,
+    EvaluationSuite,
+)
 
 _SHA256 = re.compile(r"[a-f0-9]{64}\Z")
 _POLICY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
@@ -290,7 +299,11 @@ def compare_strategy_ablations(left: EvaluationResult, right: EvaluationResult) 
 
 
 __all__ = [
-    "StrategyEvidenceClass", "StrategyEvaluationIdentity", "StrategyHeldoutStep", "StrategyHeldoutCase",
+    "StrategyEvaluationIdentity",
+    "StrategyEvidenceClass",
+    "StrategyHeldoutCase",
+    "StrategyHeldoutStep",
+    "compare_strategy_ablations",
+    "evaluate_heldout_strategy_case",
     "strategy_evidence_class",
-    "evaluate_heldout_strategy_case", "compare_strategy_ablations",
 ]

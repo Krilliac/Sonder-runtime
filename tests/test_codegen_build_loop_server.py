@@ -6,15 +6,21 @@ guard that needs the current file silently no-opped), and it derived
 BUILD SUCCEEDED from "no line matched the error regex" while throwing away
 the build process's own exit status.
 """
+import hashlib
 import sqlite3
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
+
 import server
+from sonder_runtime.adapters.observability import activity_tracker
 from sonder_runtime.adapters.unit_of_work import UnitOfWorkAdapter
+from sonder_runtime.application.strategy.tracing import StrategyTraceService
+from sonder_runtime.bootstrap import strategy as strategy_bootstrap
 from sonder_runtime.bootstrap.strategy import compose_strategy_trace
 from sonder_runtime.domain.strategy.models import FailureClass
+from sonder_runtime.platform.paths import state_path
 
 
 def _build(ok=True, stdout="", stderr="", timed_out=False):
@@ -49,6 +55,341 @@ def _enable_strategy(monkeypatch, home):
             unit_of_work=lambda: UnitOfWorkAdapter(str(home / "memory.db")),
         ),
     )
+
+
+def _enable_codegen_canary(monkeypatch, tmp_path):
+    _enable_strategy(monkeypatch, tmp_path / "home")
+    monkeypatch.setenv("SONDER_STRATEGY_MODE", "canary")
+    monkeypatch.setenv("SONDER_STRATEGY_CANARY_PERCENT", "100")
+    monkeypatch.setattr(server, "_ensemble_targets", lambda _tiers: ([
+        ("code", "local-codegen-test"),
+    ], []))
+    monkeypatch.setattr(server, "_auto_model_context", lambda _model: 2048)
+    # Exercise the canary host path with a test-only runner. Production has no
+    # lower-privilege build authority and refuses this rollout before a build.
+    monkeypatch.setattr(
+        strategy_bootstrap, "compose_isolated_codegen_build",
+        lambda: strategy_bootstrap.IsolatedCodegenBuild(server._codegen_build),
+    )
+
+
+def _project_guard(tmp_path):
+    scope = "codegen-scope-" + hashlib.sha256(
+        str(tmp_path.resolve()).encode(),
+    ).hexdigest()
+    return compose_strategy_trace().scope_guard(scope)
+
+
+def _canary_call(tmp_path, files_json='{"main.c": "an entry point"}'):
+    return server.codegen_build_loop(
+        str(tmp_path), files_json, "build", tiers="code", attempts=2,
+    )
+
+
+def test_codegen_selected_canary_seals_one_attempt_and_releases_project(monkeypatch, tmp_path):
+    fixed = "int main(void) { return 0; }"
+    build_calls = []
+
+    def build(*args, **kwargs):
+        build_calls.append(1)
+        source = tmp_path / "main.c"
+        return _build(ok=source.exists() and source.read_text().strip() == fixed,
+                      stdout="" if source.exists() and source.read_text().strip() == fixed
+                      else "main.c:1: error: missing entry point")
+
+    _prepare(monkeypatch, tmp_path, build)
+    _enable_codegen_canary(monkeypatch, tmp_path)
+    sends = []
+
+    def generate(*args, **kwargs):
+        guard = _project_guard(tmp_path)
+        assert guard is not None
+        member = guard["member_run_ids"][0]
+        usage = compose_strategy_trace().pending(member)["usage"]
+        assert usage["model_calls"] == 1
+        assert usage["wall_seconds"] == 330
+        assert 1 <= kwargs["timeout"] <= 330
+        sends.append(1)
+        return fixed
+
+    monkeypatch.setattr(server, "_codegen_pinned_generation", generate)
+    report = _canary_call(tmp_path)
+    assert "BUILD SUCCEEDED" in report
+    assert len(sends) == 1
+    assert len(build_calls) == 3
+    assert _project_guard(tmp_path) is None
+
+
+def test_codegen_selected_canary_dispatches_critic_and_rotation_within_budget(monkeypatch, tmp_path):
+    broken = "int main(void) { return missing; }"
+    fixed = "int main(void) { return 0; }"
+
+    def build(*args, **kwargs):
+        source = tmp_path / "main.c"
+        green = source.exists() and source.read_text().strip() == fixed
+        return _build(ok=green, stdout="" if green else "main.c:1: error: missing name")
+
+    _prepare(monkeypatch, tmp_path, build)
+    _enable_codegen_canary(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        server, "_ensemble_targets",
+        lambda _tiers: ([("code", "coder"), ("reasoning", "critic")], []),
+    )
+    routes = []
+    critiques = []
+
+    def generate(prompt, *, model, **kwargs):
+        routes.append(model)
+        assert _project_guard(tmp_path) is not None
+        return fixed if model == "critic" else broken
+
+    def critique(prompt, **kwargs):
+        critiques.append(kwargs["model"])
+        assert kwargs["single_send"] is True
+        return "Replace the missing identifier with a constant."
+
+    monkeypatch.setattr(server, "_codegen_pinned_generation", generate)
+    monkeypatch.setattr(server, "_codegen_critic_generation", critique)
+    report = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build",
+        tiers="code,reasoning", attempts=4,
+    )
+    assert "BUILD SUCCEEDED" in report
+    assert routes == ["coder", "coder", "coder", "critic"]
+    assert critiques == ["critic"]
+    assert _project_guard(tmp_path) is None
+
+
+def test_codegen_production_canary_requires_isolated_build_before_any_effect(monkeypatch, tmp_path):
+    _prepare(monkeypatch, tmp_path, lambda *a, **k: pytest.fail("build dispatched"))
+    _enable_codegen_canary(monkeypatch, tmp_path)
+    monkeypatch.setattr(strategy_bootstrap, "compose_isolated_codegen_build", lambda: None)
+    monkeypatch.setattr(server, "_codegen_pinned_generation", lambda *a, **k: pytest.fail("model sent"))
+    assert "isolated build authority unavailable" in _canary_call(tmp_path)
+
+
+def test_codegen_missing_existing_checkpoint_db_blocks_even_with_rollout_off(monkeypatch, tmp_path):
+    _prepare(monkeypatch, tmp_path, lambda *a, **k: pytest.fail("build dispatched"))
+    _enable_strategy(monkeypatch, tmp_path / "home")
+    trace = compose_strategy_trace()
+    trace.acquire_scope_guard(
+        "scope-1", "owner-1", objective_digest="a" * 64,
+        member_run_ids=("member-1",),
+    )
+    Path(state_path("strategy/checkpoints.db", "SONDER_STRATEGY_CHECKPOINT_DB")).unlink()
+    monkeypatch.setenv("SONDER_STRATEGY_MODE", "off")
+    assert "sealed strategy state unavailable" in _canary_call(tmp_path)
+
+
+def test_codegen_repair_uses_bounded_durable_strategy_memory_before_model(monkeypatch, tmp_path):
+    broken = "int main(void) { return missing; }"
+    fixed = "int main(void) { return 0; }"
+
+    def build(*args, **kwargs):
+        source = tmp_path / "main.c"
+        green = source.exists() and source.read_text().strip() == fixed
+        return _build(ok=green, stdout="" if green else "main.c:1: error: missing")
+
+    _prepare(monkeypatch, tmp_path, build)
+    _enable_strategy(monkeypatch, tmp_path / "home")
+    monkeypatch.setattr(server, "_ensemble_targets", lambda _tiers: ([
+        ("code", "local-codegen-test"),
+    ], []))
+    monkeypatch.setattr(server, "_auto_model_context", lambda _model: 8192)
+    prompts = []
+
+    def generate(prompt, **kwargs):
+        prompts.append(prompt)
+        return fixed if "past_strategy_observations" in prompt else broken
+
+    monkeypatch.setattr(server, "ensemble_answer", generate)
+    monkeypatch.setattr(server, "_codegen_observed_generation", generate)
+    report = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build",
+        tiers="code", attempts=2, num_predict=128,
+    )
+    assert "BUILD SUCCEEDED" in report
+    assert len(prompts) == 2
+    assert "past_strategy_observations" not in prompts[0]
+    assert "past_strategy_observations" in prompts[1]
+    assert "advisory_only" in prompts[1]
+    assert broken in prompts[1] and "main.c:1: error: missing" in prompts[1]
+
+
+def test_codegen_memory_selection_stays_unattributed_without_model_response(monkeypatch, tmp_path):
+    _prepare(monkeypatch, tmp_path, lambda *a, **k: _build(
+        ok=False, stdout="main.c:1: error: missing",
+    ))
+    home = tmp_path / "home"
+    _enable_strategy(monkeypatch, home)
+    monkeypatch.setattr(server, "_ensemble_targets", lambda _tiers: ([
+        ("code", "local-codegen-test"),
+    ], []))
+    monkeypatch.setattr(server, "_auto_model_context", lambda _model: 8192)
+    monkeypatch.setattr(server, "ensemble_answer", lambda *a, **k: "int x = missing;")
+    def fail_after_selection(prompt, **kwargs):
+        assert "past_strategy_observations" in prompt
+        raise server.ModelCallError("transport", "provider unavailable")
+
+    monkeypatch.setattr(server, "_codegen_observed_generation", fail_after_selection)
+    report = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build",
+        tiers="code", attempts=2, num_predict=128,
+    )
+    assert "provider unavailable" in report
+    with sqlite3.connect(home / "memory.db") as connection:
+        rows = connection.execute(
+            "SELECT outcome FROM strategy_memory_selection",
+        ).fetchall()
+    assert rows == [(None,)]
+
+
+def test_codegen_model_failure_blocks_alias_and_rollout_off_before_build(monkeypatch, tmp_path):
+    build_calls = []
+    _prepare(monkeypatch, tmp_path, lambda *a, **k: (
+        build_calls.append(1) or _build(ok=False, stdout="main.c:1: error: broken")
+    ))
+    _enable_codegen_canary(monkeypatch, tmp_path)
+    sends = []
+
+    def failed_send(*args, **kwargs):
+        sends.append(1)
+        raise server.ModelCallError("transport", "lost after dispatch")
+
+    monkeypatch.setattr(server, "_codegen_pinned_generation", failed_send)
+    assert "strategy canary paused" in _canary_call(tmp_path)
+    assert len(sends) == 1
+    assert len(build_calls) == 1
+    assert _project_guard(tmp_path) is not None
+    monkeypatch.setenv("SONDER_STRATEGY_MODE", "off")
+    alias = str(tmp_path / ".")
+    report = server.codegen_build_loop(
+        alias, '{"other.c": "another file"}', "build", tiers="code",
+    )
+    assert "prior project effect" in report
+    assert len(sends) == 1
+    assert len(build_calls) == 1
+
+
+def test_codegen_candidate_build_crash_keeps_pending_and_project_guard(monkeypatch, tmp_path):
+    calls = []
+
+    def build(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise KeyboardInterrupt("crash after model before verifier")
+        return _build(ok=False, stdout="main.c:1: error: broken")
+
+    _prepare(monkeypatch, tmp_path, build)
+    _enable_codegen_canary(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "_codegen_pinned_generation", lambda *a, **k: "int x = 1;")
+    with pytest.raises(KeyboardInterrupt):
+        _canary_call(tmp_path)
+    guard = _project_guard(tmp_path)
+    assert guard is not None
+    assert compose_strategy_trace().pending(guard["member_run_ids"][0]) is not None
+    monkeypatch.setenv("SONDER_STRATEGY_MODE", "off")
+    assert "prior project effect" in _canary_call(tmp_path)
+    assert len(calls) == 2
+
+
+def test_codegen_final_build_timeout_keeps_project_guard(monkeypatch, tmp_path):
+    fixed = "int main(void) { return 0; }"
+    calls = []
+
+    def build(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 3:
+            return _build(ok=False, timed_out=True)
+        return _build(ok=len(calls) == 2,
+                      stdout="" if len(calls) == 2 else "main.c:1: error: broken")
+
+    _prepare(monkeypatch, tmp_path, build)
+    _enable_codegen_canary(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "_codegen_pinned_generation", lambda *a, **k: fixed)
+    assert "build outcome needs host inspection" in _canary_call(tmp_path)
+    assert _project_guard(tmp_path) is not None
+    monkeypatch.setenv("SONDER_STRATEGY_MODE", "off")
+    assert "prior project effect" in _canary_call(tmp_path)
+    assert len(calls) == 3
+
+
+def test_codegen_baseline_timeout_blocks_model_and_keeps_guard(monkeypatch, tmp_path):
+    calls = []
+    _prepare(monkeypatch, tmp_path, lambda *a, **k: (
+        calls.append(1) or _build(ok=False, timed_out=True)
+    ))
+    _enable_codegen_canary(monkeypatch, tmp_path)
+    sends = []
+    monkeypatch.setattr(server, "_codegen_pinned_generation", lambda *a, **k: sends.append(1))
+    assert "build outcome needs host inspection" in _canary_call(tmp_path)
+    assert _project_guard(tmp_path) is not None
+    assert sends == []
+    monkeypatch.setenv("SONDER_STRATEGY_MODE", "off")
+    assert "prior project effect" in _canary_call(tmp_path)
+    assert len(calls) == 1
+
+
+def test_codegen_reservation_failure_blocks_model_and_reinvocation(monkeypatch, tmp_path):
+    calls = []
+    _prepare(monkeypatch, tmp_path, lambda *a, **k: (
+        calls.append(1) or _build(ok=False, stdout="main.c:1: error: broken")
+    ))
+    _enable_codegen_canary(monkeypatch, tmp_path)
+    sends = []
+    monkeypatch.setattr(server, "_codegen_pinned_generation", lambda *a, **k: sends.append(1))
+    monkeypatch.setattr(StrategyTraceService, "reserve_next", lambda *a, **k: (
+        _ for _ in ()).throw(OSError("save failed"))
+    )
+    assert "could not be reserved" in _canary_call(tmp_path)
+    assert sends == []
+    assert _project_guard(tmp_path) is not None
+    monkeypatch.setenv("SONDER_STRATEGY_MODE", "off")
+    assert "prior project effect" in _canary_call(tmp_path)
+    assert len(calls) == 1
+
+
+def test_codegen_mutated_write_then_error_blocks_next_invocation(monkeypatch, tmp_path):
+    calls = []
+    _prepare(monkeypatch, tmp_path, lambda *a, **k: (
+        calls.append(1) or _build(ok=False, stdout="main.c:1: error: broken")
+    ))
+    _enable_codegen_canary(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "_codegen_pinned_generation", lambda *a, **k: "int x = 1;")
+    original_write = server.file_ops.write_file
+
+    def uncertain_write(*args, **kwargs):
+        original_write(*args, **kwargs)
+        raise OSError("ack lost after mutation")
+
+    monkeypatch.setattr(server.file_ops, "write_file", uncertain_write)
+    assert "could not write" in _canary_call(tmp_path)
+    guard = _project_guard(tmp_path)
+    assert guard is not None
+    assert compose_strategy_trace().pending(guard["member_run_ids"][0]) is None
+    assert (tmp_path / "main.c").read_text().strip() == "int x = 1;"
+    monkeypatch.setenv("SONDER_STRATEGY_MODE", "off")
+    assert "prior project effect" in _canary_call(tmp_path)
+    assert len(calls) == 1
+
+
+def test_codegen_failed_attempt_completion_seal_keeps_pending(monkeypatch, tmp_path):
+    calls = []
+    _prepare(monkeypatch, tmp_path, lambda *a, **k: (
+        calls.append(1) or _build(ok=False, stdout="main.c:1: error: broken")
+    ))
+    _enable_codegen_canary(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "_codegen_pinned_generation", lambda *a, **k: "int x = 1;")
+    monkeypatch.setattr(StrategyTraceService, "record_reserved", lambda *a, **k: (
+        _ for _ in ()).throw(OSError("checkpoint save failed"))
+    )
+    assert "result could not be sealed" in _canary_call(tmp_path)
+    guard = _project_guard(tmp_path)
+    assert guard is not None
+    assert compose_strategy_trace().pending(guard["member_run_ids"][0]) is not None
+    monkeypatch.setenv("SONDER_STRATEGY_MODE", "off")
+    assert "prior project effect" in _canary_call(tmp_path)
+    assert len(calls) == 2
 
 
 def test_second_attempt_repairs_from_bounded_compiler_feedback(monkeypatch, tmp_path):

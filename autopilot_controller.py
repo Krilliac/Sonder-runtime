@@ -58,6 +58,10 @@ class HostTaskResult:
     verification_certificate_id: str = ""
     verification_generation: int = 0
     verification_code: str = ""
+    # Host-owned proof that a provider returned a response to a prompt that
+    # contained the selected pre-model context. Transport failures do not
+    # establish that the model saw or used a selected strategy reference.
+    pre_model_context_response_observed: bool = False
 
     def receipt(self) -> dict:
         receipt = {
@@ -76,6 +80,8 @@ class HostTaskResult:
                 "code": self.verification_code,
                 "scope": "point_in_time_workspace_evidence",
             }
+        if self.pre_model_context_response_observed:
+            receipt["pre_model_context_response_observed"] = True
         return receipt
 
 

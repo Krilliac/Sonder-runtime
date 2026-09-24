@@ -3,24 +3,40 @@ from dataclasses import replace
 
 import pytest
 
-from sonder_runtime.adapters.persistence.sqlite.runtime_checkpoints import SQLiteRuntimeCheckpointRepository
+from sonder_runtime.adapters.persistence.sqlite.runtime_checkpoints import (
+    SQLiteRuntimeCheckpointRepository,
+)
 from sonder_runtime.application.evaluation.promotion_gates import (
-    DEFAULT_PROMOTION_GATE_POLICIES, PromotionGateError, PromotionKind,
+    DEFAULT_PROMOTION_GATE_POLICIES,
+    PromotionGateError,
+    PromotionKind,
     evaluate_promotion_gate,
 )
 from sonder_runtime.application.evaluation.proposal_lifecycle import (
-    EvaluationMode, ShadowCanaryObservation,
+    EvaluationMode,
+    ShadowCanaryObservation,
 )
 from sonder_runtime.application.evaluation.strategy_cases import (
-    StrategyEvidenceClass, StrategyEvaluationIdentity, StrategyHeldoutCase, StrategyHeldoutStep,
-    compare_strategy_ablations, evaluate_heldout_strategy_case,
+    StrategyEvaluationIdentity,
+    StrategyEvidenceClass,
+    StrategyHeldoutCase,
+    StrategyHeldoutStep,
+    compare_strategy_ablations,
+    evaluate_heldout_strategy_case,
 )
 from sonder_runtime.application.strategy.tracing import StrategyTraceService
 from sonder_runtime.bootstrap.strategy_observers import observe_codegen_build
 from sonder_runtime.domain.strategy.models import (
-    FailureClass, FailureObservation, ProgressMetric, ProgressVector,
-    StrategyAction, StrategyAttempt, StrategyBudget, StrategyError,
-    StrategySignature, StrategyUsage,
+    FailureClass,
+    FailureObservation,
+    ProgressMetric,
+    ProgressVector,
+    StrategyAction,
+    StrategyAttempt,
+    StrategyBudget,
+    StrategyError,
+    StrategySignature,
+    StrategyUsage,
 )
 
 
@@ -178,7 +194,7 @@ def test_host_codegen_observation_produces_actual_trace_resource_readings(tmp_pa
         observe_codegen_build(
             trace, run_id="host-codegen", file_name="main.c", project_dir="project",
             spec="compile", build_program="cc main.c", attempt_number=number,
-            attempt_limit=4, code="int main(void) { return %d; }" % number,
+            attempt_limit=4, code=f"int main(void) {{ return {number}; }}",
             before_errors=["main.c: unknown type"], after_errors=errors,
             before_complete=True, after_complete=True, build_ran=True,
             exit_ok=not errors, route="coder", critic_used=critic,
@@ -250,9 +266,16 @@ def test_invalid_context_or_invalid_attempt_graph_fails_closed(tmp_path):
 
 def test_thirty_genuine_sealed_synthetic_canaries_cannot_approve_task_strategy(tmp_path):
     from sonder_runtime.adapters.evaluation_corpus import EvaluationCorpusSource
-    from sonder_runtime.adapters.persistence.session_repository import SQLiteSessionRepository
-    from sonder_runtime.application.evaluation.corpus_inventory import CorpusSourceKind, CorpusSourceSpec
-    from sonder_runtime.application.evaluation.proposal_lifecycle import EvaluationLifecycleError
+    from sonder_runtime.adapters.persistence.session_repository import (
+        SQLiteSessionRepository,
+    )
+    from sonder_runtime.application.evaluation.corpus_inventory import (
+        CorpusSourceKind,
+        CorpusSourceSpec,
+    )
+    from sonder_runtime.application.evaluation.proposal_lifecycle import (
+        EvaluationLifecycleError,
+    )
     from sonder_runtime.bootstrap.evaluation import compose_evaluation_service
 
     sources = tuple(EvaluationCorpusSource(

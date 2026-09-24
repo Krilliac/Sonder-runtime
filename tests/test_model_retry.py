@@ -62,6 +62,29 @@ def test_transient_local_failure_retries_once_under_original_budget(monkeypatch)
     assert 1 <= calls[1] <= calls[0] == 17
 
 
+def test_codegen_reserved_generation_has_one_physical_send_even_with_local_retries(monkeypatch):
+    sends = []
+
+    def fake_post(path, payload, **kwargs):
+        if path == "/api/chat":
+            sends.append((payload, kwargs))
+            raise urllib.error.URLError(ConnectionResetError("reset"))
+        return {}
+
+    monkeypatch.setenv("SONDER_LOCAL_RETRIES", "3")
+    monkeypatch.setenv("SONDER_LOCAL_RETRY_DELAY_MS", "0")
+    monkeypatch.setattr(server, "_post", fake_post)
+    with pytest.raises(server.ModelCallError) as caught:
+        server._codegen_pinned_generation(
+            "repair source", model="local-codegen-test", num_predict=128, num_ctx=2048,
+        )
+    assert caught.value.attempts == 1
+    assert len(sends) == 1
+    assert sends[0][0]["think"] is False
+    assert sends[0][1]["local_only"] is True
+    assert "idempotent" not in sends[0][1]
+
+
 def test_incomplete_response_read_is_a_bounded_transient_retry(monkeypatch):
     calls = []
 

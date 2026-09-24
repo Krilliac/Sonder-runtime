@@ -22,18 +22,22 @@ comparison of recorded counts against the policy.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import Enum
 import hashlib
 import json
 import math
 import re
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from enum import Enum
 from statistics import NormalDist
 from types import MappingProxyType
-from typing import Any, Mapping, Sequence
+from typing import Any
 
-from .proposal_lifecycle import EvaluationMode, EvaluationResult, ShadowCanaryObservation
-
+from .proposal_lifecycle import (
+    EvaluationMode,
+    EvaluationResult,
+    ShadowCanaryObservation,
+)
 
 SCHEMA = "sonder.evaluation-promotion-gate.v1"
 PASS_RATE_METRIC = "pass_rate"
@@ -352,6 +356,7 @@ def evaluate_promotion_gate(
 def _validate_strategy_result_identity(result: EvaluationResult) -> tuple[str, str]:
     """A strategy policy cannot pool generic or unbound evaluation results."""
     from sonder_runtime.domain.strategy.models import StrategyError
+
     from .strategy_cases import _METRICS, _POLICY, strategy_evidence_class
 
     dimensions = {item.name: item.value for item in result.dimensions}

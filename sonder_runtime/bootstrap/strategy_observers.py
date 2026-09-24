@@ -28,6 +28,14 @@ def _digest(value) -> str:
                                      default=str).encode("ascii")).hexdigest()
 
 
+def codegen_objective_digest(project_dir: str, spec: str, build_program: str) -> str:
+    return _digest((project_dir, spec, build_program))
+
+
+def codegen_attempt_id(file_name: str, attempt_number: int) -> str:
+    return f"file-{_digest(file_name)[:12]}-attempt-{attempt_number}"
+
+
 def observe_codegen_build(trace, *, run_id: str, file_name: str, project_dir: str,
                           spec: str, build_program: str, attempt_number: int,
                           attempt_limit: int, code: str, before_errors: list[str],
@@ -35,7 +43,11 @@ def observe_codegen_build(trace, *, run_id: str, file_name: str, project_dir: st
                           after_complete: bool, build_ran: bool, exit_ok: bool,
                           route: str, critic_used: bool = False,
                           rotated: bool = False, rejected: bool = False,
-                          unresolved_effects: bool = False, memory_service=None):
+                          unresolved_effects: bool = False, memory_service=None,
+                          no_progress: bool = False, available_actions=None,
+                          reserved_usage: StrategyUsage | None = None,
+                          reserved_budget: StrategyBudget | None = None,
+                          reserved_action: StrategyAction | None = None):
     """Observe one codegen candidate after its build or a pre-write rejection."""
     scope = _digest((project_dir, file_name, build_program))
 
@@ -56,35 +68,47 @@ def observe_codegen_build(trace, *, run_id: str, file_name: str, project_dir: st
         failure = FailureObservation(FailureClass.VERIFIER_FAILURE,
                                      "BUILD_MEASUREMENT_INCOMPLETE", _digest(after_errors))
     elif not exit_ok or after_errors:
-        failure = FailureObservation(FailureClass.BUILD_FAILURE,
-                                     "BUILD_FAILED", _digest(after_errors))
+        failure = FailureObservation(
+                                     FailureClass.NO_PROGRESS if no_progress else FailureClass.BUILD_FAILURE,
+                                     "BUILD_NO_PROGRESS" if no_progress else "BUILD_FAILED",
+                                     _digest(after_errors))
     else:
         failure = None
     signature = StrategySignature(
-        "patch", _digest((project_dir, spec, build_program)),
+        "patch", codegen_objective_digest(project_dir, spec, build_program),
         ("project:" + scope,), _digest(code),
         "repair compiler-checked file", "build:" + _digest(build_program)[:16],
     )
     attempt = StrategyAttempt(
-        run_id, f"file-{_digest(file_name)[:12]}-attempt-{attempt_number}",
+        run_id, codegen_attempt_id(file_name, attempt_number),
         signature, "uncertain" if unresolved_effects else "failed" if failure else "succeeded",
         failure, vector(before_errors, before_complete),
         vector(after_errors, after_complete),
-        StrategyUsage(attempts=1, model_calls=1 + int(critic_used),
-                      verifier_calls=0 if rejected or unresolved_effects else 1,
-                      critic_calls=int(critic_used), strategy_switches=int(rotated)),
+        reserved_usage or StrategyUsage(
+            attempts=1, model_calls=1 + int(critic_used),
+            verifier_calls=0 if rejected or unresolved_effects else 1,
+            critic_calls=int(critic_used), strategy_switches=int(rotated),
+        ),
         model_route=route[:128],
     )
-    decision = trace.record(
-        attempt, budget=StrategyBudget(attempts=attempt_limit),
-        available_actions=(StrategyAction.REPAIR, StrategyAction.INSPECT,
-                           StrategyAction.CRITIC, StrategyAction.SWITCH_MODEL),
+    action_choices = available_actions if available_actions is not None else (
+        StrategyAction.REPAIR, StrategyAction.INSPECT,
+        StrategyAction.CRITIC, StrategyAction.SWITCH_MODEL,
+    )
+    recorder = trace.record_reserved if reserved_usage is not None else trace.record
+    decision = recorder(
+        attempt, budget=reserved_budget or StrategyBudget(attempts=attempt_limit),
+        available_actions=action_choices,
         unresolved_effects=unresolved_effects,
         transport_replay_safe=False,
+        **({"action": reserved_action} if reserved_usage is not None else {}),
     )
     if memory_service is not None and attempt.outcome in {"succeeded", "failed"}:
+        from sonder_runtime.application.memory.strategy_memory import language_from_path
+
         memory_service.observe_recorded(
             attempt.run_id, attempt.attempt_id, project_scope=project_dir,
+            language=language_from_path(file_name),
         )
     return decision
 
@@ -267,9 +291,16 @@ def observe_autopilot_task(trace, *, run: dict, task: dict, memory_service=None)
         memory_service.observe_recorded(
             attempt.run_id, attempt.attempt_id,
             project_scope=str(run.get("project") or "run:" + run_id),
+            complete_selection=receipt.get("pre_model_context_response_observed") is True,
         )
     return decision
 
 
-__all__ = ["observe_autopilot_task", "observe_codegen_build", "observe_workbench_lane",
-           "observe_fleet_worker"]
+__all__ = [
+    "codegen_attempt_id",
+    "codegen_objective_digest",
+    "observe_autopilot_task",
+    "observe_codegen_build",
+    "observe_fleet_worker",
+    "observe_workbench_lane",
+]

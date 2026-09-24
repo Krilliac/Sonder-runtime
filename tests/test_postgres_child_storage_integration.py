@@ -4,22 +4,22 @@ The workspace conformance harness supplies an ACL-protected binding and owns
 both database processes. These tests do not start services or accept a DSN.
 """
 
+import os
+import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import get_context
 from pathlib import Path
 from threading import Barrier
-import os
-import time
-import uuid
 
 import pytest
 
 from sonder_runtime.application.ports.continuation_mutations import prepare_call
 from sonder_runtime.application.ports.continuation_records import (
-    DurableChildSession,
     ChildSessionLineage,
+    DurableChildSession,
 )
-from sonder_runtime.application.ports.subagents import SubagentRequest, SubagentBudget
+from sonder_runtime.application.ports.subagents import SubagentBudget, SubagentRequest
 from sonder_runtime.application.subagents.continuable import ContinuableCheckpoint
 from sonder_runtime.platform.child_storage_config import ChildStorageConfig
 
@@ -79,9 +79,15 @@ def new_record():
 
 
 def _competing_owner(config, response):
-    from sonder_runtime.adapters.persistence.postgres_binding import PostgresPrivateBinding
-    from sonder_runtime.adapters.persistence.postgres_continuation import PostgreSQLDurableContinuationRepository
-    from sonder_runtime.application.ports.continuation_mutations import ContinuationStorageFailure
+    from sonder_runtime.adapters.persistence.postgres_binding import (
+        PostgresPrivateBinding,
+    )
+    from sonder_runtime.adapters.persistence.postgres_continuation import (
+        PostgreSQLDurableContinuationRepository,
+    )
+    from sonder_runtime.application.ports.continuation_mutations import (
+        ContinuationStorageFailure,
+    )
 
     binding = PostgresPrivateBinding(
         Path(config.binding_file), writable_roots=lambda: (Path(__file__).resolve().parents[1],)
@@ -116,7 +122,9 @@ def test_actual_pair_rejects_second_execution_process(repository, storage_config
 
 def test_actual_pair_serializes_distinct_child_admissions_for_one_root(repository):
     from sonder_runtime.application.ports.subagents import InvalidSubagentRequest
-    from sonder_runtime.application.subagents.durable_continuation import DurableContinuationService
+    from sonder_runtime.application.subagents.durable_continuation import (
+        DurableContinuationService,
+    )
 
     root_id = "pg-root-" + uuid.uuid4().hex
     DurableContinuationService(repository).register_root(
@@ -161,7 +169,9 @@ def test_actual_pair_recovers_scoped_keys_and_rejects_parallel_duplicates(reposi
                              max_depth=2, max_concurrency=3),
     )
     candidates = tuple(DurableChildSession(
-        SubagentRequest(root, "same scoped work", SubagentBudget(max_steps=4),
+        SubagentRequest(root, "same scoped work", SubagentBudget(
+            max_steps=4, max_children=3, max_depth=2, max_concurrency=3,
+        ),
                         "pg-key-child-" + uuid.uuid4().hex, resume_key=key,
                         idempotency_key=key),
         ChildSessionLineage(root),
@@ -178,7 +188,7 @@ def test_actual_pair_recovers_scoped_keys_and_rejects_parallel_duplicates(reposi
 
     with ThreadPoolExecutor(2) as executor:
         outcomes = list(executor.map(reserve, candidates))
-    assert sorted(status for status, _ in outcomes) == ["admitted", "rejected"]
+    assert sorted(status for status, _ in outcomes) == ["admitted", "rejected"], outcomes
     assert "key already exists" in next(detail for status, detail in outcomes if status == "rejected")
     winner = next(value for status, value in outcomes if status == "admitted")
     for namespace in ("resume", "idempotency"):
@@ -238,8 +248,13 @@ def test_actual_pair_serializes_owner_width_across_operation_roots(repository):
 
 def test_actual_pair_serializes_owned_scope_and_cancellation(repository):
     from sonder_runtime.application.ports.subagents import InvalidSubagentRequest
-    from sonder_runtime.application.ports.worker_registry import WorkerExecutionContract, WorkerLaunch
-    from sonder_runtime.application.subagents.durable_continuation import DurableContinuationService
+    from sonder_runtime.application.ports.worker_registry import (
+        WorkerExecutionContract,
+        WorkerLaunch,
+    )
+    from sonder_runtime.application.subagents.durable_continuation import (
+        DurableContinuationService,
+    )
     from sonder_runtime.application.worker_registry.continuation import _request_for
 
     root_id = "pg-owned-root-" + uuid.uuid4().hex
@@ -302,7 +317,9 @@ def test_actual_pair_serializes_owned_scope_and_cancellation(repository):
 
 def test_actual_pair_reserves_speculative_hypothesis_once(repository):
     from sonder_runtime.application.ports.subagents import InvalidSubagentRequest
-    from sonder_runtime.application.subagents.durable_continuation import DurableContinuationService
+    from sonder_runtime.application.subagents.durable_continuation import (
+        DurableContinuationService,
+    )
 
     root_id = "pg-speculative-root-" + uuid.uuid4().hex
     DurableContinuationService(repository).register_root(
@@ -337,6 +354,7 @@ def test_actual_pair_reserves_speculative_hypothesis_once(repository):
 
 def test_actual_pair_keeps_original_logical_receipt(repository):
     from dataclasses import replace
+
     from sonder_runtime.application.ports.subagents import InvalidSubagentRequest
 
     record = new_record()
@@ -431,21 +449,22 @@ def test_actual_application_provider_lineage_and_denied_workspace(
     storage_config, tmp_path, monkeypatch
 ):
     from dataclasses import replace
-    from sonder_runtime.bootstrap.app import build_application
-    from sonder_runtime.platform.config import SonderConfig
+
     from sonder_runtime.adapters import conversational_subagents
     from sonder_runtime.adapters.persistence.postgres_continuation import (
         PostgreSQLDurableContinuationRepository,
     )
     from sonder_runtime.application.agents.lineage_delegation import (
         DelegationRequest,
+        IntegrationError,
         LineageRecord,
         WorkspaceAssignment,
-        IntegrationError,
     )
     from sonder_runtime.application.agents.presets import resolve_preset
     from sonder_runtime.application.context import local_owner_context
     from sonder_runtime.application.ports.subagents import SubagentStatus
+    from sonder_runtime.bootstrap.app import build_application
+    from sonder_runtime.platform.config import SonderConfig
 
     effects = []
 
@@ -581,6 +600,7 @@ def test_earliest_retained_intent_orders_real_connection_mutations(
     repository, monkeypatch
 ):
     from threading import Event
+
     from sonder_runtime.application.ports.continuation_mutations import (
         ContinuationCommitAmbiguous,
         ContinuationStorageFailure,
@@ -673,6 +693,7 @@ def test_driver_upgrade_requires_review_before_pool_creation(
     storage_config, monkeypatch
 ):
     import psycopg_pool
+
     from sonder_runtime.adapters.persistence.postgres_continuation_transport import (
         PostgresContinuationTransport,
     )
@@ -692,6 +713,7 @@ def test_driver_upgrade_requires_review_before_pool_creation(
 
 def test_unknown_pool_ownership_shape_fails_closed(storage_config, monkeypatch):
     import psycopg_pool
+
     from sonder_runtime.adapters.persistence.postgres_continuation_transport import (
         PostgresContinuationTransport,
     )
@@ -793,14 +815,16 @@ def test_toml_cli_uses_actual_postgres_graph(
 ):
     import json
     from types import SimpleNamespace
+
     import server
     from sonder_runtime import __main__ as cli
-    from sonder_runtime.bootstrap import app as composition, legacy_root
-    from sonder_runtime.platform import logging as runtime_logging
-    from sonder_runtime.interfaces.repl import repl
     from sonder_runtime.adapters.persistence.postgres_continuation import (
         PostgreSQLDurableContinuationRepository,
     )
+    from sonder_runtime.bootstrap import app as composition
+    from sonder_runtime.bootstrap import legacy_root
+    from sonder_runtime.interfaces.repl import repl
+    from sonder_runtime.platform import logging as runtime_logging
 
     composition.reset_for_tests()
     monkeypatch.setattr(runtime_logging, "configure_logging", lambda **kwargs: None)

@@ -3,16 +3,22 @@
 import pytest
 
 from sonder_runtime.adapters.evaluation_corpus import EvaluationCorpusSource
-from sonder_runtime.adapters.persistence.session_repository import SQLiteSessionRepository
+from sonder_runtime.adapters.persistence.session_repository import (
+    SQLiteSessionRepository,
+)
 from sonder_runtime.application.evaluation.corpus_inventory import (
-    CorpusSourceKind, CorpusSourceSpec, EvaluationCorpusCoverageError,
+    CorpusSourceKind,
+    CorpusSourceSpec,
+    EvaluationCorpusCoverageError,
 )
 from sonder_runtime.application.evaluation.promotion_gates import PromotionKind
 from sonder_runtime.application.evaluation.proposal_lifecycle import (
-    EvaluationDimension, EvaluationLifecycleError, EvaluationSuite, ProposalState,
+    EvaluationDimension,
+    EvaluationLifecycleError,
+    EvaluationSuite,
+    ProposalState,
 )
 from sonder_runtime.bootstrap.evaluation import compose_evaluation_service
-
 
 SUITE = EvaluationSuite(
     "strategy-orchestration", "strategy-v1",

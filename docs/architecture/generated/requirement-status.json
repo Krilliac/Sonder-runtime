@@ -649,9 +649,9 @@
     },
     {
       "checked": false,
-      "claim": "Strategy canaries bind sealed attempt graph and policy, role, tool, memory, skill, runtime and case-manifest identities; evaluator composition uses actual existing corpus/session/failure ports and refuses missing sources.",
+      "claim": "Strategy canaries bind sealed attempt graphs, policy/role/tool/memory/skill/runtime identities and caller-provided case input/source digests. This corrects the prior case-manifest wording: the strategy evaluator does not bind an independently owned EvaluationCaseManifest or real-task grader.",
       "requirement_id": "EVAL-004",
-      "revision": 4,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -887,9 +887,9 @@
     },
     {
       "checked": false,
-      "claim": "Sealed strategy attempt projections use the canonical memory UoW and existing authenticated LearningLadder; selected failed reuse decays confidence; indexing retains digests and typed outcomes rather than raw rationale or paths. Production Codegen and Autopilot observers index after sealed writes through the application UoW.",
+      "claim": "Production Codegen and Autopilot select content-free typed recovery references before local model dispatch using actual context-window budgets; host filename language preserves compatible unknown history. Failed reuse is credited only after a host-observed model response, with durable Autopilot attribution surviving restart.",
       "requirement_id": "MEM-003",
-      "revision": 7,
+      "revision": 8,
       "status": "implemented_unverified"
     },
     {
@@ -1363,9 +1363,9 @@
     },
     {
       "checked": false,
-      "claim": "Strategy attempt history uses existing RuntimeCheckpointRepository sealing and CAS, preserves other checkpoint facets, refuses conflicting IDs and budget expansion, and restores failed attempts after restart; Codegen and Autopilot have opt-in production observers.",
+      "claim": "Existing sealed checkpoint CAS now supports pending action reservations and project-wide guards with immutable membership, exact objective/action binding, conservative usage liability and crash/reinvocation refusal. Codegen uses single-send inference and a finite monotonic project deadline in the isolated test profile.",
       "requirement_id": "SESSION-009",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -1461,9 +1461,9 @@
     },
     {
       "checked": false,
-      "claim": "Native progressive schema loads, hidden-call refusals and compatibility calls share the application durable audit; receipts preserve immutable call-begin schema selection, outcome and compatibility authority without inventing typed gateway approval.",
+      "claim": "Native progressive discovery searches, schema loads and invalid discovery/schema refusals now join effect-call outcomes in the existing durable audit. Only digests and fixed refusal/selection markers persist; audit failure prevents response or schema publication.",
       "requirement_id": "TOOL-007",
-      "revision": 4,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "81746a1358e37152b7ef2ddf62a06e22cb8ed0ab8dd110dcec960e42fde7e071",
+    "ledger_sha256": "78286eedccf4e8eee0cfd62a24e27da5aaf7daa58fc7f3053d8e23be968bf5de",
     "spec_sha256": "d11b5664c594bb79042c358a0510393d1ee0dd6d718830332a6362ed652c9bc5"
   }
 }

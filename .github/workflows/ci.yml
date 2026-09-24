@@ -123,6 +123,7 @@ jobs:
           tests/test_managed_runtime_payload.py
           tests/test_managed_runtime_owner.py
           tests/test_artifact_fetch.py
+          tests/test_artifact_authenticode_native_windows.py
           tests/test_legacy_tool_executor.py
           tests/test_selfmod_isolation_scope.py
           tests/test_nightly_selfmod_model_selection.py
