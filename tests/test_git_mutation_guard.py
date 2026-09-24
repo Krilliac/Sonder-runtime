@@ -231,3 +231,82 @@ def test_linked_worktree_is_its_own_key(tmp_path):
     )
     assert guard.worktree_key(linked / "deep") == guard.worktree_key(linked)
     assert guard.worktree_key(linked) != guard.worktree_key(main)
+
+
+# -- review follow-ups (PR #553) --------------------------------------------
+
+def test_canary_mcp_wrapper_surfaces_guard_and_recovery_fields(tmp_path, monkeypatch):
+    import server
+
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    root = _fake_tree(tmp_path / "repo")
+    fake = _BlockingGit()
+    monkeypatch.setattr(harness_tools, "_run_git", fake)
+    monkeypatch.setattr(guard, "DEFAULT_WAIT_SECONDS", 0.05)
+    thread, _held = _hold_commit(root, fake)
+    try:
+        output = server.git_merge(root=str(root), branch="feature")
+    finally:
+        fake.release.set()
+        thread.join(10)
+
+    assert "  guard: git_mutation_concurrency (busy)" in output
+    assert "  recovery: Do not retry this mutation blindly." in output
+    assert "re-inspect the tree with repo_status" in output
+
+
+def test_index_lock_refusal_does_not_assume_a_crash_or_writer(tmp_path, monkeypatch):
+    root = _fake_tree(tmp_path / "repo")
+    (root / ".git" / "index.lock").write_text("", encoding="utf-8")
+    monkeypatch.setattr(harness_tools, "_run_git", lambda *a, **k: {"ok": True})
+
+    refused = harness_tools.git_commit(root=str(root), message="m")
+
+    assert (
+        "another git process holds index.lock (possibly a concurrent read "
+        "or a crashed process)" in refused["error"]
+    )
+
+
+def test_canary_linked_worktree_leftover_index_lock_is_refused_not_deleted(
+    tmp_path, monkeypatch,
+):
+    main = _fake_tree(tmp_path / "main")
+    private = main / ".git" / "worktrees" / "linked"
+    private.mkdir(parents=True)
+    lock = private / "index.lock"
+    lock.write_text("", encoding="utf-8")
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    (linked / ".git").write_text("gitdir: %s\n" % private, encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(
+        harness_tools, "_run_git",
+        lambda *a, **k: calls.append(a) or {"ok": True},
+    )
+
+    refused = harness_tools.git_checkout(root=str(linked), ref="other")
+    # The main worktree's own index is free, so it is not blocked.
+    admitted = harness_tools.git_checkout(root=str(main), ref="other")
+
+    assert refused["ok"] is False
+    assert refused["guard_reason"] == "foreign_index_lock"
+    assert str(lock) in refused["error"]
+    assert lock.exists()
+    assert admitted["ok"] is True
+    assert len(calls) == 1
+
+
+def test_linked_worktree_relative_gitdir_leftover_lock_is_refused(tmp_path, monkeypatch):
+    main = _fake_tree(tmp_path / "main")
+    private = main / ".git" / "worktrees" / "rel"
+    private.mkdir(parents=True)
+    (private / "index.lock").write_text("", encoding="utf-8")
+    linked = tmp_path / "rel"
+    linked.mkdir()
+    (linked / ".git").write_text("gitdir: ../main/.git/worktrees/rel\n", encoding="utf-8")
+    monkeypatch.setattr(harness_tools, "_run_git", lambda *a, **k: {"ok": True})
+
+    refused = harness_tools.git_stash(root=str(linked), action="push")
+
+    assert refused["guard_reason"] == "foreign_index_lock"

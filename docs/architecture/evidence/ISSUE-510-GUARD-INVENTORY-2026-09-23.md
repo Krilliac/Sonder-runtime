@@ -48,13 +48,18 @@ not happen. A code path that exists but that no test trips is listed as
 tree (nearest ancestor with a `.git` entry; a linked worktree is its own key).
 A second host-driven mutation on the same tree waits at most 2 s, then is
 refused with `ConcurrentGitMutation` (a `PermissionError`) naming the holder.
-A foreign `index.lock` is reported as its own refusal and is never deleted.
+An `index.lock` held by another Git process is reported as its own refusal
+and is never deleted. That holder may be a brief concurrent read such as
+`repo_status` or a crashed process, so the refusal says so instead of assuming
+a crash. Linked worktrees are checked against their private git directory
+(absolute or relative `gitdir:`).
 
 Recovery is bounded and materially different from the blocked action: the
 mutation is not queued or retried; the result tells the caller to wait for the
 holder, re-inspect with `repo_status`, and decide again. `harness_tools`
-mutations return `{"ok": False, "guard": "git_mutation_concurrency", ...}`;
-the runtime-source MCP tools report `refused: HOST GUARD ...` through their
+mutations return `{"ok": False, "guard": "git_mutation_concurrency", ...}`,
+and the MCP git tools render the `guard`, `holder`, and `recovery` fields
+through `format_run_result`; the runtime-source MCP tools report `refused: HOST GUARD ...` through their
 existing `PermissionError` handlers. The status probe and the fast-forward in
 `runtime_update` now run inside one slot, closing its check-then-act window
 against tool mutations in the same process.
@@ -63,13 +68,27 @@ against tool mutations in the same process.
 
 `codegen_build_loop` previously accepted any `attempts` value and re-sent the
 same prompt to the model ensemble on every attempt regardless of outcome.
-Now `bounded_attempts` clamps attempts to 1..6, and
-`VerificationProgressGuard` stops regenerating a file when two consecutive
-attempts return an identical (order- and whitespace-insensitive) set of build
-errors. The best version so far is kept and the report names the stall and
-its fingerprint, directing a change of spec or approach instead of another
-identical attempt. A clean outcome or any change in errors resets the streak;
-the default two-attempt contract is unchanged.
+Now `bounded_attempts` clamps attempts to 1..6, and the report states when
+a requested count was clamped. `VerificationProgressGuard` stops regenerating
+a file when two consecutive observed attempts return an identical failing
+outcome and the score did not improve. The outcome is fingerprinted as a
+sorted list of whitespace-normalized error lines with duplicates kept, so
+fewer copies of the same error count as a change. The best version so far is
+kept and the report names the stall and its fingerprint, directing a change
+of spec or approach instead of another identical attempt.
+
+What restarts the streak: a clean outcome, a different fingerprint, or an
+improved score. What the guard never sees: an attempt whose errors cannot be
+compared. That means the host placeholder for a failing build whose output
+matched no `error_regex` line, the truncated-output marker, or any error that
+`codegen_loop.count_unreliable` classifies as masking (parse, declaration,
+compiler error-limit, or partial output). Such an attempt resets the streak
+instead of counting toward a stall, because equal floors say nothing about
+whether the real errors changed; those loops run to the attempt cap. Note
+that `codegen_loop.count_errors` already de-duplicates identical lines within
+one build, so the duplicate-keeping fingerprint matters for other callers of
+the guard rather than for this loop. The default two-attempt contract is
+unchanged.
 
 ## Verification
 
@@ -85,6 +104,17 @@ Commands run locally on Windows 11, Python 3.12.10, in a fresh venv from
 | `python -m pytest tests/test_issue510_existing_guard_canaries.py -q` | 5 passed |
 | same, with the web-repeat and both selfmod budget conditions forced false (RED) | 3 failed (all canaries), 2 passed |
 
+Review follow-up (PR #553). New tests were added first and run against the
+previous head, then against the fix:
+
+| Check | Before fix | After fix |
+|---|---|---|
+| `tests/test_verification_no_progress_guard.py` | 7 failed, 7 passed | 14 passed |
+| `tests/test_git_mutation_guard.py` | 2 failed, 10 passed | 12 passed |
+
+The two linked-worktree `index.lock` tests passed before the fix (the check
+already existed); they add coverage, not a RED proof.
+
 Regression suites and repository checks are listed in the pull request.
 
 ## Requirement mapping
@@ -92,8 +122,8 @@ Regression suites and repository checks are listed in the pull request.
 | Requirement | Ledger revision | Why |
 |---|---|---|
 | AGENT-008 (isolated workspaces; reconcile concurrent Git changes without force-overwriting another session) | 3, `implemented_unverified` | concurrent Git mutation guard |
-| LOOP-007 (bounded retries) | 3, `implemented_unverified` | verification no-progress guard; web-repeat canary |
-| AGENT-007 (budgets) | 3, `implemented_unverified` | codegen attempt clamp; selfmod tool-call and runtime budget canaries |
+| LOOP-007 (bounded retries) | 3, then 4, `implemented_unverified` | verification no-progress guard; web-repeat canary; revision 4 narrows the stall rule (duplicates kept, score must not improve, non-comparable outcomes excluded) |
+| AGENT-007 (budgets) | 3, then 4, `implemented_unverified` | codegen attempt clamp; selfmod tool-call and runtime budget canaries; revision 4 adds reporting of a clamped attempt count |
 
 All three stay `implemented_unverified`: the canaries are focused tests with
 fake Git and fake compiler/model boundaries, not an end-to-end multi-lane run.
