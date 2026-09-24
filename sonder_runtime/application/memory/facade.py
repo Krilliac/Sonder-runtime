@@ -90,5 +90,32 @@ class MemoryLearningFacade:
     ) -> list[PromotionCandidate]:
         return self._procedural_learning.candidates(memories, now=now)
 
+    def promote_verified_subject(
+        self, project: str, fact_id: str, observation_ids: tuple[str, ...],
+    ):
+        """Apply the receipt-bound verifier ladder through the live UoW.
+
+        Callers provide durable observation identities only.  The canonical
+        subject token and fact source come from the composed persistence graph.
+        """
+        from .receipt_observation import VerifiedSubjectFactPromotion
+
+        with self._unit_of_work() as scope:
+            source = scope.authoritative_fact_source
+            if source is None:
+                raise RuntimeError("authoritative fact source is not configured")
+            # Freeze the observation snapshot together with the eventual fact
+            # mutation so a newly persisted contradiction cannot be omitted.
+            scope.connection.execute("BEGIN IMMEDIATE")
+            result = VerifiedSubjectFactPromotion().apply(
+                project=project,
+                fact_id=fact_id,
+                observation_ids=observation_ids,
+                repository=scope.verifier_observations,
+                fact_source=source,
+                connection=scope.connection,
+            )
+            return result
+
 
 __all__ = ["MemoryLearningFacade"]

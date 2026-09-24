@@ -243,9 +243,9 @@ class AgentLaneService:
         self._scheduled_dirty = {}
         self._capacity_waiters = {}
         self._capture = SessionCaptureService(sessions)
-        self._archive = SessionContextArchiveService(sessions)
+        self._archive = SessionContextArchiveService(sessions, max_items=10_000)
         self._compaction = compaction_service or SessionCompactionService(
-            sessions, max_events=256, archive_service=self._archive,
+            sessions, max_events=10_000, archive_service=self._archive,
         )
         if loop is not None and loop_factory is not None:
             raise ValueError("loop and loop_factory are mutually exclusive")
@@ -1356,32 +1356,24 @@ class AgentLaneService:
                 for m in tx.messages(lane["id"])
                 if m["delivery_state"] == "handled"
             }
-        read_tail = getattr(self.sessions, "read_tail", None)
-        if not callable(read_tail):
-            raise RuntimeError("canonical session repository lacks bounded tail reads")
         try:
-            events = read_tail(
-                lane["session_id"],
-                limit=min(256, getattr(self.sessions, "_max_read_limit", 256)),
-            )
+            read_complete = getattr(self.sessions, "read_complete", None)
+            if not callable(read_complete):
+                raise RuntimeError("canonical session lacks complete bounded recovery")
+            events = read_complete(lane["session_id"], max_events=10_000)
         except (AttributeError, TypeError, ValueError) as exc:
-            raise RuntimeError("canonical session tail is unavailable") from exc
-        if events and events[0].sequence > 1:
-            # A bounded tail cannot prove whether an omitted earlier event
-            # carried a user constraint, decision, or failure. Stop before
-            # presenting an apparently complete continuation to the model.
             raise ContextHistoryOverflowError(
-                "canonical session tail omits earlier events; "
-                "resume after operator-led compaction"
-            )
+                "canonical session history is unavailable or failed integrity verification"
+            ) from exc
         # Use the durable compaction seam immediately before provider request
         # assembly. Only tool results are eligible for eviction; model/user
         # events, including decisions and failures, stay in the source range.
+        # The chain-verified snapshot itself is archived: a second range read
+        # here would let a row changed after verification reach the model.
         try:
-            archived = self._compaction.archive_context(
+            archived = self._compaction.archive_verified_context(
                 lane["session_id"],
-                start_sequence=events[0].sequence,
-                end_sequence=events[-1].sequence,
+                events,
                 budget_bytes=_LANE_CANONICAL_HISTORY_BYTES,
             ) if events else None
         except SessionCompactionError:
@@ -1623,6 +1615,12 @@ class AgentLaneService:
         prefix_manifest = None
         replay_manifest = None
         prefix_cache_observation = None
+        # The selection id names one attempt/turn.  It must stay visible so a
+        # model tool call can be bound to the exact advertised catalog, but it
+        # is dynamic: placing it inside the stable instructions would change
+        # the reusable prefix (and the provider's byte prefix) on every turn
+        # and for every worker.  It is appended after the stable prefix.
+        dynamic_suffix = ""
         if selection is not None and self.tools is not None:
             visible_schemas = getattr(self.tools, "visible_tool_schemas", None)
             if callable(visible_schemas):
@@ -1640,10 +1638,10 @@ class AgentLaneService:
             if len(rendered.encode("utf-8")) > 65536:
                 raise ValueError("visible tool schemas exceed lane system payload ceiling")
             system += (
-                "\nTool schema selection id: " + selection.selection_id
-                + "\nVisible tool schemas (only these tools may be requested): "
+                "\nVisible tool schemas (only these tools may be requested): "
                 + rendered
             )
+            dynamic_suffix = "\nTool schema selection id: " + selection.selection_id
         route = route if isinstance(route, ResolvedModelRoute) else None
         route_identity = (
             route if route is not None
@@ -1721,6 +1719,7 @@ class AgentLaneService:
                         )
                 except (TypeError, ValueError) as exc:
                     system += "\nLive stable context unavailable: " + type(exc).__name__
+        system += dynamic_suffix
         request_options = {
             "num_predict": max(1, lane["max_output_tokens"] - lane["used_tokens"])
         }
