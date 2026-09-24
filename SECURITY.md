@@ -110,6 +110,21 @@ Mitigations that are already in place and worth knowing about:
 - Lessons are passed through a 20-rule privacy classifier before storage, so
   paths, emails, credentials, private keys, and tokens are not distilled into
   memory.
+- Update bundles are staged by a TAR extractor that validates every member
+  before writing: traversal, drive-relative/UNC/backslash, alternate-stream,
+  reserved-device, control-character, duplicate and case- or
+  normalization-colliding names, links, devices, member-count and
+  expanded-byte overruns are rejected. Every TAR reader refuses long-name,
+  long-link, and PAX metadata records larger than 64 KiB, more than four
+  chained metadata records per member, more than 1 MiB of metadata or
+  32,768 PAX keys per archive, global PAX headers, and GNU sparse members
+  before parsing them. ZIP readers check the declared central-directory entry count before
+  opening the archive.
+- Self-modification backups, manifests, checksums, the `selfmod_events` audit
+  table, and recovery evidence are tamper-evident only. They are written by the
+  same OS user as Sonder, so they are not a security boundary against
+  `--unrestricted-selfmod`, which can rewrite them consistently; see
+  [SELFMOD.md](SELFMOD.md#recovery-and-audit-are-not-a-security-boundary).
 
 The repository also carries a documented historical Git-history privacy gate;
 see [the debt evidence record](docs/security/history-privacy-debt.md). Normal

@@ -346,7 +346,7 @@
       ]
     },
     {
-      "file_count": 331,
+      "file_count": 332,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -602,6 +602,7 @@
         "sonder_runtime/application/scenario_validation/github.py",
         "sonder_runtime/application/scenario_validation/runner.py",
         "sonder_runtime/application/security/__init__.py",
+        "sonder_runtime/application/security/bounded_archives.py",
         "sonder_runtime/application/security/credential_broker.py",
         "sonder_runtime/application/security/path_archive_safety.py",
         "sonder_runtime/application/security/prompt_provenance.py",

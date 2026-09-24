@@ -15,6 +15,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from .bounded_archives import (
+    TarMetadataLimitError,
+    ZipCentralDirectoryLimitError,
+    open_bounded,
+    require_zip_entry_bound,
+)
+
 
 class UnsafePathError(ValueError):
     """Raised when a path cannot be proven safe for the requested operation."""
@@ -129,6 +136,10 @@ def validate_archive_members(
 
 
 def inspect_zip(path: str | os.PathLike[str], limits: ArchiveLimits = ArchiveLimits()) -> tuple[str, ...]:
+    try:
+        require_zip_entry_bound(path, limits.max_entries)
+    except ZipCentralDirectoryLimitError as exc:
+        raise ArchiveLimitError(str(exc)) from None
     with zipfile.ZipFile(path) as archive:
         return validate_archive_members(
             ((item.filename, item.file_size, bool((item.external_attr >> 16) & 0o170000 == 0o120000)) for item in archive.infolist()),
@@ -137,8 +148,14 @@ def inspect_zip(path: str | os.PathLike[str], limits: ArchiveLimits = ArchiveLim
 
 
 def inspect_tar(path: str | os.PathLike[str], limits: ArchiveLimits = ArchiveLimits()) -> tuple[str, ...]:
-    with tarfile.open(path, "r:*") as archive:
-        return validate_archive_members(
-            ((item.name, item.size, item.issym() or item.islnk()) for item in archive.getmembers()),
-            limits,
-        )
+    # Iterate lazily through the bounded reader: validate_archive_members
+    # stops at the entry limit, and open_bounded bounds metadata records,
+    # chains, and sparse maps before tarfile parses them.
+    try:
+        with open_bounded(path) as archive:
+            return validate_archive_members(
+                ((item.name, item.size, item.issym() or item.islnk()) for item in archive),
+                limits,
+            )
+    except TarMetadataLimitError as exc:
+        raise ArchiveLimitError("archive metadata exceeds reader bound: %s" % exc) from None

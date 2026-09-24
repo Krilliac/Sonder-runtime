@@ -91,9 +91,9 @@
       "verified": 0
     },
     "SEC": {
-      "checked": 0,
+      "checked": 1,
       "total": 9,
-      "verified": 0
+      "verified": 1
     },
     "SELFMOD": {
       "checked": 1,
@@ -127,13 +127,13 @@
     }
   },
   "overall": {
-    "checked": 8,
+    "checked": 9,
     "statuses": {
-      "implemented_unverified": 196,
-      "verified": 8
+      "implemented_unverified": 195,
+      "verified": 9
     },
     "total": 204,
-    "verified": 8
+    "verified": 9
   },
   "requirements": [
     {
@@ -1222,11 +1222,11 @@
       "status": "implemented_unverified"
     },
     {
-      "checked": false,
-      "claim": "Package and archive safety semantics are preserved in the packaged artifact-grounding adapter.",
+      "checked": true,
+      "claim": "Every production archive reader bounds member names, links and special files, member counts, per-entry and aggregate expansion, compression ratio, TAR metadata record size, metadata-record chains, archive-wide TAR metadata bytes and PAX keys, and preview scans; rejects GNU sparse members and global PAX headers before their payloads are read; and checks ZIP central-directory entry count and size before parsing the directory. An adversarial corpus with memory and wall-time bounds drives each protection in the archive tools, update staging, data-inspection, OOXML, and path-safety readers.",
       "requirement_id": "SEC-004",
-      "revision": 2,
-      "status": "implemented_unverified"
+      "revision": 7,
+      "status": "verified"
     },
     {
       "checked": false,
@@ -1258,9 +1258,9 @@
     },
     {
       "checked": false,
-      "claim": "Recovery evidence is stored through a bounded repository boundary.",
+      "claim": "The repository-wide recovery/audit claim ratchet now has no known debt (PR #519 removed the last five pinned backup overclaims), recovery evidence discloses same-user, audit, and startup unrestricted-selfmod limits on every record with the capability required at construction, and operator documents state that recovery and audit are not a security boundary against --unrestricted-selfmod.",
       "requirement_id": "SEC-009",
-      "revision": 2,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "bb00c98ff75d73d1685c774f9f12171b988075697e11770a67e0c399159c13d6",
-    "spec_sha256": "ed5ab01393d72681fc4eb4b9581e832d3d07ee95595b8b58dfe094c9e7dbf4fa"
+    "ledger_sha256": "e572a8cc107d1a2ba09c3c18059cee9fb8a43fd52e7fa55b11a0c86c9d7bffb5",
+    "spec_sha256": "d11b5664c594bb79042c358a0510393d1ee0dd6d718830332a6362ed652c9bc5"
   }
 }
