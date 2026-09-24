@@ -5,7 +5,7 @@
 > stale-promise inventory live in
 > [`DOCUMENT-AUTHORITY-INDEX.md`](DOCUMENT-AUTHORITY-INDEX.md). The master
 > specification remains the authoritative list of unfinished requirements;
-> this documentation pass does not alter its checkboxes.
+> its checkboxes change only with linked verified evidence.
 
 ## Direct authority map
 
