@@ -216,9 +216,13 @@ def _regression_workers() -> int:
 def _regression_isolation(kind: str, workers: int) -> dict:
     """Job limits and integrity level for one regression partition."""
     if kind == "regression":
-        # Each xdist worker is its own process under the 2 GiB per-process
-        # limit; the job budget scales with the worker count.
-        return {"job_memory_mb": min(24576, max(4096, 2048 * (workers + 1))),
+        # A long-lived xdist worker accumulates memory across thousands of
+        # tests: in the 2026-09-23 baseline one worker reached the 2 GiB
+        # per-process limit at 99% and died ("unable to start watchdog
+        # thread"). Give each worker 4 GiB and scale the job budget with the
+        # worker count, bounded by the supervisor's ceilings.
+        return {"process_memory_mb": 4096,
+                "job_memory_mb": min(24576, max(6144, 4096 * workers + 2048)),
                 "active_processes": min(128, 32 + 8 * workers)}
     if kind == "regression_heavy":
         return {"process_memory_mb": 6144, "job_memory_mb": 8192}
