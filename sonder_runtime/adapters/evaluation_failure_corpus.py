@@ -1,18 +1,27 @@
 """Durable, digest-addressed retention for minimized evaluation failures.
 
-Each :class:`MinimizedFailure` is written atomically as ``<digest>.json`` in
-one directory.  Loading re-verifies the trajectory, step, and record digests,
-so a tampered or truncated file is refused rather than replayed.  The store is
-bounded by file count and per-file bytes and never overwrites a different
-record under an existing digest name.
+Each :class:`MinimizedFailure` is written as ``<digest>.json`` in one
+directory.  Loading re-verifies the trajectory, step, record digests and
+divergence consistency, so a corrupted or inconsistent file is refused rather
+than replayed.  The digests are integrity checks, not tamper-proofing: anyone
+who can write the directory can recompute them.
+
+Writers are serialized by an exclusive ``.lock`` file created with
+``O_CREAT | O_EXCL``, so the capacity check, the no-overwrite check, and the
+atomic rename happen as one critical section.  A lock older than
+``STALE_LOCK_SECONDS`` is presumed abandoned by a crashed writer and removed;
+temporary files older than ``STALE_TEMPORARY_SECONDS`` are cleaned on write.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
 import re
 import tempfile
+import time
+from typing import Iterator
 
 from sonder_runtime.application.evaluation.divergence import (
     DivergenceError,
@@ -22,7 +31,12 @@ from sonder_runtime.application.evaluation.divergence import (
 
 
 MAX_FAILURE_BYTES = 1024 * 1024
+STALE_LOCK_SECONDS = 60.0
+STALE_TEMPORARY_SECONDS = 300.0
+DEFAULT_LOCK_TIMEOUT_SECONDS = 5.0
+_LOCK_NAME = ".lock"
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
+_TEMPORARY = re.compile(r"^[0-9a-f]{64}\.json\..+\.tmp$")
 
 
 class JsonMinimizedFailureStore:
@@ -34,50 +48,100 @@ class JsonMinimizedFailureStore:
         *,
         max_failures: int = MAX_RETAINED_FAILURES,
         max_bytes: int = MAX_FAILURE_BYTES,
+        lock_timeout_seconds: float = DEFAULT_LOCK_TIMEOUT_SECONDS,
     ) -> None:
         if type(max_failures) is not int or not 1 <= max_failures <= MAX_RETAINED_FAILURES:
             raise DivergenceError(f"max_failures must be within 1..{MAX_RETAINED_FAILURES}")
         if type(max_bytes) is not int or not 1 <= max_bytes <= MAX_FAILURE_BYTES:
             raise DivergenceError(f"max_bytes must be within 1..{MAX_FAILURE_BYTES}")
+        if (
+            isinstance(lock_timeout_seconds, bool) or not isinstance(lock_timeout_seconds, (int, float))
+            or not 0 < lock_timeout_seconds <= 60
+        ):
+            raise DivergenceError("lock_timeout_seconds must be within (0, 60]")
         self.directory = Path(directory)
         self._max_failures = max_failures
         self._max_bytes = max_bytes
+        self._lock_timeout = float(lock_timeout_seconds)
 
     def _path(self, failure_digest: str) -> Path:
         if not isinstance(failure_digest, str) or not _DIGEST.match(failure_digest):
             raise DivergenceError("failure digest must be a lowercase SHA-256 hex digest")
         return self.directory / f"{failure_digest}.json"
 
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        lock = self.directory / _LOCK_NAME
+        deadline = time.monotonic() + self._lock_timeout
+        while True:
+            try:
+                descriptor = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                break
+            except FileExistsError:
+                try:
+                    if time.time() - lock.stat().st_mtime > STALE_LOCK_SECONDS:
+                        lock.unlink()
+                        continue
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    pass
+                if time.monotonic() >= deadline:
+                    raise DivergenceError("minimized failure store lock is held by another writer") from None
+                time.sleep(0.02)
+        try:
+            os.close(descriptor)
+            yield
+        finally:
+            try:
+                lock.unlink()
+            except OSError:
+                pass
+
+    def _clean_stale_temporaries(self) -> None:
+        now = time.time()
+        for entry in self.directory.iterdir():
+            if entry.is_file() and _TEMPORARY.match(entry.name):
+                try:
+                    if now - entry.stat().st_mtime > STALE_TEMPORARY_SECONDS:
+                        entry.unlink()
+                except OSError:
+                    pass
+
     def retain(self, failure: MinimizedFailure) -> str:
         digest = failure.digest
         path = self._path(digest)
-        if path.exists():
-            if self.load(digest).digest != digest:
-                raise DivergenceError("retained failure name does not match its content")
-            return digest
-        if len(self.digests()) >= self._max_failures:
-            raise DivergenceError("minimized failure store is full")
-        encoded = (json.dumps(failure.as_dict(), indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+        encoded = (
+            json.dumps(failure.as_dict(), indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n"
+        ).encode("utf-8")
         if len(encoded) > self._max_bytes:
             raise DivergenceError("minimized failure exceeds the retention byte bound")
         self.directory.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(self.directory))
-        try:
+        with self._locked():
+            self._clean_stale_temporaries()
+            if path.exists():
+                if self.load(digest).digest != digest:
+                    raise DivergenceError("retained failure name does not match its content")
+                return digest
+            if len(self.digests()) >= self._max_failures:
+                raise DivergenceError("minimized failure store is full")
+            descriptor, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(self.directory))
             try:
-                os.chmod(temporary, 0o600)
-            except OSError:
-                pass
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(encoded)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-        except Exception:
-            try:
-                os.unlink(temporary)
-            except OSError:
-                pass
-            raise
+                try:
+                    os.chmod(temporary, 0o600)
+                except OSError:
+                    pass
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(encoded)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, path)
+            except Exception:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+                raise
         return digest
 
     def load(self, failure_digest: str) -> MinimizedFailure:

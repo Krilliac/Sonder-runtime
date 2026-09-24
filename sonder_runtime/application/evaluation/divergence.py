@@ -33,7 +33,10 @@ from .trajectory_replay import TrajectoryRecord, TrajectoryStep
 
 SCHEMA = "sonder.evaluation-minimized-failure.v1"
 POLICY_SCHEMA = "sonder.evaluation-divergence-policy.v1"
-DECISION_FIELDS = frozenset({"output", "state"})
+# Only ``output`` is a decision field.  Replay feeds the recorded input to the
+# candidate and records what it returns; step ``state`` is carried over from the
+# recording, so a state comparison could never observe a candidate difference.
+DECISION_FIELDS = frozenset({"output"})
 MAX_PATHS = 64
 MAX_PATH_DEPTH = 16
 MAX_CHANGED_PATHS = 32
@@ -49,7 +52,7 @@ EvaluatorFactory = Callable[[], Callable[[Any], Any]]
 
 
 class DivergenceError(ValueError):
-    """Invalid policy, non-reproducible failure, or tampered failure record."""
+    """Invalid policy, non-reproducible failure, or inconsistent failure record."""
 
 
 def _canonical(value: Any) -> str:
@@ -271,7 +274,15 @@ def replay_divergence(
 
 @dataclass(frozen=True)
 class MinimizedFailure:
-    """Immutable, self-verifying minimal replay that reproduces a divergence."""
+    """Immutable minimal replay that reproduces one recorded divergence.
+
+    The digests are integrity checks against accidental corruption and
+    inconsistent edits, not tamper-proofing: they are plain SHA-256 values that
+    anyone able to edit a record can recompute.  Construction and loading
+    therefore also re-derive what they can from the stored steps -- the
+    divergent step must be the last retained step and its projected expected
+    content must match the recorded divergence digest.
+    """
 
     source_trajectory_id: str
     source_digest: str
@@ -298,8 +309,11 @@ class MinimizedFailure:
             raise DivergenceError("source indexes must be unique, sorted, non-negative integers")
         if tuple(step.index for step in self.steps) != tuple(range(len(self.steps))):
             raise DivergenceError("minimized failure steps must be contiguous from zero")
-        if not self.divergence.index < len(self.steps) and self.divergence.field != "step_count":
-            raise DivergenceError("divergence index is outside the minimized replay")
+        if self.divergence.field not in self.policy.fields or self.divergence.index != len(self.steps) - 1:
+            raise DivergenceError("divergence must be on a policy decision field at the last retained step")
+        divergent = getattr(self.steps[self.divergence.index], self.divergence.field)
+        if _digest(self.policy.project(divergent)) != self.divergence.expected_digest:
+            raise DivergenceError("divergence expected digest does not match the stored step")
         if type(self.evaluations) is not int or self.evaluations < 1 or type(self.one_minimal) is not bool:
             raise DivergenceError("minimization bookkeeping is invalid")
         if self.strategy not in STRATEGIES:
@@ -340,7 +354,7 @@ class MinimizedFailure:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "MinimizedFailure":
-        """Restore a retained failure, verifying the trajectory and record digests."""
+        """Restore a retained failure, re-checking digests and step consistency."""
         fields = {
             "schema", "source_trajectory_id", "source_digest", "policy", "source_indexes",
             "trajectory", "divergence", "reproduction_digest", "evaluations", "one_minimal",
@@ -410,9 +424,9 @@ def minimize_failure(
     baseline_factory: EvaluatorFactory | None = None,
     max_evaluations: int = DEFAULT_MAX_EVALUATIONS,
 ) -> MinimizedFailure:
-    """Reduce a divergent replay to a small, reproducing step set.
+    """Reduce a divergent replay to a small step set reproducing the same divergence.
 
-    Recorded outputs are only a valid oracle for the exact step sequence that
+    Recorded outputs are only a valid oracle for the exact sequence that
     produced them: once an earlier step is removed, a later recorded output
     may depend on state that no longer exists.  Two sound strategies follow:
 
@@ -420,21 +434,27 @@ def minimize_failure(
       **prefix** -- the steps through the earliest meaningful divergence,
       whose recorded outputs remain valid because nothing before them moved.
     * With ``baseline_factory`` (the behavior the recording came from), the
-      oracle is **differential**: each ddmin trial replays the subset through
-      a fresh baseline and a fresh candidate and asks whether they diverge.
-      The baseline must first reproduce the full recording under ``policy``,
-      and the retained expected outputs are the baseline's outputs for the
-      minimized subset, so the record is self-consistent when replayed alone.
+      oracle is **differential**: each trial replays a subset through a fresh
+      baseline and a fresh candidate.  The baseline must first reproduce the
+      full recording under ``policy``, and the retained expected outputs are
+      the baseline's outputs for the minimized subset.
 
-    Every trial uses fresh evaluators, so stateful sessions restart cleanly.
-    The result is replayed twice more and must diverge identically both
-    times; otherwise :class:`DivergenceError` is raised instead of retaining
-    an unreproducible record.  ``one_minimal`` is true only when differential
-    ddmin converged within ``max_evaluations`` replays.
+    Minimization is anchored to the originally reported divergence: the
+    divergent step is always retained as the last step, and a trial counts
+    only if it diverges *first* at that step with the same projected expected
+    and actual content.  A subset that fails some other way (a different bug
+    exposed by removing context) is not accepted as a reproduction.
+
+    ``max_evaluations`` is a hard ceiling on replays, including the baseline
+    faithfulness check (1), the initial full replay (1), and the two
+    confirmation replays (2).  It must leave room for those fixed replays;
+    whatever remains is the ddmin budget.  ``one_minimal`` is true only when
+    differential ddmin converged within that budget.
     """
     policy = policy or DivergencePolicy()
-    if type(max_evaluations) is not int or not 1 <= max_evaluations <= MAX_EVALUATIONS:
-        raise DivergenceError(f"max_evaluations must be within 1..{MAX_EVALUATIONS}")
+    reserved = 3 + (1 if baseline_factory is not None else 0)
+    if type(max_evaluations) is not int or not reserved <= max_evaluations <= MAX_EVALUATIONS:
+        raise DivergenceError(f"max_evaluations must be within {reserved}..{MAX_EVALUATIONS} for this strategy")
     evaluations = 0
 
     def replay(indexes: tuple[int, ...]) -> tuple[TrajectoryRecord, MeaningfulDivergence | None, str]:
@@ -443,44 +463,72 @@ def minimize_failure(
         evaluations += 1
         chosen = [expected.steps[index] for index in indexes]
         if baseline_factory is None:
-            reference, _ = replay_steps(chosen, lambda value: None, trajectory_id=expected.trajectory_id, metadata=expected.metadata)
+            reference, _ = replay_steps(
+                chosen, lambda value: None, trajectory_id=expected.trajectory_id, metadata=expected.metadata,
+            )
         else:
-            _, reference = replay_steps(chosen, baseline_factory(), trajectory_id=expected.trajectory_id, metadata=expected.metadata)
-        _, actual = replay_steps(chosen, evaluator_factory(), trajectory_id=expected.trajectory_id, metadata=expected.metadata)
+            _, reference = replay_steps(
+                chosen, baseline_factory(), trajectory_id=expected.trajectory_id, metadata=expected.metadata,
+            )
+        _, actual = replay_steps(
+            chosen, evaluator_factory(), trajectory_id=expected.trajectory_id, metadata=expected.metadata,
+        )
         return reference, earliest_divergence(reference, actual, policy), actual.digest
 
     full = tuple(range(len(expected.steps)))
     if not full:
         raise DivergenceError("an empty trajectory cannot diverge")
     if baseline_factory is not None:
-        recorded, _ = replay_steps(expected.steps, lambda value: None, trajectory_id=expected.trajectory_id, metadata=expected.metadata)
-        _, rebuilt = replay_steps(expected.steps, baseline_factory(), trajectory_id=expected.trajectory_id, metadata=expected.metadata)
+        evaluations += 1
+        recorded, _ = replay_steps(
+            expected.steps, lambda value: None, trajectory_id=expected.trajectory_id, metadata=expected.metadata,
+        )
+        _, rebuilt = replay_steps(
+            expected.steps, baseline_factory(), trajectory_id=expected.trajectory_id, metadata=expected.metadata,
+        )
         if earliest_divergence(recorded, rebuilt, policy) is not None:
             raise DivergenceError("baseline does not reproduce the recorded trajectory")
     _, first, _ = replay(full)
     if first is None:
         raise DivergenceError("replay does not diverge under the supplied policy")
-    prefix = full[: min(first.index, len(full) - 1) + 1]
+    target = first.index
+    context = full[:target]
+
+    def same_divergence(found: MeaningfulDivergence | None, position: int) -> bool:
+        return (
+            found is not None and found.index == position and found.field == first.field
+            and found.expected_digest == first.expected_digest
+            and found.actual_digest == first.actual_digest
+        )
 
     converged = False
-    minimized = prefix
+    minimized = context
     if baseline_factory is not None:
+        ddmin_budget = max_evaluations - 2  # the two confirmation replays stay reserved
         cache: dict[tuple[int, ...], bool] = {}
 
         def fails(indexes: tuple[int, ...]) -> bool:
-            if not indexes:
-                return False
             if indexes not in cache:
-                cache[indexes] = replay(indexes)[1] is not None
+                cache[indexes] = same_divergence(replay(indexes + (target,))[1], len(indexes))
             return cache[indexes]
 
-        minimized, converged = _ddmin(prefix, fails, lambda: evaluations >= max_evaluations)
+        def exhausted() -> bool:
+            return evaluations >= ddmin_budget
 
-    confirmations = [replay(minimized) for _ in range(2)]
+        if not exhausted() and fails(()):
+            minimized, converged = (), True
+        elif not exhausted():
+            minimized, converged = _ddmin(context, fails, exhausted)
+
+    chosen = minimized + (target,)
+    confirmations = [replay(chosen) for _ in range(2)]
     divergences = [item[1] for item in confirmations]
     references = {item[0].digest for item in confirmations}
     digests = {item[2] for item in confirmations}
-    if any(item is None for item in divergences) or divergences[0] != divergences[1] or len(digests) != 1 or len(references) != 1:
+    if (
+        not all(same_divergence(item, len(minimized)) for item in divergences)
+        or divergences[0] != divergences[1] or len(digests) != 1 or len(references) != 1
+    ):
         raise DivergenceError("minimized failure does not reproduce deterministically")
     reference = confirmations[0][0]
     steps = tuple(
@@ -488,7 +536,7 @@ def minimize_failure(
         for position, step in enumerate(reference.steps)
     )
     return MinimizedFailure(
-        expected.trajectory_id, expected.digest, policy, minimized, steps,
+        expected.trajectory_id, expected.digest, policy, chosen, steps,
         divergences[0], digests.pop(), evaluations, converged,
         STRATEGY_DIFFERENTIAL if baseline_factory is not None else STRATEGY_PREFIX,
     )

@@ -6,6 +6,7 @@ from typing import Callable, Mapping, Protocol, Sequence
 from ..evaluation.corpus_inventory import CorpusSourceReport
 from ..evaluation.divergence import MinimizedFailureStore
 from ..evaluation.proposal_lifecycle import (
+    EvaluationMode,
     EvaluationResult,
     EvaluationSuite,
     Proposal,
@@ -39,6 +40,8 @@ class EvaluationLifecyclePort(Protocol):
     def begin_canary(self, proposal_id: str) -> Proposal: ...
     def record_result(self, proposal_id: str, result: EvaluationResult) -> EvaluationResult: ...
     def record_observation(self, proposal_id: str, observation: ShadowCanaryObservation) -> ShadowCanaryObservation: ...
+    def recorded_results(self, proposal_id: str) -> tuple[EvaluationResult, ...]: ...
+    def recorded_observation(self, proposal_id: str, mode: EvaluationMode) -> ShadowCanaryObservation | None: ...
     def build_promotion_evidence(
         self,
         proposal_id: str,

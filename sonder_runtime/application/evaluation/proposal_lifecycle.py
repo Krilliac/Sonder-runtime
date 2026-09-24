@@ -362,6 +362,15 @@ class ProposalLifecycle:
         except KeyError as exc:
             raise EvaluationLifecycleError(f"unknown proposal {proposal_id!r}") from exc
 
+    def recorded_results(self, proposal_id: str) -> tuple[EvaluationResult, ...]:
+        """Results accepted for this proposal, in recording order."""
+        return tuple(self._results[result_id] for result_id in self.get(proposal_id).result_ids)
+
+    def recorded_observation(self, proposal_id: str, mode: EvaluationMode) -> ShadowCanaryObservation | None:
+        """The accepted shadow or canary observation for this proposal, if any."""
+        self.get(proposal_id)
+        return self._observations[proposal_id].get(mode)
+
     def _transition(self, proposal_id: str, target: ProposalState) -> Proposal:
         current = self.get(proposal_id)
         if target not in self._allowed[current.state]:
