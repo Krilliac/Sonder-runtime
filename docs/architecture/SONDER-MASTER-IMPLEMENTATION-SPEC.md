@@ -490,7 +490,7 @@ schema, cancellation, cleanup-to-quiescence contract, and conformance tests.
   loopback, link-local, metadata, redirect, DNS-rebinding, and private-network targets.
 - [ ] **SEC-003 — Filesystem races.** Use symlink- and race-resistant path resolution for
   authorized roots and destructive targets.
-- [ ] **SEC-004 — Package/archive safety.** Bound files, expansion ratios, paths, links,
+- [x] **SEC-004 — Package/archive safety.** Bound files, expansion ratios, paths, links,
   total bytes, and parser resource use.
 - [ ] **SEC-005 — Extension provenance.** Record trust/signature/source, produce an SBOM,
   and quarantine compromised or incompatible packages.

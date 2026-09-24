@@ -6,12 +6,11 @@ inventories every production archive reader, fixes the defects that an
 adversarial corpus exposed, and records the corpus as a regression gate.
 The requirement-wide audit is in [SEC-AUDIT-2026-09-23.md](SEC-AUDIT-2026-09-23.md).
 
-> **Status: verification withdrawn (ledger revision 4).** Revision 3 marked
-> SEC-004 verified at `e077dbf2`. A re-review at `eca9f597` then measured
+> **Status history.** Revision 3 marked SEC-004 verified at `e077dbf2`.
+> Revision 4 withdrew that after a re-review at `eca9f597` measured
 > unbounded parser work through GNU sparse members and uncaught recursion
-> through chained metadata records, neither of which the metadata cap
-> covered. The checkbox is cleared until those fixes have a green CI run on
-> their exact SHA.
+> through chained metadata records. Revision 5 re-verifies at `cf83cb18`,
+> which contains fixes 1 to 10 below. The CI receipt is under Evidence.
 
 ## Production archive readers
 
@@ -179,6 +178,16 @@ Hosted CI history: run
 passed at `e077dbf2`, which contained fixes 1 to 6. It was the basis of the
 withdrawn revision 3. The CI receipt for fixes 7 to 10 is recorded with the
 next verified ledger revision, which names its exact SHA.
+
+Re-verification receipt (revision 5): the pull request's exact-head run
+[`35945618003`](https://github.com/Krilliac/Sonder-runtime/actions/runs/35945618003)
+passed its `Validate master-spec evidence ledger`,
+`Validate evidence changes against pull request base`, and `Run test suite`
+steps (Ubuntu, 16721 passed, 104 skipped) at
+`cf83cb184981db46692234b8f1f36e2559410858`. That head contains fixes 1 to 10 and all 49 corpus cases. The
+ledger's `verified_sha` names it. The checkbox, this receipt, and a merge
+of `main` (#541, #549) follow in later commits, which are gated by CI on the
+pull request's final head.
 
 ## Limitations
 
