@@ -91,9 +91,9 @@
       "verified": 0
     },
     "SEC": {
-      "checked": 1,
+      "checked": 0,
       "total": 9,
-      "verified": 1
+      "verified": 0
     },
     "SELFMOD": {
       "checked": 1,
@@ -127,13 +127,13 @@
     }
   },
   "overall": {
-    "checked": 9,
+    "checked": 8,
     "statuses": {
-      "implemented_unverified": 195,
-      "verified": 9
+      "implemented_unverified": 196,
+      "verified": 8
     },
     "total": 204,
-    "verified": 9
+    "verified": 8
   },
   "requirements": [
     {
@@ -1222,11 +1222,11 @@
       "status": "implemented_unverified"
     },
     {
-      "checked": true,
-      "claim": "Every production archive reader bounds member names, links and special files, member counts, per-entry and aggregate expansion, compression ratio, TAR header metadata size, metadata-record chains, and preview scans, rejects GNU sparse members before any sparse map is read, and checks ZIP central-directory entry counts before parsing the directory; an adversarial corpus with memory and wall-time bounds drives each protection in the archive tools, update staging, data-inspection, OOXML, and path-safety readers.",
+      "checked": false,
+      "claim": "Revision 5 is withdrawn: round-3 review of PR #548 at 774c8965 measured global PAX records accumulating keys into every later member (quadratic retained memory, accepted by update staging and previews) and per-member PAX keys retained without an archive-wide metadata budget; two ZIP readers also checked only the declared entry count and not the central-directory size.",
       "requirement_id": "SEC-004",
-      "revision": 5,
-      "status": "verified"
+      "revision": 6,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "d4a7f7d8a432bc2fabc4c7f058e6593fc5aea1dd41ed4c93519af68b90c26202",
-    "spec_sha256": "d11b5664c594bb79042c358a0510393d1ee0dd6d718830332a6362ed652c9bc5"
+    "ledger_sha256": "18d0b508d12eab9ea9ae19c10787728806ba7ea01276aad537ead97470fe61a5",
+    "spec_sha256": "ed5ab01393d72681fc4eb4b9581e832d3d07ee95595b8b58dfe094c9e7dbf4fa"
   }
 }
