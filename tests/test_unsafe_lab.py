@@ -46,7 +46,8 @@ def test_missing_acknowledgement_preserves_safe_default():
 def test_security_docs_disclose_direct_mcp_and_hosted_boundaries():
     for relative in ("SECURITY.md", "docs/runbooks/unsafe-lab.md"):
         text = (ROOT / relative).read_text(encoding="utf-8")
-        assert "46 direct MCP call paths" in text
+        assert "direct MCP call path" in text
+        assert "46 direct MCP" not in text  # the count was never derived from source
         assert "nested-model" in text
         assert "artifact" in text and "process" in text
     assert "safe default" in unsafe_lab.status_line(

@@ -1,11 +1,13 @@
-"""sonder_client — standalone thin remote client for a hosted Sonder Runtime.
+"""sonder_client — thin remote client (run from a checkout) for a hosted Sonder Runtime.
 
-Drop this single file on any PC with Python (stdlib only — no server/memory_store/
-mcp/ollama imports) to talk to a Sonder Runtime instance hosted elsewhere (e.g. a VPS
-running sonder_serve.py with SONDER_HOST=0.0.0.0).
+Run this file from a checkout of the repository: it needs only the Python
+standard library plus the checkout's ``sonder_runtime`` client adapters (no
+server/memory_store/mcp/ollama imports and no pip installs). It is not a
+single-file download. Remote hosts keep the runtime on loopback behind the
+documented TLS reverse proxy; see CLIENT.md.
 
 Config (env or argv):
-    SONDER_SERVER   e.g. http://your-vps:11435   (required)
+    SONDER_SERVER   e.g. https://sonder.example.com   (required)
     SONDER_API_KEY  optional bearer key, if the server has auth enabled
     SONDER_LOCAL_FALLBACK  default http://127.0.0.1:11435
     SONDER_FALLBACK_LOCAL=0 disables local fallback
@@ -14,7 +16,7 @@ Config (env or argv):
 
 Run:
     python sonder_client.py
-    python sonder_client.py --server http://your-vps:11435 --key s3cret
+    python sonder_client.py --server https://sonder.example.com --key s3cret
 """
 import sys
 import urllib.error
@@ -46,7 +48,7 @@ Set SONDER_SERVER (and optionally SONDER_API_KEY) in the environment,
 or pass --server/--key on the command line.
 
 Example:
-    set SONDER_SERVER=http://your-vps:11435
+    set SONDER_SERVER=https://sonder.example.com
     set SONDER_API_KEY=s3cret
     python sonder_client.py
 """
