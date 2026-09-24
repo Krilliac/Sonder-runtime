@@ -101,8 +101,15 @@ Regression checks from the same worktree (Windows, Python 3.12.10), round 0:
   manifest-trust, and architecture suites: 158 passed, 6 skipped;
   `scripts/check_architecture.py` passed.
 
-Hosted CI: the pull request's exact-head run is recorded when the ledger
-revision is marked `verified`.
+Hosted CI: the pull request's exact-head run
+[`35939556037`](https://github.com/Krilliac/Sonder-runtime/actions/runs/35939556037)
+passed its `Validate master-spec evidence ledger`,
+`Validate evidence changes against pull request base`, and `Run test suite`
+steps (Ubuntu, 16527 passed, 104 skipped) for head
+`e077dbf25068c6c51d4fb12af22f4b27992d791a`. That head contains every fix and
+case described above. The ledger's `verified_sha` names it. This evidence
+update, the SEC-004 checkbox, and a merge of `main` follow in later commits,
+which are gated by CI on the pull request's final head.
 
 ## Limitations
 
