@@ -91,9 +91,9 @@
       "verified": 0
     },
     "SEC": {
-      "checked": 1,
+      "checked": 0,
       "total": 9,
-      "verified": 1
+      "verified": 0
     },
     "SELFMOD": {
       "checked": 1,
@@ -127,13 +127,13 @@
     }
   },
   "overall": {
-    "checked": 7,
+    "checked": 6,
     "statuses": {
-      "implemented_unverified": 197,
-      "verified": 7
+      "implemented_unverified": 198,
+      "verified": 6
     },
     "total": 204,
-    "verified": 7
+    "verified": 6
   },
   "requirements": [
     {
@@ -1222,11 +1222,11 @@
       "status": "implemented_unverified"
     },
     {
-      "checked": true,
-      "claim": "Every production archive reader bounds member names, links and special files, member counts, per-entry and aggregate expansion, compression ratio, TAR header metadata, and preview scans before or while parsing, and an adversarial corpus drives each bound in the archive tools, update staging, and data-inspection readers.",
+      "checked": false,
+      "claim": "Revision 3 is withdrawn: re-review of PR #548 at eca9f597 measured unbounded parser work through GNU sparse members (old-style extended sparse headers and PAX GNU.sparse 1.0 maps) and uncaught recursion through chained metadata records, which open_bounded did not cover; ZIP readers also materialized the whole central directory before checking the entry count.",
       "requirement_id": "SEC-004",
-      "revision": 3,
-      "status": "verified"
+      "revision": 4,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "87c80468d35f9a4a180f8de330bbe3a4c8590f0d844938b3e0fca43ace9578e6",
-    "spec_sha256": "8279cfe6b4435ee89e097ecbaa5213e6469ea15ce541813b4448a495ea3638e3"
+    "ledger_sha256": "bf5fa1f1e8245ef4a4de1a075232727673716be10e57089e107f7ea3aa1a93a2",
+    "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
   }
 }
