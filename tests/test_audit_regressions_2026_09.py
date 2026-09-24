@@ -20,6 +20,12 @@ from sonder_runtime.bootstrap import config_loading
         # Substring matching used to plan these as 7b / 3b.
         ("qwen3.8:27b-q6", "auto"),
         ("ornith-1.5:35b-a3b", "auto"),
+        ("custom-7b-model:3b", "3b"),
+        ("custom-27b-model:3b", "3b"),
+        ("custom-7b-model:latest", "auto"),
+        ("Qwen/Qwen2.5-Coder-7B-Instruct", "7b"),
+        ("registry.example:11434/qwen:3b", "3b"),
+        ("qwen:7b-a3b", "7b"),
         ("sonder:latest", "auto"),
         ("", "auto"),
     ],
@@ -30,7 +36,14 @@ def test_planner_size_matches_parameter_token_exactly(requested, expected):
 
 @pytest.mark.parametrize(
     ("requested", "expected"),
-    [("qwen:7b", "7b"), ("qwen:27b-q6", "auto"), ("ornith:35b-a3b", "auto")],
+    [
+        ("qwen:7b", "7b"), ("qwen:27b-q6", "auto"), ("ornith:35b-a3b", "auto"),
+        ("custom-7b-model:3b", "3b"), ("custom-27b-model:3b", "3b"),
+        ("custom-7b-model:latest", "auto"),
+        ("Qwen/Qwen2.5-Coder-7B-Instruct", "7b"),
+        ("registry.example:11434/qwen:3b", "3b"),
+        ("qwen:7b-a3b", "7b"),
+    ],
 )
 def test_bootstrap_passes_parameter_bucket_to_planner(monkeypatch, requested, expected):
     """The real CLI must send the corrected bucket before any runtime action."""

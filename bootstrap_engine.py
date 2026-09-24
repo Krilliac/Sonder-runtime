@@ -40,9 +40,11 @@ def _planner_size_for(requested: str) -> str:
     Matches the parameter token exactly (``:7b``, ``-7b``), never as a
     substring, so ``27b`` is not planned as ``7b`` and the ``a3b`` active
     parameter suffix of an MoE tag is not planned as ``3b``. Sizes outside
-    the planner's buckets fall back to ``auto``.
+    the planner's buckets fall back to ``auto``. An explicit tag takes
+    precedence over size tokens in the repository name.
     """
-    match = re.search(r"(?:^|[:\-_/])(\d+(?:\.\d+)?)b(?![a-z0-9])", requested.lower())
+    candidate = requested.rsplit(":", 1)[-1].strip().lower()
+    match = re.search(r"(?:^|[:\-_/])(\d+(?:\.\d+)?)b(?![a-z0-9])", candidate)
     if not match:
         return "auto"
     size = match.group(1) + "b"
