@@ -887,9 +887,9 @@
     },
     {
       "checked": false,
-      "claim": "Live managed app work invokes host-owned durable verifier-observation persistence at the terminal eligibility boundary: the bootstrap-composed recorder re-derives each observation from the current owner-bound host turn through the application unit of work, accepts no caller trust or HostFinalFacts semantic claims, fails closed without changing the work result, and runs verified-subject promotion only through a composed authoritative fact source.",
+      "claim": "Corrects revisions 4-5: the first verifier-observation insert now requires the exact private producer authorization type (a duck-typed matches() stand-in was accepted before); independence is keyed by authenticated principal and scope, so one principal's child lanes cannot reach FACT; promotion reads only indexed subject-scoped rows and a persisted verified negative demotes before any completeness bound; the managed boundary decision is sealed and resolved once; certified_after_return is refused explicitly; learning refusals carry a visible reason and cannot alter work outcomes.",
       "requirement_id": "MEM-003",
-      "revision": 5,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "7d990f67d566d6fc99b9a816b06f57b1559384081c05cdb554b8479e6109269d",
+    "ledger_sha256": "d1b35365b93783c47b73e98add3eed33422e708481608cd3988d56db24a51b30",
     "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
   }
 }

@@ -2,96 +2,123 @@
 
 Status: `implemented_unverified`.
 
-This slice closes the first-insert and public-value forgery holes in the
-receipt observation path. `ReceiptObservationProducer` now requires the
-opaque authority attached by the managed verifier boundary and resolves that
-authority against the current owner-bound terminal decision before deriving
-worker identity, scope, subject digest, and outcome. A copied or modified
-`ManagedTerminalEligibility` without that authority is refused, and modified
-public fields on a copied value are ignored in favor of the durable resolver.
+## Correction (revision 6, security review of PR #525)
 
-`SQLiteVerifierObservationRepository` accepts a first insert only when the
-producer's in-process authorization capability matches the receipt and
-observation. The capability is excluded from serialized receipt data, so
-restart/replay still compares the immutable persisted payload. Contradictory
-and failed verifier receipts remain negative learning evidence; this slice
-does not accept caller-authored semantic fact text. The live application
-composition now exposes a managed-session durable persistence method using the
-application-owned unit of work, and `MemoryLearningFacade.promote_verified_subject`
-can promote the canonical `verified-subject:<digest>` token after the learning
-ladder has two independent authenticated workers; a persisted verified
-negative demotes the same fact.
+Revisions 4 and 5 of this document overclaimed. An independent review
+found, and this revision fixes:
 
-Promotion derives the reserved fact identity as
-`verified-subject-fact-<subject-digest>` and rejects caller-selected IDs. It
-also takes a `BEGIN IMMEDIATE` snapshot, loads the complete bounded
-observation set, and evaluates every persisted observation for the subject;
-omitted contradictory receipts therefore cannot be bypassed. An incomplete
-snapshot fails closed.
+- **First-insert gate was not type-exact.** The document said exact internal
+  types rejected duck-typed values at the first insert. In fact
+  `SQLiteVerifierObservationRepository.append` only required a truthy
+  `authorization.matches(...)`, so a stand-in object with `matches() -> True`
+  inserted two forged trusted `passed` rows that `VerifiedSubjectFactPromotion`
+  promoted. The gate now requires `type(authorization) is
+  _ObservationAuthorization` (and exact receipt/observation types) before
+  calling `matches`.
+- **Independence was per lane, not per principal.** The key derived from the
+  child lane id, so one principal running two child lanes over the same
+  unchanged source reached `FACT`. The independence key is now
+  `sha256({principal_id, workspace_scope})`; two lanes of one principal are a
+  single source. Promotion therefore needs two distinct authenticated
+  principals.
+- **Promotion loaded a global snapshot.** It read up to 10,001 rows across all
+  projects under `BEGIN IMMEDIATE`; past that bound it raised "snapshot is
+  incomplete" before the negative-evidence branch, so a new verified negative
+  could not demote a contradicted fact. Promotion now reads only this
+  project's rows for the exact subject token through an expression index
+  (`verifier_learning_observations_subject`), and a separate negative query
+  demotes before any completeness check.
+- **The recovery refusal reason was stated wrongly.** The document claimed
+  `PERSIST_VALUEERROR`. The producer now refuses `certified_after_return`
+  explicitly with a `PermissionError` naming that phase, and the recorder
+  reports the reason text.
+- **The boundary was re-run twice per learning call.** Persistence re-ran
+  `terminal_eligibility` (publication, inventory and manifest capture) and the
+  producer's resolver re-ran it again while the work lease was held. The
+  boundary now seals the exact decision it produced into its authority; the
+  recorder passes that decision through and the producer resolves the sealed
+  value once.
+- **Learning hook isolation.** Both hook call sites now catch every failure,
+  including non-`Exception` types, so learning cannot alter a completed work or
+  recovery outcome. Refusals (persistence or promotion) are recorded with a
+  bounded reason and emitted as a structured warning log record.
+
+## Design
+
+`ReceiptObservationProducer` requires the opaque `_HostVerifierAuthority`
+attached by the managed verifier boundary. That authority seals the exact
+decision the boundary derived from the current owner-bound durable host turn;
+the producer derives worker, scope, subject digest, and outcome only from
+that sealed value, so modified public fields on a copied eligibility are
+ignored and a copy without the authority is refused.
+
+`SQLiteVerifierObservationRepository` accepts a first insert only with the
+producer's exact `_ObservationAuthorization` capability bound to the complete
+receipt and observation payload. The capability is excluded from serialized
+receipt data, so restart/replay compares the immutable persisted payload.
+
+Promotion derives the reserved fact identity
+`verified-subject-fact-<subject-digest>` and rejects caller-selected IDs. Under
+`BEGIN IMMEDIATE` it first demotes on any persisted authenticated verified
+negative for the subject, then reads the bounded subject-scoped set and fails
+closed if it exceeds 10,000 rows or omits a selected observation.
 
 The authority and insert capability are process-local Python objects. Exact
-internal types reject ordinary duck-typed or caller-constructed public values,
-but arbitrary code already running in the same Python process can inspect
+type checks reject duck-typed or caller-constructed public values, but
+arbitrary code already running in the same Python process can inspect
 underscore-prefixed module internals. This is an API and ownership boundary,
 not a substitute for process isolation against a malicious extension.
 
-Evidence:
-
-- `tests/test_receipt_observation.py`: 17 focused tests, including public
-  eligibility forgery, modified-field substitution, first-insert forgery,
-  restart/replay, and immutable conflict behavior.
-- `tests/test_managed_terminal_eligibility.py`: 6 focused tests, including the
-  live failed-verifier authority attachment.
-- `tests/test_receipt_observation.py`: production unit-of-work composition,
-  independent subject promotion, and persisted negative demotion.
-
-## Live managed-work invocation (revision 5)
+## Live managed-work invocation
 
 `sonder_runtime/bootstrap/managed_learning.py` adds `ManagedLearningRecorder`,
-a bootstrap-owned recorder composed by `AppManagedWorkHttp` with the owned
-`Application` and the same private `runtime._standalone_verifier_factory`
-that decides terminal eligibility. It is wired into the two production
-points where a managed session reaches a terminal verifier outcome:
+composed by `AppManagedWorkHttp` with the owned `Application` and the private
+`runtime._standalone_verifier_factory`. It is invoked from
+`AppManagedWorkDispatcher._run` after the host-current eligibility decision
+and from `AppWorkRecoveryAttempt.resume` (composed by
+`app_work_recovery_http`). It acts only on the exact authority type in a
+certified/failed phase and on the exact managed owner types; callers pass no
+receipt, worker, trust, or fact text, and no `HostFinalFacts` semantic claim
+is accepted. When the composed unit of work has an authoritative fact source
+whose project scope equals the receipt scope it runs
+`MemoryLearningFacade.promote_verified_subject`; otherwise promotion reports
+`unconfigured` or `out_of_scope`.
 
-- `AppManagedWorkDispatcher._run`, after the host-current eligibility
-  decision is recorded (certified terminal or verified failed check);
-- `AppWorkRecoveryAttempt.resume`, after recovered completion or a verified
-  failed check (composed by `app_work_recovery_http`).
+## Evidence (local, Windows, `-p no:cacheprovider`)
 
-The recorder only acts on a `ManagedTerminalEligibility` carrying the exact
-`_HostVerifierAuthority` type in a certified/failed phase, and only for the
-exact `ManagedConversationLifetime`/`ManagedStandaloneSession` owner types.
-It calls `persist_learning_observation_durable`, which re-runs the current
-owner-bound eligibility and the receipt producer against the application
-unit of work; callers pass no receipt, worker, trust, or fact text, and no
-`HostFinalFacts` semantic claim is accepted. Failures are recorded as a
-bounded `refused` outcome and never change the work result. When the
-composed unit of work has an authoritative fact source whose project scope
-equals the receipt scope, the recorder then runs
-`MemoryLearningFacade.promote_verified_subject` for the canonical subject
-token; otherwise promotion reports `unconfigured` or `out_of_scope`.
-
-Evidence (local, Windows, `-p no:cacheprovider`):
-
+- `tests/test_receipt_observation_review.py`: 7 regression tests, each
+  observed failing on the pre-fix code (7 failed) and passing after: duck-typed
+  first insert (reviewer repro), same-principal two lanes stay `CANDIDATE`,
+  distinct principals reach `FACT`, explicit `certified_after_return`
+  refusal, verified negative demotes past both the global and same-subject
+  bounds with the subject index in the query plan, single boundary resolution,
+  and visible promotion refusal reason. The reviewer's `forge.py` now raises
+  `PermissionError` on the first forged insert.
+- `tests/test_app_recovery_coordinator.py::test_learning_hook_failure_never_escapes_recovery`:
+  failed on the pre-fix coordinator (`KeyboardInterrupt` escaped), passes now.
+  The dispatcher call site had no observable RED: `_unknown` already ignores
+  terminal records, so its wrapper is defensive.
 - `tests/test_managed_learning_composition.py::test_live_certified_managed_work_persists_authenticated_observation`:
   real `AppManagedWorkDispatcher`, `server._application()`, an
-  `AppManagedAuthority`-bound `ManagedStandaloneSession`, the real delegated
-  verifier and approval bridge. The work reaches `terminal`/`certified`, and
-  exactly one `passed` observation is persisted in the application memory
-  database with the host principal, run, final receipt digest, and
-  worker-derived independence key. No eligibility value is constructed by
-  the test. RED check: disabling the dispatcher hook makes this test fail.
+  `AppManagedAuthority`-bound `ManagedStandaloneSession`, and the real
+  delegated verifier. The work reaches `terminal`/`certified`, exactly one
+  `passed` observation is persisted with the host principal, run, final
+  receipt digest and principal-derived independence key, and the boundary is
+  resolved exactly once. Status is read with a freshly bounded selection so the
+  fixture deadline cannot fail the test.
 - `tests/test_app_recovery_coordinator.py::test_real_pending_work_explicitly_reattaches_and_certifies_once`:
-  the live recovery hook runs for a `certified_after_return` completion and
-  fails closed (`refused`, `PERSIST_VALUEERROR`, no observation) because the
-  original outward final carried no certificate identity.
+  the live recovery hook runs for `certified_after_return` and is refused
+  (`PERSIST_PERMISSIONERROR`, reason names `certified_after_return`), with no
+  observation.
 
-Remaining gaps: `certified_after_return` recoveries are not yet learning
-evidence (the producer requires the original final to carry the
-certificate); live promotion runs only when replication composition supplies
-an authoritative fact source (owned by PR #538 / issue #514); the
-verified-failed dispatcher path is covered by unit tests, not a live
-failing-check run; and hosted CI has not yet run this revision.
+## Remaining gaps
 
-No semantic fact claim is accepted from `HostFinalFacts` in this slice;
-promotion is limited to the canonical verifier-subject token.
+`certified_after_return` recoveries are not learning evidence; live
+promotion runs only when replication composition supplies an authoritative
+fact source (PR #538 / issue #514); the verified-failed dispatcher path has
+unit coverage but no live failing-check run; worker/model-class identity is
+not part of independence (principal only); hosted CI has not run this
+revision.
+
+No semantic fact claim is accepted from `HostFinalFacts`; promotion is
+limited to the canonical verifier-subject token.
