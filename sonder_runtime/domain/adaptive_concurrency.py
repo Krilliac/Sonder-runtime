@@ -69,24 +69,58 @@ class LaneClaim:
         )
 
 
-def _normalize_path(path: str) -> str:
-    """Return a comparable ``a/b/c`` path; ``""`` is the whole scope root.
+def _path_parts(path: str) -> tuple[bool, tuple[str, ...]]:
+    """Return ``(absolute, parts)`` with case folded and separators unified.
 
-    Case is folded and separators unified on purpose: on a case-insensitive
-    filesystem ``A.py`` and ``a.py`` are the same file, and a false conflict
-    only costs parallelism while a missed one can corrupt a shared file.
+    Case is folded on purpose: on a case-insensitive filesystem ``A.py`` and
+    ``a.py`` are the same file, and a false conflict only costs parallelism
+    while a missed one can corrupt a shared file.
     """
     if not isinstance(path, str):
         raise ValueError("claimed paths must be strings")
     text = path.replace("\\", "/").strip().casefold()
     if not text:
         raise ValueError("claimed paths must be non-empty")
-    parts = [part for part in PurePosixPath(text).parts if part not in ("", ".")]
-    if parts and parts[0] == "/":
-        parts = parts[1:]
+    absolute = text.startswith("/") or (
+        len(text) >= 2 and text[1] == ":" and text[0].isalpha()
+    )
+    parts = [part for part in PurePosixPath(text).parts if part not in ("", ".", "/")]
     if ".." in parts:
         raise ValueError("claimed paths must not escape the scope root")
+    return absolute, tuple(parts)
+
+
+def _normalize_path(path: str) -> str:
+    """Return a comparable root-relative ``a/b/c`` path; ``""`` is the root.
+
+    Absolute paths are rejected: two spellings of one file (``a.py`` and
+    ``C:/repo/a.py``) must be anchored with :func:`anchor_claim_path` first,
+    otherwise they would silently compare as different files.
+    """
+    absolute, parts = _path_parts(path)
+    if absolute:
+        raise ValueError("claimed paths must be anchored to the scope root")
     return "/".join(parts)
+
+
+def anchor_claim_path(path: str, root: str) -> str:
+    """Express ``path`` relative to the scope ``root``.
+
+    A relative path is already root-relative.  An absolute path must lie
+    inside ``root``; anything else raises ``ValueError`` so an unanchorable
+    claim can never masquerade as an independent lane.
+    """
+    absolute, parts = _path_parts(path)
+    if not absolute:
+        return "/".join(parts)
+    if not isinstance(root, str) or not root.strip():
+        raise ValueError("an absolute claim needs a scope root to anchor to")
+    root_absolute, root_parts = _path_parts(root)
+    if not root_absolute:
+        raise ValueError("the scope root must be absolute")
+    if parts[:len(root_parts)] != root_parts:
+        raise ValueError("claimed path lies outside the scope root")
+    return "/".join(parts[len(root_parts):])
 
 
 def _paths_overlap(left: str, right: str) -> bool:
@@ -202,6 +236,10 @@ class ConcurrencyPolicy:
     # Observations that must pass after a shrink before pressure may shrink
     # again, so a persistent pressure signal walks the cap down gradually.
     pressure_cooldown: int = 2
+    # Consecutive *unknown* resource readings (the probe answered but knew
+    # nothing) after which latched pressure is released.  Without this a
+    # probe that goes dark while pressured would pin the cap forever.
+    unknown_release_after: int = 3
 
     def __post_init__(self) -> None:
         if self.floor < 1:
@@ -220,16 +258,20 @@ class ConcurrencyPolicy:
             raise ValueError("shrink_divisor must be at least two")
         if self.grow_step < 1 or self.recovery_streak < 1 or self.pressure_cooldown < 0:
             raise ValueError("growth and cooldown settings must be positive")
+        if self.unknown_release_after < 1:
+            raise ValueError("unknown_release_after must be positive")
 
 
 @dataclass(frozen=True, slots=True)
 class ConcurrencyState:
     cap: int
-    recent: tuple[Outcome, ...] = ()
+    # (outcome, source lane or None) pairs, newest last.
+    recent: tuple[tuple[Outcome, str | None], ...] = ()
     healthy_streak: int = 0
     pressured: bool = False
     since_shrink: int = 0
     observations: int = 0
+    unknown_streak: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,32 +302,59 @@ def initial_state(policy: ConcurrencyPolicy, cap: int | None = None) -> Concurre
 
 
 def _resource_pressure(
-    snapshot: ResourceSnapshot | None, currently: bool, policy: ConcurrencyPolicy,
-) -> tuple[bool, bool]:
-    """Return ``(pressured, breaching)``.
+    snapshot: ResourceSnapshot | None,
+    currently: bool,
+    unknown_streak: int,
+    policy: ConcurrencyPolicy,
+) -> tuple[bool, bool, int]:
+    """Return ``(pressured, breaching, unknown_streak)``.
 
     ``breaching`` means a known signal is past its enter threshold right now.
-    ``pressured`` is the hysteresis state: it turns on with a breach and only
-    turns off once every known signal is back inside its exit band.  Unknown
-    signals neither enter nor release pressure.
+    ``pressured`` is the hysteresis state: it turns on with a breach and turns
+    off once every known signal is back inside its exit band.  ``None`` means
+    "not sampled" and changes nothing.  A snapshot with no known field is an
+    *unknown reading*: it never enters pressure, and after
+    ``unknown_release_after`` consecutive unknown readings it releases latched
+    pressure, so a dark probe cannot pin the cap.
     """
     if snapshot is None:
-        return currently, False
+        return currently, False, unknown_streak
     fraction = snapshot.memory_available_fraction
     band = snapshot.pressure_band
     if fraction is None and band is None:
-        return currently, False
+        streak = unknown_streak + 1
+        if currently and streak >= policy.unknown_release_after:
+            return False, False, streak
+        return currently, False, streak
     breaching = (
         (fraction is not None and fraction < policy.memory_pressure_enter)
         or (band is not None and band in _HIGH_PRESSURE_BANDS)
     )
     if breaching:
-        return True, True
+        return True, True, 0
     if not currently:
-        return False, False
+        return False, False, 0
     memory_released = fraction is None or fraction >= policy.memory_pressure_exit
     band_released = band is None or band in _RELEASED_PRESSURE_BANDS
-    return not (memory_released and band_released), False
+    return not (memory_released and band_released), False, 0
+
+
+def _retry_storm_weight(recent) -> int:
+    """Transient failures in the window, at most one per source lane.
+
+    One flaky lane retrying several times is that lane's problem, not a
+    fleet-wide storm; unattributed (``None``) reports each count once.
+    """
+    lanes = set()
+    anonymous = 0
+    for outcome, source in recent:
+        if outcome is not Outcome.TRANSIENT_RETRY:
+            continue
+        if source is None:
+            anonymous += 1
+        else:
+            lanes.add(source)
+    return anonymous + len(lanes)
 
 
 def observe(
@@ -293,20 +362,28 @@ def observe(
     outcome: Outcome,
     policy: ConcurrencyPolicy,
     resources: ResourceSnapshot | None = None,
+    *,
+    source: str | None = None,
 ) -> tuple[ConcurrencyState, ConcurrencyDecision]:
-    """Fold one observation into the state and decide the next cap."""
+    """Fold one observation into the state and decide the next cap.
+
+    ``source`` names the reporting lane; a retry storm counts at most one
+    transient failure per lane inside the window.
+    """
     if not isinstance(outcome, Outcome):
         raise ValueError("outcome must be an Outcome")
     recent = state.recent
     if outcome is not Outcome.SAMPLE:
-        recent = (recent + (outcome,))[-policy.window:]
-    pressured, breaching = _resource_pressure(resources, state.pressured, policy)
+        recent = (recent + ((outcome, source),))[-policy.window:]
+    pressured, breaching, unknown_streak = _resource_pressure(
+        resources, state.pressured, state.unknown_streak, policy,
+    )
     since_shrink = state.since_shrink + 1
 
     reasons: list[str] = []
-    if recent.count(Outcome.TRANSIENT_RETRY) >= policy.retry_storm_threshold:
+    if _retry_storm_weight(recent) >= policy.retry_storm_threshold:
         reasons.append(REASON_RETRY_STORM)
-    if recent.count(Outcome.CHURN) >= policy.churn_threshold:
+    if sum(1 for item, _ in recent if item is Outcome.CHURN) >= policy.churn_threshold:
         reasons.append(REASON_CHURN)
     # A fresh breach shrinks at once; a persisting breach shrinks again only
     # after the cooldown.  Inside the hysteresis band (pressured but no longer
@@ -324,7 +401,7 @@ def observe(
             consumed.add(Outcome.TRANSIENT_RETRY)
         if REASON_CHURN in reasons:
             consumed.add(Outcome.CHURN)
-        recent = tuple(item for item in recent if item not in consumed)
+        recent = tuple(entry for entry in recent if entry[0] not in consumed)
         next_state = ConcurrencyState(
             cap=shrunk,
             recent=recent,
@@ -332,6 +409,7 @@ def observe(
             pressured=pressured,
             since_shrink=0,
             observations=state.observations + 1,
+            unknown_streak=unknown_streak,
         )
         action = "shrink" if shrunk < cap else "hold"
         return next_state, ConcurrencyDecision(cap, shrunk, action, tuple(reasons))
@@ -357,6 +435,7 @@ def observe(
         pressured=pressured,
         since_shrink=since_shrink,
         observations=state.observations + 1,
+        unknown_streak=unknown_streak,
     )
     return next_state, ConcurrencyDecision(state.cap, cap, action, decision_reasons)
 
@@ -374,6 +453,7 @@ __all__ = [
     "REASON_RETRY_STORM",
     "ResourceSnapshot",
     "admissible_lanes",
+    "anchor_claim_path",
     "claims_conflict",
     "conflict_graph",
     "coupled_lane_count",
