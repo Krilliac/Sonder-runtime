@@ -116,8 +116,9 @@ Mitigations that are already in place and worth knowing about:
   normalization-colliding names, links, devices, member-count and
   expanded-byte overruns are rejected. Every TAR reader refuses long-name,
   long-link, and PAX metadata records larger than 64 KiB, more than four
-  chained metadata records per member, and GNU sparse members before parsing
-  them. ZIP readers check the declared central-directory entry count before
+  chained metadata records per member, more than 1 MiB of metadata or
+  32,768 PAX keys per archive, global PAX headers, and GNU sparse members
+  before parsing them. ZIP readers check the declared central-directory entry count before
   opening the archive.
 - Self-modification backups, manifests, checksums, the `selfmod_events` audit
   table, and recovery evidence are tamper-evident only. They are written by the

@@ -7,6 +7,13 @@ module so that the parser itself is bounded:
 
 * TAR GNU long-name/long-link and PAX records are rejected when they declare
   more than :data:`MAX_TAR_METADATA_BYTES`, before their payload is read;
+* global PAX (``g``) records are rejected: ``tarfile`` merges their keys
+  into the archive and copies the merged mapping into every later member,
+  so retained memory grows quadratically with the member count;
+* all long-name, long-link, and PAX records of one archive share
+  :data:`MAX_TAR_METADATA_TOTAL_BYTES` of declared payload and
+  :data:`MAX_TAR_PAX_KEYS` parsed keys, because ``tarfile`` retains every
+  member's metadata for the life of the archive object;
 * at most :data:`MAX_TAR_METADATA_CHAIN` metadata records may precede one
   member.  ``tarfile`` processes each chained record by recursing, so an
   uncapped chain ends in ``RecursionError``;
@@ -27,11 +34,15 @@ from typing import IO
 
 MAX_TAR_METADATA_BYTES = 64 * 1024
 MAX_TAR_METADATA_CHAIN = 4
+MAX_TAR_METADATA_TOTAL_BYTES = 1024 * 1024
+MAX_TAR_PAX_KEYS = 32 * 1024
 # Central-directory bytes allowed per declared entry: a 46-byte fixed record
 # plus name, extra field, and comment for ordinary archives.
 MAX_ZIP_CENTRAL_DIRECTORY_BYTES_PER_ENTRY = 4096
 _SPARSE_PREFIX = "GNU.sparse."
 _CHAIN_ATTRIBUTE = "_sonder_metadata_chain"
+_TOTAL_ATTRIBUTE = "_sonder_metadata_total"
+_KEYS_ATTRIBUTE = "_sonder_pax_keys"
 
 
 class TarMetadataLimitError(tarfile.TarError):
@@ -57,6 +68,15 @@ class BoundedTarInfo(tarfile.TarInfo):
                 % (self.size, MAX_TAR_METADATA_BYTES)
             )
 
+    def _charge_metadata(self, tarfile_) -> None:
+        total = getattr(tarfile_, _TOTAL_ATTRIBUTE, 0) + self.size
+        if total > MAX_TAR_METADATA_TOTAL_BYTES:
+            raise TarMetadataLimitError(
+                "TAR metadata records exceed %d bytes per archive"
+                % MAX_TAR_METADATA_TOTAL_BYTES
+            )
+        setattr(tarfile_, _TOTAL_ATTRIBUTE, total)
+
     def _chained(self, tarfile_, process):
         depth = getattr(tarfile_, _CHAIN_ATTRIBUTE, 0) + 1
         if depth > MAX_TAR_METADATA_CHAIN:
@@ -72,15 +92,25 @@ class BoundedTarInfo(tarfile.TarInfo):
 
     def _proc_gnulong(self, tarfile_):  # tarfile hook
         self._require_bounded_size()
+        self._charge_metadata(tarfile_)
         return self._chained(tarfile_, super()._proc_gnulong)
 
     def _proc_pax(self, tarfile_):  # tarfile hook
+        if self.type == tarfile.XGLTYPE:
+            # Rejected before the payload is read: global keys would be
+            # merged into, and copied by, every later member.
+            raise TarMetadataLimitError("TAR global PAX headers are not supported")
         self._require_bounded_size()
+        self._charge_metadata(tarfile_)
         result = self._chained(tarfile_, super()._proc_pax)
-        # A global header stores its keys on the archive; reject a sparse
-        # key there too, before any later member can use it.
         if any(str(key).startswith(_SPARSE_PREFIX) for key in tarfile_.pax_headers):
             raise TarMetadataLimitError("TAR GNU sparse metadata is not supported")
+        keys = getattr(tarfile_, _KEYS_ATTRIBUTE, 0) + len(result.pax_headers)
+        if keys > MAX_TAR_PAX_KEYS:
+            raise TarMetadataLimitError(
+                "TAR PAX metadata exceeds %d keys per archive" % MAX_TAR_PAX_KEYS
+            )
+        setattr(tarfile_, _KEYS_ATTRIBUTE, keys)
         return result
 
     def _proc_sparse(self, tarfile_):  # old-style GNU sparse ("S") member
@@ -167,6 +197,8 @@ __all__ = [
     "BoundedTarInfo",
     "MAX_TAR_METADATA_BYTES",
     "MAX_TAR_METADATA_CHAIN",
+    "MAX_TAR_METADATA_TOTAL_BYTES",
+    "MAX_TAR_PAX_KEYS",
     "MAX_ZIP_CENTRAL_DIRECTORY_BYTES_PER_ENTRY",
     "TarMetadataLimitError",
     "ZipCentralDirectoryLimitError",
