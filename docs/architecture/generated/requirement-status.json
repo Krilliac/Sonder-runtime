@@ -180,9 +180,9 @@
     },
     {
       "checked": false,
-      "claim": "Revisions 2 and 3 still apply; additionally, when codegen_build_loop clamps a caller-supplied attempt count, its report states the requested and applied values.",
+      "claim": "The live delegated-fleet dispatcher enforces its static worker-slot ceiling through an ownership-aware adaptive lane scheduler: overlapping write claims are serialized while readers and independent lanes stay parallel, and retry storms, target churn, or host memory pressure shrink the live concurrency cap with hysteresis before it regrows on sustained healthy outcomes.",
       "requirement_id": "AGENT-007",
-      "revision": 4,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -1272,9 +1272,9 @@
     },
     {
       "checked": false,
-      "claim": "Isolated candidate execution is wired through the live typed selfmod bridge and rejects a candidate workspace that resolves to the live repository.",
+      "claim": "Tested-bytes digests are persisted in the selfmod database when testing begins. Review rejects runs whose bytes differ from the record, and every deploy (unattended or later human approval) requires the record and verifies the candidate bytes before the copy and the installed bytes after it. A committed-blob mismatch rejects the run and deletes its branch. An overlong child working directory is refused up front.",
       "requirement_id": "SELFMOD-002",
-      "revision": 2,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "18d0b508d12eab9ea9ae19c10787728806ba7ea01276aad537ead97470fe61a5",
+    "ledger_sha256": "ec12080197c9cfb86ccfa1ef5df3c18afaf177b5518a6e63e6a01cb2483f5c68",
     "spec_sha256": "ed5ab01393d72681fc4eb4b9581e832d3d07ee95595b8b58dfe094c9e7dbf4fa"
   }
 }
