@@ -13,10 +13,16 @@ import sys
 import tarfile
 import tempfile
 import time
+import unicodedata
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
+from sonder_runtime.adapters.bounded_tar import (
+    TarMetadataLimitError,
+    is_tarfile_bounded,
+    open_bounded,
+)
 
 
 CHUNK_BYTES = 64 * 1024
@@ -43,10 +49,15 @@ NESTED_ARCHIVE_SUFFIXES = (
     ".tar.xz", ".txz",
 )
 WINDOWS_DEVICES = frozenset({
-    "con", "prn", "aux", "nul",
-    *("com%d" % index for index in range(1, 10)),
-    *("lpt%d" % index for index in range(1, 10)),
+    "con", "prn", "aux", "nul", "conin$", "conout$",
+    *("com%s" % suffix for suffix in "0123456789¹²³"),
+    *("lpt%s" % suffix for suffix in "0123456789¹²³"),
 })
+
+
+def _collision_key(value: str) -> str:
+    """Key under which case-folding and normalizing filesystems collide."""
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", value).casefold())
 
 
 class ArchiveRejected(ValueError):
@@ -180,7 +191,8 @@ def _portable_member_path(raw_name: str, *, is_directory: bool, max_depth: int) 
             raise ArchiveRejected("archive entry contains control or colon syntax: %r" % raw_name)
         if part.rstrip(" .") != part:
             raise ArchiveRejected("archive entry has a trailing dot/space component: %r" % raw_name)
-        stem = part.split(".", 1)[0].casefold()
+        # Windows ignores trailing spaces before the extension ("CON .txt").
+        stem = part.split(".", 1)[0].rstrip(" ").casefold()
         if stem in WINDOWS_DEVICES:
             raise ArchiveRejected("archive entry uses a reserved device name: %r" % raw_name)
     normalized = "/".join(parts)
@@ -287,7 +299,7 @@ def _validate_entries(entries: list[dict], limits: dict, source_bytes: int) -> N
         path = row["path"]
         if path in exact:
             raise ArchiveRejected("duplicate archive entry path: %s" % path)
-        key = path.casefold()
+        key = _collision_key(path)
         if key in folded:
             raise ArchiveRejected(
                 "case-colliding archive entries: %s and %s" % (folded[key], path)
@@ -298,7 +310,7 @@ def _validate_entries(entries: list[dict], limits: dict, source_bytes: int) -> N
         parts = path.split("/")
         for index in range(1, len(parts) + 1):
             prefix = "/".join(parts[:index])
-            prefix_key = prefix.casefold()
+            prefix_key = _collision_key(prefix)
             previous = folded_components.get(prefix_key)
             if previous is not None and previous != prefix:
                 raise ArchiveRejected(
@@ -310,15 +322,18 @@ def _validate_entries(entries: list[dict], limits: dict, source_bytes: int) -> N
         parts = path.split("/")
         for index in range(1, len(parts)):
             parent = "/".join(parts[:index])
-            if folded_types.get(parent.casefold()) == "file":
+            if folded_types.get(_collision_key(parent)) == "file":
                 raise ArchiveRejected("file entry is an ancestor of another entry: %s" % parent)
 
 
 def _archive_kind(source: Path) -> str:
     if zipfile.is_zipfile(source):
         return "zip"
-    if tarfile.is_tarfile(source):
-        return "tar"
+    try:
+        if is_tarfile_bounded(source):
+            return "tar"
+    except TarMetadataLimitError as exc:
+        raise ArchiveRejected(str(exc)) from None
     raise ArchiveRejected("source is not a supported ZIP or TAR archive")
 
 
@@ -382,12 +397,14 @@ def _plan(source: Path, limits: dict, *, deadline: float | None = None) -> dict:
                     raise ArchiveRejected("archive prevalidation exceeded time ceiling")
                 entries.append(_zip_entry(info, limits))
     else:
-        with tarfile.open(source, "r:*") as archive:
+        with open_bounded(source) as archive:
             if archive.pax_headers:
                 raise ArchiveRejected("TAR global PAX special metadata is not allowed")
             # Reaching the next header of a compressed TAR decompresses the
-            # previous payload, so the aggregate budget is enforced during
-            # the walk rather than only after every header was read.
+            # previous payload, so the aggregate *payload* budget is checked
+            # per member rather than after every header was read.  Header
+            # metadata (long names, PAX records) is bounded separately by
+            # open_bounded before tarfile reads it.
             walked_bytes = 0
             for info in archive:
                 if time.monotonic() > deadline:
@@ -483,7 +500,7 @@ def _extract_tar(source: Path, stage: Path, plan: dict, deadline: float) -> None
         "max_total": plan["limits"]["max_total_bytes"],
     }
     by_offset = {row["source_index"]: row for row in plan["entries"]}
-    with tarfile.open(source, "r:*") as archive:
+    with open_bounded(source) as archive:
         for info in archive:
             row = by_offset[info.offset]
             target = stage.joinpath(*row["path"].split("/"))

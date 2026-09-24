@@ -15,7 +15,7 @@ from sonder_runtime.application.security.recovery_boundary import RecoveryBounda
 
 def _repository(tmp_path: Path) -> FilesystemRecoveryEvidenceRepository:
     service = RecoveryArtifactService((tmp_path / "recovery").resolve(), owner="same-user")
-    return FilesystemRecoveryEvidenceRepository(service)
+    return FilesystemRecoveryEvidenceRepository(service, unrestricted_selfmod=False)
 
 
 def test_repository_returns_typed_durable_owner_path_evidence(tmp_path: Path):

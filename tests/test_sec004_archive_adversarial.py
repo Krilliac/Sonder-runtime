@@ -277,3 +277,130 @@ def test_small_tar_preview_is_complete(tmp_path):
     assert result["truncated"] is False
     assert result["members"] == 2
     assert result["expanded_bytes"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 (PR #548): header metadata, device names, normalization
+# ---------------------------------------------------------------------------
+
+import gzip
+import tracemalloc
+import unicodedata
+
+LONG_METADATA_BYTES = 48 * 1024 * 1024
+PEAK_BUDGET_BYTES = 8 * 1024 * 1024
+
+
+def _raw_tar_header(name: bytes, size: int, typeflag: bytes) -> bytes:
+    header = bytearray(512)
+    header[0:len(name)] = name
+    header[100:108] = b"0000644\0"
+    header[108:116] = b"0000000\0"
+    header[116:124] = b"0000000\0"
+    header[124:136] = b"%011o\0" % size
+    header[136:148] = b"00000000000\0"
+    header[148:156] = b" " * 8
+    header[156:157] = typeflag
+    header[257:265] = b"ustar  \0"
+    checksum = sum(header)
+    header[148:156] = b"%06o\0 " % checksum
+    return bytes(header)
+
+
+def _oversized_metadata_tar_gz(path, typeflag: bytes):
+    # A GNU long-name ("L") or PAX ("x") record whose declared payload is
+    # tens of MiB of one repeated byte: a few tens of KiB on disk.  Written
+    # in chunks so building the fixture allocates almost nothing.
+    chunk = b"a" * (1024 * 1024)
+    with gzip.open(path, "wb", compresslevel=9) as stream:
+        stream.write(_raw_tar_header(b"././@LongLink", LONG_METADATA_BYTES, typeflag))
+        remaining = LONG_METADATA_BYTES
+        while remaining:
+            step = min(len(chunk), remaining)
+            stream.write(chunk[:step])
+            remaining -= step
+        stream.write(b"\0" * ((-LONG_METADATA_BYTES) % 512))
+        stream.write(_raw_tar_header(b"payload.txt", 1, b"0"))
+        stream.write(b"x" + b"\0" * 511)
+        stream.write(b"\0" * 1024)
+    assert path.stat().st_size < 512 * 1024
+    return path
+
+
+def _peak(callable_):
+    tracemalloc.start()
+    try:
+        try:
+            callable_()
+        except Exception:
+            pass
+        return tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+
+@pytest.mark.parametrize("typeflag", [b"L", b"K", b"x"])
+def test_oversized_tar_header_metadata_is_bounded_in_every_reader(
+    workspace, tmp_path, typeflag,
+):
+    source = _oversized_metadata_tar_gz(workspace / "meta.tar.gz", typeflag)
+
+    peak = _peak(lambda: archive_tools.list_archive("meta.tar.gz"))
+    assert peak < PEAK_BUDGET_BYTES, "archive_list peak %d" % peak
+    assert archive_tools.list_archive("meta.tar.gz")["valid"] is False
+
+    peak = _peak(lambda: safe_extract(
+        source, tmp_path / "stage", max_expanded_bytes=1 << 30,
+    ))
+    assert peak < PEAK_BUDGET_BYTES, "safe_extract peak %d" % peak
+    with pytest.raises(ExtractionError):
+        safe_extract(source, tmp_path / "stage2", max_expanded_bytes=1 << 30)
+
+    peak = _peak(lambda: file_ops._inspect_tar(source))
+    assert peak < PEAK_BUDGET_BYTES, "inspect preview peak %d" % peak
+
+
+@pytest.mark.parametrize("name", [
+    "CONIN$", "conout$.log", "COM¹.txt", "lpt³", "CON .txt",
+])
+def test_additional_windows_device_names_are_rejected_by_both_extractors(
+    workspace, tmp_path, name,
+):
+    _zip(workspace / "dev.zip", [(name, b"x")])
+    assert archive_tools.list_archive("dev.zip")["valid"] is False
+    archive = _tar(tmp_path / "dev.tar", [(name, b"x")])
+    with pytest.raises(ExtractionError):
+        safe_extract(archive, tmp_path / "out", max_expanded_bytes=1024)
+
+
+def test_unicode_normalization_collisions_are_rejected_by_both_extractors(
+    workspace, tmp_path,
+):
+    composed = unicodedata.normalize("NFC", "café.txt")
+    decomposed = unicodedata.normalize("NFD", "café.txt")
+    assert composed != decomposed
+    _zip(workspace / "nfc.zip", [(composed, b"a"), (decomposed, b"b")])
+    listed = archive_tools.list_archive("nfc.zip")
+    assert listed["valid"] is False
+    assert "collid" in listed["errors"][0]
+    archive = _tar(tmp_path / "nfc.tar", [(composed, b"a"), (decomposed, b"b")])
+    with pytest.raises(ExtractionError, match="collid"):
+        safe_extract(archive, tmp_path / "out", max_expanded_bytes=1024)
+
+
+def test_update_staging_rejects_case_folded_component_collisions(tmp_path):
+    archive = _tar(tmp_path / "cf.tar", [("Dir/a", b"1"), ("dir/b", b"2")])
+    with pytest.raises(ExtractionError, match="collid"):
+        safe_extract(archive, tmp_path / "out", max_expanded_bytes=1024)
+    assert _tree(tmp_path / "out") == []
+
+
+@pytest.mark.parametrize("rows", [
+    [("a", b"1"), ("a/b", b"2")],
+    [("a/b", b"2"), ("a", b"1")],
+])
+def test_update_staging_rejects_file_that_is_an_ancestor(tmp_path, rows):
+    archive = _tar(tmp_path / "anc.tar", rows)
+    with pytest.raises(ExtractionError, match="ancestor|collid"):
+        safe_extract(archive, tmp_path / "out", max_expanded_bytes=1024)
+    assert _tree(tmp_path / "out") == []

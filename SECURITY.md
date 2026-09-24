@@ -105,8 +105,10 @@ Mitigations that are already in place and worth knowing about:
   memory.
 - Update bundles are staged by a TAR extractor that validates every member
   before writing: traversal, drive-relative/UNC/backslash, alternate-stream,
-  reserved-device, control-character, duplicate and case-colliding names,
-  links, devices, member-count and expanded-byte overruns are rejected.
+  reserved-device, control-character, duplicate and case- or
+  normalization-colliding names, links, devices, member-count and
+  expanded-byte overruns are rejected. Every TAR reader refuses long-name,
+  long-link, and PAX metadata records larger than 64 KiB before parsing them.
 - Self-modification backups, manifests, checksums, the `selfmod_events` audit
   table, and recovery evidence are tamper-evident only. They are written by the
   same OS user as Sonder, so they are not a security boundary against

@@ -45,7 +45,13 @@ class RecoveryBoundaryAssessment:
 
 
 class RecoveryBoundary:
-    """Create explicit, non-overclaiming recovery assessments."""
+    """Create explicit, non-overclaiming recovery assessments.
+
+    ``actor`` and ``resource_owner`` are caller-supplied application labels,
+    not operating-system identities derived from the process.  They only
+    choose which limitations are disclosed; a same-user process can pass any
+    label, so an assessment never authorizes and never claims a boundary.
+    """
 
     _SAME_USER_LIMITATION = (
         "same-user recovery is an operational continuity aid, not a security "
