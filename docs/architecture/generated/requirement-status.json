@@ -1258,9 +1258,9 @@
     },
     {
       "checked": false,
-      "claim": "Recovery evidence discloses same-user, audit, and startup unrestricted-selfmod limits on every recorded and verified record, operator documents state that recovery and audit are not a security boundary against --unrestricted-selfmod, and a repository-wide claim ratchet rejects new recovery/audit assurance overclaims.",
+      "claim": "The repository-wide recovery/audit claim ratchet now has no known debt (PR #519 removed the last five pinned backup overclaims), recovery evidence discloses same-user, audit, and startup unrestricted-selfmod limits on every record with the capability required at construction, and operator documents state that recovery and audit are not a security boundary against --unrestricted-selfmod.",
       "requirement_id": "SEC-009",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "ec12080197c9cfb86ccfa1ef5df3c18afaf177b5518a6e63e6a01cb2483f5c68",
+    "ledger_sha256": "98039ef933719083a34118f12cddab028be011b2a769c00834793622849fc5f2",
     "spec_sha256": "ed5ab01393d72681fc4eb4b9581e832d3d07ee95595b8b58dfe094c9e7dbf4fa"
   }
 }

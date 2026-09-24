@@ -266,13 +266,9 @@ def test_ratchet_accepts_limited_or_neutral_statements(text):
 
 
 # Known remaining overclaims, pinned to exact counts so the list can only
-# shrink.  Both files describe backups as "immutable" and are owned by the
-# open low-integrity self-mod change (PR #519), so this lane may not edit
-# them.  SEC-009 stays unverified until these entries are gone.
-KNOWN_DEBT = {
-    "selfmod.py": 3,
-    "scripts/nightly_selfmod.py": 2,
-}
+# shrink.  Empty since PR #519 reworded the five "immutable backup" strings
+# in selfmod.py and scripts/nightly_selfmod.py; any new finding now fails.
+KNOWN_DEBT: dict[str, int] = {}
 
 
 def _repository_overclaims() -> dict[str, list[str]]:
