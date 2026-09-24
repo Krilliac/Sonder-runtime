@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 296,
+      "file_count": 297,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -134,6 +134,7 @@
         "sonder_runtime/adapters/filesystem/workspace_manifest.py",
         "sonder_runtime/adapters/git/__init__.py",
         "sonder_runtime/adapters/git_discovery.py",
+        "sonder_runtime/adapters/git_mutation_guard.py",
         "sonder_runtime/adapters/goal_formatting.py",
         "sonder_runtime/adapters/host_terminal_projection.py",
         "sonder_runtime/adapters/host_terminal_result.py",
@@ -740,7 +741,7 @@
       ]
     },
     {
-      "file_count": 187,
+      "file_count": 188,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -927,6 +928,7 @@
         "sonder_runtime/domain/updates/models.py",
         "sonder_runtime/domain/updates/runtime_update_formatting.py",
         "sonder_runtime/domain/updates/stash_formatting.py",
+        "sonder_runtime/domain/verification_progress.py",
         "sonder_runtime/domain/work_stealing.py",
         "sonder_runtime/domain/worker_capacity.py",
         "sonder_runtime/domain/worker_epoch_fence.py"
