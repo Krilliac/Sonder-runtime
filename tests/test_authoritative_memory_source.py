@@ -45,6 +45,24 @@ def _live_replication_config() -> SonderConfig:
     )
 
 
+def test_windows_scope_is_accepted_as_opaque_exact_identity(tmp_path):
+    """Backslashes are valid scope text; slash variants remain distinct."""
+    path = tmp_path / "windows-scope.db"
+    windows_scope = r"C:\Users\owner\workspace"
+    slash_variant = "C:/Users/owner/workspace"
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope=windows_scope)
+    connection = connect(path)
+    try:
+        source.activate(connection)
+        source.add_fact(connection, "fact-1", windows_scope, "accepted")
+        assert facts_for_project(connection, windows_scope)[0]["text"] == "accepted"
+        with pytest.raises(MemoryReplicationError, match="scope"):
+            source.add_fact(connection, "fact-2", slash_variant, "must refuse")
+        assert facts_for_project(connection, slash_variant) == []
+    finally:
+        connection.close()
+
+
 def test_live_application_composes_authoritative_fact_write_and_restart(tmp_path, monkeypatch):
     path = tmp_path / "memory.db"
     monkeypatch.setenv("SONDER_DB", str(path))
