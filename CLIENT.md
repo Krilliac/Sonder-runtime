@@ -6,9 +6,12 @@
 > [behavior status](#behavior-status) table labels what is implemented,
 > experimental, proposed, degraded, or unsupported.
 
-`sonder_client.py` is a **standalone** thin remote client: stdlib-only
-Python, no repo checkout, no Ollama, no `mcp` package. Drop the one file on
-any PC and point it at a Sonder Runtime host elsewhere. Remote hosts use the
+`sonder_client.py` is a thin remote client. It runs from a checkout of this
+repository with only the Python standard library plus the checkout's own
+`sonder_runtime` client adapters: no pip installs, no Ollama, and no `mcp`
+package. It is **not** a single-file download; copied on its own it fails
+with `ModuleNotFoundError: No module named 'sonder_runtime'`. Point it at a
+Sonder Runtime host elsewhere. Remote hosts use the
 [server-private installer](docs/runbooks/install-server-private.md) and a
 [TLS reverse proxy](docs/runbooks/secure-remote-access.md); the runtime listener
 itself stays on loopback.
@@ -23,8 +26,9 @@ weights because those stay on the host.
 
 1. **Hosted server + thin client (this doc).** Someone else (or your own
    VPS) runs Sonder's full orchestration loop and its configured inference
-   host; you talk to it over HTTPS from any PC with just Python. No local GPU,
-   no Ollama, no repo needed on the client side.
+   host; you talk to it over HTTPS from any PC with Python and a checkout of
+   this repository. No local GPU, no Ollama, and no pip installs are needed on
+   the client side.
 2. **Fully local.** Clone the repo and run Sonder Runtime on your own
    machine — the `sonder` REPL / `sonder.cmd` (Windows). See
    [README.md → Quick start](README.md#quick-start).
@@ -37,20 +41,24 @@ This doc covers #1.
 
 ## Requirements
 
-Just **Python 3** (any recent 3.x). Nothing else — no repo clone, no
-Ollama, no pip installs.
+**Python 3** (any recent 3.x) and a checkout of this repository (a Git clone
+or an extracted source archive). The client imports only the standard library
+and the checkout's `sonder_runtime` package, so no virtual environment, pip
+installs, or Ollama are required.
 
 ## Get the client
 
-Grab the single file from the repo's raw GitHub URL:
+Clone the repository (a shallow clone is enough) and run the client from it:
 
 ```bash
-curl -fsSL -o sonder_client.py \
-  https://raw.githubusercontent.com/Krilliac/Sonder-runtime/main/sonder_client.py
+git clone --depth 1 https://github.com/Krilliac/Sonder-runtime.git
+cd Sonder-runtime
+python3 sonder_client.py --help
 ```
 
-(Windows PowerShell equivalent: `curl.exe` ships with Windows 10/11 and
-works the same way, or use `Invoke-WebRequest -Uri <url> -OutFile sonder_client.py`.)
+On Windows, use `py sonder_client.py --help` from the same directory. Keep
+`sonder_client.py` inside the checkout; it must sit beside the `sonder_runtime`
+package it imports.
 
 ## Configure
 
@@ -89,20 +97,16 @@ account bans, do not fall back.
 python3 sonder_client.py --server https://sonder.example.com --key s3cret
 ```
 
-## One-liner install (macOS / Linux) — get a `sonder` command
+## Add a `sonder` command (macOS / Linux)
+
+`sonder_client.py` has no shebang line and must run from its checkout, so
+install a small wrapper that points at the clone instead of copying the file.
+Run this from the repository directory so `$PWD` is the checkout path:
 
 ```bash
 mkdir -p ~/.local/bin
-curl -fsSL -o ~/.local/bin/sonder \
-  https://raw.githubusercontent.com/Krilliac/Sonder-runtime/main/sonder_client.py
+printf '#!/bin/sh\nexec python3 "%s/sonder_client.py" "$@"\n' "$PWD" > ~/.local/bin/sonder
 chmod +x ~/.local/bin/sonder
-```
-
-`sonder_client.py` has no shebang line, so add one (or invoke it via
-`python3`) for direct execution:
-
-```bash
-sed -i '1i #!/usr/bin/env python3' ~/.local/bin/sonder
 ```
 
 Make sure `~/.local/bin` is on your `PATH` (add `export
@@ -135,8 +139,9 @@ implementation work is tracked only in the
 
 | Behavior | Status | Boundary |
 |---|---|---|
-| Standalone stdlib-only thin client | Implemented | Configured by `SONDER_SERVER`, `SONDER_API_KEY`, `--server`, and `--key`. |
+| Thin client run from a repository checkout | Implemented | Standard library plus the checkout's `sonder_runtime` client adapters; configured by `SONDER_SERVER`, `SONDER_API_KEY`, `--server`, and `--key`. |
+| Copying `sonder_client.py` alone to another machine | Unsupported | The file imports `sonder_runtime` client adapters and fails with `ModuleNotFoundError` outside a checkout. |
 | Automatic retry against the local server when the hosted server is unreachable | Implemented | `SONDER_FALLBACK_LOCAL=0` disables it; HTTP errors from the hosted server never fall back. |
-| Direct execution without adding a shebang | Unsupported | `sonder_client.py` has no shebang line; invoke it with Python or add one. |
+| Direct execution without Python or a wrapper | Unsupported | `sonder_client.py` has no shebang line; invoke it with Python or the wrapper above. |
 | Sending the API key over plaintext HTTP to a non-loopback host | Unsupported | Not a supported deployment; the client itself does not refuse it, so use HTTPS. |
 | Resumable streams with sequence numbers and resume watermarks | Proposed | API-002; protocol-boundary validation exists, but the thin client does not resume streams. |
