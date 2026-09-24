@@ -247,3 +247,23 @@ pass now (10 new tests, red before and green after):
 The full-baseline numbers above were measured at `1eb3ee25`. Because the
 medium partition no longer runs against the candidate, its "24 passed" row
 describes the trusted checkout only. It is not candidate evidence.
+
+## Re-review follow-ups (P3s on `6eb36092`)
+
+- **Committed-bytes mismatch fails closed.** If the committed blob differs
+  from the tested bytes, the nightly stage detaches the worktree, deletes the
+  `selfmod/<run-id>` branch, rejects the run and discards the workspace.
+- **Tested bytes are persisted.** `begin_testing()` writes the SHA-256 of
+  every changed file and of the diff to `selfmod_tested_files` before any
+  check can be recorded. Re-entering testing with different bytes fails
+  closed. `review()` rejects a run that has no record or whose bytes differ
+  from it. `deploy()` requires the record for every caller, including a human
+  `/selfmod approve` deployed later. It verifies the candidate bytes before
+  any copy and the installed bytes after it. A caller-supplied
+  `expected_digests` must match the record. Runs created before this change
+  have no record and therefore cannot be deployed.
+- **Child working-directory length is checked up front.** `run_isolated()`
+  refuses a working directory longer than 258 characters with an explicit
+  `ERROR_DIRECTORY 267` message, before creating any token or Job.
+
+Five new tests fail against the `6eb36092` source and pass now.

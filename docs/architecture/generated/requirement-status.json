@@ -1272,9 +1272,9 @@
     },
     {
       "checked": false,
-      "claim": "Unattended candidate checks run only at low integrity inside a Job. Tests that need medium integrity are not run against the candidate; they are recorded as not evaluated and block unattended approval and deployment. The SHA-256 of every changed file and of the diff is recorded before the first gate and re-verified before review, before the branch commit (including the committed blobs) and before and after the deploy copy.",
+      "claim": "Tested-bytes digests are persisted in the selfmod database when testing begins. Review rejects runs whose bytes differ from the record, and every deploy (unattended or later human approval) requires the record and verifies the candidate bytes before the copy and the installed bytes after it. A committed-blob mismatch rejects the run and deletes its branch. An overlong child working directory is refused up front.",
       "requirement_id": "SELFMOD-002",
-      "revision": 5,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "b53cd23562798711b8e9c45cbd0c68034df22012fd789763fdcba690c2aa8c81",
+    "ledger_sha256": "72f2d24e18eeeada74a05e93b346df815ec50600a9b68b81562fbb1aa8075c56",
     "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
   }
 }

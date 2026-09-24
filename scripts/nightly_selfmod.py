@@ -1475,8 +1475,12 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
             return "candidate tested but commit failed: %s" % out[:160]
         committed = _committed_digests(workspace, binding["files"])
         if committed != binding["files"]:
-            return ("candidate rejected: committed bytes differ from tested bytes "
-                    "on %s; branch %s must not be used" % (name, name))
+            # Never leave a branch whose bytes were not the tested bytes.
+            selfmod._git(workspace, "checkout", "--detach")
+            selfmod._git(workspace, "branch", "-D", name)
+            return _reject_unbound(
+                run_id, "after commit",
+                "committed bytes differ from tested bytes on %s (branch deleted)" % name)
         _, sha = selfmod._git(workspace, "rev-parse", "--short", "HEAD")
         return ("COMMITTED %s to %s (%s) -- %s NOT EVALUATED, human review "
                 "required: git log -p %s" % (sha.strip(), name, target,

@@ -351,3 +351,11 @@ def test_work_root_is_short_enough_for_nested_test_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(sli.tempfile, "gettempdir", lambda: str(long_root))
     with pytest.raises(RuntimeError, match="scratch root"):
         sli._short_work_dir()
+
+
+def test_overlong_child_working_directory_is_refused_up_front(tmp_path):
+    from scripts import selfmod_low_integrity as sli
+
+    too_long = tmp_path / ("d" * 120) / ("e" * 120)
+    with pytest.raises(ValueError, match="ERROR_DIRECTORY 267"):
+        sli.run_isolated([sys.executable, "-c", "pass"], cwd=too_long, timeout=5)

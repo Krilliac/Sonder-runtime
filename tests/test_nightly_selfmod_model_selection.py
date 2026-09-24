@@ -802,3 +802,14 @@ def test_committed_digests_match_binding_for_real_git_commit(tmp_path):
     (repo / "reflection.py").write_bytes(b"changed\n")
     changed = nightly_selfmod._candidate_binding(repo, ["reflection.py"], "d")
     assert nightly_selfmod._committed_digests(repo, changed["files"]) != changed["files"]
+
+
+def test_committed_bytes_mismatch_rejects_and_deletes_branch(tmp_path, monkeypatch):
+    # The faked `git show` returns empty bytes, so the committed blob differs
+    # from the tested bytes.
+    calls = _drive_to_gates(tmp_path, monkeypatch)
+    result = nightly_selfmod.run(object(), lambda _m: None, test_timeout=60, branch=True)
+
+    assert result.startswith("candidate rejected: committed bytes differ")
+    assert ("branch", "-D", "selfmod/run-bind") in calls["git"]
+    assert calls["reject"] and "after commit" in calls["reject"][0]

@@ -119,6 +119,10 @@ CREATE TABLE IF NOT EXISTS selfmod_deployed_files (
   sha256_after TEXT, mode_after INTEGER, recorded_ts REAL NOT NULL,
   PRIMARY KEY(run_id, path)
 );
+CREATE TABLE IF NOT EXISTS selfmod_tested_files (
+  run_id TEXT NOT NULL, path TEXT NOT NULL, sha256 TEXT, diff_sha256 TEXT NOT NULL,
+  recorded_ts REAL NOT NULL, PRIMARY KEY(run_id, path)
+);
 CREATE TABLE IF NOT EXISTS selfmod_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, ts REAL NOT NULL,
   kind TEXT NOT NULL, details TEXT NOT NULL
@@ -755,8 +759,54 @@ def diff_text(run_id):
     return inspect_diff(run_id)["diff"]
 
 
+def _candidate_snapshot(run_id):
+    """SHA-256 of every changed candidate file and of the diff, from disk."""
+    diff = inspect_diff(run_id)
+    workspace = candidate_path(run_id)
+    files = {}
+    for rel in sorted(str(item) for item in diff["changed_files"]):
+        path = workspace / rel
+        files[rel] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+    digest = hashlib.sha256(str(diff["diff"]).encode("utf-8", "surrogatepass")).hexdigest()
+    return {"files": files, "diff_sha256": digest}
+
+
+def tested_digests(run_id):
+    """The tested-bytes record written when testing began, or None."""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT path,sha256,diff_sha256 FROM selfmod_tested_files WHERE run_id=? ORDER BY path",
+            (run_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return None
+    return {"files": {row[0]: row[1] for row in rows}, "diff_sha256": rows[0][2]}
+
+
 def begin_testing(run_id):
-    inspect_diff(run_id)
+    """Enter testing and bind the candidate bytes that the tests will see.
+
+    The record is written by this (host) process before any check can run,
+    because checks may only be recorded in the testing phase. Re-entering
+    after an interruption must find the same bytes; otherwise earlier results
+    would describe different code, so the run fails closed.
+    """
+    snapshot = _candidate_snapshot(run_id)
+    existing = tested_digests(run_id)
+    if existing is not None and existing != snapshot:
+        raise RuntimeError("candidate bytes changed since testing began")
+    if existing is None:
+        now = time.time()
+        with _tx() as conn:
+            for rel, digest in snapshot["files"].items():
+                conn.execute(
+                    "INSERT INTO selfmod_tested_files(run_id,path,sha256,diff_sha256,recorded_ts) VALUES(?,?,?,?,?)",
+                    (run_id, rel, digest, snapshot["diff_sha256"], now),
+                )
+            _event(conn, run_id, "tested_bytes", "bound %d file(s) before validation" % len(snapshot["files"]))
     return _phase(run_id, {"editing", "interrupted"}, "testing", "testing", "host-controlled validation started")
 
 
@@ -1073,6 +1123,11 @@ def review(run_id, *, require_kinds=None, unevaluated=()):
             failures.append("original failure was not demonstrated before editing")
     if not diff["changed_files"]:
         failures.append("candidate produced no scoped diff")
+    tested = tested_digests(run_id)
+    if tested is None:
+        failures.append("no tested-bytes record")
+    elif tested != _candidate_snapshot(run_id):
+        failures.append("candidate bytes changed after testing began")
     if any(_protected(path) for path in diff["changed_files"]) and not run["maintenance_authorized"]:
         failures.append("protected file modified")
     manifest = verify_backup(run_id)
@@ -1515,9 +1570,11 @@ def _digest_mismatches(workspace: Path, changed_files, expected_digests) -> list
 def deploy(run_id, *, health_command=None, commit=True, expected_digests=None):
     """Install an approved candidate.
 
-    ``expected_digests`` binds promotion to the bytes that were tested: the
-    SHA-256 of every changed file is re-checked immediately before any copy
-    and again on the installed bytes; any mismatch fails closed.
+    Promotion is bound to the bytes that were tested: the tested-bytes
+    record written by begin_testing() is required, and the SHA-256 of every
+    changed file is re-checked immediately before any copy and again on the
+    installed bytes. ``expected_digests`` (optional) must equal that record.
+    This applies to every caller, including a human approval deployed later.
     """
     run = get_run(run_id)
     if run["phase"] != "approved":
@@ -1532,12 +1589,17 @@ def deploy(run_id, *, health_command=None, commit=True, expected_digests=None):
         if set(diff["changed_files"]) - set(run["files"]):
             raise RuntimeError("candidate diff no longer matches approved scope")
         root, workspace = Path(run["repository_root"]), candidate_path(run_id)
-        if expected_digests is not None:
-            mismatched = _digest_mismatches(workspace, diff["changed_files"], expected_digests)
-            if mismatched:
-                raise RuntimeError(
-                    "candidate bytes differ from tested bytes: %s" % ", ".join(mismatched)
-                )
+        tested = tested_digests(run_id)
+        if tested is None:
+            raise RuntimeError("deployment requires a tested-bytes record; run was never bound")
+        if expected_digests is not None and dict(expected_digests) != tested["files"]:
+            raise RuntimeError("caller digests do not match the tested-bytes record")
+        expected_digests = tested["files"]
+        mismatched = _digest_mismatches(workspace, diff["changed_files"], expected_digests)
+        if mismatched:
+            raise RuntimeError(
+                "candidate bytes differ from tested bytes: %s" % ", ".join(mismatched)
+            )
         try:
             for rel in diff["changed_files"]:
                 source, target = workspace / rel, root / rel
@@ -1548,12 +1610,11 @@ def deploy(run_id, *, health_command=None, commit=True, expected_digests=None):
                 elif target.exists():
                     target.unlink()
                     _remove_bytecode_cache(target)
-            if expected_digests is not None:
-                mismatched = _digest_mismatches(root, diff["changed_files"], expected_digests)
-                if mismatched:
-                    raise RuntimeError(
-                        "installed bytes differ from tested bytes: %s" % ", ".join(mismatched)
-                    )
+            mismatched = _digest_mismatches(root, diff["changed_files"], expected_digests)
+            if mismatched:
+                raise RuntimeError(
+                    "installed bytes differ from tested bytes: %s" % ", ".join(mismatched)
+                )
             deployed_commit = ""
             git_mode, _, _ = _git_info(root)
             if git_mode and commit and not run["git_status_start"].strip():
