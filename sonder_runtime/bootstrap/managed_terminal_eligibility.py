@@ -29,7 +29,7 @@ def _with_authority(
         value.pending_identity, value.pending_approval, value.published,
         value.authenticated_worker_id, value.verified_subject_digest,
         value.verified_failure_receipt,
-        _issue_host_verifier_authority(lambda: sealed["value"]),
+        _issue_host_verifier_authority(lambda: sealed["value"], owner=session),
     )
     sealed["value"] = decision
     return decision

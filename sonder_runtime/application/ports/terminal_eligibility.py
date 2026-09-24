@@ -8,19 +8,22 @@ _AUTHORITY_SEAL = object()
 
 
 class _HostVerifierAuthority:
-    """Opaque live resolver issued only by the managed verifier boundary.
+    """Opaque sealed-decision authority issued only by the verifier boundary.
 
-    The resolver is deliberately process-local.  It cannot be serialized with
-    a caller's eligibility object and re-reads the current durable host turn
-    when evidence is consumed.
+    The authority is deliberately process-local and cannot be serialized with
+    a caller's eligibility object.  It holds a snapshot: the exact decision the
+    boundary derived from the owner-bound durable turn at issue time.  It does
+    not re-read the turn when evidence is consumed; consumers must check the
+    issuing owner and expected turn themselves.
     """
 
-    __slots__ = ("_resolver",)
+    __slots__ = ("_resolver", "_owner")
 
-    def __init__(self, resolver, seal):
+    def __init__(self, resolver, seal, owner=None):
         if seal is not _AUTHORITY_SEAL or not callable(resolver):
             raise TypeError("managed verifier authority is private")
         self._resolver = resolver
+        self._owner = owner
 
     def resolve(self):
         value = self._resolver()
@@ -28,9 +31,12 @@ class _HostVerifierAuthority:
             raise PermissionError("current managed verifier authority is unavailable")
         return value
 
+    def issued_by(self, owner) -> bool:
+        return self._owner is not None and self._owner is owner
 
-def _issue_host_verifier_authority(resolver):
-    return _HostVerifierAuthority(resolver, _AUTHORITY_SEAL)
+
+def _issue_host_verifier_authority(resolver, owner=None):
+    return _HostVerifierAuthority(resolver, _AUTHORITY_SEAL, owner)
 
 
 @dataclass(frozen=True)
@@ -48,5 +54,5 @@ class ManagedTerminalEligibility:
     verified_subject_digest: str | None = None
     verified_failure_receipt: object | None = None
     # Never accepted from a public caller.  The managed verifier attaches an
-    # opaque resolver which re-reads the owner-bound durable turn.
+    # opaque authority sealing this exact decision (a snapshot, not a re-read).
     authority: object | None = field(default=None, repr=False, compare=False)

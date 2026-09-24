@@ -138,10 +138,11 @@ class ReceiptObservationProducer:
             raise PermissionError(
                 "owner-bound managed verifier authority is required"
             )
-        # Do not trust any fields on the public eligibility value.  The live
-        # resolver re-reads the current owner-bound durable host turn and
-        # verifier result, so a copied or modified dataclass cannot mint a
-        # trusted observation.
+        # Do not trust any fields on the public eligibility value.  The
+        # authority returns the sealed snapshot the managed boundary derived
+        # (it does not re-read the turn), so a copied or modified dataclass
+        # cannot mint a trusted observation.  Owner and turn binding are
+        # checked by the managed session before this producer runs.
         eligibility = resolver()
         if type(eligibility) is not ManagedTerminalEligibility:
             raise PermissionError("owner-bound managed verifier result is invalid")
