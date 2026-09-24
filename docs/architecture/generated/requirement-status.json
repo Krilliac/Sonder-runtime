@@ -180,9 +180,9 @@
     },
     {
       "checked": false,
-      "claim": "Transactional SQLite and PostgreSQL admission conserves hierarchical step, output-token and additive worker-time envelopes, root child/depth limits, owner-wide active concurrency across operations, ownership and distinct active speculative hypotheses. Terminal unmetered token usage retains its complete reservation.",
+      "claim": "The transactional hierarchical resource/ownership/key admission implementation passed an actual owned PostgreSQL 18 primary and synchronous standby qualification at published code revision 6dcd99246a1a8dca5ae6aaff63bb94c7f2180a9d: 21 tests, no skips. SQLite multi-process races and the integrated Linux suite also pass.",
       "requirement_id": "AGENT-007",
-      "revision": 7,
+      "revision": 8,
       "status": "implemented_unverified"
     },
     {
@@ -1272,9 +1272,9 @@
     },
     {
       "checked": false,
-      "claim": "Selfmod execution refuses unsupported automatic low-integrity hosts and records actual host isolation provenance, while parent-side filtered test runs remain manual-review only because candidate code can forge the child result frame.",
+      "claim": "Native Windows MIC canaries and unsupported-host refusal are qualified at published revision 6dcd99246a1a8dca5ae6aaff63bb94c7f2180a9d; the Windows suite passed 20 MIC tests with one explicitly deselected Git Bash case. Automatic approval remains blocked because neither low MIC nor parent-filtered candidate output provides an independent grader.",
       "requirement_id": "SELFMOD-002",
-      "revision": 8,
+      "revision": 9,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "78286eedccf4e8eee0cfd62a24e27da5aaf7daa58fc7f3053d8e23be968bf5de",
+    "ledger_sha256": "9edfd7a80bc4b4b2a8dd3a7c2dd57edcb21686e500c3c91c4810bcc42dd6c309",
     "spec_sha256": "d11b5664c594bb79042c358a0510393d1ee0dd6d718830332a6362ed652c9bc5"
   }
 }

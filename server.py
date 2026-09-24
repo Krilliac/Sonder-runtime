@@ -25417,7 +25417,11 @@ def codegen_build_loop(
                             raise
                         # No generation response: the durable memory selection
                         # remains pending and cannot count as a failed reuse.
-                        return _format_model_call_error(error)
+                        return _format_runtime_model_call_error_policy(
+                            error,
+                            endpoint_loopback=_ollama_endpoint_is_local(),
+                            display=_ollama_display(),
+                        )
                 else:
                     reply = ensemble_answer(
                         prompt, tiers=generation_tiers, num_predict=num_predict, mode="code",

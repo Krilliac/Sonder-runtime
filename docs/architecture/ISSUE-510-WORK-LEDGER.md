@@ -15,13 +15,13 @@ this ledger. Existing implementations are extended instead of being duplicated.
 
 | Item | Implementation and meaningful verification | Qualification |
 |---|---|---|
-| W1 Artifact signature/publisher trust | Windows signable artifacts reject unavailable verification; exact normalized publisher organization matching; verifier environment stripped; non-Windows results explicitly disclose absent signature verification. `tests/test_artifact_fetch_tools.py`, `tests/test_runtime_artifact_adapters.py`. | Implemented; a real OS-signed PowerShell positive canary is included in Windows CI and awaits qualification. |
-| W2 Root/concurrency counting | Root anchor is excluded; transactional SQLite/PostgreSQL admission conserves nested resources and owner-wide active slots across operation roots. Reused reservations count once. | SQLite multi-process races pass; disposable primary/standby PostgreSQL qualification is pending CI. |
+| W1 Artifact signature/publisher trust | Windows signable artifacts reject unavailable verification; exact normalized publisher organization matching; verifier environment stripped; non-Windows results explicitly disclose absent signature verification. `tests/test_artifact_fetch_tools.py`, `tests/test_runtime_artifact_adapters.py`. | Qualified on native Windows at `6dcd9924`: real OS-signed PowerShell PE and fixed Microsoft publisher pin passed, alongside refusal/tamper fixtures. |
+| W2 Root/concurrency counting | Root anchor is excluded; transactional SQLite/PostgreSQL admission conserves nested resources and owner-wide active slots across operation roots. Reused reservations count once. | SQLite multi-process races pass; native owned PostgreSQL primary/standby qualification passed 21 tests without skips at `6dcd9924`. |
 | W3 Cancellation and reserved workers | Transactional cancellation fence prevents late success; cancelled ancestors prevent new descendants; pre-start cancellation terminalizes the record; resume clears stale verification. Provider launch failure releases only a newly created unstarted row with its expected revision. | Implemented; race and reused-reservation canaries pass. |
 | W4 Wall budget | Child deadline and measured elapsed time reject success after budget exhaustion. | Implemented; deterministic late-success test. |
 | W5 Durable outcome authority | Delegation verification compares the full canonical terminal result, including status, output, error and usage. Identical receipts are idempotent; conflicting receipts fail. | Implemented; forged-success and resumed-result regressions pass. |
 | W6 Compiler-feedback repair | Next codegen candidate receives bounded prior source, normalized diagnostics and progress; explicit multi-route policy admits a scoped critic then a distinct model; incomplete evidence and critic failure degrade safely; best candidate retained. | Implemented and unit/integration tested; live model benefit remains unmeasured. |
-| W7 Runtime closure / #550 | Inventory and byte/count bounds precede hashing; scan/hash replacement detected; full closure still hashed. Canonical Windows installer can provision a separate pinned `venv-managed`; host selects and validates its bound profile. | Linux contract tests pass. Native Windows installer/launch qualification is required; no arbitrary new production size/time cap. |
+| W7 Runtime closure / #550 | Inventory and byte/count bounds precede hashing; scan/hash replacement detected; full closure still hashed. Canonical Windows installer can provision a separate pinned `venv-managed`; host selects and validates its bound profile. | Linux contract tests and native Windows installer/profile/real launch qualification pass. Existing size/count bounds remain; no arbitrary new production time cap. |
 | W8 Release dependency gate | Tagged release depends on integrity, Flutter analysis, reusable exact-tag Python CI and installer-owned Windows profile/launch qualification. Native MIC checks run independently after preceding test failures. Existing required `tests` context retained. | Workflow structure and local release tests pass; tagged publication itself is not exercised. |
 | W9 Release archive validation | Require real platform binaries, nested payload manifests and digests, build identity and bounded archive structure. | Four existing platform artifacts accepted; malformed and incomplete archive canaries pass. |
 | W10 Strategy convergence | Pure contracts/controller, durable observations and production adapters, bounded tools and evidence-backed memory are being integrated through existing ports. | Experimental. The full program definition of done is not yet met. |
@@ -36,7 +36,7 @@ stage retains the original durable parent and actual lineage depth.
 |---|---|---|
 | 1 Lossless archives and selective eviction | Session archive, `application/compaction`, CTX/COMPACT retention; merged #547. | Preserve archive references, objective/constraints and failed-attempt evidence. Strategy context uses typed references, not transcript copies. |
 | 2 Resumable worker registry | `application/worker_registry/continuation.py`, `application/subagents/durable_continuation.py`. | Cancellation, terminal-result and launch-cleanup fixes above; restart/reuse canaries retained. |
-| 3 Productive parallelism | `domain/adaptive_concurrency.py`, ownership scheduler from #552; AGENT-007. | SQLite writer transaction / PostgreSQL row lock conserve aggregate resource reservations; active speculative lane/hypothesis identities are unique per task scope. Owner-wide concurrency spans durable roots. Native PostgreSQL qualification remains pending. |
+| 3 Productive parallelism | `domain/adaptive_concurrency.py`, ownership scheduler from #552; AGENT-007. | SQLite writer transaction / PostgreSQL row lock conserve aggregate resource reservations; active speculative lane/hypothesis identities are unique per task scope. Owner-wide concurrency spans durable roots. Native PostgreSQL primary/synchronous standby qualification passed 21 tests without skips at `6dcd9924`; see the verification record. |
 | 4 Worker execution contracts | AGENT-009 / #541, `application/agents/delegation_service.py`. | Canonical result binding, scoped critic context and inherited budgets. |
 | 5 Deterministic workflow gates | Delegation role workflow, artifact readiness barrier, EVAL proposal lifecycle. | PR #546 merged after reconciliation and green CI; exact artifact identity and canonical child results bind readiness fan-in. |
 | 6 Critical runtime guards | [Guard inventory](evidence/ISSUE-510-GUARD-INVENTORY-2026-09-23.md), #553 no-progress guards. | Shared opt-in host request admission covers physical Ollama/OpenAI chat and embedding sends. Top-tier lanes are durable per parent; cross-process request-rate and batching remain distinct gaps. |
@@ -68,7 +68,7 @@ The series IDs below are from issue comment
 | C3 Workbench | Production terminal observer, durable backfill and explicit rollout controls use existing agent/effect/context boundaries. | Active recovery cannot bypass explicit resume authority or effect reconciliation. |
 | C4 Fleet | Production per-attempt observer, shadow comparison and deterministic pure-text canary may suppress legacy retries. Repository workers remain observe-only. | Controlled live quality/equivalence evaluation and wider safe action migration. |
 | D1 Structured results | Existing AGENT-009 plus exact durable terminal result binding and typed specialist/delegation proposals. | Cross-host live qualification. |
-| D2 Reservations | Atomic hierarchical step/token/worker-time reservations, depth/child limits, owner-wide concurrency and ownership admission; unknown token usage retains its complete reservation. | PostgreSQL primary/standby qualification in progress: the registry lookup and atomic duplicate-key admission are fixed; latest native run passed 20 tests with one invalid fixture budget being corrected. Zero-test/skip-only runs are rejected. |
+| D2 Reservations | Atomic hierarchical step/token/worker-time reservations, depth/child limits, owner-wide concurrency and ownership admission; unknown token usage retains its complete reservation. | Native PostgreSQL primary/synchronous standby qualification passed 21 tests without skips at `6dcd9924`, including the corrected registry lookup, duplicate-key admission and fixture budget. Zero-test/skip-only runs are rejected. |
 | D3 Specialist proposals | Canonical delegation service accepts bounded typed specialist proposals under an owner-bound operation root and inherited finite budgets. | Native platform and live-model quality qualification. |
 | D4 Hypotheses | Canonical transactional admission rejects duplicate active speculative lanes or hypothesis digests within the root task scope. | Live search diversity and marginal-benefit evaluation. |
 | D5 Evidence synthesis | Fan-in rechecks canonical child outputs, artifact ID/size/source specification and host verifier metrics; recursive proposals retain scoped evidence. | Independent verifier authority and complete live exhausted-search qualification. |
@@ -92,6 +92,18 @@ The series IDs below are from issue comment
 | H3 Ablations | No measured critic/delegation/rotation lift claimed. | Independent controlled comparisons. |
 | H4 Promotion | #546 kind-bound lifecycle gates; new results invalidate stale evidence; retained divergence blocks promotion. | Independent real-task score/receipt authority; synthetic agreement is not task success. |
 | H5 Rollout | Default off; explicit observe/shadow/deterministic canary controls preserve host authority. Fleet pure-text canary can suppress retry; Codegen canary refuses without independently isolated build execution. | Build isolation, independent task grades and live promotion evidence remain required; no default-on claim. |
+
+## Chat-lane convergence delta
+
+The later [chat-lane request](https://github.com/Krilliac/Sonder-runtime/issues/510#issuecomment-5809305131)
+remains part of #510. It is not implemented by the strategy recovery batch.
+
+| Workstream | Existing foundation | Remaining implementation and acceptance |
+|---|---|---|
+| Explicit Chat policy | `application/chat/handle_chat.py` uses the canonical ModelGateway and session capture; `domain/runtime_policy/rules.py` already separates model tiers from execution lanes. | Add the `chat` lane and `chat -> general` policy mapping without a new tier, gateway or store. Preserve explicit model pins and single-model deployments; verify ordinary conversation stays in Chat and record its selected route. |
+| Typed Chat-to-work handoff | Existing parent-bound agent-lane entrypoints enforce scope and authority; chat and worker lifecycle telemetry exist separately. | Connect a typed `ChatHandoff` preserving objective, constraints, project identity and bounded durable context references to eligible Workbench/Autopilot/Fleet requests. Verify refused/allowed handoffs, conversational tool restrictions, structured work return and durable attribution without copying the full transcript or widening permissions. |
+
+Generic agent-lane tests do not establish these Chat-specific acceptance criteria.
 
 ## Admission and recovery policy
 
@@ -136,11 +148,49 @@ The series IDs below are from issue comment
   correction, revision `9c2bb9a7` passed 20 MIC tests (1 Git Bash test intentionally
   deselected), 193 Windows owner/artifact/lifecycle tests and release smoke. Artifact
   signature fixtures do not establish a real signed-PE positive verification.
-- Live PostgreSQL, provider/model quality and independent task/held-out grading
-  remain distinct qualifications. Concrete PostgreSQL and native Windows jobs
-  must pass for their respective claims. Synthetic tests do not replace them.
+- Exact published code head `6dcd99246a1a8dca5ae6aaff63bb94c7f2180a9d`: native
+  PostgreSQL primary/synchronous standby passed 21 tests with zero skips; Windows
+  owner/artifact/lifecycle plus real fixed-publisher Authenticode passed 194 tests
+  (6 platform skips), release smoke passed 1, and MIC passed 20 (1 Git Bash
+  deselection). Installer-owned Windows runtime/profile/launch also passed.
+  [PostgreSQL job](https://github.com/Krilliac/Sonder-runtime/actions/runs/35973735098/jobs/107549187387),
+  [Windows job](https://github.com/Krilliac/Sonder-runtime/actions/runs/35973735104/jobs/107549187540).
+- Fourth broad Linux run: 17,288 passed, 159 skipped, 2 failed. The canonical
+  model-error formatting path and the exact competing prepared-claim test
+  expectation are corrected, with focused regressions passing.
+- Final combined Linux run after integration: **17,290 passed, 165 skipped**,
+  3 warnings and 4 subtests passed (222.97 seconds). Windows-only isolation
+  diagnostics are among the explicit Linux skips. Architecture, evidence,
+  documentation and error-signal gates pass; the lint comparison has zero new
+  diagnostic groups (10,889 baseline / 10,819 current), not a full-tree lint pass.
+- Provider/model quality and independent task/held-out grading remain distinct
+  qualifications. Synthetic controller canaries do not replace them.
 - History privacy ratchet passed with zero new/unexpected findings and seven
   existing known findings; this is not a claim of a debt-free history.
+- Recovery-session validation on 2026-09-24 reproduced **17,290 passed,
+  165 skipped**, 3 warnings and 4 subtests passed (324.58 seconds, Python 3.12,
+  four xdist workers). The two previously failing CI test files passed all
+  25 tests. Architecture, append-only evidence/base-diff, error-signal,
+  documentation and history-privacy gates passed; offline smoke replay passed
+  4/4 cases and tool-policy evaluation passed 33/33. The recovered file delta
+  was applied on top of published `6dcd9924`, preserving the existing PR
+  history. Hosted checks for this new recovery commit are still required.
+
+## Active-build isolation boundary
+
+The current build runner executes candidate code with the host user identity. A
+local negative probe confirmed that such code can read the private strategy seal
+key even with POSIX mode `0600`. Production active Codegen therefore refuses before
+build/model dispatch until a supported lower-privilege execution adapter exists.
+
+The separate, non-gating Windows diagnostic job exercises dummy protected-state
+reads, inherited MIC labels and tampering, process handle access, a WMI broker,
+staged compilation and a per-run restricting-SID experiment. Its pass/fail/skip
+results are diagnostic evidence, not production isolation qualification. Ordinary
+low MIC, file labels alone, a restricting SID or a successful staged build cannot
+substitute for demonstrated process, desktop, credential and broker boundaries.
+Task Scheduler/other brokers and a separate desktop remain explicit unqualified
+surfaces; no adapter is enabled from these probes.
 
 ## Completion gate
 
