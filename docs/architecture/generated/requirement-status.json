@@ -516,9 +516,9 @@
     },
     {
       "checked": false,
-      "claim": "A bounded local Ollama probe through the live AgentLaneService path observed scoped skill refresh invalidating the application prefix while preserving provider model identity and forwarding provider cache telemetry.",
+      "claim": "Live tool-enabled agent-lane requests keep the per-turn tool selection id outside the reusable prefix, so turns of one lane and independent worker processes on the same project derive one deterministic prefix identity; a bounded two-process loopback Ollama probe observed provider-reported prompt-cache reuse through the production gateway.",
       "requirement_id": "CTX-009",
-      "revision": 6,
+      "revision": 7,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "2fe11844914eff000507e631af9ca4f656cd7eaffa7f3789f8d5b1d97590ed55",
+    "ledger_sha256": "1ecff0f333c1773b34836c3a87a3c6f531828ac1e0fa7c154f76d8b09419399f",
     "spec_sha256": "ed5ab01393d72681fc4eb4b9581e832d3d07ee95595b8b58dfe094c9e7dbf4fa"
   }
 }
