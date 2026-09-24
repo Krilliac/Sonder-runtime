@@ -67,11 +67,19 @@ fixed `ThreadPoolExecutor(max_workers=worker_slots)`. It now builds an
   `SC_AVPHYS_PAGES` is MemFree and excludes reclaimable page cache; the
   `sysconf` path remains the fallback. The fleet's own `fleet_pressure` band is deliberately excluded,
   because it measures the fleet's self-utilization.
-- `dispatch_lanes()` logs and survives a raising `collect`/`on_error` (for
-  example the fleet store failing while a failure is recorded), so later lanes
-  are still admitted. If the loop itself aborts, every never-started lane is
-  finished with `dispatch aborted before this lane started`, so no child row
-  or reserved slot is stranded as queued.
+- `dispatch_lanes()` survives a raising `collect`/`on_error` (for example
+  the fleet store failing while a failure is recorded), so later lanes are
+  still admitted. The failure is logged as a one-line, 200-character-bounded
+  `Type: message` and counted as `handler_failures` in the summary. A failed
+  `on_error` means the worker never closed its row, so the lane is closed
+  through `on_abandon`. A failed `collect` follows a worker that already
+  closed its row, so it is not closed twice.
+- If the loop itself aborts, every lane without a future is closed through
+  `on_abandon`. That covers lanes still pending and lanes that `admit()`
+  marked running but `pool.submit` rejected. No child row or reserved slot
+  is stranded as queued. When the store still refuses the close, the
+  process-local reserved slot is released anyway, and the durable row is
+  left to owner-lease recovery.
 - Lane claims are built inside the fleet-startup containment: an objective
   path that cannot be anchored fails the fleet with every queued child
   cancelled.
@@ -79,8 +87,8 @@ fixed `ThreadPoolExecutor(max_workers=worker_slots)`. It now builds an
   `adaptive concurrency shrink: cap 4 -> 2 (retry_storm)`. Every
   `run_delegated` return after dispatch (success, cancel, failure, drift, and
   audit paths) carries a `concurrency` summary with `ceiling`,
-  `final_cap`, `peak_running`, `coupled_lanes`, `serialized_waits`, and
-  `decisions`.
+  `final_cap`, `peak_running`, `coupled_lanes`, `serialized_waits`,
+  `handler_failures`, and `decisions`.
 - Rollback: `SONDER_FLEET_ADAPTIVE_CONCURRENCY` accepts exactly
   `0`/`false`/`no`/`off` (pin the cap at `worker_slots`) or
   `1`/`true`/`yes`/`on`/unset. Any other value is logged as a warning and
@@ -89,12 +97,12 @@ fixed `ThreadPoolExecutor(max_workers=worker_slots)`. It now builds an
   objectives on one file stay parallel. A future write-capable lane passes
   WRITE claims to the same scheduler.
 
-No file in open PRs #519, #523, #525, #538, #541, or #542 is modified
+No file in open PRs #519, #525, #538, #541, or #542 is modified
 except the shared append-only ledger and its generated projection.
 
 ## Verification
 
-Focused tests (`tests/test_adaptive_concurrency.py`, 71 tests) cover:
+Focused tests (`tests/test_adaptive_concurrency.py`, 75 tests) cover:
 
 - the pure ownership and cap policy;
 - guard canaries that deliberately trip each shrink trigger:
@@ -116,7 +124,13 @@ Focused tests (`tests/test_adaptive_concurrency.py`, 71 tests) cover:
   error handler, never-started lanes on abort, `run_delegated` with the fleet
   store failing, Linux `MemAvailable` from a fake meminfo, path anchoring and
   rejection, one-retry-per-lane, the `concurrency` key on the cancel and
-  all-failed paths, and strict kill-switch parsing.
+  all-failed paths, and strict kill-switch parsing;
+- re-review fixes, each with a test that failed before its fix (4 failed
+  before, all pass after): a lane admitted but rejected by `pool.submit` is
+  abandoned; a failed error handler is logged with its bounded message,
+  counted, and its lane closed; a failed `collect` is counted but not
+  re-closed; `run_delegated` returns the reserved slot while the fleet store
+  keeps refusing writes.
 
 Mutation proof: each deliberate break was applied and the file rerun, and each
 break made the suite fail.
@@ -134,11 +148,15 @@ Local runs (Windows 11, Python 3.12.10, pinned `requirements-runtime.txt` and
 
 ```text
 python -m pytest -q tests/test_adaptive_concurrency.py
-71 passed
+75 passed
 python -m pytest -q <orchestrator, provenance, durability, readiness, fleet-pattern and adaptive modules>
-214 passed
+218 passed
 python -m pytest -q -n auto <every module referencing master_orchestrator, fleet_pressure or adaptive_concurrency, except test_serve_auth.py>
-890 passed (three consecutive runs)
+894 passed in 3 of 6 runs; the other runs failed 1-3 order-dependent
+master_orchestrator tests (cancel, queued-cancel, active-model-call count,
+fleet-width, and once test_server_helpers' 2-second fleet deadline). Pristine
+origin/main fails the same master_orchestrator tests in 3 of 4 runs; every
+failing test passes in isolation.
 python scripts/check_architecture.py            (exit 0)
 ```
 

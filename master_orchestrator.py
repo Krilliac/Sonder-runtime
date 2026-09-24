@@ -1756,6 +1756,7 @@ class AdaptiveLaneScheduler:
         self.decisions: list[dict] = []
         self.peak_running = 0
         self.serialized_waits = 0
+        self.handler_failures = 0
 
     @property
     def cap(self) -> int:
@@ -1768,6 +1769,9 @@ class AdaptiveLaneScheduler:
     @property
     def running(self) -> frozenset:
         return frozenset(self._running)
+
+    def record_handler_failure(self) -> None:
+        self.handler_failures += 1
 
     def sink(self, lane_id: str):
         def record(outcome) -> None:
@@ -1828,8 +1832,24 @@ class AdaptiveLaneScheduler:
             "peak_running": int(self.peak_running),
             "coupled_lanes": adaptive_concurrency.coupled_lane_count(self.graph),
             "serialized_waits": int(self.serialized_waits),
+            "handler_failures": int(self.handler_failures),
             "decisions": list(self.decisions),
         }
+
+
+_MAX_LOGGED_ERROR_CHARS = 200
+
+
+def _bounded_error_text(exc: BaseException) -> str:
+    """One-line, length-bounded ``Type: message`` for operator logs.
+
+    Whitespace (including newlines) is collapsed and the message truncated,
+    so a failure that embeds a large payload cannot flood or forge log lines.
+    """
+    text = " ".join(str(exc).split())
+    if len(text) > _MAX_LOGGED_ERROR_CHARS:
+        text = text[:_MAX_LOGGED_ERROR_CHARS] + "..."
+    return "%s: %s" % (type(exc).__name__, text) if text else type(exc).__name__
 
 
 def dispatch_lanes(
@@ -1845,18 +1865,46 @@ def dispatch_lanes(
     conflicts decide actual concurrency.
 
     A raising ``collect``/``on_error`` (for example a fleet store that is
-    down while recording a failure) is logged and cannot stop later lanes
-    from being admitted.  If the loop itself aborts, every lane that was
-    never started is handed to ``on_abandon`` so no durable row is stranded
-    as queued; the original exception still propagates.
+    down while recording a failure) is logged with a bounded message, counted
+    in the scheduler summary (``handler_failures``), and cannot stop later
+    lanes from being admitted.  When ``on_error`` fails the lane's row was
+    never closed (the worker itself raised), so the lane is handed to
+    ``on_abandon``; a failed ``collect`` follows a worker that already closed
+    its own row, so it is not closed twice.  If the loop itself aborts, every
+    lane that never got a future -- still pending, or admitted but rejected
+    by ``pool.submit`` -- is handed to ``on_abandon`` so no durable row is
+    stranded as queued; the original exception still propagates.
     """
+    unsubmitted: list[str] = []
+
+    def close(lane_id: str, when: str) -> None:
+        if on_abandon is None:
+            return
+        try:
+            on_abandon(lane_id)
+        except Exception as abandon_exc:
+            logger.warning(
+                "fleet lane %s could not be closed %s: %s",
+                lane_id, when, _bounded_error_text(abandon_exc),
+            )
+
     try:
         with ThreadPoolExecutor(max_workers=max(1, int(max_workers))) as pool:
             futures = {}
 
             def submit_admitted() -> None:
-                for lane_id in scheduler.admit():
-                    futures[pool.submit(run_lane, lane_id, scheduler.sink(lane_id))] = lane_id
+                admitted = list(scheduler.admit())
+                while admitted:
+                    lane_id = admitted[0]
+                    try:
+                        future = pool.submit(run_lane, lane_id, scheduler.sink(lane_id))
+                    except BaseException:
+                        # admit() already marked these lanes running; none of
+                        # them has a future, so the abort path must close them.
+                        unsubmitted.extend(admitted)
+                        raise
+                    admitted.pop(0)
+                    futures[future] = lane_id
 
             submit_admitted()
             while futures:
@@ -1873,22 +1921,18 @@ def dispatch_lanes(
                     try:
                         handler(*args)
                     except Exception as handler_exc:
+                        scheduler.record_handler_failure()
                         logger.warning(
                             "fleet lane %s result handling failed: %s",
-                            lane_id, type(handler_exc).__name__,
+                            lane_id, _bounded_error_text(handler_exc),
                         )
+                        if handler is on_error:
+                            close(lane_id, "after its error handler failed")
                     scheduler.complete(lane_id)
                 submit_admitted()
     finally:
-        if on_abandon is not None:
-            for lane_id in scheduler.pending:
-                try:
-                    on_abandon(lane_id)
-                except Exception as abandon_exc:
-                    logger.warning(
-                        "fleet lane %s could not be closed after dispatch abort: %s",
-                        lane_id, type(abandon_exc).__name__,
-                    )
+        for lane_id in unsubmitted + list(scheduler.pending):
+            close(lane_id, "after dispatch abort")
 
 
 def run_delegated(
@@ -2073,7 +2117,18 @@ def run_delegated(
         _finish(agent_id, error=str(exc))
 
     def _lane_abandoned(agent_id: str) -> None:
-        _finish(agent_id, error="dispatch aborted before this lane started")
+        # Close a lane dispatch could not finish normally: never started, or
+        # its own failure could not be recorded.  If the durable store is
+        # still refusing writes, at least return the process-local reserved
+        # slot (``_finish`` only releases it after the store write succeeds);
+        # the durable row is then left to owner-lease recovery.
+        try:
+            _finish(agent_id, error="fleet dispatch could not complete this lane")
+        except Exception:
+            with _LOCK:
+                global _RESERVED_SLOTS
+                _RESERVED_SLOTS = max(0, _RESERVED_SLOTS - 1)
+            raise
 
     dispatch_lanes(
         scheduler, worker_slots, _run_lane, _collect, _lane_error,
