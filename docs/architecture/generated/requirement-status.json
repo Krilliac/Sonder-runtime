@@ -887,9 +887,9 @@
     },
     {
       "checked": false,
-      "claim": "Host-current delegated verifier results can produce immutable project-scoped positive or verified-negative observations bound to an exact check, unchanged source manifest, cleanup proofs, authenticated child worker, and durable receipt.",
+      "claim": "Corrects revisions 4-5: the first verifier-observation insert now requires the exact private producer authorization type (a duck-typed matches() stand-in was accepted before); independence is keyed by authenticated principal and scope, so one principal's child lanes cannot reach FACT; promotion reads only indexed subject-scoped rows and a persisted verified negative demotes before any completeness bound; the managed boundary decision is sealed and resolved once; certified_after_return is refused explicitly; learning refusals carry a visible reason and cannot alter work outcomes.",
       "requirement_id": "MEM-003",
-      "revision": 4,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "d6a58075f763faf0f586f609e7a199d75eb1da727f26b71c62e4a2bd68f16719",
+    "ledger_sha256": "378f95cd90f0c9863c9375aab265285cc9b2b89e55fba6ad38672a52941058c4",
     "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
   }
 }
