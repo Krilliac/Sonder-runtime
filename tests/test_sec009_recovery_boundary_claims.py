@@ -107,9 +107,13 @@ def test_non_bool_unrestricted_flag_is_rejected_not_coerced():
 # Durable evidence repository
 # ---------------------------------------------------------------------------
 
-def _repository(tmp_path: Path, **kwargs) -> FilesystemRecoveryEvidenceRepository:
+def _repository(
+    tmp_path: Path, *, unrestricted_selfmod: bool = False,
+) -> FilesystemRecoveryEvidenceRepository:
     service = RecoveryArtifactService((tmp_path / "recovery").resolve(), owner="same-user")
-    return FilesystemRecoveryEvidenceRepository(service, **kwargs)
+    return FilesystemRecoveryEvidenceRepository(
+        service, unrestricted_selfmod=unrestricted_selfmod,
+    )
 
 
 def test_verification_under_unrestricted_startup_keeps_the_disclosure(tmp_path):
@@ -330,3 +334,18 @@ def test_operator_documents_disclose_the_unrestricted_recovery_limit():
             r"not a security boundary against (?:a process granted )?"
             r"(?:explicitly )?`?--unrestricted-selfmod`?", flat,
         ), "unrestricted recovery/audit disclosure missing"
+
+
+def test_startup_capability_is_a_required_keyword(tmp_path):
+    # A composition root that forgets the capability must fail loudly
+    # instead of silently dropping the unrestricted disclosure.
+    import inspect
+
+    service = RecoveryArtifactService((tmp_path / "recovery").resolve(), owner="u")
+    with pytest.raises(TypeError):
+        FilesystemRecoveryEvidenceRepository(service)
+    parameter = inspect.signature(FilesystemRecoveryEvidenceRepository).parameters[
+        "unrestricted_selfmod"
+    ]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty

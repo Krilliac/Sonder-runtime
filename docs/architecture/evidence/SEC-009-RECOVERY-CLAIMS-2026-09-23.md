@@ -18,7 +18,9 @@ The requirement-wide audit is in [SEC-AUDIT-2026-09-23.md](SEC-AUDIT-2026-09-23.
    process could have rewritten the artifact and the audit chain together.
    The repository now takes the frozen startup capability. Every record it
    returns, from `record` or `verify`, carries the unrestricted limitation, and
-   a per-call `False` cannot remove it.
+   a per-call `False` cannot remove it. Review round 1 made the capability a
+   required keyword with no default, so a composition root that forgets it
+   fails instead of silently dropping the disclosure.
 2. **Operator and agent documents overclaimed.** `SELFMOD.md` described
    "immutable backups" and did not mention `--unrestricted-selfmod`. The selfmod
    skill said "immutable backup" and "append-only audit" without qualification,
@@ -28,14 +30,15 @@ The requirement-wide audit is in [SEC-AUDIT-2026-09-23.md](SEC-AUDIT-2026-09-23.
 
 ## Evidence
 
-`tests/test_sec009_recovery_boundary_claims.py` (22 cases):
+`tests/test_sec009_recovery_boundary_claims.py` (23 cases):
 
 - the typed contract refuses a declared boundary for every actor shape,
   `dataclasses.replace` cannot add one, a forged field is ignored by
   `can_claim_security_boundary` and rejected by `RecoveryEvidenceRecord`, and
   non-bool flags are rejected rather than coerced;
-- the repository keeps the unrestricted disclosure through `verify` and cannot
-  have it downgraded per call;
+- the repository keeps the unrestricted disclosure through `verify`, cannot
+  have it downgraded per call, and cannot be constructed without the startup
+  capability;
 - the honest limit is stated as a test: a consistent same-user rewrite of the
   artifact and the whole audit chain still verifies, and the record carries
   the limitation instead of implying that the rewrite was detected;
@@ -50,7 +53,8 @@ The requirement-wide audit is in [SEC-AUDIT-2026-09-23.md](SEC-AUDIT-2026-09-23.
 RED/GREEN: run against the unchanged implementation and documents, 5 cases
 failed: the verify disclosure, the per-call downgrade, the rewrite
 disclosure, the repository ratchet, and the operator-document disclosure.
-All 22 pass after the change. `tests/test_sec009_recovery_evidence_repository.py`,
+All 22 pass after the change. Review round 1 added the required-keyword case,
+which failed before the default was removed and passes after. `tests/test_sec009_recovery_evidence_repository.py`,
 `tests/test_remaining_sec_009.py`, `tests/test_remaining_recovery_updates.py`,
 and `tests/test_selfmod_deploy_health.py` also pass (41 with the new file).
 The selfmod suites `tests/production/test_release_hardening.py`,
@@ -68,6 +72,12 @@ does not edit them. The ratchet pins exactly those five findings in
 shrink. SEC-009 can be marked verified once `KNOWN_DEBT` is empty.
 
 ## Limitations
+
+`actor` and `resource_owner` are caller-supplied application labels, not
+operating-system identities derived from the process. This is documented on
+`RecoveryBoundary` and the repository adapter. The labels only choose which
+limitations are disclosed. They never authorize anything, and since a
+same-user process can pass any label, no assessment may claim a boundary.
 
 The ratchet is lexical. It catches the assurance phrasings it lists, not
 every way a sentence could imply protection, and a negation anywhere in a

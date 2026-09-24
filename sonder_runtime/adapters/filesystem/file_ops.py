@@ -2210,12 +2210,12 @@ def _inspect_zip(p: Path) -> dict:
 
 
 def _inspect_tar(p: Path) -> dict:
-    import tarfile
+    from sonder_runtime.adapters.bounded_tar import open_bounded
 
     names = []
     expanded = 0
     truncated = False
-    with tarfile.open(p) as archive:
+    with open_bounded(p) as archive:
         # Iterate instead of getmembers(): stop before decompressing past
         # the scan budget or collecting an unbounded member list.
         for member in archive:

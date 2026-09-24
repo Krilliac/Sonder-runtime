@@ -23,14 +23,22 @@ class FilesystemRecoveryEvidenceRepository:
     process.  When it is set, every record -- including one returned by a
     later ``verify`` -- discloses that the process could have rewritten the
     artifact and audit chain together.  A per-call flag can add that
-    disclosure but can never remove it.
+    disclosure but can never remove it.  The capability has no default: a
+    composition root that omits it fails instead of silently dropping the
+    disclosure.
+
+    ``actor`` and ``resource_owner`` are application labels supplied by the
+    caller, not operating-system identities.  They select the disclosure
+    text; they never authorize anything, and a same-user process can supply
+    any label it likes -- which is exactly why no assessment may claim a
+    security boundary.
     """
 
     def __init__(
         self,
         artifacts: RecoveryArtifactService,
         *,
-        unrestricted_selfmod: bool = False,
+        unrestricted_selfmod: bool,
     ) -> None:
         if not isinstance(unrestricted_selfmod, bool):
             raise TypeError("unrestricted_selfmod must be bool")

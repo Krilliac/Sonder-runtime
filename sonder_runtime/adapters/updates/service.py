@@ -26,11 +26,13 @@ import sqlite3
 import sys
 import tarfile
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import sonder_runtime.adapters.persistence.migrations as sonder_migrations
+from sonder_runtime.adapters.bounded_tar import open_bounded
 import sonder_runtime.platform.version as sonder_version
 
 MANIFEST_SCHEMA_VERSION = 1
@@ -675,10 +677,15 @@ def _read_pointer(link: Path) -> str | None:
 MAX_EXTRACT_MEMBERS = 50_000
 MAX_MEMBER_NAME_CHARS = 1_024
 _WINDOWS_DEVICE_STEMS = frozenset({
-    "con", "prn", "aux", "nul",
-    *("com%d" % index for index in range(1, 10)),
-    *("lpt%d" % index for index in range(1, 10)),
+    "con", "prn", "aux", "nul", "conin$", "conout$",
+    *("com%s" % suffix for suffix in "0123456789¹²³"),
+    *("lpt%s" % suffix for suffix in "0123456789¹²³"),
 })
+
+
+def _collision_key(value: str) -> str:
+    """Key under which case-folding and normalizing filesystems collide."""
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", value).casefold())
 
 
 def safe_extract(
@@ -696,7 +703,7 @@ def safe_extract(
         raise ValueError("max_members must be a positive integer")
     dest = Path(destination).resolve()
     try:
-        tar = tarfile.open(archive_path, "r:*")
+        tar = open_bounded(archive_path)
     except (OSError, EOFError, tarfile.TarError) as exc:
         raise ExtractionError(f"cannot open archive: {exc}") from None
     try:
@@ -746,7 +753,8 @@ def _portable_member_parts(name: object) -> tuple[str, ...]:
             raise ExtractionError(
                 f"archive path has a trailing dot/space component: {name!r}"
             )
-        if part.split(".", 1)[0].casefold() in _WINDOWS_DEVICE_STEMS:
+        # Windows ignores trailing spaces before the extension ("CON .txt").
+        if part.split(".", 1)[0].rstrip(" ").casefold() in _WINDOWS_DEVICE_STEMS:
             raise ExtractionError(
                 f"archive path uses a reserved device name: {name!r}"
             )
@@ -757,7 +765,9 @@ def _plan_members(tar, max_expanded_bytes: int, max_members: int) -> list:
     """Validate every member (and the aggregate) before extraction starts.
 
     Walking a compressed TAR decompresses each payload to reach the next
-    header, so the member and byte bounds are enforced during the walk.
+    header, so the member-count and payload-byte bounds are checked per
+    member.  Header metadata (long names, PAX records) is bounded
+    separately by ``open_bounded`` before ``tarfile`` reads it.
     """
     plan: list = []
     total = 0
@@ -785,7 +795,7 @@ def _plan_members(tar, max_expanded_bytes: int, max_members: int) -> list:
         if member.size < 0:
             raise ExtractionError(f"negative member size: {name!r}")
         normalized = "/".join(parts)
-        folded = normalized.casefold()
+        folded = _collision_key(normalized)
         if not is_directory:
             if normalized in exact or folded in folded_types:
                 raise ExtractionError(
@@ -805,7 +815,7 @@ def _plan_members(tar, max_expanded_bytes: int, max_members: int) -> list:
         folded_types[folded] = "directory" if is_directory else "file"
         for index in range(1, len(parts) + 1):
             prefix = "/".join(parts[:index])
-            previous = folded_components.setdefault(prefix.casefold(), prefix)
+            previous = folded_components.setdefault(_collision_key(prefix), prefix)
             if previous != prefix:
                 raise ExtractionError(
                     f"archive has case-colliding path components: {name!r}"
@@ -814,7 +824,7 @@ def _plan_members(tar, max_expanded_bytes: int, max_members: int) -> list:
     for normalized in exact:
         parts = normalized.split("/")
         for index in range(1, len(parts)):
-            if folded_types.get("/".join(parts[:index]).casefold()) == "file":
+            if folded_types.get(_collision_key("/".join(parts[:index]))) == "file":
                 raise ExtractionError(
                     "archive file member is an ancestor of another: "
                     f"{normalized!r}"

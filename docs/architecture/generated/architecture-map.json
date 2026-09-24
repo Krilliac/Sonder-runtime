@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 296,
+      "file_count": 297,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -72,6 +72,7 @@
         "sonder_runtime/adapters/backup.py",
         "sonder_runtime/adapters/backup_gateway.py",
         "sonder_runtime/adapters/bounded_cloud_generation.py",
+        "sonder_runtime/adapters/bounded_tar.py",
         "sonder_runtime/adapters/cli_options.py",
         "sonder_runtime/adapters/client_config.py",
         "sonder_runtime/adapters/client_endpoint.py",
