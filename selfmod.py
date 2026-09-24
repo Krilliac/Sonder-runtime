@@ -1,7 +1,7 @@
 """Host-controlled, auditable self-improvement lifecycle.
 
 Candidate code never calls acceptance or deployment primitives directly. This
-module owns state transitions, immutable backups, deterministic checks, locks,
+module owns state transitions, tamper-evident backups, deterministic checks, locks,
 deployment, and rollback. It is stdlib-only so recovery remains available when
 the rest of Sonder cannot import.
 """
@@ -118,6 +118,10 @@ CREATE TABLE IF NOT EXISTS selfmod_deployed_files (
   run_id TEXT NOT NULL, path TEXT NOT NULL, existed_after INTEGER NOT NULL,
   sha256_after TEXT, mode_after INTEGER, recorded_ts REAL NOT NULL,
   PRIMARY KEY(run_id, path)
+);
+CREATE TABLE IF NOT EXISTS selfmod_tested_files (
+  run_id TEXT NOT NULL, path TEXT NOT NULL, sha256 TEXT, diff_sha256 TEXT NOT NULL,
+  recorded_ts REAL NOT NULL, PRIMARY KEY(run_id, path)
 );
 CREATE TABLE IF NOT EXISTS selfmod_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, ts REAL NOT NULL,
@@ -447,7 +451,7 @@ def create_plan(
               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (run_id, objective, problem or objective, _json(ev), _json(normalized),
              _json(acceptance), classification, expected_benefit or "bounded reliability improvement",
-             rollback_plan or "restore immutable backup bundle", str(root), phase, config["mode"],
+             rollback_plan or "restore tamper-evident backup bundle", str(root), phase, config["mode"],
              commit, git_status, fingerprint, int(config["mode"] != "auto-low-risk" or classification != "low"),
              int(bool(maintenance_authorized)), now, now, _json(limits), _json(_test_inventory(root))),
         )
@@ -576,7 +580,7 @@ def create_backup(run_id):
                 (run_id, record["path"], int(record["existed_before"]), record["sha256_before"],
                  record["size_before"], record["mode_before"], record["backup_path"], record["sha256_backup"]),
             )
-    updated = _phase(run_id, {"proposed"}, "backed_up", "backup", "immutable backup verified", backup_manifest=str(manifest_path))
+    updated = _phase(run_id, {"proposed"}, "backed_up", "backup", "tamper-evident backup verified", backup_manifest=str(manifest_path))
     verify_backup(run_id)
     return updated
 
@@ -755,15 +759,97 @@ def diff_text(run_id):
     return inspect_diff(run_id)["diff"]
 
 
+def _candidate_snapshot(run_id):
+    """SHA-256 of every changed candidate file and of the diff, from disk."""
+    diff = inspect_diff(run_id)
+    workspace = candidate_path(run_id)
+    files = {}
+    for rel in sorted(str(item) for item in diff["changed_files"]):
+        path = workspace / rel
+        files[rel] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+    digest = hashlib.sha256(str(diff["diff"]).encode("utf-8", "surrogatepass")).hexdigest()
+    return {"files": files, "diff_sha256": digest}
+
+
+def tested_digests(run_id):
+    """The tested-bytes record written when testing began, or None."""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT path,sha256,diff_sha256 FROM selfmod_tested_files WHERE run_id=? ORDER BY path",
+            (run_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return None
+    return {"files": {row[0]: row[1] for row in rows}, "diff_sha256": rows[0][2]}
+
+
 def begin_testing(run_id):
-    inspect_diff(run_id)
+    """Enter testing and bind the candidate bytes that the tests will see.
+
+    The record is written by this (host) process before any check can run,
+    because checks may only be recorded in the testing phase. Re-entering
+    after an interruption must find the same bytes; otherwise earlier results
+    would describe different code, so the run fails closed.
+    """
+    snapshot = _candidate_snapshot(run_id)
+    existing = tested_digests(run_id)
+    if existing is not None and existing != snapshot:
+        raise RuntimeError("candidate bytes changed since testing began")
+    if existing is None:
+        now = time.time()
+        with _tx() as conn:
+            for rel, digest in snapshot["files"].items():
+                conn.execute(
+                    "INSERT INTO selfmod_tested_files(run_id,path,sha256,diff_sha256,recorded_ts) VALUES(?,?,?,?,?)",
+                    (run_id, rel, digest, snapshot["diff_sha256"], now),
+                )
+            _event(conn, run_id, "tested_bytes", "bound %d file(s) before validation" % len(snapshot["files"]))
     return _phase(run_id, {"editing", "interrupted"}, "testing", "testing", "host-controlled validation started")
 
 
-def _record_command(run, kind, command, cwd_path, seconds, expect_failure=False, receipt=None):
+def _record_command(
+    run, kind, command, cwd_path, seconds, expect_failure=False, receipt=None,
+    protected_paths=(), low_integrity=None, isolation=None,
+):
     run_id = run["id"]
-    code, output, duration = _run(command, cwd_path, seconds)
-    passed = code != 0 if expect_failure else code == 0
+    isolation_failed = False
+    # ``low_integrity`` is explicit for unattended candidate checks.  Keep the
+    # environment fallback for older callers and operators that already opt in
+    # through the process environment, but do not make nightly's choice a
+    # process-global side effect.
+    use_low_integrity = (
+        os.environ.get("SELFMOD_LOW_INTEGRITY") == "1"
+        if low_integrity is None else bool(low_integrity)
+    )
+    if use_low_integrity and os.name == "nt":
+        from scripts.selfmod_low_integrity import run_isolated
+        started = time.monotonic()
+        try:
+            isolated = run_isolated(
+                command, cwd=cwd_path, timeout=seconds,
+                protected_paths=protected_paths, **dict(isolation or {}),
+            )
+            code = int(isolated["exit_code"])
+            output = str(isolated.get("output") or "")
+            job = isolated.get("job")
+            if job:
+                # Record which boundary actually ran and how close the Job
+                # came to its limits, so a medium gate or a limit hit is
+                # visible in the ledger rather than inferred.
+                output = (output + "\nSELFMOD ISOLATION: %s\n" % _json(job))[-100_000:]
+        except Exception as exc:
+            # A missing token/ACL/Job capability rejects this check.  It
+            # cannot accidentally count as a successful negative reproducer.
+            code = 125
+            output = "low-integrity isolation unavailable: %s" % type(exc).__name__
+            isolation_failed = True
+        duration = int((time.monotonic() - started) * 1000)
+    else:
+        code, output, duration = _run(command, cwd_path, seconds)
+    passed = (code not in (0, 124, 125) if expect_failure else code == 0) and not isolation_failed
     if receipt is not None and passed and receipt not in output:
         # "It exited 0" is not "it did the thing". The receipt is computed by
         # this process from the candidate on disk and is deliberately never
@@ -794,14 +880,21 @@ def record_reproducer_before(run_id, command, timeout=None):
     return _record_command(run, "reproducer_before", command, Path(run["repository_root"]), seconds, expect_failure=True)
 
 
-def record_test(run_id, kind, command, *, cwd=None, timeout=None):
+def record_test(
+    run_id, kind, command, *, cwd=None, timeout=None, protected_paths=(),
+    low_integrity=None, isolation=None,
+):
     run = get_run(run_id)
     if run["phase"] != "testing":
         raise RuntimeError("tests may run only in testing phase")
     workspace = candidate_path(run_id)
     cwd_path = workspace if cwd is None else (workspace / _rel(workspace, cwd)).parent
     seconds = min(int(timeout or run["budgets"]["max_test_seconds"]), run["budgets"]["max_test_seconds"])
-    return _record_command(run, kind, command, cwd_path, seconds)
+    return _record_command(
+        run, kind, command, cwd_path, seconds,
+        protected_paths=protected_paths, low_integrity=low_integrity,
+        isolation=isolation,
+    )
 
 
 SMOKE_RECEIPT_PREFIX = "SELFMOD-SMOKE-RECEIPT"
@@ -994,7 +1087,14 @@ def _backup_rehearsal(run_id):
     return True
 
 
-def review(run_id, *, require_kinds=None):
+def review(run_id, *, require_kinds=None, unevaluated=()):
+    """Deterministic acceptance review.
+
+    ``unevaluated`` names checks the caller deliberately did not run against
+    the candidate. A run with any unevaluated check can pass review but is
+    never auto-approved: it stops at ``reviewing`` for a human.
+    """
+    unevaluated = tuple(str(item)[:300] for item in (unevaluated or ()))
     run = get_run(run_id)
     if run["phase"] != "testing":
         raise RuntimeError("review requires testing phase")
@@ -1023,6 +1123,11 @@ def review(run_id, *, require_kinds=None):
             failures.append("original failure was not demonstrated before editing")
     if not diff["changed_files"]:
         failures.append("candidate produced no scoped diff")
+    tested = tested_digests(run_id)
+    if tested is None:
+        failures.append("no tested-bytes record")
+    elif tested != _candidate_snapshot(run_id):
+        failures.append("candidate bytes changed after testing began")
     if any(_protected(path) for path in diff["changed_files"]) and not run["maintenance_authorized"]:
         failures.append("protected file modified")
     manifest = verify_backup(run_id)
@@ -1046,14 +1151,18 @@ def review(run_id, *, require_kinds=None):
     if not _backup_rehearsal(run_id):
         failures.append("rollback rehearsal failed")
     target = "rejected" if failures else "reviewing"
+    passed_note = "deterministic acceptance checks passed"
+    if unevaluated:
+        passed_note += "; NOT EVALUATED (human review required): " + "; ".join(unevaluated)
     updated = _phase(
         run_id, {"testing"}, target, "review",
-        "; ".join(failures) if failures else "deterministic acceptance checks passed",
+        "; ".join(failures) if failures else passed_note[:1000],
         test_inventory_after=_json(after_inventory), last_error="; ".join(failures),
     )
     if failures:
         restore(run_id, from_candidate_only=True)
-    elif updated["mode"] == "auto-low-risk" and updated["risk"] == "low" and not updated["approval_required"]:
+    elif (updated["mode"] == "auto-low-risk" and updated["risk"] == "low"
+          and not updated["approval_required"] and not unevaluated):
         approve(run_id, approver="host:auto-low-risk")
     return get_run(run_id)
 
@@ -1445,7 +1554,28 @@ def _verify_deployed_rollback(run_id, root, timeout):
     return ok, detail, probe, code, output, duration
 
 
-def deploy(run_id, *, health_command=None, commit=True):
+def _digest_mismatches(workspace: Path, changed_files, expected_digests) -> list:
+    """Return changed files whose candidate bytes differ from ``expected_digests``."""
+    expected = {str(key): value for key, value in dict(expected_digests).items()}
+    names = set(str(item) for item in changed_files) | set(expected)
+    mismatched = []
+    for rel in sorted(names):
+        path = Path(workspace) / rel
+        actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+        if rel not in expected or actual != expected[rel]:
+            mismatched.append(rel)
+    return mismatched
+
+
+def deploy(run_id, *, health_command=None, commit=True, expected_digests=None):
+    """Install an approved candidate.
+
+    Promotion is bound to the bytes that were tested: the tested-bytes
+    record written by begin_testing() is required, and the SHA-256 of every
+    changed file is re-checked immediately before any copy and again on the
+    installed bytes. ``expected_digests`` (optional) must equal that record.
+    This applies to every caller, including a human approval deployed later.
+    """
     run = get_run(run_id)
     if run["phase"] != "approved":
         raise RuntimeError("deployment requires explicit/host approval")
@@ -1459,6 +1589,17 @@ def deploy(run_id, *, health_command=None, commit=True):
         if set(diff["changed_files"]) - set(run["files"]):
             raise RuntimeError("candidate diff no longer matches approved scope")
         root, workspace = Path(run["repository_root"]), candidate_path(run_id)
+        tested = tested_digests(run_id)
+        if tested is None:
+            raise RuntimeError("deployment requires a tested-bytes record; run was never bound")
+        if expected_digests is not None and dict(expected_digests) != tested["files"]:
+            raise RuntimeError("caller digests do not match the tested-bytes record")
+        expected_digests = tested["files"]
+        mismatched = _digest_mismatches(workspace, diff["changed_files"], expected_digests)
+        if mismatched:
+            raise RuntimeError(
+                "candidate bytes differ from tested bytes: %s" % ", ".join(mismatched)
+            )
         try:
             for rel in diff["changed_files"]:
                 source, target = workspace / rel, root / rel
@@ -1469,6 +1610,11 @@ def deploy(run_id, *, health_command=None, commit=True):
                 elif target.exists():
                     target.unlink()
                     _remove_bytecode_cache(target)
+            mismatched = _digest_mismatches(root, diff["changed_files"], expected_digests)
+            if mismatched:
+                raise RuntimeError(
+                    "installed bytes differ from tested bytes: %s" % ", ".join(mismatched)
+                )
             deployed_commit = ""
             git_mode, _, _ = _git_info(root)
             if git_mode and commit and not run["git_status_start"].strip():
