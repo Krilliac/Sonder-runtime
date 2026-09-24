@@ -36,9 +36,9 @@
       "verified": 0
     },
     "DOC": {
-      "checked": 5,
+      "checked": 7,
       "total": 7,
-      "verified": 5
+      "verified": 7
     },
     "EVAL": {
       "checked": 0,
@@ -91,9 +91,9 @@
       "verified": 0
     },
     "SEC": {
-      "checked": 0,
+      "checked": 1,
       "total": 9,
-      "verified": 0
+      "verified": 1
     },
     "SELFMOD": {
       "checked": 1,
@@ -127,13 +127,13 @@
     }
   },
   "overall": {
-    "checked": 6,
+    "checked": 9,
     "statuses": {
-      "implemented_unverified": 198,
-      "verified": 6
+      "implemented_unverified": 195,
+      "verified": 9
     },
     "total": 204,
-    "verified": 6
+    "verified": 9
   },
   "requirements": [
     {
@@ -180,23 +180,23 @@
     },
     {
       "checked": false,
-      "claim": "Agent budgets are admitted and enforced at the application boundary.",
+      "claim": "The live delegated-fleet dispatcher enforces its static worker-slot ceiling through an ownership-aware adaptive lane scheduler: overlapping write claims are serialized while readers and independent lanes stay parallel, and retry storms, target churn, or host memory pressure shrink the live concurrency cap with hysteresis before it regrows on sustained healthy outcomes.",
       "requirement_id": "AGENT-007",
-      "revision": 2,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Delegated workspaces are isolated and bounded by parent context.",
+      "claim": "Revision 2 delegated-workspace isolation still applies; additionally, host-driven Git mutations (harness git tools and runtime-source update/stash) are serialized per working tree; an overlapping mutation or a foreign index.lock is refused without running Git and without deleting the lock, and the refusal directs re-inspection instead of a blind retry.",
       "requirement_id": "AGENT-008",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Structured delegation validates lineage, workspace, budgets, and result evidence.",
+      "claim": "Structured delegation validates lineage, workspace, budgets, and result evidence; delegated workers also carry a durable typed execution contract: success criteria, argv verification commands, inherit/scoped/clean context policy with digest-pinned inputs or inherited-context hash, owned files distinct from task scope, and an explicit speculative-lane flag; dispatch gates owned files to the write assignment, admission rejects overlapping active ownership, and integration fails closed on contract drift.",
       "requirement_id": "AGENT-009",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -357,35 +357,35 @@
       "checked": false,
       "claim": "Non-destructive.",
       "requirement_id": "COMPACT-001",
-      "revision": 3,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Source range.",
       "requirement_id": "COMPACT-002",
-      "revision": 3,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Structured retention.",
       "requirement_id": "COMPACT-003",
-      "revision": 3,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Validation.",
       "requirement_id": "COMPACT-004",
-      "revision": 3,
+      "revision": 7,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Typed modalities.",
       "requirement_id": "COMPACT-005",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -474,9 +474,9 @@
     },
     {
       "checked": false,
-      "claim": "Priority selection and eviction are composed through the typed context selection policy.",
+      "claim": "Live continuation reads complete canonical session history through bounded pages before applying selective tool-output eviction, preserving protected requirements and decisions.",
       "requirement_id": "CTX-003",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -502,9 +502,9 @@
     },
     {
       "checked": false,
-      "claim": "The context facade exposes bounded overflow preparation and recovery without provider calls.",
+      "claim": "Bounded continuation recovery fails closed on unavailable, non-contiguous, tampered, or over-limit history while recovering complete history across adapter pages.",
       "requirement_id": "CTX-007",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -599,11 +599,11 @@
       "status": "verified"
     },
     {
-      "checked": false,
-      "claim": "Focused contracts are documented in the generated inventory and architecture references.",
+      "checked": true,
+      "claim": "The six root focused contracts link the master specification within their first twelve lines and each carry one gated Behavior status table whose Proposed rows must cite open master-spec requirements, so unfinished work lives only in the specification. Revision 4 re-verifies after correcting the CLIENT.md standalone-client claim.",
       "requirement_id": "DOC-004",
-      "revision": 2,
-      "status": "implemented_unverified"
+      "revision": 4,
+      "status": "verified"
     },
     {
       "checked": true,
@@ -620,11 +620,11 @@
       "status": "verified"
     },
     {
-      "checked": false,
-      "claim": "Documentation authority checks detect stale promises and out-of-date generated references.",
+      "checked": true,
+      "claim": "Product documentation (root README and the six focused contracts) labels behavior with the Implemented, Experimental, Proposed, Degraded, and Unsupported vocabulary, and a CI gate rejects unknown labels, stale Proposed rows, unlabeled forward-looking prose, and implementation slice logs. Revision 4 re-verifies after the CLIENT.md correction and the widened stale-promise and Implemented-citation checks.",
       "requirement_id": "DOC-007",
-      "revision": 2,
-      "status": "implemented_unverified"
+      "revision": 4,
+      "status": "verified"
     },
     {
       "checked": false,
@@ -859,16 +859,16 @@
     },
     {
       "checked": false,
-      "claim": "Transport retries are bounded and fenced to loop cancellation and idempotency evidence.",
+      "claim": "Revision 2 transport-retry bounds and the revision 3 web-repeat canary still apply. The codegen no-progress guard, corrected from revision 3, stops regenerating a file only when two consecutive comparable attempts produce an identical failing outcome (sorted error lines with duplicates kept) without a score improvement. Attempts whose errors are a host placeholder, truncated output, or masked by count_unreliable reset the streak and never count toward a stall.",
       "requirement_id": "LOOP-007",
-      "revision": 2,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Live agent tools and composed process, compute, local subagent, and self-mod worker adapters persist host-owned effect intents and outcomes; checkpoint restore validates journal high-water and unresolved effects.",
+      "claim": "Corrects revisions 12 and 13 after an independent review of 3d22e670. Concurrent effects in one shared run now always commit their terminal outcome and checkpoint only the settled high-water prefix; restore accepts later effects only when every effect in the run is terminal and reports journal_high_water, so restart succeeds after verified reconciliation; reconcile clears the run-wide recovery fence once nothing is unresolved; checkpoint writes require the current unfenced owner epoch and idempotent outcome replays append no generation; checkpoint generations are bounded per run; the process-start verifier reports an attached launch as completed with the live {job_id}:{pid} receipt shape.",
       "requirement_id": "LOOP-008",
-      "revision": 4,
+      "revision": 15,
       "status": "implemented_unverified"
     },
     {
@@ -887,16 +887,16 @@
     },
     {
       "checked": false,
-      "claim": "Host-current delegated verifier results can produce immutable project-scoped positive or verified-negative observations bound to an exact check, unchanged source manifest, cleanup proofs, authenticated child worker, and durable receipt.",
+      "claim": "Corrects revisions 4-5: the first verifier-observation insert now requires the exact private producer authorization type (a duck-typed matches() stand-in was accepted before); independence is keyed by authenticated principal and scope, so one principal's child lanes cannot reach FACT; promotion reads only indexed subject-scoped rows and a persisted verified negative demotes before any completeness bound; the managed boundary decision is sealed and resolved once; certified_after_return is refused explicitly; learning refusals carry a visible reason and cannot alter work outcomes.",
       "requirement_id": "MEM-003",
-      "revision": 4,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Composed authoritative fact writes now require an acyclic same-source and same-project supersession link, and scoped entity and decision indexes hide the predecessor after the successor becomes effective across restart and journal rebuild.",
+      "claim": "Live authoritative activation pays full journal authentication only on first claim and keeps a bounded indexed invariant per unit of work, and the replication receiver fails fast at startup instead of retrying peer fact batches rejected by an authoritatively owned scope.",
       "requirement_id": "MEM-004",
-      "revision": 7,
+      "revision": 9,
       "status": "implemented_unverified"
     },
     {
@@ -1222,11 +1222,11 @@
       "status": "implemented_unverified"
     },
     {
-      "checked": false,
-      "claim": "Package and archive safety semantics are preserved in the packaged artifact-grounding adapter.",
+      "checked": true,
+      "claim": "Every production archive reader bounds member names, links and special files, member counts, per-entry and aggregate expansion, compression ratio, TAR metadata record size, metadata-record chains, archive-wide TAR metadata bytes and PAX keys, and preview scans; rejects GNU sparse members and global PAX headers before their payloads are read; and checks ZIP central-directory entry count and size before parsing the directory. An adversarial corpus with memory and wall-time bounds drives each protection in the archive tools, update staging, data-inspection, OOXML, and path-safety readers.",
       "requirement_id": "SEC-004",
-      "revision": 2,
-      "status": "implemented_unverified"
+      "revision": 7,
+      "status": "verified"
     },
     {
       "checked": false,
@@ -1258,9 +1258,9 @@
     },
     {
       "checked": false,
-      "claim": "Recovery evidence is stored through a bounded repository boundary.",
+      "claim": "The repository-wide recovery/audit claim ratchet now has no known debt (PR #519 removed the last five pinned backup overclaims), recovery evidence discloses same-user, audit, and startup unrestricted-selfmod limits on every record with the capability required at construction, and operator documents state that recovery and audit are not a security boundary against --unrestricted-selfmod.",
       "requirement_id": "SEC-009",
-      "revision": 2,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -1272,9 +1272,9 @@
     },
     {
       "checked": false,
-      "claim": "Isolated candidate execution is wired through the live typed selfmod bridge and rejects a candidate workspace that resolves to the live repository.",
+      "claim": "Tested-bytes digests are persisted in the selfmod database when testing begins. Review rejects runs whose bytes differ from the record, and every deploy (unattended or later human approval) requires the record and verifies the candidate bytes before the copy and the installed bytes after it. A committed-blob mismatch rejects the run and deletes its branch. An overlong child working directory is refused up front.",
       "requirement_id": "SELFMOD-002",
-      "revision": 2,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
@@ -1335,9 +1335,9 @@
     },
     {
       "checked": false,
-      "claim": "A reopened application can verify and deterministically replay a live captured turn; capture failure is fail-closed.",
+      "claim": "A long-session continuation can reopen and recover complete durable history across adapter pages from one read snapshot, including under the production default compaction wiring and with legacy events larger than the current append cap.",
       "requirement_id": "SESSION-005",
-      "revision": 2,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -1349,9 +1349,9 @@
     },
     {
       "checked": false,
-      "claim": "Resume and repair are exposed through the continuity boundary with fail-closed sequence verification.",
+      "claim": "Live continuation uses complete, integrity-verified durable history and leaves the lane recoverably blocked when the history cannot be proven.",
       "requirement_id": "SESSION-007",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "e472ae7bdf455d05a03282c84838a7d63f458586dbf163e4f719bcd2fbd7b69f",
-    "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
+    "ledger_sha256": "c84547e537234a35919fa8687f44fb026466928f1888e3db94b1826228dd7604",
+    "spec_sha256": "d11b5664c594bb79042c358a0510393d1ee0dd6d718830332a6362ed652c9bc5"
   }
 }

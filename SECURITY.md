@@ -1,5 +1,11 @@
 # Security Policy
 
+> **Contract scope:** this focused contract describes current behavior. Unfinished
+> implementation work is tracked in the
+> [master implementation specification](docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md); the
+> [behavior status](#behavior-status) table labels what is implemented,
+> experimental, proposed, degraded, or unsupported.
+
 ## Reporting a vulnerability
 
 Report privately through GitHub's **Report a vulnerability** button on the
@@ -79,10 +85,11 @@ Mitigations that are already in place and worth knowing about:
 - `script_run` applies `SONDER_EXECUTION_RISK_POLICY` before launching an exact
   guarded script. The default is `report`; operators may choose `deny-high`,
   `deny-medium`, or `deny-unknown`. A caller may strengthen but cannot weaken
-  the configured policy. Enforcing `deny-*` modes currently fail closed for
-  every launch because a portable exact inspected-handle-to-interpreter handoff
-  is not yet available; `report` remains advisory. This avoids a pathname-swap
-  bypass and is defense in depth, not an OS sandbox.
+  the configured policy. Enforcing `deny-*` modes are degraded: they fail
+  closed for every launch (`exact_execution_handoff_unavailable`) because the
+  runner cannot hand the already-inspected file handle to the interpreter
+  portably; `report` remains advisory. This avoids a pathname-swap bypass and
+  is defense in depth, not an OS sandbox.
 - Process inventory and memory-risk inspection are disabled unless the operator
   sets `SONDER_PROCESS_INSPECTION=enabled:bounded-read-only`. The Windows-only
   scanner requests read/query rights for one exact PID and returns only fixed
@@ -103,6 +110,21 @@ Mitigations that are already in place and worth knowing about:
 - Lessons are passed through a 20-rule privacy classifier before storage, so
   paths, emails, credentials, private keys, and tokens are not distilled into
   memory.
+- Update bundles are staged by a TAR extractor that validates every member
+  before writing: traversal, drive-relative/UNC/backslash, alternate-stream,
+  reserved-device, control-character, duplicate and case- or
+  normalization-colliding names, links, devices, member-count and
+  expanded-byte overruns are rejected. Every TAR reader refuses long-name,
+  long-link, and PAX metadata records larger than 64 KiB, more than four
+  chained metadata records per member, more than 1 MiB of metadata or
+  32,768 PAX keys per archive, global PAX headers, and GNU sparse members
+  before parsing them. ZIP readers check the declared central-directory entry count before
+  opening the archive.
+- Self-modification backups, manifests, checksums, the `selfmod_events` audit
+  table, and recovery evidence are tamper-evident only. They are written by the
+  same OS user as Sonder, so they are not a security boundary against
+  `--unrestricted-selfmod`, which can rewrite them consistently; see
+  [SELFMOD.md](SELFMOD.md#recovery-and-audit-are-not-a-security-boundary).
 
 The repository also carries a documented historical Git-history privacy gate;
 see [the debt evidence record](docs/security/history-privacy-debt.md). Normal
@@ -117,8 +139,8 @@ Sonder has a deliberately dangerous model-evaluation override. It is **not an
 OS sandbox and provides no containment**. It removes the local model agent and
 autopilot host-tool allowlists, project scoping, read-only gate, web/location
 gate, and file approval gate so an untrusted or unguarded model can exercise
-the host-native tool surface. The shared file-approval bypass also affects the
-46 direct MCP call paths that consult it; direct MCP is therefore part of the
+the host-native tool surface. The shared file-approval bypass also affects every
+direct MCP call path that consults it; direct MCP is therefore part of the
 blast radius, not an unchanged boundary. Direct tool time/output bounds still
 exist, but they are reliability controls, not a security boundary.
 
@@ -193,3 +215,20 @@ Out of scope: the fact that the tools execute code when asked (see above),
 issues that require an attacker who already has the API key or local shell,
 and anything in the upstream base models' output. Model output is not a
 security boundary — do not rely on it to refuse anything.
+
+## Behavior status
+
+Labels follow the [documentation status vocabulary](docs/architecture/DOCUMENT-AUTHORITY-INDEX.md#documentation-status-vocabulary). Unfinished
+implementation work is tracked only in the
+[master implementation specification](docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md).
+
+| Behavior | Status | Boundary |
+|---|---|---|
+| Guarded file, archive, patch, data, and Git inspection tools | Implemented | Constrained to configured roots and the per-tool ceilings described above. |
+| `script_run` execution-risk policy in `report` mode | Implemented | Default mode; advisory, and not an OS sandbox. |
+| `script_run` enforcing `deny-high`, `deny-medium`, or `deny-unknown` modes | Degraded | Every launch fails closed because no portable exact inspected-handle-to-interpreter handoff exists. |
+| Process inventory and memory-risk inspection | Implemented | Off unless `SONDER_PROCESS_INSPECTION=enabled:bounded-read-only`; Windows only. |
+| Process memory-risk inspection on non-Windows hosts | Unsupported | The bounded scanner is Windows-only. |
+| Unsafe lab mode | Experimental | Exact acknowledgement, loopback-only, and unprivileged; disposable isolated hosts only, and never an OS sandbox. |
+| Exposing the runtime port directly to a network | Unsupported | Remote access requires the server-private profile behind a TLS reverse proxy. |
+| Scoped credential handles for every tool instead of injected raw secrets | Proposed | SEC-001; an opaque-handle provider boundary exists but is not yet the end-to-end tool contract. |

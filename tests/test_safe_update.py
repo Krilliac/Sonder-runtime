@@ -1,7 +1,14 @@
 import shutil
 import subprocess
 
+import pytest
+
 import safe_update
+
+# Git for Windows' MSYS2 runtime cannot start below medium integrity (it must
+# create a directory in the global object namespace), so these tests run in
+# the separately reported medium-integrity selfmod gate.
+pytestmark = pytest.mark.requires_medium_integrity
 
 
 def git(cwd, *args):

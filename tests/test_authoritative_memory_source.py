@@ -17,7 +17,7 @@ from sonder_runtime.adapters.persistence.sqlite.memory_projection import (
     SQLiteMemoryReplicationProjection,
 )
 from sonder_runtime.domain.memory.replication import MemoryReplicationError
-from sonder_runtime.bootstrap.app import build_application
+from sonder_runtime.bootstrap.app import build_application, compose_memory_unit_of_work
 from sonder_runtime.platform.config import Secrets, SonderConfig
 from sonder_runtime.platform.memory_replication_config import (
     MemoryReplicationConfig, MemoryReplicationPeerConfig,
@@ -43,6 +43,38 @@ def _live_replication_config() -> SonderConfig:
             ),),
         ),
     )
+
+
+def test_memory_composition_captures_one_authority_for_every_live_unit_of_work(tmp_path):
+    factory = compose_memory_unit_of_work(_live_replication_config())
+
+    first = factory(str(tmp_path / "first.db"))
+    second = factory(str(tmp_path / "second.db"))
+    assert first._authoritative_fact_source is second._authoritative_fact_source
+    assert first._authoritative_fact_source.source_id == "node-a"
+    assert first._authoritative_fact_source.project_scope == "repo-a"
+
+
+def test_disabled_memory_composition_preserves_legacy_factory():
+    assert compose_memory_unit_of_work(SonderConfig()) is UnitOfWorkAdapter
+
+
+def test_windows_scope_is_accepted_as_opaque_exact_identity(tmp_path):
+    """Backslashes are valid scope text; slash variants remain distinct."""
+    path = tmp_path / "windows-scope.db"
+    windows_scope = r"C:\Users\owner\workspace"
+    slash_variant = "C:/Users/owner/workspace"
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope=windows_scope)
+    connection = connect(path)
+    try:
+        source.activate(connection)
+        source.add_fact(connection, "fact-1", windows_scope, "accepted")
+        assert facts_for_project(connection, windows_scope)[0]["text"] == "accepted"
+        with pytest.raises(MemoryReplicationError, match="scope"):
+            source.add_fact(connection, "fact-2", slash_variant, "must refuse")
+        assert facts_for_project(connection, slash_variant) == []
+    finally:
+        connection.close()
 
 
 def test_live_application_composes_authoritative_fact_write_and_restart(tmp_path, monkeypatch):
@@ -298,6 +330,68 @@ def test_direct_activation_fails_closed_without_publishing_marker(tmp_path):
         connection.close()
 
 
+def test_activation_rejects_foreign_tombstone_only_state(tmp_path):
+    connection = connect(tmp_path / "foreign-tombstone-activation.db")
+    try:
+        connection.execute(
+            "INSERT INTO memory_authoritative_fact_state"
+            "(project,fact_id,source_id,version,tombstoned) VALUES(?,?,?,?,?)",
+            ("repo-a", "gone", "node-b", 2, 1),
+        )
+        connection.commit()
+        with pytest.raises(MemoryReplicationError, match="conflicting authoritative ownership"):
+            SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a").activate(connection)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM memory_authoritative_fact_activation"
+        ).fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_activation_accepts_same_source_tombstone_only_state_with_delete_evidence(tmp_path):
+    path = tmp_path / "same-tombstone-activation.db"
+    connection = connect(path)
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    source.activate(connection)
+    source.add_fact(connection, "gone", "repo-a", "temporary")
+    assert source.delete_fact(connection, "gone", "repo-a") is True
+    source.activate(connection)
+    assert connection.execute(
+        "SELECT source_id FROM memory_authoritative_fact_activation "
+        "WHERE project_scope=?", ("repo-a",)
+    ).fetchone()[0] == "node-a"
+    connection.close()
+
+
+def test_activation_pages_large_authoritative_state_without_rejecting_valid_rows(tmp_path):
+    connection = connect(tmp_path / "large-authoritative-state.db")
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    source.activate(connection)
+    for index in range(1025):
+        source.add_fact(connection, f"fact-{index:04d}", "repo-a", f"value-{index}")
+    # Full paged journal authentication runs when a source first claims a
+    # scope (for example after an operator migration or restore); re-entry on
+    # an already-claimed scope uses the bounded check in
+    # test_authoritative_activation_cost.py.
+    connection.execute("DELETE FROM memory_authoritative_fact_activation")
+    connection.commit()
+
+    statements = []
+    connection.set_trace_callback(statements.append)
+    try:
+        source.activate(connection)
+    finally:
+        connection.set_trace_callback(None)
+    evidence_pages = [
+        statement for statement in statements
+        if "memory_authoritative_fact_state AS state" in statement
+        and "LIMIT 256" in statement
+    ]
+    assert len(evidence_pages) >= 5
+    assert connection.in_transaction is False
+    connection.close()
+
+
 def test_activation_rejects_state_without_matching_journal_evidence(tmp_path):
     path = tmp_path / "missing-journal.db"
     connection = connect(path)
@@ -412,6 +506,7 @@ def test_authoritative_fact_source_commits_fact_and_journal_record_together(tmp_
     )
     connection.close()
 
+
     journal = SQLiteMemoryReplicationJournal(
         path,
         source_id="node-a",
@@ -421,6 +516,39 @@ def test_authoritative_fact_source_commits_fact_and_journal_record_together(tmp_
         assert journal.export().records == (record,)
     finally:
         journal.close()
+
+
+def test_interrupted_authoritative_write_rolls_back_and_releases_connection(
+    tmp_path, monkeypatch,
+):
+    from sonder_runtime.adapters.persistence.sqlite import authoritative_memory
+
+    connection = connect(tmp_path / "interrupted-write.db")
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    original_append = authoritative_memory.append_memory_mutations_in_transaction
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt("simulated authoritative interruption")
+
+    monkeypatch.setattr(
+        authoritative_memory, "append_memory_mutations_in_transaction", interrupt,
+    )
+    with pytest.raises(KeyboardInterrupt, match="simulated"):
+        source.add_fact(connection, "fact-1", "repo-a", "must roll back")
+
+    assert connection.in_transaction is False
+    assert facts_for_project(connection, "repo-a") == []
+    assert connection.execute(
+        "SELECT COUNT(*) FROM memory_authoritative_fact_state"
+    ).fetchone()[0] == 0
+
+    monkeypatch.setattr(
+        authoritative_memory, "append_memory_mutations_in_transaction", original_append,
+    )
+    source.add_fact(connection, "fact-1", "repo-a", "retry succeeds")
+    assert connection.in_transaction is False
+    assert facts_for_project(connection, "repo-a")[0]["text"] == "retry succeeds"
+    connection.close()
 
 
 def test_authoritative_fact_source_advances_entity_version_on_explicit_upsert(tmp_path):

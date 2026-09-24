@@ -1,9 +1,11 @@
 """Verify relative Markdown links in operator/developer docs resolve to a file.
 
 Scope is deliberately narrow: the top-level operator docs (README, SELFMOD,
-SECURITY, ...), the wiki, and the runbooks. ``docs/architecture/`` is excluded
-on purpose -- it is a generated/historical ledger maintained by
-``generate_documentation_catalogs.py`` and audited separately by
+SECURITY, ...), the wiki, the runbooks, security notes, and the requirement
+evidence records under ``docs/architecture/evidence/``. Evidence records are
+cited by the requirement ledger as proof, so a broken link there is a broken
+proof. The rest of ``docs/architecture/`` (slice history and generated
+references) stays excluded; it is audited by
 ``check_documentation_authority.py``.
 
 Checks only that the file-path portion of a relative link exists; it does not
@@ -24,6 +26,7 @@ DOC_ROOTS = (
     REPO_ROOT / "docs" / "wiki",
     REPO_ROOT / "docs" / "runbooks",
     REPO_ROOT / "docs" / "security",
+    REPO_ROOT / "docs" / "architecture" / "evidence",
 )
 
 _LINK_RE = re.compile(r"\[[^\]\n]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")

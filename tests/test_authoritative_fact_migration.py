@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import json
+import struct
 from dataclasses import replace
 import sys
 
@@ -9,6 +10,7 @@ import pytest
 
 from sonder_runtime.adapters.memory_store import connect, facts_for_project
 from sonder_runtime.adapters.persistence.sqlite.authoritative_memory import (
+    SQLiteAuthoritativeFactSource,
     migrate_legacy_facts,
     plan_legacy_fact_migration,
 )
@@ -91,6 +93,52 @@ def test_legacy_migration_rolls_back_fact_state_journal_and_indexes(tmp_path, mo
     connection.close()
 
 
+def test_interrupted_migration_releases_write_lock_and_can_resume(tmp_path, monkeypatch):
+    from sonder_runtime.adapters.persistence.sqlite import authoritative_memory
+
+    path = tmp_path / "interrupted.db"
+    connection = connect(path)
+    connection.execute(
+        "INSERT INTO facts(id,project,text,embedding) VALUES(?,?,?,?)",
+        ("legacy", "repo-a", "old fact", None),
+    )
+    connection.commit()
+    plan = plan_legacy_fact_migration(
+        connection, source_id="node-a", project_scope="repo-a",
+    )
+
+    original_append = authoritative_memory.append_memory_mutations_in_transaction
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt("simulated operator interruption")
+
+    monkeypatch.setattr(
+        authoritative_memory, "append_memory_mutations_in_transaction", interrupt,
+    )
+    with pytest.raises(KeyboardInterrupt, match="simulated"):
+        migrate_legacy_facts(
+            connection, plan, backup_path=tmp_path / "interrupted-backup.db",
+        )
+
+    assert connection.in_transaction is False
+    assert connection.execute(
+        "SELECT COUNT(*) FROM memory_replication_log"
+    ).fetchone()[0] == 0
+    assert facts_for_project(connection, "repo-a")[0]["text"] == "old fact"
+
+    monkeypatch.setattr(
+        authoritative_memory, "append_memory_mutations_in_transaction",
+        original_append,
+    )
+    assert migrate_legacy_facts(
+        connection, plan, backup_path=tmp_path / "resumed-backup.db",
+    ) == 1
+    assert connection.execute(
+        "SELECT COUNT(*) FROM memory_replication_log"
+    ).fetchone()[0] == 1
+    connection.close()
+
+
 def test_migration_replay_is_idempotent_only_after_plan_is_empty(tmp_path):
     connection = connect(tmp_path / "memory.db")
     connection.execute(
@@ -121,7 +169,8 @@ def test_migration_keeps_tombstones_and_conflicting_ownership_fail_closed(tmp_pa
         "DELETE FROM facts WHERE id=?", ("legacy",)
     )
     connection.commit()
-    assert plan_legacy_fact_migration(connection, source_id="node-a", project_scope="repo-a").rows == ()
+    with pytest.raises(MemoryReplicationError, match="missing authoritative journal evidence"):
+        plan_legacy_fact_migration(connection, source_id="node-a", project_scope="repo-a")
     connection.close()
 
 
@@ -141,6 +190,133 @@ def test_migration_digest_binds_source_and_project_scope(tmp_path):
     ).digest
     with pytest.raises(MemoryReplicationError, match="stale"):
         migrate_legacy_facts(connection, replace(plan, source_id="node-b"))
+    connection.close()
+
+
+@pytest.mark.parametrize(
+    ("source_id", "state_source", "expected"),
+    [
+        ("node-a", "node-b", "conflicting authoritative ownership"),
+        ("node-a", "node-a", "missing authoritative journal evidence"),
+    ],
+)
+def test_migration_rejects_existing_state_without_matching_authority_evidence(
+    tmp_path, source_id, state_source, expected,
+):
+    connection = connect(tmp_path / f"inconsistent-{state_source}.db")
+    connection.execute(
+        "INSERT INTO facts(id,project,text,embedding) VALUES(?,?,?,?)",
+        ("fact-1", "repo-a", "already materialized", None),
+    )
+    connection.execute(
+        "INSERT INTO memory_authoritative_fact_state"
+        "(project,fact_id,source_id,version,tombstoned) VALUES(?,?,?,?,?)",
+        ("repo-a", "fact-1", state_source, 1, 0),
+    )
+    connection.commit()
+
+    with pytest.raises(MemoryReplicationError, match=expected):
+        plan_legacy_fact_migration(
+            connection, source_id=source_id, project_scope="repo-a",
+        )
+    assert connection.execute(
+        "SELECT COUNT(*) FROM memory_replication_log"
+    ).fetchone()[0] == 0
+    connection.close()
+
+
+def test_migration_rejects_foreign_tombstone_without_a_fact_row(tmp_path):
+    connection = connect(tmp_path / "foreign-tombstone.db")
+    connection.execute(
+        "INSERT INTO memory_authoritative_fact_state"
+        "(project,fact_id,source_id,version,tombstoned) VALUES(?,?,?,?,?)",
+        ("repo-a", "gone", "node-b", 2, 1),
+    )
+    connection.commit()
+    with pytest.raises(MemoryReplicationError, match="conflicting authoritative ownership"):
+        plan_legacy_fact_migration(
+            connection, source_id="node-a", project_scope="repo-a",
+        )
+    connection.close()
+
+
+def test_migration_accepts_same_source_tombstone_with_delete_evidence(tmp_path):
+    connection = connect(tmp_path / "same-source-tombstone.db")
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    source.activate(connection)
+    source.add_fact(connection, "gone", "repo-a", "temporary")
+    assert source.delete_fact(connection, "gone", "repo-a") is True
+
+    plan = plan_legacy_fact_migration(
+        connection, source_id="node-a", project_scope="repo-a",
+    )
+    assert plan.rows == ()
+    connection.close()
+
+
+def test_migration_rejects_same_source_tombstone_without_delete_evidence(tmp_path):
+    connection = connect(tmp_path / "missing-delete-evidence.db")
+    connection.execute(
+        "INSERT INTO memory_authoritative_fact_state"
+        "(project,fact_id,source_id,version,tombstoned) VALUES(?,?,?,?,?)",
+        ("repo-a", "gone", "node-a", 2, 1),
+    )
+    connection.commit()
+    with pytest.raises(MemoryReplicationError, match="missing authoritative journal evidence"):
+        plan_legacy_fact_migration(
+            connection, source_id="node-a", project_scope="repo-a",
+        )
+    connection.close()
+
+
+@pytest.mark.parametrize("corruption", ["text", "embedding", "digest"])
+def test_migration_rejects_corrupt_live_journal_proof(tmp_path, corruption):
+    connection = connect(tmp_path / f"corrupt-{corruption}.db")
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    source.activate(connection)
+    source.add_fact(connection, "fact-1", "repo-a", "canonical")
+    if corruption == "text":
+        connection.execute("UPDATE facts SET text=? WHERE id=?", ("tampered", "fact-1"))
+    elif corruption == "embedding":
+        connection.execute(
+            "UPDATE facts SET embedding=? WHERE id=?",
+            (sqlite3.Binary(struct.pack("<f", 1.0)), "fact-1"),
+        )
+    else:
+        connection.execute(
+            "UPDATE memory_replication_log SET digest=? WHERE entity_id=?",
+            ("0" * 64, "fact-1"),
+        )
+    connection.commit()
+    with pytest.raises(MemoryReplicationError, match="authoritative journal evidence"):
+        plan_legacy_fact_migration(
+            connection, source_id="node-a", project_scope="repo-a",
+        )
+    connection.close()
+
+
+@pytest.mark.parametrize("corruption", ["payload", "version"])
+def test_migration_rejects_corrupt_tombstone_proof(tmp_path, corruption):
+    connection = connect(tmp_path / f"corrupt-tombstone-{corruption}.db")
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope="repo-a")
+    source.activate(connection)
+    source.add_fact(connection, "gone", "repo-a", "temporary")
+    source.delete_fact(connection, "gone", "repo-a")
+    if corruption == "payload":
+        connection.execute(
+            "UPDATE memory_replication_log SET payload_json=? WHERE entity_id=?",
+            ('{"text":"forged"}', "gone"),
+        )
+    else:
+        connection.execute(
+            "UPDATE memory_authoritative_fact_state SET version=? WHERE fact_id=?",
+            (3, "gone"),
+        )
+    connection.commit()
+    with pytest.raises(MemoryReplicationError, match="authoritative journal evidence"):
+        plan_legacy_fact_migration(
+            connection, source_id="node-a", project_scope="repo-a",
+        )
     connection.close()
 
 

@@ -1,5 +1,11 @@
 # Safe self-improvement in Sonder Runtime
 
+> **Contract scope:** this focused contract describes current behavior. Unfinished
+> implementation work is tracked in the
+> [master implementation specification](docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md); the
+> [behavior status](#behavior-status) table labels what is implemented,
+> experimental, proposed, degraded, or unsupported.
+
 Sonder Runtime self-improvement is a host-controlled state machine. Sonder is
 not the candidate or base model: candidate model output is only one untrusted
 input to the runtime. Candidate output can inspect and edit only an isolated
@@ -18,7 +24,7 @@ editing/testing/reviewing -> rejected -> restored
 deployed -> rollback_requested -> restored
 ```
 
-`selfmod.py` owns SQLite state, immutable backups, hashes, budgets, test
+`selfmod.py` owns SQLite state, hash-verified backups, hashes, budgets, test
 evidence, acceptance, deployment locks, and restoration. `server.py` may ask the
 existing guarded workbench agent to edit the isolated workspace, but the host
 independently inventories its complete diff and runs deterministic commands.
@@ -63,6 +69,24 @@ The SQLite `selfmod_events` table is append-only through the public API and
 records proposals, backups, edits, diffs, tests, reviews, approvals, locks,
 deployments, health checks, and rollback. Retention is age/size bounded and
 never deletes the newest valid rollback bundle.
+
+### Recovery and audit are not a security boundary
+
+Backups, manifests, `manifest.sha256`, the `selfmod_events` table, and recovery
+evidence artifacts are written by the same operating-system user that runs
+Sonder. They make accidental corruption and ordinary guarded-mode mistakes
+detectable and recoverable. They are tamper-evident, not tamper-resistant: a
+same-user process can rewrite a backup, its manifest, its checksum, and the
+audit chain together so that verification still passes.
+
+Starting Sonder with `--unrestricted-selfmod` grants self-modification exactly
+that authority. Recovery state and audit files are therefore not a security
+boundary against `--unrestricted-selfmod`, and a successful verification made
+while that flag is active is not evidence that the process left them
+untouched. Typed recovery evidence carries this limitation on every record
+(`sonder_runtime/application/security/recovery_boundary.py`). Protection
+against an unrestricted process must come from outside it: a separate OS
+account, read-only or off-host backups, or an external append-only log.
 
 ## Protected policy
 
@@ -271,3 +295,18 @@ py C:\absolute\path\selfmod_recover.py %LOCALAPPDATA%\sonder\selfmod\backups\<ru
 The command verifies the manifest checksum and every backup hash, atomically
 restores existing files, removes only files recorded as newly created, verifies
 the restored SHA-256 values, and aborts on any corruption.
+
+## Behavior status
+
+Labels follow the [documentation status vocabulary](docs/architecture/DOCUMENT-AUTHORITY-INDEX.md#documentation-status-vocabulary). Unfinished
+implementation work is tracked only in the
+[master implementation specification](docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md).
+
+| Behavior | Status | Boundary |
+|---|---|---|
+| Interactive guarded lifecycle (`observe`, `propose`, `auto-low-risk`) with backups, deployment, and rollback | Implemented | Host-owned state machine; candidate output cannot approve or deploy itself. |
+| Continuous unattended loop (`scripts/selfmod_forever.py`) | Implemented | Commits only to its own `selfmod/<run-id>` branch; never deploys or writes the main working tree. |
+| Held-out test snapshot tamper check | Degraded | Best-effort tamper evidence, not a same-user security boundary (SEC-009). |
+| Automatic push, fetch, rebase, reset, clean, or dependency installation | Unsupported | No selfmod command performs these operations (SELFMOD-006). |
+| Unattended edits to `server.py` or protected-policy paths | Unsupported | Permanently excluded from unattended candidates. |
+| Before/after evaluation and security gates for every self-modification candidate | Proposed | SELFMOD-003 and EVAL-007 track the complete verification and promotion gates. |

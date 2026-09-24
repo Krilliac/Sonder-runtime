@@ -490,7 +490,7 @@ schema, cancellation, cleanup-to-quiescence contract, and conformance tests.
   loopback, link-local, metadata, redirect, DNS-rebinding, and private-network targets.
 - [ ] **SEC-003 — Filesystem races.** Use symlink- and race-resistant path resolution for
   authorized roots and destructive targets.
-- [ ] **SEC-004 — Package/archive safety.** Bound files, expansion ratios, paths, links,
+- [x] **SEC-004 — Package/archive safety.** Bound files, expansion ratios, paths, links,
   total bytes, and parser resource use.
 - [ ] **SEC-005 — Extension provenance.** Record trust/signature/source, produce an SBOM,
   and quarantine compromised or incompatible packages.
@@ -545,14 +545,14 @@ schema, cancellation, cleanup-to-quiescence contract, and conformance tests.
   program status as superseded without erasing decision history.
 - [x] **DOC-003 — ADR namespace.** Consolidate new ADRs under one directory with globally
   unique IDs; retain the two old directories as historical series until normalized.
-- [ ] **DOC-004 — Focused contracts.** Keep `ARCHITECTURE.md`, `SECURITY.md`,
+- [x] **DOC-004 — Focused contracts.** Keep `ARCHITECTURE.md`, `SECURITY.md`,
   `SELFMOD.md`, `TRAINING.md`, `CLIENT.md`, and `MOBILE_HOST_CONTROL.md` focused on
   current behavior and link their unfinished implementation work here.
 - [x] **DOC-005 — Generated references.** Generate tool, command, event, configuration,
   schema, and capability references from source and freshness-gate them.
 - [x] **DOC-006 — Status evidence.** Check off an item only in the same change that adds
   or links its verifiable evidence.
-- [ ] **DOC-007 — No stale promises.** Product documentation distinguishes implemented,
+- [x] **DOC-007 — No stale promises.** Product documentation distinguishes implemented,
   experimental, proposed, degraded, and unsupported behavior.
 
 ## 19. Implementation sequence
