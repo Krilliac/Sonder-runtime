@@ -3,6 +3,7 @@
 import pytest
 
 from scripts.run_disposable_postgres_pair import _reviewed_postgres_version
+from tests import test_postgres_child_storage_integration as conformance
 
 
 @pytest.mark.parametrize("version", [
@@ -21,3 +22,19 @@ def test_disposable_pair_accepts_reviewed_native_postgres(version):
 ])
 def test_disposable_pair_rejects_unreviewed_or_malformed_versions(version):
     assert not _reviewed_postgres_version(version)
+
+
+def test_disposable_pair_needs_packaged_private_binding_not_ambient_environment(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("SONDER_TEST_CHILD_PG_BINDING", str(tmp_path / "untrusted.json"))
+    monkeypatch.setenv("SONDER_TEST_DISPOSABLE_PG", "1")
+    monkeypatch.setattr(conformance, "PAIR_BINDING", None)
+    monkeypatch.setattr(conformance, "PAIR_CONTROL", None)
+    with pytest.raises(pytest.skip.Exception, match="explicit disposable PostgreSQL"):
+        conformance.storage_config.__wrapped__()
+
+    private_binding = str(tmp_path / "owned-binding.json")
+    monkeypatch.setattr(conformance, "PAIR_BINDING", private_binding)
+    monkeypatch.setattr(conformance, "PAIR_CONTROL", (lambda: None, lambda: None))
+    assert conformance.storage_config.__wrapped__().binding_file == private_binding

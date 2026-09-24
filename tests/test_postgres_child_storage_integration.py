@@ -24,14 +24,16 @@ from sonder_runtime.application.subagents.continuable import ContinuableCheckpoi
 from sonder_runtime.platform.child_storage_config import ChildStorageConfig
 
 # Supplied only by the in-process disposable harness; never read from a DSN,
-# request payload, or production configuration.
+# request payload, or deployment environment. The root pytest isolation hook
+# intentionally clears all ambient SONDER_* variables before test setup.
+PAIR_BINDING = None
 PAIR_CONTROL = None
 
 
 @pytest.fixture
 def storage_config():
-    path = os.environ.get("SONDER_TEST_CHILD_PG_BINDING")
-    if not path or os.environ.get("SONDER_TEST_DISPOSABLE_PG") != "1":
+    path = PAIR_BINDING
+    if path is None or PAIR_CONTROL is None:
         pytest.skip("requires explicit disposable PostgreSQL conformance binding")
     return ChildStorageConfig(
         backend="postgresql",

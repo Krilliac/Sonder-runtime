@@ -33,6 +33,18 @@ def _reviewed_postgres_version(output: str) -> bool:
     return match is not None and int(match[1]) == 18 and int(match[2]) >= 6
 
 
+class _ConformanceCounts:
+    def __init__(self) -> None:
+        self.executed = 0
+        self.skipped = 0
+
+    def pytest_runtest_logreport(self, report) -> None:
+        if report.when == "call" and not report.skipped:
+            self.executed += 1
+        if report.skipped:
+            self.skipped += 1
+
+
 def _run(*argv: str | Path, timeout: int = 30, env: dict[str, str] | None = None) -> None:
     completed = subprocess.run(
         tuple(map(str, argv)), capture_output=True, text=True, timeout=timeout,
@@ -212,6 +224,7 @@ def main() -> int:
 
     home = Path(tempfile.mkdtemp(prefix="sonder-owned-pg-pair-"))
     pair = DisposablePair(arguments.pg_bin.resolve(), home)
+    integration = None
     try:
         binding = pair.start()
         import pytest
@@ -219,12 +232,22 @@ def main() -> int:
         from tests import test_postgres_child_storage_integration as integration
 
         integration.PAIR_CONTROL = (pair.stop_standby, pair.start_standby)
-        os.environ["SONDER_TEST_CHILD_PG_BINDING"] = str(binding)
-        os.environ["SONDER_TEST_DISPOSABLE_PG"] = "1"
-        return int(pytest.main(["-q", str(REPO / "tests/test_postgres_child_storage_integration.py")]))
+        integration.PAIR_BINDING = str(binding)
+        counts = _ConformanceCounts()
+        result = int(pytest.main(
+            ["-q", str(REPO / "tests/test_postgres_child_storage_integration.py")],
+            plugins=[counts],
+        ))
+        if counts.executed == 0 or counts.skipped:
+            raise RuntimeError(
+                f"disposable PostgreSQL conformance did not execute every test: "
+                f"{counts.executed} executed, {counts.skipped} skipped"
+            )
+        return result
     finally:
-        os.environ.pop("SONDER_TEST_CHILD_PG_BINDING", None)
-        os.environ.pop("SONDER_TEST_DISPOSABLE_PG", None)
+        if integration is not None:
+            integration.PAIR_BINDING = None
+            integration.PAIR_CONTROL = None
         pair.close()
         if not pair._running(pair.primary) and not pair._running(pair.standby):
             shutil.rmtree(home)
