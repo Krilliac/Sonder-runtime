@@ -1272,9 +1272,9 @@
     },
     {
       "checked": false,
-      "claim": "The nightly regression gate is partitioned into three required, separately recorded gates: a low-integrity parallel partition, a low-integrity heavy-memory partition, and a medium-integrity partition for MSYS2-dependent tests. Every result records the integrity level, the Job limits and the observed peak memory.",
+      "claim": "Unattended candidate checks run only at low integrity inside a Job. Tests that need medium integrity are not run against the candidate; they are recorded as not evaluated and block unattended approval and deployment. The SHA-256 of every changed file and of the diff is recorded before the first gate and re-verified before review, before the branch commit (including the committed blobs) and before and after the deploy copy.",
       "requirement_id": "SELFMOD-002",
-      "revision": 4,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "23aa12f146ba87f5a4a2785f66a5900391fa2da8fd37405e5b73ea10ecd394aa",
+    "ledger_sha256": "b53cd23562798711b8e9c45cbd0c68034df22012fd789763fdcba690c2aa8c81",
     "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
   }
 }

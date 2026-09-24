@@ -140,20 +140,6 @@ def _low_token():
     return restricted
 
 
-def _medium_restricted_token():
-    """Privilege-stripped token that keeps the caller's medium integrity."""
-    import win32api
-    import win32con
-    import win32security
-
-    current = win32security.OpenProcessToken(
-        win32api.GetCurrentProcess(), win32con.TOKEN_ALL_ACCESS
-    )
-    return win32security.CreateRestrictedToken(
-        current, win32security.DISABLE_MAX_PRIVILEGE, [], [], []
-    )
-
-
 def _child(spec_path: Path) -> int:
     """Run the actual check. This process and all descendants are low."""
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
@@ -274,11 +260,41 @@ def _bounded(value, default: int, ceiling: int, name: str) -> int:
     return number
 
 
+# Tests nest deep directories below TEMP (pytest-of-<user>/pytest-N/popen-gwN/
+# <test name>/...). A long work root pushed working directories past
+# MAX_PATH, and CreateProcess then failed with ERROR_DIRECTORY (267). Keep the
+# root short and refuse to run from a root that is not.
+MAX_WORK_ROOT_CHARS = 48
+
+
+def _short_work_dir() -> Path:
+    """Create the per-run work directory under a short, user-owned root."""
+    override = os.environ.get("SONDER_SELFMOD_SCRATCH_ROOT", "").strip()
+    candidates = [Path(override)] if override else []
+    candidates.append(Path(os.environ.get("USERPROFILE") or Path.home()) / ".sl")
+    candidates.append(Path(tempfile.gettempdir()))
+    for root in candidates:
+        if len(str(root)) > MAX_WORK_ROOT_CHARS - 10:
+            continue
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            work = Path(tempfile.mkdtemp(prefix="w", dir=str(root)))
+        except OSError:
+            continue
+        if len(str(work)) <= MAX_WORK_ROOT_CHARS:
+            return work
+        shutil.rmtree(work, ignore_errors=True)
+    raise RuntimeError(
+        "no scratch root shorter than %d characters is available; set "
+        "SONDER_SELFMOD_SCRATCH_ROOT" % MAX_WORK_ROOT_CHARS
+    )
+
+
 def run_isolated(
     command: Sequence[str], *, cwd: str | os.PathLike[str], timeout: int,
     protected_paths: Sequence[str | os.PathLike[str]] = (),
     process_memory_mb: int | None = None, job_memory_mb: int | None = None,
-    active_processes: int | None = None, integrity: str = "low",
+    active_processes: int | None = None,
 ) -> dict[str, object]:
     """Run ``command`` below low MIC and return a selfmod-compatible result.
 
@@ -288,15 +304,11 @@ def run_isolated(
     reports the configured limits and the observed peaks so a limit hit is
     diagnosable instead of looking like a candidate regression.
 
-    ``integrity="medium"`` exists only for checks that cannot start below
-    medium integrity (Git for Windows' MSYS2 runtime). It keeps the Job,
-    privilege stripping, environment allowlist and protected-file digests,
-    but it does NOT provide the low-integrity write boundary: code in that
-    process can write anything the user can. Callers must report it as a
-    separate, non-isolated gate.
+    There is deliberately no medium-integrity mode: a candidate process at
+    medium integrity could rewrite its own tested bytes, the selfmod database
+    or .git, and a Job object does not contain what it can start through
+    WMI or the Task Scheduler.
     """
-    if integrity not in ("low", "medium"):
-        raise ValueError("integrity must be 'low' or 'medium'")
     process_memory_mb = _bounded(process_memory_mb, DEFAULT_PROCESS_MEMORY_MB, _MAX_PROCESS_MEMORY_MB, "process_memory_mb")
     job_memory_mb = _bounded(job_memory_mb, DEFAULT_JOB_MEMORY_MB, _MAX_JOB_MEMORY_MB, "job_memory_mb")
     active_processes = _bounded(active_processes, DEFAULT_ACTIVE_PROCESSES, _MAX_ACTIVE_PROCESSES, "active_processes")
@@ -313,7 +325,7 @@ def run_isolated(
 
     protected = [Path(item).resolve() for item in protected_paths]
     before = {str(path): _digest(path) for path in protected if path.is_file()}
-    work = Path(tempfile.mkdtemp(prefix="sonder-selfmod-low-"))
+    work = _short_work_dir()
     try:
         # A low object is writable by the low candidate; the evaluator files
         # remain medium with NO_READ_UP|NO_WRITE_UP below.
@@ -336,7 +348,7 @@ def run_isolated(
         manifest = work / "truth-manifest.json"
         manifest.write_text(json.dumps(before, sort_keys=True), encoding="utf-8")
         _label(manifest, "WinMediumLabelSid", win32security.SYSTEM_MANDATORY_LABEL_NO_READ_UP | win32security.SYSTEM_MANDATORY_LABEL_NO_WRITE_UP)
-        token = _low_token() if integrity == "low" else _medium_restricted_token()
+        token = _low_token()
         job = process_handle = thread_handle = None
         try:
             # pywin32 requires a name; a fresh unshared random name prevents
@@ -406,7 +418,7 @@ def run_isolated(
                 stream.seek(max(0, output.stat().st_size - 120000))
                 output_text = stream.read(120000).decode("utf-8", "replace")
         job_report = {
-            "integrity": integrity,
+            "integrity": "low",
             "limits": {"process_memory_mb": process_memory_mb, "job_memory_mb": job_memory_mb,
                        "active_processes": active_processes},
             **peaks,
