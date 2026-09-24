@@ -1,5 +1,11 @@
 # Safe self-improvement in Sonder Runtime
 
+> **Contract scope:** this focused contract describes current behavior. Unfinished
+> implementation work is tracked in the
+> [master implementation specification](docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md); the
+> [behavior status](#behavior-status) table labels what is implemented,
+> experimental, proposed, degraded, or unsupported.
+
 Sonder Runtime self-improvement is a host-controlled state machine. Sonder is
 not the candidate or base model: candidate model output is only one untrusted
 input to the runtime. Candidate output can inspect and edit only an isolated
@@ -289,3 +295,18 @@ py C:\absolute\path\selfmod_recover.py %LOCALAPPDATA%\sonder\selfmod\backups\<ru
 The command verifies the manifest checksum and every backup hash, atomically
 restores existing files, removes only files recorded as newly created, verifies
 the restored SHA-256 values, and aborts on any corruption.
+
+## Behavior status
+
+Labels follow the [documentation status vocabulary](docs/architecture/DOCUMENT-AUTHORITY-INDEX.md#documentation-status-vocabulary). Unfinished
+implementation work is tracked only in the
+[master implementation specification](docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md).
+
+| Behavior | Status | Boundary |
+|---|---|---|
+| Interactive guarded lifecycle (`observe`, `propose`, `auto-low-risk`) with backups, deployment, and rollback | Implemented | Host-owned state machine; candidate output cannot approve or deploy itself. |
+| Continuous unattended loop (`scripts/selfmod_forever.py`) | Implemented | Commits only to its own `selfmod/<run-id>` branch; never deploys or writes the main working tree. |
+| Held-out test snapshot tamper check | Degraded | Best-effort tamper evidence, not a same-user security boundary (SEC-009). |
+| Automatic push, fetch, rebase, reset, clean, or dependency installation | Unsupported | No selfmod command performs these operations (SELFMOD-006). |
+| Unattended edits to `server.py` or protected-policy paths | Unsupported | Permanently excluded from unattended candidates. |
+| Before/after evaluation and security gates for every self-modification candidate | Proposed | SELFMOD-003 and EVAL-007 track the complete verification and promotion gates. |
