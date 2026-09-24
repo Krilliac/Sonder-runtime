@@ -124,8 +124,8 @@ Sonder has a deliberately dangerous model-evaluation override. It is **not an
 OS sandbox and provides no containment**. It removes the local model agent and
 autopilot host-tool allowlists, project scoping, read-only gate, web/location
 gate, and file approval gate so an untrusted or unguarded model can exercise
-the host-native tool surface. The shared file-approval bypass also affects the
-46 direct MCP call paths that consult it; direct MCP is therefore part of the
+the host-native tool surface. The shared file-approval bypass also affects every
+direct MCP call path that consults it; direct MCP is therefore part of the
 blast radius, not an unchanged boundary. Direct tool time/output bounds still
 exist, but they are reliability controls, not a security boundary.
 

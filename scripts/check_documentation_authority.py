@@ -88,9 +88,14 @@ MARKDOWN_LINK = re.compile(r"\]\(([^)\s#]+)(?:#[^)]*)?\)")
 STALE_PROMISE = re.compile(
     r"(?i)\b(?:coming soon|will (?:be )?(?:added|supported|implemented|shipped)"
     r"|will (?:add|support|implement|ship)|in a future|future (?:backend|release|version)"
-    r"|not yet (?:available|implemented|supported)|roadmap|TODO|TBD)\b"
+    r"|will (?:land|be available)|not yet|planned|upcoming|eventually|roadmap|TODO|TBD)\b"
 )
-SLICE_LOG_LINE = re.compile(r"^\s*(?:[-*#]+\s*)?WP\d+ [\w-]+ Slice\b")
+# Any line that opens with a work-package tag and names a slice ("WP1 Slice 12",
+# "WP2 Three Hundred Slice", "- WP1 One-Hundred-Tenth Slice: ...").
+SLICE_LOG_LINE = re.compile(r"(?i)^\s*(?:[-*#>]+\s*)?WP\d+\b.{0,80}?\bslice\b")
+# Implemented rows that cite requirements must cite ones the ledger records as
+# at least implemented; a planned/in-progress ID cannot back current behavior.
+IMPLEMENTED_LEDGER_STATUSES = frozenset({"implemented_unverified", "verified"})
 
 
 def _spec_state() -> dict[str, bool]:
@@ -181,6 +186,14 @@ def _check_product_documents() -> list[str]:
             for requirement_id in cited:
                 if requirement_id not in spec_state:
                     problems.append(f"{relative}: {behavior!r} cites unknown requirement {requirement_id}")
+            if label == "Implemented":
+                for requirement_id in cited:
+                    status = ledger_status.get(requirement_id)
+                    if requirement_id in spec_state and status not in IMPLEMENTED_LEDGER_STATUSES:
+                        problems.append(
+                            f"{relative}: implemented behavior {behavior!r} cites {requirement_id} "
+                            f"whose latest ledger status is {status!r}"
+                        )
             if label == "Proposed":
                 open_ids = [
                     requirement_id for requirement_id in cited

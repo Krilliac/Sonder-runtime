@@ -211,16 +211,18 @@ _SPEC_FIXTURE = """# Spec
 - [ ] **ABC-001 — Open item.** Still open.
 - [x] **ABC-002 — Done item.** Complete.
 - [ ] **ABC-003 — Verified but unchecked.** Inconsistent ledger.
+- [ ] **ABC-004 — Implemented foundation.** Unverified.
 """
 _LEDGER_FIXTURE = "\n".join((
     '{"requirement_id":"ABC-001","revision":1,"status":"planned"}',
     '{"requirement_id":"ABC-002","revision":1,"status":"verified"}',
     '{"requirement_id":"ABC-003","revision":1,"status":"planned"}',
     '{"requirement_id":"ABC-003","revision":2,"status":"verified"}',
+    '{"requirement_id":"ABC-004","revision":1,"status":"implemented_unverified"}',
 )) + "\n"
 _ROWS = """| Behavior | Status | Boundary |
 |---|---|---|
-| Shipped path | Implemented | Current. |
+| Shipped path | Implemented | Current (ABC-004). |
 | Lab path | Experimental | Opt-in. |
 | End state | Proposed | ABC-001 tracks it. |
 | Fallback path | Degraded | Fails closed. |
@@ -304,3 +306,86 @@ def test_status_vocabulary_must_be_exercised_and_sections_unique(tmp_path, monke
     assert "README.md: needs exactly one '## Behavior status' section" in problems
     for label in ("Experimental", "Proposed", "Degraded", "Unsupported"):
         assert f"product documentation never uses the {label!r} status label" in problems
+
+
+def test_check_reports_a_planted_bad_product_document(tmp_path, monkeypatch):
+    """The product-document gate must be wired into ``check()`` itself."""
+    readme = "# Product\n\nResumable streams are planned.\n\n## Behavior status\n\n" + _ROWS
+    _product_fixture(tmp_path, monkeypatch, readme=readme)
+    monkeypatch.setattr(checker, "HISTORICAL_DOCUMENTS", ())
+    monkeypatch.setattr(checker, "_check_adr_namespace", lambda: [])
+    monkeypatch.setattr(checker, "expected", lambda: {})
+    problems = checker.check()
+    assert any("README.md:3: unlabeled forward-looking promise 'planned'" in item for item in problems)
+
+
+def test_status_rows_must_have_exactly_three_columns(tmp_path, monkeypatch):
+    readme = "# Product\n\n## Behavior status\n\n" + _ROWS + "| Wide path | Implemented | Now. | Extra cell |\n"
+    _product_fixture(tmp_path, monkeypatch, readme=readme)
+    problems = checker._check_product_documents()
+    assert any(
+        item.startswith("README.md: status row needs Behavior | Status | Boundary")
+        and "Extra cell" in item
+        for item in problems
+    )
+
+
+def test_widened_promise_and_slice_patterns(tmp_path, monkeypatch):
+    phrases = (
+        "Sharding is upcoming.", "It will eventually ship.", "Resume is not yet wired.",
+        "Streaming will land later.", "The API will be available soon.", "A planned mode.",
+    )
+    slices = ("WP1 Slice 12: moved a helper.", "- WP2 Three Hundred Slice: moved.", "## WP1 One-Hundred-Tenth Slice")
+    readme = "# Product\n\n" + "\n".join(phrases + slices) + "\n\n## Behavior status\n\n" + _ROWS
+    _product_fixture(tmp_path, monkeypatch, readme=readme)
+    problems = checker._check_product_documents()
+    for offset in range(len(phrases)):
+        assert any(item.startswith(f"README.md:{3 + offset}: unlabeled forward-looking promise") for item in problems), phrases[offset]
+    for offset in range(len(slices)):
+        line = 3 + len(phrases) + offset
+        assert f"README.md:{line}: implementation slice log belongs in historical records" in problems, slices[offset]
+    assert not checker.STALE_PROMISE.search("Sonder is local by default.")
+    assert not checker.SLICE_LOG_LINE.match("The WP1 program ended.")
+
+
+def test_implemented_rows_must_cite_implemented_or_verified_requirements(tmp_path, monkeypatch):
+    readme = "# Product\n\n## Behavior status\n\n" + _ROWS + "| Early claim | Implemented | Backed by ABC-001. |\n"
+    _product_fixture(tmp_path, monkeypatch, readme=readme)
+    problems = checker._check_product_documents()
+    assert "README.md: implemented behavior 'Early claim' cites ABC-001 whose latest ledger status is 'planned'" in problems
+    assert not any("'Shipped path'" in item for item in problems)
+
+
+def test_thin_client_documentation_matches_its_checkout_dependency(tmp_path):
+    """CLIENT.md must not promise a single-file client while it imports the package."""
+    import os
+    import shutil
+    import subprocess
+    import sys
+
+    env = {
+        key: value for key, value in os.environ.items()
+        if key != "PYTHONPATH" and not key.startswith("SONDER_")
+    }
+    lone = tmp_path / "sonder_client.py"
+    shutil.copy2(ROOT / "sonder_client.py", lone)
+    alone = subprocess.run(
+        [sys.executable, "-S", "-E", str(lone), "--help"],
+        cwd=tmp_path, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
+    )
+    assert alone.returncode != 0
+    assert "No module named 'sonder_runtime'" in alone.stderr
+    in_checkout = subprocess.run(
+        [sys.executable, "-S", "-E", str(ROOT / "sonder_client.py"), "--help"],
+        cwd=ROOT, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
+    )
+    # With no SONDER_SERVER the client prints usage and exits 1: it imported fine.
+    assert in_checkout.returncode == 1, in_checkout.stderr
+    assert "ModuleNotFoundError" not in in_checkout.stderr
+    assert "usage: sonder_client.py" in in_checkout.stdout
+
+    client = _read("CLIENT.md")
+    assert "stdlib-only" not in client
+    assert "raw.githubusercontent.com" not in client
+    assert "| Copying `sonder_client.py` alone to another machine | Unsupported |" in client
+    assert "http://your-vps" not in _read("sonder_client.py")
