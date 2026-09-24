@@ -99,10 +99,28 @@ The requirement-wide audit is in [SEC-AUDIT-2026-09-23.md](SEC-AUDIT-2026-09-23.
 10. **`path_archive_safety.inspect_tar`** used raw `tarfile.open` and
     `getmembers()`. It now iterates through the bounded reader, so its entry
     limit stops the walk.
+11. **Global PAX records accumulated** (review round 3). `tarfile` merges
+    every global PAX (`g`) record into the archive's `pax_headers` and copies
+    the merged mapping into each later member, which stays alive in
+    `TarFile.members`. Retained memory grows quadratically: the reviewer
+    measured 12.5 GiB from a 3.7 MiB `.tar.gz` with 500 members.
+    `safe_extract`, the preview, and `path_archive_safety.inspect_tar`
+    accepted such archives; only `archive_tools` rejected them, through its
+    own separate check. `BoundedTarInfo` now rejects a `g` record before
+    reading its payload.
+12. **Per-member metadata had no archive-wide budget** (review round 3).
+    Every member's PAX keys are retained for the life of the archive object.
+    All long-name, long-link, and PAX records in one archive now share
+    1 MiB of declared payload (`MAX_TAR_METADATA_TOTAL_BYTES`) and 32,768
+    parsed PAX keys (`MAX_TAR_PAX_KEYS`).
+13. **Two ZIP readers checked only the declared count** (review round 3).
+    The `inspect_data` preview and OOXML validation now also apply
+    `require_zip_entry_bound`, which checks the central-directory size, as
+    `archive_tools` and `path_archive_safety` already did.
 
 ## Evidence
 
-`tests/test_sec004_archive_adversarial.py`: 49 cases across all three
+`tests/test_sec004_archive_adversarial.py`: 54 cases across all three
 untrusted readers, including the update-staging name corpus, duplicate and
 case collisions, the member bound, validation before any write, hard links,
 FIFOs, and block devices, overlapping ZIP entries, ZIP declared-size lies in
@@ -120,7 +138,14 @@ parse; the ZIP central-directory count checked with `_RealGetContents`
 instrumented so the test fails if a reader parses the directory first; and
 `path_archive_safety.inspect_tar`. Every rejection case asserts the typed
 error from each reader, peak traced memory under 8 MiB, and wall time under
-10 s.
+10 s. Round 3 adds a 16-member corpus with a 60 KiB distinct-key global
+record before each member, which must be rejected with peak memory under
+2 MiB, well below one member's worth of accumulation. It also adds 40-member
+corpora with 60 KiB of per-member PAX keys, both many small keys and fewer
+large ones; a check that 200 ordinary PAX long-name members still fit the
+budget; and a ZIP with a small declared count but a large central directory.
+Test sizes stay small; the tests assert early rejection rather than
+allocating the reviewer's gigabytes.
 
 RED/GREEN, round 0: run against the unchanged implementation, 14 of the
 first 25 cases failed, each on one of defects 1 to 4. After the fix, all 25
@@ -156,6 +181,21 @@ reached 0.5 to 3.3 GiB and 40 to 150 s before the fix. The old-style sparse
 fixture stays under the 8 MiB budget even before the fix, so for that case
 the test fails on acceptance, not on memory.
 
+RED/GREEN, review round 3: the 4 new rejection cases failed on
+`774c8965` because the archives were accepted or the ZIP was parsed. All 54
+pass after fixes 11 to 13. Before (`774c8965`) and after, same fixtures:
+
+| Fixture (compressed size) | Readers | Before | After |
+|---|---|---|---|
+| 16 members, 60 KiB distinct global keys each (96 KiB) | `safe_extract` / preview / `path_archive_safety` | 14.8 MiB, 0.5 s, **accepted** | 0.3 MiB, <0.01 s, rejected |
+| 32 members, same (192 KiB) | same | 48.0 MiB, 1.2 s, **accepted** (quadratic) | 0.3 MiB, <0.01 s, rejected |
+| 40 members, 60 KiB per-member keys, 8-byte values (290 KiB) | same | 15.7 MiB, 1.2 s, **accepted** | 5.3 MiB, 0.36 s, rejected at the key cap |
+| 40 members, 60 KiB per-member keys, 200-byte values (37 KiB) | same | 3.7 MiB, 0.16 s, **accepted** | 1.7 MiB, 0.06 s, rejected at the byte budget |
+| ZIP, 8 entries with 60 KB comments (469 KiB) | preview | parsed and **accepted** | rejected from the end record, directory not parsed |
+
+`archive_tools` already rejected every one of these through its own
+checks, at 0.1 to 1.1 MiB.
+
 Regression checks from the same worktree (Windows, Python 3.12.10), round 0:
 
 - `tests/test_archive_tools.py`, `tests/production/test_updates.py`,
@@ -173,6 +213,9 @@ Regression checks from the same worktree (Windows, Python 3.12.10), round 0:
   manifest-trust, and architecture suites: 158 passed, 6 skipped;
   `scripts/check_architecture.py` passed.
 
+- Round 3: archive, update, data-inspect, update-engine,
+  manifest-trust, artifact-grounding, architecture, SEC-004, and SEC-009
+  suites: 265 passed, 6 skipped; `scripts/check_architecture.py` passed.
 - Round 2, after merging `main` (#525, #542): archive, update,
   data-inspect, update-engine, manifest-trust, artifact-grounding,
   architecture, and SEC-009 suites: 211 passed, 6 skipped;
@@ -205,8 +248,12 @@ afterwards. The llama.cpp converter `extractall` reads only a sealed,
 hash-pinned tree and was not re-hardened. Collision keys use NFC plus case
 folding. That matches Windows, macOS, and default Linux behavior, but not
 every filesystem's exact folding tables. The 64 KiB metadata cap, the
-4-record chain cap, and the sparse rejection also reject legitimate archives
-that use those features; Sonder's own bundles and archives use none of them.
+4-record chain cap, the 1 MiB / 32,768-key archive-wide metadata budget, and
+the rejection of sparse members and global PAX headers also reject
+legitimate archives that use those features. For example, `git archive`
+tarballs carry a global PAX comment, and archives with several thousand
+long-named members exceed the budget. Sonder's own bundles use none of
+these.
 The bounded TAR reader overrides private `tarfile.TarInfo` hooks
 (`_proc_gnulong`, `_proc_pax`, `_proc_sparse`, `_proc_gnusparse_*`,
 `_apply_pax_info`), and the ZIP pre-check uses `zipfile._EndRecData`. A

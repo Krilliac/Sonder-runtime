@@ -2196,6 +2196,7 @@ def _inspect_zip(p: Path) -> dict:
     import zipfile
 
     from sonder_runtime.application.security.bounded_archives import (
+        require_zip_entry_bound,
         zip_central_directory,
     )
 
@@ -2211,6 +2212,9 @@ def _inspect_zip(p: Path) -> dict:
             "text": "(central directory declares %d entries; preview limit is %d)"
             % (declared, INSPECT_MAX_ARCHIVE_MEMBERS),
         }
+    # Also bound the central-directory size (names, extra fields, comments)
+    # before zipfile parses it; raises ZipCentralDirectoryLimitError.
+    require_zip_entry_bound(p, INSPECT_MAX_ARCHIVE_MEMBERS)
     with zipfile.ZipFile(p) as archive:
         names = archive.namelist()
         total = sum(info.file_size for info in archive.infolist())

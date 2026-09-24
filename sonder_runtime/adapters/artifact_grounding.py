@@ -3173,6 +3173,8 @@ def _ooxml_kind(path: Path, recipe: str, names: set[str]) -> str:
 def _validate_ooxml(path: Path, recipe: str, requirements: dict, checks: list):
     """Validate an editable Office Open XML ZIP package without third parties."""
     from sonder_runtime.application.security.bounded_archives import (
+        ZipCentralDirectoryLimitError,
+        require_zip_entry_bound,
         zip_central_directory,
     )
 
@@ -3190,6 +3192,11 @@ def _validate_ooxml(path: Path, recipe: str, requirements: dict, checks: list):
             False,
             "%d declared entries (maximum %d)" % (declared, MAX_OOXML_ENTRIES),
         )
+        return
+    try:
+        require_zip_entry_bound(path, MAX_OOXML_ENTRIES)
+    except ZipCentralDirectoryLimitError as exc:
+        _check(checks, "ooxml-entry-limit", False, str(exc))
         return
     try:
         archive = zipfile.ZipFile(path)

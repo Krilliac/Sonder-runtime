@@ -659,3 +659,130 @@ def test_path_archive_safety_inspect_tar_uses_bounded_reader(tmp_path):
             error, (tarfile.TarError, path_archive_safety.ArchiveLimitError),
         ), repr(error)
         assert _within_budget(peak, elapsed), (source.name, peak, elapsed)
+
+
+# ---------------------------------------------------------------------------
+# Review round 3 (PR #548 @ 774c8965): PAX accumulation, ZIP CD size
+# ---------------------------------------------------------------------------
+
+ACCUMULATION_PEAK_BYTES = 2 * 1024 * 1024
+
+
+def _pax_keys_record(prefix: str, target_bytes: int, value_bytes: int) -> bytes:
+    records = []
+    size = 0
+    index = 0
+    while size < target_bytes:
+        record = _pax_record("%s.%06d" % (prefix, index), "v" * value_bytes)
+        records.append(record)
+        size += len(record)
+        index += 1
+    return b"".join(records)
+
+
+def _pax_per_member_tar_gz(path, members: int, typeflag: bytes, *, distinct: bool,
+                           value_bytes: int, record_bytes: int = 60 * 1024):
+    def blocks():
+        for member in range(members):
+            prefix = ("k%04d" % member) if distinct else "k"
+            records = _pax_keys_record(prefix, record_bytes, value_bytes)
+            yield from _pax_block(records, typeflag)
+            yield _raw_tar_header(b"m%04d.txt" % member, 1, b"0")
+            yield b"x" + b"\0" * 511
+
+    return _gz_stream(path, blocks())
+
+
+def _assert_rejected_early(workspace, tmp_path, source, peak_budget):
+    name = source.name
+    for label, call, expected in (
+        ("safe_extract", lambda: safe_extract(
+            source, tmp_path / "stage", max_expanded_bytes=1 << 30,
+        ), ExtractionError),
+        ("inspect", lambda: file_ops._inspect_tar(source), tarfile.TarError),
+        ("archive_extract", lambda: archive_tools.extract_archive(
+            name, "out", developer_authorized=True,
+        ), archive_tools.ArchiveRejected),
+    ):
+        peak, elapsed, error = _measure(call)
+        assert isinstance(error, expected), (label, repr(error))
+        assert peak < peak_budget and elapsed < WALL_BUDGET_SECONDS, (label, peak, elapsed)
+    from sonder_runtime.application.security import path_archive_safety
+
+    peak, elapsed, error = _measure(lambda: path_archive_safety.inspect_tar(source))
+    assert isinstance(error, (tarfile.TarError, path_archive_safety.ArchiveLimitError)), repr(error)
+    assert peak < peak_budget and elapsed < WALL_BUDGET_SECONDS, ("path_safety", peak, elapsed)
+    listed = archive_tools.list_archive(name)
+    assert listed["valid"] is False
+
+
+def test_global_pax_records_are_rejected_before_they_accumulate(workspace, tmp_path):
+    # Each member is preceded by a 60 KiB global record of distinct keys.
+    # tarfile merges global keys into the archive and copies the merged
+    # dict into every later member, so retained memory grows quadratically.
+    # The first global record must be refused; peak memory stays near the
+    # size of that one record.
+    source = _pax_per_member_tar_gz(
+        workspace / "globals.tar.gz", 16, b"g", distinct=True, value_bytes=8,
+    )
+    _assert_rejected_early(workspace, tmp_path, source, ACCUMULATION_PEAK_BYTES)
+
+
+@pytest.mark.parametrize("value_bytes", [8, 200])
+def test_per_member_pax_metadata_has_an_archive_wide_budget(
+    workspace, tmp_path, value_bytes,
+):
+    # 40 members x 60 KiB of per-member PAX keys (2.4 MiB of metadata,
+    # compressing to a few KiB) is retained member by member.  Both many
+    # small keys and fewer larger ones must hit the archive-wide budget.
+    source = _pax_per_member_tar_gz(
+        workspace / "locals.tar.gz", 40, b"x", distinct=False, value_bytes=value_bytes,
+    )
+    assert source.stat().st_size < 512 * 1024
+    _assert_rejected_early(workspace, tmp_path, source, PEAK_BUDGET_BYTES)
+
+
+def test_ordinary_pax_members_fit_the_metadata_budget(workspace, tmp_path):
+    source = workspace / "ordinary.tar"
+    with tarfile.open(source, "w", format=tarfile.PAX_FORMAT) as tar:
+        for index in range(200):
+            info = tarfile.TarInfo("dir/" + ("long-%03d-" % index) * 20 + ".txt")
+            info.size = 1
+            tar.addfile(info, io.BytesIO(b"x"))
+    assert safe_extract(source, tmp_path / "ok", max_expanded_bytes=1024) == 200
+    assert file_ops._inspect_tar(source)["members"] == 200
+
+
+def _zip_with_large_central_directory(path, entries: int, comment_bytes: int):
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+        for index in range(entries):
+            info = zipfile.ZipInfo("e%03d" % index)
+            info.comment = b"c" * comment_bytes
+            archive.writestr(info, b"")
+    return path
+
+
+def test_zip_central_directory_size_is_checked_before_parsing(workspace, monkeypatch):
+    # Few declared entries, but each carries a large comment: the declared
+    # count passes, the central-directory size must not.
+    source = _zip_with_large_central_directory(workspace / "fat.zip", 8, 60_000)
+    parsed = []
+    original = zipfile.ZipFile._RealGetContents
+
+    def counting(self):
+        parsed.append(self.filename)
+        return original(self)
+
+    monkeypatch.setattr(zipfile.ZipFile, "_RealGetContents", counting)
+
+    with pytest.raises(zipfile.BadZipFile):
+        file_ops._inspect_zip(source)
+
+    from sonder_runtime.adapters import artifact_grounding
+
+    checks = []
+    artifact_grounding._validate_ooxml(source, "docx", {}, checks)
+    assert checks and checks[-1]["ok"] is False, checks
+
+    assert archive_tools.list_archive("fat.zip")["valid"] is False
+    assert parsed == [], "a ZIP reader parsed an oversized central directory"
