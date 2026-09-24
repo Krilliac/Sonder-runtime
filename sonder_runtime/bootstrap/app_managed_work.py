@@ -3,6 +3,7 @@
 from ..platform.runtime_threads import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 import hashlib
+import logging
 import threading
 import time
 import uuid
@@ -24,6 +25,8 @@ from ..application.ports.app_managed_work import (
 from ..application.ports.host_turn_links import FinalizedHostResult
 from ..application.ports.lane_continuation import GrantedApprovalEvidence
 from .managed_conversation import ManagedConversationLifetime
+
+_LOG = logging.getLogger(__name__)
 
 
 def dispatch_approval_arguments(work):
@@ -443,9 +446,12 @@ class AppManagedWorkDispatcher:
             else:
                 self._unknown(entry.selection, entry.record, stage)
             if self._learning is not None and eligibility.authority is not None:
-                # The recorder re-derives everything from the current durable
-                # host turn and never raises into the work outcome.
-                self._learning(lifetime, entry.record.host_turn, eligibility)
+                # Isolated so no failure (including a non-Exception) in
+                # learning can reach the work outcome handler below.
+                try:
+                    self._learning(lifetime, entry.record.host_turn, eligibility)
+                except BaseException:
+                    _LOG.warning("managed learning hook failed", exc_info=True)
         except BaseException:
             self._unknown(entry.selection, entry.record, stage)
         finally:

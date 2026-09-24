@@ -146,9 +146,9 @@ def test_one_authenticated_worker_cannot_create_independence_from_repeated_recei
     assert decision.stage == LearningStage.CANDIDATE
 
 
-def test_distinct_authenticated_workers_can_reach_fact_but_contradiction_demotes():
-    first = ReceiptObservationProducer.from_terminal_eligibility(_eligibility(_evidence(principal="owner"), worker_id="lane-worker-a"))[1]
-    second = ReceiptObservationProducer.from_terminal_eligibility(_eligibility(_evidence(principal="owner", run_id="run-2"), worker_id="lane-worker-b"))[1]
+def test_distinct_authenticated_principals_can_reach_fact_but_contradiction_demotes():
+    first = ReceiptObservationProducer.from_terminal_eligibility(_eligibility(_evidence(principal="owner-a"), worker_id="lane-worker-a"))[1]
+    second = ReceiptObservationProducer.from_terminal_eligibility(_eligibility(_evidence(principal="owner-b", run_id="run-2"), worker_id="lane-worker-b"))[1]
     assert LearningLadder().evaluate((first, second))[0].stage == LearningStage.FACT
     failure = {
         "schema": "delegated-verification-failure-v1",
@@ -368,7 +368,7 @@ def test_application_composition_persists_and_promotes_independent_subject_recei
     for worker, run_id in (("lane-a", "run-a"), ("lane-b", "run-b")):
         receipt, observation = ReceiptObservationProducer.from_terminal_eligibility(
             _eligibility(
-                _evidence(principal="owner", run_id=run_id, project="repo-a"),
+                _evidence(principal="principal-" + worker, run_id=run_id, project="repo-a"),
                 worker_id=worker,
             )
         )
@@ -402,7 +402,7 @@ def test_application_promotion_demotes_on_persisted_verified_negative(tmp_path):
     for worker, run_id in (("lane-a", "run-a"), ("lane-b", "run-b")):
         pair = ReceiptObservationProducer.from_terminal_eligibility(
             _eligibility(
-                _evidence(principal="owner", run_id=run_id, project="repo-a"),
+                _evidence(principal="principal-" + worker, run_id=run_id, project="repo-a"),
                 worker_id=worker,
             )
         )
@@ -437,7 +437,7 @@ def test_reserved_subject_fact_collision_fails_closed(tmp_path):
     for worker, run_id in (("lane-a", "run-a"), ("lane-b", "run-b")):
         pair = ReceiptObservationProducer.from_terminal_eligibility(
             _eligibility(
-                _evidence(principal="owner", run_id=run_id, project="repo-a"),
+                _evidence(principal="principal-" + worker, run_id=run_id, project="repo-a"),
                 worker_id=worker,
             )
         )

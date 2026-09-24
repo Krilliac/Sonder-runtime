@@ -50,6 +50,38 @@ def test_recovery_attempt_holds_selection_until_explicit_close(managed):
     assert not authority._selections
 
 
+def test_learning_hook_failure_never_escapes_recovery(managed):
+    from types import SimpleNamespace
+    from sonder_runtime.bootstrap.app_recovery_coordinator import AppWorkRecoveryAttempt
+
+    authority, selection, *_ = managed
+
+    def interrupted(*args):
+        raise KeyboardInterrupt("learning interrupted")
+
+    attempt = AppWorkRecoveryAttempt(
+        authority=authority,
+        selection=selection,
+        application=object(),
+        recovery_factory=lambda *args: None,
+        verifier_factory=lambda *args: None,
+        approve_attachment=lambda *args: None,
+        approve_verification=lambda *args: None,
+        private_paths=lambda: (),
+        model_writable_roots=lambda: (),
+        learning=interrupted,
+    )
+    try:
+        # Called after recovered completion: a non-Exception from learning
+        # must not turn a completed recovery into a raised operation.
+        attempt._record_learning(
+            SimpleNamespace(work=SimpleNamespace(host_turn=object())),
+            SimpleNamespace(authority=object()),
+        )
+    finally:
+        attempt.close()
+
+
 from tests.test_app_work_dispatcher import dispatch, prepare
 
 
@@ -259,8 +291,9 @@ def test_real_pending_work_explicitly_reattaches_and_certifies_once(
         # and no trusted observation is minted for certified_after_return.
         outcomes = learning.recent()
         assert [o.status for o in outcomes] == ["refused"], outcomes
-        # The producer refuses the blank original certificate identity.
-        assert outcomes[0].code == "PERSIST_VALUEERROR"
+        # The producer refuses certified_after_return explicitly.
+        assert outcomes[0].code == "PERSIST_PERMISSIONERROR"
+        assert "certified_after_return is not learning evidence" in outcomes[0].reason
         assert outcomes[0].observation_id is None
 
         def no_callbacks(*args, **kwargs):

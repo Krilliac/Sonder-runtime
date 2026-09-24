@@ -16,18 +16,23 @@ from .standalone_continuation import PublishedHostTerminal
 def _with_authority(
     value, session, expected_turn, verifier_factory,
 ):
-    """Attach a live resolver only to decisions produced by this boundary."""
-    return ManagedTerminalEligibility(
+    """Seal the exact decision produced by this boundary into its authority.
+
+    The decision was just derived from the current owner-bound durable turn;
+    consumers resolve that sealed value once instead of re-running
+    publication and manifest capture.  Public fields on copies are ignored
+    because the producer reads only the sealed value.
+    """
+    sealed = {}
+    decision = ManagedTerminalEligibility(
         value.evidence, value.eligible, value.phase, value.code,
         value.pending_identity, value.pending_approval, value.published,
         value.authenticated_worker_id, value.verified_subject_digest,
         value.verified_failure_receipt,
-        _issue_host_verifier_authority(
-            lambda: terminal_eligibility(
-                session, expected_turn, verifier_factory=verifier_factory
-            )
-        ),
+        _issue_host_verifier_authority(lambda: sealed["value"]),
     )
+    sealed["value"] = decision
+    return decision
 
 
 def terminal_eligibility(session, expected_turn, *, verifier_factory):

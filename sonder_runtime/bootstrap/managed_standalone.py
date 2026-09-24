@@ -341,14 +341,22 @@ class ManagedStandaloneSession:
         )
 
     def persist_learning_observation(
-        self, expected_turn, *, verifier_factory, repository,
+        self, expected_turn, *, verifier_factory, repository, eligibility=None,
     ):
-        """Persist one observation only after current terminal eligibility passes."""
+        """Persist one observation only after current terminal eligibility passes.
+
+        ``eligibility`` is the decision the host just resolved for this turn;
+        the producer trusts only its sealed verifier authority, so the
+        boundary is not re-run (no second publication or manifest capture).
+        """
         if not callable(getattr(repository, "append", None)):
             raise TypeError("verifier observation repository is required")
-        eligibility = self.terminal_eligibility(
-            expected_turn, verifier_factory=verifier_factory
-        )
+        if eligibility is None:
+            eligibility = self.terminal_eligibility(
+                expected_turn, verifier_factory=verifier_factory
+            )
+        else:
+            self.require_current()
         from ..application.memory.receipt_observation import ReceiptObservationProducer
 
         receipt, observation = ReceiptObservationProducer.from_terminal_eligibility(
@@ -357,7 +365,9 @@ class ManagedStandaloneSession:
         repository.append(receipt, observation)
         return observation
 
-    def persist_learning_observation_durable(self, expected_turn, *, verifier_factory):
+    def persist_learning_observation_durable(
+        self, expected_turn, *, verifier_factory, eligibility=None,
+    ):
         """Run the real host producer against the application-owned UoW."""
         unit_of_work = getattr(self._application, "unit_of_work", None)
         if not callable(unit_of_work):
@@ -371,6 +381,7 @@ class ManagedStandaloneSession:
                 expected_turn,
                 verifier_factory=verifier_factory,
                 repository=SQLiteVerifierObservationRepository(scope.connection),
+                eligibility=eligibility,
             )
 
     def recovery_verification(self, *, verifier_factory):

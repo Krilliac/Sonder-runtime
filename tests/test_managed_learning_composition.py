@@ -43,7 +43,7 @@ def test_live_certified_managed_work_persists_authenticated_observation(
     db_path = str(tmp_path_factory.mktemp("learning-private") / "memory.db")
     monkeypatch.setenv("SONDER_DB", db_path)
     dispatcher, selection, models, lifetimes, _, fresh = dispatch
-    authority, _, lanes, model, _, binding, *_ = managed
+    authority, _, lanes, model, context, binding, token, credential = managed
     gate = bridge(
         ApprovalLedger(tmp_path / "learning-approvals.db"),
         rule={"action": "allow", "pattern": "workspace_run"},
@@ -109,6 +109,16 @@ def test_live_certified_managed_work_persists_authenticated_observation(
         )
 
     monkeypatch.setattr(_ManagedTurn, "stage_final", stage)
+    from sonder_runtime.bootstrap import managed_terminal_eligibility as boundary
+
+    resolutions = []
+    real_boundary = boundary.terminal_eligibility
+
+    def counted(*args, **kwargs):
+        resolutions.append(1)
+        return real_boundary(*args, **kwargs)
+
+    monkeypatch.setattr(boundary, "terminal_eligibility", counted)
     verifier_factory = lambda *args: verified[0][0]  # noqa: E731
     dispatcher._eligibility = (
         lambda lifetime, turn, finalized: lifetime.terminal_eligibility(
@@ -124,10 +134,22 @@ def test_live_certified_managed_work_persists_authenticated_observation(
     dispatcher.execute(selection, work_id=work.prepared.work_id)
     dispatcher._executor.shutdown(wait=True)
 
-    record = dispatcher.status(fresh(), work_id=work.prepared.work_id)
+    # Observe with a newly bounded context so a slow host cannot turn the
+    # fixture deadline into a spurious authentication failure.
+    observer = authority.issue_selection(
+        account_token=token,
+        control_token=credential,
+        context=replace(context, deadline_monotonic=time.monotonic() + 300),
+    )
+    try:
+        record = dispatcher.status(observer, work_id=work.prepared.work_id)
+    finally:
+        authority.release_selection(observer)
     assert record.state == "terminal", record
     assert record.completion.phase == "certified"
     assert lifetimes[0]._application is application and len(models) == 1
+    # The boundary (publication + manifest capture) is resolved exactly once.
+    assert len(resolutions) == 1, resolutions
 
     outcomes = recorder.recent()
     assert [outcome.status for outcome in outcomes] == ["persisted"], outcomes
@@ -147,10 +169,10 @@ def test_live_certified_managed_work_persists_authenticated_observation(
     assert observation.source == "authenticated_verifier"
     assert observation.trusted_source is True and observation.positive is True
     assert observation.content.startswith("verified-subject:")
-    worker = verified[0][2]
+    # Independence is keyed by authenticated principal and scope (not lane).
     assert observation.independent_key == hashlib.sha256(
         json.dumps(
-            {"worker_id": worker, "authority_scope": receipt.authority_scope},
+            {"principal_id": receipt.principal_id, "workspace_scope": receipt.project_scope},
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=True,

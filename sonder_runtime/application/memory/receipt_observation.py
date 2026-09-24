@@ -145,7 +145,14 @@ class ReceiptObservationProducer:
         eligibility = resolver()
         if type(eligibility) is not ManagedTerminalEligibility:
             raise PermissionError("owner-bound managed verifier result is invalid")
-        if eligibility.phase in {"certified", "certified_after_return"}:
+        if eligibility.phase == "certified_after_return":
+            # The outward final did not carry the certificate identity, so the
+            # host receipt cannot bind this certificate as learning evidence.
+            raise PermissionError(
+                "certified_after_return is not learning evidence: the original "
+                "outward final carries no certificate identity"
+            )
+        if eligibility.phase == "certified":
             if eligibility.eligible is not True:
                 raise PermissionError("current certified terminal eligibility is required")
         elif eligibility.phase == "failed":
@@ -228,9 +235,12 @@ class ReceiptObservationProducer:
             observation_id="observation-" + receipt.receipt_id,
             content=claim,
             source=cls.SOURCE,
+            # Independence is per authenticated principal and scope: one
+            # principal running several child lanes over the same source is a
+            # single source of evidence, never two.
             independent_key=_digest({
-                "worker_id": eligibility.authenticated_worker_id,
-                "authority_scope": receipt.authority_scope,
+                "principal_id": turn.principal_id,
+                "workspace_scope": facts.project_scope,
             }),
             provenance=(
                 "receipt:" + receipt.receipt_id,
@@ -310,18 +320,44 @@ class VerifiedSubjectFactPromotion:
         ).fetchone()
         if existing is not None and (existing[0] != project or existing[1] != content):
             raise PermissionError("reserved verifier subject fact identity is occupied")
-        list_pairs = getattr(repository, "list_pairs", None)
-        if not callable(list_pairs):
-            raise TypeError("complete verifier observation snapshot is required")
-        complete = list_pairs(limit=10_001)
-        if len(complete) > 10_000:
-            raise PermissionError("verifier observation snapshot is incomplete")
-        subject_pairs = tuple(
-            pair for pair in complete
-            if pair[0].project_scope == project
-            and pair[0].workspace_scope == project
-            and pair[1].content_key == selected_observations[0].content_key
+        list_subject_pairs = getattr(repository, "list_subject_pairs", None)
+        list_negatives = getattr(repository, "list_subject_negative_pairs", None)
+        if not callable(list_subject_pairs) or not callable(list_negatives):
+            raise TypeError("subject-scoped verifier observation snapshot is required")
+
+        def authenticated(pair):
+            receipt, observation = pair
+            return (
+                receipt.project_scope == project
+                and receipt.workspace_scope == project
+                and receipt.verifier_outcome in {"passed", "failed"}
+                and observation.source == ReceiptObservationProducer.SOURCE
+                and observation.trusted_source is True
+                and observation.content == content
+            )
+
+        # A persisted authenticated negative demotes before any completeness
+        # or snapshot check, so volume can never shield a contradicted fact.
+        negatives = tuple(
+            pair for pair in list_negatives(project, content, limit=16)
+            if authenticated(pair)
+            and pair[0].verifier_outcome == "failed"
+            and pair[1].positive is False
         )
+        if negatives:
+            evaluated = {
+                pair[1].observation_id: pair[1] for pair in (*selected, *negatives)
+            }
+            decision = self._ladder.evaluate(tuple(evaluated.values()))[0]
+            mutation = fact_source.delete_fact(connection, fact_id, project)
+            return "demoted" if mutation else "unchanged", decision
+        # Indexed read of this project's rows for this exact subject token only.
+        subject_pairs = tuple(
+            pair for pair in list_subject_pairs(project, content, limit=10_001)
+            if pair[1].content_key == selected_observations[0].content_key
+        )
+        if len(subject_pairs) > 10_000:
+            raise PermissionError("verifier observation snapshot is incomplete")
         if not subject_pairs:
             raise PermissionError("authenticated subject observations are unavailable")
         persisted_ids = {pair[1].observation_id for pair in subject_pairs}
@@ -329,15 +365,7 @@ class VerifiedSubjectFactPromotion:
             raise PermissionError("observation snapshot changed")
         pairs = subject_pairs
         observations = tuple(pair[1] for pair in pairs)
-        if any(
-            receipt.project_scope != project
-            or receipt.workspace_scope != project
-            or receipt.verifier_outcome not in {"passed", "failed"}
-            or observation.source != ReceiptObservationProducer.SOURCE
-            or observation.trusted_source is not True
-            or not observation.content.startswith("verified-subject:")
-            for receipt, observation in pairs
-        ):
+        if not all(authenticated(pair) for pair in pairs):
             raise PermissionError("only scoped authenticated verifier observations may promote")
         content_keys = {observation.content_key for observation in observations}
         if len(content_keys) != 1:

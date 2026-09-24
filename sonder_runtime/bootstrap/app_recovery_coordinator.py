@@ -1,6 +1,7 @@
 """One explicitly owned app recovery attempt; never dispatches a model turn."""
 
 from dataclasses import dataclass, field
+import logging
 from threading import RLock
 
 from ..application.ports.app_control import CommandKey, CommandConflict, identifier
@@ -11,6 +12,8 @@ from ..application.ports.lane_continuation import (
 )
 from .app_work_recovery import AppWorkRecoveryHistory
 from .managed_standalone import ManagedStandaloneRecovery, PreparedManagedReattachment
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -254,7 +257,10 @@ class AppWorkRecoveryAttempt:
         if self._learning is not None and eligible.authority is not None:
             # The recorder re-reads the attached session's durable turn and is
             # fail-closed; it never changes the recovered work outcome.
-            self._learning(self._session, prepared.work.host_turn, eligible)
+            try:
+                self._learning(self._session, prepared.work.host_turn, eligible)
+            except BaseException:
+                _LOG.warning("managed learning hook failed", exc_info=True)
 
     def _complete(self, prepared, terminal, completion):
         selected = self._selection
