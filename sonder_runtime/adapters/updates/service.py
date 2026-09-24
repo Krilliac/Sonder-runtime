@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import sonder_runtime.adapters.persistence.migrations as sonder_migrations
-from sonder_runtime.adapters.bounded_tar import open_bounded
+from sonder_runtime.application.security.bounded_archives import open_bounded
 import sonder_runtime.platform.version as sonder_version
 
 MANIFEST_SCHEMA_VERSION = 1

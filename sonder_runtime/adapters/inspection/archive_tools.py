@@ -18,10 +18,13 @@ import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
-from sonder_runtime.adapters.bounded_tar import (
+from sonder_runtime.application.security.bounded_archives import (
     TarMetadataLimitError,
+    ZipCentralDirectoryLimitError,
     is_tarfile_bounded,
     open_bounded,
+    require_zip_entry_bound,
+    zip_central_directory,
 )
 
 
@@ -387,7 +390,33 @@ def _plan(source: Path, limits: dict, *, deadline: float | None = None) -> dict:
     if time.monotonic() > deadline:
         raise ArchiveRejected("archive prevalidation exceeded time ceiling")
     entries = []
+    try:
+        _plan_entries(source, kind, limits, deadline, entries)
+    except (TarMetadataLimitError, ZipCentralDirectoryLimitError) as exc:
+        # Parser-bound violations are policy rejections, not corrupt input.
+        raise ArchiveRejected(str(exc)) from None
+    _require_same_source(source, signature, deadline=deadline)
+    _validate_entries(entries, limits, source.stat().st_size)
+    entries.sort(key=lambda row: row["path"])
+    return {
+        "archive_type": kind, "source": str(source), "limits": limits,
+        "entry_count": len(entries),
+        "total_bytes": sum(row["bytes"] for row in entries),
+        "entries": entries, "valid": True, "errors": [],
+        "source_signature": signature,
+    }
+
+
+def _plan_entries(
+    source: Path, kind: str, limits: dict, deadline: float, entries: list,
+) -> None:
     if kind == "zip":
+        # The end-of-central-directory record is read first, so the entry
+        # ceiling applies before zipfile builds one ZipInfo per entry.
+        declared, _directory_bytes = zip_central_directory(source)
+        if declared > limits["max_entries"]:
+            raise ArchiveRejected("archive exceeds entry ceiling")
+        require_zip_entry_bound(source, limits["max_entries"])
         with zipfile.ZipFile(source, "r") as archive:
             infos = archive.infolist()
             if len(infos) > limits["max_entries"]:
@@ -416,16 +445,6 @@ def _plan(source: Path, limits: dict, *, deadline: float | None = None) -> dict:
                 walked_bytes += entry["bytes"]
                 if walked_bytes > limits["max_total_bytes"]:
                     raise ArchiveRejected("archive exceeds aggregate byte ceiling")
-    _require_same_source(source, signature, deadline=deadline)
-    _validate_entries(entries, limits, source.stat().st_size)
-    entries.sort(key=lambda row: row["path"])
-    return {
-        "archive_type": kind, "source": str(source), "limits": limits,
-        "entry_count": len(entries),
-        "total_bytes": sum(row["bytes"] for row in entries),
-        "entries": entries, "valid": True, "errors": [],
-        "source_signature": signature,
-    }
 
 
 def list_archive(
