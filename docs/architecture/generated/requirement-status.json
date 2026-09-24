@@ -600,9 +600,9 @@
     },
     {
       "checked": true,
-      "claim": "The six root focused contracts link the master specification within their first twelve lines and each carry one gated Behavior status table whose Proposed rows must cite open master-spec requirements, so unfinished work lives only in the specification.",
+      "claim": "The six root focused contracts link the master specification within their first twelve lines and each carry one gated Behavior status table whose Proposed rows must cite open master-spec requirements, so unfinished work lives only in the specification. Revision 4 re-verifies after correcting the CLIENT.md standalone-client claim.",
       "requirement_id": "DOC-004",
-      "revision": 3,
+      "revision": 4,
       "status": "verified"
     },
     {
@@ -621,9 +621,9 @@
     },
     {
       "checked": true,
-      "claim": "Product documentation (root README and the six focused contracts) labels behavior with the Implemented, Experimental, Proposed, Degraded, and Unsupported vocabulary, and a CI gate rejects unknown labels, stale Proposed rows, unlabeled forward-looking prose, and implementation slice logs.",
+      "claim": "Product documentation (root README and the six focused contracts) labels behavior with the Implemented, Experimental, Proposed, Degraded, and Unsupported vocabulary, and a CI gate rejects unknown labels, stale Proposed rows, unlabeled forward-looking prose, and implementation slice logs. Revision 4 re-verifies after the CLIENT.md correction and the widened stale-promise and Implemented-citation checks.",
       "requirement_id": "DOC-007",
-      "revision": 3,
+      "revision": 4,
       "status": "verified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "1ecff0f333c1773b34836c3a87a3c6f531828ac1e0fa7c154f76d8b09419399f",
+    "ledger_sha256": "ddbb68239a2d46bec6eac88e3074b901c75a494230d40f82b5a0d3fde2fc0f91",
     "spec_sha256": "ed5ab01393d72681fc4eb4b9581e832d3d07ee95595b8b58dfe094c9e7dbf4fa"
   }
 }
