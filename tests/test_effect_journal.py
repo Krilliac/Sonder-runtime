@@ -122,7 +122,7 @@ def test_crash_cut_points_never_turn_an_unresolved_effect_into_completion(tmp_pa
     decision = reopened.recover("run-1", live_workers={})
     assert decision.action == "reconcile"
     assert reopened.get(intent.intent_id).state is EffectState.UNCERTAIN
-    with pytest.raises(EffectJournalError, match="duplicate effect intent"):
+    with pytest.raises(EffectJournalError, match="worker owner recovery is required"):
         JournalBinding(reopened, "run-1", "worker", 2, "/workspace").begin_request(
             operation_id="mutate", idempotency_key="mutate-1", request_digest="a" * 64,
         )
@@ -335,7 +335,7 @@ def test_recovered_owner_epoch_fences_old_binding_before_new_intent(tmp_path):
     with pytest.raises(EffectJournalError, match="uncertain"):
         current.recover_before_restart()
     called = []
-    with pytest.raises(EffectJournalError, match="stale worker owner epoch"):
+    with pytest.raises(EffectJournalError, match="worker owner recovery is required"):
         journaled_effect(
             old, operation_id="old-after-recovery", idempotency_key="old-after-recovery",
             request={"n": 2}, invoke=lambda: called.append(True), receipt_key="late",
@@ -387,7 +387,7 @@ def test_recovery_refusal_blocks_new_effect_before_invocation(tmp_path):
         current.recover_before_restart()
 
     invoked = []
-    with pytest.raises(EffectJournalError, match="reconciliation"):
+    with pytest.raises(EffectJournalError, match="worker owner recovery is required"):
         journaled_effect(
             current, operation_id="op-2", idempotency_key="op-2",
             request={"value": "must-not-run"},
@@ -416,7 +416,7 @@ def test_epoch_advance_cannot_clear_recovery_fence(tmp_path):
     journal.claim_owner("run", "worker", 3)
     invoked = []
     epoch_three = AuthenticatedWorkerBinding(journal, "run", "worker", 3, "/workspace")
-    with pytest.raises(EffectJournalError, match="reconciliation"):
+    with pytest.raises(EffectJournalError, match="worker owner recovery is required"):
         journaled_effect(
             epoch_three, operation_id="op-2", idempotency_key="op-2",
             request={"value": "must-not-run"},
@@ -493,7 +493,7 @@ def test_unsupported_operation_family_stays_fenced(tmp_path):
     journal, intent = _uncertain_for_reconciliation(tmp_path, operation="unsupported-op")
     with pytest.raises(EffectJournalError, match="no trusted reconciliation verifier"):
         journal.reconcile(intent.intent_id, owner_epoch=2)
-    with pytest.raises(EffectJournalError, match="duplicate effect intent"):
+    with pytest.raises(EffectJournalError, match="worker owner recovery is required"):
         journal.begin(EffectIntent(
             "run:after", "run", "worker", "after", "/workspace", 2,
             "after", "b" * 64,

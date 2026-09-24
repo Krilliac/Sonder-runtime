@@ -16,12 +16,15 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import math
 import os
 import re
 import threading
 import time
 import uuid
 from pathlib import Path
+
+import durable_locks
 
 
 SCHEMA_VERSION = 1
@@ -42,6 +45,10 @@ def _open_no_follow(path, flags, mode=0o600):
 
 class CommandJournalError(RuntimeError):
     """Base class for a journal failure that must fail dispatch closed."""
+
+
+class CommandJournalLockTimeout(durable_locks.LockTimeout, CommandJournalError):
+    """A bounded journal lock wait that launcher callers can return as 503."""
 
 
 class CommandConflict(CommandJournalError):
@@ -95,6 +102,7 @@ class CommandJournal:
         *,
         max_commands=DEFAULT_MAX_COMMANDS,
         compact_after_bytes=DEFAULT_COMPACT_AFTER_BYTES,
+        lock_timeout=30.0,
     ):
         self.path = Path(path).expanduser().absolute()
         self.lock_path = self.path.with_name(self.path.name + ".lock")
@@ -102,8 +110,12 @@ class CommandJournal:
         self.compact_after_bytes = max(
             MAX_EVENT_BYTES, min(int(compact_after_bytes), 64 * 1024 * 1024)
         )
+        self.lock_timeout = max(0.0, float(lock_timeout))
+        if not math.isfinite(float(lock_timeout)) or self.lock_timeout > threading.TIMEOUT_MAX:
+            raise ValueError("command journal lock timeout must be finite and supported")
         self.instance_id = uuid.uuid4().hex
         self._thread_lock = threading.RLock()
+        self._thread_owner = None
         self.path.parent.mkdir(parents=True, exist_ok=True)
         for candidate in (self.path, self.lock_path):
             if candidate.is_symlink():
@@ -111,40 +123,33 @@ class CommandJournal:
 
     @contextlib.contextmanager
     def _locked(self):
-        with self._thread_lock:
-            descriptor = _open_no_follow(
-                self.lock_path, os.O_RDWR | os.O_CREAT
+        deadline = time.monotonic() + self.lock_timeout
+        if not self._thread_lock.acquire(timeout=self.lock_timeout):
+            holder = self._thread_owner or {
+                "pid": os.getpid(), "instance": self.instance_id,
+                "purpose": "command-journal thread admission",
+            }
+            raise CommandJournalLockTimeout(
+                "could not acquire command journal thread lock within %.1fs; holder=%s"
+                % (self.lock_timeout, json.dumps(holder, sort_keys=True)), holder=holder,
             )
-            acquired = False
+        self._thread_owner = {
+            "pid": os.getpid(), "thread_id": threading.get_ident(),
+            "instance": self.instance_id, "started": time.time(),
+            "purpose": "command-journal",
+        }
+        try:
+            remaining = max(0.0, deadline - time.monotonic())
             try:
-                if os.name == "nt":
-                    import msvcrt
-
-                    if os.fstat(descriptor).st_size < 1:
-                        os.write(descriptor, b"0")
-                        os.fsync(descriptor)
-                    os.lseek(descriptor, 0, os.SEEK_SET)
-                    msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(descriptor, fcntl.LOCK_EX)
-                acquired = True
-                yield
-            finally:
-                try:
-                    if acquired:
-                        os.lseek(descriptor, 0, os.SEEK_SET)
-                        if os.name == "nt":
-                            import msvcrt
-
-                            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
-                        else:
-                            import fcntl
-
-                            fcntl.flock(descriptor, fcntl.LOCK_UN)
-                finally:
-                    os.close(descriptor)
+                with durable_locks.exclusive_file_lock(
+                    self.lock_path, timeout=remaining, purpose="command-journal"
+                ):
+                    yield
+            except durable_locks.LockTimeout as exc:
+                raise CommandJournalLockTimeout(str(exc), holder=exc.holder) from exc
+        finally:
+            self._thread_owner = None
+            self._thread_lock.release()
 
     @staticmethod
     def _apply(states, event):

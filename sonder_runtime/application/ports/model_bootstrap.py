@@ -16,7 +16,7 @@ from .model_target import ModelTarget
 class LegacyModelRuntime(Protocol):
     """The narrow legacy dependency needed by the compatibility adapter."""
 
-    def _serve_target(self, tier: str, strict: bool = False) -> tuple[Any, ...]: ...
+    def _serve_target(self, tier: str, strict: bool | None = None) -> tuple[Any, ...]: ...
 
     def _make_generate(
         self,
@@ -32,7 +32,7 @@ class LegacyModelRuntime(Protocol):
 class ModelBootstrapProvider(Protocol):
     """Typed owner for target selection and generator construction."""
 
-    def resolve_target(self, tier: str, strict: bool = False) -> ModelTarget: ...
+    def resolve_target(self, tier: str, strict: bool | None = None) -> ModelTarget: ...
 
     def make_generate(
         self,

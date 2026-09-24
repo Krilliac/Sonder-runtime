@@ -208,7 +208,9 @@ class OllamaGateway:
             raise DependencyUnavailable(
                 "Ollama gateway requires an injected target provider"
             )
-        target = self._target_resolver(request.tier or "sonder", False)
+        # An unpinned alias inherits the operator's strict default. Concrete
+        # tier/model requests remain pinned by the policy owner itself.
+        target = self._target_resolver(request.tier or "sonder", None)
         if not isinstance(target, ModelTarget):
             raise DependencyUnavailable("model target provider returned invalid target")
         if target.tier_label == "cloud-disabled":
@@ -247,7 +249,7 @@ class OllamaGateway:
             raise InvalidInput("resolved routes cannot be supplied as model options")
         resolved_route = request._resolved_route
         if resolved_route is None:
-            target = self._target_resolver(request.tier or "sonder", False)
+            target = self._target_resolver(request.tier or "sonder", None)
             if not isinstance(target, ModelTarget):
                 raise DependencyUnavailable("model target provider returned invalid target")
             model, cloud, tier_label = target.model, target.cloud, target.tier_label

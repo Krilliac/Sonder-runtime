@@ -7,13 +7,16 @@ BUILD SUCCEEDED from "no line matched the error regex" while throwing away
 the build process's own exit status.
 """
 import hashlib
+import os
 import sqlite3
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import server
+from sonder_runtime.adapters.execution import codegen_container_build, isolated_runner
 from sonder_runtime.adapters.observability import activity_tracker
 from sonder_runtime.adapters.unit_of_work import UnitOfWorkAdapter
 from sonder_runtime.application.strategy.tracing import StrategyTraceService
@@ -69,13 +72,39 @@ def _enable_codegen_canary(monkeypatch, tmp_path):
     # lower-privilege build authority and refuses this rollout before a build.
     monkeypatch.setattr(
         strategy_bootstrap, "compose_isolated_codegen_build",
-        lambda: strategy_bootstrap.IsolatedCodegenBuild(server._codegen_build),
+        lambda **_kwargs: strategy_bootstrap.IsolatedCodegenBuild(server._codegen_build),
+    )
+
+
+def _enable_real_isolated_codegen_canary(monkeypatch, root, project, allowed_sources):
+    """Configure the production composer while replacing its Docker boundary."""
+    _enable_strategy(monkeypatch, root / "home")
+    staging = root / "staging"
+    staging.mkdir(mode=0o700)
+    image = "sha256:" + "a" * 64
+    monkeypatch.setenv("SONDER_STRATEGY_MODE", "canary")
+    monkeypatch.setenv("SONDER_STRATEGY_CANARY_PERCENT", "100")
+    monkeypatch.setenv("SONDER_CODEGEN_BUILD_PROJECT", str(project))
+    monkeypatch.setenv("SONDER_CODEGEN_BUILD_STAGING_ROOT", str(staging))
+    monkeypatch.setenv("SONDER_CODEGEN_BUILD_IMAGE", image)
+    monkeypatch.setenv("SONDER_CODEGEN_BUILD_ALLOWED_SOURCES", allowed_sources)
+    monkeypatch.setenv("SONDER_ISOLATED_ROOTS", str(staging))
+    monkeypatch.setattr(server, "_ensemble_targets", lambda _tiers: ([
+        ("code", "local-codegen-test"),
+    ], []))
+    monkeypatch.setattr(server, "_auto_model_context", lambda _model: 2048)
+    monkeypatch.setattr(
+        isolated_runner, "detect_runtime", lambda: ("docker", "/test/docker", ()),
+    )
+    monkeypatch.setattr(
+        isolated_runner, "_inspect_image_policy", lambda *_args: image,
     )
 
 
 def _project_guard(tmp_path):
+    project_identity = os.path.normcase(os.path.realpath(tmp_path))
     scope = "codegen-scope-" + hashlib.sha256(
-        str(tmp_path.resolve()).encode(),
+        os.fsencode(project_identity),
     ).hexdigest()
     return compose_strategy_trace().scope_guard(scope)
 
@@ -163,9 +192,63 @@ def test_codegen_selected_canary_dispatches_critic_and_rotation_within_budget(mo
 def test_codegen_production_canary_requires_isolated_build_before_any_effect(monkeypatch, tmp_path):
     _prepare(monkeypatch, tmp_path, lambda *a, **k: pytest.fail("build dispatched"))
     _enable_codegen_canary(monkeypatch, tmp_path)
-    monkeypatch.setattr(strategy_bootstrap, "compose_isolated_codegen_build", lambda: None)
+    monkeypatch.setattr(strategy_bootstrap, "compose_isolated_codegen_build", lambda **_kwargs: None)
     monkeypatch.setattr(server, "_codegen_pinned_generation", lambda *a, **k: pytest.fail("model sent"))
     assert "isolated build authority unavailable" in _canary_call(tmp_path)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="native isolated build qualification is Linux-only")
+def test_codegen_server_composes_isolated_build_from_host_project_and_sources(
+    monkeypatch, tmp_path,
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    _prepare(monkeypatch, project, lambda *a, **k: pytest.fail("host build dispatched"))
+    _enable_real_isolated_codegen_canary(
+        monkeypatch, tmp_path, project, '["main.c", "lib.c"]',
+    )
+    composed = []
+
+    def fake_isolated_run(self, *args):
+        composed.append((self.project, self.names, args[2]))
+        absent = [name for name in self.names if not (self.project / name).exists()]
+        if absent:
+            return "error: source is absent", False
+        return "build complete", True
+
+    monkeypatch.setattr(
+        codegen_container_build.CodegenContainerBuild, "run", fake_isolated_run,
+    )
+    monkeypatch.setattr(server, "_codegen_pinned_generation", lambda *a, **k: "int x = 1;")
+
+    report = _canary_call(
+        project,
+        '[{"name": "main.c", "spec": "entry"}, {"name": "lib.c", "spec": "library"}]',
+    )
+
+    assert "BUILD SUCCEEDED" in report
+    assert composed
+    assert {(path, names, cwd) for path, names, cwd in composed} == {
+        (project, ("main.c", "lib.c"), str(project)),
+    }
+
+
+def test_codegen_server_refuses_undeclared_source_before_model_or_build(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    _prepare(monkeypatch, project, lambda *a, **k: pytest.fail("host build dispatched"))
+    _enable_real_isolated_codegen_canary(monkeypatch, tmp_path, project, '["main.c"]')
+    monkeypatch.setattr(
+        server, "_codegen_pinned_generation", lambda *a, **k: pytest.fail("model dispatched"),
+    )
+    monkeypatch.setattr(
+        codegen_container_build.CodegenContainerBuild, "run",
+        lambda *a, **k: pytest.fail("isolated build dispatched"),
+    )
+
+    report = _canary_call(project, '{"other.c": "not host-granted"}')
+
+    assert "isolated build authority unavailable" in report
 
 
 def test_codegen_missing_existing_checkpoint_db_blocks_even_with_rollout_off(monkeypatch, tmp_path):

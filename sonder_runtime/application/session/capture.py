@@ -133,6 +133,7 @@ def _snapshot_payload(
 ) -> dict[str, object]:
     history = _json_copy(list(request.history), "request.history")
     options = _json_copy(dict(request.options), "request.options")
+    routing_metadata = _json_copy(dict(request.routing_metadata), "request.routing_metadata")
     tool_manifest = _json_copy([dict(tool) for tool in tools], "request.tools")
     ui = _json_copy(dict(ui_facts), "request.ui_facts")
     payload: dict[str, object] = {
@@ -143,6 +144,7 @@ def _snapshot_payload(
         "system": request.system,
         "history": history,
         "options": options,
+        "routing_metadata": routing_metadata,
         "stream": request.stream,
         "tools": tool_manifest,
         "ui_facts": ui,

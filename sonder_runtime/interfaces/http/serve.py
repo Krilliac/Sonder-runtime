@@ -61,47 +61,60 @@ from sonder_runtime.adapters.security.permission_policy import permission_policy
 permission_modes = permission_policy
 import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
 import sonder_runtime.adapters.observability.chat_formatting as chat_formatting
-from sonder_runtime.adapters.command_completion import (
-    COMPLETE_DEFAULT_LIMIT,
-    COMPLETE_MAX_LIMIT,
-    completion_limit as _completion_limit,
-)
-from sonder_runtime.adapters.command_catalog import command_catalog
-from sonder_runtime.adapters.security.account_auth import account_auth as admin_auth
-from sonder_runtime.adapters.execution_tools import code_runner, grounding
-from sonder_runtime.adapters.content_services import feedback, intents, training_tasks
-from sonder_runtime.adapters.web import live_reload
-from sonder_runtime.platform import debug_dump
-from sonder_runtime.domain import launcher_health as sonder_health
-from sonder_runtime.domain.launcher_health import token_is_configured
+import sonder_runtime.adapters.secrets as sonder_secrets
 import sonder_runtime.adapters.web.lifecycle as sonder_lifecycle
 import sonder_runtime.platform.config as runtime_config
 import sonder_runtime.platform.paths as runtime_paths
-import sonder_runtime.adapters.secrets as sonder_secrets
+from sonder_runtime.adapters.command_catalog import command_catalog
+from sonder_runtime.adapters.command_completion import (
+    COMPLETE_DEFAULT_LIMIT,
+    COMPLETE_MAX_LIMIT,
+)
+from sonder_runtime.adapters.command_completion import (
+    completion_limit as _completion_limit,
+)
+from sonder_runtime.adapters.content_services import feedback, intents, training_tasks
+from sonder_runtime.adapters.execution_tools import code_runner, grounding
+from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.adapters.persistence import served_action_receipts
-from . import authority_contract as tool_contract
 from sonder_runtime.adapters.security import unsafe_lab
+from sonder_runtime.adapters.security.account_auth import account_auth as admin_auth
+from sonder_runtime.adapters.web import live_reload
+from sonder_runtime.application.chat.handoff_receipts import (
+    ChatWorkReceiptService,
+    ChatWorkResult,
+)
+from sonder_runtime.application.execution.world_control import OutputWatermark
+from sonder_runtime.application.extensions.facade import ExtensionAuthority
+from sonder_runtime.application.ports.model_gateway import ModelRequest
+from sonder_runtime.domain import launcher_health as sonder_health
+from sonder_runtime.domain.common.errors import (
+    Conflict,
+    DependencyUnavailable,
+    InvalidInput,
+    NotFound,
+)
+from sonder_runtime.domain.launcher_health import token_is_configured
+from sonder_runtime.domain.operational_capabilities import (
+    build_operational_capabilities,
+)
 from sonder_runtime.interfaces.http.facades import HealthStatusFacade
-from sonder_runtime.interfaces.http.facades.control_plane import ControlPlaneFacade
 from sonder_runtime.interfaces.http.facades.a2a import A2AAgentCardFacade
 from sonder_runtime.interfaces.http.facades.a2a_jsonrpc import (
     build_application_a2a_handler,
     dispatch_a2a_jsonrpc_route,
 )
+from sonder_runtime.interfaces.http.facades.control_plane import ControlPlaneFacade
 from sonder_runtime.interfaces.http.facades.extensions import dispatch_extension_route
-from sonder_runtime.interfaces.http.facades.observability import dispatch_trace_route
-from sonder_runtime.interfaces.http.facades.session import dispatch_session_route
 from sonder_runtime.interfaces.http.facades.model_request import (
     ModelFacadeError,
     ModelRequestFacade,
 )
-from sonder_runtime.domain.common.errors import Conflict, DependencyUnavailable, InvalidInput, NotFound
-from sonder_runtime.domain.operational_capabilities import build_operational_capabilities
-from sonder_runtime.adapters.model_transport import ModelCallError
-from sonder_runtime.application.execution.world_control import OutputWatermark
-from sonder_runtime.application.ports.model_gateway import ModelRequest
-from sonder_runtime.application.extensions.facade import ExtensionAuthority
+from sonder_runtime.interfaces.http.facades.observability import dispatch_trace_route
+from sonder_runtime.interfaces.http.facades.session import dispatch_session_route
+from sonder_runtime.platform import debug_dump
 
+from . import authority_contract as tool_contract
 
 _LEGACY_RUNTIME = None
 
@@ -289,8 +302,20 @@ class _LiveSessionCaptureFailure(RuntimeError):
     """The HTTP turn cannot claim durable recovery evidence."""
 
 
+def _chat_routing_metadata(selector):
+    """Keep the HTTP chat route observable without storing user text or auth state."""
+    return {
+        "lane": "chat",
+        "reason": (
+            "explicit model selection"
+            if str(selector or "").strip() else "ordinary conversation"
+        ),
+    }
+
+
 def _capture_live_session_turn(*, session_id, prompt, history, model, content,
-                               request_id, turn_id, stream, provider_capture=None):
+                               request_id, turn_id, stream, provider_capture=None,
+                               selector=None, resolved_tier=None):
     """Capture only a named, model-backed HTTP turn through the app graph.
 
     Legacy control/web/execution routes intentionally do not enter this seam.
@@ -310,9 +335,10 @@ def _capture_live_session_turn(*, session_id, prompt, history, model, content,
 
         request = ModelRequest(
             prompt=prompt,
-            tier=model or "code",
+            tier=resolved_tier or selector or model or "sonder",
             history=tuple(history),
             options={"stream": bool(stream)},
+            routing_metadata=_chat_routing_metadata(selector),
         )
         return default_app().session_capture_service().capture_turn(
             session_id,
@@ -3045,26 +3071,97 @@ def _work_project_for_request(project, storage_project):
 
 
 def _handle_work_intent(content, project="", authorized=False, context=None,
-                        idempotency_key=""):
+                        idempotency_key="", session_id="", session_ref="",
+                        correlation_id="", with_receipt=False):
     """Route developer work through the bounded execution-mode chooser."""
     refusal = intents.containment_egress_refusal(content)
     if refusal:
-        return refusal
+        return ChatWorkResult(refusal, "refused") if with_receipt else refusal
     if not authorized:
         return None
     # Do not let ordinary keyed chat occupy the bounded replay cache.  The
     # work router itself returns None for those turns, but caching that miss
     # would evict a completed mutating action which a client may still retry.
-    # This is a pure host-side preflight; route_work_request repeats the same
-    # classification under its stable execution context before any work starts.
-    if not (
-        server.master_orchestrator.requested_worker_cap(content)
-        or intents.classify_execution(content)
-    ):
+    # This is a pure host-side preflight; hand the same decision to the server
+    # boundary after the replay guard so it cannot classify a second time.
+    worker_cap = server.master_orchestrator.requested_worker_cap(content)
+    classified_intent = None if worker_cap else intents.classify_execution(content)
+    if not worker_cap and not classified_intent:
         return None
+    action = "natural-work\0%s\0%s" % (project, content)
+    if with_receipt:
+        # A cached receipt names its owner-scoped source session. Bind the
+        # replay key to that session as well as the project/objective so a
+        # repeated client key cannot disclose another conversation's refs.
+        action += f"\0session={session_id}"
+        from sonder_runtime.application.chat.lanes import (
+            ChatHandoffProvenance, ChatLaneService,
+        )
+        from sonder_runtime.bootstrap.app import default_app
+
+        def run_admitted_work():
+            try:
+                receipts = ChatWorkReceiptService(default_app().session_repository())
+                source = receipts.source(session_id)
+            except Exception as error:
+                raise _LiveSessionCaptureFailure from error
+            decision = ChatLaneService(intents.classify_execution).decide(
+                content,
+                project=project,
+                durable_context_refs=(source.handoff_ref,) if source else (),
+                provenance=ChatHandoffProvenance(
+                    surface="served-http", reason="natural work admission",
+                    correlation_id=correlation_id,
+                ),
+                intent_override=(
+                    {"mode": "fleet", "reason": "explicit bounded worker-count request",
+                     "plan_only": False}
+                    if worker_cap else classified_intent
+                ),
+            )
+            if not decision.is_execution:
+                raise ValueError("admitted work must have an execution handoff")
+            try:
+                admission = receipts.admit(session_id, decision.handoff, source)
+            except Exception as error:
+                raise _LiveSessionCaptureFailure from error
+            try:
+                output = server.route_work_request(
+                    content, project=project, _classified_intent=classified_intent,
+                    _admitted_decision=decision,
+                )
+            except BaseException:
+                # A lane may already have had side effects. Preserve uncertainty
+                # rather than manufacturing a successful return or a retry.
+                with contextlib.suppress(Exception):
+                    receipts.finish(session_id, admission, "unknown")
+                raise
+            status = "returned" if isinstance(output, str) and output.strip() else "unknown"
+            try:
+                terminal = receipts.finish(session_id, admission, status)
+            except Exception as error:
+                raise _LiveSessionCaptureFailure from error
+            return ChatWorkResult(
+                output if isinstance(output, str) else "", status,
+                decision.lane, session_ref, admission.event_id,
+                terminal.event_id, source.event_id if source else "",
+            )
+
+        result = _idempotent_http_action(context, idempotency_key, action, run_admitted_work)
+        if isinstance(result, ChatWorkResult):
+            return result
+        # A plain string can only originate in the existing durable replay
+        # guard, which refused or could not re-run the action; no new lane
+        # return or admission receipt is claimed for it.
+        return ChatWorkResult(
+            result if isinstance(result, str) else "", "refused" if isinstance(result, str) else "unknown",
+            session_ref=session_ref,
+        )
     return _idempotent_http_action(
-        context, idempotency_key, "natural-work\0%s\0%s" % (project, content),
-        lambda: server.route_work_request(content, project=project),
+        context, idempotency_key, action,
+        lambda: server.route_work_request(
+            content, project=project, _classified_intent=classified_intent,
+        ),
     )
 
 
@@ -3241,12 +3338,23 @@ def _capture_http_provider_request(function):
         def admit():
             from sonder_runtime.bootstrap.app import default_app
 
+            requested_tier = values.get("tier")
+            captured_tier = requested_tier
+            if not captured_tier:
+                # Admission precedes the transport attempt. Resolve the same
+                # default policy and per-conversation strict setting as the
+                # live generator, so restart replay does not turn an ordinary
+                # general-chat request into an unrelated code-tier request.
+                state = values.get("state")
+                strict = state.strict if state is not None else None
+                _, _, _, captured_tier = server._serve_target(None, strict)
             capture = default_app().session_capture_service()
             pending = capture.begin_request(
                 values["session"], values["capture_turn_id"],
-                ModelRequest(prompt=values["prompt"], tier=values.get("tier") or "code",
+                ModelRequest(prompt=values["prompt"], tier=captured_tier or "sonder",
                              history=tuple(values.get("history") or ()),
-                             options={"stream": bool(values.get("capture_stream"))}),
+                             options={"stream": bool(values.get("capture_stream"))},
+                             routing_metadata=_chat_routing_metadata(values.get("tier"))),
                 request_id=values["capture_request_id"], user_message=values["prompt"],
             )
             return capture, pending
@@ -6230,6 +6338,7 @@ class Handler(BaseHTTPRequestHandler):
         response_model = ""
         response_tier = ""
         activity_response = None
+        chat_work_receipt = None
         _lifecycle = sonder_lifecycle.get()
         _request_started = time.monotonic()
         # Selecting a concrete model is an API routing contract.  The default
@@ -6317,13 +6426,29 @@ class Handler(BaseHTTPRequestHandler):
                         )
                         web_routed = reply is not None
                     if structured_schema is None and allow_control_routes and reply is None:
+                        work_session_ref = session or self._correlation()
                         reply = _handle_work_intent(
                             prompt,
                             project=_work_project_for_request(project, storage_project),
                             authorized=_developer_authorized(context),
                             context=context,
                             idempotency_key=self.headers.get("Idempotency-Key", ""),
+                            session_id=storage_session or _hosted_storage_id(
+                                context, work_session_ref, "session",
+                            ),
+                            session_ref=work_session_ref,
+                            correlation_id=self._correlation(),
+                            with_receipt=True,
                         )
+                        if isinstance(reply, ChatWorkResult):
+                            chat_work_receipt = reply.public_receipt()
+                            # The lane may already have had side effects. An
+                            # unknown typed outcome cannot fall through to a
+                            # fresh model answer that appears to complete it.
+                            if reply.status == "unknown":
+                                reply = "Work outcome is unknown. Inspect the session receipt before retrying."
+                            else:
+                                reply = reply.text if reply.text.strip() else "Work was not started."
                         execution_routed = reply is not None
                     if structured_schema is None and reply is not None:
                         content = reply
@@ -6489,6 +6614,8 @@ class Handler(BaseHTTPRequestHandler):
                         turn_id=response_iid or uuid.uuid4().hex,
                         stream=stream,
                         provider_capture=turn.provider_capture,
+                        selector=model_selector,
+                        resolved_tier=response_tier,
                     )
         except sonder_lifecycle.AdmissionRejected as rejection:
             _serve_logger.error(f"request admission rejected: code={rejection.code!r}, retryable={rejection.retryable}, correlation={self._correlation()!r}")
@@ -6601,6 +6728,8 @@ class Handler(BaseHTTPRequestHandler):
         # request cache; a closed "hit"/"miss" set with no request identity.
         if turn is not None and getattr(turn, "cache", ""):
             receipt["cache"] = turn.cache
+        if chat_work_receipt is not None:
+            receipt["chat_work"] = chat_work_receipt
         if stream:
             streamed = self._send_stream(
                 content, model, iid=response_iid, elapsed_ms=elapsed_ms,

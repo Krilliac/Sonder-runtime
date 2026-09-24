@@ -41,9 +41,19 @@ class IsolatedCodegenBuild:
     run: Callable[..., tuple[str, bool]]
 
 
-def compose_isolated_codegen_build() -> IsolatedCodegenBuild | None:
-    """No supported isolated Codegen build adapter is installed yet."""
-    return None
+def compose_isolated_codegen_build(
+    *, project_dir: str | None = None, declared_sources: tuple[str, ...] = (),
+) -> IsolatedCodegenBuild | None:
+    """Bind exact host-granted source files to an optional Linux container.
+
+    No configuration or no supported local engine means no active build
+    authority. Windows remains unsupported: its low-MIC candidate supervisor
+    does not protect ordinary same-user checkpoint files or network access.
+    """
+    from sonder_runtime.adapters.execution.codegen_container_build import compose_build
+
+    adapter = compose_build(project_dir=project_dir, declared_sources=declared_sources)
+    return IsolatedCodegenBuild(adapter.run) if adapter is not None else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +115,8 @@ def _private_key(path: Path) -> bytes:
             raise CheckpointError("strategy key directory is not private")
         if directory.st_uid != os.getuid():
             raise CheckpointError("strategy key directory has another owner")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    binary = getattr(os, "O_BINARY", 0)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | binary | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags, 0o600)
@@ -125,7 +136,7 @@ def _private_key(path: Path) -> bytes:
                 os.fsync(directory)
             finally:
                 os.close(directory)
-    read_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    read_flags = os.O_RDONLY | binary | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, read_flags)
     try:
         info = os.fstat(descriptor)

@@ -65,6 +65,34 @@ def test_architecture_check_passes():
     assert stats["violations"] == 0
 
 
+def test_migration_os_adapter_allowance_does_not_expand_other_platform_edges(tmp_path):
+    (tmp_path / "scripts").mkdir()
+    checker = tmp_path / "scripts" / "check_architecture.py"
+    shutil.copy2(_REPO_ROOT / "scripts" / "check_architecture.py", checker)
+    paths = tmp_path / "sonder_runtime" / "platform"
+    paths.mkdir(parents=True)
+    (paths / "paths.py").write_text(
+        "from sonder_runtime.adapters.filesystem.durable_locks import exclusive_file_lock\n"
+        "from sonder_runtime.adapters.process_liveness import probe_process\n"
+        "from sonder_runtime.adapters.persistence import fleet_store\n", encoding="utf-8",
+    )
+    (paths / "adjacent.py").write_text(
+        "from sonder_runtime.adapters.process_liveness import probe_process\n", encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "add", "--", "sonder_runtime/platform/paths.py", "sonder_runtime/platform/adjacent.py"],
+        cwd=tmp_path, check=True,
+    )
+    result = subprocess.run(
+        [sys.executable, str(checker)], capture_output=True, text=True, timeout=30,
+    )
+    errors = [line.replace("\\", "/") for line in result.stdout.splitlines() if "may not import" in line]
+    assert len(errors) == 2
+    assert any("platform/paths.py" in line and "persistence" in line for line in errors)
+    assert any("platform/adjacent.py" in line and "process_liveness" in line for line in errors)
+
+
 def test_absolute_import_index_preserves_compatibility_rule_semantics():
     module = _architecture_module()
     tree = ast.parse(

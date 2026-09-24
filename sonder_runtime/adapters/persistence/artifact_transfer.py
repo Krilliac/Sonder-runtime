@@ -1,7 +1,5 @@
 """Single-host scoped transfer ledger and immutable files in an anchored private spool."""
 
-from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
-
 from contextlib import contextmanager
 import hashlib
 import hmac
@@ -16,6 +14,8 @@ import uuid
 
 from ...application.artifacts.transfer import ArtifactRange, TransferError
 from ...application.compute_fabric.artifact_spool import PrivateDirectoryAnchor
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+from sonder_runtime.adapters.filesystem.durable_locks import LockTimeout, exclusive_descriptor_lock
 
 
 def _command(value):
@@ -106,26 +106,17 @@ class SQLiteArtifactTransferStore:
     def _mutation(self):
         self._safe_root()
         with PrivateDirectoryAnchor(self.root) as anchor:
-            with anchor.open_read("transfer.lock") as lock:
-                try:
-                    if os.name == "nt":
-                        import msvcrt
-
-                        msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
-                    else:
-                        import fcntl
-
-                        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except OSError:
-                    raise TransferError("BUSY") from None
-                try:
+            try:
+                with anchor.open_read("transfer.lock") as lock, exclusive_descriptor_lock(
+                    lock.fileno(),
+                    self.root / "transfer.lock",
+                    timeout=0.5,
+                    purpose="artifact-transfer",
+                    directory_fd=anchor.fd,
+                ):
                     yield
-                finally:
-                    if os.name == "nt":
-                        lock.seek(0)
-                        msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
-                    else:
-                        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            except LockTimeout as exc:
+                raise TransferError(f"BUSY: {exc}") from None
 
     @contextmanager
     def _directories(self, row):

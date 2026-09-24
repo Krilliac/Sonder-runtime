@@ -3,6 +3,7 @@ import json
 import pytest
 
 import command_recovery
+import durable_locks
 
 
 def test_receive_complete_replay_and_ack_lifecycle(tmp_path):
@@ -115,3 +116,55 @@ def test_durable_transition_survives_best_effort_compaction_failure(tmp_path, mo
     assert completed["state"] == "completed"
     recovered = command_recovery.CommandJournal(journal.path)
     assert recovered.inspect("client", "one")["state"] == "completed"
+
+
+def test_command_journal_lock_timeout_reports_holder(tmp_path):
+    path = tmp_path / "commands.jsonl"
+    journal = command_recovery.CommandJournal(path, lock_timeout=0)
+    with durable_locks.exclusive_file_lock(
+        journal.lock_path, timeout=1, purpose="test-command-holder"
+    ), pytest.raises(durable_locks.LockTimeout, match="test-command-holder"):
+        journal.receive("client", "blocked", {"action": "start"})
+
+
+def test_command_journal_thread_wait_is_bounded_and_names_owner(tmp_path):
+    import os
+    import threading
+    import time
+
+    journal = command_recovery.CommandJournal(tmp_path / "commands.jsonl", lock_timeout=0.1)
+    entered, release = threading.Event(), threading.Event()
+
+    def hold():
+        with journal._locked():
+            entered.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    try:
+        assert entered.wait(3)
+        started = time.monotonic()
+        with pytest.raises(command_recovery.CommandJournalLockTimeout) as raised:
+            journal.receive("client", "blocked", {"action": "start"})
+        assert time.monotonic() - started < 2
+        assert raised.value.holder["pid"] == os.getpid()
+        assert raised.value.holder["thread_id"] == holder.ident
+    finally:
+        release.set()
+        holder.join(timeout=3)
+    assert not holder.is_alive()
+
+
+def test_lock_poll_interval_cannot_extend_the_acquisition_deadline(tmp_path):
+    import time
+
+    lock = tmp_path / "deadline.lock"
+    with durable_locks.exclusive_file_lock(lock, purpose="long-poll-holder"):
+        started = time.monotonic()
+        with (
+            pytest.raises(durable_locks.LockTimeout, match="long-poll-holder"),
+            durable_locks.exclusive_file_lock(lock, timeout=0.05, poll_interval=10),
+        ):
+            pytest.fail("contended lock admitted a second owner")
+        assert time.monotonic() - started < 1

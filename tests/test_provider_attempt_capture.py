@@ -238,6 +238,28 @@ def test_named_legacy_history_admits_before_final_dispatch(tmp_path, monkeypatch
     events = repository.read_range("named")
     assert [e.event_type for e in events] == ["model.requested", "user.message", "provider.requested", "provider.responded", "model.response"]
     assert events[0].payload["request_id"] == events[2].payload["request_id"]
+    assert events[0].payload["routing_metadata"] == {
+        "lane": "chat", "reason": "explicit model selection",
+    }
+
+
+def test_named_terminal_chat_default_retrospective_capture_replays_lane(tmp_path, monkeypatch):
+    import types
+
+    import server
+
+    database = tmp_path / "terminal-session.sqlite"
+    capture = SessionCaptureService(SQLiteSessionRepository(database))
+    monkeypatch.setattr(server, "_application", lambda: types.SimpleNamespace(session_capture_service=lambda: capture))
+    server._capture_durable_session_turn(
+        "terminal-chat", "hello", [], "general-model", "system", "general",
+        "response", requested_tier=None,
+    )
+
+    restarted = SessionCaptureService(SQLiteSessionRepository(database))
+    assert restarted.replay("terminal-chat").request.request.routing_metadata == {
+        "lane": "chat", "reason": "ordinary conversation",
+    }
 
 
 def test_served_scope_carries_http_identity_to_single_completion(tmp_path, monkeypatch):
@@ -259,11 +281,18 @@ def test_served_scope_carries_http_identity_to_single_completion(tmp_path, monke
     events = repository.read_range("http-session")
     assert [e.event_type for e in events] == ["model.requested", "user.message", "provider.requested", "provider.responded"]
     assert events[2].payload["request_id"] == "http-request"
+    assert events[0].payload["routing_metadata"] == {
+        "lane": "chat", "reason": "ordinary conversation",
+    }
     serve._capture_live_session_turn(session_id="http-session", prompt="hello", history=[], model="fixture", content=turn.content,
                                      request_id="http-request", turn_id="http-turn", stream=False, provider_capture=turn.provider_capture)
     events = repository.read_range("http-session")
     assert [e.event_type for e in events].count("model.requested") == 1
     assert [e.event_type for e in events].count("model.response") == 1
+    restarted = SessionCaptureService(SQLiteSessionRepository(tmp_path / "session.db"))
+    assert restarted.replay("http-session").request.request.routing_metadata == {
+        "lane": "chat", "reason": "ordinary conversation",
+    }
 
 
 def test_served_cache_hit_has_no_provider_admission(tmp_path, monkeypatch):
@@ -272,6 +301,27 @@ def test_served_cache_hit_has_no_provider_admission(tmp_path, monkeypatch):
     monkeypatch.setattr(serve.server, "answer_with_history", lambda *a, **k: "cached answer")
     turn = serve._run_prompt("hello", session="http-session", return_result=True, capture_request_id="http-request", capture_turn_id="http-turn")
     assert turn.provider_capture is None
+
+
+def test_http_retrospective_capture_preserves_explicit_chat_route_after_restart(tmp_path, monkeypatch):
+    import types
+
+    from sonder_runtime.bootstrap import app as bootstrap_app
+    from sonder_runtime.interfaces.http import serve
+
+    database = tmp_path / "http-retrospective.sqlite"
+    capture = SessionCaptureService(SQLiteSessionRepository(database))
+    monkeypatch.setattr(bootstrap_app, "default_app", lambda: types.SimpleNamespace(session_capture_service=lambda: capture))
+    serve._capture_live_session_turn(
+        session_id="retrospective", prompt="hello", history=[],
+        model="selected-model", content="model answer", request_id="request",
+        turn_id="turn", stream=False, selector="general",
+    )
+
+    restarted = SessionCaptureService(SQLiteSessionRepository(database))
+    assert restarted.replay("retrospective").request.request.routing_metadata == {
+        "lane": "chat", "reason": "explicit model selection",
+    }
 
 
 def test_openai_embedding_inside_chat_scope_is_not_generation_evidence(tmp_path):

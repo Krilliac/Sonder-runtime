@@ -784,6 +784,17 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
                     and name == "sonder_runtime.domain.artifact_mobility_label"
                 ):
                     continue
+                # State-path initialization can migrate a legacy database before
+                # bootstrap exists. It shares the OS lock and non-destructive
+                # identity probes instead of reimplementing these boundaries.
+                if (
+                    rel.as_posix() == "sonder_runtime/platform/paths.py"
+                    and name in {
+                        "sonder_runtime.adapters.filesystem.durable_locks",
+                        "sonder_runtime.adapters.process_liveness",
+                    }
+                ):
+                    continue
                 if target_layer not in ALLOWED_PACKAGE_EDGES[layer]:
                     violations.append(
                         f"{rel}: {layer} may not import {name} "

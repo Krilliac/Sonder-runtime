@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
-import os
+import json
 import re
 import tempfile
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -32,44 +30,23 @@ class PublishPlan:
 class _PublicationLock:
     """Small cross-process lock for marker lookup plus publication."""
 
-    def __init__(self, plan: PublishPlan):
+    def __init__(self, plan: PublishPlan, lock_factory=None):
         key = hashlib.sha256((plan.issue_command[plan.issue_command.index("--repo") + 1] + "\0" + plan.marker).encode()).hexdigest()
         self.path = Path(tempfile.gettempdir()) / ("sonder-scenario-validation-" + key + ".lock")
-        self.handle = None
+        self._lock_factory = lock_factory
+        self._lock = None
 
     def __enter__(self):
-        self.path.touch(exist_ok=True)
-        self.handle = self.path.open("r+b")
-        deadline = time.monotonic() + 30
-        while True:
-            try:
-                if os.name == "nt":
-                    import msvcrt
-                    self.handle.seek(0)
-                    msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
-                else:
-                    import fcntl
-                    fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return self
-            except (OSError, BlockingIOError):
-                if time.monotonic() >= deadline:
-                    self.handle.close()
-                    raise RuntimeError("timed out waiting for scenario validation publication lock")
-                time.sleep(0.05)
+        self._lock = self._lock_factory(
+            self.path, timeout=30, purpose="scenario-validation-publication"
+        )
+        self._lock.__enter__()
+        return self
 
     def __exit__(self, *_):
-        if self.handle is None:
+        if self._lock is None:
             return
-        try:
-            if os.name == "nt":
-                import msvcrt
-                self.handle.seek(0)
-                msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
-        finally:
-            self.handle.close()
+        self._lock.__exit__(*_)
 
 
 def _body(report: ScenarioReport) -> str:
@@ -118,9 +95,10 @@ def build_publish_plan(report: ScenarioReport, *, repository: str, branch: str |
 class GitHubPublisher:
     """Execute an already validated plan. Dry-run is deliberately default."""
 
-    def __init__(self, *, dry_run: bool = True, adapter: GitHubAdapter | None = None):
+    def __init__(self, *, dry_run: bool = True, adapter: GitHubAdapter | None = None, lock_factory=None):
         self.dry_run = dry_run
         self.adapter = adapter
+        self.lock_factory = lock_factory
 
     def publish(self, plan: PublishPlan, *, create_issue: bool = True, create_pr: bool = False) -> dict[str, object]:
         commands = []
@@ -134,7 +112,9 @@ class GitHubPublisher:
             return {"dry_run": True, "operations": ["issue" if command == plan.issue_command else "pr" for command in commands], "title": plan.issue_title, "marker": plan.marker}
         if self.adapter is None:
             raise RuntimeError("a GitHub adapter is required for non-dry-run publication")
-        with _PublicationLock(plan):
+        if self.lock_factory is None:
+            raise RuntimeError("a lock provider is required for non-dry-run publication")
+        with _PublicationLock(plan, self.lock_factory):
             results = []
             existing = self._existing_issue(plan) if create_issue else []
             existing_pr = self._existing_pr(plan) if create_pr else []

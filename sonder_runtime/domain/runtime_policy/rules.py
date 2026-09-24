@@ -22,7 +22,7 @@ BASE_LOCAL_TIERS = ("fast", "code", "general")
 # case the router degrades to a base tier exactly as it did before they existed.
 OPTIONAL_LOCAL_TIERS = ("reasoning", "vision")
 LOCAL_TIERS = BASE_LOCAL_TIERS + OPTIONAL_LOCAL_TIERS
-ROUTING_LANES = ("router", "workbench", "autopilot", "fleet", "review")
+ROUTING_LANES = ("chat", "router", "workbench", "autopilot", "fleet", "review")
 # Environment values that explicitly leave an optional tier unbound.
 UNSET_TOKENS = frozenset({"none", "off", "disabled", "-"})
 DEFAULT_MODELS = {
@@ -40,6 +40,9 @@ DEFAULT_MODELS = {
 DEFAULT_EMBEDDING_MODEL = "nomic-embed-text"
 RESERVED_PERSONAL_MODEL = "sonder-personal:latest"
 DEFAULT_ROUTING = {
+    # Chat is a routing lane, not a model tier. Ordinary conversation uses
+    # the general base tier unless the operator pins a request explicitly.
+    "chat": "general",
     "router": "fast",
     "workbench": "code",
     "autopilot": "code",

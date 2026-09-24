@@ -112,7 +112,7 @@ def test_natural_execution_retry_reuses_only_the_same_caller_action(monkeypatch)
     calls = []
     monkeypatch.setattr(
         server, "route_work_request",
-        lambda prompt, project="": calls.append((prompt, project)) or "started",
+        lambda prompt, project="", **_kwargs: calls.append((prompt, project)) or "started",
     )
 
     assert serve._handle_work_intent(

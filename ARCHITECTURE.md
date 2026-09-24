@@ -8,6 +8,14 @@ experimental, proposed, degraded, or unsupported.
 
 ## What Sonder is
 
+Worker liveness and work progress are distinct. Fleet progress deadlines
+surface a silent lane without granting permission to kill a process or repeat
+an uncertain effect. Shared filesystem advisory locks have bounded acquisition
+and diagnostic process-identity sidecars. The lock inode remains persistent;
+owner metadata is cleared on release. See the
+[stall and recovery boundaries](docs/architecture/evidence/STALL-RECOVERY-2026-09-24.md)
+for the concrete sites, configuration and bootstrap dependency decision.
+
 Sonder is an AI runtime and orchestration system. It is not a foundation model,
 a pretrained language model, or a repository of base-model weights.
 

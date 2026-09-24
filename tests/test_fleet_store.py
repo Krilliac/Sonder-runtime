@@ -91,6 +91,84 @@ def test_agent_lifecycle_is_durable_and_queryable(monkeypatch, tmp_path):
     assert snap["latest_master"]["task"] == "work"
 
 
+def test_snapshot_marks_active_agent_stalled_after_independent_progress_deadline(
+    monkeypatch, tmp_path,
+):
+    _isolated_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("SONDER_FLEET_PROGRESS_DEADLINE_SECONDS", "0.1")
+    clock = {"now": 100.0}
+    monkeypatch.setattr(fleet_store.time, "time", lambda: clock["now"])
+    fleet_store.register_owner("owner-stall", os.getpid(), 100.0)
+    fleet_store.create_agent(
+        _row("agent-stall", task="blocked call"), "owner-stall", os.getpid(),
+    )
+    fleet_store.start_agent("agent-stall", "owner-stall", "running blocked call")
+    clock["now"] = 100.2
+    snapshot = fleet_store.snapshot(include_finished=False)
+    row = snapshot["agents"][0]
+
+    assert row["stalled"] is True
+    assert row["progress_age_seconds"] >= 0.1
+    assert "no progress" in row["stalled_reason"]
+    assert snapshot["stalled_agent_count"] == 1
+    assert snapshot["stalled_agents"][0]["id"] == "agent-stall"
+
+
+def test_snapshot_counts_stalled_agents_outside_paginated_details(monkeypatch, tmp_path):
+    _isolated_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("SONDER_FLEET_PROGRESS_DEADLINE_SECONDS", "0.1")
+    clock = {"now": 100.0}
+    monkeypatch.setattr(fleet_store.time, "time", lambda: clock["now"])
+    fleet_store.register_owner("owner-page-stall", 901, 100.0)
+    fleet_store.create_agent(
+        _row("old-stall"), "owner-page-stall", 901,
+    )
+    clock["now"] = 100.2
+    newer = _row("new-stall")
+    newer["updated_ts"] = 100.2
+    fleet_store.create_agent(newer, "owner-page-stall", 901)
+    snapshot = fleet_store.snapshot(include_finished=False, limit=1)
+
+    assert snapshot["stalled_agent_count"] == 1
+    assert snapshot["stalled_agent_total"] == 1
+    assert snapshot["stalled_agent_listed_count"] == 0
+    assert snapshot["agents"][0]["id"] == "new-stall"
+
+
+def test_reconciliation_does_not_reclaim_stale_heartbeat_from_live_process(
+    monkeypatch, tmp_path,
+):
+    _isolated_store(monkeypatch, tmp_path)
+    clock = {"now": 100.0}
+    monkeypatch.setattr(fleet_store.time, "time", lambda: clock["now"])
+    fleet_store.register_owner("owner-live", os.getpid(), 100.0)
+    fleet_store.create_agent(
+        _row("agent-live"), "owner-live", os.getpid(),
+    )
+    clock["now"] = 200.0
+    result = fleet_store.reconcile_stale_owners(
+        now=200.0, stale_seconds=30, grace_seconds=1,
+    )
+
+    assert result["suspect_owners"] == 0
+    assert fleet_store.get_agent("agent-live")["status"] == "queued"
+
+
+@pytest.mark.parametrize("host,identity", [("foreign-host", ""), (None, "")])
+def test_reconciliation_preserves_foreign_and_legacy_live_owner(monkeypatch, tmp_path, host, identity):
+    _isolated_store(monkeypatch, tmp_path)
+    fleet_store.register_owner("owner-unknown", os.getpid(), 1.0)
+    fleet_store.create_agent(_row("agent-unknown"), "owner-unknown", os.getpid())
+    with sqlite3.connect(fleet_store.database_path()) as conn:
+        conn.execute(
+            "UPDATE fleet_owners SET host=COALESCE(?,host),process_identity=?,heartbeat_ts=1,stale_seen_ts=1",
+            (host, identity),
+        )
+    result = fleet_store.reconcile_stale_owners(now=1000, stale_seconds=30, grace_seconds=1)
+    assert result["interrupted"] == 0
+    assert fleet_store.get_agent("agent-unknown")["status"] == "queued"
+
+
 def test_same_path_database_restore_reinitializes_schema(monkeypatch, tmp_path):
     _isolated_store(monkeypatch, tmp_path)
     database = Path(fleet_store.database_path())

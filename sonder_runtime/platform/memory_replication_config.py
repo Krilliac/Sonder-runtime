@@ -11,7 +11,9 @@ import re
 
 
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
-_PROJECT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
+# This is an opaque scope token, not a filesystem authorization rule.  Keep
+# admitted POSIX, drive, and UNC spellings exact through configuration.
+_PROJECT = re.compile(r"(?:[A-Za-z0-9]|/|\\\\)[A-Za-z0-9._:\\/\\-]{0,255}\Z")
 _HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _HTTPS_ORIGIN = re.compile(
     r"https://(?P<host>\[[0-9a-f:]+\]|[a-z0-9.-]+):(?P<port>[0-9]{1,5})\Z"

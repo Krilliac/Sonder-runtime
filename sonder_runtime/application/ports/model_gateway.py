@@ -28,6 +28,8 @@ class ModelRequest:
     system: str = ""
     history: tuple = ()
     options: dict = field(default_factory=dict)
+    # Durable route telemetry belongs beside the request, never in provider options.
+    routing_metadata: Mapping[str, object] = field(default_factory=dict)
     stream: bool = False
     provenance: ModelRequestProvenance | None = None
     context_packet: ContextPacket | None = None
@@ -41,6 +43,8 @@ class ModelRequest:
     _resolved_route: object | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.routing_metadata, Mapping):
+            raise ValueError("routing_metadata must be a mapping")  # noqa: TRY004 - preserve the DTO validation ValueError contract
         # Provider-bound cache evidence must describe this request's own
         # prefix. Replay reconstructs these fields as dictionaries, while live
         # requests carry immutable manifest values.

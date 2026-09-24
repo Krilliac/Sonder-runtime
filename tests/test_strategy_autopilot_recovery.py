@@ -155,6 +155,47 @@ def test_unmeasured_or_full_window_does_not_claim_exposure(monkeypatch, tmp_path
         ).fetchone()[0] == 0
 
 
+def test_pre_model_autopilot_selection_ignores_same_project_other_task_family(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    trace, memory, database = _memory(tmp_path)
+    _seed_failed_inspection(trace, memory, str(project))
+    observe_autopilot_task(
+        trace,
+        run={"id": "unrelated-autopilot", "objective": "validate project",
+             "project": str(project), "tier": "code"},
+        task={"id": "task-02", "kind": "validate", "attempts": 1,
+              "status": "failed", "error": "unrelated validation"},
+        memory_service=memory,
+    )
+    # The live pre-model callback is the same entry point used by the agent.
+    seen = []
+
+    def agent(prompt, **kwargs):
+        brief = kwargs["pre_model_context"](
+            "measured-model", False, "host instruction", prompt, 256, 32768,
+        )
+        seen.append(brief)
+        return "fixed outcome"
+
+    monkeypatch.setattr(server, "_agent_impl", agent)
+    monkeypatch.setattr(server, "_autopilot_allowed_tools", lambda _run: frozenset({"file_read"}))
+    monkeypatch.setattr(server, "_autopilot_tool_policy", lambda _run: None)
+    run = {"id": "pre-model-negative", "project": str(project), "owner_id": "owner",
+           "tier": "code", "policy": "observe"}
+    task = {"id": "task-01", "kind": "inspect", "title": "Inspect",
+            "instruction": "Inspect project", "attempts": 1}
+    assert server._autopilot_work_model(run, task, "", strategy_memory=memory) == "fixed outcome"
+    assert len(seen) == 1 and '"authority":"advisory_only"' in seen[0]
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT x.experience_id, e.family FROM strategy_memory_selection x "
+            "JOIN strategy_experience e ON x.experience_id=e.experience_id"
+        ).fetchall()
+    assert len(rows) == 1 and rows[0][1] == "inspect"
+    assert rows[0][0] in seen[0]
+
+
 def test_unanswered_model_request_does_not_penalize_selected_reference(monkeypatch, tmp_path):
     project = tmp_path / "project"
     project.mkdir()

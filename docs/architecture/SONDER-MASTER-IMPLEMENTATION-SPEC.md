@@ -411,7 +411,7 @@ schema, cancellation, cleanup-to-quiescence contract, and conformance tests.
 - [ ] **MODEL-002 — Pure route planner.** Route planning performs no model/network I/O
   and returns an explainable decision.
 - [ ] **MODEL-003 — Logical roles.** Preserve fast, code, general, reasoning, and vision
-  tiers and router, workbench, autopilot, fleet, and review lanes while permitting
+  tiers and chat, router, workbench, autopilot, fleet, and review lanes while permitting
   planner/editor/verifier role composition.
 - [ ] **MODEL-004 — Calibration profiles.** Key measured residency, throughput, latency,
   and KV-cache costs by exact model digest, quantization, architecture, total/active

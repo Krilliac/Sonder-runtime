@@ -77,6 +77,14 @@ if "_OWNER_ID" not in globals():
 if "_PRINCIPAL_ID" not in globals():
     _PRINCIPAL_ID = ""
     _PRINCIPAL_SECRET = ""
+
+
+class FleetStalledError(RuntimeError):
+    """A lane exceeded its progress deadline and remains quarantined alive."""
+
+    def __init__(self, lanes):
+        self.lanes = tuple(str(lane) for lane in lanes)
+        super().__init__("fleet lanes stalled without progress: %s" % ", ".join(self.lanes))
 _MAX_EVENTS = 80
 DEFAULT_MAX_AGENTS = 16
 ABSOLUTE_MAX_AGENTS = 64
@@ -1904,6 +1912,7 @@ def _bounded_error_text(exc: BaseException) -> str:
 
 def dispatch_lanes(
     scheduler, max_workers: int, run_lane, collect, on_error, on_abandon=None,
+    on_stall=None,
 ) -> None:
     """Run every scheduled lane, admitting only what ``scheduler`` allows.
 
@@ -1923,7 +1932,11 @@ def dispatch_lanes(
     its own row, so it is not closed twice.  If the loop itself aborts, every
     lane that never got a future -- still pending, or admitted but rejected
     by ``pool.submit`` -- is handed to ``on_abandon`` so no durable row is
-    stranded as queued; the original exception still propagates.
+    stranded as queued; the original exception still propagates. A lane that
+    makes no progress for the configured deadline is reported through
+    ``on_stall`` and aborts dispatch with ``FleetStalledError``. Live workers
+    retain their reservations until they exit; this generic layer has no safe
+    termination authority.
     """
     unsubmitted: list[str] = []
 
@@ -1938,9 +1951,15 @@ def dispatch_lanes(
                 lane_id, when, _bounded_error_text(abandon_exc),
             )
 
+    pool = ThreadPoolExecutor(max_workers=max(1, int(max_workers)))
+    futures = {}
+    started_at = {}
+    last_progress_ts = {}
+    progress_deadline = float(
+        getattr(fleet_store, "progress_deadline_seconds", lambda: 120.0)()
+    )
+    wait_slice = max(0.1, min(float(HEARTBEAT_SECONDS), progress_deadline / 4.0))
     try:
-        with ThreadPoolExecutor(max_workers=max(1, int(max_workers))) as pool:
-            futures = {}
 
             def submit_admitted() -> None:
                 admitted = list(scheduler.admit())
@@ -1955,12 +1974,51 @@ def dispatch_lanes(
                         raise
                     admitted.pop(0)
                     futures[future] = lane_id
+                    started_at[future] = time.monotonic()
+                    last_progress_ts[future] = None
 
             submit_admitted()
             while futures:
-                done, _pending = wait(tuple(futures), return_when=FIRST_COMPLETED)
+                done, pending = wait(
+                    tuple(futures), timeout=wait_slice, return_when=FIRST_COMPLETED,
+                )
+                now = time.monotonic()
+                # Refresh only futures still pending. A completed sibling is
+                # collected below and can never be classified as stalled.
+                for future in pending:
+                    lane_id = futures[future]
+                    with contextlib.suppress(Exception):
+                        row = fleet_store.get_agent(lane_id)
+                        updated_ts = float(row.get("updated_ts") or 0) if row else 0
+                        if updated_ts and (
+                            last_progress_ts.get(future) is None
+                            or updated_ts > last_progress_ts[future]
+                        ):
+                            last_progress_ts[future] = updated_ts
+                            started_at[future] = now
+                stalled = [
+                    future for future in pending
+                    if now - started_at[future] >= progress_deadline
+                ]
+                if stalled:
+                    stalled_lanes = [futures[future] for future in stalled]
+                    logger.warning(
+                        "fleet lanes stalled; quarantining live workers: %s",
+                        ", ".join(stalled_lanes),
+                    )
+                    if on_stall is not None:
+                        on_stall(tuple(stalled_lanes))
+                    raise FleetStalledError(stalled_lanes)
+                if not done:
+                    logger.info(
+                        "fleet dispatch waiting on %d lane(s); progress deadline %.1fs",
+                        len(futures), progress_deadline,
+                    )
+                    continue
                 for future in done:
                     lane_id = futures.pop(future)
+                    started_at.pop(future, None)
+                    last_progress_ts.pop(future, None)
                     try:
                         result = future.result()
                     except Exception as exc:
@@ -1983,6 +2041,10 @@ def dispatch_lanes(
     finally:
         for lane_id in unsubmitted + list(scheduler.pending):
             close(lane_id, "after dispatch abort")
+        # A worker blocked in a model/tool call is deliberately left running;
+        # there is no safe generic termination authority.  Do not make its
+        # coordinator wait forever during error/abort cleanup.
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def run_delegated(
@@ -2183,10 +2245,30 @@ def run_delegated(
                 _RESERVED_SLOTS = max(0, _RESERVED_SLOTS - 1)
             raise
 
-    dispatch_lanes(
-        scheduler, worker_slots, _run_lane, _collect, _lane_error,
-        on_abandon=_lane_abandoned,
-    )
+    try:
+        dispatch_lanes(
+            scheduler, worker_slots, _run_lane, _collect, _lane_error,
+            on_abandon=_lane_abandoned,
+            on_stall=lambda lanes: [request_cancel(lane) for lane in lanes],
+        )
+    except FleetStalledError as exc:
+        concurrency_report = scheduler.summary()
+        # Stalled children stay running/cancel-requested until their actual
+        # calls return.  Never run fan-in or audit against this uncertain set.
+        error = "fleet stalled; result is uncertain: %s" % exc
+        _finish(master_id, error=error)
+        return {
+            "mode": "delegated",
+            "master_id": master_id,
+            "agents": child_ids,
+            "worker_slots": worker_slots,
+            "concurrency": concurrency_report,
+            "outputs": _public_outputs(outputs),
+            "output": "STALLED: %s" % error,
+            "stalled": True,
+            "uncertain": True,
+            "stalled_lanes": list(exc.lanes),
+        }
     concurrency_report = scheduler.summary()
     if cancel_requested(master_id):
         final = _finish(master_id)
@@ -2604,6 +2686,12 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
                 "tokens_out": sum(int(row.get("tokens_out") or 0) for row in rows),
                 "latest_master_result": "",
                 "latest_master": {},
+                "stalled_agents": [],
+                "stalled_agent_count": 0,
+                "stalled_agent_total": 0,
+                "progress_deadline_seconds": float(
+                    getattr(fleet_store, "progress_deadline_seconds", lambda: 120.0)()
+                ),
                 "database": "",
             }
     data["capacity"] = capacity()
@@ -2795,6 +2883,10 @@ def format_snapshot(data: dict) -> str:
         "  active agents: %s" % data.get("active_agents", 0),
         "  cancellation pending: %s" % data.get("cancel_pending", 0),
         "  interrupted/recoverable: %s" % data.get("interrupted_agents", 0),
+        "  stalled/no-progress: %s (deadline %.1fs)" % (
+            data.get("stalled_agent_total", data.get("stalled_agent_count", 0)),
+            float(data.get("progress_deadline_seconds") or 0),
+        ),
         "  task drift rejected: %s" % data.get("task_drift_agents", 0),
         "  tokens in/out: %s/%s" % (data.get("tokens_in", 0), data.get("tokens_out", 0)),
     ]

@@ -1,28 +1,27 @@
-# Backend route attestation
+# Backend probe diagnostics
 
-`scripts/backend_attest.py` probes one OpenAI-compatible model route for chat,
-structured JSON, and cancellation behavior. It stores capability results and
-reason codes in the private state directory; provider responses and API keys
-are not written to the evidence file.
+`scripts/backend_attest.py` probes one OpenAI-compatible endpoint and stores
+reason codes in the private state directory. Its records are **always
+synthetic diagnostics**, even when the script calls a live endpoint. They do
+not qualify a model for identity-bound capability routing. The evidence file
+contains no provider response text or API key.
 
-Preview a local route without a model call or state write:
+Preview the request without a model call or state write:
 
 ```powershell
 python scripts/backend_attest.py --base-url http://127.0.0.1:8080 --model my-model --dry-run
 ```
 
-Run the bounded probe by omitting `--dry-run`. A non-loopback endpoint requires
-both HTTPS and `--allow-cloud`; the probe prompts are fixed and contain no
-project data. Set `SONDER_OPENAI_API_KEY` in the process environment when the
-endpoint requires it. Keep the key out of command arguments and logs.
+Omit `--dry-run` to check nonempty chat output, a small JSON response, and
+local pre-cancelled request handling. That cancellation check does not prove
+that an in-flight provider effect stopped. For additional diagnostic
+JSON-shape checks, provide an absolute host metadata file:
 
-The recorded backend is `openai-compatible`. A route profile must use that
-backend label and the same model name to consume this evidence. A failed,
-missing, synthetic, or stale record keeps the optional route ineligible.
+```powershell
+python scripts/backend_attest.py --base-url http://127.0.0.1:8080 --model my-model --identity-file C:\path\to\backend-identity.json --protocol-probes
+```
 
-Identity-bound routing needs an additional host-owned observation of the exact
-backend deployment. Supply `--identity-file` when probing a live endpoint. It
-must be an ordinary absolute JSON file with exactly these fields:
+The optional file must be ordinary JSON with exactly these fields:
 
 ```json
 {
@@ -35,28 +34,30 @@ must be an ordinary absolute JSON file with exactly these fields:
 }
 ```
 
-The host must derive these values from the running deployment and re-observe
-them at every route admission; a tag, endpoint URL, profile metadata, or model
-name alone cannot certify identity. A change to any field, an expired probe,
-or a failed/unknown required capability refuses the route. For example, a
-host can opt in with `ModelGatewayFacade(..., recent_evidence=store,
-identity_for=current_route_identity)` after publishing READY provider health.
-`generate`, `generate_for_role`, `embed` and `route` then enforce the evidence
-before an inference effect. An in-flight deployment change also refuses the
-result, even when the new deployment has its own passing probe. The public
-`facade.gateway` reference remains gated in identity-bound mode. Default
-gateway construction remains unchanged.
-The canonical `build_runtime(..., route_evidence=store,
+The protocol mode rereads the file around requests and requires the provider
+to report the configured model name. Neither check verifies that the declared
+model digest, tokenizer, template, context window, quantization or hardware
+actually belongs to the responding endpoint. Output therefore reports
+`identity_declared: true` and `identity_bound: false`; the stored record
+remains `synthetic: true`. Native tool calls, fallback tool execution,
+sequential tool calls, continuation and in-flight cancellation are `unknown`
+because this mode has no real granted tool dispatch or corresponding host
+receipts. Other unprobed capabilities also remain unknown. A zero exit code
+means only that attempted diagnostic cases did not fail.
+
+A non-loopback endpoint requires both HTTPS and `--allow-cloud`. The fixed
+probe prompts contain no project data. If the endpoint needs an API key, set
+`SONDER_OPENAI_API_KEY` in the process environment and keep it out of command
+arguments and logs.
+
+For production identity-bound routing, an independent host observer must bind
+the full concrete deployment identity to the actual serving endpoint and
+measure each required capability through the supported runtime path. Only
+that separately established, recent, non-synthetic evidence can be passed to
+`ModelGatewayFacade(..., recent_evidence=store,
+identity_for=current_route_identity)` with READY provider health, or through
+`build_runtime(..., route_evidence=store,
 route_identity_for=current_route_identity, route_bindings=bindings,
-route_health=health)` uses that facade as `Runtime.model_gateway`, so normal
-runtime callers also pass through the gate. Opt-in composition requires all
-roles to bind the same configured concrete transport; a mixed provider tier
-dispatcher has no single provider whose conformance would cover every tier.
-Keep `current_route_identity`
-host-owned and re-read the running model digest, template, backend and hardware
-on each invocation; a cached file of old metadata cannot detect deployment
-changes. A synthetic probe or unbound identity refuses the call.
-Only the chat, JSON-format and pre-cancelled request cases in this script
-run through the OpenAI-compatible gateway. Tool protocol, true in-flight
-cancellation, long-context, cache, resume and vision capabilities stay unknown
-until an actual host-owned live protocol provider supplies those observations.
+route_health=health)`. The identity resolver must reobserve the deployment on
+each admission. An unknown, stale, failed or synthetic case refuses the
+optional route, including any record written by this diagnostic script.

@@ -72,7 +72,7 @@ def lazy_legacy_model_provider_factories(
                     selected = _provider(runtime)
         return require_model_bootstrap_provider(selected)
 
-    def resolve(tier: str, strict: bool = False) -> ModelTarget:
+    def resolve(tier: str, strict: bool | None = None) -> ModelTarget:
         return ensure().resolve_target(tier, strict)
 
     def generate(model, system, temperature, num_predict, num_ctx, **kwargs):

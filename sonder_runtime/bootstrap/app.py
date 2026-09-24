@@ -468,14 +468,18 @@ def build_application(
         """Return the single durable journal shared by direct worker adapters."""
         nonlocal worker_effect_journal
         if worker_effect_journal is None:
-            from ..adapters.execution.process_jobs import DurableProcessEffectVerifier
+            from ..adapters.execution.compute_effect_verifier import (
+                DurableComputeSubmitVerifier,
+                DurableLocalProcessStartVerifier,
+            )
             from ..adapters.persistence.sqlite.effect_journal import SQLiteEffectJournal
             from ..platform.paths import state_path
 
             worker_effect_journal = SQLiteEffectJournal(
                 state_path("worker-effects.db", "SONDER_WORKER_EFFECTS_DB"),
                 reconciliation_verifiers={
-                    "process-start": DurableProcessEffectVerifier(get_job_registry),
+                    "process-start": DurableLocalProcessStartVerifier(get_job_registry),
+                    "compute-submit": DurableComputeSubmitVerifier(get_job_registry),
                 },
             )
         return worker_effect_journal
@@ -1473,6 +1477,8 @@ def build_application(
         chat=ChatService(
             gateway,
             session_capture_service,
+            chat_default_tier=lambda: target_resolver("sonder", None).tier_label or "sonder",
+            strict_alias_provider_available="ollama" in provider_bindings.required_providers,
             session_capture_factory=(
                 None
                 if session_capture_service is not None

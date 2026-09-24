@@ -10,7 +10,6 @@ import pytest
 
 import isolated_runner
 
-
 DOCKER_PREFIX = ("--host", "npipe:////./pipe/docker_engine")
 IMAGE_ID = "sha256:" + "a" * 64
 
@@ -434,6 +433,191 @@ def test_metadata_probe_hard_caps_output_without_thread_leak(monkeypatch):
         ["runtime", "image", "inspect"], output_limit=1024
     ) is None
     assert threading.active_count() == before
+
+
+def test_probe_pipe_readers_finish_under_the_runtime_owner(monkeypatch):
+    from sonder_runtime.platform.runtime_threads import OwnedRuntimeThreads
+
+    owner = OwnedRuntimeThreads(cleanup=lambda: True, max_threads=2)
+    monkeypatch.setattr(isolated_runner, "owned_runtime_thread", owner.thread)
+
+    class FakeProc:
+        stdout = io.BytesIO(b"pinned metadata")
+        stderr = io.BytesIO()
+        returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    monkeypatch.setattr(isolated_runner.subprocess, "Popen", lambda *_a, **_k: FakeProc())
+    result = isolated_runner._bounded_probe(["docker", "image", "inspect"])
+    assert result is not None and result.stdout == "pinned metadata"
+    assert owner.close(timeout=1).clean
+
+
+@pytest.mark.parametrize("container_cleanup", ["verified-absent", "uncertain-container-removal"])
+def test_reader_owner_denial_reaps_child_and_preserves_container_uncertainty(
+    monkeypatch, container_cleanup,
+):
+    from sonder_runtime.platform.runtime_threads import ThreadOwnershipRefused
+
+    class FakeProc:
+        def __init__(self):
+            self.returncode = None
+            self.stdout = io.BytesIO(b"untrusted candidate output")
+            self.stderr = io.BytesIO()
+            self.killed = False
+            self.reaped = False
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            self.reaped = True
+            return self.returncode
+
+    processes = []
+
+    def popen(*_args, **_kwargs):
+        process = FakeProc()
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(isolated_runner.subprocess, "Popen", popen)
+    actual_factory = isolated_runner.owned_runtime_thread
+    attempts = []
+
+    def limited_owner(**kwargs):
+        attempts.append(kwargs["name"])
+        if len(attempts) == 2:
+            raise ThreadOwnershipRefused("no second owned reader")
+        return actual_factory(**kwargs)
+
+    monkeypatch.setattr(isolated_runner, "owned_runtime_thread", limited_owner)
+    monkeypatch.setattr(isolated_runner, "_verify_project_unchanged", lambda *_a: None)
+    cleanup = []
+    monkeypatch.setattr(isolated_runner, "_cleanup", lambda *_a: cleanup.append(True) or container_cleanup)
+
+    before = threading.active_count()
+    assert isolated_runner._bounded_probe(["docker", "image", "inspect"]) is None
+    assert processes[0].killed and processes[0].reaped
+    assert processes[0].stdout.closed and processes[0].stderr.closed
+    attempts.clear()
+
+    result = isolated_runner._run_bounded(
+        ["/usr/bin/docker", "run"], "docker", "/usr/bin/docker", DOCKER_PREFIX,
+        "sonder-isolated-" + "a" * 32, b"", 2, 1024, "C:/project", (),
+        verify_exit_cleanup=True,
+    )
+    assert processes[1].killed and processes[1].reaped
+    assert processes[1].stdout.closed and processes[1].stderr.closed
+    assert result["ok"] is False and result["returncode"] is None
+    assert result["stdout"] == "" and result["stderr"] == ""
+    assert "output reader unavailable" in result["error"]
+    assert result["cleanup"] == container_cleanup
+    assert len(cleanup) == 1
+    assert threading.active_count() == before
+
+
+def test_second_reader_denial_does_not_start_blocking_pipe_read(monkeypatch):
+    from sonder_runtime.platform.runtime_threads import (
+        OwnedRuntimeThreads,
+        ThreadOwnershipRefused,
+    )
+
+    class HeldPipe(io.BytesIO):
+        def __init__(self):
+            super().__init__()
+            self.read_started = threading.Event()
+            self.release = threading.Event()
+
+        def read(self, size=-1):
+            self.read_started.set()
+            self.release.wait(timeout=1)
+            return super().read(size)
+
+    class FakeProc:
+        def __init__(self):
+            self.stdout = HeldPipe()
+            self.stderr = io.BytesIO()
+            self.returncode = None
+
+        def kill(self):
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    proc = FakeProc()
+    owner = OwnedRuntimeThreads(cleanup=lambda: True, max_threads=1)
+    attempts = []
+
+    def limited_owner(**kwargs):
+        attempts.append(kwargs["name"])
+        if len(attempts) == 2:
+            # Before the admission gate, the first reader enters its blocking
+            # pipe read and close cannot finish until that read is released.
+            proc.stdout.read_started.wait(timeout=.1)
+            raise ThreadOwnershipRefused("second admission denied")
+        return owner.thread(**kwargs)
+
+    monkeypatch.setattr(isolated_runner, "owned_runtime_thread", limited_owner)
+    try:
+        with pytest.raises(RuntimeError, match="ThreadOwnershipRefused") as error:
+            isolated_runner._start_readers(
+                proc, lambda _label, stream: stream.read(4096),
+            )
+        assert error.value.cli_reaped is True
+        assert error.value.readers_stopped is True
+        assert not proc.stdout.read_started.is_set()
+        assert proc.stdout.closed and proc.stderr.closed
+        assert owner.close(timeout=.2).clean
+    finally:
+        proc.stdout.release.set()
+
+
+def test_reader_denial_cannot_claim_safe_cleanup_when_cli_not_reaped(monkeypatch):
+    from sonder_runtime.platform.runtime_threads import (
+        OwnedRuntimeThreads,
+        ThreadOwnershipRefused,
+    )
+
+    class UnreapedProc:
+        stdout = io.BytesIO()
+        stderr = io.BytesIO()
+
+        def kill(self):
+            raise OSError("CLI cannot be killed")
+
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired("docker", timeout)
+
+    attempts = []
+    owner = OwnedRuntimeThreads(cleanup=lambda: True, max_threads=1)
+
+    def limited_owner(**kwargs):
+        attempts.append(kwargs["name"])
+        if len(attempts) == 2:
+            raise ThreadOwnershipRefused("second admission denied")
+        return owner.thread(**kwargs)
+
+    monkeypatch.setattr(isolated_runner, "owned_runtime_thread", limited_owner)
+    monkeypatch.setattr(isolated_runner.subprocess, "Popen", lambda *_a, **_k: UnreapedProc())
+    monkeypatch.setattr(isolated_runner, "_verify_project_unchanged", lambda *_a: None)
+    monkeypatch.setattr(isolated_runner, "_cleanup", lambda *_a: "verified-absent")
+    result = isolated_runner._run_bounded(
+        ["docker", "run"], "docker", "/usr/bin/docker", DOCKER_PREFIX,
+        "sonder-isolated-" + "a" * 32, b"", 2, 1024, "C:/project", (),
+        verify_exit_cleanup=True,
+    )
+    assert result["ok"] is False
+    assert result["cleanup"] == "uncertain-cli-or-reader-teardown"
+    assert "container CLI did not exit after kill" in result["error"]
+    assert owner.close(timeout=.2).clean
 
 
 def test_run_uses_inspected_image_id_not_mutable_tag(monkeypatch, tmp_path):

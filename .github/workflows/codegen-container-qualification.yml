@@ -1,0 +1,56 @@
+name: Codegen Linux container qualification
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  linux-container-boundary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Build a hermetic, locally pinned scratch fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker info --format '{{.OSType}}' | grep -Fx linux
+          mkdir -p "$RUNNER_TEMP/codegen-image"
+          gcc -static -O2 -Wall -Wextra -Werror -o "$RUNNER_TEMP/codegen-image/env" scripts/codegen_container_env.c
+          gcc -static -O2 -Wall -Wextra -Werror -o "$RUNNER_TEMP/codegen-image/launch" scripts/codegen_container_launch.c
+          gcc -static -O2 -Wall -Wextra -Werror -o "$RUNNER_TEMP/codegen-image/probe" tests/fixtures/codegen_container_probe.c
+          cat > "$RUNNER_TEMP/codegen-image/Dockerfile" <<'DOCKERFILE'
+          FROM scratch
+          COPY env /usr/bin/env
+          COPY launch /usr/local/bin/sonder-codegen-launch
+          COPY probe /usr/bin/probe
+          DOCKERFILE
+          docker build --pull=false --no-cache -t sonder-codegen-qualification:local "$RUNNER_TEMP/codegen-image"
+          image_id=$(docker image inspect --format '{{.Id}}' sonder-codegen-qualification:local)
+          [[ "$image_id" =~ ^sha256:[a-f0-9]{64}$ ]]
+          # Root conftest.py clears SONDER_* deployment inputs before test
+          # collection. Pass this CI-built fixture identifier via a test-only
+          # key so collection still proves all four native probes ran.
+          echo "CODEGEN_NATIVE_IMAGE_ID=$image_id" >> "$GITHUB_ENV"
+      - name: Prove real container boundary and refuse any skipped probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pytest -q -s -rs tests/test_codegen_container_native_linux.py \
+            --junitxml="$RUNNER_TEMP/codegen-container-native.xml"
+          python - "$RUNNER_TEMP/codegen-container-native.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          suites = list(ET.parse(sys.argv[1]).getroot().iter("testsuite"))
+          assert len(suites) == 1, suites
+          suite = suites[0]
+          assert int(suite.get("tests", "0")) == 4, suite.attrib
+          assert all(int(suite.get(key, "0")) == 0 for key in ("skipped", "errors", "failures")), suite.attrib
+          PY

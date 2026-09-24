@@ -31,8 +31,9 @@ def _rows(db_path):
         )
 
 
-def test_live_certified_managed_work_persists_authenticated_observation(
-    dispatch, managed, monkeypatch, tmp_path, tmp_path_factory
+@pytest.mark.parametrize("check_exit_code", [0, 7], ids=["passed", "verified-failed"])
+def test_live_managed_verifier_outcome_persists_authenticated_observation(
+    dispatch, managed, monkeypatch, tmp_path, tmp_path_factory, check_exit_code
 ):
     from sonder_runtime.adapters.security.approval_ledger import ApprovalLedger
     from sonder_runtime.bootstrap.managed_conversation import _ManagedTurn
@@ -78,6 +79,8 @@ def test_live_certified_managed_work_persists_authenticated_observation(
         def checked(*args, **kwargs):
             execute(*args, **kwargs)
             for proof in proofs.values():
+                proof["status"] = "failed" if check_exit_code else "succeeded"
+                proof["exit_code"] = check_exit_code
                 proof["digest"] = hashlib.sha256(
                     json.dumps(
                         {k: v for k, v in proof.items() if k != "digest"},
@@ -92,7 +95,7 @@ def test_live_certified_managed_work_persists_authenticated_observation(
         verdict = view.verify_delegated(
             view._draft, verifier_factory=lambda *args: verifier
         )
-        assert verdict.valid, verdict
+        assert verdict.valid is (check_exit_code == 0), verdict
         certificates.append(verdict)
         original_stage(
             view,
@@ -100,8 +103,8 @@ def test_live_certified_managed_work_persists_authenticated_observation(
                 facts,
                 delegated_work=True,
                 validation_attempted=True,
-                validation_passed=True,
-                terminal_class="NORMAL",
+                validation_passed=check_exit_code == 0,
+                terminal_class="VALIDATION_FAILED" if check_exit_code else "NORMAL",
                 certificate_id=verdict.certificate_id,
                 certificate_generation=verdict.generation,
                 certificate_code=verdict.code,
@@ -115,8 +118,9 @@ def test_live_certified_managed_work_persists_authenticated_observation(
     real_boundary = boundary.terminal_eligibility
 
     def counted(*args, **kwargs):
-        resolutions.append(1)
-        return real_boundary(*args, **kwargs)
+        decision = real_boundary(*args, **kwargs)
+        resolutions.append(decision)
+        return decision
 
     monkeypatch.setattr(boundary, "terminal_eligibility", counted)
     verifier_factory = lambda *args: verified[0][0]  # noqa: E731
@@ -145,14 +149,22 @@ def test_live_certified_managed_work_persists_authenticated_observation(
         record = dispatcher.status(observer, work_id=work.prepared.work_id)
     finally:
         authority.release_selection(observer)
-    assert record.state == "terminal", record
-    assert record.completion.phase == "certified"
+    if check_exit_code:
+        # A host-verified failure is negative learning evidence, never a
+        # certificate that the outward work completed successfully.
+        assert record.state == "unknown", record
+        assert record.completion is None and record.terminal is None
+    else:
+        assert record.state == "terminal", record
+        assert record.completion.phase == "certified"
     assert lifetimes[0]._application is application and len(models) == 1
     # The boundary (publication + manifest capture) is resolved exactly once.
     assert len(resolutions) == 1, resolutions
 
     outcomes = recorder.recent()
-    assert [outcome.status for outcome in outcomes] == ["persisted"], outcomes
+    assert [outcome.status for outcome in outcomes] == ["persisted"], (
+        outcomes, [(decision.phase, decision.code) for decision in resolutions]
+    )
     outcome = outcomes[0]
     # Replication is not configured in this composition; promotion must not
     # invent a fact source.
@@ -162,12 +174,14 @@ def test_live_certified_managed_work_persists_authenticated_observation(
     assert len(rows) == 1
     receipt, observation = rows[0]
     assert observation.observation_id == outcome.observation_id
-    assert receipt.verifier_outcome == "passed"
+    assert receipt.verifier_outcome == ("failed" if check_exit_code else "passed")
     assert receipt.principal_id == selection.context.principal_id
     assert receipt.run_id == record.host_turn.run_id
-    assert receipt.receipt_id == record.terminal.receipt_digest
+    if not check_exit_code:
+        assert receipt.receipt_id == record.terminal.receipt_digest
     assert observation.source == "authenticated_verifier"
-    assert observation.trusted_source is True and observation.positive is True
+    assert observation.trusted_source is True
+    assert observation.positive is (check_exit_code == 0)
     assert observation.content.startswith("verified-subject:")
     # Independence is keyed by authenticated principal and scope (not lane).
     assert observation.independent_key == hashlib.sha256(

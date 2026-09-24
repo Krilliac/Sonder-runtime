@@ -355,7 +355,7 @@ class AppControlBinding:
                 issuer is not self._private_inventory_issuer
                 or record_scope is not scope
                 or scope not in self._private_inventory_scopes
-                or record_config is not config
+                or (record_config is not config and record_config != config)
                 or record_digest != self._private_scope_digest(record_required)
                 or not inventory.covers(required)
                 or (
@@ -676,15 +676,20 @@ class AppControlBinding:
             raise PermissionError("private account database changed")
         for suffix in ("-wal", "-shm", "-journal"):
             side = Path(str(raw) + suffix)
-            if side.exists() or side.is_symlink():
+            try:
                 value = side.lstat()
-                if (
-                    not stat.S_ISREG(value.st_mode)
-                    or value.st_nlink != 1
-                    or side.is_symlink()
-                    or getattr(value, "st_file_attributes", 0) & 0x400
-                ):
-                    raise PermissionError("private account sidecar changed")
+            except FileNotFoundError:
+                # SQLite can remove its rollback journal as another owned
+                # connection commits. Absence is valid; other inspection
+                # failures and every unsafe existing sidecar still refuse.
+                continue
+            if (
+                not stat.S_ISREG(value.st_mode)
+                or value.st_nlink != 1
+                or side.is_symlink()
+                or getattr(value, "st_file_attributes", 0) & 0x400
+            ):
+                raise PermissionError("private account sidecar changed")
         identity = (str(raw), meta.st_dev, meta.st_ino)
         if self._account_identity is not None and identity != self._account_identity:
             raise PermissionError("account source changed")

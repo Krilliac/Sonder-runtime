@@ -17,11 +17,12 @@ from sonder_runtime.application.ports.model_gateway import ModelRequest
 from sonder_runtime.domain.common.errors import Cancelled, CapacityExceeded, Forbidden
 
 
-def _policy(burst=2):
+def _policy(tmp_path, burst=2):
     return model_request_admission.HostModelRequestAdmission.from_environ(
         {"SONDER_MODEL_REQUEST_BURST": str(burst),
          "SONDER_MODEL_REQUESTS_PER_MINUTE": "1"},
         clock=lambda: 100.0,
+        db_path=tmp_path / "rate.db",
     )
 
 
@@ -35,8 +36,8 @@ def _response():
             "usage": {"prompt_tokens": 3, "completion_tokens": 4}}
 
 
-def test_ollama_then_openai_share_the_same_host_physical_request_bucket(monkeypatch):
-    policy = _policy()
+def test_ollama_then_openai_share_the_same_host_physical_request_bucket(monkeypatch, tmp_path):
+    policy = _policy(tmp_path)
     monkeypatch.setattr(server, "_HOST_MODEL_REQUEST_ADMISSION", policy)
     monkeypatch.setattr(server, "_require_ollama_endpoint", lambda **_: None)
     seen = []
@@ -57,8 +58,8 @@ def test_ollama_then_openai_share_the_same_host_physical_request_bucket(monkeypa
     assert seen == ["ollama", "openai"]
 
 
-def test_openai_refusal_and_cancellation_do_not_send_or_report_fake_usage():
-    policy = _policy(burst=1)
+def test_openai_refusal_and_cancellation_do_not_send_or_report_fake_usage(tmp_path):
+    policy = _policy(tmp_path, burst=1)
     seen = []
     gateway = OpenAICompatibleGateway(
         _cfg(), transport=lambda *_: seen.append("send") or _response(),
@@ -94,8 +95,8 @@ def test_openai_refusal_and_cancellation_do_not_send_or_report_fake_usage():
     assert seen == ["send"]
 
 
-def test_openai_failed_send_then_next_send_each_consume_a_token():
-    policy = _policy(burst=2)
+def test_openai_failed_send_then_next_send_each_consume_a_token(tmp_path):
+    policy = _policy(tmp_path, burst=2)
     seen = []
 
     def transport(*_args):
@@ -120,8 +121,8 @@ def test_openai_failed_send_then_next_send_each_consume_a_token():
     assert seen == ["physical-send", "physical-send"]
 
 
-def test_standalone_openai_host_factory_uses_the_same_process_authority(monkeypatch):
-    policy = _policy(burst=1)
+def test_standalone_openai_host_factory_uses_the_same_process_authority(monkeypatch, tmp_path):
+    policy = _policy(tmp_path, burst=1)
     monkeypatch.setattr(
         model_request_admission, "_HOST_MODEL_REQUEST_ADMISSION", policy
     )
@@ -130,8 +131,8 @@ def test_standalone_openai_host_factory_uses_the_same_process_authority(monkeypa
     assert gateway.request_admission is policy
 
 
-def test_embedding_and_chat_use_one_physical_request_bucket():
-    policy = _policy(burst=1)
+def test_embedding_and_chat_use_one_physical_request_bucket(tmp_path):
+    policy = _policy(tmp_path, burst=1)
     sends = []
 
     def transport(url, *_args):
@@ -148,8 +149,8 @@ def test_embedding_and_chat_use_one_physical_request_bucket():
     assert len(sends) == 1 and sends[0].endswith("/v1/embeddings")
 
 
-def test_cancellation_race_before_physical_send_keeps_token_available():
-    policy = _policy(burst=1)
+def test_cancellation_race_before_physical_send_keeps_token_available(tmp_path):
+    policy = _policy(tmp_path, burst=1)
     sends = []
 
     class Cancel:

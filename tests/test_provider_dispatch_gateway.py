@@ -100,6 +100,22 @@ def test_sonder_tier_uses_the_configured_default_generation_provider():
     assert prism.generated == []
 
 
+def test_caller_metadata_cannot_redirect_a_default_request_to_local_alias():
+    ollama = RecordingGateway("ollama")
+    prism = RecordingGateway("prism")
+    gateway = ProviderDispatchGateway(
+        providers={"ollama": ollama, "openai_compatible": prism},
+        tier_providers={"fast": "ollama", "general": "ollama", "code": "ollama"},
+        default_generation_provider="openai_compatible",
+        embedding_provider="ollama",
+    )
+    request = ModelRequest("hello", "sonder", routing_metadata={"strict_alias": True})
+
+    assert gateway.generate(request, _context()).model == "prism"
+    assert len(prism.generated) == 1
+    assert ollama.generated == []
+
+
 def test_provider_failure_is_propagated_without_second_provider_call():
     ollama = RecordingGateway("ollama")
     prism = RecordingGateway("prism", fail=True)

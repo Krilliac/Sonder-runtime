@@ -272,7 +272,11 @@ def test_nightly_reclaims_old_lock_when_owner_is_gone(tmp_path, monkeypatch):
     messages = []
 
     assert nightly_self_improve._claim_lock(path, messages.append)
-    assert path.read_text(encoding="utf-8") == str(nightly_self_improve.os.getpid())
+    import json
+    owner = json.loads(path.read_text(encoding="utf-8"))
+    assert owner["pid"] == nightly_self_improve.os.getpid()
+    assert owner["process_identity"]
+    nightly_self_improve._release_lock(path)
 
 
 def test_windows_lock_owner_probe_never_terminates_a_live_process():

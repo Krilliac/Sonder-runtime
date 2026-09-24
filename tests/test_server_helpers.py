@@ -1707,15 +1707,16 @@ def test_structured_answer_rejects_oversized_unique_array_before_pairwise_compar
     assert raised.value.kind == "protocol"
 
 
-def test_serve_target_default_is_local_student(monkeypatch):
-    monkeypatch.setattr(server, "_get",
-                        lambda path: {"models": [{"name": "qwen2.5:3b"}]})
+def test_serve_target_default_is_local_chat_policy_model(monkeypatch):
+    monkeypatch.setattr(server, "_STRICT_DEFAULT", False)
+    monkeypatch.setattr(server, "_RUNTIME_POLICY", {"routing": {"chat": "general"}})
+    monkeypatch.setitem(server.TIERS, "general", "configured-general-model")
     for name in ("", "sonder", "local", None):
         model, cloud, augment, label = server._serve_target(name, None)
-        assert model == server.LOCAL_CODE_MODEL
+        assert model == "configured-general-model"
         assert cloud is False
         assert augment is True
-        assert label == "sonder"
+        assert label == "general"
 
 
 def test_serve_target_strict_uses_explicit_stable_alias(monkeypatch):

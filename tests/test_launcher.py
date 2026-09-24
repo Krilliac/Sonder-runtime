@@ -220,6 +220,22 @@ def test_launcher_requires_authentication(launcher_server):
     assert status == 200 and payload["launcher"] == "ready"
 
 
+def test_launcher_reports_journal_holder_as_503_before_dispatch(launcher_server, monkeypatch):
+    base, token, controller = launcher_server
+
+    def busy(*_args, **_kwargs):
+        raise sonder_launcher.command_recovery.CommandJournalLockTimeout("holder pid=12345 purpose=test")
+
+    monkeypatch.setattr(sonder_launcher.command_recovery.CommandJournal, "receive", busy)
+    with pytest.raises(urllib.error.HTTPError) as error:
+        request(base + "/v1/launcher/start", token, "POST", {}, {
+            "X-Sonder-Client-Id": "test-client", "X-Sonder-Command-Id": "test-command",
+        })
+    assert error.value.code == 503
+    assert "pid=12345" in error.value.read().decode()
+    assert not controller.operations
+
+
 def test_launcher_exposes_only_bounded_actions(launcher_server):
     base, token, controller = launcher_server
     status, payload = request(

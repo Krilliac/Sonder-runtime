@@ -332,6 +332,31 @@ def test_relocated_database_rejected_by_actual_sqlite_mutation_tool(state, monke
         assert conn.execute("SELECT value FROM records").fetchone() == (1,)
 
 
+def test_model_request_admission_store_resists_ordinary_tool_tampering(state, monkeypatch):
+    import sqlite_mutate as mutate
+    from sonder_runtime.adapters.model_request_admission import (
+        HostModelRequestAdmission,
+        ModelRequestRateConfig,
+    )
+
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(state))
+    admission = HostModelRequestAdmission(ModelRequestRateConfig(1, 1), clock=lambda: 100.0)
+    assert admission.try_acquire().allowed
+    database = state / "state/model-request-admission.sqlite3"
+    assert database.is_file()
+    for suffix in ("", "-wal", "-shm", "-journal", ".lock"):
+        target = Path(str(database) + suffix)
+        with pytest.raises(PermissionError):
+            file_ops.write_file(str(target), "tamper", mode="overwrite", bypass=True)
+        with pytest.raises(PermissionError):
+            file_ops.read_file(str(target))
+    with pytest.raises(mutate.SqliteMutateError, match="control"):
+        mutate.mutate_sqlite(database, "UPDATE model_request_rate SET tokens=?", [1])
+    assert not HostModelRequestAdmission(
+        ModelRequestRateConfig(1, 1), clock=lambda: 100.0,
+    ).try_acquire().allowed
+
+
 def test_live_additional_provider_and_context_scope_are_isolated(state):
     from contextvars import Context
     from sonder_runtime.adapters.security.control_plane_paths import (

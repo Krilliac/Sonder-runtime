@@ -45,7 +45,7 @@ class ResolvedModelRoute:
 class ModelTargetResolver(Protocol):
     """Resolve a user-facing tier without importing a composition root."""
 
-    def __call__(self, tier: str, strict: bool = False) -> ModelTarget: ...
+    def __call__(self, tier: str, strict: bool | None = None) -> ModelTarget: ...
 
 
 class ModelSystemBuilder(Protocol):

@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import logging
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Iterator, Mapping, Protocol
+
+_LOG = logging.getLogger(__name__)
 
 
 class EffectJournalError(ValueError):
@@ -179,7 +182,8 @@ class EffectJournalReader(Protocol):
 class EffectJournal(Protocol):
     def begin(self, intent: EffectIntent) -> EffectIntent: ...
     def outcome(self, outcome: EffectOutcome) -> EffectIntent: ...
-    def uncertain(self, intent_id: str, *, detail: str) -> EffectIntent: ...
+    def uncertain(self, intent_id: str, *, detail: str, run_id: str | None = None) -> EffectIntent: ...
+    def latch_uncertainty(self, intent_id: str, *, detail: str, run_id: str | None = None) -> EffectIntent: ...
     def high_water(self, run_id: str) -> int: ...
     def recover(self, run_id: str, *, live_workers: Mapping[str, int], max_records: int = 100) -> RecoveryDecision: ...
     def validate_checkpoint(self, run_id: str, high_water: int) -> None: ...
@@ -227,7 +231,19 @@ class JournalBinding:
         ))
 
     def mark_uncertain(self, intent: EffectIntent, *, detail: str) -> EffectIntent:
-        return self.journal.uncertain(intent.intent_id, detail=detail)
+        try:
+            return self.journal.uncertain(intent.intent_id, detail=detail, run_id=intent.run_id)
+        except BaseException:
+            # If the ordinary uncertainty transition failed after the effect
+            # boundary, atomically set the owner recovery latch as a second
+            # fail-closed path. Preserve the original exception for the caller.
+            latch = getattr(self.journal, "latch_uncertainty", None)
+            if callable(latch):
+                try:
+                    latch(intent.intent_id, detail=detail, run_id=intent.run_id)
+                except BaseException as latch_error:  # noqa: BLE001 - preserve original failure
+                    _LOG.debug("effect uncertainty latch failed: %s", type(latch_error).__name__)
+            raise
 
 
 _CURRENT: contextvars.ContextVar[JournalBinding | None] = contextvars.ContextVar(

@@ -2005,11 +2005,24 @@ def _typed_tool(tool_name, arguments, *, token="", approval="", extra_roots=""):
 
     from sonder_runtime.application.context import LOCAL_OWNER
     from sonder_runtime.application.tools.gateway_contract import (
-        ToolGatewayRequest, ToolPermission, ToolScope,
+        ToolGatewayRequest,
+        ToolPermission,
+        ToolScope,
     )
-    from sonder_runtime.bootstrap.typed_tools import GUARD_KNOBS, LEGACY_TO_CANONICAL
+    from sonder_runtime.bootstrap.typed_tools import (
+        GUARD_KNOBS,
+        LEGACY_TO_CANONICAL,
+        typed_tool_registry,
+    )
 
     canonical = LEGACY_TO_CANONICAL.get(tool_name, tool_name)
+    descriptor = typed_tool_registry().get(canonical)
+    if descriptor is None:
+        raise ValueError("typed tool is absent from the admitted registry")
+    # This entry is already gated by its legacy surface. Grant only the
+    # effects the host's executable descriptor declares for this exact tool;
+    # caller arguments cannot add effects or bypass the existing gate.
+    effects = frozenset(effect.name.lower() for effect in descriptor.effects)
     developer = _file_developer_allowed(token)
     bypass = _file_bypass_allowed(token, approval)
     knobs = GUARD_KNOBS[canonical]
@@ -2027,11 +2040,12 @@ def _typed_tool(tool_name, arguments, *, token="", approval="", extra_roots=""):
         scope=ToolScope(
             principal_id=LOCAL_OWNER,
             workspace_roots=(str(file_ops.workspace_root()),),
+            allowed_effects=effects,
             source="worker" if activity_tracker.inside_tool_call() else "repl",
             auth_level="developer" if developer else "local",
             gate="surface",
         ),
-        permission=ToolPermission(),
+        permission=ToolPermission(effects),
         execution_world="local",
     )
     receipt = _application().tools.execute(request)
@@ -2055,6 +2069,18 @@ def _typed_tool(tool_name, arguments, *, token="", approval="", extra_roots=""):
             "text": receipt.output,
         }
     return json.loads(receipt.output)
+
+
+def _chat_capture_routing_metadata(tier=None, model_override=None):
+    """Record only the chat lane and whether a caller selected its model."""
+    return {
+        "lane": "chat",
+        "reason": (
+            "explicit model selection"
+            if _explicit_serve_selection(tier, model_override)
+            else "ordinary conversation"
+        ),
+    }
 
 
 def _capture_named_provider_request(function):
@@ -2084,7 +2110,10 @@ def _capture_named_provider_request(function):
                 str(session_id), new_id("turn"),
                 ModelRequest(prompt=values["prompt"], tier=values.get("tier") or "sonder",
                              system=values.get("system", ""), history=tuple(values.get("history") or ()),
-                             options={key: values[key] for key in ("temperature", "num_predict", "num_ctx") if key in values}),
+                             options={key: values[key] for key in ("temperature", "num_predict", "num_ctx") if key in values},
+                             routing_metadata=_chat_capture_routing_metadata(
+                                 values.get("tier"), values.get("model_override"),
+                             )),
                 request_id=new_id("request"), user_message=values["prompt"],
             )
             return capture, pending
@@ -2097,6 +2126,7 @@ def _capture_named_provider_request(function):
 
 def _capture_durable_session_turn(
     session_id, prompt, history, model, system, tier, response, request_id=None,
+    *, requested_tier=None, model_override=None,
 ):
     """Commit one completed live turn through the typed session boundary.
 
@@ -2120,6 +2150,7 @@ def _capture_durable_session_turn(
         tier=tier or "sonder",
         system=system,
         history=tuple(history or ()),
+        routing_metadata=_chat_capture_routing_metadata(requested_tier, model_override),
     )
     return _application().session_capture_service().capture_turn(
         str(session_id),
@@ -2426,7 +2457,18 @@ def _serve_target(tier, strict):
     _refresh_live_cloud_tiers()
     t = (tier or "").strip().lower()
     if t in ("", "sonder", "local"):
+        # A strict selection is an explicit compatibility-alias contract. Only
+        # the unpinned default route resolves through the chat policy lane.
         strict_eff = _STRICT_DEFAULT if strict is None else strict
+        if strict_eff is True:
+            return resolve_sonder_model(strict_eff), False, True, "sonder"
+        chat_tier = runtime_policy.route_tier(
+            "chat", _RUNTIME_POLICY or _refresh_runtime_policy(create=True),
+            fallback="general",
+        )
+        model = TIERS.get(chat_tier)
+        if model:
+            return model, False, True, chat_tier
         return resolve_sonder_model(strict_eff), False, True, "sonder"
     if t in TIERS:
         model = TIERS[t]
@@ -6436,7 +6478,8 @@ def _sonder_impl_serialized(
     # The code gate already ran on the attempt that stood (inside the loop).
     _capture_durable_session_turn(
         session_id, prompt, history, tgt_model, effective_system, tier_label,
-        response, request_id=iid,
+        response, request_id=iid, requested_tier=tier,
+        model_override=model_override,
     )
     footer_iid = iid
     if code_repaired and not _persist_verified_code_repair(
@@ -6864,7 +6907,7 @@ def _answer_with_history_impl(
         # turn twice under two request ids.
         _capture_durable_session_turn(
             session_id, prompt, history, model, effective_system, tier_label,
-            response, request_id=iid,
+            response, request_id=iid, requested_tier=tier,
         )
     footer_iid = iid
     if code_repaired and not _persist_verified_code_repair(
@@ -22487,7 +22530,10 @@ def _capability_refined_tier(
     return selected_tier, reason
 
 
-def route_work_request(prompt: str, project: str = "") -> str | None:
+def route_work_request(
+    prompt: str, project: str = "", *, _classified_intent=None,
+    _admitted_decision=None,
+) -> str | None:
     """Transparently route eligible natural work to a bounded execution lane.
 
     The disk-backed system-prompt parts are pinned across the whole routed
@@ -22495,28 +22541,62 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
     own system prompt, and both go to a model. See _stable_system_context.
     """
     with _stable_system_context():
-        return _route_work_request(prompt, project=project)
+        return _route_work_request(
+            prompt, project=project, _classified_intent=_classified_intent,
+            _admitted_decision=_admitted_decision,
+        )
 
 
-def _route_work_request(prompt: str, project: str = "") -> str | None:
+def _route_work_request(
+    prompt: str, project: str = "", *, _classified_intent=None,
+    _admitted_decision=None,
+) -> str | None:
     _maybe_live_reload()
     refusal = intents.containment_egress_refusal(prompt)
     if refusal:
         return refusal
     explicit_worker_cap = master_orchestrator.requested_worker_cap(prompt)
-    decision = (
+    intent_override = (
         {
             "mode": "fleet",
             "reason": "explicit bounded worker-count request",
             "plan_only": False,
             "actions": [],
         }
-        if explicit_worker_cap else intents.classify_execution(prompt)
+        if explicit_worker_cap else None
     )
-    if not decision:
+    # The classifier may identify work, but only this typed boundary packages
+    # it for a pre-existing execution lane.  A plain conversation yields no
+    # handoff and therefore cannot start tools or background work.
+    from sonder_runtime.application.chat.lanes import (
+        ChatHandoffProvenance, ChatLaneDecision, ChatLaneService,
+    )
+    if _admitted_decision is not None:
+        handoff = _admitted_decision.handoff if type(_admitted_decision) is ChatLaneDecision else None
+        if (handoff is None or handoff.objective != prompt
+                or handoff.project != project):
+            raise ValueError("pre-admitted chat work handoff does not match the request")
+        lane_decision = _admitted_decision
+    else:
+        lane_decision = ChatLaneService(intents.classify_execution).decide(
+            prompt,
+            project=project,
+            # The legacy terminal route has no separate structured constraints
+            # or durable source references. Keep the exact objective intact.
+            provenance=ChatHandoffProvenance(
+                surface="legacy-server", reason="natural work admission",
+            ),
+            intent_override=intent_override if explicit_worker_cap else _classified_intent,
+        )
+    if not lane_decision.is_execution:
         return None
-    mode = decision["mode"]
-    reason = decision["reason"]
+    handoff = lane_decision.handoff
+    assert handoff is not None
+    # Keep the one admitted typed decision. Reclassifying here could change
+    # plan-only/actions semantics between admission and execution.
+    decision = {"plan_only": lane_decision.plan_only}
+    mode = handoff.requested_mode
+    reason = lane_decision.reason
     source = "explicit host cue" if mode in {"fleet", "autopilot"} else "host classifier"
     confidence = None
     selected_tier = runtime_policy.route_tier(
@@ -22617,10 +22697,10 @@ def _route_work_request(prompt: str, project: str = "") -> str | None:
 
     selected_tier, reason = _capability_refined_tier(prompt, selected_tier, reason)
 
-    resolved_project = _resolve_project(project) or ""
+    resolved_project = _resolve_project(handoff.project) or ""
     if mode == "fleet":
         master_kwargs = {
-            "task": prompt, "mode": "fleet", "tier": selected_tier,
+            "task": handoff.objective, "mode": "fleet", "tier": selected_tier,
             "learn": False,
         }
         if explicit_worker_cap:
@@ -22631,7 +22711,7 @@ def _route_work_request(prompt: str, project: str = "") -> str | None:
         output = master_orchestrate(**master_kwargs)
     elif mode == "workbench":
         output, selected_tier = _workbench_agent_escalating(
-            prompt, selected_tier, max_steps=12, allow_web=True,
+            handoff.objective, selected_tier, max_steps=12, allow_web=True,
             project=resolved_project, allow_location=False,
         )
     else:
@@ -22659,7 +22739,7 @@ def _route_work_request(prompt: str, project: str = "") -> str | None:
                 current.get("id", ""),
             )
         output = autopilot_start(
-            objective=prompt,
+            objective=handoff.objective,
             project=resolved_project,
             tier=selected_tier,
             policy="workspace",
@@ -24999,7 +25079,13 @@ def codegen_build_loop(
             "codegen project guard unavailable: %s", type(error).__name__,
         )
         return render_codegen_canary_stop(CodegenCanaryStop.TRACE_UNAVAILABLE)
-    isolated_build = compose_isolated_codegen_build() if active_operation else None
+    isolated_build = (
+        compose_isolated_codegen_build(
+            project_dir=project_dir,
+            declared_sources=tuple(name for name, _ in wanted),
+        )
+        if active_operation else None
+    )
     if active_operation and not isinstance(isolated_build, IsolatedCodegenBuild):
         return render_codegen_canary_stop(CodegenCanaryStop.ISOLATION_UNAVAILABLE)
     strategy_trace = try_configured_strategy_trace(strategy_rollout)

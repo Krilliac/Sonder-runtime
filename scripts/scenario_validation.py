@@ -25,6 +25,7 @@ from sonder_runtime.application.scenario_validation import (  # noqa: E402
     write_reports,
 )
 from sonder_runtime.adapters.scenario_validation import GhCliAdapter, ProcessAdapter  # noqa: E402
+from sonder_runtime.adapters.filesystem.durable_locks import exclusive_file_lock  # noqa: E402
 
 
 def _scenarios(args: argparse.Namespace) -> list[Scenario]:
@@ -152,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
                 if args.pr:
                     _validate_real_pr_state(args.cwd, args.publish_repo, final_branch, report.commit_sha)
             plan = build_publish_plan(report, repository=args.publish_repo, branch=final_branch, base=args.base, request_pr=create_pr, clean=clean, head_sha=final_sha)
-            publications.append(GitHubPublisher(dry_run=not args.publish, adapter=GhCliAdapter() if args.publish else None).publish(plan, create_issue=create_issue, create_pr=create_pr))
+            publications.append(GitHubPublisher(dry_run=not args.publish, adapter=GhCliAdapter() if args.publish else None, lock_factory=exclusive_file_lock).publish(plan, create_issue=create_issue, create_pr=create_pr))
         output["publications"] = publications
     print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if all(report.passed for report in reports) else 1

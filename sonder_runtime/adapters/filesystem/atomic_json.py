@@ -10,15 +10,16 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import time
 import uuid
 from pathlib import Path
+
+from sonder_runtime.adapters.filesystem.durable_locks import exclusive_file_lock
 
 
 def write_json_atomic(path, payload) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name("%s.tmp-%s" % (path.name, uuid.uuid4().hex))
+    temporary = path.with_name(f"{path.name}.tmp-{uuid.uuid4().hex}")
     try:
         temporary.write_text(
             json.dumps(payload, indent=2, sort_keys=True) + "\n",
@@ -37,42 +38,7 @@ def file_lock(target: Path, *, timeout: float = 10.0, suffix: str = ".lock"):
     target = Path(target).resolve()
     lock_path = target.with_name(target.name + suffix)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = lock_path.open("a+b")
-    try:
-        if handle.seek(0, os.SEEK_END) == 0:
-            handle.write(b"\0")
-            handle.flush()
-        deadline = time.monotonic() + timeout
-        acquired = False
-        while not acquired:
-            try:
-                handle.seek(0)
-                if os.name == "nt":  # pragma: no cover - windows only
-                    import msvcrt
-
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                acquired = True
-            except OSError as exc:
-                if time.monotonic() >= deadline:
-                    raise RuntimeError(
-                        "timed out waiting for %s lock" % target.name
-                    ) from exc
-                time.sleep(0.02)
-        try:
+    with exclusive_file_lock(
+        lock_path, timeout=timeout, purpose=f"atomic-json:{target.name}"
+    ):
             yield
-        finally:
-            handle.seek(0)
-            if os.name == "nt":  # pragma: no cover - windows only
-                import msvcrt
-
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    finally:
-        handle.close()

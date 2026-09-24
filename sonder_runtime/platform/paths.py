@@ -7,6 +7,7 @@ one path implementation and one module identity.
 from __future__ import annotations
 
 import os
+import logging
 import ntpath
 import platform
 import re
@@ -20,6 +21,7 @@ _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:$")
 _LEGACY_DB_MIGRATION_POLL_SECONDS = 0.02
 _LEGACY_DB_MIGRATION_STALE_LOCK_SECONDS = 30.0
 _LEGACY_DB_MIGRATION_LOCK_RELEASE_SECONDS = 5.0
+_LEGACY_DB_MIGRATION_WAIT_SECONDS = 30.0
 _LEGACY_DB_MIGRATION_THREAD_LOCK = threading.Lock()
 _HOME_OVERRIDE_LOCK = threading.RLock()
 _HOME_OVERRIDE: Path | None = None
@@ -208,31 +210,49 @@ def memory_db_path() -> str:
         # Serialize callers in one process before taking the cross-process
         # lock. This avoids same-process readers keeping a Windows lock file
         # open while the elected migrator is publishing the target.
-        with _LEGACY_DB_MIGRATION_THREAD_LOCK:
+        if not _LEGACY_DB_MIGRATION_THREAD_LOCK.acquire(
+            timeout=_LEGACY_DB_MIGRATION_WAIT_SECONDS,
+        ):
+            raise TimeoutError(
+                "legacy memory migration thread wait timed out; holder pid=%s host=%s"
+                % (os.getpid(), platform.node())
+            )
+        try:
             if not target.exists():
                 _migrate_legacy_memory_db(legacy, target)
+        finally:
+            _LEGACY_DB_MIGRATION_THREAD_LOCK.release()
     return str(target)
 
 
 def _migration_lock_owner(lock: Path) -> tuple[int | None, float | None]:
     """Read the advisory owner record without trusting a partial crash write."""
     try:
-        lines = lock.read_text(encoding="ascii").splitlines()
+        lines = _migration_owner_record(lock)
         return int(lines[0]), float(lines[1])
     except (OSError, ValueError, IndexError):
         return None, None
 
 
-def _migration_owner_alive(pid: int | None) -> bool:
+def _migration_owner_alive(
+    pid: int | None, expected_identity: str | None = None, host: str | None = None,
+) -> bool:
     if not pid or pid <= 0:
         return False
+    if host and host != platform.node():
+        return True
+    from sonder_runtime.adapters.process_liveness import PROCESS_DEAD, probe_process
+
+    state, _ = probe_process(pid, expected_identity=expected_identity)
+    return state != PROCESS_DEAD
+
+
+def _migration_owner_record(lock: Path) -> tuple[str, ...]:
     try:
-        os.kill(pid, 0)
-        return True
-    except PermissionError:
-        return True
+        with lock.open(encoding="ascii") as stream:
+            return tuple(stream.read(4096).splitlines())
     except OSError:
-        return False
+        return ()
 
 
 def _release_migration_lock(lock: Path) -> bool:
@@ -253,7 +273,10 @@ def _release_migration_lock(lock: Path) -> bool:
 def _reclaim_abandoned_migration_lock(lock: Path) -> bool:
     """Remove a dead or long-abandoned migration lock, never a live owner."""
     pid, started = _migration_lock_owner(lock)
-    if _migration_owner_alive(pid):
+    record = _migration_owner_record(lock)
+    identity = (record[3] or None) if len(record) > 3 else None
+    host = record[4] if len(record) > 4 else None
+    if _migration_owner_alive(pid, identity, host):
         return False
     try:
         age = max(0.0, time.time() - (started or lock.stat().st_mtime))
@@ -262,8 +285,9 @@ def _reclaim_abandoned_migration_lock(lock: Path) -> bool:
     if age < _LEGACY_DB_MIGRATION_STALE_LOCK_SECONDS:
         return False
     try:
-        verify_pid, _ = _migration_lock_owner(lock)
-        if _migration_owner_alive(verify_pid):
+        if _migration_owner_record(lock) != record:
+            return False
+        if _migration_owner_alive(pid, identity, host):
             return False
         lock.unlink()
         return True
@@ -273,8 +297,25 @@ def _reclaim_abandoned_migration_lock(lock: Path) -> bool:
 
 def _migrate_legacy_memory_db(legacy: Path, target: Path) -> None:
     """Copy one legacy SQLite store without racing another startup process."""
+    from sonder_runtime.adapters.filesystem.durable_locks import exclusive_file_lock
+
+    # Persistent OS lock serializes reclamation as well as publication. The
+    # legacy lease remains readable for mixed-version startup diagnostics.
+    guard = target.with_name(".%s.legacy-migrate.guard" % target.name)
+    with exclusive_file_lock(
+        guard, timeout=_LEGACY_DB_MIGRATION_WAIT_SECONDS,
+        purpose="legacy memory database migration",
+    ):
+        _migrate_legacy_memory_db_owned(legacy, target)
+
+
+def _migrate_legacy_memory_db_owned(legacy: Path, target: Path) -> None:
+    from sonder_runtime.adapters.process_liveness import process_identity
+
     lock = target.with_name(".%s.legacy-migrate.lock" % target.name)
     stage_paths: list[Path] = []
+    deadline = time.monotonic() + _LEGACY_DB_MIGRATION_WAIT_SECONDS
+    next_report = 0.0
     while not target.exists():
         try:
             fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -287,10 +328,22 @@ def _migrate_legacy_memory_db(legacy: Path, target: Path) -> None:
                 return
             if _reclaim_abandoned_migration_lock(lock):
                 continue
+            now = time.monotonic()
+            holder = _migration_owner_record(lock)
+            if now >= deadline:
+                raise TimeoutError("legacy memory migration timed out; holder=%r" % (holder,))
+            if now >= next_report:
+                logging.getLogger(__name__).warning(
+                    "Waiting for legacy memory migration; holder=%r", holder,
+                )
+                next_report = now + 5.0
             time.sleep(_LEGACY_DB_MIGRATION_POLL_SECONDS)
             continue
         try:
-            record = "%d\n%.6f\n%s\n" % (os.getpid(), time.time(), uuid.uuid4().hex)
+            record = "%d\n%.6f\n%s\n%s\n%s\n" % (
+                os.getpid(), time.time(), uuid.uuid4().hex,
+                process_identity(os.getpid()) or "", platform.node(),
+            )
             os.write(fd, record.encode("ascii"))
             os.fsync(fd)
             if target.exists():

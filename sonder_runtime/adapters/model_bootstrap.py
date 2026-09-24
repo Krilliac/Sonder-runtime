@@ -20,7 +20,7 @@ class LegacyModelBootstrapAdapter:
 
     runtime: LegacyModelRuntime
 
-    def resolve_target(self, tier: str, strict: bool = False) -> ModelTarget:
+    def resolve_target(self, tier: str, strict: bool | None = None) -> ModelTarget:
         model, cloud, augment, tier_label = self.runtime._serve_target(tier, strict)
         tokenizer = template = None
         identity = getattr(self.runtime, "_model_prompt_identity", None)
