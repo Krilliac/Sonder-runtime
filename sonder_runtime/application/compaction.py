@@ -21,6 +21,9 @@ from .ports.compaction import (
     SessionHistoryEvent,
     validate_compaction_result,
 )
+from .compaction_retention import (
+    SUMMARY_SCHEMA_VERSION, critical_retention_problems, summarized_modality,
+)
 
 
 _STRUCTURED_FIELDS = (
@@ -42,7 +45,12 @@ def _source_events(request: CompactionRequest) -> tuple[SessionHistoryEvent, ...
     )
 
 
-def _summary_from(events: tuple[SessionHistoryEvent, ...], max_tokens: int | None) -> CompactionSummary:
+def _summary_from(
+    events: tuple[SessionHistoryEvent, ...],
+    max_tokens: int | None,
+    *,
+    schema: int = SUMMARY_SCHEMA_VERSION,
+) -> CompactionSummary:
     values: dict[str, list[str]] = {field: [] for field in _STRUCTURED_FIELDS}
     modalities: list[SessionHistoryEvent] = []
     confidence_values: list[float] = []
@@ -62,8 +70,20 @@ def _summary_from(events: tuple[SessionHistoryEvent, ...], max_tokens: int | Non
                     "confidence must be a number between 0 and 1"
                 )
             confidence_values.append(float(confidence))
-        if event.modality != "text" or event.event_type not in {"message.received", "message.sent"}:
-            modalities.append(event)
+        # Plain conversation text collapses into the bound source range.  Any
+        # event carrying a failure, constraint, or requirement is retained as
+        # a typed modality, and bulky tool output becomes a digest-bound
+        # reference before any live reasoning is compressed.
+        if schema == 1:
+            # Legacy (pre-#510) projection, kept only so persisted summaries
+            # written before critical retention can still be re-derived and
+            # then checked for loss; new summaries never use it.
+            if event.modality != "text" or event.event_type not in {"message.received", "message.sent"}:
+                modalities.append(event)
+            continue
+        modality = summarized_modality(event)
+        if modality is not None:
+            modalities.append(modality)
 
     # Preserve first-seen order while avoiding duplicate retention claims.
     unique = {field: tuple(dict.fromkeys(items)) for field, items in values.items()}
@@ -86,6 +106,15 @@ def _summary_from(events: tuple[SessionHistoryEvent, ...], max_tokens: int | Non
 
 def _facts(events: tuple[SessionHistoryEvent, ...]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(item for event in events for item in _strings(event.payload.get("facts"))))
+
+
+def canonical_summary(
+    request: CompactionRequest, *, schema: int = SUMMARY_SCHEMA_VERSION,
+) -> CompactionSummary:
+    """Re-derive the deterministic summary of ``request`` for ``schema``."""
+    if schema not in (1, SUMMARY_SCHEMA_VERSION):
+        raise CompactionValidationError("unsupported compaction summary schema")
+    return _summary_from(_source_events(request), request.max_summary_tokens, schema=schema)
 
 
 class CompactionApplicationService:
@@ -122,11 +151,20 @@ class CompactionApplicationService:
         expected = _facts(events)
         retained = tuple(fact for fact in expected if fact in summary.facts)
         missing = tuple(fact for fact in expected if fact not in summary.facts)
-        valid = not missing
-        detail = "all source facts retained" if valid else "source facts missing from summary"
+        critical = critical_retention_problems(events, summary)
+        valid = not missing and not critical
+        if missing:
+            detail = "source facts missing from summary"
+        elif critical:
+            detail = "critical history missing from summary: " + "; ".join(critical[:8])
+        else:
+            detail = "all source facts and critical history retained"
         return CompactionValidation(valid, retained, missing, detail)
 
 
 DeterministicCompactionEngine = CompactionApplicationService
 
-__all__ = ["CompactionApplicationService", "DeterministicCompactionEngine", "CompactionEngine"]
+__all__ = [
+    "CompactionApplicationService", "DeterministicCompactionEngine", "CompactionEngine",
+    "canonical_summary",
+]
