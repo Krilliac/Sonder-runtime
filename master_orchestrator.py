@@ -6,6 +6,7 @@ import contextlib
 import ctypes
 import itertools
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -25,6 +26,9 @@ import sonder_runtime.domain.events as events
 import sonder_runtime.domain.fleet_pressure as fleet_pressure
 from sonder_runtime.application.artifacts import ArtifactReadiness, ArtifactReadinessBarrier
 import fleet_provenance
+
+
+logger = logging.getLogger(__name__)
 
 
 # Preserve process-local execution state across importlib.reload(). The durable
@@ -283,9 +287,52 @@ def hardware_max_agents() -> int:
     return max(DEFAULT_MAX_AGENTS, min(ABSOLUTE_MAX_AGENTS, logical * 2))
 
 
+_PROC_MEMINFO = "/proc/meminfo"
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _linux_meminfo_bytes() -> tuple[int, int] | None:
+    """``(MemTotal, MemAvailable)`` from ``/proc/meminfo``, or ``None``.
+
+    ``SC_AVPHYS_PAGES`` is MemFree: it excludes reclaimable page cache, so a
+    healthy Linux/WSL host with a warm cache reads as nearly out of memory.
+    MemAvailable is the kernel's own estimate of memory usable without
+    swapping and is the right headroom signal.
+    """
+    try:
+        with open(_PROC_MEMINFO, encoding="ascii", errors="replace") as handle:
+            text = handle.read(64 * 1024)
+    except OSError:
+        return None
+    values = {}
+    for line in text.splitlines():
+        name, _, rest = line.partition(":")
+        fields = rest.split()
+        if name in ("MemTotal", "MemAvailable") and fields:
+            try:
+                value = int(fields[0])
+            except ValueError:
+                return None
+            unit = fields[1].lower() if len(fields) > 1 else ""
+            values[name] = value * 1024 if unit == "kb" else value
+    if "MemTotal" not in values or "MemAvailable" not in values:
+        return None
+    total, available = values["MemTotal"], values["MemAvailable"]
+    if total <= 0 or available < 0:
+        return None
+    return total, min(available, total)
+
+
 def physical_memory_bytes() -> tuple[int, int]:
     """Return ``(total, available)`` physical RAM, or zeros if unavailable."""
-    if os.name == "nt":
+    if not _is_windows():
+        meminfo = _linux_meminfo_bytes()
+        if meminfo is not None:
+            return meminfo
+    if _is_windows():
         class MemoryStatusEx(ctypes.Structure):
             _fields_ = [
                 ("length", ctypes.c_ulong),
@@ -1609,10 +1656,28 @@ def _objective_assignments(objectives, count: int):
     return tuple(tuple(bucket) for bucket in buckets)
 
 
+_ADAPTIVE_OFF_VALUES = frozenset({"0", "false", "no", "off"})
+_ADAPTIVE_ON_VALUES = frozenset({"", "1", "true", "yes", "on"})
+
+
 def adaptive_concurrency_enabled() -> bool:
-    """Operator rollback switch; ``SONDER_FLEET_ADAPTIVE_CONCURRENCY=0`` pins the cap."""
+    """Operator rollback switch for adaptive fleet concurrency.
+
+    ``SONDER_FLEET_ADAPTIVE_CONCURRENCY`` accepts exactly ``0``/``false``/
+    ``no``/``off`` (pin the cap at the static worker slots) or
+    ``1``/``true``/``yes``/``on``/unset (adaptive), case-insensitively.  Any
+    other value is logged and ignored, leaving the default (adaptive) on.
+    """
     raw = os.environ.get("SONDER_FLEET_ADAPTIVE_CONCURRENCY", "").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
+    if raw in _ADAPTIVE_OFF_VALUES:
+        return False
+    if raw not in _ADAPTIVE_ON_VALUES:
+        logger.warning(
+            "ignoring unrecognized SONDER_FLEET_ADAPTIVE_CONCURRENCY=%r; "
+            "expected one of 0/false/no/off or 1/true/yes/on; adaptive stays on",
+            raw[:32],
+        )
+    return True
 
 
 def concurrency_resources() -> adaptive_concurrency.ResourceSnapshot:
@@ -1631,7 +1696,7 @@ def concurrency_resources() -> adaptive_concurrency.ResourceSnapshot:
     )
 
 
-def delegated_lane_claims(child_ids, assignments) -> list:
+def delegated_lane_claims(child_ids, assignments, project_root: str = "") -> list:
     """Ownership claims for delegated fleet lanes.
 
     Delegated fleet workers only receive guarded read-only file tools (see
@@ -1639,19 +1704,21 @@ def delegated_lane_claims(child_ids, assignments) -> list:
     readers never serialize each other and independent read fan-out keeps its
     full width.  A write-capable lane would pass WRITE claims to
     :class:`AdaptiveLaneScheduler` and be serialized against overlapping lanes.
+
+    Every path is anchored to ``project_root`` so ``a.py`` and
+    ``<root>/a.py`` are one file.  A path that cannot be anchored (outside the
+    root, escaping with ``..``, absolute without a root) raises
+    ``ValueError`` rather than silently becoming an independent lane.
     """
     claims = []
     for agent_id, assigned in zip(child_ids, assignments or [()] * len(child_ids)):
         paths = frozenset(
-            str(objective.path) for objective in assigned if str(objective.path).strip()
+            adaptive_concurrency.anchor_claim_path(str(objective.path), project_root)
+            for objective in assigned
         )
-        try:
-            claim = adaptive_concurrency.LaneClaim(
-                agent_id, paths, adaptive_concurrency.LaneAccess.READ,
-            )
-        except ValueError:
-            claim = adaptive_concurrency.LaneClaim(agent_id)
-        claims.append(claim)
+        claims.append(adaptive_concurrency.LaneClaim(
+            agent_id, paths, adaptive_concurrency.LaneAccess.READ,
+        ))
     return claims
 
 
@@ -1743,6 +1810,7 @@ class AdaptiveLaneScheduler:
                 outcome,
                 self.policy,
                 resources if index == len(inbox) - 1 else None,
+                source=source,
             )
             if decision.action != "hold" or decision.reasons:
                 record = decision.to_dict()
@@ -1764,7 +1832,9 @@ class AdaptiveLaneScheduler:
         }
 
 
-def dispatch_lanes(scheduler, max_workers: int, run_lane, collect, on_error) -> None:
+def dispatch_lanes(
+    scheduler, max_workers: int, run_lane, collect, on_error, on_abandon=None,
+) -> None:
     """Run every scheduled lane, admitting only what ``scheduler`` allows.
 
     ``run_lane(lane_id, sink)`` runs on a pool thread and may report
@@ -1773,28 +1843,52 @@ def dispatch_lanes(scheduler, max_workers: int, run_lane, collect, on_error) -> 
     dispatcher thread.  ``max_workers`` is the static ceiling; the pool only
     ever holds admitted lanes, so the scheduler's live cap and ownership
     conflicts decide actual concurrency.
+
+    A raising ``collect``/``on_error`` (for example a fleet store that is
+    down while recording a failure) is logged and cannot stop later lanes
+    from being admitted.  If the loop itself aborts, every lane that was
+    never started is handed to ``on_abandon`` so no durable row is stranded
+    as queued; the original exception still propagates.
     """
-    with ThreadPoolExecutor(max_workers=max(1, int(max_workers))) as pool:
-        futures = {}
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, int(max_workers))) as pool:
+            futures = {}
 
-        def submit_admitted() -> None:
-            for lane_id in scheduler.admit():
-                futures[pool.submit(run_lane, lane_id, scheduler.sink(lane_id))] = lane_id
+            def submit_admitted() -> None:
+                for lane_id in scheduler.admit():
+                    futures[pool.submit(run_lane, lane_id, scheduler.sink(lane_id))] = lane_id
 
-        submit_admitted()
-        while futures:
-            done, _pending = wait(tuple(futures), return_when=FIRST_COMPLETED)
-            for future in done:
-                lane_id = futures.pop(future)
-                try:
-                    result = future.result()
-                except Exception as exc:
-                    scheduler.sink(lane_id)(adaptive_concurrency.Outcome.FAILED)
-                    on_error(lane_id, exc)
-                else:
-                    collect(lane_id, result)
-                scheduler.complete(lane_id)
             submit_admitted()
+            while futures:
+                done, _pending = wait(tuple(futures), return_when=FIRST_COMPLETED)
+                for future in done:
+                    lane_id = futures.pop(future)
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        scheduler.sink(lane_id)(adaptive_concurrency.Outcome.FAILED)
+                        handler, args = on_error, (lane_id, exc)
+                    else:
+                        handler, args = collect, (lane_id, result)
+                    try:
+                        handler(*args)
+                    except Exception as handler_exc:
+                        logger.warning(
+                            "fleet lane %s result handling failed: %s",
+                            lane_id, type(handler_exc).__name__,
+                        )
+                    scheduler.complete(lane_id)
+                submit_admitted()
+    finally:
+        if on_abandon is not None:
+            for lane_id in scheduler.pending:
+                try:
+                    on_abandon(lane_id)
+                except Exception as abandon_exc:
+                    logger.warning(
+                        "fleet lane %s could not be closed after dispatch abort: %s",
+                        lane_id, type(abandon_exc).__name__,
+                    )
 
 
 def run_delegated(
@@ -1883,6 +1977,13 @@ def run_delegated(
                     ],
                 },
             ))
+        # Claims are validated inside the startup containment: an objective
+        # path that cannot be anchored to the project fails the fleet here,
+        # with every queued child cancelled, instead of becoming a lane that
+        # silently conflicts with nothing.
+        lane_claims = delegated_lane_claims(
+            child_ids, assignments, project_root=project_scope,
+        )
     except Exception as exc:
         # Partial fanout containment: a store failure on child N must not
         # strand children 1..N-1 as durable queued rows that no worker will
@@ -1940,7 +2041,7 @@ def run_delegated(
     # pressure (issue #510 section 3).  The pool never holds more than the
     # admitted lanes, so a shrunk cap takes effect at the next admission.
     scheduler = AdaptiveLaneScheduler(
-        delegated_lane_claims(child_ids, assignments),
+        lane_claims,
         worker_slots,
         adaptive=adaptive_concurrency_enabled(),
         on_decision=_concurrency_event,
@@ -1971,7 +2072,13 @@ def run_delegated(
     def _lane_error(agent_id: str, exc: BaseException) -> None:
         _finish(agent_id, error=str(exc))
 
-    dispatch_lanes(scheduler, worker_slots, _run_lane, _collect, _lane_error)
+    def _lane_abandoned(agent_id: str) -> None:
+        _finish(agent_id, error="dispatch aborted before this lane started")
+
+    dispatch_lanes(
+        scheduler, worker_slots, _run_lane, _collect, _lane_error,
+        on_abandon=_lane_abandoned,
+    )
     concurrency_report = scheduler.summary()
     if cancel_requested(master_id):
         final = _finish(master_id)
@@ -1980,6 +2087,7 @@ def run_delegated(
             "master_id": master_id,
             "agents": child_ids,
             "worker_slots": worker_slots,
+            "concurrency": concurrency_report,
             "outputs": _public_outputs(outputs),
             "output": final,
         }
@@ -1999,6 +2107,7 @@ def run_delegated(
                 "master_id": master_id,
                 "agents": child_ids,
                 "worker_slots": worker_slots,
+                "concurrency": concurrency_report,
                 "outputs": [],
                 "output": "TASK_DRIFT: all delegated results missed objective evidence",
                 "task_drift": True,
@@ -2011,6 +2120,7 @@ def run_delegated(
                 "master_id": master_id,
                 "agents": child_ids,
                 "worker_slots": worker_slots,
+                "concurrency": concurrency_report,
                 "outputs": [],
                 "output": final,
             }
@@ -2021,6 +2131,7 @@ def run_delegated(
             "master_id": master_id,
             "agents": child_ids,
             "worker_slots": worker_slots,
+            "concurrency": concurrency_report,
             "outputs": [],
             "output": final if final in ABORT_MARKERS else "ERROR: %s" % error,
         }
@@ -2066,6 +2177,7 @@ def run_delegated(
             "master_id": master_id,
             "agents": child_ids,
             "worker_slots": worker_slots,
+            "concurrency": concurrency_report,
             "outputs": _public_outputs(outputs),
             "output": final if final in ABORT_MARKERS else "ERROR: %s" % error,
         }
@@ -2081,6 +2193,7 @@ def run_delegated(
             "master_id": master_id,
             "agents": child_ids,
             "worker_slots": worker_slots,
+            "concurrency": concurrency_report,
             "outputs": [],
             "output": final if final in ABORT_MARKERS else "ERROR: %s" % error,
         }
@@ -2115,6 +2228,7 @@ def run_delegated(
                 "master_id": master_id,
                 "agents": child_ids,
                 "worker_slots": worker_slots,
+                "concurrency": concurrency_report,
                 "outputs": _public_outputs(outputs),
                 "output": "TASK_DRIFT: aggregation refused due to missing objective evidence",
                 "task_drift": True,
@@ -2129,6 +2243,7 @@ def run_delegated(
             "master_id": master_id,
             "agents": child_ids,
             "worker_slots": worker_slots,
+            "concurrency": concurrency_report,
             "outputs": _public_outputs(outputs),
             "output": final,
         }
@@ -2193,6 +2308,7 @@ def run_delegated(
                 "master_id": master_id,
                 "agents": child_ids,
                 "worker_slots": worker_slots,
+                "concurrency": concurrency_report,
                 "outputs": _public_outputs(outputs),
                 "output": final if final in ABORT_MARKERS else merged,
             }
@@ -2217,6 +2333,7 @@ def run_delegated(
                 "master_id": master_id,
                 "agents": child_ids,
                 "worker_slots": worker_slots,
+                "concurrency": concurrency_report,
                 "outputs": _public_outputs(outputs),
                 "output": "TASK_DRIFT: audit aggregate omitted authoritative objectives",
                 "task_drift": True,
@@ -2228,9 +2345,9 @@ def run_delegated(
         "master_id": master_id,
         "agents": child_ids,
         "worker_slots": worker_slots,
+        "concurrency": concurrency_report,
         "outputs": _public_outputs(outputs),
         "output": final,
-        "concurrency": concurrency_report,
     }
 
 

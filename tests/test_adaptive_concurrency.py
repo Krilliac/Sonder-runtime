@@ -236,13 +236,27 @@ def test_pressure_hysteresis_blocks_growth_inside_the_band():
     assert decisions[-1].action == "grow" and state.cap == 3
 
 
-def test_unknown_resources_neither_enter_nor_release_pressure():
+def test_unknown_resources_never_enter_pressure():
     policy = ConcurrencyPolicy(ceiling=4)
+    state, decisions = _run(policy, [Outcome.SAMPLE] * 10, resources=ResourceSnapshot())
+
+    assert not state.pressured and state.cap == 4
+    assert {d.action for d in decisions} == {"hold"}
+
+
+def test_brief_unknown_gap_keeps_latched_pressure():
+    policy = ConcurrencyPolicy(ceiling=4, unknown_release_after=3)
     state, _ = _run(policy, [Outcome.SAMPLE],
                     resources=ResourceSnapshot(memory_available_fraction=0.01))
-    state, _ = _run(policy, [Outcome.SUCCEEDED] * 5, state=state,
+    state, _ = _run(policy, [Outcome.SUCCEEDED] * 2, state=state,
                     resources=ResourceSnapshot())
+    assert state.pressured
 
+    # A known reading resets the unknown streak.
+    state, _ = _run(policy, [Outcome.SUCCEEDED], state=state,
+                    resources=ResourceSnapshot(memory_available_fraction=0.15))
+    state, _ = _run(policy, [Outcome.SUCCEEDED] * 2, state=state,
+                    resources=ResourceSnapshot())
     assert state.pressured
 
 
@@ -456,13 +470,6 @@ def test_delegated_lane_claims_keep_read_fanout_unserialized():
     assert ac.admissible_lanes(["a", "b", "c"], (), 3, graph) == ("a", "b", "c")
 
 
-def test_delegated_lane_claims_tolerate_invalid_paths():
-    objective = type("Objective", (), {"path": "../escape.py"})()
-    claims = master_orchestrator.delegated_lane_claims(["a"], ((objective,),))
-
-    assert claims[0].paths == frozenset()
-
-
 def test_concurrency_resources_reports_unknown_memory_as_unknown(monkeypatch):
     monkeypatch.setattr(master_orchestrator, "physical_memory_bytes", lambda: (0, 0))
     assert master_orchestrator.concurrency_resources() == ResourceSnapshot()
@@ -573,3 +580,252 @@ def test_run_delegated_healthy_fanout_keeps_full_width(monkeypatch):
     assert result["output"] == "merged"
     assert result["concurrency"]["peak_running"] == 3
     assert result["concurrency"]["decisions"] == []
+
+
+# --- review fixes (PR #552): each test failed before its fix ---------------
+
+
+def test_p2_1_unknown_probe_releases_latched_pressure_and_regrows():
+    policy = ConcurrencyPolicy(ceiling=8)
+    state, _ = _run(policy, [Outcome.SAMPLE],
+                    resources=ResourceSnapshot(memory_available_fraction=0.01))
+    assert state.cap == 4 and state.pressured
+
+    # The probe then goes dark: every reading is unknown.  Latched pressure
+    # must not pin the cap forever.
+    state, decisions = _run(policy, [Outcome.SUCCEEDED] * 39, state=state,
+                            resources=ResourceSnapshot())
+    assert not state.pressured
+    assert state.cap == 8
+    assert "grow" in {d.action for d in decisions}
+
+
+def test_p2_1_unsampled_observations_do_not_count_as_unknown_readings():
+    policy = ConcurrencyPolicy(ceiling=8)
+    state, _ = _run(policy, [Outcome.SAMPLE],
+                    resources=ResourceSnapshot(memory_available_fraction=0.01))
+    state, _ = _run(policy, [Outcome.SUCCEEDED] * 20, state=state, resources=None)
+
+    assert state.pressured and state.cap == 4
+
+
+def test_p2_1_scheduler_with_dark_probe_recovers():
+    readings = iter(
+        [ResourceSnapshot(memory_available_fraction=0.01)] + [ResourceSnapshot()] * 60
+    )
+    claims = [LaneClaim("lane-%d" % index) for index in range(40)]
+    scheduler = _scheduler(claims, 8, resources=lambda: next(readings))
+    for _ in range(40):
+        scheduler.admit()
+        lane = sorted(scheduler.running)[0]
+        scheduler.sink(lane)(Outcome.SUCCEEDED)
+        scheduler.complete(lane)
+
+    assert scheduler.cap == 8
+
+
+def test_p2_2_dispatch_survives_raising_error_handler_and_runs_every_lane():
+    scheduler = _scheduler([LaneClaim(name) for name in ("a", "b", "c", "d")], 1)
+    ran = []
+
+    def run_lane(lane_id, _sink):
+        ran.append(lane_id)
+        if lane_id == "a":
+            raise RuntimeError("worker boom")
+        return lane_id
+
+    def on_error(_lane, _exc):
+        raise RuntimeError("fleet store down")
+
+    collected = []
+    master_orchestrator.dispatch_lanes(
+        scheduler, 1, run_lane, lambda lane, result: collected.append(lane), on_error,
+        on_abandon=lambda lane: None,
+    )
+
+    assert ran == ["a", "b", "c", "d"]
+    assert collected == ["b", "c", "d"]
+
+
+def test_p2_2_dispatch_abandons_never_started_lanes_when_loop_aborts():
+    scheduler = _scheduler([LaneClaim(name) for name in ("a", "b", "c")], 1)
+    original_admit = scheduler.admit
+    calls = {"n": 0}
+
+    def flaky_admit():
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise RuntimeError("scheduler broke")
+        return original_admit()
+
+    scheduler.admit = flaky_admit
+    abandoned = []
+    with pytest.raises(RuntimeError, match="scheduler broke"):
+        master_orchestrator.dispatch_lanes(
+            scheduler, 1, lambda lane, sink: lane, lambda lane, result: None,
+            lambda lane, exc: None, on_abandon=abandoned.append,
+        )
+
+    assert abandoned == ["b", "c"]
+
+
+def test_p2_2_run_delegated_does_not_strand_lanes_when_finish_fails(monkeypatch):
+    monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda requested: 1)
+    real_finish = master_orchestrator._finish
+    doomed = {}
+
+    def worker(prompt):
+        if "subagent 1/" in prompt:
+            raise ValueError("permanent worker failure")
+        return "ok"
+
+    def finish(agent_id, *args, **kwargs):
+        if kwargs.get("error") and not doomed:
+            doomed["id"] = agent_id
+        if doomed.get("id") == agent_id:
+            raise OSError("fleet store down")
+        return real_finish(agent_id, *args, **kwargs)
+
+    monkeypatch.setattr(master_orchestrator, "_finish", finish)
+    result = master_orchestrator.run_delegated(
+        "fan out", worker_fn=worker, audit_fn=lambda prompt: "merged", agents=3,
+    )
+
+    assert result["output"] == "merged"
+    rows = master_orchestrator.snapshot(limit=20)["agents"]
+    children = [row for row in rows if row["role"] == "agent" and row["id"] != doomed["id"]]
+    assert len(children) == 2
+    assert {row["status"] for row in children} == {"done"}
+
+
+def test_p2_3_linux_memory_uses_memavailable(tmp_path, monkeypatch):
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text(
+        "MemTotal:       16000000 kB\n"
+        "MemFree:          500000 kB\n"
+        "MemAvailable:    9000000 kB\n"
+        "Cached:          8000000 kB\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(master_orchestrator, "_PROC_MEMINFO", str(meminfo))
+    monkeypatch.setattr(master_orchestrator, "_is_windows", lambda: False)
+
+    total, available = master_orchestrator.physical_memory_bytes()
+
+    assert total == 16000000 * 1024
+    assert available == 9000000 * 1024
+
+
+def test_p2_3_meminfo_without_memavailable_falls_back(tmp_path, monkeypatch):
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemTotal: 100 kB\nMemFree: 10 kB\n", encoding="utf-8")
+    monkeypatch.setattr(master_orchestrator, "_PROC_MEMINFO", str(meminfo))
+
+    assert master_orchestrator._linux_meminfo_bytes() is None
+
+
+def test_p3_absolute_and_relative_claims_anchor_to_project_root():
+    objective = type("Objective", (), {})
+    rel, absolute = objective(), objective()
+    rel.path, absolute.path = "pkg/a.py", "C:\\Repo\\pkg\\a.py"
+    claims = master_orchestrator.delegated_lane_claims(
+        ["x", "y"], ((rel,), (absolute,)), project_root="C:/repo",
+    )
+
+    assert claims[0].paths == claims[1].paths == frozenset({"pkg/a.py"})
+    write = [LaneClaim(c.lane_id, frozenset(c.paths), LaneAccess.WRITE) for c in claims]
+    assert ac.claims_conflict(*write)
+
+
+@pytest.mark.parametrize("bad", ["../escape.py", "D:/elsewhere/a.py", "/etc/passwd"])
+def test_p3_invalid_claim_paths_are_rejected_not_made_independent(bad):
+    objective = type("Objective", (), {"path": bad})()
+    with pytest.raises(ValueError):
+        master_orchestrator.delegated_lane_claims(
+            ["a"], ((objective,),), project_root="C:/repo",
+        )
+
+
+def test_p3_lane_claim_rejects_unanchored_absolute_paths():
+    for bad in ("/abs/a.py", "C:/abs/a.py"):
+        with pytest.raises(ValueError):
+            LaneClaim("a", frozenset({bad}), LaneAccess.WRITE)
+
+
+def test_p3_one_flaky_lane_cannot_trigger_a_retry_storm_alone():
+    policy = ConcurrencyPolicy(ceiling=8)
+    state = ac.initial_state(policy)
+    for _ in range(4):
+        state, decision = ac.observe(state, Outcome.TRANSIENT_RETRY, policy, source="flaky")
+        assert decision.action == "hold"
+    for lane in ("b", "c"):
+        state, decision = ac.observe(state, Outcome.TRANSIENT_RETRY, policy, source=lane)
+    assert decision.action == "shrink" and decision.reasons == (ac.REASON_RETRY_STORM,)
+
+
+def test_p3_scheduler_counts_one_retry_per_lane():
+    scheduler = _scheduler([LaneClaim("a"), LaneClaim("b")], 4)
+    scheduler.admit()
+    for _ in range(4):
+        scheduler.sink("a")(Outcome.TRANSIENT_RETRY)
+    scheduler.complete("a")
+
+    assert scheduler.cap == 4
+
+
+def test_p3_cancel_return_path_reports_concurrency(monkeypatch):
+    monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda requested: 1)
+    started = threading.Event()
+    release = threading.Event()
+    box = {}
+
+    def worker(prompt):
+        started.set()
+        assert release.wait(5)
+        return "late"
+
+    def run():
+        box["result"] = master_orchestrator.run_delegated(
+            "cancel fleet", worker_fn=worker, audit_fn=lambda p: "merged", agents=2,
+        )
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert started.wait(5)
+    snap = master_orchestrator.snapshot(include_finished=False, limit=20)
+    master_id = next(row["id"] for row in snap["agents"] if row["role"] == "master")
+    master_orchestrator.request_cancel(master_id)
+    release.set()
+    thread.join(5)
+
+    assert box["result"]["output"] == "CANCELLED"
+    assert box["result"]["concurrency"]["ceiling"] == 1
+
+
+def test_p3_all_failed_return_path_reports_concurrency(monkeypatch):
+    monkeypatch.setattr(master_orchestrator, "parallel_worker_slots", lambda requested: 2)
+
+    def worker(prompt):
+        raise ValueError("permanent")
+
+    result = master_orchestrator.run_delegated(
+        "fan out", worker_fn=worker, audit_fn=lambda p: "merged", agents=2,
+    )
+
+    assert result["output"].startswith("ERROR")
+    assert result["concurrency"]["ceiling"] == 2
+
+
+def test_p3_kill_switch_unknown_value_is_logged_and_ignored(monkeypatch, caplog):
+    monkeypatch.setenv("SONDER_FLEET_ADAPTIVE_CONCURRENCY", "maybe")
+    with caplog.at_level("WARNING"):
+        assert master_orchestrator.adaptive_concurrency_enabled() is True
+    assert "SONDER_FLEET_ADAPTIVE_CONCURRENCY" in caplog.text
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off", " OFF "])
+def test_p3_kill_switch_documented_off_values(monkeypatch, value, caplog):
+    monkeypatch.setenv("SONDER_FLEET_ADAPTIVE_CONCURRENCY", value)
+    with caplog.at_level("WARNING"):
+        assert master_orchestrator.adaptive_concurrency_enabled() is False
+    assert caplog.text == ""
