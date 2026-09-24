@@ -91,9 +91,9 @@
       "verified": 0
     },
     "SEC": {
-      "checked": 0,
+      "checked": 1,
       "total": 9,
-      "verified": 0
+      "verified": 1
     },
     "SELFMOD": {
       "checked": 1,
@@ -127,13 +127,13 @@
     }
   },
   "overall": {
-    "checked": 8,
+    "checked": 9,
     "statuses": {
-      "implemented_unverified": 196,
-      "verified": 8
+      "implemented_unverified": 195,
+      "verified": 9
     },
     "total": 204,
-    "verified": 8
+    "verified": 9
   },
   "requirements": [
     {
@@ -1222,11 +1222,11 @@
       "status": "implemented_unverified"
     },
     {
-      "checked": false,
-      "claim": "Revision 3 is withdrawn: re-review of PR #548 at eca9f597 measured unbounded parser work through GNU sparse members (old-style extended sparse headers and PAX GNU.sparse 1.0 maps) and uncaught recursion through chained metadata records, which open_bounded did not cover; ZIP readers also materialized the whole central directory before checking the entry count.",
+      "checked": true,
+      "claim": "Every production archive reader bounds member names, links and special files, member counts, per-entry and aggregate expansion, compression ratio, TAR header metadata size, metadata-record chains, and preview scans, rejects GNU sparse members before any sparse map is read, and checks ZIP central-directory entry counts before parsing the directory; an adversarial corpus with memory and wall-time bounds drives each protection in the archive tools, update staging, data-inspection, OOXML, and path-safety readers.",
       "requirement_id": "SEC-004",
-      "revision": 4,
-      "status": "implemented_unverified"
+      "revision": 5,
+      "status": "verified"
     },
     {
       "checked": false,
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "c2405a78eabe40069b6be4e9057cd02669d94b4f6d44981b954d677a4774442f",
-    "spec_sha256": "ed5ab01393d72681fc4eb4b9581e832d3d07ee95595b8b58dfe094c9e7dbf4fa"
+    "ledger_sha256": "d4a7f7d8a432bc2fabc4c7f058e6593fc5aea1dd41ed4c93519af68b90c26202",
+    "spec_sha256": "d11b5664c594bb79042c358a0510393d1ee0dd6d718830332a6362ed652c9bc5"
   }
 }
