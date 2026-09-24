@@ -158,9 +158,9 @@ def test_live_protocol_cases_validate_transcript_shape_and_leave_unsupported_unk
             assert model == "model:latest" and timeout_seconds <= 30
             return observed.get(capability)
 
-    result = run_protocol_probes(LiveProtocol(), identity=identity(), now=100,
-                                 synthetic=False)
+    result = run_protocol_probes(LiveProtocol(), identity=identity(), now=100)
     assert result.passed == frozenset(observed)
+    assert result.synthetic is True
     assert BackendCapability.RESUME not in result.passed
     assert BackendCapability.RESUME not in result.failed
     assert result.identity == identity()
@@ -168,9 +168,10 @@ def test_live_protocol_cases_validate_transcript_shape_and_leave_unsupported_unk
     observed[BackendCapability.TOOL_CONTINUATION] = {
         "model": "other-model", "events": ["call:echo", "result:echo", "assistant:done"],
     }
-    different = run_protocol_probes(LiveProtocol(), identity=identity(), now=100,
-                                    synthetic=False)
+    different = run_protocol_probes(LiveProtocol(), identity=identity(), now=100)
     assert BackendCapability.TOOL_CONTINUATION in different.failed
+    with pytest.raises(ValueError, match="cannot certify live inference"):
+        run_protocol_probes(LiveProtocol(), identity=identity(), synthetic=False)
 
 
 def test_router_rejects_name_only_record_and_allows_identity_bound_role(tmp_path):

@@ -119,8 +119,11 @@ class RoutePlanner:
             allow_oracle=request.allow_oracle,
         )
 
-        # 3. Is matching specialist bound? Use specialist, else base tier
-        tier = cap_route.tier
+        # 3. Chat is a first-class lane rather than another capability tier.
+        # Its normal route is the policy-selected general base tier. Execution
+        # lanes retain capability refinement below, and explicit model pins are
+        # resolved before this planner reaches the request.
+        tier = lane_tier if request.lane == "chat" else cap_route.tier
         if tier not in available.available_tiers:
             logger.warning(f"preferred tier {cap_route.tier!r} unavailable for lane={request.lane!r}, degrading to lane_tier={lane_tier!r}")
             logger.info(f"route tier fallback: preferred tier {cap_route.tier!r} unavailable for lane={request.lane!r}, trying lane_tier={lane_tier!r}")

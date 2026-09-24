@@ -78,7 +78,7 @@ def test_memory_db_migration_reclaims_a_dead_stale_lock(monkeypatch, tmp_path):
     monkeypatch.setattr(sonder_paths, "__file__", str(module_path))
     monkeypatch.setenv("SONDER_HOME", str(home))
     monkeypatch.delenv("SONDER_DB", raising=False)
-    monkeypatch.setattr(sonder_paths, "_migration_owner_alive", lambda _pid: False)
+    monkeypatch.setattr(sonder_paths, "_migration_owner_alive", lambda *_args: False)
     monkeypatch.setattr(sonder_paths.time, "time", lambda: 100.0)
 
     assert sonder_paths.memory_db_path() == str(home / "memory.db")
@@ -86,10 +86,10 @@ def test_memory_db_migration_reclaims_a_dead_stale_lock(monkeypatch, tmp_path):
     assert not lock.exists()
 
 
-def test_memory_db_migration_waits_for_a_live_owner_without_a_fixed_timeout(monkeypatch, tmp_path):
+def test_memory_db_migration_never_reclaims_a_live_owner(monkeypatch, tmp_path):
     lock = tmp_path / ".memory.db.legacy-migrate.lock"
     lock.write_text("123\n1.0\nlive\n", encoding="ascii")
-    monkeypatch.setattr(sonder_paths, "_migration_owner_alive", lambda _pid: True)
+    monkeypatch.setattr(sonder_paths, "_migration_owner_alive", lambda *_args: True)
 
     assert sonder_paths._reclaim_abandoned_migration_lock(lock) is False
     assert lock.exists()

@@ -1,6 +1,8 @@
 """Atomic source-side evidence for the deliberately narrow fact write set."""
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from sonder_runtime.adapters.embeddings import from_blob, to_blob
@@ -20,7 +22,7 @@ from sonder_runtime.domain.memory.replication import MemoryReplicationError
 from sonder_runtime.bootstrap.app import build_application, compose_memory_unit_of_work
 from sonder_runtime.platform.config import Secrets, SonderConfig
 from sonder_runtime.platform.memory_replication_config import (
-    MemoryReplicationConfig, MemoryReplicationPeerConfig,
+    MemoryReplicationConfig, MemoryReplicationPeerConfig, memory_replication_errors,
 )
 
 
@@ -75,6 +77,44 @@ def test_windows_scope_is_accepted_as_opaque_exact_identity(tmp_path):
         assert facts_for_project(connection, slash_variant) == []
     finally:
         connection.close()
+
+
+@pytest.mark.parametrize(
+    "scope",
+    (
+        "/workspace/managed/project",
+        r"C:\Users\owner\workspace",
+        r"\\host\share\workspace",
+    ),
+)
+def test_workspace_scope_forms_are_opaque_and_never_widened(tmp_path, scope):
+    """Managed receipts may carry absolute scopes without path normalization."""
+    source = SQLiteAuthoritativeFactSource("node-a", project_scope=scope)
+    connection = connect(tmp_path / "memory.db")
+    other = scope + "-other"
+    try:
+        source.add_fact(connection, "fact-1", scope, "accepted")
+        with pytest.raises(MemoryReplicationError, match="scope"):
+            source.add_fact(connection, "fact-2", other, "must remain separate")
+        assert facts_for_project(connection, scope)[0]["text"] == "accepted"
+        assert facts_for_project(connection, other) == []
+    finally:
+        connection.close()
+
+    config = _live_replication_config()
+    config = replace(
+        config,
+        memory_replication=MemoryReplicationConfig(
+            enabled=True,
+            local_node_id="node-a",
+            project_scope=scope,
+            peers=(MemoryReplicationPeerConfig(
+                node_id="node-b", project_scope=scope,
+                origin="https://node-b.example:8443",
+            ),),
+        ),
+    )
+    assert memory_replication_errors(config) == []
 
 
 def test_live_application_composes_authoritative_fact_write_and_restart(tmp_path, monkeypatch):

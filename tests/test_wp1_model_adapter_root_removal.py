@@ -65,8 +65,8 @@ def test_legacy_gateway_fails_closed_without_injected_chat_provider():
 def test_ollama_gateway_preserves_target_system_and_generation_shape():
     calls = []
 
-    def resolve(tier, strict=False):
-        assert (tier, strict) == ("code", False)
+    def resolve(tier, strict=None):
+        assert (tier, strict) == ("code", None)
         return ModelTarget("provider-model", False, "code")
 
     def build_system(system, trace, persona, *, model="", cloud=False):

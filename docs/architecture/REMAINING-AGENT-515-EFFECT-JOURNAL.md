@@ -43,9 +43,9 @@ until the unresolved effect is explicitly reconciled. Advancing the owner
 epoch does not clear that fence; this slice has no automatic reconciliation
 clear path and therefore remains fail-closed. The journal accepts an immutable
 operation-family verifier registry only during trusted bootstrap construction;
-there is no post-construction registration method. Production bootstrap
-currently supplies no verifier, so its fences cannot be positively cleared
-until a real provider composition exists. A configured verifier runs outside
+there is no post-construction registration method. The original bootstrap supplied no verifier. Production composition now
+supplies the bounded process-start and local compute verifiers described below;
+unknown operation families remain fenced. A configured verifier runs outside
 the journal write transaction under a bounded timeout and must return a typed
 `ReconciliationProof` containing
 the exact intent, operation, external receipt, outcome digest, verifier id,
@@ -75,7 +75,9 @@ start of the process. The job's exit status is not that effect's outcome.
 Pending, missing, malformed, unattached, or otherwise unknown registry state
 produces no proof and leaves the fence set. The
 verifier never uses process output, caller text, or an in-memory process handle
-as authority. Other worker families remain unsupported and fenced.
+as authority. Local compute-submit and its nested process-start also have the bounded
+attachment proof described in the continuation section below. Other unknown
+worker families remain unsupported and fenced.
 
 Trust boundary: this is a cooperative host-process API, not an in-process
 Python authentication boundary. Any code that can open the effects database
@@ -306,3 +308,77 @@ Remaining limits:
   verifier, so their fences can be cleared only by future trusted composition.
 - A full hosted regression and deployment receipt are still required before
   LOOP-008 can be promoted to `verified`.
+
+
+## Continuation qualification on 2026-09-24
+
+Supported native and legacy typed file mutations now declare canonical
+`write_files`/`delete_files` effects. Trusted edge permissions carry those
+host-owned descriptors into ToolGateway; caller restrictions and ordinary
+resource policy remain enforced. Real writes create completed journal entries;
+reads and denied calls create none. A subprocess crash immediately after an
+actual typed append but before receipt leaves one uncertain intent after
+restart and refuses a second append (`test_typed_file_effect_crash.py`).
+
+`test_tool_gateway_effect_crash_matrix.py` separately covers gateway crash cuts,
+overlapping effects, settled-prefix checkpoint recovery, and failures during
+redaction/receipt publication after the physical effect. Failed uncertainty
+publication preserves the original error and does not certify completion.
+
+Production composition adds local compute-submit and nested process-start
+verifiers bound to the durable process registry. Exact job/worker/controller,
+idempotency, scope, attached PID and both request digests are required. A terminal
+failed/cancelled workload can prove that its launch occurred; it cannot prove
+successful workload execution. Missing, legacy, running, unattached, or mismatched
+records produce no proof. Real child-process crash tests cover both receipt
+boundaries and assert stale-owner refusal and no second launch.
+
+Issue #515 remains open. Child-session checkpoint generations still lack a
+journal-high-water saga; whole-child fencing is not proof of safe continuation
+from every child checkpoint. Compute cancel, subagent and self-mod status text
+cannot supply independent effect receipts, and legacy self-mod intermediate
+stages are outside the currently qualified deploy/rollback boundary. These gaps
+must remain explicit rather than being hidden by the passing direct-worker
+matrix.
+
+### Concrete child-checkpoint blocker and next implementation
+
+`LocalSubagentProvider` currently wraps the entire runner in one
+`subagent-run:{child_id}` effect. That first intent stays unresolved while the
+runner saves child checkpoints and completes inner tool effects in the same
+run. Consequently, even a journal containing a completed inner mutation has a
+settled high-water of zero until the outer runner returns. Copying zero into a
+child checkpoint would not establish a resumable effect prefix.
+
+`test_child_effect_checkpoint_crash.py` reproduces this with two persisted
+databases and a real interpreter exit after one fsynced mutation and a child
+checkpoint. The inner effect has a completed receipt, the outer intent has none,
+and reopening both stores refuses duplicate work. This qualifies the existing
+fence, not checkpoint-based continuation.
+
+The child checkpoint CAS in `application/subagents/durable_continuation.py`
+stores no journal provenance. Existing restart paths correctly require owner
+cleanup and fence the unresolved outer effect. They prevent duplicate execution
+but cannot continue from the saved child state. The next implementation needs:
+
+1. A bounded dispatch effect whose receipt proves exact durable child admission,
+   with an identity and request digest, rather than completion of the entire
+   runner. Crashes across dispatch must still refuse an unproven second start.
+2. Host-stamped checkpoint provenance binding child sequence/state digest,
+   journal identity, run, worker, owner epoch, and settled position to the child
+   CAS. SQLite child storage, PostgreSQL snapshots, and the continuation codec
+   all need compatible handling; legacy rows without provenance must refuse.
+3. A cross-store commit protocol that records journal proof before child CAS.
+   Resume must clean up the old owner, claim/reconcile the journal epoch, and
+   validate bounded `effects_since` pages against the checkpoint. The runner
+   must consume already-settled receipts or block; merely returning them is
+   insufficient to prevent replay. Production currently composes the effect
+   binding around spawn, and exposes no bound child resume adapter. A future
+   resume entry point must validate that binding before claiming the child;
+   calling the bare continuation service cannot establish journal authority.
+4. Real crash cuts around dispatch, inner mutation, both checkpoint stores, and
+   terminal publication, including stale epochs, missing or swapped journals,
+   truncated receipt pages, and overlapping unresolved intents.
+
+This is a coordinated lifecycle and persistence change, not an extra checkpoint
+field. Terminal child status text is not a substitute for a dispatch receipt.

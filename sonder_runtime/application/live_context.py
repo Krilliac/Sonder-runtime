@@ -137,12 +137,18 @@ class LiveAgentContextProducer:
         try:
             if redirected or not root.is_dir():
                 raise ValueError("workspace scope is unavailable")
+            for roots in (*self._instruction_roots.values(), *self._skill_roots.values()):
+                for source_root in roots:
+                    if (not source_root.is_dir() or source_root.is_symlink()
+                            or getattr(source_root, "is_junction", lambda: False)()):
+                        raise ValueError("configured context source is unavailable")
             instruction = InstructionRegistry(
                 self._sources(self._instruction_roots, root)
             )
             skills = ProgressiveSkillRegistry(
                 self._skill_sources(self._skill_roots, root),
                 max_entries=self._max_skills,
+                require_complete=True,
             )
             summaries = skills.discover()
             if len(summaries) > self._max_skills:

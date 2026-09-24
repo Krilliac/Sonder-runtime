@@ -28,6 +28,7 @@ STATE_DATABASES = (
     ("embed-cache.db", "SONDER_EMBED_CACHE_DB"),
     ("agent-effects.db", "SONDER_AGENT_EFFECTS_DB"),
     ("worker-effects.db", "SONDER_WORKER_EFFECTS_DB"),
+    ("model-request-admission.sqlite3", ""),
 )
 
 _WINDOWS_FORBIDDEN_COMPONENT_CHARS = frozenset('<>:"/\\|?*')
@@ -299,6 +300,7 @@ def live_control_plane_inventory(*, additional=None):
         if rotation_override
         else home / "secrets" / "rotation.json"
     )
+    files.append(state("model-request-admission.sqlite3.lock"))
     atomic = [
         policy,
         Path(str(policy) + ".transition.json"),

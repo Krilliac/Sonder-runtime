@@ -198,6 +198,20 @@ non-finite, zero, or negative values fail safe to the historical 16-worker
 ceiling and are visible in `master_capacity`. Without a per-run `worker_cap`,
 the conservative hardware-derived worker width is unchanged.
 
+Physical model request rate: set both `SONDER_MODEL_REQUEST_BURST` (1–256) and
+`SONDER_MODEL_REQUESTS_PER_MINUTE` (1–1200), or leave both unset to disable this
+optional limit. The burst is shared by Ollama and OpenAI-compatible chat and
+embedding sends, including provider retries. Admission is transactional across
+processes using the same `SONDER_HOME` and survives process restarts. Different
+state homes have independent limits. If live processes disagree on settings,
+the shared store keeps the lower burst and refill rate; raising either limit
+requires a deliberate reset of both `model-request-admission.sqlite3` and its
+`.lock` marker after all senders have stopped. A missing database after first
+use, or a missing/damaged bucket row or marker, refuses sends until repaired.
+The persistent marker prevents a missing database from looking like first boot
+after a process restart; these guards do not isolate state from arbitrary
+same-user host code.
+
 Consent gates: `SONDER_ALLOW_CLOUD`, `SONDER_WEB_TOOLS`,
 `SONDER_ALLOW_REMOTE_OLLAMA`, and `SONDER_ALLOW_REMOTE_COMPUTE`. These are
 independent: enabling private-node compute does not enable remote inference or

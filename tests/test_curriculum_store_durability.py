@@ -114,10 +114,18 @@ def test_concurrent_multiprocess_appends_never_interleave(tmp_path):
 
 def test_lock_is_exclusive_and_times_out(tmp_path):
     lock_path = tmp_path / "x.lock"
-    with durable_locks.exclusive_file_lock(lock_path, timeout=5):
-        with pytest.raises(durable_locks.LockTimeout):
+    with durable_locks.exclusive_file_lock(lock_path, timeout=5, purpose="test-holder"):
+        owner = durable_locks.read_owner(lock_path)
+        assert owner["pid"] == os.getpid()
+        assert owner["host"]
+        assert owner["started"]
+        assert owner["purpose"] == "test-holder"
+        with pytest.raises(durable_locks.LockTimeout, match="test-holder") as error:
             with durable_locks.exclusive_file_lock(lock_path, timeout=0.2):
                 pass
+        assert error.value.holder["pid"] == os.getpid()
+        assert os.path.exists(durable_locks.owner_path(lock_path))
+    assert not os.path.exists(durable_locks.owner_path(lock_path))
     # Released: a fresh acquisition succeeds immediately.
     with durable_locks.exclusive_file_lock(lock_path, timeout=1):
         pass

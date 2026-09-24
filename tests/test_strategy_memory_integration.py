@@ -203,6 +203,37 @@ def test_recovery_context_is_selected_before_attempt_and_project_bound(tmp_path)
         assert scope.strategy_experiences.failed_reuses(stored.experience_id) == 1
 
 
+def test_irrelevant_same_project_memory_does_not_displace_or_get_reuse_credit(tmp_path):
+    trace, memory, path = _application(tmp_path)
+    matched = _attempt("matched", outcome="failed")
+    _record(trace, matched)
+    matched_ref = memory.observe_recorded("matched", "attempt-1", project_scope="project-a")
+    before = memory.recovery_context(
+        "control", "attempt-1", project_scope="project-a", plan=_plan(192),
+        failure_class=FailureClass.TEST_FAILURE, family="patch", language="py",
+        verifier_fingerprint="f" * 64,
+    )
+    unrelated = replace(
+        _attempt("unrelated", outcome="failed"),
+        failure=FailureObservation(FailureClass.DEPENDENCY_FAILURE, evidence_digest="e" * 64),
+    )
+    _record(trace, unrelated)
+    unrelated_ref = memory.observe_recorded("unrelated", "attempt-1", project_scope="project-a")
+    after = memory.recovery_context(
+        "treatment", "attempt-1", project_scope="project-a", plan=_plan(192),
+        failure_class=FailureClass.TEST_FAILURE, family="patch", language="py",
+        verifier_fingerprint="f" * 64,
+    )
+    assert after.prompt_brief == before.prompt_brief
+    assert [ref.experience_id for ref in after.selection.references] == [matched_ref.experience_id]
+    assert unrelated_ref.experience_id not in after.prompt_brief
+    _record(trace, _attempt("treatment", outcome="failed"))
+    memory.observe_recorded("treatment", "attempt-1", project_scope="project-a")
+    with UnitOfWorkAdapter(str(path)) as unit:
+        assert unit.strategy_experiences.failed_reuses(matched_ref.experience_id) == 1
+        assert unit.strategy_experiences.failed_reuses(unrelated_ref.experience_id) == 0
+
+
 def test_host_language_metadata_indexes_digest_only_codegen_scope_with_legacy_fallback(tmp_path):
     trace, memory, _ = _application(tmp_path)
     assert language_from_path("src/module.py") == "py"

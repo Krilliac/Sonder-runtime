@@ -516,9 +516,9 @@
     },
     {
       "checked": false,
-      "claim": "Live tool-enabled agent-lane requests keep the per-turn tool selection id outside the reusable prefix, so turns of one lane and independent worker processes on the same project derive one deterministic prefix identity; a bounded two-process loopback Ollama probe observed provider-reported prompt-cache reuse through the production gateway.",
+      "claim": "Live tool-enabled agent requests retain deterministic stable sections and exact durable replay manifests. Scoped live skill discovery now refuses malformed, truncated or oversized metadata and absent configured roots instead of silently claiming completeness; partial refresh retains last-good records marked incomplete and makes no cache claim. Higher-precedence damage cannot select a lower-precedence fallback.",
       "requirement_id": "CTX-009",
-      "revision": 7,
+      "revision": 9,
       "status": "implemented_unverified"
     },
     {
@@ -544,37 +544,37 @@
     },
     {
       "checked": false,
-      "claim": "Typed record and outbox writes share one caller-owned SQLite transaction.",
+      "claim": "Production SQLiteOutboxCASRepository state and outbox writes commit atomically in one transaction across every repository in the typed persistence graph; a child crash immediately before the real outbox INSERT leaves no partial state or event.",
       "requirement_id": "DATA-003",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Revision compare-and-set is enforced by the SQLite persistence adapter.",
+      "claim": "Production SQLite compare-and-set admits exactly one winner under four-process contention for each typed persistence-graph repository; stale revision losers leave no state or outbox event, and a fresh reader observes the committed result.",
       "requirement_id": "DATA-004",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Migration and ownership operations remain explicit typed persistence boundaries with fail-closed validation.",
+      "claim": "Real-file migration rehearsal and production bridge entrypoint preserve a verified pre-migration backup across process crash/resume; checksum-refusal helpers reject tampered backup files before source writes, with restore proof over real SQLite files.",
       "requirement_id": "DATA-005",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Epoch/adoption coordination remains represented by explicit persistence graph and CAS seams.",
+      "claim": "The production epoch-2 admission entrypoint reopens supported state without changing main database bytes and rejects future epoch 3 before writes across every database in its EPOCH2_DATABASES catalog; the separately owned UpdateRepository reopens supported update state and refuses an unknown future migration ledger row before writes.",
       "requirement_id": "DATA-006",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Immutable artifact manifests use deterministic canonical hashes at the persistence boundary.",
+      "claim": "Real producer-to-consumer qualification binds update/generated-deliverable, training, selfmod, durable spill/session attachment, and signed update admission to persisted full hashes/manifests; same-path byte, manifest, signature, and post-review candidate tampering is rejected before effect or activation.",
       "requirement_id": "DATA-007",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -859,16 +859,16 @@
     },
     {
       "checked": false,
-      "claim": "Production codegen repair receives bounded prior source, exact diagnostics and progress; explicit distinct-route policy allows a scoped critic then model rotation; the strategy controller applies bounded no-progress and host-policy precedence.",
+      "claim": "Explicit physical model request limits share a SQLite bucket across host processes. An OS creation lock and fsynced first-use marker prevent cold-start races and missing-database restart resets. Clock rollback and mixed settings cannot increase capacity; ordinary tools cannot mutate admission state.",
       "requirement_id": "LOOP-007",
-      "revision": 5,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Corrects revisions 12 and 13 after an independent review of 3d22e670. Concurrent effects in one shared run now always commit their terminal outcome and checkpoint only the settled high-water prefix; restore accepts later effects only when every effect in the run is terminal and reports journal_high_water, so restart succeeds after verified reconciliation; reconcile clears the run-wide recovery fence once nothing is unresolved; checkpoint writes require the current unfenced owner epoch and idempotent outcome replays append no generation; checkpoint generations are bounded per run; the process-start verifier reports an attached launch as completed with the live {job_id}:{pid} receipt shape.",
+      "claim": "ToolGateway publishes its durable audit receipt before definitive effect completion. Post-effect interruptions and audit/storage failures fence the run under the same admission lock before further storage access. A new request ID cannot bypass the fence; replay of a proven durable outcome releases it only when every sibling effect is settled. Real SQLite, filesystem and subprocess tests cover receipt cuts, total storage outage, competing admission, and settled-outcome replay.",
       "requirement_id": "LOOP-008",
-      "revision": 15,
+      "revision": 17,
       "status": "implemented_unverified"
     },
     {
@@ -887,16 +887,16 @@
     },
     {
       "checked": false,
-      "claim": "Production Codegen and Autopilot select content-free typed recovery references before local model dispatch using actual context-window budgets; host filename language preserves compatible unknown history. Failed reuse is credited only after a host-observed model response, with durable Autopilot attribution surviving restart.",
+      "claim": "The failed managed-receipt boundary now attaches its current owner. Real authenticated principals and composed authoritative persistence prove repeated-principal non-promotion, second-principal fact promotion, failed-check demotion, and reopen. Same-project irrelevant-family controls exercise pre-model Autopilot memory selection.",
       "requirement_id": "MEM-003",
-      "revision": 8,
+      "revision": 9,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Live authoritative activation pays full journal authentication only on first claim and keeps a bounded indexed invariant per unit of work, and the replication receiver fails fast at startup instead of retrying peer fact batches rejected by an authoritatively owned scope.",
+      "claim": "Replication scope validation now accepts bounded POSIX, drive, and UNC workspace spellings as opaque exact identities, allowing actual managed receipts to use composed authoritative persistence without forging a token-only scope.",
       "requirement_id": "MEM-004",
-      "revision": 9,
+      "revision": 10,
       "status": "implemented_unverified"
     },
     {
@@ -943,9 +943,9 @@
     },
     {
       "checked": false,
-      "claim": "The model facade exposes stable logical-role route bindings rather than transport-specific role names.",
+      "claim": "Chat is a policy lane mapped to general by default through existing tiers and gateway dispatch. Typed and HTTP paths preserve strict local aliases and explicit tier/model pins across mixed provider configurations; selected route and content-free lane metadata survive canonical replay. HTTP work handoffs persist owner-scoped source/admission/return event references and truthful JSON/SSE handler-outcome receipts with restart/idempotency coverage.",
       "requirement_id": "MODEL-003",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -957,9 +957,9 @@
     },
     {
       "checked": false,
-      "claim": "Explicit strict capability routing binds persisted passed nonsynthetic conformance to the exact concrete provider/model digest, quantization, backend/version, tokenizer/template, context window and hardware; routing and in-flight response checks reject unknown, stale, failed or mismatched identity.",
+      "claim": "Corrects diagnostic authority: generic callbacks cannot request nonsynthetic conformance, and both OpenAI-compatible CLI modes persist synthetic diagnostics even with a real transport and declared identity file. Those records cannot authorize capability routing.",
       "requirement_id": "MODEL-005",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -1013,9 +1013,9 @@
     },
     {
       "checked": false,
-      "claim": "The live lifecycle projects typed readiness, dependency, drain, recovery, admission, and bounded telemetry state into its health snapshot.",
+      "claim": "Fleet snapshots distinguish owner process heartbeat from per-agent progress, report full-table stalled counts with paginated details, and verify local process-instance identity before stale-owner reclamation. Dispatch has bounded progress waits, reports uncertainty without fan-in, requests cooperative cancellation, and retains a live worker's reservation until it exits. Shared locks expose bounded owner diagnostics, and command-journal and legacy migration waits have deadlines.",
       "requirement_id": "OPS-003",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1034,9 +1034,9 @@
     },
     {
       "checked": false,
-      "claim": "Live operation telemetry is bounded, redacted, and exposed only as a local diagnostic snapshot.",
+      "claim": "Real local activity producers omit synthetic prompt, secret and artifact sentinels from default public projections. Overflow retains exactly the bounded per-owner history, evicts the oldest owner beyond the owner limit, and caps global feed events and bytes with explicit truncation.",
       "requirement_id": "OPS-006",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1272,9 +1272,9 @@
     },
     {
       "checked": false,
-      "claim": "Native Windows MIC canaries and unsupported-host refusal are qualified at published revision 6dcd99246a1a8dca5ae6aaff63bb94c7f2180a9d; the Windows suite passed 20 MIC tests with one explicitly deselected Git Bash case. Automatic approval remains blocked because neither low MIC nor parent-filtered candidate output provides an independent grader.",
+      "claim": "An opt-in Linux Codegen adapter stages exact host-granted sources into a pinned local container with read-only input, bounded disposable build storage, network denial and verified cleanup. Source/root replacement races and uncertain launcher exits refuse; default and Windows profiles stay closed.",
       "requirement_id": "SELFMOD-002",
-      "revision": 9,
+      "revision": 10,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "9edfd7a80bc4b4b2a8dd3a7c2dd57edcb21686e500c3c91c4810bcc42dd6c309",
-    "spec_sha256": "d11b5664c594bb79042c358a0510393d1ee0dd6d718830332a6362ed652c9bc5"
+    "ledger_sha256": "08c2e844d31f93f734940c1ea3434dfad47730e8dcd8d80a093b4833f64d7ed4",
+    "spec_sha256": "1d7da49c5910bcf0bd5099ef1858312a8491a0429a4df33895d8088942278e33"
   }
 }

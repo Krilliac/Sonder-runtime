@@ -25,10 +25,20 @@ import pytest
 import permission_modes as pm
 import server
 from sonder_runtime.adapters.filesystem import file_ops
+from sonder_runtime.adapters.persistence.sqlite.effect_journal import (
+    SQLiteEffectJournal,
+)
 from sonder_runtime.adapters.persistence.tool_audit import DurableToolAuditRepository
 from sonder_runtime.adapters.security import approval_ledger as ledger_module
+from sonder_runtime.application.execution.effect_journal import (
+    EffectState,
+    JournalBinding,
+    bound,
+)
 from sonder_runtime.bootstrap import app as bootstrap_app
-from sonder_runtime.bootstrap.native_mcp import run_native_mcp
+from sonder_runtime.bootstrap.native_mcp import native_tool_registry, run_native_mcp
+from sonder_runtime.bootstrap.typed_tools import typed_tool_registry
+from sonder_runtime.domain.tools.descriptors import ToolEffect
 from sonder_runtime.platform import paths as runtime_paths
 
 pytestmark = pytest.mark.unit
@@ -89,6 +99,95 @@ def _native_rows(app, name, arguments):
 
 def _native(app, name, arguments):
     return _native_rows(app, name, arguments)[1]["result"]
+
+
+def test_supported_file_mutations_declare_effects_on_both_catalogs():
+    native = native_tool_registry()
+    typed = typed_tool_registry()
+    expected = {
+        "write_file": {ToolEffect.WRITE_FILES},
+        "edit_file": {ToolEffect.WRITE_FILES},
+        "make_directory": {ToolEffect.WRITE_FILES},
+        "file_copy": {ToolEffect.WRITE_FILES},
+        "file_move": {ToolEffect.WRITE_FILES, ToolEffect.DELETE_FILES},
+        "file_batch_write": {ToolEffect.WRITE_FILES},
+        "json_patch": {ToolEffect.WRITE_FILES},
+        "text_patch": {ToolEffect.WRITE_FILES},
+        "file_delete": {ToolEffect.DELETE_FILES},
+    }
+    for tool, effects in expected.items():
+        assert native.get(tool).effects == typed.get(tool).effects == frozenset(effects)
+    for alias, canonical in (
+        ("file_write", "write_file"), ("file_edit", "edit_file"),
+        ("directory_create", "make_directory"),
+    ):
+        assert native.get(alias).effects == native.get(canonical).effects
+    assert typed.get("read_file").effects == frozenset()
+
+
+def test_composed_file_mutations_commit_effect_intents_for_worker_on_both_surfaces(
+    application, tmp_path, workspace, unattended_effects_allowed,
+):
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    with bound(JournalBinding(journal, "run-file-tools", "worker", 1, str(workspace))):
+        assert not server.file_write("legacy.txt", "legacy").startswith("ERROR")
+        native = _native(application, "file_write", {
+            "path": "native.txt", "content": "native", "mode": "create",
+        })
+        assert native["isError"] is False, native
+        assert "legacy" in server.file_read("legacy.txt")
+
+    assert journal.high_water("run-file-tools") == 2
+    rows = _audit(tmp_path).read()
+    assert [row["tool_name"] for row in rows] == ["write_file", "write_file", "read_file"]
+    assert [row["effects"] for row in rows] == [
+        ["write_files"], ["write_files"], [],
+    ]
+    for row in rows[:2]:
+        assert journal.get("run-file-tools:" + row["request_id"]).state is EffectState.COMPLETED
+    assert (workspace / "legacy.txt").read_text() == "legacy"
+    assert (workspace / "native.txt").read_text() == "native"
+
+
+def test_native_policy_denial_has_no_effect_intent(application, tmp_path, workspace, monkeypatch):
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    monkeypatch.setitem(pm._STATE, "mode", pm.PLAN)
+    with bound(JournalBinding(journal, "denied-file-tools", "worker", 1, str(workspace))):
+        refused = _native(application, "file_write", {
+            "path": "denied.txt", "content": "x", "mode": "create",
+        })
+    assert refused["isError"] is True
+    assert refused["error"] == "permission_denied"
+    assert journal.high_water("denied-file-tools") == 0
+    assert not (workspace / "denied.txt").exists()
+
+
+def test_gateway_does_not_widen_an_explicitly_restricted_caller_scope(
+    application, tmp_path, workspace,
+):
+    from sonder_runtime.application.tools.gateway_contract import (
+        ToolGatewayRequest,
+        ToolPermission,
+        ToolScope,
+    )
+    from sonder_runtime.domain.common.errors import Forbidden
+
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    request = ToolGatewayRequest(
+        request_id="restricted-worker-request", tool_name="write_file",
+        arguments={"path": "restricted.txt", "content": "x", "mode": "create"},
+        scope=ToolScope(
+            "worker", (str(workspace),), allowed_effects=frozenset(), source="worker",
+        ),
+        permission=ToolPermission(frozenset({"write_files"})),
+    )
+    with (
+        bound(JournalBinding(journal, "restricted-tools", "worker", 1, str(workspace))),
+        pytest.raises(Forbidden, match="exceeds the request scope"),
+    ):
+        application.tools.execute(request)
+    assert journal.high_water("restricted-tools") == 0
+    assert not (workspace / "restricted.txt").exists()
 
 
 # (legacy call, native tool name, native arguments, canonical typed name)
@@ -357,4 +456,3 @@ def test_an_approved_native_call_reaches_exactly_the_roots_it_named(application,
     monkeypatch.setitem(pm._STATE, "mode", pm.AUTO)
     plain = _native(application, "file_write", {**arguments, "path": str(elsewhere / "two.txt")})
     assert plain["isError"] is True and "outside allowed roots" in plain["output"]
-

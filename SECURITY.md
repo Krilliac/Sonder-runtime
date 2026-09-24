@@ -1,5 +1,12 @@
 # Security Policy
 
+Lock-owner sidecars and progress deadlines are diagnostic, not authority to
+terminate or replay work. A PID alone does not identify a process instance;
+unknown or foreign ownership must not be reclaimed as if it were dead. An
+effect is not definitively complete until its audit receipt is durable, and
+uncertainty fences further mutation even if its persistence attempt fails.
+See [stalled-worker recovery](docs/architecture/evidence/STALL-RECOVERY-2026-09-24.md).
+
 > **Contract scope:** this focused contract describes current behavior. Unfinished
 > implementation work is tracked in the
 > [master implementation specification](docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md); the

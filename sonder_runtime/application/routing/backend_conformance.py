@@ -88,14 +88,16 @@ def run_gateway_probes(
     """Probe one concrete ``ModelGateway`` route; default to synthetic evidence.
 
     The probe uses fixed, non-sensitive prompts and records only outcome codes;
-    provider text is never persisted. Only a trusted host with an actual live
-    backend may set ``synthetic=False``. The structured check requires a small
+    provider text is never persisted. The structured check requires a small
     JSON response from the requested model, while cancellation is checked
     with a pre-cancelled context so an implementation cannot pass by merely
-    returning a plausible cancellation flag.  ``timeout_seconds`` is bounded
-    to keep an operator or nightly preflight from becoming an unbounded model
-    call.
+    returning a plausible cancellation flag. Such a local pre-cancelled check
+    cannot certify provider in-flight cancellation. ``timeout_seconds`` is
+    bounded to keep preflight from becoming an unbounded model call. This
+    generic API is diagnostic-only; no caller can declare a callback live.
     """
+    if synthetic is not True:
+        raise ValueError("arbitrary gateway callbacks cannot certify live inference")
     if not 0.0 < float(timeout_seconds) <= 300.0:
         raise ValueError("timeout_seconds must be between 0 and 300")
     checked_at = time.time() if now is None else float(now)
@@ -245,10 +247,12 @@ def run_protocol_probes(
 ) -> BackendConformanceRecord:
     """Validate bounded host-observed protocol traces; unimplemented cases stay unknown.
 
-    A supplied fake remains synthetic unless the host explicitly declares an
-    actual live probe. No model name, metadata or unattempted case certifies a
-    capability; unknown categories are not exported as passing results.
+    Generic callbacks are diagnostic-only. Only a concrete host adapter that
+    verifies the actual transport and backend identity can issue measured
+    evidence; caller-selected ``synthetic=False`` cannot certify a callback.
     """
+    if synthetic is not True:
+        raise ValueError("arbitrary protocol callbacks cannot certify live inference")
     if not isinstance(identity, BackendIdentity):
         raise TypeError("a host-observed backend identity is required")
     if not 0.0 < float(timeout_seconds) <= 300.0:

@@ -130,6 +130,27 @@ jobs:
           tests/test_selfmod_verification_lifecycle.py
           tests/test_runtime_lifecycle_graceful_drain_bridge.py
           tests/test_application_lifecycle_adapter.py
+          tests/test_shared_model_request_admission.py
+          tests/test_host_model_request_admission.py
+          tests/test_openai_host_model_admission.py
+          tests/test_control_plane_inventory.py
+          tests/test_process_wait_hardening.py
+          tests/test_start_selfmod_launcher.py
+          tests/test_command_recovery.py
+          tests/test_curriculum_store_durability.py
+          tests/test_fleet_store.py
+          tests/test_adaptive_concurrency.py
+          tests/test_tool_gateway_effect_crash_matrix.py
+          tests/test_autopilot_controller.py
+          tests/test_codegen_build_loop_server.py
+          tests/test_launcher.py
+          tests/test_app_control_http.py
+          tests/test_app_recovery_http.py
+          tests/test_data004_multiprocess_qualification.py
+          tests/test_data005_migration_rehearsal.py
+          tests/test_data006_epoch_qualification.py
+          tests/test_data007_artifact_consumer_qualification.py
+          tests/test_ops006_telemetry_qualification.py
       - name: Exercise Windows release smoke script
         if: ${{ !cancelled() && steps.install-focused-venv.outcome == 'success' }}
         env:

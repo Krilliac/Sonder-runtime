@@ -5,6 +5,7 @@ import pytest
 
 import autopilot_controller
 import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
+import sonder_runtime.bootstrap.strategy as strategy_bootstrap
 from sonder_runtime.adapters.unit_of_work import UnitOfWorkAdapter
 from sonder_runtime.application.memory.strategy_memory import StrategyMemoryService
 from sonder_runtime.bootstrap.strategy import compose_strategy_trace
@@ -706,3 +707,11 @@ def test_ownership_theft_at_task_start_raises_instead_of_calling_model(monkeypat
 
     assert calls == [], "lost ownership must suppress the model call"
     assert original_get_run(run["id"])["status"] == "interrupted"
+
+
+def test_strategy_private_key_preserves_windows_control_bytes(tmp_path, monkeypatch):
+    expected = bytes(range(32))
+    monkeypatch.setattr(strategy_bootstrap.os, "urandom", lambda size: expected[:size])
+    path = tmp_path / "strategy-private" / "checkpoint.key"
+    assert strategy_bootstrap._private_key(path) == expected
+    assert strategy_bootstrap._private_key(path) == expected

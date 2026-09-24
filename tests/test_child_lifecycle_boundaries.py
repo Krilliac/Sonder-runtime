@@ -421,10 +421,18 @@ def test_direct_service_also_enforces_wall_budget_and_releases_capacity(tmp_path
     ))
 
     def slow(*_):
+        started.set()
         Event().wait(.04)
         return "late result"
 
+    started = Event()
     timed_out = service.spawn(_child("late", budget), local_owner_context(correlation_id="late"), slow).result(2)
     assert timed_out.status is SubagentStatus.TIMED_OUT
-    assert timed_out.usage.wall_seconds >= .04
+    # Admission itself is inside the wall budget. Under load the deadline can
+    # expire before runner entry; when the runner did enter, retain the real
+    # late-work duration as the stronger assertion.
+    if started.is_set():
+        assert timed_out.usage.wall_seconds >= .04
+    else:
+        assert timed_out.usage.wall_seconds >= .01
     assert service.spawn(_child("next", _budget(wall=.5)), local_owner_context(correlation_id="next"), lambda *_: "done").result(2).status is SubagentStatus.SUCCEEDED

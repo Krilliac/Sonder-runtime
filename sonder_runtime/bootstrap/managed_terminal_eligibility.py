@@ -152,9 +152,14 @@ def terminal_eligibility(session, expected_turn, *, verifier_factory):
             current = session._verifier.snapshotter.capture(tuple(prepared.roots))
             if current.digest != failure["after_manifest_digest"]:
                 raise ValueError("failure source manifest changed")
-            session._verifier._require_current(
-                prepared, session.context, exact_context=False
-            )
+            # Host-managed roots require the live attachment installed by the
+            # bound session. Positive validation enters it through
+            # verification_view; this direct failed-receipt recheck must do
+            # the same instead of treating every real failure as untrusted.
+            with bound._scope() as current:
+                session._verifier._require_current(
+                    prepared, current, exact_context=False
+                )
             if facts.project_scope not in prepared.roots:
                 raise ValueError("failure scope is outside prepared roots")
             verified_subject_digest = digest({

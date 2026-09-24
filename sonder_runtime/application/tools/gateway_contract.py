@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -26,6 +27,8 @@ from typing import Any, Mapping, Protocol
 from ...domain.common.errors import Cancelled, DeadlineExceeded, Forbidden, InvalidInput
 from ..execution import effect_journal
 from ..ports.tool_registry import ToolSchemaSelection
+
+_LOG = logging.getLogger(__name__)
 
 # Where a request came from and what privilege it carries. These mirror the
 # literals of ``application.context``: the scope is what a typed request knows
@@ -343,11 +346,15 @@ class ToolGateway:
                 )
             try:
                 result = self._invoker.invoke(request)
-            except Exception as exc:
+            except BaseException as exc:
                 if journal_binding is not None and journal_intent is not None:
-                    journal_binding.mark_uncertain(
-                        journal_intent, detail=f"invoker raised {type(exc).__name__}"
-                    )
+                    try:
+                        journal_binding.mark_uncertain(
+                            journal_intent, detail=f"invoker raised {type(exc).__name__}"
+                        )
+                    except BaseException as uncertainty_error:  # noqa: BLE001 - preserve original interrupt
+                        _LOG.error("tool effect uncertainty publication failed: %s",
+                                   type(uncertainty_error).__name__)
                 raise
             # The executor returned the terminal outcome of an already admitted
             # effect. Preserve that truth even if cancellation/deadline arrived
@@ -360,53 +367,73 @@ class ToolGateway:
                 policy_match or _match_text(getattr(exc, "policy_match", "")),
             ))
             raise
-        redacted = self._redactor.redact(request.tool_name, result.output)
-        if isinstance(redacted, RedactedOutput):
-            safe_output, redaction_applied = redacted.value, redacted.applied
-        else:
-            safe_output, redaction_applied = redacted, True
-        # A failure message is shown and audited exactly like output, so it is
-        # scrubbed the same way; a primitive's refusal can quote a path or a
-        # value the caller sent.
-        safe_error = self._redactor.redact(request.tool_name, result.error) if result.error else ""
-        if isinstance(safe_error, RedactedOutput):
-            safe_error = safe_error.value
-        evidence = dict((getattr(result, "metadata", None) or {}).get("evidence") or {})
-        safe_evidence = self._redactor.redact(request.tool_name, evidence) if evidence else {}
-        if isinstance(safe_evidence, RedactedOutput):
-            safe_evidence = safe_evidence.value
-        receipt = ToolReceipt(
-            request_id=request.request_id,
-            tool_name=request.tool_name,
-            success=result.success,
-            output=safe_output,
-            error_code=result.error_code,
-            error=safe_error if isinstance(safe_error, str) else str(safe_error),
-            duration_ms=max(0, int((time.monotonic() - started) * 1000)),
-            redaction_applied=redaction_applied,
-            approval_required=request.permission.approval is ApprovalMode.REQUIRED,
-            requester_id=request.scope.principal_id,
-            argument_digest=_digest(dict(request.arguments)),
-            result_digest=_digest(safe_output),
-            execution_world=getattr(request, "execution_world", ""),
-            policy_match=policy_match,
-            resource=self._resource(request),
-            effects=tuple(sorted(request.permission.effects)),
-            model=NOT_A_MODEL_CALL,
-            terminal=(COMPLETED if result.success else CANCELLED
-                      if result.error_code in {"TEST_CANCELLED", "CANCELLED", "Cancelled"}
-                      else FAILED),
-            evidence=safe_evidence if isinstance(safe_evidence, Mapping) else {},
-        )
-        if journal_binding is not None and journal_intent is not None:
-            journal_binding.complete(
-                journal_intent,
-                outcome_digest=receipt.result_digest,
-                receipt_key=receipt.request_id,
-                detail=receipt.error,
-                success=receipt.success,
+        try:
+            redacted = self._redactor.redact(request.tool_name, result.output)
+            if isinstance(redacted, RedactedOutput):
+                safe_output, redaction_applied = redacted.value, redacted.applied
+            else:
+                safe_output, redaction_applied = redacted, True
+            # A failure message is shown and audited exactly like output, so it is
+            # scrubbed the same way; a primitive's refusal can quote a path or a
+            # value the caller sent.
+            safe_error = self._redactor.redact(request.tool_name, result.error) if result.error else ""
+            if isinstance(safe_error, RedactedOutput):
+                safe_error = safe_error.value
+            evidence = dict((getattr(result, "metadata", None) or {}).get("evidence") or {})
+            safe_evidence = self._redactor.redact(request.tool_name, evidence) if evidence else {}
+            if isinstance(safe_evidence, RedactedOutput):
+                safe_evidence = safe_evidence.value
+            receipt = ToolReceipt(
+                request_id=request.request_id,
+                tool_name=request.tool_name,
+                success=result.success,
+                output=safe_output,
+                error_code=result.error_code,
+                error=safe_error if isinstance(safe_error, str) else str(safe_error),
+                duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+                redaction_applied=redaction_applied,
+                approval_required=request.permission.approval is ApprovalMode.REQUIRED,
+                requester_id=request.scope.principal_id,
+                argument_digest=_digest(dict(request.arguments)),
+                result_digest=_digest(safe_output),
+                execution_world=getattr(request, "execution_world", ""),
+                policy_match=policy_match,
+                resource=self._resource(request),
+                effects=tuple(sorted(request.permission.effects)),
+                model=NOT_A_MODEL_CALL,
+                terminal=(COMPLETED if result.success else CANCELLED
+                          if result.error_code in {"TEST_CANCELLED", "CANCELLED", "Cancelled"}
+                          else FAILED),
+                evidence=safe_evidence if isinstance(safe_evidence, Mapping) else {},
             )
-        self._publish(request, receipt)
+            # Durable audit publication is part of the effect receipt. Keep
+            # the journal unresolved until it succeeds, so an audit failure
+            # cannot certify an effect that a retry could repeat.
+            self._publish(request, receipt)
+            if journal_binding is not None and journal_intent is not None:
+                journal_binding.complete(
+                    journal_intent,
+                    outcome_digest=receipt.result_digest,
+                    receipt_key=receipt.request_id,
+                    detail=receipt.error,
+                    success=receipt.success,
+                )
+        except BaseException as error:
+            if journal_binding is not None and journal_intent is not None:
+                try:
+                    # The effect already ran. A failed redaction or receipt
+                    # write cannot leave a reattachable bare intent. If the
+                    # receipt committed before raising, the journal retains
+                    # its definitive result instead of downgrading it.
+                    journal_binding.mark_uncertain(
+                        journal_intent, detail=f"post-invoke {type(error).__name__}"
+                    )
+                except Exception as recovery_error:  # noqa: BLE001 - preserve the original post-invoke failure
+                    # Keep the original error; an unreadable journal still
+                    # blocks safe checkpoint restore and blind replay.
+                    _LOG.error("tool effect uncertainty publication failed: %s",
+                               type(recovery_error).__name__)
+            raise
         return receipt
 
     def _early_receipt(self, request: ToolGatewayRequest, exc: BaseException,

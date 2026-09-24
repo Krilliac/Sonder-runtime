@@ -311,7 +311,7 @@ def test_natural_execution_intent_requires_developer_authorization(monkeypatch):
     monkeypatch.setattr(
         ts.server,
         "route_work_request",
-        lambda prompt, project="": calls.append((prompt, project)) or "grounded work",
+        lambda prompt, project="", **_kwargs: calls.append((prompt, project)) or "grounded work",
     )
 
     assert ts._handle_work_intent("edit the app files", authorized=False) is None

@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 301,
+      "file_count": 306,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -106,8 +106,11 @@
         "sonder_runtime/adapters/evaluation_history_store.py",
         "sonder_runtime/adapters/evaluation_lifecycle.py",
         "sonder_runtime/adapters/execution/__init__.py",
+        "sonder_runtime/adapters/execution/codegen_container_build.py",
+        "sonder_runtime/adapters/execution/compute_effect_verifier.py",
         "sonder_runtime/adapters/execution/durable_output.py",
         "sonder_runtime/adapters/execution/effect_fence.py",
+        "sonder_runtime/adapters/execution/isolated_runner.py",
         "sonder_runtime/adapters/execution/persistent_terminal.py",
         "sonder_runtime/adapters/execution/process_jobs.py",
         "sonder_runtime/adapters/execution/runtime_owner.py",
@@ -127,6 +130,7 @@
         "sonder_runtime/adapters/filesystem/__init__.py",
         "sonder_runtime/adapters/filesystem/atomic_json.py",
         "sonder_runtime/adapters/filesystem/child_migration_bundle.py",
+        "sonder_runtime/adapters/filesystem/durable_locks.py",
         "sonder_runtime/adapters/filesystem/file_ops.py",
         "sonder_runtime/adapters/filesystem/json_patch.py",
         "sonder_runtime/adapters/filesystem/text_patch.py",
@@ -152,6 +156,7 @@
         "sonder_runtime/adapters/inference/ollama_vision.py",
         "sonder_runtime/adapters/inference/openai_compat.py",
         "sonder_runtime/adapters/inference/openai_compat_gateway.py",
+        "sonder_runtime/adapters/inference/openai_protocol_probe.py",
         "sonder_runtime/adapters/inference/static_membership.py",
         "sonder_runtime/adapters/inference/telemetry.py",
         "sonder_runtime/adapters/inference/vision.py",
@@ -350,7 +355,7 @@
       ]
     },
     {
-      "file_count": 343,
+      "file_count": 345,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -386,6 +391,8 @@
         "sonder_runtime/application/capabilities/observability.py",
         "sonder_runtime/application/chat/__init__.py",
         "sonder_runtime/application/chat/handle_chat.py",
+        "sonder_runtime/application/chat/handoff_receipts.py",
+        "sonder_runtime/application/chat/lanes.py",
         "sonder_runtime/application/command_surface/__init__.py",
         "sonder_runtime/application/command_surface/mcp.py",
         "sonder_runtime/application/compaction.py",

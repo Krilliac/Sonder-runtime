@@ -79,7 +79,9 @@ def reconstruct_model_request(
             continue
         history = payload.get("history", ())
         options = payload.get("options", {})
-        if not isinstance(history, (list, tuple)) or not isinstance(options, Mapping):
+        routing_metadata = payload.get("routing_metadata", {})
+        if (not isinstance(history, (list, tuple)) or not isinstance(options, Mapping)
+                or not isinstance(routing_metadata, Mapping)):
             raise IntegrityFailure("model request snapshot has invalid containers")
         request = ModelRequest(
             prompt=_text(payload, "prompt"),
@@ -87,6 +89,7 @@ def reconstruct_model_request(
             system=_text(payload, "system"),
             history=tuple(history),
             options=MappingProxyType(dict(options)),
+            routing_metadata=MappingProxyType(dict(routing_metadata)),
             stream=payload.get("stream", False) is True,
             prefix_manifest=payload.get("prefix_manifest"),
             replay_manifest=payload.get("replay_manifest"),

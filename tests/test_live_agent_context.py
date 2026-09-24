@@ -3,16 +3,22 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+
 import pytest
 
 from sonder_runtime.adapters.persistence.agent_lanes import SQLiteAgentLaneStore
-from sonder_runtime.adapters.persistence.session_repository import SQLiteSessionRepository
+from sonder_runtime.adapters.persistence.session_repository import (
+    SQLiteSessionRepository,
+)
 from sonder_runtime.adapters.provider_dispatch.gateway import ProviderDispatchGateway
 from sonder_runtime.application.agents.interactive_lanes import AgentLaneService
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.context_integration import ContextPlanningFacade
 from sonder_runtime.application.live_context import LiveAgentContextProducer
-from sonder_runtime.application.ports.model_gateway import InferenceTelemetry, ModelResponse
+from sonder_runtime.application.ports.model_gateway import (
+    InferenceTelemetry,
+    ModelResponse,
+)
 from sonder_runtime.application.ports.model_target import ResolvedModelRoute
 
 
@@ -29,6 +35,31 @@ class _Model:
             "fake", "fake-model", request.tier, request.tier,
             False, "fake-tokenizer", "fake-template", self,
         )
+
+
+class _RoutedProvider(_Model):
+    """A deterministic route authority, without simulated provider cache hits."""
+
+    def __init__(self, provider_id: str, *, artifact_digest: str):
+        super().__init__()
+        self.provider_id = provider_id
+        self.artifact_digest = artifact_digest
+
+    def resolve_route(self, request, context):
+        return ResolvedModelRoute(
+            self.provider_id, "model:latest", request.tier, request.tier,
+            False, "tokenizer", (
+                "ollama-template-sha256:" + "c" * 64
+                + ";ollama-model-sha256:" + self.artifact_digest
+                if self.artifact_digest else ""
+            ), self,
+        )
+
+    def generate(self, request, context):
+        assert request._resolved_route is not None
+        assert request._resolved_route.provider_id == self.provider_id
+        self.requests.append(request)
+        return ModelResponse("done", "model:latest", request.tier, tokens_out=1)
 
 
 def _project(root: Path, *, name: str, rule: str) -> Path:
@@ -217,6 +248,108 @@ def test_stale_project_rules_are_retained_but_not_injected_as_authoritative(tmp_
     assert planner.prefix_cache_telemetry.writes == 1
 
 
+@pytest.mark.parametrize("previously_valid", (False, True))
+@pytest.mark.parametrize("invalid_manifest", (
+    "---\nname: play\ndescription: partially written skill",
+    "---\nname: play\ndescription: " + "x" * 20_000 + "\n---\n",
+))
+def test_incomplete_scoped_skill_cannot_claim_live_prefix(
+    tmp_path, previously_valid, invalid_manifest,
+):
+    project = _project(tmp_path, name="alpha", rule="ALPHA RULE")
+    sessions = SQLiteSessionRepository(tmp_path / "sessions.db")
+    store = SQLiteAgentLaneStore(tmp_path / "lanes.db", sessions)
+    producer = LiveAgentContextProducer()
+    planner = ContextPlanningFacade()
+    service = AgentLaneService(
+        store, sessions, _Model(), auto_start=False,
+        context_planning=planner, live_context=producer,
+    )
+    context = local_owner_context(correlation_id="partial-skill", workspace_roots=(tmp_path,))
+    lane_id = service.spawn(
+        command_id="spawn-partial-skill", parent_session_id="parent", task="inspect",
+        workspace_root=str(project), context=context,
+    )["lane"]["id"]
+    lane = store.read_lane(lane_id)
+    if previously_valid:
+        first = service._request(lane, (), request_id="before-truncation", context=context)
+        assert "Scoped scenario validation skill" in first.system
+        assert first.prefix_manifest is not None
+
+    # An interrupted write leaves plausible metadata without the closing
+    # delimiter. Publishing an empty complete catalog would invent a new
+    # stable prefix whose missing skill was never an intentional policy edit.
+    (project / "play" / "SKILL.md").write_text(
+        invalid_manifest, encoding="utf-8",
+    )
+    partial = producer.refresh(project)
+    assert not partial.complete
+    assert partial.reason == (
+        "last_good:SkillManifestIncomplete" if previously_valid
+        else "SkillManifestIncomplete"
+    )
+    if previously_valid:
+        assert "Scoped scenario validation skill" in partial.records[-1].content
+    else:
+        assert partial.records == ()
+
+    request = service._request(lane, (), request_id="after-truncation", context=context)
+    assert request.prefix_manifest is None
+    assert request.prefix_cache_observation is None
+    assert request.replay_manifest is None
+    assert "partially written skill" not in request.system
+    assert "Scoped scenario validation skill" not in request.system
+    assert "Live stable context unavailable: " + partial.reason in request.system
+    assert planner.prefix_cache_telemetry.writes == int(previously_valid)
+
+
+def test_missing_explicit_source_is_incomplete(tmp_path):
+    project = _project(tmp_path, name="alpha", rule="ALPHA RULE")
+    configured = tmp_path / "configured"
+    configured.mkdir()
+    producer = LiveAgentContextProducer(skill_roots={"configured": (configured,)})
+    assert producer.refresh(project).complete
+
+    offline = configured.rename(tmp_path / "offline")
+    stale = producer.refresh(project)
+    assert not stale.complete
+    assert stale.reason == "last_good:ValueError"
+    assert "Scoped scenario validation skill" in stale.records[-1].content
+    fresh = LiveAgentContextProducer(skill_roots={"configured": (configured,)})
+    missing = fresh.refresh(project)
+    assert not missing.complete and missing.reason == "ValueError"
+    assert missing.records == ()
+    offline.rename(configured)
+    assert producer.refresh(project).complete
+
+
+def test_truncated_high_precedence_skill_does_not_silently_fall_back(tmp_path):
+    project = _project(tmp_path, name="alpha", rule="ALPHA RULE")
+    configured = tmp_path / "configured"
+    selected = configured / "play" / "SKILL.md"
+    selected.parent.mkdir(parents=True)
+    selected.write_text(
+        "---\nname: play\ndescription: Configured skill\n---\n", encoding="utf-8",
+    )
+    producer = LiveAgentContextProducer(skill_roots={"configured": (configured,)})
+    first = producer.refresh(project)
+    assert first.complete and "Configured skill" in first.records[-1].content
+    assert "Scoped scenario validation skill" not in first.records[-1].content
+
+    selected.write_text("---\nname: play\n", encoding="utf-8")
+    partial = producer.refresh(project)
+    assert not partial.complete and partial.reason == "last_good:SkillManifestIncomplete"
+    assert partial.records == first.records
+
+    # Deleting an individual manifest is an intentional catalog change; only
+    # the interrupted/malformed refresh blocks a complete replacement.
+    selected.unlink()
+    removed = producer.refresh(project)
+    assert removed.complete
+    assert "Scoped scenario validation skill" in removed.records[-1].content
+    assert "Configured skill" not in removed.records[-1].content
+
+
 def test_empty_project_catalog_is_a_complete_live_prefix(tmp_path):
     project = tmp_path / "empty"
     project.mkdir()
@@ -394,6 +527,65 @@ def test_independent_workers_derive_identical_prefix_for_same_project(tmp_path):
     assert "ALPHA RULE" not in beta["stable_system"]
 
 
+def test_live_route_replacement_and_origin_change_invalidate_prefix_identity(tmp_path):
+    project = _project(tmp_path, name="alpha", rule="SCOPED RULE")
+    sessions = SQLiteSessionRepository(tmp_path / "sessions.db")
+    store = SQLiteAgentLaneStore(tmp_path / "lanes.db", sessions)
+    provider = _RoutedProvider("origin-a", artifact_digest="a" * 64)
+    gateway = ProviderDispatchGateway(
+        providers={"origin-a": provider}, tier_providers={"code": "origin-a"},
+        default_generation_provider="origin-a", embedding_provider="origin-a",
+    )
+    planner = ContextPlanningFacade()
+    service = AgentLaneService(
+        store, sessions, gateway, auto_start=False,
+        context_planning=planner, live_context=LiveAgentContextProducer(),
+    )
+    context = local_owner_context(correlation_id="route", workspace_roots=(tmp_path,))
+    lane_id = service.spawn(
+        command_id="spawn-route", parent_session_id="parent", task="inspect",
+        workspace_root=str(project), context=context,
+    )["lane"]["id"]
+    lane = store.read_lane(lane_id)
+    first = service._request(lane, (), request_id="before-replace", context=context)
+    gateway.generate(first, context)
+    assert first.prefix_manifest is not None
+
+    # A mutable tag can keep the same name and template while the provider's
+    # resolved artifact changes. Its next live request must get a new prefix.
+    provider.artifact_digest = "b" * 64
+    replaced = service._request(lane, (), request_id="after-replace", context=context)
+    gateway.generate(replaced, context)
+    assert replaced.prefix_manifest.cache_key != first.prefix_manifest.cache_key
+    assert replaced.replay_manifest.manifest_digest != first.replay_manifest.manifest_digest
+    assert replaced.prefix_cache_observation.reason == "identity_changed"
+
+    # Missing identity disables a positive cache claim even though ordinary
+    # scoped rules remain visible and generation may still proceed.
+    provider.artifact_digest = ""
+    unknown = service._request(lane, (), request_id="unknown-model", context=context)
+    gateway.generate(unknown, context)
+    assert unknown.prefix_manifest is None
+    assert unknown.prefix_cache_observation is None
+    assert "SCOPED RULE" in unknown.system
+
+    other = _RoutedProvider("origin-b", artifact_digest="b" * 64)
+    other_gateway = ProviderDispatchGateway(
+        providers={"origin-b": other}, tier_providers={"code": "origin-b"},
+        default_generation_provider="origin-b", embedding_provider="origin-b",
+    )
+    other_service = AgentLaneService(
+        store, sessions, other_gateway, auto_start=False,
+        context_planning=ContextPlanningFacade(), live_context=LiveAgentContextProducer(),
+    )
+    other_request = other_service._request(
+        lane, (), request_id="different-origin", context=context,
+    )
+    other_gateway.generate(other_request, context)
+    assert other_request.prefix_manifest.cache_key != replaced.prefix_manifest.cache_key
+    assert other_request.prefix_cache_observation.result == "miss"
+
+
 def test_prefix_identity_is_stable_across_processes_and_hash_seeds(tmp_path):
     shared = tmp_path / "shared"
     shared.mkdir()
@@ -404,7 +596,7 @@ def test_prefix_identity_is_stable_across_processes_and_hash_seeds(tmp_path):
         env = dict(os.environ, PYTHONHASHSEED=seed)
         completed = subprocess.run(
             [sys.executable, "-m", "tests.test_live_agent_context",
-             str(tmp_path / ("process-%d" % index)), str(project)],
+             str(tmp_path / f"process-{index}"), str(project)],
             cwd=repo, env=env, capture_output=True, text=True, timeout=120,
             check=False,
         )
@@ -415,10 +607,88 @@ def test_prefix_identity_is_stable_across_processes_and_hash_seeds(tmp_path):
     assert observed[0]["stable_system_sha256"] == observed[1]["stable_system_sha256"]
 
 
+def test_live_request_survives_restart_without_rewriting_stale_project_context(tmp_path):
+    project = _project(tmp_path, name="alpha", rule="ORIGINAL RULE: keep edits scoped")
+    worker_dir = tmp_path / "first-worker"
+    service, store, planner, context = _tool_worker(worker_dir, tmp_path)
+    lane_id = service.spawn(
+        command_id="spawn-captured", parent_session_id="parent", task="inspect",
+        workspace_root=str(project), context=context,
+    )["lane"]["id"]
+
+    # Execute the real lane admission, request builder, and durable outbox
+    # before restarting the reader. This is the model-bound request, rather
+    # than a test-constructed manifest passed directly to session capture.
+    service.run_pending(lane_id, context)
+    original = service.gateway.requests[0]
+    session_id = store.read_lane(lane_id)["session_id"]
+    session_path = worker_dir / "sessions.db"
+    events = SQLiteSessionRepository(session_path).read_complete(session_id)
+    snapshots = [event.payload for event in events if event.event_type == "model.requested"]
+    assert len(snapshots) == 1
+    assert any(event.event_type == "model.response" for event in events)
+    persisted = snapshots[0]
+    assert planner.prefix_cache_telemetry.writes == 1
+    assert original.prefix_manifest is not None
+    assert original.replay_manifest is not None
+    assert "Visible tool schemas" in original.system
+    assert "Tool schema selection id:" in original.system
+    assert "Tool schema selection id:" not in original.prefix_manifest.sections[0].content
+    assert persisted["prefix_manifest"]["cache_key"] == original.prefix_manifest.cache_key
+    assert persisted["prefix_manifest"]["identity_key"] == original.prefix_manifest.identity_key
+    assert persisted["replay_manifest"]["manifest_digest"] == original.replay_manifest.manifest_digest
+    assert {section["section"] for section in persisted["replay_manifest"]["sections"]} == {
+        "stable_instructions", "project_rules", "skill_catalog",
+    }
+    assert len(json.dumps(persisted["replay_manifest"]).encode("utf-8")) < 16_384
+    assert "ORIGINAL RULE" not in json.dumps(persisted["replay_manifest"])
+    assert "Scoped scenario validation skill" not in json.dumps(persisted["replay_manifest"])
+    service.close()
+
+    (project / "AGENTS.md").write_text("REVISED RULE: require a review", encoding="utf-8")
+    (project / "play" / "SKILL.md").write_text(
+        "---\nname: play\ndescription: Revised scoped skill\n---\n", encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [sys.executable, "-m", "tests.test_live_agent_context", "--replay",
+         str(session_path), session_id, str(tmp_path / "restarted-worker"), str(project)],
+        cwd=Path(__file__).resolve().parents[1],
+        env=dict(os.environ, PYTHONHASHSEED="4242"),
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    restarted = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert restarted["crash_safe"] is True
+    assert restarted["prefix"] == persisted["prefix_manifest"]
+    assert restarted["replay"] == persisted["replay_manifest"]
+    assert "ORIGINAL RULE" in restarted["system"]
+    assert "REVISED RULE" not in restarted["system"]
+    assert restarted["new_prefix"] != restarted["prefix"]["cache_key"]
+    assert "REVISED RULE" in restarted["new_system"]
+    assert "Revised scoped skill" in restarted["new_system"]
+    assert "ORIGINAL RULE" not in restarted["new_system"]
+
+
 if __name__ == "__main__":
     import hashlib
 
-    evidence = _worker_prefix_evidence(Path(sys.argv[1]), Path(sys.argv[2]))
-    stable = evidence.pop("stable_system")
-    evidence["stable_system_sha256"] = hashlib.sha256(stable.encode("utf-8")).hexdigest()
+    if sys.argv[1] == "--replay":
+        from sonder_runtime.application.session.durable_replay import crash_safe_replay
+
+        recovered = crash_safe_replay(SQLiteSessionRepository(sys.argv[2]), sys.argv[3])
+        assert recovered.request is not None
+        request = recovered.request.request
+        new = _worker_prefix_evidence(Path(sys.argv[4]), Path(sys.argv[5]))
+        evidence = {
+            "crash_safe": recovered.crash_safe,
+            "prefix": request.prefix_manifest,
+            "replay": request.replay_manifest,
+            "system": request.system,
+            "new_prefix": new["cache_key"],
+            "new_system": new["stable_system"],
+        }
+    else:
+        evidence = _worker_prefix_evidence(Path(sys.argv[1]), Path(sys.argv[2]))
+        stable = evidence.pop("stable_system")
+        evidence["stable_system_sha256"] = hashlib.sha256(stable.encode("utf-8")).hexdigest()
     print(json.dumps(evidence, sort_keys=True))
