@@ -144,6 +144,54 @@ def test_actual_pair_serializes_distinct_child_admissions_for_one_root(repositor
     assert "concurrency" in next(value for status, value in outcomes if status == "rejected")
 
 
+def test_actual_pair_recovers_scoped_keys_and_rejects_parallel_duplicates(repository):
+    from sonder_runtime.application.ports.subagents import (
+        InvalidSubagentRequest,
+        SubagentResult,
+        SubagentStatus,
+    )
+    from sonder_runtime.application.subagents.durable_continuation import (
+        DurableContinuationService,
+    )
+
+    root = "pg-key-root-" + uuid.uuid4().hex
+    key = "pg-key-" + uuid.uuid4().hex
+    DurableContinuationService(repository).register_root(
+        root, SubagentBudget(max_steps=20, max_children=3,
+                             max_depth=2, max_concurrency=3),
+    )
+    candidates = tuple(DurableChildSession(
+        SubagentRequest(root, "same scoped work", SubagentBudget(max_steps=4),
+                        "pg-key-child-" + uuid.uuid4().hex, resume_key=key,
+                        idempotency_key=key),
+        ChildSessionLineage(root),
+    ) for _ in range(2))
+    barrier = Barrier(2)
+
+    def reserve(record):
+        barrier.wait(timeout=3)
+        try:
+            repository.create(record)
+        except InvalidSubagentRequest as error:
+            return "rejected", str(error)
+        return "admitted", record.request.child_id
+
+    with ThreadPoolExecutor(2) as executor:
+        outcomes = list(executor.map(reserve, candidates))
+    assert sorted(status for status, _ in outcomes) == ["admitted", "rejected"]
+    assert "key already exists" in next(detail for status, detail in outcomes if status == "rejected")
+    winner = next(value for status, value in outcomes if status == "admitted")
+    for namespace in ("resume", "idempotency"):
+        assert repository.get_active_by_key(root, key, namespace).request.child_id == winner
+        assert repository.get_by_key(root, key, namespace).request.child_id == winner
+    assert repository.update(winner, status=SubagentStatus.SUCCEEDED, expected_revision=0,
+                             result=SubagentResult(winner, root, SubagentStatus.SUCCEEDED,
+                                                   output="done")) is not None
+    for namespace in ("resume", "idempotency"):
+        assert repository.get_active_by_key(root, key, namespace) is None
+        assert repository.get_by_key(root, key, namespace).request.child_id == winner
+
+
 def test_actual_pair_serializes_owner_width_across_operation_roots(repository):
     from sonder_runtime.application.ports.subagents import InvalidSubagentRequest
     from sonder_runtime.application.subagents.durable_continuation import (

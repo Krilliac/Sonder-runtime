@@ -38,6 +38,17 @@ class _ConformanceCounts:
         self.executed = 0
         self.skipped = 0
 
+    def pytest_collection_modifyitems(self, items) -> None:
+        # The owner-loss canary deliberately leaves the only pair's durable
+        # owner marker unclean. Run it after every test needing a clean owner,
+        # including cases added to this file later.
+        destructive = [item for item in items if item.name ==
+                       "test_owner_loss_during_commit_never_publishes_success"]
+        if len(destructive) != 1:
+            raise RuntimeError("disposable pair needs exactly one owner-loss canary")
+        items.remove(destructive[0])
+        items.append(destructive[0])
+
     def pytest_runtest_logreport(self, report) -> None:
         if report.when == "call" and not report.skipped:
             self.executed += 1

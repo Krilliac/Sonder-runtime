@@ -265,6 +265,21 @@ class PostgreSQLDurableContinuationRepository:
         return tuple(session_from_data(json.loads(bytes(row[0]))) for row in rows)
 
     @staticmethod
+    def _check_active_keys(candidate, existing):
+        active = {SubagentStatus.CREATED, SubagentStatus.QUEUED, SubagentStatus.RUNNING}
+        for attribute, label in (("resume_key", "resume"), ("idempotency_key", "idempotency")):
+            key = getattr(candidate.request, attribute)
+            if key and any(
+                record.status in active
+                and record.request.parent_id == candidate.request.parent_id
+                and getattr(record.request, attribute) == key
+                for record in existing
+            ):
+                raise InvalidSubagentRequest(
+                    f"active child {label} key already exists for parent"
+                )
+
+    @staticmethod
     def _retained(connection, prepared):
         row = connection.execute(
             "SELECT digest FROM sonder_child.intent WHERE operation_id=%s",
@@ -371,11 +386,14 @@ class PostgreSQLDurableContinuationRepository:
             try:
                 next_record, value = _apply(prepared.kind, current, args, kwargs)
                 if next_record is not None and prepared.kind in {"create", "claim_resume"}:
+                    existing = self._admission_records(connection)
                     validate_admission(
-                        next_record, self._admission_records(connection),
+                        next_record, existing,
                         resuming=prepared.kind == "claim_resume",
                         new_execution=True,
                     )
+                    if prepared.kind == "create":
+                        self._check_active_keys(next_record, existing)
                 if (next_record is not None and prepared.kind == "update"
                         and next_record.status is SubagentStatus.SUCCEEDED
                         and current.status not in TERMINAL_SUBAGENT_STATUSES):
@@ -470,6 +488,34 @@ class PostgreSQLDurableContinuationRepository:
 
     def get(self, child_id):
         return self._read(lambda connection: self._get(connection, child_id))
+
+    def _get_by_key(self, parent_id, key, namespace, *, active_only):
+        if not isinstance(parent_id, str) or not parent_id.strip() or not isinstance(key, str) or not key.strip():
+            raise InvalidSubagentRequest("parent_id and key are required")
+        field = {"resume": "resume_key", "idempotency": "idempotency_key"}.get(namespace)
+        if field is None:
+            raise InvalidSubagentRequest("key namespace must be resume or idempotency")
+
+        def lookup(connection):
+            rows = connection.execute(
+                "SELECT snapshot FROM sonder_child.child WHERE "
+                "convert_from(snapshot,'UTF8')::jsonb->'request'->>'parent_id'=%s "
+                "AND convert_from(snapshot,'UTF8')::jsonb->'request'->>%s=%s "
+                + ("AND status IN ('created','queued','running') " if active_only else "")
+                + "ORDER BY child_id LIMIT 2",
+                (parent_id, field, key),
+            ).fetchall()
+            if len(rows) > 1:
+                raise InvalidSubagentRequest("ambiguous durable worker key requires explicit recovery")
+            return session_from_data(json.loads(bytes(rows[0][0]))) if rows else None
+
+        return self._read(lookup)
+
+    def get_active_by_key(self, parent_id, key, namespace):
+        return self._get_by_key(parent_id, key, namespace, active_only=True)
+
+    def get_by_key(self, parent_id, key, namespace):
+        return self._get_by_key(parent_id, key, namespace, active_only=False)
 
     def reconcile(self, prepared):
         self._transport.require_reconcilable(prepared)
