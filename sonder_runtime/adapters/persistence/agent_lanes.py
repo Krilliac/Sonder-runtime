@@ -298,6 +298,28 @@ class LaneTransaction:
         ).fetchall()
         return [(r[0], json.loads(r[1])) for r in rows]
 
+    def expensive_spawn_count(self, principal, parent_session):
+        """Count all admitted expensive lanes, including archived tombstones.
+
+        This runs within the writer transaction that admits a new lane, so
+        concurrent spawns and service restarts cannot reset the parent cap.
+        Older rows had no classification bit; charge explicitly expensive
+        tier names rather than silently treating their history as free.
+        """
+        return self.conn.execute(
+            """SELECT COUNT(*) FROM agent_lanes
+               WHERE principal=? AND parent_session=? AND (
+                 json_extract(data, '$.expensive_tier') = 1
+                 OR (json_type(data, '$.expensive_tier') IS NULL AND (
+                     lower(json_extract(data, '$.tier')) = 'reasoning'
+                     OR lower(json_extract(data, '$.tier')) LIKE 'cloud-%'
+                     OR lower(json_extract(data, '$.tier')) LIKE '%-cloud%'
+                     OR lower(json_extract(data, '$.tier')) LIKE '%:cloud'
+                 ))
+               )""",
+            (principal, parent_session),
+        ).fetchone()[0]
+
     def active_count(self, principal):
         """Count every owned lane, including those beyond a history page."""
         return self.conn.execute(

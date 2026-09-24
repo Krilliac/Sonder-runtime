@@ -437,7 +437,7 @@ def run_isolated(
         }
         after = {str(path): _digest(path) for path in protected if path.is_file()}
         if before != after:
-            return {"exit_code": 2, "output": output_text + "\nSELFMOD EVALUATOR CANARY FAILED: protected truth changed\n", "passed": False, "job": job_report}
+            return {"exit_code": 2, "output": output_text + "\nSELFMOD EVALUATOR CANARY FAILED: protected truth changed\n", "passed": False, "integrity_failed": True, "job": job_report}
         if timed_out:
             code = 124
         return {"exit_code": int(code), "output": output_text, "passed": int(code) == 0, "job": job_report}

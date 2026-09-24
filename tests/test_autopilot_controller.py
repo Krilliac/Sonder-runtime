@@ -1,9 +1,14 @@
 import os
+import sqlite3
 
 import pytest
 
 import autopilot_controller
 import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
+from sonder_runtime.adapters.unit_of_work import UnitOfWorkAdapter
+from sonder_runtime.application.memory.strategy_memory import StrategyMemoryService
+from sonder_runtime.bootstrap.strategy import compose_strategy_trace
+from sonder_runtime.domain.strategy.models import FailureClass
 
 
 @pytest.fixture(autouse=True)
@@ -82,6 +87,51 @@ def test_successful_run_completes_only_after_validation_and_review():
     assert "host-verified task evidence" in result["summary"]
     assert "action: workspace_run" in result["final_report"]
     assert result["checkpoints"] == 1
+
+
+def test_autopilot_observations_restore_after_restart(tmp_path):
+    database = tmp_path / "observations.db"
+    key = tmp_path / "private" / "checkpoint.key"
+    trace = compose_strategy_trace(db_path=database, key_path=key)
+    memory_path = tmp_path / "memory.db"
+    memory = StrategyMemoryService(
+        trace, lambda: UnitOfWorkAdapter(str(memory_path)),
+    )
+    run = autopilot_store.create_run("Inspect and validate", project="project-a")
+    result = autopilot_controller.execute_run(
+        run["id"], "owner", owner_pid=os.getpid(),
+        plan_fn=lambda _run: _plan(),
+        work_fn=lambda _run, task, _prior: _task_evidence(task),
+        review_fn=_complete, max_cycles=2, strategy_trace=trace,
+        strategy_memory=memory,
+    )
+
+    assert result["status"] == "completed"
+    history = compose_strategy_trace(db_path=database, key_path=key).history(run["id"])
+    assert len(history) == 2
+    assert [attempt.outcome for attempt in history] == ["succeeded", "succeeded"]
+    assert [attempt.usage.attempts for attempt in history] == [1, 1]
+    assert len({attempt.attempt_id for attempt in history}) == 2
+    with sqlite3.connect(memory_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM strategy_experience"
+        ).fetchone()[0] == 2
+
+
+def test_strategy_observer_failure_does_not_change_autopilot_result():
+    class FailedTrace:
+        def record(self, *args, **kwargs):
+            raise RuntimeError("unavailable")
+
+    run = autopilot_store.create_run("Inspect and validate")
+    result = autopilot_controller.execute_run(
+        run["id"], "owner", owner_pid=os.getpid(),
+        plan_fn=lambda _run: _plan(),
+        work_fn=lambda _run, task, _prior: _task_evidence(task),
+        review_fn=_complete, max_cycles=2, strategy_trace=FailedTrace(),
+    )
+    assert result["status"] == "completed"
+    assert all(task["status"] == "passed" for task in result["plan"])
 
 
 def test_adaptive_checkpoint_replaces_stale_pending_plan():
@@ -299,6 +349,47 @@ def test_failed_task_can_retry_once_with_reviewer_instruction():
     assert result["plan"][0]["attempts"] == 2
 
 
+def test_observed_retry_preserves_attempt_budget_across_controller_restart(tmp_path):
+    run = autopilot_store.create_run("Retry carefully", adaptive=False)
+    database = tmp_path / "observations.db"
+    key = tmp_path / "private" / "checkpoint.key"
+    work_calls = []
+
+    def work(_run, task, _prior):
+        work_calls.append((task["id"], task["attempts"]))
+        if len(work_calls) == 1:
+            return "ERROR: transient failure"
+        return _task_evidence(task)
+
+    def review(current, issue):
+        if issue != "host completion gates passed":
+            return {
+                "decision": "retry", "reason": "correct the exact failure",
+                "instruction": "retry with inspected evidence", "tasks": [],
+            }
+        return _complete(current, issue)
+
+    first = autopilot_controller.execute_run(
+        run["id"], "first-owner", owner_pid=os.getpid(),
+        plan_fn=lambda _run: _plan(), work_fn=work, review_fn=review,
+        max_cycles=1, strategy_trace=compose_strategy_trace(db_path=database, key_path=key),
+    )
+    assert first["status"] == "paused"
+    assert len(compose_strategy_trace(db_path=database, key_path=key).history(run["id"])) == 1
+
+    second = autopilot_controller.execute_run(
+        run["id"], "second-owner", owner_pid=os.getpid(),
+        plan_fn=lambda _run: pytest.fail("restart must retain its plan"),
+        work_fn=work, review_fn=review,
+        max_cycles=2, strategy_trace=compose_strategy_trace(db_path=database, key_path=key),
+    )
+    assert second["status"] == "completed"
+    history = compose_strategy_trace(db_path=database, key_path=key).history(run["id"])
+    assert [attempt.outcome for attempt in history] == ["failed", "succeeded", "succeeded"]
+    assert [attempt.usage.attempts for attempt in history] == [1, 1, 1]
+    assert work_calls == [("task-01", 1), ("task-01", 2), ("task-02", 1)]
+
+
 def test_replan_respects_one_remaining_slot_and_preserves_validation():
     run = {
         "objective": "finish safely", "max_tasks": 3,
@@ -447,6 +538,43 @@ def test_interrupted_running_task_is_not_automatically_replayed():
         event["kind"] == "interrupted_task_uncertain"
         for event in autopilot_store.events(run["id"])
     )
+
+
+def test_observed_interrupted_task_restores_uncertainty_without_replay(tmp_path):
+    run = autopilot_store.create_run("Never replay an uncertain mutation")
+    claimed = autopilot_store.claim_run(run["id"], "dead-owner", owner_pid=os.getpid())
+    assert claimed is not None
+    plan = [
+        {"id": "task-01", "title": "Mutate workspace", "instruction": "write once",
+         "kind": "implement", "status": "running", "attempts": 1,
+         "output": "", "error": "", "history": []},
+        {"id": "task-02", "title": "Validate", "instruction": "check",
+         "kind": "validate", "status": "pending", "attempts": 0,
+         "output": "", "error": "", "history": []},
+    ]
+    saved = autopilot_store.save_progress(
+        run["id"], "dead-owner", plan=plan, criteria=["validated"],
+        status="running", phase="execute",
+    )
+    assert saved is not None
+    assert autopilot_store.reconcile_stale_runs(now=saved["lease_until"] + 1) == 1
+    database = tmp_path / "observations.db"
+    key = tmp_path / "private" / "checkpoint.key"
+
+    result = autopilot_controller.execute_run(
+        run["id"], "recovery-owner", owner_pid=os.getpid(),
+        plan_fn=lambda _run: pytest.fail("recovery must not plan"),
+        work_fn=lambda *_args: pytest.fail("recovery must not dispatch tools"),
+        review_fn=lambda *_args: pytest.fail("recovery must not ask the model"),
+        strategy_trace=compose_strategy_trace(db_path=database, key_path=key),
+    )
+
+    assert result["status"] == "paused"
+    history = compose_strategy_trace(db_path=database, key_path=key).history(run["id"])
+    assert len(history) == 1
+    assert history[0].outcome == "uncertain"
+    assert history[0].failure.classification is FailureClass.UNCERTAIN_SIDE_EFFECT
+    assert history[0].usage.attempts == 1
 
 
 def test_final_cycle_budget_review_honors_operator_pause():

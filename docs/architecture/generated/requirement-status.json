@@ -166,23 +166,23 @@
     },
     {
       "checked": false,
-      "claim": "Delegated work carries durable parent-child lineage.",
+      "claim": "Durable children enforce cancellation-before-success and pre-start cancellation with revision fences; stale verification is cleared on resume and deadlines reject late success.",
       "requirement_id": "AGENT-005",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Delegation retries with a new proposed child ID propagate the canonical terminal child ID returned by the durable key registry, reuse the persisted result without a runner, and reject ambiguous duplicate terminal rows or foreign operation context.",
+      "claim": "Worker reuse and launch failure cleanup retain exact admission provenance: only a newly created unstarted row is eligible for revision-fenced cleanup; reused or uncertain running work is preserved.",
       "requirement_id": "AGENT-006",
-      "revision": 5,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "The live delegated-fleet dispatcher enforces its static worker-slot ceiling through an ownership-aware adaptive lane scheduler: overlapping write claims are serialized while readers and independent lanes stay parallel, and retry storms, target churn, or host memory pressure shrink the live concurrency cap with hysteresis before it regrows on sustained healthy outcomes.",
+      "claim": "The transactional hierarchical resource/ownership/key admission implementation passed an actual owned PostgreSQL 18 primary and synchronous standby qualification at published code revision 6dcd99246a1a8dca5ae6aaff63bb94c7f2180a9d: 21 tests, no skips. SQLite multi-process races and the integrated Linux suite also pass.",
       "requirement_id": "AGENT-007",
-      "revision": 5,
+      "revision": 8,
       "status": "implemented_unverified"
     },
     {
@@ -194,9 +194,9 @@
     },
     {
       "checked": false,
-      "claim": "Structured delegation validates lineage, workspace, budgets, and result evidence; delegated workers also carry a durable typed execution contract: success criteria, argv verification commands, inherit/scoped/clean context policy with digest-pinned inputs or inherited-context hash, owned files distinct from task scope, and an explicit speculative-lane flag; dispatch gates owned files to the write assignment, admission rejects overlapping active ownership, and integration fails closed on contract drift.",
+      "claim": "Typed specialist proposals use the existing durable delegation service with owner-bound roots and inherited finite budgets; result verification binds the complete canonical terminal result and artifact fan-in recomputes specification/output/readiness identity.",
       "requirement_id": "AGENT-009",
-      "revision": 3,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -649,9 +649,9 @@
     },
     {
       "checked": false,
-      "claim": "Evaluation results bind provider, model, revision, provider digest, and scenario-fixture digest only; the remaining required dimensions are not yet bound.",
+      "claim": "Strategy canaries bind sealed attempt graphs, policy/role/tool/memory/skill/runtime identities and caller-provided case input/source digests. This corrects the prior case-manifest wording: the strategy evaluator does not bind an independently owned EvaluationCaseManifest or real-task grader.",
       "requirement_id": "EVAL-004",
-      "revision": 3,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -670,9 +670,9 @@
     },
     {
       "checked": false,
-      "claim": "Every promotion kind (runtime, prompt, skill, route, model, memory, selfmod) has a digest-bound gate policy with sample, point pass-rate, one-sided Wilson confidence, regression, explicit-baseline, replay, and shadow/canary requirements; the proposal lifecycle owns the gate fixed at construction and the kind bound at creation, recomputes decisions from its recorded results, persists kind and gate decision digests in durable events, and approves kind-bound proposals only with gated evidence.",
+      "claim": "Strategy promotion explicitly excludes synthetic controller agreement from task-success scoring and fails the independent-task-receipt gate even with thirty passing canaries and caller-stated rollout health; changed source inventories and duplicate cases are rejected.",
       "requirement_id": "EVAL-007",
-      "revision": 5,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
@@ -859,9 +859,9 @@
     },
     {
       "checked": false,
-      "claim": "Revision 2 transport-retry bounds and the revision 3 web-repeat canary still apply. The codegen no-progress guard, corrected from revision 3, stops regenerating a file only when two consecutive comparable attempts produce an identical failing outcome (sorted error lines with duplicates kept) without a score improvement. Attempts whose errors are a host placeholder, truncated output, or masked by count_unreliable reset the streak and never count toward a stall.",
+      "claim": "Production codegen repair receives bounded prior source, exact diagnostics and progress; explicit distinct-route policy allows a scoped critic then model rotation; the strategy controller applies bounded no-progress and host-policy precedence.",
       "requirement_id": "LOOP-007",
-      "revision": 4,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -887,9 +887,9 @@
     },
     {
       "checked": false,
-      "claim": "Corrects revisions 4-5: the first verifier-observation insert now requires the exact private producer authorization type (a duck-typed matches() stand-in was accepted before); independence is keyed by authenticated principal and scope, so one principal's child lanes cannot reach FACT; promotion reads only indexed subject-scoped rows and a persisted verified negative demotes before any completeness bound; the managed boundary decision is sealed and resolved once; certified_after_return is refused explicitly; learning refusals carry a visible reason and cannot alter work outcomes.",
+      "claim": "Production Codegen and Autopilot select content-free typed recovery references before local model dispatch using actual context-window budgets; host filename language preserves compatible unknown history. Failed reuse is credited only after a host-observed model response, with durable Autopilot attribution surviving restart.",
       "requirement_id": "MEM-003",
-      "revision": 6,
+      "revision": 8,
       "status": "implemented_unverified"
     },
     {
@@ -957,9 +957,9 @@
     },
     {
       "checked": false,
-      "claim": "Capability routing remains an injected typed policy seam at the model facade.",
+      "claim": "Explicit strict capability routing binds persisted passed nonsynthetic conformance to the exact concrete provider/model digest, quantization, backend/version, tokenizer/template, context window and hardware; routing and in-flight response checks reject unknown, stale, failed or mismatched identity.",
       "requirement_id": "MODEL-005",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1272,9 +1272,9 @@
     },
     {
       "checked": false,
-      "claim": "Tested-bytes digests are persisted in the selfmod database when testing begins. Review rejects runs whose bytes differ from the record, and every deploy (unattended or later human approval) requires the record and verifies the candidate bytes before the copy and the installed bytes after it. A committed-blob mismatch rejects the run and deletes its branch. An overlong child working directory is refused up front.",
+      "claim": "Native Windows MIC canaries and unsupported-host refusal are qualified at published revision 6dcd99246a1a8dca5ae6aaff63bb94c7f2180a9d; the Windows suite passed 20 MIC tests with one explicitly deselected Git Bash case. Automatic approval remains blocked because neither low MIC nor parent-filtered candidate output provides an independent grader.",
       "requirement_id": "SELFMOD-002",
-      "revision": 6,
+      "revision": 9,
       "status": "implemented_unverified"
     },
     {
@@ -1363,9 +1363,9 @@
     },
     {
       "checked": false,
-      "claim": "Projection checkpoints are exposed through the typed session continuity facade.",
+      "claim": "Existing sealed checkpoint CAS now supports pending action reservations and project-wide guards with immutable membership, exact objective/action binding, conservative usage liability and crash/reinvocation refusal. Codegen uses single-send inference and a finite monotonic project deadline in the isolated test profile.",
       "requirement_id": "SESSION-009",
-      "revision": 2,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -1454,16 +1454,16 @@
     },
     {
       "checked": false,
-      "claim": "Tool catalogs and generated artifact projections remain behind typed application catalog boundaries.",
+      "claim": "Native MCP can explicitly opt into summary-first bounded tool search and lazy schema loading over immutable host grants; unknown/stale schema selection and calls to unexposed tools are refused.",
       "requirement_id": "TOOL-006",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Tool receipts preserve requester, resource, effect, world, redaction, digest, and truthful completion fields.",
+      "claim": "Native progressive discovery searches, schema loads and invalid discovery/schema refusals now join effect-call outcomes in the existing durable audit. Only digests and fixed refusal/selection markers persist; audit failure prevents response or schema publication.",
       "requirement_id": "TOOL-007",
-      "revision": 2,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "c84547e537234a35919fa8687f44fb026466928f1888e3db94b1826228dd7604",
+    "ledger_sha256": "9edfd7a80bc4b4b2a8dd3a7c2dd57edcb21686e500c3c91c4810bcc42dd6c309",
     "spec_sha256": "d11b5664c594bb79042c358a0510393d1ee0dd6d718830332a6362ed652c9bc5"
   }
 }

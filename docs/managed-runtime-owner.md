@@ -16,6 +16,21 @@ runtime path configurations, reparse entries, more than 50,000 files, more than
 4 GiB of external/payload files, or a manifest larger than 32 MiB are refused.
 The Sonder copy itself is limited to 10,000 files and 256 MiB.
 
+For a dedicated lean dependency closure, run the canonical Windows workstation
+installer with `-ManagedRuntime` and use
+`ManagedRuntimeOwner.workstation_local(path, writable_roots=live_roots)`.
+It provisions `venv-managed` from the exact `requirements-runtime.txt` pins,
+including Windows pywin32, and seals a host-selected profile tied to the
+current CPython 3.12 base executable, requirements file, venv configuration
+and installed distribution inventory. A caller may instead explicitly supply
+an absolute `runtime_venv=` pointing to such an installed profile. The owner
+rejects relative/reparse paths and a profile overlapping live model-writable
+roots; the profile marker, venv configuration, redirector executable and site
+packages join the launch hash manifest. Default construction still selects
+the current host venv. No metadata-only cache is used: all selected bytes are
+hashed on each validation, so optional training packages present only in the
+host venv are not part of the dedicated child's path or verification cost.
+
 The digest is bound into configuration, prepared launch, process metadata and
 READY/CLEAN evidence. Content/identity and live writable-root separation are
 rechecked before the process effect, immediately before native spawn, and at

@@ -28,6 +28,28 @@ def test_low_candidate_cannot_write_protected_truth(tmp_path):
     assert truth.read_text(encoding="utf-8") == "original"
 
 
+def test_low_candidate_cannot_rewrite_evaluator_receipt_or_rollback(tmp_path):
+    from scripts.selfmod_low_integrity import run_isolated
+
+    paths = tuple(tmp_path / name for name in (
+        "evaluator-truth.txt", "promotion-receipt.txt", "rollback-baseline.txt",
+    ))
+    for path in paths:
+        path.write_text("trusted\n", encoding="utf-8")
+    command = [
+        sys.executable, "-c",
+        "from pathlib import Path\n"
+        "for name in %r:\n"
+        "  try: Path(name).write_text('tampered\\n'); raise SystemExit(3)\n"
+        "  except PermissionError: pass\n" % [str(path) for path in paths],
+    ]
+
+    result = run_isolated(command, cwd=tmp_path, timeout=10, protected_paths=paths)
+    assert result["passed"] is True
+    assert result["job"]["integrity"] == "low"
+    assert all(path.read_text(encoding="utf-8") == "trusted\n" for path in paths)
+
+
 def test_low_candidate_can_run_and_write_low_temp(tmp_path):
     from scripts.selfmod_low_integrity import run_isolated
 
@@ -212,7 +234,10 @@ def test_record_test_routes_regression_and_held_out_through_low_runner(tmp_path,
 
     def isolated(command, **kwargs):
         calls.append((tuple(command), kwargs))
-        return {"exit_code": 0, "output": "ok", "passed": True}
+        return {
+            "exit_code": 0, "output": "ok", "passed": True,
+            "job": {"integrity": "low"},
+        }
 
     class Connection:
         def execute(self, *_args):

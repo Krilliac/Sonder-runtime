@@ -369,6 +369,14 @@ class CapacityConfig:
     autopilot_runs: int = 1
     training_jobs: int = 1
     queue_depth: int = 32
+    # One operation's durable delegation reservation, configured by the
+    # host. Each child must fit both its role preset and these root ceilings.
+    delegation_max_children: int = 8
+    delegation_max_depth: int = 2
+    delegation_max_concurrency: int = 2
+    delegation_max_steps: int = 96
+    delegation_max_output_tokens: int = 24_000
+    delegation_max_wall_seconds: int = 2_400
 
 
 @dataclass(frozen=True)
@@ -1808,6 +1816,14 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
                  "queue_depth"):
         if getattr(config.capacity, name) < 1:
             errors.append(f"[capacity].{name} must be >= 1")
+    for name, limit in (
+        ("delegation_max_children", 8), ("delegation_max_depth", 2),
+        ("delegation_max_concurrency", 8), ("delegation_max_steps", 256),
+        ("delegation_max_output_tokens", 64_000), ("delegation_max_wall_seconds", 14_400),
+    ):
+        value = getattr(config.capacity, name)
+        if type(value) is not int or not 1 <= value <= limit:
+            errors.append(f"[capacity].{name} must be an integer within 1..{limit}")
     if config.server.owner_max_inflight < 0:
         errors.append("[server].owner_max_inflight must be >= 0")
 

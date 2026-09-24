@@ -68,6 +68,36 @@ def test_repair_prompt_includes_prior_code_and_error():
     assert "do X" in p and "return 0" in p and "AssertionError: boom" in p
 
 
+def test_scoped_critic_prompt_contains_only_bounded_task_source_and_evidence():
+    prompt = solver.scoped_critic_prompt(
+        "make main compile",
+        "int main(void) { return widget; }",
+        ["main.c:1: error: unknown type name 'widget'"],
+        language="C", constraints="use the sibling header",
+    )
+    assert "make main compile" in prompt
+    assert "return widget" in prompt
+    assert "unknown type name 'widget'" in prompt
+    assert "use the sibling header" in prompt
+    assert "implementer rationale" not in prompt
+    huge = solver.scoped_critic_prompt("task" * 10_000, "c" * 50_000, ["e" * 500] * 100)
+    assert len(huge) < 25_000
+    assert "excerpt incomplete" in huge and "more diagnostic lines omitted" in huge
+
+
+def test_scoped_critic_review_uses_typed_generator_outcome():
+    # A literal error prefix in generated prose is still model text; only a
+    # typed generator failure can mark the call unavailable.
+    answered = solver.scoped_critic_review(
+        "diagnose", lambda prompt: "ERROR: the failed call needs a different API",
+    )
+    assert answered.status is solver.CriticStatus.ANSWERED
+    assert answered.diagnosis.startswith("ERROR:")
+    assert solver.scoped_critic_review(
+        "diagnose", lambda prompt: "   ",
+    ).status is solver.CriticStatus.EMPTY
+
+
 def test_best_of_n_returns_first_green():
     seq = iter([BAD, GOOD, GOOD])
     res = solver.best_of_n("write f", generate_fn=lambda p: next(seq), check=CHECK, run_code_fn=_runner, n=3)

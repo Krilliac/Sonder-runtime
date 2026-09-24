@@ -6,9 +6,9 @@ ports, while the existing typed evaluation modules enforce the invariants.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Mapping
 import warnings
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 
 from ..ports.evaluation import (
     EvaluationCorpusPort,
@@ -34,11 +34,10 @@ from .promotion_gates import (
     PromotionKind,
 )
 from .proposal_lifecycle import (
-    EvaluationMode,
     EvaluationResult,
     EvaluationSuite,
-    Proposal,
     PromotionEvidence,
+    Proposal,
     ShadowCanaryObservation,
 )
 from .trajectory_replay import ReplayReport, TrajectoryRecord, replay_trajectory

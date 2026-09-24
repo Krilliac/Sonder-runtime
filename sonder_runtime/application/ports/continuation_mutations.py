@@ -99,7 +99,7 @@ def prepare_call(kind, *args, operation_id=None, **kwargs):
             "verification",
         },
         "claim_resume": {"expected_revision"},
-        "request_cancel": {"reason"},
+        "request_cancel": {"reason", "expected_revision", "unstarted_only"},
     }[kind]
     required = {
         "create": {"session"},
@@ -129,6 +129,12 @@ def prepare_call(kind, *args, operation_id=None, **kwargs):
         raise InvalidSubagentRequest("invalid recovery flag")
     if kind == "request_cancel" and not isinstance(payload["reason"], str):
         raise InvalidSubagentRequest("cancellation reason must be a string")
+    if kind == "request_cancel" and (
+        ("unstarted_only" in payload and type(payload["unstarted_only"]) is not bool)
+        or ("expected_revision" in payload) != payload.get("unstarted_only", False)
+        or (payload.get("unstarted_only", False) and payload["expected_revision"] is None)
+    ):
+        raise InvalidSubagentRequest("conditional cancellation requires a revision and unstarted-only scope")
     if kind == "update":
         payload["status"] = SubagentStatus(payload["status"]).value
         for name in ("usage", "result"):

@@ -99,6 +99,15 @@ class UnitOfWorkAdapter:
         )
         return SQLiteVerifierObservationRepository(self.connection)
 
+    @property
+    def strategy_experiences(self):
+        """Return the scoped strategy index in this canonical memory transaction."""
+        from .persistence.sqlite.strategy_memory import (
+            SQLiteStrategyExperienceRepository,
+        )
+
+        return SQLiteStrategyExperienceRepository(self.connection)
+
     def commit(self) -> None:
         if self._conn is not None:
             self._conn.commit()

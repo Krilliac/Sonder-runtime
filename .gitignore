@@ -1,4 +1,5 @@
 venv/
+venv-managed/
 file_roots.local
 __pycache__/
 *.pyc

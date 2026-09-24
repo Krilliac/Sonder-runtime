@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "bf82c15aaee7aa0cffc28f50ac3b333779a8324463e5581292c12f1026c9fea9",
+    "catalog_digest": "5599c9d0c78ad36e5490d5d450bb3c1c96216a1ec6edcedf17c28e1941172cf8",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "bf82c15aaee7aa0cffc28f50ac3b333779a8324463e5581292c12f1026c9fea9",
+      "catalog_digest": "5599c9d0c78ad36e5490d5d450bb3c1c96216a1ec6edcedf17c28e1941172cf8",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -1261,7 +1261,7 @@
           "name": "cloud_opt_in"
         },
         {
-          "description": "Write code, compile it, and repair it against the real compiler.\n\n    Generates one file at a time from a per-file spec, runs the project's own\n    build after each, and keeps whichever version leaves the WHOLE project with\n    the fewest errors. Later files are shown the API extracted from the files\n    already written, not an idealised contract, because a local model cannot\n    hold an agreement spanning files even when told it every time.\n\n    Guards that are not optional (each one is here because the unguarded loop\n    was measured doing the opposite):\n      - a replacement that shrinks a file below 75% is rejected as deletion\n        rather than repair;\n      - a file that already builds clean is never regenerated;\n      - versions are scored on total project errors, not the file's own;\n      - known wrong-library calls are rewritten mechanically, not by asking.\n\n    A green build here is NOT proof the program works: a declared-but-never\n    assigned field is not a compile error. Run the project's tests too.\n\n    Args:\n        project_dir: directory holding the project. Must be inside an allowed root.\n        files_json: {\"name.ext\": \"what this file must contain\"} in dependency\n            order, earliest first, or a list of {\"name\", \"spec\"} objects.\n        build_program: the build executable, e.g. \"dotnet\", \"cargo\", \"make\".\n        build_args_json: argv for it as JSON, e.g. [\"build\", \"-c\", \"Release\"].\n        tiers: comma-separated model tiers to ensemble. Default: all bound local tiers.\n        attempts: tries per file; the best-scoring one is kept. Clamped to\n            1..6, and a file stops early when two consecutive attempts return\n            identical build errors (no progress).\n        error_regex: how to recognise an error line in build output. Defaults to\n            a generic error/fatal match; pass a stricter one for a noisy build.\n        slips_json: [[regex, replacement], ...] rewrites applied to generated\n            code, for wrong-library calls the model repeats.\n    ",
+          "description": "Write code, compile it, and repair it against the real compiler.\n\n    Generates one file at a time from a per-file spec, runs the project's own\n    build after each, and keeps whichever version leaves the WHOLE project with\n    the fewest errors. Later files are shown the API extracted from the files\n    already written, not an idealised contract, because a local model cannot\n    hold an agreement spanning files even when told it every time.\n\n    Guards that are not optional (each one is here because the unguarded loop\n    was measured doing the opposite):\n      - a replacement that shrinks a file below 75% is rejected as deletion\n        rather than repair;\n      - a file that already builds clean is never regenerated;\n      - versions are scored on total project errors, not the file's own;\n      - known wrong-library calls are rewritten mechanically, not by asking.\n\n    A green build here is NOT proof the program works: a declared-but-never\n    assigned field is not a compile error. Run the project's tests too.\n\n    Args:\n        project_dir: directory holding the project. Must be inside an allowed root.\n        files_json: {\"name.ext\": \"what this file must contain\"} in dependency\n            order, earliest first, or a list of {\"name\", \"spec\"} objects.\n        build_program: the build executable, e.g. \"dotnet\", \"cargo\", \"make\".\n        build_args_json: argv for it as JSON, e.g. [\"build\", \"-c\", \"Release\"].\n        tiers: comma-separated model tiers. Default: ensemble all bound local\n            tiers. With at least three attempts and two distinct explicitly\n            named models, use the first as editor and the second as scoped\n            critic; the fourth attempt may rotate to the second model.\n        attempts: tries per file; the best-scoring one is kept. Clamped to\n            1..6. Repeated identical failures stop early; a configured scoped\n            critic may take one different strategy before the stop.\n        error_regex: how to recognise an error line in build output. Defaults to\n            a generic error/fatal match; pass a stricter one for a noisy build.\n        slips_json: [[regex, replacement], ...] rewrites applied to generated\n            code, for wrong-library calls the model repeats.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -2362,7 +2362,7 @@
           "name": "extract_grounded"
         },
         {
-          "description": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- the\n    Authenticode signer subject against expect_publisher. Success also writes\n    <dest>.provenance.json recording the URL, redirect chain, digest,\n    signature, and every verdict.\n    ",
+          "description": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- an exact\n    match to the complete certificate organization (O=) value in\n    expect_publisher. Success also writes <dest>.provenance.json recording\n    the URL, redirect chain, digest, signature, and every verdict.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -6949,7 +6949,7 @@
           "name": "update_system_profile"
         },
         {
-          "description": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and the Authenticode signer subject against expect_publisher. Use\n    it on anything staged earlier or acquired outside Sonder.\n    ",
+          "description": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and an exact match to the complete certificate organization (O=)\n    value in expect_publisher. Use it on anything staged earlier or acquired\n    outside Sonder.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -17116,6 +17116,42 @@
       "type": "int"
     },
     {
+      "default": 8,
+      "field": "delegation_max_children",
+      "section": "capacity",
+      "type": "int"
+    },
+    {
+      "default": 2,
+      "field": "delegation_max_depth",
+      "section": "capacity",
+      "type": "int"
+    },
+    {
+      "default": 2,
+      "field": "delegation_max_concurrency",
+      "section": "capacity",
+      "type": "int"
+    },
+    {
+      "default": 96,
+      "field": "delegation_max_steps",
+      "section": "capacity",
+      "type": "int"
+    },
+    {
+      "default": 24000,
+      "field": "delegation_max_output_tokens",
+      "section": "capacity",
+      "type": "int"
+    },
+    {
+      "default": 2400,
+      "field": "delegation_max_wall_seconds",
+      "section": "capacity",
+      "type": "int"
+    },
+    {
       "default": "sqlite",
       "field": "backend",
       "section": "child_storage",
@@ -17801,12 +17837,12 @@
   "counts": {
     "capabilities": 214,
     "commands": 320,
-    "configuration": 208,
+    "configuration": 214,
     "events": 43,
     "schemas": 4,
     "tools": 214
   },
-  "digest": "ac085e9b33523e349f9690b7c3b8f8ade5e5a3785971b7c21df08b75573a9339",
+  "digest": "49f713136014b4c8e99e86244747a4782514361791f546986b11f956755fd849",
   "events": [
     {
       "name": "session.started",
@@ -18276,9 +18312,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "bf82c15aaee7aa0cffc28f50ac3b333779a8324463e5581292c12f1026c9fea9",
+    "catalog_digest": "5599c9d0c78ad36e5490d5d450bb3c1c96216a1ec6edcedf17c28e1941172cf8",
     "client": {
-      "digest": "bf82c15aaee7aa0cffc28f50ac3b333779a8324463e5581292c12f1026c9fea9",
+      "digest": "5599c9d0c78ad36e5490d5d450bb3c1c96216a1ec6edcedf17c28e1941172cf8",
       "events": [
         {
           "name": "approval.denied",
@@ -19845,7 +19881,7 @@
           {
             "name": "codegen_build_loop",
             "schema_available": true,
-            "summary": "Write code, compile it, and repair it against the real compiler.\n\n    Generates one file at a time from a per-file spec, runs the project's own\n    build after each, and keeps whichever version leaves the WHOLE project with\n    the fewest errors. Later files are shown the API extracted from the files\n    already written, not an idealised contract, because a local model cannot\n    hold an agreement spanning files even when told it every time.\n\n    Guards that are not optional (each one is here because the unguarded loop\n    was measured doing the opposite):\n      - a replacement that shrinks a file below 75% is rejected as deletion\n        rather than repair;\n      - a file that already builds clean is never regenerated;\n      - versions are scored on total project errors, not the file's own;\n      - known wrong-library calls are rewritten mechanically, not by asking.\n\n    A green build here is NOT proof the program works: a declared-but-never\n    assigned field is not a compile error. Run the project's tests too.\n\n    Args:\n        project_dir: directory holding the project. Must be inside an allowed root.\n        files_json: {\"name.ext\": \"what this file must contain\"} in dependency\n            order, earliest first, or a list of {\"name\", \"spec\"} objects.\n        build_program: the build executable, e.g. \"dotnet\", \"cargo\", \"make\".\n        build_args_json: argv for it as JSON, e.g. [\"build\", \"-c\", \"Release\"].\n        tiers: comma-separated model tiers to ensemble. Default: all bound local tiers.\n        attempts: tries per file; the best-scoring one is kept. Clamped to\n            1..6, and a file stops early when two consecutive attempts return\n            identical build errors (no progress).\n        error_regex: how to recognise an error line in build output. Defaults to\n            a generic error/fatal match; pass a stricter one for a noisy build.\n        slips_json: [[regex, replacement], ...] rewrites applied to generated\n            code, for wrong-library calls the model repeats.\n    "
+            "summary": "Write code, compile it, and repair it against the real compiler.\n\n    Generates one file at a time from a per-file spec, runs the project's own\n    build after each, and keeps whichever version leaves the WHOLE project with\n    the fewest errors. Later files are shown the API extracted from the files\n    already written, not an idealised contract, because a local model cannot\n    hold an agreement spanning files even when told it every time.\n\n    Guards that are not optional (each one is here because the unguarded loop\n    was measured doing the opposite):\n      - a replacement that shrinks a file below 75% is rejected as deletion\n        rather than repair;\n      - a file that already builds clean is never regenerated;\n      - versions are scored on total project errors, not the file's own;\n      - known wrong-library calls are rewritten mechanically, not by asking.\n\n    A green build here is NOT proof the program works: a declared-but-never\n    assigned field is not a compile error. Run the project's tests too.\n\n    Args:\n        project_dir: directory holding the project. Must be inside an allowed root.\n        files_json: {\"name.ext\": \"what this file must contain\"} in dependency\n            order, earliest first, or a list of {\"name\", \"spec\"} objects.\n        build_program: the build executable, e.g. \"dotnet\", \"cargo\", \"make\".\n        build_args_json: argv for it as JSON, e.g. [\"build\", \"-c\", \"Release\"].\n        tiers: comma-separated model tiers. Default: ensemble all bound local\n            tiers. With at least three attempts and two distinct explicitly\n            named models, use the first as editor and the second as scoped\n            critic; the fourth attempt may rotate to the second model.\n        attempts: tries per file; the best-scoring one is kept. Clamped to\n            1..6. Repeated identical failures stop early; a configured scoped\n            critic may take one different strategy before the stop.\n        error_regex: how to recognise an error line in build output. Defaults to\n            a generic error/fatal match; pass a stricter one for a noisy build.\n        slips_json: [[regex, replacement], ...] rewrites applied to generated\n            code, for wrong-library calls the model repeats.\n    "
           },
           {
             "name": "command_registry_list",
@@ -19995,7 +20031,7 @@
           {
             "name": "fetch_artifact",
             "schema_available": true,
-            "summary": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- the\n    Authenticode signer subject against expect_publisher. Success also writes\n    <dest>.provenance.json recording the URL, redirect chain, digest,\n    signature, and every verdict.\n    "
+            "summary": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- an exact\n    match to the complete certificate organization (O=) value in\n    expect_publisher. Success also writes <dest>.provenance.json recording\n    the URL, redirect chain, digest, signature, and every verdict.\n    "
           },
           {
             "name": "file_batch_write",
@@ -20675,7 +20711,7 @@
           {
             "name": "verify_artifact",
             "schema_available": true,
-            "summary": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and the Authenticode signer subject against expect_publisher. Use\n    it on anything staged earlier or acquired outside Sonder.\n    "
+            "summary": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and an exact match to the complete certificate organization (O=)\n    value in expect_publisher. Use it on anything staged earlier or acquired\n    outside Sonder.\n    "
           },
           {
             "name": "vision_analyze",
@@ -21917,7 +21953,7 @@
           "name": "cloud_opt_in"
         },
         {
-          "description": "Write code, compile it, and repair it against the real compiler.\n\n    Generates one file at a time from a per-file spec, runs the project's own\n    build after each, and keeps whichever version leaves the WHOLE project with\n    the fewest errors. Later files are shown the API extracted from the files\n    already written, not an idealised contract, because a local model cannot\n    hold an agreement spanning files even when told it every time.\n\n    Guards that are not optional (each one is here because the unguarded loop\n    was measured doing the opposite):\n      - a replacement that shrinks a file below 75% is rejected as deletion\n        rather than repair;\n      - a file that already builds clean is never regenerated;\n      - versions are scored on total project errors, not the file's own;\n      - known wrong-library calls are rewritten mechanically, not by asking.\n\n    A green build here is NOT proof the program works: a declared-but-never\n    assigned field is not a compile error. Run the project's tests too.\n\n    Args:\n        project_dir: directory holding the project. Must be inside an allowed root.\n        files_json: {\"name.ext\": \"what this file must contain\"} in dependency\n            order, earliest first, or a list of {\"name\", \"spec\"} objects.\n        build_program: the build executable, e.g. \"dotnet\", \"cargo\", \"make\".\n        build_args_json: argv for it as JSON, e.g. [\"build\", \"-c\", \"Release\"].\n        tiers: comma-separated model tiers to ensemble. Default: all bound local tiers.\n        attempts: tries per file; the best-scoring one is kept. Clamped to\n            1..6, and a file stops early when two consecutive attempts return\n            identical build errors (no progress).\n        error_regex: how to recognise an error line in build output. Defaults to\n            a generic error/fatal match; pass a stricter one for a noisy build.\n        slips_json: [[regex, replacement], ...] rewrites applied to generated\n            code, for wrong-library calls the model repeats.\n    ",
+          "description": "Write code, compile it, and repair it against the real compiler.\n\n    Generates one file at a time from a per-file spec, runs the project's own\n    build after each, and keeps whichever version leaves the WHOLE project with\n    the fewest errors. Later files are shown the API extracted from the files\n    already written, not an idealised contract, because a local model cannot\n    hold an agreement spanning files even when told it every time.\n\n    Guards that are not optional (each one is here because the unguarded loop\n    was measured doing the opposite):\n      - a replacement that shrinks a file below 75% is rejected as deletion\n        rather than repair;\n      - a file that already builds clean is never regenerated;\n      - versions are scored on total project errors, not the file's own;\n      - known wrong-library calls are rewritten mechanically, not by asking.\n\n    A green build here is NOT proof the program works: a declared-but-never\n    assigned field is not a compile error. Run the project's tests too.\n\n    Args:\n        project_dir: directory holding the project. Must be inside an allowed root.\n        files_json: {\"name.ext\": \"what this file must contain\"} in dependency\n            order, earliest first, or a list of {\"name\", \"spec\"} objects.\n        build_program: the build executable, e.g. \"dotnet\", \"cargo\", \"make\".\n        build_args_json: argv for it as JSON, e.g. [\"build\", \"-c\", \"Release\"].\n        tiers: comma-separated model tiers. Default: ensemble all bound local\n            tiers. With at least three attempts and two distinct explicitly\n            named models, use the first as editor and the second as scoped\n            critic; the fourth attempt may rotate to the second model.\n        attempts: tries per file; the best-scoring one is kept. Clamped to\n            1..6. Repeated identical failures stop early; a configured scoped\n            critic may take one different strategy before the stop.\n        error_regex: how to recognise an error line in build output. Defaults to\n            a generic error/fatal match; pass a stricter one for a noisy build.\n        slips_json: [[regex, replacement], ...] rewrites applied to generated\n            code, for wrong-library calls the model repeats.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -23018,7 +23054,7 @@
           "name": "extract_grounded"
         },
         {
-          "description": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- the\n    Authenticode signer subject against expect_publisher. Success also writes\n    <dest>.provenance.json recording the URL, redirect chain, digest,\n    signature, and every verdict.\n    ",
+          "description": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- an exact\n    match to the complete certificate organization (O=) value in\n    expect_publisher. Success also writes <dest>.provenance.json recording\n    the URL, redirect chain, digest, signature, and every verdict.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -27605,7 +27641,7 @@
           "name": "update_system_profile"
         },
         {
-          "description": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and the Authenticode signer subject against expect_publisher. Use\n    it on anything staged earlier or acquired outside Sonder.\n    ",
+          "description": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and an exact match to the complete certificate organization (O=)\n    value in expect_publisher. Use it on anything staged earlier or acquired\n    outside Sonder.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -30385,7 +30421,7 @@
           "name": "cloud_opt_in"
         },
         {
-          "description": "Write code, compile it, and repair it against the real compiler.\n\n    Generates one file at a time from a per-file spec, runs the project's own\n    build after each, and keeps whichever version leaves the WHOLE project with\n    the fewest errors. Later files are shown the API extracted from the files\n    already written, not an idealised contract, because a local model cannot\n    hold an agreement spanning files even when told it every time.\n\n    Guards that are not optional (each one is here because the unguarded loop\n    was measured doing the opposite):\n      - a replacement that shrinks a file below 75% is rejected as deletion\n        rather than repair;\n      - a file that already builds clean is never regenerated;\n      - versions are scored on total project errors, not the file's own;\n      - known wrong-library calls are rewritten mechanically, not by asking.\n\n    A green build here is NOT proof the program works: a declared-but-never\n    assigned field is not a compile error. Run the project's tests too.\n\n    Args:\n        project_dir: directory holding the project. Must be inside an allowed root.\n        files_json: {\"name.ext\": \"what this file must contain\"} in dependency\n            order, earliest first, or a list of {\"name\", \"spec\"} objects.\n        build_program: the build executable, e.g. \"dotnet\", \"cargo\", \"make\".\n        build_args_json: argv for it as JSON, e.g. [\"build\", \"-c\", \"Release\"].\n        tiers: comma-separated model tiers to ensemble. Default: all bound local tiers.\n        attempts: tries per file; the best-scoring one is kept. Clamped to\n            1..6, and a file stops early when two consecutive attempts return\n            identical build errors (no progress).\n        error_regex: how to recognise an error line in build output. Defaults to\n            a generic error/fatal match; pass a stricter one for a noisy build.\n        slips_json: [[regex, replacement], ...] rewrites applied to generated\n            code, for wrong-library calls the model repeats.\n    ",
+          "description": "Write code, compile it, and repair it against the real compiler.\n\n    Generates one file at a time from a per-file spec, runs the project's own\n    build after each, and keeps whichever version leaves the WHOLE project with\n    the fewest errors. Later files are shown the API extracted from the files\n    already written, not an idealised contract, because a local model cannot\n    hold an agreement spanning files even when told it every time.\n\n    Guards that are not optional (each one is here because the unguarded loop\n    was measured doing the opposite):\n      - a replacement that shrinks a file below 75% is rejected as deletion\n        rather than repair;\n      - a file that already builds clean is never regenerated;\n      - versions are scored on total project errors, not the file's own;\n      - known wrong-library calls are rewritten mechanically, not by asking.\n\n    A green build here is NOT proof the program works: a declared-but-never\n    assigned field is not a compile error. Run the project's tests too.\n\n    Args:\n        project_dir: directory holding the project. Must be inside an allowed root.\n        files_json: {\"name.ext\": \"what this file must contain\"} in dependency\n            order, earliest first, or a list of {\"name\", \"spec\"} objects.\n        build_program: the build executable, e.g. \"dotnet\", \"cargo\", \"make\".\n        build_args_json: argv for it as JSON, e.g. [\"build\", \"-c\", \"Release\"].\n        tiers: comma-separated model tiers. Default: ensemble all bound local\n            tiers. With at least three attempts and two distinct explicitly\n            named models, use the first as editor and the second as scoped\n            critic; the fourth attempt may rotate to the second model.\n        attempts: tries per file; the best-scoring one is kept. Clamped to\n            1..6. Repeated identical failures stop early; a configured scoped\n            critic may take one different strategy before the stop.\n        error_regex: how to recognise an error line in build output. Defaults to\n            a generic error/fatal match; pass a stricter one for a noisy build.\n        slips_json: [[regex, replacement], ...] rewrites applied to generated\n            code, for wrong-library calls the model repeats.\n    ",
           "inputSchema": {
             "properties": {
               "approval": {
@@ -31426,7 +31462,7 @@
           "name": "extract_grounded"
         },
         {
-          "description": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- the\n    Authenticode signer subject against expect_publisher. Success also writes\n    <dest>.provenance.json recording the URL, redirect chain, digest,\n    signature, and every verdict.\n    ",
+          "description": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- an exact\n    match to the complete certificate organization (O=) value in\n    expect_publisher. Success also writes <dest>.provenance.json recording\n    the URL, redirect chain, digest, signature, and every verdict.\n    ",
           "inputSchema": {
             "properties": {
               "approval": {
@@ -35741,7 +35777,7 @@
           "name": "update_system_profile"
         },
         {
-          "description": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and the Authenticode signer subject against expect_publisher. Use\n    it on anything staged earlier or acquired outside Sonder.\n    ",
+          "description": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and an exact match to the complete certificate organization (O=)\n    value in expect_publisher. Use it on anything staged earlier or acquired\n    outside Sonder.\n    ",
           "inputSchema": {
             "properties": {
               "approval": {
@@ -37440,7 +37476,7 @@
         },
         {
           "function": {
-            "description": "Write code, compile it, and repair it against the real compiler.\n\n    Generates one file at a time from a per-file spec, runs the project's own\n    build after each, and keeps whichever version leaves the WHOLE project with\n    the fewest errors. Later files are shown the API extracted from the files\n    already written, not an idealised contract, because a local model cannot\n    hold an agreement spanning files even when told it every time.\n\n    Guards that are not optional (each one is here because the unguarded loop\n    was measured doing the opposite):\n      - a replacement that shrinks a file below 75% is rejected as deletion\n        rather than repair;\n      - a file that already builds clean is never regenerated;\n      - versions are scored on total project errors, not the file's own;\n      - known wrong-library calls are rewritten mechanically, not by asking.\n\n    A green build here is NOT proof the program works: a declared-but-never\n    assigned field is not a compile error. Run the project's tests too.\n\n    Args:\n        project_dir: directory holding the project. Must be inside an allowed root.\n        files_json: {\"name.ext\": \"what this file must contain\"} in dependency\n            order, earliest first, or a list of {\"name\", \"spec\"} objects.\n        build_program: the build executable, e.g. \"dotnet\", \"cargo\", \"make\".\n        build_args_json: argv for it as JSON, e.g. [\"build\", \"-c\", \"Release\"].\n        tiers: comma-separated model tiers to ensemble. Default: all bound local tiers.\n        attempts: tries per file; the best-scoring one is kept. Clamped to\n            1..6, and a file stops early when two consecutive attempts return\n            identical build errors (no progress).\n        error_regex: how to recognise an error line in build output. Defaults to\n            a generic error/fatal match; pass a stricter one for a noisy build.\n        slips_json: [[regex, replacement], ...] rewrites applied to generated\n            code, for wrong-library calls the model repeats.\n    ",
+            "description": "Write code, compile it, and repair it against the real compiler.\n\n    Generates one file at a time from a per-file spec, runs the project's own\n    build after each, and keeps whichever version leaves the WHOLE project with\n    the fewest errors. Later files are shown the API extracted from the files\n    already written, not an idealised contract, because a local model cannot\n    hold an agreement spanning files even when told it every time.\n\n    Guards that are not optional (each one is here because the unguarded loop\n    was measured doing the opposite):\n      - a replacement that shrinks a file below 75% is rejected as deletion\n        rather than repair;\n      - a file that already builds clean is never regenerated;\n      - versions are scored on total project errors, not the file's own;\n      - known wrong-library calls are rewritten mechanically, not by asking.\n\n    A green build here is NOT proof the program works: a declared-but-never\n    assigned field is not a compile error. Run the project's tests too.\n\n    Args:\n        project_dir: directory holding the project. Must be inside an allowed root.\n        files_json: {\"name.ext\": \"what this file must contain\"} in dependency\n            order, earliest first, or a list of {\"name\", \"spec\"} objects.\n        build_program: the build executable, e.g. \"dotnet\", \"cargo\", \"make\".\n        build_args_json: argv for it as JSON, e.g. [\"build\", \"-c\", \"Release\"].\n        tiers: comma-separated model tiers. Default: ensemble all bound local\n            tiers. With at least three attempts and two distinct explicitly\n            named models, use the first as editor and the second as scoped\n            critic; the fourth attempt may rotate to the second model.\n        attempts: tries per file; the best-scoring one is kept. Clamped to\n            1..6. Repeated identical failures stop early; a configured scoped\n            critic may take one different strategy before the stop.\n        error_regex: how to recognise an error line in build output. Defaults to\n            a generic error/fatal match; pass a stricter one for a noisy build.\n        slips_json: [[regex, replacement], ...] rewrites applied to generated\n            code, for wrong-library calls the model repeats.\n    ",
             "name": "codegen_build_loop",
             "parameters": {
               "properties": {
@@ -38571,7 +38607,7 @@
         },
         {
           "function": {
-            "description": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- the\n    Authenticode signer subject against expect_publisher. Success also writes\n    <dest>.provenance.json recording the URL, redirect chain, digest,\n    signature, and every verdict.\n    ",
+            "description": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- an exact\n    match to the complete certificate organization (O=) value in\n    expect_publisher. Success also writes <dest>.provenance.json recording\n    the URL, redirect chain, digest, signature, and every verdict.\n    ",
             "name": "fetch_artifact",
             "parameters": {
               "properties": {
@@ -43294,7 +43330,7 @@
         },
         {
           "function": {
-            "description": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and the Authenticode signer subject against expect_publisher. Use\n    it on anything staged earlier or acquired outside Sonder.\n    ",
+            "description": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and an exact match to the complete certificate organization (O=)\n    value in expect_publisher. Use it on anything staged earlier or acquired\n    outside Sonder.\n    ",
             "name": "verify_artifact",
             "parameters": {
               "properties": {
@@ -43820,12 +43856,12 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "9122fe1578e332ae5e48ece39ddc5675cc534a37b2fc90c18063e3dcc3a1270e",
+    "server.py": "b75b2c5898c168a0fb9bb6669a14ea000cfbb92e36220e17f72f1ab169180833",
     "sonder_runtime/application/tools/generated_catalogs.py": "57a490ddd581e3e7a5d4b7b73379d205048f1db6de8e7e73c71f1124c6d84900",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",
-    "sonder_runtime/platform/config.py": "9715b77d76bda6c59460f6d74a7b1877ebc1386e0b2b08b7344d752ae92a8ea0",
+    "sonder_runtime/platform/config.py": "a7caf20f77ebb3a18b59140edc58d3ebf000360c9b1e7ba69d97cb08b93234ac",
     "sonder_runtime/platform/memory_replication_config.py": "1981bbc57a4e6442fc1b770d9c37cc766c66334089697d762e9b9b7ed578d179"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
@@ -44937,7 +44973,7 @@
       }
     },
     {
-      "description": "Write code, compile it, and repair it against the real compiler.\n\n    Generates one file at a time from a per-file spec, runs the project's own\n    build after each, and keeps whichever version leaves the WHOLE project with\n    the fewest errors. Later files are shown the API extracted from the files\n    already written, not an idealised contract, because a local model cannot\n    hold an agreement spanning files even when told it every time.\n\n    Guards that are not optional (each one is here because the unguarded loop\n    was measured doing the opposite):\n      - a replacement that shrinks a file below 75% is rejected as deletion\n        rather than repair;\n      - a file that already builds clean is never regenerated;\n      - versions are scored on total project errors, not the file's own;\n      - known wrong-library calls are rewritten mechanically, not by asking.\n\n    A green build here is NOT proof the program works: a declared-but-never\n    assigned field is not a compile error. Run the project's tests too.\n\n    Args:\n        project_dir: directory holding the project. Must be inside an allowed root.\n        files_json: {\"name.ext\": \"what this file must contain\"} in dependency\n            order, earliest first, or a list of {\"name\", \"spec\"} objects.\n        build_program: the build executable, e.g. \"dotnet\", \"cargo\", \"make\".\n        build_args_json: argv for it as JSON, e.g. [\"build\", \"-c\", \"Release\"].\n        tiers: comma-separated model tiers to ensemble. Default: all bound local tiers.\n        attempts: tries per file; the best-scoring one is kept. Clamped to\n            1..6, and a file stops early when two consecutive attempts return\n            identical build errors (no progress).\n        error_regex: how to recognise an error line in build output. Defaults to\n            a generic error/fatal match; pass a stricter one for a noisy build.\n        slips_json: [[regex, replacement], ...] rewrites applied to generated\n            code, for wrong-library calls the model repeats.\n    ",
+      "description": "Write code, compile it, and repair it against the real compiler.\n\n    Generates one file at a time from a per-file spec, runs the project's own\n    build after each, and keeps whichever version leaves the WHOLE project with\n    the fewest errors. Later files are shown the API extracted from the files\n    already written, not an idealised contract, because a local model cannot\n    hold an agreement spanning files even when told it every time.\n\n    Guards that are not optional (each one is here because the unguarded loop\n    was measured doing the opposite):\n      - a replacement that shrinks a file below 75% is rejected as deletion\n        rather than repair;\n      - a file that already builds clean is never regenerated;\n      - versions are scored on total project errors, not the file's own;\n      - known wrong-library calls are rewritten mechanically, not by asking.\n\n    A green build here is NOT proof the program works: a declared-but-never\n    assigned field is not a compile error. Run the project's tests too.\n\n    Args:\n        project_dir: directory holding the project. Must be inside an allowed root.\n        files_json: {\"name.ext\": \"what this file must contain\"} in dependency\n            order, earliest first, or a list of {\"name\", \"spec\"} objects.\n        build_program: the build executable, e.g. \"dotnet\", \"cargo\", \"make\".\n        build_args_json: argv for it as JSON, e.g. [\"build\", \"-c\", \"Release\"].\n        tiers: comma-separated model tiers. Default: ensemble all bound local\n            tiers. With at least three attempts and two distinct explicitly\n            named models, use the first as editor and the second as scoped\n            critic; the fourth attempt may rotate to the second model.\n        attempts: tries per file; the best-scoring one is kept. Clamped to\n            1..6. Repeated identical failures stop early; a configured scoped\n            critic may take one different strategy before the stop.\n        error_regex: how to recognise an error line in build output. Defaults to\n            a generic error/fatal match; pass a stricter one for a noisy build.\n        slips_json: [[regex, replacement], ...] rewrites applied to generated\n            code, for wrong-library calls the model repeats.\n    ",
       "name": "codegen_build_loop",
       "parameters": {
         "properties": {
@@ -45978,7 +46014,7 @@
       }
     },
     {
-      "description": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- the\n    Authenticode signer subject against expect_publisher. Success also writes\n    <dest>.provenance.json recording the URL, redirect chain, digest,\n    signature, and every verdict.\n    ",
+      "description": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- an exact\n    match to the complete certificate organization (O=) value in\n    expect_publisher. Success also writes <dest>.provenance.json recording\n    the URL, redirect chain, digest, signature, and every verdict.\n    ",
       "name": "fetch_artifact",
       "parameters": {
         "properties": {
@@ -50293,7 +50329,7 @@
       }
     },
     {
-      "description": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and the Authenticode signer subject against expect_publisher. Use\n    it on anything staged earlier or acquired outside Sonder.\n    ",
+      "description": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and an exact match to the complete certificate organization (O=)\n    value in expect_publisher. Use it on anything staged earlier or acquired\n    outside Sonder.\n    ",
       "name": "verify_artifact",
       "parameters": {
         "properties": {

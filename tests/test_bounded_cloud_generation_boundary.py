@@ -80,3 +80,45 @@ def test_shared_budget_state_is_honoured_and_updated():
     assert state["spent"] >= 91
     assert wrapped.output_token_budget == 100
     assert wrapped.output_budget_state is state
+
+
+def test_hosted_request_velocity_refuses_before_network_call_and_refills(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(bounded.time, "monotonic", lambda: clock[0])
+    gen = _fake_gen("ok", tokens_out=1)
+    wrapped = bounded.bounded_cloud_generate(gen, per_call_limit=1, total_budget=1000)
+    for _ in range(bounded.CLOUD_AGENT_REQUEST_BURST):
+        assert wrapped("p") == "ok"
+    with pytest.raises(ModelCallError, match="rate") as blocked:
+        wrapped("blocked")
+    assert blocked.value.attempts == 0
+    assert blocked.value.cloud is True
+    assert blocked.value.retry_after_seconds > 0
+    assert len(gen.calls) == bounded.CLOUD_AGENT_REQUEST_BURST
+    clock[0] += blocked.value.retry_after_seconds + 0.001
+    assert wrapped("after refill") == "ok"
+
+
+def test_hosted_request_count_is_shared_with_review_and_refuses_after_limit(
+    monkeypatch,
+):
+    # Shared with the negative-claim reviewer, so a second wrapper cannot
+    # silently reset the run's admission record.
+    now = [100.0]
+    monkeypatch.setattr(bounded.time, "monotonic", lambda: now[0])
+    state = {"spent": 0, "total": 1000}
+    main = _fake_gen("ok", tokens_out=1)
+    review = _fake_gen("ok", tokens_out=1)
+    gen = bounded.bounded_cloud_generate(
+        main, per_call_limit=1, total_budget=1000, budget_state=state
+    )
+    reviewer = bounded.bounded_cloud_generate(
+        review, per_call_limit=1, total_budget=1000, budget_state=state
+    )
+    for i in range(bounded.CLOUD_AGENT_MAX_REQUESTS):
+        now[0] += 60
+        (gen if i % 2 else reviewer)("p")
+    with pytest.raises(ModelCallError, match="request count") as blocked:
+        gen("blocked")
+    assert blocked.value.attempts == 0
+    assert len(main.calls) + len(review.calls) == bounded.CLOUD_AGENT_MAX_REQUESTS

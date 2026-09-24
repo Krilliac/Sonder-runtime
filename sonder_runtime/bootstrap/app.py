@@ -8,110 +8,128 @@ no hardware, and contacts no services; construction happens inside
 """
 from __future__ import annotations
 
+import atexit
+import importlib
+import logging
+import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import wraps
-import importlib
-import atexit
-import logging
-import os
+from pathlib import Path
 from threading import RLock
 from time import monotonic, time_ns
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+from ..adapters.application_lifecycle import ApplicationLifecycle
+from ..adapters.backup_gateway import LegacyBackupGateway
+from ..adapters.evaluation_history_reader import EvaluationHistoryReaderAdapter
+from ..adapters.execution.durable_output import DurableExecutionOutput, SQLiteSpillStore
+from ..adapters.execution.process_jobs import SubprocessJobProvider
+from ..adapters.extensions.host import ExtensionHost
+from ..adapters.inference import ollama_endpoint
+from ..adapters.inference.ollama_vision import OllamaVisionGateway
+from ..adapters.inspection_executor import InspectionExecutorAdapter
+from ..adapters.local_observability import LocalObservabilitySink
+from ..adapters.model_gateway_factory import build_model_gateway
+from ..adapters.operations_event_sink import OperationsEventSink
 from ..adapters.persistence.autopilot_repository import AutopilotRepository
+from ..adapters.persistence.durable_continuation import (
+    SQLiteDurableContinuationRepository,
+)
 from ..adapters.persistence.fleet_registry import FleetStoreRegistryAdapter
 from ..adapters.persistence.session_repository import SQLiteSessionRepository
-from ..adapters.persistence.durable_continuation import SQLiteDurableContinuationRepository
+from ..adapters.persistence.sqlite.extensions import SQLiteExtensionStateRepository
 from ..adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
-from ..adapters.subagents import LocalSubagentProvider
-from ..adapters.persistence.sqlite.workflow_checkpoints import SQLiteWorkflowCheckpointRepository
-from ..adapters.process_probe import ProcessProbeAdapter
-from ..adapters.process_termination import ProcessTreeSupervisor
-from ..adapters.execution.process_jobs import SubprocessJobProvider
-from ..application.execution.world_providers import (
-    ContainerWorldConfig,
-    GuardedContainerWorld,
-    ConfiguredRemoteWorld,
-    RemoteWorldConfig,
+from ..adapters.persistence.sqlite.workflow_checkpoints import (
+    SQLiteWorkflowCheckpointRepository,
 )
-from ..adapters.execution.durable_output import DurableExecutionOutput, SQLiteSpillStore
-from ..adapters.runtime_policy_repository import RuntimePolicyRepository
-from ..adapters.tool_executor import ToolExecutorAdapter
-from ..adapters.typed_tool_executor import PackagedToolExecutor
-from ..adapters.persistence.tool_audit import DurableToolAuditRepository, ToolAuditLimits
-from ..adapters.security.permission_evaluator import PermissionModesEvaluator
-from ..application.tools.facade import PatternOutputRedactor, ReceiptStore, ToolApplicationFacade
-from .typed_tools import POLICY_NAMES, typed_tool_policy, typed_tool_registry
-from ..adapters.unit_of_work import UnitOfWorkAdapter
-from ..adapters.operations_event_sink import OperationsEventSink
-from ..adapters.security import permission_receipts
-from ..adapters.evaluation_history_reader import EvaluationHistoryReaderAdapter
-from ..adapters.inspection_executor import InspectionExecutorAdapter
-from ..adapters.backup_gateway import LegacyBackupGateway
-from ..adapters.recall_gateway import LegacyRecallGateway
+from ..adapters.persistence.tool_audit import (
+    DurableToolAuditRepository,
+    ToolAuditLimits,
+)
 from ..adapters.preference_adapters import (
     LegacyPreferenceRepository,
     NullPreferenceEventSink,
 )
 from ..adapters.preference_codec import PreferenceCodecAdapter
-from ..adapters.workflow_repository import WorkflowRepositoryAdapter
-from ..adapters.workflow_loop_runner import LoopRunnerAdapter
-from ..adapters.local_observability import LocalObservabilitySink
-from ..adapters.model_gateway_factory import build_model_gateway
+from ..adapters.process_probe import ProcessProbeAdapter
+from ..adapters.process_termination import ProcessTreeSupervisor
 from ..adapters.provider_bindings import ProviderBindings, provider_bindings_from_env
-from ..adapters.web_provider import LegacyWebProvider
-from ..adapters.inference.ollama_vision import OllamaVisionGateway
-from ..adapters.vision_input import FileVisionInputProvider
-from ..adapters.application_lifecycle import ApplicationLifecycle
-from ..adapters.extensions.host import ExtensionHost
-from ..adapters.persistence.sqlite.extensions import SQLiteExtensionStateRepository
+from ..adapters.recall_gateway import LegacyRecallGateway
+from ..adapters.runtime_policy_repository import RuntimePolicyRepository
+from ..adapters.security import permission_receipts
+from ..adapters.security.permission_evaluator import PermissionModesEvaluator
+from ..adapters.subagents import LocalSubagentProvider
 from ..adapters.system_clock import SystemClock
-from ..application.chat.handle_chat import ChatService
-from ..application.vision import VisionService
-from ..application.session import (
-    SessionCaptureService, SessionCheckpointPrivacyService, SessionContinuityService,
-)
-from ..application.session.http_facade import HttpSessionFacade
-from ..application.compaction import SessionCompactionService
-from ..application.extensions.experiments import (
-    EphemeralExperimentManager,
-    StartupAuthority,
-)
-from ..application.extensions.registry import ExtensionRegistry
-from ..application.extensions.provenance_inventory import ProvenanceInventory
-from ..application.selfmod.selfmod_service import GuardedLegacySelfmodService
-from ..application.extensions.facade import ExtensionApplicationFacade
-from ..application.backup import BackupService
-from ..application.capabilities.jobs import JobRegistryService, ResumableWorkflowEngine
-from ..application.jobs.durable_registry import JobRecoveryReport
-from ..application.jobs.session_lifecycle import JobRegistryLifecycleAdapter, JobSessionLifecycleRecorder
+from ..adapters.tool_executor import ToolExecutorAdapter
+from ..adapters.typed_tool_executor import PackagedToolExecutor
+from ..adapters.unit_of_work import UnitOfWorkAdapter
+from ..adapters.vision_input import FileVisionInputProvider
+from ..adapters.web_provider import LegacyWebProvider
+from ..adapters.workflow_loop_runner import LoopRunnerAdapter
+from ..adapters.workflow_repository import WorkflowRepositoryAdapter
 from ..application.agent_registry.unified import UnifiedAgentRegistryService
 from ..application.agents.delegation_service import DelegationService
 from ..application.agents.durable_lineage import DurableLineageQuery
 from ..application.agents.workflow_integration import AgentWorkflowService
-from ..application.subagents.durable_continuation import DurableContinuationService
+from ..application.backup import BackupService
+from ..application.capabilities.jobs import JobRegistryService, ResumableWorkflowEngine
+from ..application.chat.handle_chat import ChatService
+from ..application.compaction import SessionCompactionService
+from ..application.compute_fabric.jobs import (
+    ArgumentPolicy,
+    ComputeJobWorker,
+    JobCatalogEntry,
+)
+from ..application.compute_fabric.registry import ComputeNodeRegistry
+from ..application.compute_fabric.service import ComputeFabricService
+from ..application.context import OperationContext
+from ..application.context_integration import ContextPlanningFacade
+from ..application.control_plane import ControlPlaneSnapshotService
 from ..application.evaluation_history import EvaluationHistoryService
+from ..application.execution.process_jobs import ProcessJobProvider
+from ..application.execution.world_providers import (
+    ConfiguredRemoteWorld,
+    ContainerWorldConfig,
+    GuardedContainerWorld,
+    RemoteWorldConfig,
+)
+from ..application.extensions.experiments import (
+    EphemeralExperimentManager,
+    StartupAuthority,
+)
+from ..application.extensions.facade import ExtensionApplicationFacade
+from ..application.extensions.provenance_inventory import ProvenanceInventory
+from ..application.extensions.registry import ExtensionRegistry
 from ..application.inspection import InspectionService
-from ..application.recall import RecallService
+from ..application.jobs.durable_registry import JobRecoveryReport
+from ..application.jobs.session_lifecycle import (
+    JobRegistryLifecycleAdapter,
+    JobSessionLifecycleRecorder,
+)
 from ..application.memory import MemoryLearningFacade
-from ..application.preferences import PreferenceService
+from ..application.ports.clock import Clock
+from ..application.ports.event_sink import EventSink
+from ..application.ports.jobs import JobRegistry
+from ..application.ports.model_gateway import ModelGateway
 from ..application.ports.preferences import (
     ConnectionFactory,
     PreferenceModuleProvider,
 )
-from ..application.ports.clock import Clock
-from ..application.ports.event_sink import EventSink
-from ..application.ports.model_gateway import ModelGateway
+from ..application.ports.process_probe import ProcessProbe
+from ..application.ports.repositories import AutomationRepository, UnitOfWork
+from ..application.ports.session_repository import SessionRepository
 from ..application.ports.specialized_lifecycle import (
     ActivationRequest,
     ActivationResult,
     DeploymentResult,
     TrainingRequest,
 )
+from ..application.ports.tool_executor import ToolExecutor
+from ..application.ports.web import WebProvider
+from ..application.preferences import PreferenceService
 from ..application.provider_overrides import ProviderOverrideService
 from ..application.providers import (
     EmbeddingLifecycleAdapter,
@@ -122,39 +140,37 @@ from ..application.providers import (
     UpdateLifecycleAdapter,
     wire_specialized_providers,
 )
-from ..domain.provider_override_policy import ProviderOverridePolicy
+from ..application.recall import RecallService
+from ..application.runtime_policy.use_cases import RuntimePolicyService
+from ..application.selfmod.selfmod_service import GuardedLegacySelfmodService
+from ..application.session import (
+    SessionCaptureService,
+    SessionCheckpointPrivacyService,
+    SessionContinuityService,
+)
+from ..application.session.http_facade import HttpSessionFacade
+from ..application.subagents.durable_continuation import DurableContinuationService
+from ..application.tools.facade import (
+    PatternOutputRedactor,
+    ReceiptStore,
+    ToolApplicationFacade,
+)
+from ..application.vision import VisionService
+from ..application.workflows.use_cases import WorkflowService
 from ..domain.compute_fabric import (
     ComputeCapability,
     ComputeNode,
     ComputePlacementScheduler,
-    PlacementPolicy,
-    NodeSnapshot,
     NodeHealth,
+    NodeSnapshot,
+    PlacementPolicy,
     WorkloadKind,
 )
-from ..application.compute_fabric.jobs import (
-    ArgumentPolicy,
-    ComputeJobWorker,
-    JobCatalogEntry,
-)
-from ..application.compute_fabric.registry import ComputeNodeRegistry
-from ..application.compute_fabric.service import ComputeFabricService
-from ..application.ports.web import WebProvider
-from ..application.ports.session_repository import SessionRepository
-from ..application.ports.jobs import JobRegistry
-from ..application.execution.process_jobs import ProcessJobProvider
-from ..application.ports.process_probe import ProcessProbe
-from ..application.ports.repositories import AutomationRepository, UnitOfWork
-from ..application.ports.tool_executor import ToolExecutor
-from ..application.runtime_policy.use_cases import RuntimePolicyService
-from ..application.workflows.use_cases import WorkflowService
-from ..application.context_integration import ContextPlanningFacade
-from ..application.control_plane import ControlPlaneSnapshotService
-from ..application.context import OperationContext
-from .artifact_mobility_source import ArtifactMobilitySourceBinding
-from ..platform.config import SonderConfig
+from ..domain.provider_override_policy import ProviderOverridePolicy
 from ..platform import paths as runtime_paths
-from ..adapters.inference import ollama_endpoint
+from ..platform.config import SonderConfig
+from .artifact_mobility_source import ArtifactMobilitySourceBinding
+from .typed_tools import POLICY_NAMES, typed_tool_policy, typed_tool_registry
 
 PROFILES = ("workstation-local", "server-private")
 
@@ -287,8 +303,12 @@ def build_application(
         inference_pool = ollama_pool.from_environment(config.ollama.url)
         source_limits = high_water_store = None
         if config.membership.mode == "external":
-            from ..adapters.inference.external_membership import ExternalMembershipSource
-            from ..adapters.inference.membership_high_water import MembershipHighWaterStore
+            from ..adapters.inference.external_membership import (
+                ExternalMembershipSource,
+            )
+            from ..adapters.inference.membership_high_water import (
+                MembershipHighWaterStore,
+            )
             from ..application.ports.inference_membership import MembershipSourceLimits
             source = ExternalMembershipSource(config.membership, config.secrets, clock=membership_clock)
             high_water_store = MembershipHighWaterStore(runtime_paths.default_home() / "inference-membership" / "high-water.json",
@@ -448,8 +468,8 @@ def build_application(
         """Return the single durable journal shared by direct worker adapters."""
         nonlocal worker_effect_journal
         if worker_effect_journal is None:
-            from ..adapters.persistence.sqlite.effect_journal import SQLiteEffectJournal
             from ..adapters.execution.process_jobs import DurableProcessEffectVerifier
+            from ..adapters.persistence.sqlite.effect_journal import SQLiteEffectJournal
             from ..platform.paths import state_path
 
             worker_effect_journal = SQLiteEffectJournal(
@@ -515,6 +535,24 @@ def build_application(
                 database
             )
         return session_repository
+
+    evaluation_service = None
+    evaluation_lock = RLock()
+
+    def get_evaluation_service():
+        nonlocal evaluation_service
+        with evaluation_lock:
+            if evaluation_service is None:
+                from ..platform.paths import state_path
+                from .evaluation import compose_evaluation_service
+
+                # No repository/tool/memory corpus source is silently claimed
+                # as covered; the host must supply bounded readers first.
+                evaluation_service = compose_evaluation_service(
+                    get_session_repository(),
+                    failure_directory=state_path("evaluation/failures"),
+                )
+            return evaluation_service
 
     def get_job_registry() -> JobRegistry:
         nonlocal job_registry
@@ -720,7 +758,10 @@ def build_application(
                 if effective_config.state.workspace_roots
                 else Path.cwd().resolve()
             )
-            from ..application.compute_fabric.capacity import WorkerBudget, measured_worker_budget
+            from ..application.compute_fabric.capacity import (
+                WorkerBudget,
+                measured_worker_budget,
+            )
 
             def worker_budget() -> WorkerBudget:
                 configured = effective_config.compute.worker_memory_budget_bytes
@@ -757,8 +798,12 @@ def build_application(
             raise ValueError("remote compute requires SONDER_API_KEY")
         with compute_composition_lock:
             if compute_refresh_coordinator is None:
-                from ..adapters.compute_fabric.http_client import HttpsComputeSnapshotSource
-                from ..application.compute_fabric.coordinator import ComputeRefreshCoordinator
+                from ..adapters.compute_fabric.http_client import (
+                    HttpsComputeSnapshotSource,
+                )
+                from ..application.compute_fabric.coordinator import (
+                    ComputeRefreshCoordinator,
+                )
                 compute_remote_snapshot_source = HttpsComputeSnapshotSource(
                     api_key=effective_config.secrets.api_key,
                     timeout_seconds=effective_config.compute.probe_timeout_ms / 1000.0,
@@ -861,9 +906,9 @@ def build_application(
             from ..adapters.persistence.agent_lanes import SQLiteAgentLaneStore
             from ..adapters.persistence.fleet_store import database_path
             from ..adapters.persistence.sqlite.effect_journal import SQLiteEffectJournal
-            from ..platform.paths import state_path
             from ..application.agents.interactive_lanes import AgentLaneService
             from ..application.live_context import LiveAgentContextProducer
+            from ..platform.paths import state_path
             sessions = get_session_repository()
             lane_tools = tools
             lane_test_catalog = None
@@ -876,8 +921,8 @@ def build_application(
                     tools, lane_test_catalog, get_process_job_provider(), audit=tool_audit,
                 )
             def authorize_lane_grant(lane, context):
-                from ..application.context import LOCAL_OWNER
                 from ..adapters.filesystem.file_ops import allowed_roots
+                from ..application.context import LOCAL_OWNER
                 if lane_test_catalog is not None:
                     lane_test_catalog.require_current()
                 if context.principal_id != LOCAL_OWNER:
@@ -886,8 +931,20 @@ def build_application(
                 if not any(root == current.resolve() or current.resolve() in root.parents
                            for current in allowed_roots()):
                     raise PermissionError("configured workspace grant was removed")
+            from .strategy import (
+                compose_workbench_strategy_observer,
+                try_compose_strategy_memory,
+                try_configured_strategy_rollout,
+                try_configured_strategy_trace,
+            )
+            lane_store = SQLiteAgentLaneStore(database_path(), sessions)
+            strategy_rollout = try_configured_strategy_rollout()
+            strategy_trace = try_configured_strategy_trace(strategy_rollout)
+            strategy_memory = try_compose_strategy_memory(
+                strategy_trace, lambda: memory_unit_of_work,
+            )
             interactive_lanes = AgentLaneService(
-                SQLiteAgentLaneStore(database_path(), sessions), sessions, gateway, lane_tools,
+                lane_store, sessions, gateway, lane_tools,
                 authorize_grant=authorize_lane_grant,
                 allowed_tools=tuple(item.name for item in lane_tools.graph.registry.list_all()),
                 context_planning=context_planning,
@@ -896,6 +953,9 @@ def build_application(
                     state_path("agent-effects.db", "SONDER_AGENT_EFFECTS_DB")
                 ),
                 compaction_service=get_compaction_service(),
+                strategy_observer=compose_workbench_strategy_observer(
+                    strategy_trace, strategy_memory, strategy_rollout, lane_store,
+                ),
             )
         return interactive_lanes
 
@@ -914,14 +974,18 @@ def build_application(
                         raise TypeError("child repository factory requires trusted host composition")
                     continuation_repository = child_repository_factory(config or SonderConfig())
                 continuation_service = DurableContinuationService(continuation_repository)
-                from ..application.worker_registry.continuation import ContinuationWorkerRegistry
+                from ..application.worker_registry.continuation import (
+                    ContinuationWorkerRegistry,
+                )
                 worker_registry = ContinuationWorkerRegistry(
                     continuation_repository,
                     owner_nonce=continuation_service.owner_nonce,
                     owner_pid=continuation_service.owner_pid,
                     owner_host=continuation_service.owner_host,
                 )
-                from ..adapters.conversational_subagents import conversational_runner_factory
+                from ..adapters.conversational_subagents import (
+                    conversational_runner_factory,
+                )
                 subagent_provider = LocalSubagentProvider(
                     continuation_service,
                     runner_factory=conversational_runner_factory(
@@ -933,7 +997,25 @@ def build_application(
                         )
                     ),
                 )
-                delegation = DelegationService(subagent_provider, events, worker_registry)
+                from ..application.ports.subagents import SubagentBudget
+
+                host_capacity = effective_config.capacity
+                host_budget = SubagentBudget(
+                    max_children=host_capacity.delegation_max_children,
+                    max_depth=host_capacity.delegation_max_depth,
+                    max_concurrency=host_capacity.delegation_max_concurrency,
+                    max_steps=host_capacity.delegation_max_steps,
+                    max_output_tokens=host_capacity.delegation_max_output_tokens,
+                    max_wall_seconds=host_capacity.delegation_max_wall_seconds,
+                )
+                provider = subagent_provider
+                delegation = DelegationService(
+                    provider, events, worker_registry,
+                    host_root_budget=host_budget,
+                    register_host_root=lambda root_id, budget, owner_id: provider.register_root(
+                        root_id, budget, owner_id=owner_id,
+                    ),
+                )
                 logger.info("delegation service initialized")
             return delegation
 
@@ -1403,6 +1485,7 @@ def build_application(
         unit_of_work=memory_unit_of_work,
         tool_executor=ToolExecutorAdapter(),
         tools=tools,
+        tool_audit=tool_audit,
         process_probe=ProcessProbeAdapter(),
         events=events,
         clock=SystemClock(),
@@ -1413,6 +1496,7 @@ def build_application(
         evaluation_history=EvaluationHistoryService(
             EvaluationHistoryReaderAdapter()
         ),
+        evaluation_service=get_evaluation_service,
         preferences=PreferenceService(
             LegacyPreferenceRepository(preference_connection_factory),
             PreferenceCodecAdapter(preference_module_provider),

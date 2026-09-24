@@ -23,22 +23,21 @@ The lock is advisory and assumes cooperating writers on one host.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
 import json
 import os
-from pathlib import Path
 import re
 import secrets
 import tempfile
 import time
-from typing import Iterator
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
 
 from sonder_runtime.application.evaluation.divergence import (
-    DivergenceError,
     MAX_RETAINED_FAILURES,
+    DivergenceError,
     MinimizedFailure,
 )
-
 
 MAX_FAILURE_BYTES = 1024 * 1024
 STALE_LOCK_SECONDS = 60.0
@@ -242,4 +241,4 @@ class JsonMinimizedFailureStore:
         return tuple(names)
 
 
-__all__ = ["JsonMinimizedFailureStore", "MAX_FAILURE_BYTES"]
+__all__ = ["MAX_FAILURE_BYTES", "JsonMinimizedFailureStore"]

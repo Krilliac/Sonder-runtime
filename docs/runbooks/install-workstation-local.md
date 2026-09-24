@@ -17,6 +17,25 @@ the `sonder:latest` Ollama alias (`-SkipModelAlias` to skip), then runs
 unless `-Force` is passed. Every step is also documented below in case the
 script is unavailable or a manual run is preferred.
 
+For the opt-in Windows foreground `ManagedRuntimeOwner`, provision a separate
+interpreter closure with `-ManagedRuntime` (Windows CPython 3.12):
+
+```powershell
+powershell -NoProfile -File packaging\install_workstation_local.ps1 -ManagedRuntime -SkipModelAlias
+```
+
+This uses the same pinned `requirements-runtime.txt` in a new `venv-managed\`
+without training or development packages. It seals the base interpreter,
+disabled system-site policy, checkout requirements and installed distributions.
+Reruns verify the profile instead of silently adopting new packages; `-Force`
+explicitly recreates it. From host-owned Python code, select this profile with
+`ManagedRuntimeOwner.workstation_local(owner_path, writable_roots=live_roots)`,
+or pass its **absolute** path as `runtime_venv=` to `ManagedRuntimeOwner`.
+Keep the profile root outside model-writable roots. The runtime continues to
+hash the full selected closure at creation, before native spawn, and in the
+child. A host using a training-laden `venv\` remains available through the
+ordinary constructor, but retains that full closure's verification cost.
+
 ## 1. Check out and prepare
 
 ```bash

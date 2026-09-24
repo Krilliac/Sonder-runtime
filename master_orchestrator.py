@@ -4,6 +4,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import ctypes
+import hashlib
 import itertools
 import json
 import logging
@@ -1326,6 +1327,23 @@ def _finish(
     return final
 
 
+def _readiness_verifier_receipt(
+    agent_id: str, run_id: str, delegated_task_digest: str,
+    output: str, verification: dict,
+) -> str:
+    """Digest the host's completion/provenance checks for an artifact join."""
+    payload = {
+        "run_id": run_id,
+        "producer_id": agent_id,
+        "source_task_digest": delegated_task_digest,
+        "completed_output_digest": fleet_provenance.task_digest(output),
+        "verification": verification,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def _run_worker(
     agent_id: str,
     prompt: str,
@@ -1337,6 +1355,8 @@ def _run_worker(
     delegated_task_digest: str = "",
     run_id: str = "",
     outcome_sink=None,
+    strategy_observer=None,
+    model_route: str = "",
 ):
     def report(outcome) -> None:
         # Content-free outcome for the adaptive lane scheduler; reporting must
@@ -1344,6 +1364,18 @@ def _run_worker(
         if outcome_sink is not None:
             with contextlib.suppress(Exception):
                 outcome_sink(outcome)
+
+    def observe_strategy(attempt_number: int, *, accepted: bool,
+                         failure_code: str = "", legacy_retry: bool = False) -> bool:
+        if strategy_observer is None:
+            return legacy_retry
+        return strategy_observer(
+            agent_id=agent_id, master_id=run_id, prompt=prompt,
+            master_digest=master_task_digest, project_scope=project_scope,
+            attempt_number=attempt_number, attempt_limit=attempts_allowed,
+            route=model_route, accepted=accepted, failure_code=failure_code,
+            legacy_retry=legacy_retry,
+        )
 
     pre_call_metrics = None
     if objectives:
@@ -1392,10 +1424,14 @@ def _run_worker(
                 break
             except Exception as exc:  # defensive boundary for worker threads
                 failure_class = classify_worker_error(exc)
-                if (
+                legacy_retry = (
                     attempt < attempts_allowed
                     and failure_class in TRANSIENT_FAILURE_CLASSES
                     and not cancel_requested(agent_id)
+                )
+                if observe_strategy(
+                    attempt, accepted=False, failure_code=failure_class,
+                    legacy_retry=legacy_retry,
                 ):
                     # A transient transport/availability fault earns one more
                     # bounded attempt.  Cancellation is re-checked first so a
@@ -1439,6 +1475,7 @@ def _run_worker(
                 task_drift=True,
                 drift_metrics=post_call,
             )
+            observe_strategy(attempt, accepted=False, failure_code="task_drift")
             report(adaptive_concurrency.Outcome.CHURN)
             return _WORKER_FAILED
         metrics = fleet_provenance.validate_result(
@@ -1451,18 +1488,31 @@ def _run_worker(
                 task_drift=True,
                 drift_metrics=metrics,
             )
+            observe_strategy(attempt, accepted=False, failure_code="task_drift")
             report(adaptive_concurrency.Outcome.FAILED)
             return _WORKER_FAILED
     final = _finish(agent_id, output=stored_output)
+    observe_strategy(
+        attempt, accepted=final not in ABORT_MARKERS,
+        failure_code="cancelled" if final in ABORT_MARKERS else "",
+    )
     if final in ABORT_MARKERS:
         return final
     report(adaptive_concurrency.Outcome.SUCCEEDED)
     completed = output if isinstance(output, RepositoryWorkerResult) else final
     if not run_id:
         return completed
+    verifier_receipt = _readiness_verifier_receipt(
+        agent_id, run_id, delegated_task_digest, stored_output,
+        metrics if objectives else {"worker_finished": True},
+    )
     return ReadyWorkerOutput(
         output=completed,
-        readiness=ArtifactReadiness.from_content(agent_id, run_id, stored_output),
+        readiness=ArtifactReadiness.from_content(
+            agent_id, run_id, stored_output,
+            source_revision=delegated_task_digest,
+            verifier_receipt=verifier_receipt,
+        ),
     )
 
 
@@ -1939,6 +1989,7 @@ def run_delegated(
     task: str, worker_fn, audit_fn, agents: int = 3,
     metadata: dict | None = None, _on_started=None, project: str = "",
     worker_cap: int | str | None = None,
+    strategy_observer=None,
 ) -> dict:
     objectives = fleet_provenance.parse_objectives(task)
     repository_task = (
@@ -2104,6 +2155,8 @@ def run_delegated(
             fleet_provenance.task_digest(prompt),
             master_id,
             outcome_sink=sink,
+            strategy_observer=strategy_observer,
+            model_route=str(metadata.get("tier") or ""),
         )
 
     def _collect(agent_id: str, output) -> None:
@@ -2223,6 +2276,23 @@ def run_delegated(
             run_id=master_id,
             expected_producers=rendered_outputs,
             content_by_producer=rendered_outputs,
+            expected_source_revisions={
+                agent_id: fleet_provenance.task_digest(lane_inputs[agent_id][0])
+                for agent_id in rendered_outputs
+            },
+            expected_verifier_receipts={
+                agent_id: _readiness_verifier_receipt(
+                    agent_id, master_id,
+                    fleet_provenance.task_digest(lane_inputs[agent_id][0]),
+                    rendered_outputs[agent_id],
+                    fleet_provenance.validate_result(
+                        rendered_outputs[agent_id], lane_inputs[agent_id][1],
+                        project=project_scope,
+                    ) if lane_inputs[agent_id][1] else {"worker_finished": True},
+                )
+                for agent_id in rendered_outputs
+            },
+            require_verifier_receipt=True,
         )
     except ValueError as exc:
         error = "artifact readiness barrier rejected fan-in: %s" % exc
@@ -2410,6 +2480,7 @@ def start_delegated(
     task: str, worker_fn, audit_fn, agents: int = 3,
     metadata: dict | None = None, startup_timeout: float = 5.0,
     project: str = "", worker_cap: int | str | None = None,
+    strategy_observer=None,
 ) -> dict:
     """Start delegated orchestration in a daemon thread and return ledger IDs.
 
@@ -2448,6 +2519,7 @@ def start_delegated(
                 _on_started=on_started,
                 project=project,
                 worker_cap=worker_cap,
+                strategy_observer=strategy_observer,
             )
         except Exception as exc:  # keep startup failures observable
             master_id = started_result.get("master_id")
@@ -2804,4 +2876,3 @@ def reset_for_tests() -> None:
     fleet_store.clear_all()
     _OWNER_REGISTERED = False
     _STORE_ERROR = ""
-

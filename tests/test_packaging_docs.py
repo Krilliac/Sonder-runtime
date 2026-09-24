@@ -31,9 +31,10 @@ def test_workstation_local_runbook_documents_the_windows_installer_and_smoke_che
     assert "-Force" in runbook
     assert "release-smoke-check.md" in runbook
     # Every numbered step's bash block has a documented PowerShell counterpart
-    # (the one-shot installer intro above step 1 is PowerShell-only by design).
+    # The one-shot installer and managed profile examples are PowerShell-only.
     assert runbook.count("```bash") == 3
-    assert runbook.count("```powershell") == 4
+    assert runbook.count("```powershell") == 5
+    assert "-ManagedRuntime" in runbook
 
 
 def test_installer_scripts_referenced_in_docs_actually_exist():

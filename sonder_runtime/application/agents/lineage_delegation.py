@@ -16,6 +16,7 @@ from pathlib import Path
 from sonder_runtime.application.agents.presets import AgentPreset, builtin_presets
 from sonder_runtime.domain.agents.roles import AgentRole, role_budget
 from sonder_runtime.application.ports.worker_registry import WorkerExecutionContract
+from sonder_runtime.application.ports.subagents import SubagentBudget
 
 
 MAX_ID_CHARS = 128
@@ -150,6 +151,9 @@ class DelegationRequest:
     workspace: WorkspaceAssignment
     evidence_tags: tuple[str, ...] = ()
     execution_contract: WorkerExecutionContract = WorkerExecutionContract()
+    resource_budget: SubagentBudget | None = None
+    hypothesis_digest: str = ""
+    speculative_lane_id: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "delegation_id", _required(self.delegation_id, "delegation_id"))
@@ -165,6 +169,17 @@ class DelegationRequest:
         object.__setattr__(self, "evidence_tags", tags)
         if not isinstance(self.execution_contract, WorkerExecutionContract):
             raise IntegrationError("execution_contract must be WorkerExecutionContract")
+        if self.resource_budget is not None and not isinstance(self.resource_budget, SubagentBudget):
+            raise IntegrationError("resource_budget must be a SubagentBudget")
+        if self.execution_contract.speculative_lane:
+            if (
+                len(self.hypothesis_digest) != 64
+                or any(char not in "0123456789abcdef" for char in self.hypothesis_digest)
+                or not self.speculative_lane_id or len(self.speculative_lane_id) > MAX_ID_CHARS
+            ):
+                raise IntegrationError("speculative delegation requires a distinct hypothesis and lane identity")
+        elif self.hypothesis_digest or self.speculative_lane_id:
+            raise IntegrationError("hypothesis metadata requires a speculative execution contract")
 
 
 @dataclass(frozen=True)
@@ -310,6 +325,13 @@ def delegation_digest(request: DelegationRequest) -> str:
         "write_roots": request.workspace.write_roots,
         "tags": request.evidence_tags,
     }
+    if request.resource_budget is not None or request.hypothesis_digest:
+        from dataclasses import asdict
+        payload = {**payload,
+                   "resource_budget": None if request.resource_budget is None else asdict(request.resource_budget),
+                   "hypothesis_digest": request.hypothesis_digest,
+                   "speculative_lane_id": request.speculative_lane_id,
+                   "execution_contract": repr(request.execution_contract)}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 

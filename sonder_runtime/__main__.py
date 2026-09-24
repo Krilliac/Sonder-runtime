@@ -1074,6 +1074,9 @@ def cmd_repl(args) -> int:
 
 
 def cmd_mcp(args) -> int:
+    if getattr(args, "progressive_tools", False) and not getattr(args, "native", False):
+        print("--progressive-tools requires --native", file=sys.stderr)
+        return 2
     if getattr(args, "native", False):
         from sonder_runtime.adapters.security import unsafe_lab
 
@@ -1108,6 +1111,8 @@ def cmd_mcp(args) -> int:
             return 1
         application = build_application(config=config)
         try:
+            if getattr(args, "progressive_tools", False):
+                return run_native_mcp(application, close_compute_on_exit=False, progressive_tools=True)
             return run_native_mcp(application, close_compute_on_exit=False)
         finally:
             application.close_providers(timeout=5)
@@ -1556,6 +1561,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--native", action="store_true",
         help="use the application-owned bounded MCP transport",
+    )
+    p.add_argument(
+        "--progressive-tools", action="store_true",
+        help="with --native, expose tool search and load selected schemas on demand",
     )
     p.set_defaults(func=cmd_mcp)
 

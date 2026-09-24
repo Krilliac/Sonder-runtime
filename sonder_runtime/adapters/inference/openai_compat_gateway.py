@@ -34,7 +34,6 @@ from urllib.parse import urlsplit
 logger = logging.getLogger(__name__)
 
 from ...application.context import OperationContext
-from ...application.session.provider_attempts import dispatch_provider
 from ...application.ports.model_gateway import (
     Embedding,
     ModelRequest,
@@ -43,8 +42,11 @@ from ...application.ports.model_gateway import (
     require_embedding_vector,
     require_model_text,
 )
-from ...platform.metrics import default_registry
-from .telemetry import from_openai_compatible
+from ...application.session.provider_attempts import dispatch_provider
+from ...domain.chat_template_policy import (
+    ChatTemplateOptionsError,
+    normalize_chat_template_options,
+)
 from ...domain.common.errors import (
     Cancelled,
     CapacityExceeded,
@@ -54,15 +56,17 @@ from ...domain.common.errors import (
     InternalFailure,
     InvalidInput,
 )
-from ...domain.chat_template_policy import (
-    ChatTemplateOptionsError,
-    normalize_chat_template_options,
-)
 from ...domain.model_capabilities import (
     GATEWAY_CAPABILITY_CHAT,
     GATEWAY_CAPABILITY_EMBEDDINGS,
     GATEWAY_CAPABILITY_FIXED_ENDPOINT,
 )
+from ...platform.metrics import default_registry
+from ..model_request_admission import (
+    HostModelRequestAdmission,
+    host_model_request_admission,
+)
+from .telemetry import from_openai_compatible
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 _DEFAULT_TIMEOUT = 300
@@ -104,9 +108,18 @@ class OpenAICompatibleGateway:
     used. ``config`` overrides env resolution (mainly for tests).
     """
 
-    def __init__(self, config: OpenAICompatibleConfig | None = None, *, transport=None):
+    def __init__(
+        self, config: OpenAICompatibleConfig | None = None, *,
+        transport=None, request_admission: HostModelRequestAdmission | None = None,
+    ):
         self._config = config
         self._transport = transport
+        self._request_admission = (
+            host_model_request_admission()
+            if request_admission is None else request_admission
+        )
+        if not isinstance(self._request_admission, HostModelRequestAdmission):
+            raise TypeError("request admission must be host-owned")
         if config is not None:
             loopback = self._is_loopback(config.base_url)
             logger.info(
@@ -121,6 +134,10 @@ class OpenAICompatibleGateway:
     def capabilities(self) -> frozenset[str]:
         """Typed capability metadata; shape matches ``ProviderHealth.capabilities``."""
         return CAPABILITIES
+
+    @property
+    def request_admission(self) -> HostModelRequestAdmission:
+        return self._request_admission
 
     # -- configuration & consent ------------------------------------------
 
@@ -185,7 +202,7 @@ class OpenAICompatibleGateway:
             payload["max_tokens"] = int(options["num_predict"])
 
         started = time.monotonic()
-        data = self._post("/v1/chat/completions", payload, cfg, timeout)
+        data = self._post("/v1/chat/completions", payload, cfg, timeout, context=context)
         # urllib cannot observe a token while blocked.  A final liveness gate
         # prevents a response/cancellation race from publishing stale work.
         self._check_liveness(context, phase="during model call")
@@ -237,7 +254,8 @@ class OpenAICompatibleGateway:
         model = cfg.embed_model or "text-embedding-3-small"
         logger.debug(f"OpenAICompatibleGateway.embed: text_count={len(items)}, model={model!r}")
         data = self._post(
-            "/v1/embeddings", {"model": model, "input": items}, cfg, timeout
+            "/v1/embeddings", {"model": model, "input": items}, cfg, timeout,
+            context=context,
         )
         self._check_liveness(context, phase="during embedding call")
         rows = data.get("data") or []
@@ -297,11 +315,20 @@ class OpenAICompatibleGateway:
         return headers
 
     def _post(
-        self, path: str, payload: dict, cfg: OpenAICompatibleConfig, timeout
+        self, path: str, payload: dict, cfg: OpenAICompatibleConfig, timeout,
+        *, context: OperationContext | None = None,
     ) -> dict:
         url = cfg.base_url.rstrip("/") + path
         logger.debug(f"OpenAICompatibleGateway._post: url={url!r}, timeout={timeout}")
         transport = self._transport or self._default_transport
+        if context is not None:
+            self._check_liveness(context, phase="before provider send")
+        admission = self._request_admission.try_acquire()
+        if admission is not None and not admission.allowed:
+            raise CapacityExceeded(
+                "host model request rate admission refused; "
+                f"retry after about {admission.retry_after:.3f}s"
+            )
         try:
             if path == "/v1/chat/completions":
                 data = dispatch_provider(

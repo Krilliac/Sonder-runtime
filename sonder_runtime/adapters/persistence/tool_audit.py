@@ -135,6 +135,8 @@ class DurableToolAuditRepository:
         }
         if rotated_from is not None:
             raw["rotated_from"] = rotated_from
+        if request.schema_selection is not None:
+            raw["tool_schema_selection"] = request.schema_selection.marker()
         try:
             safe = _redact_value(raw, self._redactor)
             json.dumps(safe, sort_keys=True, ensure_ascii=False)

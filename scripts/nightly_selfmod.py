@@ -78,7 +78,8 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-import selfmod  # noqa: E402
+import selfmod
+from scripts import selfmod_host_grader
 
 _HELD_OUT_MAX_FILES = 2048
 _HELD_OUT_MAX_BYTES = 32 * 1024 * 1024
@@ -499,7 +500,8 @@ def _held_out_suite_paths(target: str) -> tuple[str, ...]:
     return tuple(selected)
 
 
-def _prepare_held_out(target: str, workspace: Path, timeout: int):
+def _prepare_held_out(target: str, workspace: Path, timeout: int,
+                      function_name: str | None = None):
     """Snapshot and prepare the best-effort tamper-evident held-out command."""
     suites = _held_out_suite_paths(target)
     copied = []
@@ -580,6 +582,10 @@ def _prepare_held_out(target: str, workspace: Path, timeout: int):
     return {
         "command": command, "source_paths": tuple(selected_source_paths),
         "protected_paths": tuple(item["path"] for item in copied),
+        "host_cases": selfmod_host_grader.extract_cases(
+            [suite_root / item for item in suites],
+            _module_name_for_target(target) or "", function_name or "",
+        ),
         "cleanup": snapshot,
     }
 
@@ -1232,6 +1238,41 @@ def _binding_mismatch(run_id, workspace: Path, binding: dict) -> str | None:
     return "diff changed after testing"
 
 
+def _parent_scored_gate(run_id: str, workspace: Path, target: str,
+                        function_name: str, held_out: dict, timeout: int) -> dict:
+    """Score a low candidate probe against assertions retained by the host."""
+    cases = held_out["host_cases"]
+    command, nonce = selfmod_host_grader.challenge(
+        workspace, _module_name_for_target(target) or "", function_name,
+        cases, python=_test_python(),
+    )
+    probe = _record_candidate_test(
+        run_id, "host_probe", command, timeout=timeout,
+        protected_paths=held_out.get("protected_paths", ()),
+    )
+    if (not isinstance(probe, dict) or not probe.get("passed")
+            or probe.get("isolation") != "low" or not probe.get("test_id")):
+        return {"passed": False, "detail": "parent challenge lacked an attested low probe"}
+    passed, detail = selfmod_host_grader.grade(probe.get("output", ""), nonce, cases)
+    if passed:
+        try:
+            run = selfmod.get_run(run_id)
+            bound = selfmod.tested_digests(run_id)
+            clean_passed, clean_detail = selfmod_host_grader.clean_replay(
+                REPO, workspace, selfmod.state_root(), run["starting_commit"],
+                bound["files"] if bound else {},
+                _module_name_for_target(target) or "", function_name, cases,
+                timeout, held_out.get("protected_paths", ()), python=_test_python(),
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            clean_passed, clean_detail = False, f"clean replay unavailable ({type(exc).__name__})"
+        passed = clean_passed
+        detail += "; clean checkout: " + clean_detail
+    return selfmod.record_host_grade(
+        run_id, probe["test_id"], passed=passed, detail=detail,
+    )
+
+
 def _committed_digests(workspace: Path, expected_files: dict) -> dict:
     """SHA-256 of each bound file as recorded in the candidate's HEAD commit."""
     result = {}
@@ -1393,7 +1434,7 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
         log("  lint: Ruff available")
     else:
         log("  lint: Ruff unavailable; Python compilation is the syntax gate")
-    held_out = _prepare_held_out(target, workspace, test_timeout)
+    held_out = _prepare_held_out(target, workspace, test_timeout, function_name)
     workers = _regression_workers()
     for kind in REGRESSION_KINDS:
         checks.append((kind, _regression_command(
@@ -1401,6 +1442,8 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     checks.append(("held_out", held_out["command"]))
     unevaluated_kind, unevaluated_reason = UNEVALUATED_PARTITION
     log("  %s: NOT EVALUATED -- %s" % (unevaluated_kind, unevaluated_reason))
+    if not held_out.get("host_cases"):
+        log("  host_grade: NOT EVALUATED -- no safe literal assertion for selected function")
     try:
         for kind, command in checks:
             # cwd is deliberately NOT passed: the default is the candidate
@@ -1418,6 +1461,17 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
                 selfmod.reject(run_id, reason="%s failed" % kind)
                 _discard_workspace(run_id)
                 return "candidate rejected: %s failed (run %s kept for inspection)" % (kind, run_id)
+        if held_out.get("host_cases"):
+            outcome = _parent_scored_gate(
+                run_id, workspace, target, function_name, held_out, test_timeout,
+            )
+            passed = bool(outcome.get("passed"))
+            results.append(("host_grade", passed))
+            log(f"  host_grade: {'pass' if passed else 'FAIL'}")
+            if not passed:
+                selfmod.reject(run_id, reason="parent-scored host grade failed")
+                _discard_workspace(run_id)
+                return "candidate rejected: parent-scored host grade failed"
     finally:
         cleanup = held_out.get("cleanup")
         if cleanup is not None:
@@ -1439,7 +1493,10 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
         return _reject_unbound(run_id, "before review", mismatch)
     reviewed = selfmod.review(
         run_id, require_kinds={"syntax", "held_out", *REGRESSION_KINDS},
-        unevaluated=("%s: %s" % UNEVALUATED_PARTITION,),
+        unevaluated=("%s: %s" % UNEVALUATED_PARTITION,) + (
+            (f"host_grade: no safe parent-scored assertion for {function_name}",)
+            if not held_out.get("host_cases") else ()
+        ),
     )
     # A PASS lands on reviewing and may auto-advance to approved under
     # auto-low-risk; a FAIL lands on rejected/restored with last_error set.

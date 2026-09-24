@@ -63,6 +63,7 @@ SENSITIVE_PREFIXES = (
     "deploy_", "sonder-runtime", "tests/test_permission", "tests/test_admin",
     "tests/test_control_plane", "tests/test_read_only_agent_policy",
     "tests/test_selfmod",
+    "scripts/selfmod_low_integrity.py",
 )
 SENSITIVE_PARTS = (
     ".env", "credential", "secret", "token", "account", "migration",
@@ -82,6 +83,11 @@ DEFAULT_BUDGETS = {
 DEFAULT_RETENTION_DAYS = 30
 DEFAULT_RETENTION_GB = 5.0
 LEASE_SECONDS = 180
+# Candidate functions execute in the same Python process as the current
+# challenge wrapper and can inspect its arguments/frame. Host comparison and
+# clean replay catch concrete cheats, but are not an independent hidden oracle.
+# Unattended promotion must remain disabled until that boundary is real.
+_UNATTENDED_ORACLE_INDEPENDENT = False
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS selfmod_settings (
@@ -98,6 +104,7 @@ CREATE TABLE IF NOT EXISTS selfmod_runs (
   workspace_path TEXT, branch_name TEXT, backup_manifest TEXT, diff_text TEXT NOT NULL DEFAULT '',
   test_inventory_before TEXT NOT NULL DEFAULT '[]', test_inventory_after TEXT NOT NULL DEFAULT '[]',
   approval_required INTEGER NOT NULL DEFAULT 1, approved_by TEXT, approved_ts REAL,
+  auto_evaluation_eligible INTEGER NOT NULL DEFAULT 0,
   maintenance_authorized INTEGER NOT NULL DEFAULT 0, owner_id TEXT, owner_pid INTEGER,
   owner_host TEXT, lease_until REAL, deployed_commit TEXT, last_error TEXT NOT NULL DEFAULT '',
   created_ts REAL NOT NULL, updated_ts REAL NOT NULL, deployed_ts REAL, restored_ts REAL,
@@ -112,7 +119,8 @@ CREATE TABLE IF NOT EXISTS selfmod_backups (
 CREATE TABLE IF NOT EXISTS selfmod_tests (
   id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, kind TEXT NOT NULL,
   command_json TEXT NOT NULL, exit_code INTEGER, duration_ms INTEGER NOT NULL,
-  output TEXT NOT NULL, passed INTEGER NOT NULL, created_ts REAL NOT NULL
+  output TEXT NOT NULL, passed INTEGER NOT NULL, created_ts REAL NOT NULL,
+  isolation TEXT NOT NULL DEFAULT 'unverified'
 );
 CREATE TABLE IF NOT EXISTS selfmod_deployed_files (
   run_id TEXT NOT NULL, path TEXT NOT NULL, existed_after INTEGER NOT NULL,
@@ -161,6 +169,14 @@ def _connect() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA)
+    # Older installations retain their test history. The new columns default
+    # to ineligible so old output strings cannot become isolation evidence.
+    for table, column, declaration in (
+        ("selfmod_runs", "auto_evaluation_eligible", "INTEGER NOT NULL DEFAULT 0"),
+        ("selfmod_tests", "isolation", "TEXT NOT NULL DEFAULT 'unverified'"),
+    ):
+        if column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
     if os.name != "nt":
         with contextlib.suppress(OSError):
             os.chmod(path, 0o600)
@@ -470,6 +486,7 @@ def _decode_run(row):
         except ValueError:
             data[name] = [] if name != "budgets" else dict(DEFAULT_BUDGETS)
     data["approval_required"] = bool(data["approval_required"])
+    data["auto_evaluation_eligible"] = bool(data["auto_evaluation_eligible"])
     data["maintenance_authorized"] = bool(data["maintenance_authorized"])
     return data
 
@@ -786,6 +803,21 @@ def tested_digests(run_id):
     return {"files": {row[0]: row[1] for row in rows}, "diff_sha256": rows[0][2]}
 
 
+def _discard_candidate_bytecode(workspace: Path) -> None:
+    """Make the first candidate verdict describe bound source, not stale pyc."""
+    for directory in workspace.rglob("__pycache__"):
+        if directory.is_symlink():
+            raise RuntimeError("candidate bytecode cache is a symlink")
+        if directory.is_dir():
+            shutil.rmtree(directory)
+    for pattern in ("*.pyc", "*.pyo"):
+        for path in workspace.rglob(pattern):
+            if path.is_symlink():
+                raise RuntimeError("candidate bytecode is a symlink")
+            if path.is_file():
+                path.unlink()
+
+
 def begin_testing(run_id):
     """Enter testing and bind the candidate bytes that the tests will see.
 
@@ -794,6 +826,7 @@ def begin_testing(run_id):
     after an interruption must find the same bytes; otherwise earlier results
     would describe different code, so the run fails closed.
     """
+    _discard_candidate_bytecode(candidate_path(run_id))
     snapshot = _candidate_snapshot(run_id)
     existing = tested_digests(run_id)
     if existing is not None and existing != snapshot:
@@ -816,15 +849,22 @@ def _record_command(
 ):
     run_id = run["id"]
     isolation_failed = False
+    attestation = "unverified"
     # ``low_integrity`` is explicit for unattended candidate checks.  Keep the
     # environment fallback for older callers and operators that already opt in
     # through the process environment, but do not make nightly's choice a
     # process-global side effect.
-    use_low_integrity = (
+    auto_candidate = (
+        run.get("mode") == "auto-low-risk" and run.get("risk") == "low"
+        and not run.get("approval_required", True) and kind != "reproducer_before"
+    )
+    if auto_candidate and low_integrity is False:
+        raise PermissionError("auto-low-risk candidate tests require low-integrity isolation")
+    use_low_integrity = auto_candidate or (
         os.environ.get("SELFMOD_LOW_INTEGRITY") == "1"
         if low_integrity is None else bool(low_integrity)
     )
-    if use_low_integrity and os.name == "nt":
+    if use_low_integrity:
         from scripts.selfmod_low_integrity import run_isolated
         started = time.monotonic()
         try:
@@ -835,16 +875,27 @@ def _record_command(
             code = int(isolated["exit_code"])
             output = str(isolated.get("output") or "")
             job = isolated.get("job")
-            if job:
-                # Record which boundary actually ran and how close the Job
-                # came to its limits, so a medium gate or a limit hit is
-                # visible in the ledger rather than inferred.
-                output = (output + "\nSELFMOD ISOLATION: %s\n" % _json(job))[-100_000:]
+            # The low-integrity supervisor, not the candidate's stdout,
+            # constructs this report from the process handle and Job. A
+            # missing/conflicting report is an isolation failure even if
+            # candidate-controlled output claims low integrity or exit 0.
+            if (not isinstance(job, dict) or job.get("integrity") != "low"
+                    or isolated.get("passed") is not (code == 0)):
+                raise RuntimeError("invalid supervisor attestation")
+            if isolated.get("integrity_failed"):
+                raise RuntimeError("evaluator integrity failed")
+            attestation = "low"
+            output = (output + "\nSELFMOD ISOLATION: %s\n" % _json(job))[-100_000:]
         except Exception as exc:
             # A missing token/ACL/Job capability rejects this check.  It
             # cannot accidentally count as a successful negative reproducer.
             code = 125
-            output = "low-integrity isolation unavailable: %s" % type(exc).__name__
+            reason = "unsupported platform" if os.name != "nt" else (
+                str(exc) if type(exc) is RuntimeError and str(exc) in {
+                    "invalid supervisor attestation", "evaluator integrity failed",
+                } else type(exc).__name__
+            )
+            output = "low-integrity isolation unavailable: %s" % reason
             isolation_failed = True
         duration = int((time.monotonic() - started) * 1000)
     else:
@@ -863,12 +914,15 @@ def _record_command(
             % (output, str(kind).upper(), code, receipt)
         )[:100_000]
     with _tx() as conn:
-        conn.execute(
-            "INSERT INTO selfmod_tests(run_id,kind,command_json,exit_code,duration_ms,output,passed,created_ts) VALUES(?,?,?,?,?,?,?,?)",
-            (run_id, str(kind)[:80], _json(list(command)), code, duration, output, int(passed), time.time()),
+        cursor = conn.execute(
+            "INSERT INTO selfmod_tests(run_id,kind,command_json,exit_code,duration_ms,output,passed,created_ts,isolation) VALUES(?,?,?,?,?,?,?,?,?)",
+            (run_id, str(kind)[:80], _json(list(command)), code, duration, output, int(passed), time.time(), attestation),
         )
+        test_id = getattr(cursor, "lastrowid", None)
         _event(conn, run_id, "test", "%s exit=%s expected=%s duration_ms=%s" % (kind, code, "failure" if expect_failure else "success", duration))
-    return {"kind": kind, "command": list(command), "exit_code": code, "duration_ms": duration, "output": output, "passed": passed}
+    return {"kind": kind, "command": list(command), "exit_code": code,
+            "duration_ms": duration, "output": output, "passed": passed,
+            "test_id": test_id, "isolation": attestation}
 
 
 def record_reproducer_before(run_id, command, timeout=None):
@@ -887,6 +941,8 @@ def record_test(
     run = get_run(run_id)
     if run["phase"] != "testing":
         raise RuntimeError("tests may run only in testing phase")
+    if kind == "host_grade":
+        raise PermissionError("host grade can only be recorded by the parent scorer")
     workspace = candidate_path(run_id)
     cwd_path = workspace if cwd is None else (workspace / _rel(workspace, cwd)).parent
     seconds = min(int(timeout or run["budgets"]["max_test_seconds"]), run["budgets"]["max_test_seconds"])
@@ -895,6 +951,39 @@ def record_test(
         protected_paths=protected_paths, low_integrity=low_integrity,
         isolation=isolation,
     )
+
+
+def record_host_grade(run_id, probe_id, *, passed: bool, detail: str) -> dict:
+    """Persist a parent-owned verdict bound to a successful low-integrity probe.
+
+    The host owns this comparison and the row it is linked to, rather than
+    trusting a pytest exit status. The candidate still controls its reported
+    function output and can read public tests, so a passing grade needs human
+    review and cannot authorize unattended promotion.
+    """
+    run = get_run(run_id)
+    if run["phase"] != "testing":
+        raise RuntimeError("host grade requires testing phase")
+    with _tx() as conn:
+        probe = conn.execute(
+            "SELECT kind,passed,isolation FROM selfmod_tests WHERE run_id=? AND id=?",
+            (run_id, probe_id),
+        ).fetchone()
+        if (probe is None or probe["kind"] != "host_probe" or not probe["passed"]
+                or probe["isolation"] != "low"):
+            raise PermissionError("host grade requires a passing attested probe")
+        prior = conn.execute(
+            "SELECT id FROM selfmod_tests WHERE run_id=? AND kind='host_grade'", (run_id,),
+        ).fetchone()
+        if prior is not None:
+            raise RuntimeError("host grade was already recorded")
+        conn.execute(
+            "INSERT INTO selfmod_tests(run_id,kind,command_json,exit_code,duration_ms,output,passed,created_ts,isolation) VALUES(?,?,?,?,?,?,?,?,?)",
+            (run_id, "host_grade", _json({"probe_id": probe_id}), 0 if passed else 1,
+             0, str(detail)[:100_000], int(bool(passed)), time.time(), "low"),
+        )
+        _event(conn, run_id, "host_grade", "parent-scored challenge %s" % ("passed" if passed else "failed"))
+    return {"kind": "host_grade", "passed": bool(passed), "detail": str(detail)[:100_000]}
 
 
 SMOKE_RECEIPT_PREFIX = "SELFMOD-SMOKE-RECEIPT"
@@ -1150,19 +1239,31 @@ def review(run_id, *, require_kinds=None, unevaluated=()):
         failures.append("test inventory was weakened")
     if not _backup_rehearsal(run_id):
         failures.append("rollback rehearsal failed")
+    candidate_results = [row for row in results if row["kind"] != "reproducer_before"]
+    host_grades = [row for row in candidate_results if row["kind"] == "host_grade"]
+    auto_eligible = bool(
+        _UNATTENDED_ORACLE_INDEPENDENT
+        and not failures and not unevaluated and candidate_results
+        and run["mode"] == "auto-low-risk" and run["risk"] == "low"
+        and not run["approval_required"]
+        and len(host_grades) == 1 and host_grades[0]["passed"]
+        and all(row["isolation"] == "low" for row in candidate_results)
+    )
     target = "rejected" if failures else "reviewing"
     passed_note = "deterministic acceptance checks passed"
     if unevaluated:
         passed_note += "; NOT EVALUATED (human review required): " + "; ".join(unevaluated)
-    updated = _phase(
+    elif run["mode"] == "auto-low-risk" and not auto_eligible and not failures:
+        passed_note += "; independent evaluator authority unverified (human review required)"
+    _phase(
         run_id, {"testing"}, target, "review",
         "; ".join(failures) if failures else passed_note[:1000],
         test_inventory_after=_json(after_inventory), last_error="; ".join(failures),
+        auto_evaluation_eligible=int(auto_eligible),
     )
     if failures:
         restore(run_id, from_candidate_only=True)
-    elif (updated["mode"] == "auto-low-risk" and updated["risk"] == "low"
-          and not updated["approval_required"] and not unevaluated):
+    elif auto_eligible:
         approve(run_id, approver="host:auto-low-risk")
     return get_run(run_id)
 
@@ -1173,6 +1274,12 @@ def approve(run_id, approver="user"):
         raise RuntimeError("only a reviewed run can be approved")
     if run["risk"] in {"high", "critical"} and str(approver).startswith("host:"):
         raise PermissionError("high-risk changes require explicit user approval")
+    if str(approver).startswith("host:") and (
+        approver != "host:auto-low-risk" or not run["auto_evaluation_eligible"]
+        or run["mode"] != "auto-low-risk" or run["risk"] != "low"
+        or run["approval_required"]
+    ):
+        raise PermissionError("host approval requires qualified low-integrity candidate checks")
     return _phase(run_id, {"reviewing"}, "approved", "approval", "approved by %s" % approver, approved_by=str(approver)[:200], approved_ts=time.time())
 
 

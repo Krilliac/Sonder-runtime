@@ -7,6 +7,7 @@ import shutil
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 import pytest
 
+from sonder_runtime.adapters import artifact_fetch
 from sonder_runtime.adapters.tool_executor import ToolExecutorAdapter as LegacyToolExecutor
 from sonder_runtime.adapters.tool_executor import ToolExecutorAdapter
 from sonder_runtime.application.context import local_owner_context
@@ -160,14 +161,25 @@ def test_artifact_risk_uses_packaged_static_inspector(executor, tmp_path):
     assert result.evidence["kind"] == "binary"
 
 
-def test_verify_artifact_uses_packaged_acquisition_verifier(executor, tmp_path):
+def test_verify_artifact_uses_packaged_acquisition_verifier(executor, tmp_path, monkeypatch):
     artifact = tmp_path / "sample.exe"
     artifact.write_bytes(b"MZ" + b"\0" * 2048)
+    monkeypatch.setattr(
+        artifact_fetch, "_authenticode_signature",
+        lambda path: {
+            "supported": True, "status": "NotSigned", "publisher": "",
+            "thumbprint": "", "detail": "",
+        },
+    )
     result = executor.execute(
         ToolCall("verify_artifact", {"path": "sample.exe", "expect_type": "pe"}), _ctx()
     )
-    assert result.ok
-    assert result.evidence["verdict"] == "verified"
+    assert result.ok is False
+    assert result.evidence["verdict"] == "rejected"
+    assert any(
+        not check["ok"] and check["check"] == "signature"
+        for check in result.evidence["checks"]
+    )
 
 
 def test_secret_scan_uses_packaged_redacting_scanner(executor, tmp_path):

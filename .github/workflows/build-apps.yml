@@ -265,10 +265,22 @@ jobs:
             dist/sonder-runtime-provenance.intoto.json
           if-no-files-found: error
 
+  python-gate:
+    # Execute the same Python CI job at the release tag's exact commit. This
+    # includes its tag-time runtime smoke and does not depend on old PR checks.
+    if: startsWith(github.ref, 'refs/tags/app-v')
+    uses: ./.github/workflows/ci.yml
+
+  managed-runtime-profile-gate:
+    # Qualify the installed Windows CPython/venv binding at this release
+    # commit; a green earlier PR run cannot stand in for the final tag.
+    if: startsWith(github.ref, 'refs/tags/app-v')
+    uses: ./.github/workflows/managed-runtime-profile.yml
+
   release:
     # Only when a tag like app-v1.0.0 is pushed: gather every platform build
     # and publish a GitHub Release with permanent download links.
-    needs: [integrity]
+    needs: [integrity, analyze, python-gate, managed-runtime-profile-gate]
     if: startsWith(github.ref, 'refs/tags/app-v')
     runs-on: ubuntu-latest
     timeout-minutes: 15

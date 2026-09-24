@@ -23,13 +23,13 @@ is supplied by the caller; tests use deterministic fakes.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import json
-from typing import Any, Callable, Mapping, Protocol, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 from .trajectory_replay import TrajectoryRecord, TrajectoryStep
-
 
 SCHEMA = "sonder.evaluation-minimized-failure.v1"
 POLICY_SCHEMA = "sonder.evaluation-divergence-policy.v1"
@@ -170,7 +170,7 @@ class DivergencePolicy:
         return _digest(self.as_dict())
 
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "DivergencePolicy":
+    def from_dict(cls, payload: Mapping[str, Any]) -> DivergencePolicy:
         if not isinstance(payload, Mapping) or set(payload) != {"schema", "fields", "decision_paths", "ignored_paths"}:
             raise DivergenceError("divergence policy payload fields are unsupported or missing")
         try:
@@ -202,7 +202,7 @@ class MeaningfulDivergence:
         }
 
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "MeaningfulDivergence":
+    def from_dict(cls, payload: Mapping[str, Any]) -> MeaningfulDivergence:
         if not isinstance(payload, Mapping) or set(payload) != {"index", "field", "expected_digest", "actual_digest", "changed_paths"}:
             raise DivergenceError("divergence payload fields are unsupported or missing")
         index = payload["index"]
@@ -353,7 +353,7 @@ class MinimizedFailure:
         return _digest(self.as_dict(include_digest=False))
 
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "MinimizedFailure":
+    def from_dict(cls, payload: Mapping[str, Any]) -> MinimizedFailure:
         """Restore a retained failure, re-checking digests and step consistency."""
         fields = {
             "schema", "source_trajectory_id", "source_digest", "policy", "source_indexes",

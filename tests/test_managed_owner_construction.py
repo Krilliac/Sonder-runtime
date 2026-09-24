@@ -7,6 +7,12 @@ from sonder_runtime.adapters.filesystem.atomic_json import file_lock
 from sonder_runtime.bootstrap.managed_runtime_owner import ManagedRuntimeOwner
 
 
+pytest_plugins = ("tests._managed_runtime_layout",)
+
+
+pytestmark = pytest.mark.usefixtures("small_managed_runtime_layout")
+
+
 @pytest.mark.skipif(os.name != "nt", reason="actual Windows directory anchors required")
 @pytest.mark.parametrize("point", ["store", "issuer-before", "issuer-after"])
 def test_post_base_constructor_failure_releases_exact_owned_resources(

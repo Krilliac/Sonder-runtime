@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 298,
+      "file_count": 301,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -112,6 +112,7 @@
         "sonder_runtime/adapters/execution/process_jobs.py",
         "sonder_runtime/adapters/execution/runtime_owner.py",
         "sonder_runtime/adapters/execution/runtime_payload.py",
+        "sonder_runtime/adapters/execution/runtime_profile.py",
         "sonder_runtime/adapters/execution/sandbox.py",
         "sonder_runtime/adapters/execution/worlds.py",
         "sonder_runtime/adapters/execution_tools.py",
@@ -184,6 +185,7 @@
         "sonder_runtime/adapters/model_gateway_factory.py",
         "sonder_runtime/adapters/model_inventory.py",
         "sonder_runtime/adapters/model_inventory_formatting.py",
+        "sonder_runtime/adapters/model_request_admission.py",
         "sonder_runtime/adapters/model_response_metadata.py",
         "sonder_runtime/adapters/model_transport.py",
         "sonder_runtime/adapters/observability/__init__.py",
@@ -263,6 +265,7 @@
         "sonder_runtime/adapters/persistence/sqlite/physical_identity.py",
         "sonder_runtime/adapters/persistence/sqlite/runtime_checkpoints.py",
         "sonder_runtime/adapters/persistence/sqlite/selfmod.py",
+        "sonder_runtime/adapters/persistence/sqlite/strategy_memory.py",
         "sonder_runtime/adapters/persistence/sqlite/training.py",
         "sonder_runtime/adapters/persistence/sqlite/updates.py",
         "sonder_runtime/adapters/persistence/sqlite/verifier_observations.py",
@@ -347,7 +350,7 @@
       ]
     },
     {
-      "file_count": 334,
+      "file_count": 343,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -363,6 +366,7 @@
         "sonder_runtime/application/agents/lane_continuation.py",
         "sonder_runtime/application/agents/lineage_delegation.py",
         "sonder_runtime/application/agents/presets.py",
+        "sonder_runtime/application/agents/recursive_delegation.py",
         "sonder_runtime/application/agents/workflow_integration.py",
         "sonder_runtime/application/architecture/ownership_catalog.py",
         "sonder_runtime/application/artifacts/__init__.py",
@@ -425,6 +429,7 @@
         "sonder_runtime/application/evaluation/proposal_lifecycle.py",
         "sonder_runtime/application/evaluation/reproducible.py",
         "sonder_runtime/application/evaluation/service.py",
+        "sonder_runtime/application/evaluation/strategy_cases.py",
         "sonder_runtime/application/evaluation/trajectory_replay.py",
         "sonder_runtime/application/evaluation_history/__init__.py",
         "sonder_runtime/application/evaluation_history/use_cases.py",
@@ -475,6 +480,7 @@
         "sonder_runtime/application/memory/receipt_observation.py",
         "sonder_runtime/application/memory/replication.py",
         "sonder_runtime/application/memory/retrieval_evaluation.py",
+        "sonder_runtime/application/memory/strategy_memory.py",
         "sonder_runtime/application/model_gateway/__init__.py",
         "sonder_runtime/application/model_gateway/escalation.py",
         "sonder_runtime/application/model_gateway/facade.py",
@@ -642,7 +648,12 @@
         "sonder_runtime/application/skills/composition.py",
         "sonder_runtime/application/skills/procedural_publication.py",
         "sonder_runtime/application/skills/registry.py",
+        "sonder_runtime/application/strategy/__init__.py",
+        "sonder_runtime/application/strategy/codegen_result.py",
+        "sonder_runtime/application/strategy/controller.py",
+        "sonder_runtime/application/strategy/tracing.py",
         "sonder_runtime/application/subagents/__init__.py",
+        "sonder_runtime/application/subagents/admission.py",
         "sonder_runtime/application/subagents/child_migration.py",
         "sonder_runtime/application/subagents/child_migration_activation.py",
         "sonder_runtime/application/subagents/continuable.py",
@@ -653,6 +664,7 @@
         "sonder_runtime/application/tools/__init__.py",
         "sonder_runtime/application/tools/audit.py",
         "sonder_runtime/application/tools/catalog_artifacts.py",
+        "sonder_runtime/application/tools/discovery.py",
         "sonder_runtime/application/tools/facade.py",
         "sonder_runtime/application/tools/gateway_contract.py",
         "sonder_runtime/application/tools/generated_catalogs.py",
@@ -687,7 +699,7 @@
       ]
     },
     {
-      "file_count": 54,
+      "file_count": 57,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -716,6 +728,7 @@
         "sonder_runtime/bootstrap/delegated_verification.py",
         "sonder_runtime/bootstrap/doctor_checks.py",
         "sonder_runtime/bootstrap/doctor_formatting.py",
+        "sonder_runtime/bootstrap/evaluation.py",
         "sonder_runtime/bootstrap/lane_tests.py",
         "sonder_runtime/bootstrap/legacy_interfaces.py",
         "sonder_runtime/bootstrap/legacy_mcp.py",
@@ -741,13 +754,15 @@
         "sonder_runtime/bootstrap/repl_managed.py",
         "sonder_runtime/bootstrap/runtime_owner.py",
         "sonder_runtime/bootstrap/standalone_continuation.py",
+        "sonder_runtime/bootstrap/strategy.py",
+        "sonder_runtime/bootstrap/strategy_observers.py",
         "sonder_runtime/bootstrap/subprocess_mcp.py",
         "sonder_runtime/bootstrap/thread_resources.py",
         "sonder_runtime/bootstrap/typed_tools.py"
       ]
     },
     {
-      "file_count": 189,
+      "file_count": 191,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -918,6 +933,8 @@
         "sonder_runtime/domain/skills/__init__.py",
         "sonder_runtime/domain/skills/registry.py",
         "sonder_runtime/domain/speculation_policy.py",
+        "sonder_runtime/domain/strategy/__init__.py",
+        "sonder_runtime/domain/strategy/models.py",
         "sonder_runtime/domain/takeover_readiness.py",
         "sonder_runtime/domain/task_ledger.py",
         "sonder_runtime/domain/thinking_controls.py",

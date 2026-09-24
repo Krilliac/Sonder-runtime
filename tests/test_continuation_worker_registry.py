@@ -1,28 +1,50 @@
-import pytest
 import os
 import platform
 from dataclasses import replace
 
-from sonder_runtime.adapters.persistence.durable_continuation import SQLiteDurableContinuationRepository
+import pytest
+
+from sonder_runtime.adapters.persistence.durable_continuation import (
+    SQLiteDurableContinuationRepository,
+)
 from sonder_runtime.adapters.subagents import RunnerBoundSubagentProvider
 from sonder_runtime.application.agents.delegation_service import DelegationService
 from sonder_runtime.application.agents.lineage_delegation import (
-    DelegationRequest, LineageRecord, WorkspaceAssignment,
+    DelegationRequest,
+    IntegrationError,
+    LineageRecord,
+    WorkspaceAssignment,
 )
 from sonder_runtime.application.agents.presets import resolve_preset
 from sonder_runtime.application.context import local_owner_context
-from sonder_runtime.application.ports.continuation_records import ChildSessionLineage, DurableChildSession
+from sonder_runtime.application.ports.continuation_records import (
+    ChildSessionLineage,
+    DurableChildSession,
+)
 from sonder_runtime.application.ports.subagents import (
-    InvalidSubagentRequest, SubagentBudget, SubagentError, SubagentRequest,
-    SubagentResult, SubagentStatus, SubagentUsage,
+    InvalidSubagentRequest,
+    SubagentBudget,
+    SubagentRequest,
+    SubagentResult,
+    SubagentStatus,
+    SubagentUsage,
 )
-from sonder_runtime.application.ports.worker_registry import DuplicateWorkerError, WorkerLaunch, WorkerRegistryError, WorkerStatus
 from sonder_runtime.application.ports.worker_registry import (
-    WorkerContextInput, WorkerContextPolicy, WorkerExecutionContract, owned_paths_overlap,
+    DuplicateWorkerError,
+    WorkerContextInput,
+    WorkerContextPolicy,
+    WorkerExecutionContract,
+    WorkerLaunch,
+    WorkerRegistryError,
+    WorkerStatus,
+    owned_paths_overlap,
 )
-from sonder_runtime.application.agents.lineage_delegation import IntegrationError
-from sonder_runtime.application.subagents.durable_continuation import DurableContinuationService
-from sonder_runtime.application.worker_registry.continuation import ContinuationWorkerRegistry
+from sonder_runtime.application.subagents.durable_continuation import (
+    DurableContinuationService,
+)
+from sonder_runtime.application.worker_registry.continuation import (
+    ContinuationWorkerRegistry,
+)
 
 
 def _launch(root, *, worker_id="child-1", owner="owner"):
@@ -306,7 +328,7 @@ def test_delegation_service_consumes_continuation_backed_reservation(tmp_path):
     root = tmp_path / "repo"
     workspace = WorkspaceAssignment((str(root),), (str(root / "write"),))
     preset = resolve_preset("researcher")
-    lineage = LineageRecord("line-1", "root-1", "parent-1", "child-1", 1, preset.name, preset.role, workspace)
+    lineage = LineageRecord("line-1", "parent-1", "parent-1", "child-1", 1, preset.name, preset.role, workspace)
     request = DelegationRequest("delegation-1", lineage, "research the change", preset, workspace)
     repository.create(DurableChildSession(
         SubagentRequest("parent-1", "provider root", SubagentBudget(max_steps=30, max_output_tokens=6000, max_wall_seconds=600), "parent-1", (("provider_root", "true"),)),
@@ -317,14 +339,11 @@ def test_delegation_service_consumes_continuation_backed_reservation(tmp_path):
         request,
         local_owner_context(correlation_id="delegation-1", workspace_roots=(root,)),
     )
-    assert handle.result(timeout=5).output == "delegated output"
+    result = handle.result(timeout=5)
+    assert result.output == "delegated output"
     delegation.integrate(
         request,
-        SubagentResult(
-            "child-1", "parent-1", SubagentStatus.SUCCEEDED,
-            output="delegated output",
-            usage=SubagentUsage(steps=1),
-        ),
+        result,
         verification=("tests passed",),
         artifacts=("evidence.json",),
     )
@@ -343,7 +362,7 @@ def test_delegation_restart_reuses_terminal_by_key_with_new_child_id(tmp_path):
     root = tmp_path / "repo"
     preset = resolve_preset("researcher")
     workspace = WorkspaceAssignment((str(root),), (str(root / "write"),))
-    lineage = LineageRecord("line-1", "root-1", "parent-1", "child-1", 1, preset.name, preset.role, workspace)
+    lineage = LineageRecord("line-1", "parent-1", "parent-1", "child-1", 1, preset.name, preset.role, workspace)
     request = DelegationRequest("delegation-1", lineage, "research the change", preset, workspace)
     root_request = SubagentRequest(
         "parent-1", "provider root", SubagentBudget(max_steps=30, max_output_tokens=6000, max_wall_seconds=600),
@@ -358,11 +377,9 @@ def test_delegation_restart_reuses_terminal_by_key_with_new_child_id(tmp_path):
     )
     first = DelegationService(first_provider, worker_registry=ContinuationWorkerRegistry(repository))
     context = local_owner_context(correlation_id="delegation-1", workspace_roots=(root,))
-    assert first.dispatch(request, context).result(timeout=5).output == "persisted"
-    first.integrate(
-        request,
-        SubagentResult("child-1", "parent-1", SubagentStatus.SUCCEEDED, output="persisted", usage=SubagentUsage(steps=1)),
-    )
+    result = first.dispatch(request, context).result(timeout=5)
+    assert result.output == "persisted"
+    first.integrate(request, result)
     first_service.close(timeout=1)
 
     restarted_repository = SQLiteDurableContinuationRepository(database)
@@ -389,7 +406,7 @@ def test_execution_contract_is_durable_and_integration_is_a_fail_closed_gate(tmp
         success_criteria=("tests pass", "report emitted"),
         verification_commands=(("python", "-m", "pytest", "tests/test_target.py"),),
     )
-    lineage = LineageRecord("line-1", "root-1", "parent-1", "child-1", 1, preset.name, preset.role, workspace)
+    lineage = LineageRecord("line-1", "parent-1", "parent-1", "child-1", 1, preset.name, preset.role, workspace)
     request = DelegationRequest("delegation-1", lineage, "research the change", preset, workspace, execution_contract=contract)
     repository = SQLiteDurableContinuationRepository(database)
     repository.create(DurableChildSession(
@@ -400,8 +417,8 @@ def test_execution_contract_is_durable_and_integration_is_a_fail_closed_gate(tmp
     provider = RunnerBoundSubagentProvider(continuation, lambda state, save, cancellation: "persisted")
     service = DelegationService(provider, worker_registry=ContinuationWorkerRegistry(repository))
     context = local_owner_context(correlation_id="delegation-1", workspace_roots=(root,))
-    assert service.dispatch(request, context).result(timeout=5).output == "persisted"
-    result = SubagentResult("child-1", "parent-1", SubagentStatus.SUCCEEDED, output="persisted", usage=SubagentUsage(steps=1))
+    result = service.dispatch(request, context).result(timeout=5)
+    assert result.output == "persisted"
     with pytest.raises(IntegrationError, match="criteria"):
         service.integrate(request, result, verification=("tests pass",), verification_commands=contract.verification_commands)
     service.integrate(
@@ -422,7 +439,7 @@ def test_execution_contract_command_mismatch_cannot_certify_restarted_child(tmp_
     preset = resolve_preset("researcher")
     workspace = WorkspaceAssignment((str(root),), ())
     contract = WorkerExecutionContract(("tests pass",), (("python", "-m", "pytest", "tests/test_target.py"),))
-    lineage = LineageRecord("line-1", "root-1", "parent-1", "child-1", 1, preset.name, preset.role, workspace)
+    lineage = LineageRecord("line-1", "parent-1", "parent-1", "child-1", 1, preset.name, preset.role, workspace)
     request = DelegationRequest("delegation-1", lineage, "research", preset, workspace, execution_contract=contract)
     repository = SQLiteDurableContinuationRepository(database)
     repository.create(DurableChildSession(
@@ -433,8 +450,8 @@ def test_execution_contract_command_mismatch_cannot_certify_restarted_child(tmp_
     provider = RunnerBoundSubagentProvider(first, lambda state, save, cancellation: "persisted")
     service = DelegationService(provider, worker_registry=ContinuationWorkerRegistry(repository))
     context = local_owner_context(correlation_id="delegation-1", workspace_roots=(root,))
-    assert service.dispatch(request, context).result(timeout=5).output == "persisted"
-    result = SubagentResult("child-1", "parent-1", SubagentStatus.SUCCEEDED, output="persisted", usage=SubagentUsage(steps=1))
+    result = service.dispatch(request, context).result(timeout=5)
+    assert result.output == "persisted"
     with pytest.raises(IntegrationError, match="commands"):
         service.integrate(request, result, verification=contract.success_criteria, verification_commands=(("pytest",),))
 
@@ -503,7 +520,7 @@ def _root_repository(path):
     repository.create(DurableChildSession(
         SubagentRequest(
             "root-1", "provider root",
-            SubagentBudget(max_steps=30, max_output_tokens=6000, max_wall_seconds=600),
+            SubagentBudget(max_steps=30),
             "root-1", (("provider_root", "true"),),
         ),
         ChildSessionLineage("root-1"),
@@ -615,13 +632,14 @@ def test_full_contract_survives_restart_and_is_recorded_with_terminal_verificati
     )
     service = DelegationService(provider, worker_registry=ContinuationWorkerRegistry(repository))
     context = local_owner_context(correlation_id="delegation-1", workspace_roots=(root,))
-    assert service.dispatch(request, context).result(timeout=5).output == "done"
+    result = service.dispatch(request, context).result(timeout=5)
+    assert result.output == "done"
     reopened_registry = ContinuationWorkerRegistry(SQLiteDurableContinuationRepository(database))
     restored = reopened_registry.get("child-1")
     assert restored is not None and restored.launch.execution_contract == contract
     service.integrate(
         request,
-        SubagentResult("child-1", "root-1", SubagentStatus.SUCCEEDED, output="done", usage=SubagentUsage(steps=1)),
+        result,
         verification=contract.success_criteria,
         verification_commands=contract.verification_commands,
     )
@@ -647,8 +665,8 @@ def test_inherit_contract_mismatch_cannot_certify_result(tmp_path):
     )
     service = DelegationService(provider, worker_registry=ContinuationWorkerRegistry(repository))
     context = local_owner_context(correlation_id="delegation-1", workspace_roots=(root,))
-    assert service.dispatch(request, context).result(timeout=5).output == "done"
-    result = SubagentResult("child-1", "root-1", SubagentStatus.SUCCEEDED, output="done", usage=SubagentUsage(steps=1))
+    result = service.dispatch(request, context).result(timeout=5)
+    assert result.output == "done"
     drifted = replace(
         request,
         execution_contract=WorkerExecutionContract(context_policy="inherit", inherited_context_sha256=_DIGEST_B),
@@ -772,6 +790,12 @@ def test_malformed_persisted_context_contract_fails_closed(tmp_path, key, value)
         (("worker_registry_admitted", "true"), ("owner_id", "owner"), ("worker_id", "child-1"), (key, value)),
         "resume-1", "idempotency-1",
     )
+    if key in {"execution_owned_files", "execution_speculative_lane"}:
+        # Ownership now joins the canonical admission transaction, so an
+        # invalid owned-file/scope claim fails before a worker is reserved.
+        with pytest.raises(InvalidSubagentRequest, match="ownership contract"):
+            repository.create(DurableChildSession(child, ChildSessionLineage("root-1")))
+        return
     repository.create(DurableChildSession(child, ChildSessionLineage("root-1")))
     with pytest.raises(WorkerRegistryError, match="execution contract"):
         ContinuationWorkerRegistry(repository).get("child-1")
@@ -794,11 +818,9 @@ def test_failed_worker_with_contract_records_failure_instead_of_raising(tmp_path
     service = DelegationService(provider, worker_registry=ContinuationWorkerRegistry(repository))
     context = local_owner_context(correlation_id="delegation-1", workspace_roots=(root,))
     handle = service.dispatch(request, context)
-    assert handle.result(timeout=5).status is not SubagentStatus.SUCCEEDED
-    failed = SubagentResult(
-        "child-1", "root-1", SubagentStatus.FAILED,
-        error=SubagentError("runner_failed", "worker crashed"), usage=SubagentUsage(steps=1),
-    )
+    failed = handle.result(timeout=5)
+    assert failed.status is SubagentStatus.FAILED
+    assert failed.error is not None and failed.error.message == "worker crashed"
     drifted = replace(request, execution_contract=WorkerExecutionContract(("other",)))
     with pytest.raises(IntegrationError, match="does not match request"):
         service.integrate(drifted, failed)

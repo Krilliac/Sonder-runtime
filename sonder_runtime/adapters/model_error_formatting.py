@@ -11,6 +11,12 @@ def format_model_call_error(error, *, target: str, display: str) -> str:
     suffix = " after %d attempt(s)" % error.attempts
     if error.kind == "budget":
         return _ERROR_PREFIX + " hosted agent output budget exhausted: %s" % error.detail
+    if error.kind == "rate":
+        retry = (
+            f" Retry after about {max(1, round(error.retry_after_seconds))}s."
+            if error.retry_after_seconds is not None else ""
+        )
+        return _ERROR_PREFIX + f" model request rate admission refused: {error.detail.rstrip('.')}.{retry}"
     if error.kind == "http":
         retry_hint = ""
         if error.cloud and error.status in TRANSIENT_MODEL_HTTP_CODES:

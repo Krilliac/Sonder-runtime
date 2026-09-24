@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from collections.abc import Mapping
 from contextlib import contextmanager
 from functools import wraps
@@ -40,6 +40,7 @@ from sonder_runtime.application.subagents.durable_continuation import (
     DurableChildSession,
     DurableContinuationRepository,
 )
+from sonder_runtime.application.subagents.admission import usage_is_monotonic, validate_admission
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS continuation_intent(position INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT UNIQUE NOT NULL, child_id TEXT NOT NULL, kind TEXT NOT NULL, digest TEXT NOT NULL, payload BLOB NOT NULL);
@@ -305,6 +306,7 @@ class SQLiteDurableContinuationRepository:
         child_id = session.request.child_id
         if child_id is None:
             raise InvalidSubagentRequest("durable child sessions require a child_id")
+        validate_admission(session, self._admission_records(connection), new_execution=True)
         active = (SubagentStatus.CREATED.value, SubagentStatus.QUEUED.value, SubagentStatus.RUNNING.value)
         if session.request.resume_key:
             duplicate = connection.execute(
@@ -376,6 +378,15 @@ class SQLiteDurableContinuationRepository:
         except sqlite3.IntegrityError as exc:
             raise InvalidSubagentRequest("child_id already exists") from exc
         return session
+
+    def _admission_records(self, connection) -> tuple[DurableChildSession, ...]:
+        rows = connection.execute(
+            "SELECT child_id,parent_id,ancestors_json,prompt,budget_json,metadata_json,status,"
+            "checkpoint_sequence,checkpoint_state_json,checkpoint_cursor,revision,usage_json,result_json,"
+            "recovery_required,cancellation_requested,cancellation_reason,resume_key,idempotency_key,"
+            "terminal_verification_json FROM durable_child_session"
+        ).fetchall()
+        return tuple(self._row(row) for row in rows)
 
     @_storage_read
     def get(self, child_id: str) -> DurableChildSession | None:
@@ -655,8 +666,11 @@ class SQLiteDurableContinuationRepository:
             prepare_call("claim_resume", child_id, expected_revision=expected_revision)
         ).value
 
-    def request_cancel(self, child_id, *, reason):
-        prepared = prepare_call("request_cancel", child_id, reason=reason)
+    def request_cancel(self, child_id, *, reason, expected_revision=None, unstarted_only=False):
+        kwargs = {"reason": reason}
+        if unstarted_only or expected_revision is not None:
+            kwargs.update(expected_revision=expected_revision, unstarted_only=unstarted_only)
+        prepared = prepare_call("request_cancel", child_id, **kwargs)
         deadline = monotonic() + _CANCELLATION_SETTLEMENT_GRACE_SECONDS
         while True:
             try:
@@ -686,6 +700,13 @@ class SQLiteDurableContinuationRepository:
             or current_sequence != expected_sequence
             or checkpoint.sequence != expected_sequence + 1
         ):
+            return None
+        try:
+            validate_admission(
+                replace(current, checkpoint=checkpoint),
+                self._admission_records(connection), resuming=True,
+            )
+        except InvalidSubagentRequest:
             return None
         connection.execute(
             "UPDATE durable_child_session SET checkpoint_sequence=?,checkpoint_state_json=?,"
@@ -717,11 +738,34 @@ class SQLiteDurableContinuationRepository:
             expected_revision is not None and current.revision != expected_revision
         ):
             return None
-        if (
-            current.status in TERMINAL_SUBAGENT_STATUSES
-            and status not in TERMINAL_SUBAGENT_STATUSES
+        next_usage = usage if usage is not None else current.usage
+        if not usage_is_monotonic(current.usage, next_usage):
+            return None
+        if current.result is not None and result is None and next_usage != current.usage:
+            return None  # Keep the terminal receipt consistent with spent usage.
+        if result is not None and (
+            result.usage != next_usage or result.status is not status
+            or result.child_id != child_id or result.parent_id != current.request.parent_id
         ):
             return None
+        # Cancellation is durable admission intent.  A worker may have read it
+        # just before another transaction publishes it; success and restart
+        # must therefore be fenced inside this same write transaction.
+        if current.cancellation_requested and status in (
+            SubagentStatus.RUNNING, SubagentStatus.SUCCEEDED,
+        ):
+            return None
+        if (
+            current.status in TERMINAL_SUBAGENT_STATUSES
+            and status != current.status
+        ):
+            return None
+        if status is SubagentStatus.SUCCEEDED and current.status not in TERMINAL_SUBAGENT_STATUSES:
+            validate_admission(
+                replace(current, status=status, usage=next_usage,
+                        result=result, recovery_required=False),
+                self._admission_records(connection), resuming=True,
+            )
         connection.execute(
             "UPDATE durable_child_session SET status=?,revision=revision+1,usage_json=?,result_json=?,"
             "recovery_required=?,terminal_verification_json=? WHERE child_id=? AND revision=?",
@@ -749,9 +793,18 @@ class SQLiteDurableContinuationRepository:
         self, connection, child_id: str, *, expected_revision: int
     ) -> DurableChildSession | None:
         """Claim one recoverable failure without resurrecting other terminal states."""
+        current = self._select(connection, child_id)
+        if (current is None or current.revision != expected_revision
+                or current.status not in {SubagentStatus.FAILED, SubagentStatus.TIMED_OUT}
+                or not current.recovery_required or current.cancellation_requested):
+            return None
+        validate_admission(
+            replace(current, status=SubagentStatus.RUNNING, recovery_required=False, result=None),
+            self._admission_records(connection), resuming=True, new_execution=True,
+        )
         changed = connection.execute(
             "UPDATE durable_child_session SET status=?,revision=revision+1,"
-            "result_json=NULL,recovery_required=0 "
+            "result_json=NULL,recovery_required=0,terminal_verification_json='{}' "
             "WHERE child_id=? AND revision=? AND status IN (?,?) "
             "AND recovery_required=1 AND cancellation_requested=0",
             (
@@ -766,7 +819,9 @@ class SQLiteDurableContinuationRepository:
             return None
         return self._select(connection, child_id)
 
-    def _apply_request_cancel(self, connection, child_id: str, *, reason: str) -> bool:
+    def _apply_request_cancel(self, connection, child_id: str, *, reason: str,
+                              expected_revision: int | None = None,
+                              unstarted_only: bool = False) -> bool:
         if not reason.strip():
             raise InvalidSubagentRequest("cancellation reason is required")
         current = self._select(connection, child_id)
@@ -775,14 +830,32 @@ class SQLiteDurableContinuationRepository:
         if (
             current.cancellation_requested
             or current.status in TERMINAL_SUBAGENT_STATUSES
+            or (unstarted_only and (
+                current.status not in {SubagentStatus.CREATED, SubagentStatus.QUEUED}
+                or current.revision != expected_revision
+            ))
         ):
             return False
-        connection.execute(
-            "UPDATE durable_child_session SET cancellation_requested=1,cancellation_reason=?,revision=revision+1 "
-            "WHERE child_id=? AND revision=?",
-            (reason, child_id, current.revision),
-        )
-        return connection.total_changes == 1
+        if current.status in {SubagentStatus.CREATED, SubagentStatus.QUEUED}:
+            # A reservation has no runner to observe cooperative cancellation.
+            # Settle it here so it cannot indefinitely own budget or files.
+            result = SubagentResult(
+                child_id, current.request.parent_id, SubagentStatus.CANCELLED,
+                error=SubagentError("cancelled_before_start", reason), usage=current.usage,
+            )
+            changed = connection.execute(
+                "UPDATE durable_child_session SET status=?,result_json=?,"
+                "cancellation_requested=1,cancellation_reason=?,revision=revision+1 "
+                "WHERE child_id=? AND revision=?",
+                (SubagentStatus.CANCELLED.value, _result_json(result), reason, child_id, current.revision),
+            )
+        else:
+            changed = connection.execute(
+                "UPDATE durable_child_session SET cancellation_requested=1,cancellation_reason=?,revision=revision+1 "
+                "WHERE child_id=? AND revision=?",
+                (reason, child_id, current.revision),
+            )
+        return changed.rowcount == 1
 
     @_storage_read
     def list_active(self) -> tuple[DurableChildSession, ...]:
