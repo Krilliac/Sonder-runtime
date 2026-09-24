@@ -6,6 +6,7 @@ import contextlib
 import ctypes
 import itertools
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -14,16 +15,20 @@ import threading
 import time
 import urllib.request
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import timedelta
 
 import sonder_runtime.adapters.execution.effect_fence as effect_fence
 import sonder_runtime.adapters.persistence.fleet_store as fleet_store
+import sonder_runtime.domain.adaptive_concurrency as adaptive_concurrency
 import sonder_runtime.domain.events as events
 import sonder_runtime.domain.fleet_pressure as fleet_pressure
 from sonder_runtime.application.artifacts import ArtifactReadiness, ArtifactReadinessBarrier
 import fleet_provenance
+
+
+logger = logging.getLogger(__name__)
 
 
 # Preserve process-local execution state across importlib.reload(). The durable
@@ -282,9 +287,52 @@ def hardware_max_agents() -> int:
     return max(DEFAULT_MAX_AGENTS, min(ABSOLUTE_MAX_AGENTS, logical * 2))
 
 
+_PROC_MEMINFO = "/proc/meminfo"
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _linux_meminfo_bytes() -> tuple[int, int] | None:
+    """``(MemTotal, MemAvailable)`` from ``/proc/meminfo``, or ``None``.
+
+    ``SC_AVPHYS_PAGES`` is MemFree: it excludes reclaimable page cache, so a
+    healthy Linux/WSL host with a warm cache reads as nearly out of memory.
+    MemAvailable is the kernel's own estimate of memory usable without
+    swapping and is the right headroom signal.
+    """
+    try:
+        with open(_PROC_MEMINFO, encoding="ascii", errors="replace") as handle:
+            text = handle.read(64 * 1024)
+    except OSError:
+        return None
+    values = {}
+    for line in text.splitlines():
+        name, _, rest = line.partition(":")
+        fields = rest.split()
+        if name in ("MemTotal", "MemAvailable") and fields:
+            try:
+                value = int(fields[0])
+            except ValueError:
+                return None
+            unit = fields[1].lower() if len(fields) > 1 else ""
+            values[name] = value * 1024 if unit == "kb" else value
+    if "MemTotal" not in values or "MemAvailable" not in values:
+        return None
+    total, available = values["MemTotal"], values["MemAvailable"]
+    if total <= 0 or available < 0:
+        return None
+    return total, min(available, total)
+
+
 def physical_memory_bytes() -> tuple[int, int]:
     """Return ``(total, available)`` physical RAM, or zeros if unavailable."""
-    if os.name == "nt":
+    if not _is_windows():
+        meminfo = _linux_meminfo_bytes()
+        if meminfo is not None:
+            return meminfo
+    if _is_windows():
         class MemoryStatusEx(ctypes.Structure):
             _fields_ = [
                 ("length", ctypes.c_ulong),
@@ -1288,7 +1336,15 @@ def _run_worker(
     master_task_digest: str = "",
     delegated_task_digest: str = "",
     run_id: str = "",
+    outcome_sink=None,
 ):
+    def report(outcome) -> None:
+        # Content-free outcome for the adaptive lane scheduler; reporting must
+        # never change the worker's own result.
+        if outcome_sink is not None:
+            with contextlib.suppress(Exception):
+                outcome_sink(outcome)
+
     pre_call_metrics = None
     if objectives:
         if not _start_agent(agent_id, "validating delegated task provenance"):
@@ -1308,6 +1364,7 @@ def _run_worker(
                 task_drift=True,
                 drift_metrics=metrics,
             )
+            report(adaptive_concurrency.Outcome.CHURN)
             return _WORKER_FAILED
         pre_call_metrics = metrics
         if not _begin_model_call(
@@ -1349,9 +1406,15 @@ def _run_worker(
                         "transient %s failure; retrying model call (attempt %d/%d)"
                         % (failure_class, attempt + 1, attempts_allowed),
                     )
+                    report(adaptive_concurrency.Outcome.TRANSIENT_RETRY)
                     continue
                 final = _finish(
                     agent_id, error="[%s] %s" % (failure_class, exc),
+                )
+                report(
+                    adaptive_concurrency.Outcome.TRANSIENT_RETRY
+                    if failure_class in TRANSIENT_FAILURE_CLASSES
+                    else adaptive_concurrency.Outcome.FAILED
                 )
                 return final if final in ABORT_MARKERS else _WORKER_FAILED
     stored_output = (
@@ -1376,6 +1439,7 @@ def _run_worker(
                 task_drift=True,
                 drift_metrics=post_call,
             )
+            report(adaptive_concurrency.Outcome.CHURN)
             return _WORKER_FAILED
         metrics = fleet_provenance.validate_result(
             stored_output, objectives, project=project_scope,
@@ -1387,10 +1451,12 @@ def _run_worker(
                 task_drift=True,
                 drift_metrics=metrics,
             )
+            report(adaptive_concurrency.Outcome.FAILED)
             return _WORKER_FAILED
     final = _finish(agent_id, output=stored_output)
     if final in ABORT_MARKERS:
         return final
+    report(adaptive_concurrency.Outcome.SUCCEEDED)
     completed = output if isinstance(output, RepositoryWorkerResult) else final
     if not run_id:
         return completed
@@ -1590,6 +1656,285 @@ def _objective_assignments(objectives, count: int):
     return tuple(tuple(bucket) for bucket in buckets)
 
 
+_ADAPTIVE_OFF_VALUES = frozenset({"0", "false", "no", "off"})
+_ADAPTIVE_ON_VALUES = frozenset({"", "1", "true", "yes", "on"})
+
+
+def adaptive_concurrency_enabled() -> bool:
+    """Operator rollback switch for adaptive fleet concurrency.
+
+    ``SONDER_FLEET_ADAPTIVE_CONCURRENCY`` accepts exactly ``0``/``false``/
+    ``no``/``off`` (pin the cap at the static worker slots) or
+    ``1``/``true``/``yes``/``on``/unset (adaptive), case-insensitively.  Any
+    other value is logged and ignored, leaving the default (adaptive) on.
+    """
+    raw = os.environ.get("SONDER_FLEET_ADAPTIVE_CONCURRENCY", "").strip().lower()
+    if raw in _ADAPTIVE_OFF_VALUES:
+        return False
+    if raw not in _ADAPTIVE_ON_VALUES:
+        logger.warning(
+            "ignoring unrecognized SONDER_FLEET_ADAPTIVE_CONCURRENCY=%r; "
+            "expected one of 0/false/no/off or 1/true/yes/on; adaptive stays on",
+            raw[:32],
+        )
+    return True
+
+
+def concurrency_resources() -> adaptive_concurrency.ResourceSnapshot:
+    """Measure host memory headroom for the adaptive lane scheduler.
+
+    The fleet's own pressure band is deliberately NOT used here: it is the
+    fleet's utilization of its own slots, so a healthy run at full width would
+    read as "critical" and throttle itself.  Unknown memory is reported as
+    unknown, never as pressure or as headroom.
+    """
+    total, available = physical_memory_bytes()
+    if total <= 0 or available <= 0:
+        return adaptive_concurrency.ResourceSnapshot()
+    return adaptive_concurrency.ResourceSnapshot(
+        memory_available_fraction=min(1.0, available / total),
+    )
+
+
+def delegated_lane_claims(child_ids, assignments, project_root: str = "") -> list:
+    """Ownership claims for delegated fleet lanes.
+
+    Delegated fleet workers only receive guarded read-only file tools (see
+    :func:`_subtask_prompts`), so their objective files are READ claims:
+    readers never serialize each other and independent read fan-out keeps its
+    full width.  A write-capable lane would pass WRITE claims to
+    :class:`AdaptiveLaneScheduler` and be serialized against overlapping lanes.
+
+    Every path is anchored to ``project_root`` so ``a.py`` and
+    ``<root>/a.py`` are one file.  A path that cannot be anchored (outside the
+    root, escaping with ``..``, absolute without a root) raises
+    ``ValueError`` rather than silently becoming an independent lane.
+    """
+    claims = []
+    for agent_id, assigned in zip(child_ids, assignments or [()] * len(child_ids)):
+        paths = frozenset(
+            adaptive_concurrency.anchor_claim_path(str(objective.path), project_root)
+            for objective in assigned
+        )
+        claims.append(adaptive_concurrency.LaneClaim(
+            agent_id, paths, adaptive_concurrency.LaneAccess.READ,
+        ))
+    return claims
+
+
+class AdaptiveLaneScheduler:
+    """Dispatcher-side owner of the pure adaptive-concurrency policy.
+
+    ``admit``/``complete``/``summary`` are called only by the dispatching
+    thread.  Worker threads report outcomes through :meth:`sink`, which only
+    appends to a locked inbox; the inbox is folded into the policy state on
+    the dispatcher thread at the next completion.
+    """
+
+    def __init__(
+        self,
+        claims,
+        ceiling: int,
+        *,
+        adaptive: bool = True,
+        resources=None,
+        policy: adaptive_concurrency.ConcurrencyPolicy | None = None,
+        on_decision=None,
+    ) -> None:
+        ceiling = max(1, int(ceiling))
+        self.policy = policy or adaptive_concurrency.ConcurrencyPolicy(ceiling=ceiling)
+        self.state = adaptive_concurrency.initial_state(self.policy)
+        self.adaptive = bool(adaptive)
+        claims = list(claims)
+        self.graph = adaptive_concurrency.conflict_graph(claims)
+        self._pending = [claim.lane_id for claim in claims]
+        self._running: set[str] = set()
+        self._resources = resources or concurrency_resources
+        self._on_decision = on_decision
+        self._inbox: list = []
+        self._inbox_lock = threading.Lock()
+        self.decisions: list[dict] = []
+        self.peak_running = 0
+        self.serialized_waits = 0
+        self.handler_failures = 0
+
+    @property
+    def cap(self) -> int:
+        return int(self.state.cap)
+
+    @property
+    def pending(self) -> tuple:
+        return tuple(self._pending)
+
+    @property
+    def running(self) -> frozenset:
+        return frozenset(self._running)
+
+    def record_handler_failure(self) -> None:
+        self.handler_failures += 1
+
+    def sink(self, lane_id: str):
+        def record(outcome) -> None:
+            with self._inbox_lock:
+                self._inbox.append((lane_id, outcome))
+        return record
+
+    def admit(self) -> tuple:
+        admitted = adaptive_concurrency.admissible_lanes(
+            self._pending, self._running, self.cap, self.graph,
+        )
+        if len(admitted) < len(self._pending) and (
+            len(self._running) + len(admitted) < self.cap
+        ):
+            # A slot stayed free only because an ownership conflict blocked
+            # every remaining lane: that is the serialization at work.
+            self.serialized_waits += 1
+        for lane_id in admitted:
+            self._pending.remove(lane_id)
+            self._running.add(lane_id)
+        self.peak_running = max(self.peak_running, len(self._running))
+        return admitted
+
+    def complete(self, lane_id: str) -> None:
+        self._running.discard(lane_id)
+        with self._inbox_lock:
+            inbox, self._inbox = self._inbox, []
+        if not self.adaptive:
+            return
+        if not inbox:
+            # Cancelled lanes report nothing; still sample resource pressure.
+            inbox = [(lane_id, adaptive_concurrency.Outcome.SAMPLE)]
+        try:
+            resources = self._resources()
+        except Exception:
+            resources = adaptive_concurrency.ResourceSnapshot()
+        for index, (source, outcome) in enumerate(inbox):
+            self.state, decision = adaptive_concurrency.observe(
+                self.state,
+                outcome,
+                self.policy,
+                resources if index == len(inbox) - 1 else None,
+                source=source,
+            )
+            if decision.action != "hold" or decision.reasons:
+                record = decision.to_dict()
+                record["lane"] = source
+                self.decisions.append(record)
+                if self._on_decision is not None:
+                    with contextlib.suppress(Exception):
+                        self._on_decision(record)
+
+    def summary(self) -> dict:
+        return {
+            "adaptive": self.adaptive,
+            "ceiling": int(self.policy.ceiling),
+            "final_cap": self.cap,
+            "peak_running": int(self.peak_running),
+            "coupled_lanes": adaptive_concurrency.coupled_lane_count(self.graph),
+            "serialized_waits": int(self.serialized_waits),
+            "handler_failures": int(self.handler_failures),
+            "decisions": list(self.decisions),
+        }
+
+
+_MAX_LOGGED_ERROR_CHARS = 200
+
+
+def _bounded_error_text(exc: BaseException) -> str:
+    """One-line, length-bounded ``Type: message`` for operator logs.
+
+    Whitespace (including newlines) is collapsed and the message truncated,
+    so a failure that embeds a large payload cannot flood or forge log lines.
+    """
+    text = " ".join(str(exc).split())
+    if len(text) > _MAX_LOGGED_ERROR_CHARS:
+        text = text[:_MAX_LOGGED_ERROR_CHARS] + "..."
+    return "%s: %s" % (type(exc).__name__, text) if text else type(exc).__name__
+
+
+def dispatch_lanes(
+    scheduler, max_workers: int, run_lane, collect, on_error, on_abandon=None,
+) -> None:
+    """Run every scheduled lane, admitting only what ``scheduler`` allows.
+
+    ``run_lane(lane_id, sink)`` runs on a pool thread and may report
+    :class:`adaptive_concurrency.Outcome` values through ``sink``.
+    ``collect(lane_id, result)`` and ``on_error(lane_id, exc)`` run on this
+    dispatcher thread.  ``max_workers`` is the static ceiling; the pool only
+    ever holds admitted lanes, so the scheduler's live cap and ownership
+    conflicts decide actual concurrency.
+
+    A raising ``collect``/``on_error`` (for example a fleet store that is
+    down while recording a failure) is logged with a bounded message, counted
+    in the scheduler summary (``handler_failures``), and cannot stop later
+    lanes from being admitted.  When ``on_error`` fails the lane's row was
+    never closed (the worker itself raised), so the lane is handed to
+    ``on_abandon``; a failed ``collect`` follows a worker that already closed
+    its own row, so it is not closed twice.  If the loop itself aborts, every
+    lane that never got a future -- still pending, or admitted but rejected
+    by ``pool.submit`` -- is handed to ``on_abandon`` so no durable row is
+    stranded as queued; the original exception still propagates.
+    """
+    unsubmitted: list[str] = []
+
+    def close(lane_id: str, when: str) -> None:
+        if on_abandon is None:
+            return
+        try:
+            on_abandon(lane_id)
+        except Exception as abandon_exc:
+            logger.warning(
+                "fleet lane %s could not be closed %s: %s",
+                lane_id, when, _bounded_error_text(abandon_exc),
+            )
+
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, int(max_workers))) as pool:
+            futures = {}
+
+            def submit_admitted() -> None:
+                admitted = list(scheduler.admit())
+                while admitted:
+                    lane_id = admitted[0]
+                    try:
+                        future = pool.submit(run_lane, lane_id, scheduler.sink(lane_id))
+                    except BaseException:
+                        # admit() already marked these lanes running; none of
+                        # them has a future, so the abort path must close them.
+                        unsubmitted.extend(admitted)
+                        raise
+                    admitted.pop(0)
+                    futures[future] = lane_id
+
+            submit_admitted()
+            while futures:
+                done, _pending = wait(tuple(futures), return_when=FIRST_COMPLETED)
+                for future in done:
+                    lane_id = futures.pop(future)
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        scheduler.sink(lane_id)(adaptive_concurrency.Outcome.FAILED)
+                        handler, args = on_error, (lane_id, exc)
+                    else:
+                        handler, args = collect, (lane_id, result)
+                    try:
+                        handler(*args)
+                    except Exception as handler_exc:
+                        scheduler.record_handler_failure()
+                        logger.warning(
+                            "fleet lane %s result handling failed: %s",
+                            lane_id, _bounded_error_text(handler_exc),
+                        )
+                        if handler is on_error:
+                            close(lane_id, "after its error handler failed")
+                    scheduler.complete(lane_id)
+                submit_admitted()
+    finally:
+        for lane_id in unsubmitted + list(scheduler.pending):
+            close(lane_id, "after dispatch abort")
+
+
 def run_delegated(
     task: str, worker_fn, audit_fn, agents: int = 3,
     metadata: dict | None = None, _on_started=None, project: str = "",
@@ -1676,6 +2021,13 @@ def run_delegated(
                     ],
                 },
             ))
+        # Claims are validated inside the startup containment: an objective
+        # path that cannot be anchored to the project fails the fleet here,
+        # with every queued child cancelled, instead of becoming a lane that
+        # silently conflicts with nothing.
+        lane_claims = delegated_lane_claims(
+            child_ids, assignments, project_root=project_scope,
+        )
     except Exception as exc:
         # Partial fanout containment: a store failure on child N must not
         # strand children 1..N-1 as durable queued rows that no worker will
@@ -1711,35 +2063,78 @@ def run_delegated(
     outputs = []
     readiness_by_producer = {}
     fanout_started = time.monotonic()
-    with ThreadPoolExecutor(max_workers=worker_slots) as pool:
-        futures = {
-            pool.submit(
-                _run_worker,
-                agent_id,
-                prompt,
-                worker_fn,
-                project_scope,
-                task,
-                assigned,
-                master_digest,
-                fleet_provenance.task_digest(prompt),
-                master_id,
-            ): agent_id
-            for agent_id, prompt, assigned in zip(
-                child_ids, prompts, assignments or [()] * len(prompts)
-            )
-        }
-        for future in as_completed(futures):
-            agent_id = futures[future]
-            try:
-                output = future.result()
-                if output not in ABORT_MARKERS and output is not _WORKER_FAILED:
-                    if isinstance(output, ReadyWorkerOutput):
-                        readiness_by_producer[agent_id] = output.readiness
-                        output = output.output
-                    outputs.append((agent_id, output))
-            except Exception as exc:
-                _finish(agent_id, error=str(exc))
+    lane_inputs = {
+        agent_id: (prompt, assigned)
+        for agent_id, prompt, assigned in zip(
+            child_ids, prompts, assignments or [()] * len(prompts)
+        )
+    }
+
+    def _concurrency_event(record: dict) -> None:
+        _event(
+            master_id,
+            "adaptive concurrency %s: cap %d -> %d (%s)" % (
+                record["action"], record["previous_cap"], record["cap"],
+                ",".join(record["reasons"]) or "none",
+            ),
+        )
+
+    # worker_slots is the static ceiling (hardware, operator, per-run cap).
+    # Inside it the adaptive scheduler admits only ownership-compatible lanes
+    # and shrinks/regrows the live cap on retry storms, churn, and memory
+    # pressure (issue #510 section 3).  The pool never holds more than the
+    # admitted lanes, so a shrunk cap takes effect at the next admission.
+    scheduler = AdaptiveLaneScheduler(
+        lane_claims,
+        worker_slots,
+        adaptive=adaptive_concurrency_enabled(),
+        on_decision=_concurrency_event,
+    )
+
+    def _run_lane(agent_id: str, sink):
+        prompt, assigned = lane_inputs[agent_id]
+        return _run_worker(
+            agent_id,
+            prompt,
+            worker_fn,
+            project_scope,
+            task,
+            assigned,
+            master_digest,
+            fleet_provenance.task_digest(prompt),
+            master_id,
+            outcome_sink=sink,
+        )
+
+    def _collect(agent_id: str, output) -> None:
+        if output not in ABORT_MARKERS and output is not _WORKER_FAILED:
+            if isinstance(output, ReadyWorkerOutput):
+                readiness_by_producer[agent_id] = output.readiness
+                output = output.output
+            outputs.append((agent_id, output))
+
+    def _lane_error(agent_id: str, exc: BaseException) -> None:
+        _finish(agent_id, error=str(exc))
+
+    def _lane_abandoned(agent_id: str) -> None:
+        # Close a lane dispatch could not finish normally: never started, or
+        # its own failure could not be recorded.  If the durable store is
+        # still refusing writes, at least return the process-local reserved
+        # slot (``_finish`` only releases it after the store write succeeds);
+        # the durable row is then left to owner-lease recovery.
+        try:
+            _finish(agent_id, error="fleet dispatch could not complete this lane")
+        except Exception:
+            with _LOCK:
+                global _RESERVED_SLOTS
+                _RESERVED_SLOTS = max(0, _RESERVED_SLOTS - 1)
+            raise
+
+    dispatch_lanes(
+        scheduler, worker_slots, _run_lane, _collect, _lane_error,
+        on_abandon=_lane_abandoned,
+    )
+    concurrency_report = scheduler.summary()
     if cancel_requested(master_id):
         final = _finish(master_id)
         return {
@@ -1747,6 +2142,7 @@ def run_delegated(
             "master_id": master_id,
             "agents": child_ids,
             "worker_slots": worker_slots,
+            "concurrency": concurrency_report,
             "outputs": _public_outputs(outputs),
             "output": final,
         }
@@ -1766,6 +2162,7 @@ def run_delegated(
                 "master_id": master_id,
                 "agents": child_ids,
                 "worker_slots": worker_slots,
+                "concurrency": concurrency_report,
                 "outputs": [],
                 "output": "TASK_DRIFT: all delegated results missed objective evidence",
                 "task_drift": True,
@@ -1778,6 +2175,7 @@ def run_delegated(
                 "master_id": master_id,
                 "agents": child_ids,
                 "worker_slots": worker_slots,
+                "concurrency": concurrency_report,
                 "outputs": [],
                 "output": final,
             }
@@ -1788,6 +2186,7 @@ def run_delegated(
             "master_id": master_id,
             "agents": child_ids,
             "worker_slots": worker_slots,
+            "concurrency": concurrency_report,
             "outputs": [],
             "output": final if final in ABORT_MARKERS else "ERROR: %s" % error,
         }
@@ -1833,6 +2232,7 @@ def run_delegated(
             "master_id": master_id,
             "agents": child_ids,
             "worker_slots": worker_slots,
+            "concurrency": concurrency_report,
             "outputs": _public_outputs(outputs),
             "output": final if final in ABORT_MARKERS else "ERROR: %s" % error,
         }
@@ -1848,6 +2248,7 @@ def run_delegated(
             "master_id": master_id,
             "agents": child_ids,
             "worker_slots": worker_slots,
+            "concurrency": concurrency_report,
             "outputs": [],
             "output": final if final in ABORT_MARKERS else "ERROR: %s" % error,
         }
@@ -1882,6 +2283,7 @@ def run_delegated(
                 "master_id": master_id,
                 "agents": child_ids,
                 "worker_slots": worker_slots,
+                "concurrency": concurrency_report,
                 "outputs": _public_outputs(outputs),
                 "output": "TASK_DRIFT: aggregation refused due to missing objective evidence",
                 "task_drift": True,
@@ -1896,6 +2298,7 @@ def run_delegated(
             "master_id": master_id,
             "agents": child_ids,
             "worker_slots": worker_slots,
+            "concurrency": concurrency_report,
             "outputs": _public_outputs(outputs),
             "output": final,
         }
@@ -1960,6 +2363,7 @@ def run_delegated(
                 "master_id": master_id,
                 "agents": child_ids,
                 "worker_slots": worker_slots,
+                "concurrency": concurrency_report,
                 "outputs": _public_outputs(outputs),
                 "output": final if final in ABORT_MARKERS else merged,
             }
@@ -1984,6 +2388,7 @@ def run_delegated(
                 "master_id": master_id,
                 "agents": child_ids,
                 "worker_slots": worker_slots,
+                "concurrency": concurrency_report,
                 "outputs": _public_outputs(outputs),
                 "output": "TASK_DRIFT: audit aggregate omitted authoritative objectives",
                 "task_drift": True,
@@ -1995,6 +2400,7 @@ def run_delegated(
         "master_id": master_id,
         "agents": child_ids,
         "worker_slots": worker_slots,
+        "concurrency": concurrency_report,
         "outputs": _public_outputs(outputs),
         "output": final,
     }
