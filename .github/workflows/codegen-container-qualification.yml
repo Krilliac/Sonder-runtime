@@ -1,9 +1,7 @@
 name: Codegen Linux container qualification
 
 on:
-  pull_request:
-  push:
-    branches: [main]
+  workflow_call:
   workflow_dispatch:
 
 jobs:

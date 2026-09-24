@@ -14,9 +14,20 @@ jobs:
   # can never satisfy the required check. Same constraint build-apps.yml
   # documents for its own job names.
   tests:
+    # The required tests context is the merge gate for the native Windows
+    # boundary too. Keep this job present after an upstream failure so a
+    # skipped/cancelled Windows job cannot look like a passing required check.
+    needs: [windows-focused, container-qualification]
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
+      - name: Require native Windows gate
+        if: ${{ needs.windows-focused.result != 'success' || needs.container-qualification.result != 'success' }}
+        run: |
+          echo "windows-focused result: ${{ needs.windows-focused.result }}"
+          echo "container-qualification result: ${{ needs.container-qualification.result }}"
+          exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
@@ -101,6 +112,12 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # Keep the Docker boundary in the same PR/main gate as the required tests
+  # context. The called workflow retains its manual dispatch entry point for
+  # standalone qualification without duplicating automatic PR/main runs.
+  container-qualification:
+    uses: ./.github/workflows/codegen-container-qualification.yml
+
   # Native Windows boundaries are invisible to the required Ubuntu "tests"
   # context. The release workflow reuses this workflow at the tagged SHA, so
   # this focused job also blocks release when those boundaries regress.
@@ -134,6 +151,7 @@ jobs:
           tests/test_host_model_request_admission.py
           tests/test_openai_host_model_admission.py
           tests/test_control_plane_inventory.py
+          tests/test_control_plane_deleted_paths.py
           tests/test_process_wait_hardening.py
           tests/test_start_selfmod_launcher.py
           tests/test_command_recovery.py

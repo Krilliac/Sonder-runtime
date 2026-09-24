@@ -53,14 +53,22 @@ def observed(h, path, *, headers=None):
     pytest.fail("bounded recovery callback has not completed")
 
 
+@pytest.mark.parametrize("rebuild_config", [False, True], ids=["stable-config", "equal-rebuilt-config"])
 def test_http_original_pending_new_login_and_two_separate_approvals(
-    work_http, monkeypatch
+    work_http, monkeypatch, rebuild_config
 ):
     from sonder_runtime.bootstrap.managed_conversation import _ManagedTurn
     from tests.test_delegated_verification import _verifier
 
     h = work_http
     recovery = install(h)
+    if rebuild_config:
+        original_config = h.service.control._config_provider()
+        monkeypatch.setattr(
+            h.service.control,
+            "_config_provider",
+            lambda: replace(original_config),
+        )
     verified = []
     original_stage = _ManagedTurn.stage_final
 

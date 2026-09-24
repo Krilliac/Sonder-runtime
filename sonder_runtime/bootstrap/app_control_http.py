@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -45,6 +46,8 @@ from .app_control import AppProjectGrantCatalog
 
 from ..application.ports.app_control_http import ControlError
 
+
+_LOG = logging.getLogger(__name__)
 
 def canonical_digest(payload):
     return hashlib.sha256(
@@ -329,20 +332,24 @@ class AppControlBinding:
                 and scope_owner[1] is owner[1]
             )
 
-    def _record_for(self, capability, *, config, required, require_current=True):
+    def _record_for(self, capability, *, config, required, require_current=True, _rejections=None):
         """Resolve only a live issuer capability in its owning execution scope."""
+        def reject(reason):
+            if _rejections is not None:
+                _rejections.append(reason)
+
         if type(capability) is not _PrivateInventoryCapability:
-            return None
+            return reject("capability_type")
         active = self._active_private_scope()
         if active is None:
-            return None
+            return reject("owner_context")
         scope, current = active
         if require_current and capability is not current:
-            return None
+            return reject("current_capability")
         with self._private_inventory_lock:
             record = self._private_inventory_records.get(capability)
             if record is None:
-                return None
+                return reject("record_absent")
             (
                 issuer,
                 record_scope,
@@ -351,19 +358,18 @@ class AppControlBinding:
                 record_required,
                 inventory,
             ) = record
-            if (
-                issuer is not self._private_inventory_issuer
-                or record_scope is not scope
-                or scope not in self._private_inventory_scopes
-                or (record_config is not config and record_config != config)
-                or record_digest != self._private_scope_digest(record_required)
-                or not inventory.covers(required)
-                or (
-                    require_current
-                    and self._private_inventory_currents.get(scope) is not capability
-                )
-            ):
-                return None
+            if issuer is not self._private_inventory_issuer:
+                return reject("issuer")
+            if record_scope is not scope or scope not in self._private_inventory_scopes:
+                return reject("owner_scope")
+            if record_config is not config and record_config != config:
+                return reject("configuration_changed")
+            if record_digest != self._private_scope_digest(record_required):
+                return reject("source_inputs_changed")
+            if not inventory.covers(required):
+                return reject("coverage")
+            if require_current and self._private_inventory_currents.get(scope) is not capability:
+                return reject("retired_capability")
         return inventory
 
     def _current_scope_stale(self, scope, *, config):
@@ -377,7 +383,7 @@ class AppControlBinding:
             _, record_scope, record_config, record_digest, required, _ = record
             return (
                 record_scope is not scope
-                or record_config is not config
+                or (record_config is not config and record_config != config)
                 or record_digest != self._private_scope_digest(required)
             )
 
@@ -481,17 +487,27 @@ class AppControlBinding:
     def _private_snapshot(
         self, capability, *, config, required, roots, require_current=True
     ):
+        rejections = []
         inventory = self._record_for(
             capability,
             config=config,
             required=required,
             require_current=require_current,
+            _rejections=rejections,
         )
         if inventory is None:
+            _LOG.warning(
+                "private inventory snapshot rejected: reason=%s",
+                rejections[0] if rejections else "unclassified",
+            )
             raise PermissionError("private inventory snapshot unavailable")
         try:
             inventory.require_disjoint(roots)
-        except (OSError, TypeError, ValueError):
+        except (OSError, TypeError, ValueError) as error:
+            _LOG.warning(
+                "private inventory snapshot rejected: reason=disjointness error_type=%s",
+                type(error).__name__,
+            )
             raise PermissionError("private inventory snapshot unavailable") from None
         return self._inventory_copy(inventory)
 

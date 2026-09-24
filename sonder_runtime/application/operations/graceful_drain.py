@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+import math
 from time import monotonic
 from typing import Callable, Iterable, Protocol
 
@@ -46,7 +47,12 @@ class GracefulDrainRequest:
     def __post_init__(self) -> None:
         if not self.reason.strip():
             raise ValueError("reason is required")
-        if isinstance(self.deadline_seconds, bool) or self.deadline_seconds <= 0:
+        if (
+            isinstance(self.deadline_seconds, bool)
+            or not isinstance(self.deadline_seconds, (int, float))
+            or not math.isfinite(self.deadline_seconds)
+            or self.deadline_seconds <= 0
+        ):
             raise ValueError("deadline_seconds must be positive")
         if isinstance(self.max_records, bool) or self.max_records <= 0:
             raise ValueError("max_records must be positive")
