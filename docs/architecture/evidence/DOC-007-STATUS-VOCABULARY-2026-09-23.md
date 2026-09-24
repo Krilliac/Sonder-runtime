@@ -69,13 +69,16 @@ Commit `cb1a9a22` made these corrections:
   unwiring the product-document gate makes it fail.
 - A four-column-row test covers the column check.
 - `scripts/check_doc_links.py` now scans the 151 evidence records under
-  `docs/architecture/evidence/`. Before this change, "doc links passed" claims
-  about evidence records were vacuous.
+  `docs/architecture/evidence/`. Those records currently contain no relative
+  Markdown links: they cite files as backticked paths and use absolute web
+  links. The scan therefore verifies nothing today and only guards relative
+  links added later. Earlier "doc links passed" claims never covered evidence
+  records at all.
 
 The earlier verified revision is superseded by one bound to `cb1a9a22`:
 [CI run 35938479949](https://github.com/Krilliac/Sonder-runtime/actions/runs/35938479949)
 succeeded on Ubuntu at `cb1a9a22`. That covers requirement evidence, doc links
-(now including evidence records), generated-reference freshness,
+(the evidence-folder scan, which found no relative links to check), generated-reference freshness,
 documentation authority, and the full test suite (16481 passed, 104 skipped).
 The paired app-build runs were still queued, so they are not claimed.
 
@@ -84,6 +87,8 @@ The paired app-build runs were still queued, so they are not claimed.
 The vocabulary gate covers the root README and the six focused contracts. It
 does not cover wiki pages, runbooks, `NPU.md`, or external copies. It checks
 labels and phrasing, not the semantic truth of each row, so row accuracy
-remains review work. Evidence records use
-backticked repository paths more often than Markdown links, and the link gate
-does not resolve backticked paths.
+remains review work. The evidence-folder link scan is currently vacuous:
+evidence records contain no relative Markdown links, and the gate does not
+resolve backticked repository paths. Of 362 such paths, 23 do not resolve;
+most are package-relative shorthand or files removed since. These remain
+unchecked follow-up work.

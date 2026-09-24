@@ -1,4 +1,4 @@
-"""sonder_client — standalone thin remote client for a hosted Sonder Runtime.
+"""sonder_client — thin remote client (run from a checkout) for a hosted Sonder Runtime.
 
 Run this file from a checkout of the repository: it needs only the Python
 standard library plus the checkout's ``sonder_runtime`` client adapters (no
