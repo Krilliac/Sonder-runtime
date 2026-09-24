@@ -34,7 +34,10 @@ def test_all_new_languages_registered():
         assert lang in code_runner.SUPPORTED_LANGUAGES
 
 
-@pytest.mark.parametrize("lang", list(NEW_LANGS))
+@pytest.mark.parametrize("lang", [
+    pytest.param(lang, marks=pytest.mark.requires_medium_integrity) if lang == "bash" else lang
+    for lang in NEW_LANGS
+])
 def test_language_runs_or_reports_missing(lang):
     canonical, code, expected = NEW_LANGS[lang]
     if lang == "bash" and sonder_paths.bash_executable() is None:
