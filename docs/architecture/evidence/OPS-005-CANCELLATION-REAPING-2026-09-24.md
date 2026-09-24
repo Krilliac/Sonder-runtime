@@ -10,6 +10,16 @@ cleanup contract. Incomplete cleanup retains the cancellation state, owned
 process, capacity and bounded retry timer. Proven cleanup yields CANCELLED.
 Natural exits without a recorded cancellation retain their normal exit mapping.
 
+Exit publication uses the observed job revision and status as an atomic
+precondition in both registries. Cancellation recorded after the provider's
+initial status read therefore wins instead of being overwritten by success or
+failure. A losing completion attempt retains resources and routes pending
+cancellation through the same cleanup contract. Other nonterminal conflicts
+retain their output-failure state and retry without discarding ownership.
+The optional transition preconditions preserve existing unconditional callers.
+`tests/test_process_completion_race.py` exercises the late-cancellation boundary,
+including a separate SQLite registry connection.
+
 After the provider reaps a POSIX root, the supervisor can confirm that its
 recorded root-owned process group is absent. It requires a recorded process
 identity, a dead-root observation, and a group ID equal to that root PID. The

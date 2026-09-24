@@ -155,6 +155,7 @@ jobs:
           tests/test_process_wait_hardening.py
           tests/test_job004_process_provider.py
           tests/test_process_cancellation_reaping.py
+          tests/test_process_completion_race.py
           tests/test_process_group_absence.py
           tests/test_start_selfmod_launcher.py
           tests/test_command_recovery.py
