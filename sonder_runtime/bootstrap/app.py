@@ -449,10 +449,14 @@ def build_application(
         nonlocal worker_effect_journal
         if worker_effect_journal is None:
             from ..adapters.persistence.sqlite.effect_journal import SQLiteEffectJournal
+            from ..adapters.execution.process_jobs import DurableProcessEffectVerifier
             from ..platform.paths import state_path
 
             worker_effect_journal = SQLiteEffectJournal(
-                state_path("worker-effects.db", "SONDER_WORKER_EFFECTS_DB")
+                state_path("worker-effects.db", "SONDER_WORKER_EFFECTS_DB"),
+                reconciliation_verifiers={
+                    "process-start": DurableProcessEffectVerifier(get_job_registry),
+                },
             )
         return worker_effect_journal
 

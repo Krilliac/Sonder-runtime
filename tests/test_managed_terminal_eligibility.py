@@ -151,6 +151,7 @@ def test_current_host_attachment_accepts_only_the_durable_failed_check_receipt(
     result = terminal_eligibility(Session(), evidence.result.receipt.turn, verifier_factory=object())
     assert result.eligible is False
     assert result.phase == "failed"
+    assert result.authority is not None
     assert result.verified_failure_receipt["failed_check_index"] == 0
     view["failure_receipt"]["failed_proof"]["exit_code"] = 0
     spoofed = terminal_eligibility(Session(), evidence.result.receipt.turn, verifier_factory=object())

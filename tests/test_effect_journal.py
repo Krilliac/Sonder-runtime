@@ -4,11 +4,15 @@ from dataclasses import replace
 import pytest
 
 from sonder_runtime.adapters.persistence.sqlite.effect_journal import SQLiteEffectJournal
+from sonder_runtime.adapters.execution.process_jobs import DurableProcessEffectVerifier
 from sonder_runtime.adapters.persistence.sqlite.runtime_checkpoints import SQLiteRuntimeCheckpointRepository
 from sonder_runtime.application.execution.effect_journal import (
     EffectIntent, EffectJournalError, EffectOutcome, EffectState, JournalBinding, bound,
+    ReconciliationProof,
 )
+from sonder_runtime.application.execution.worker_bindings import AuthenticatedWorkerBinding
 from sonder_runtime.application.ports.runtime_checkpoints import CheckpointError, RestoreStatus, RuntimeCheckpoint
+from sonder_runtime.application.ports.jobs import JobIdentity, JobRecord, JobStatus
 
 
 def _intent(intent_id="i-1", run_id="run-1", worker_id="w-1", key="k-1", request_digest="a" * 64):
@@ -249,3 +253,491 @@ def test_gateway_marks_effect_uncertain_when_runner_crashes(tmp_path):
         with pytest.raises(RuntimeError):
             gateway.execute(request)
     assert journal.get("run-1:req-2").state is EffectState.UNCERTAIN
+
+
+def test_worker_effect_checkpoint_is_bound_to_terminal_high_water(tmp_path):
+    from sonder_runtime.application.execution.worker_bindings import (
+        AuthenticatedWorkerBinding, journaled_effect,
+    )
+
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    binding = AuthenticatedWorkerBinding(journal, "worker-run", "worker", 1, "/workspace")
+    journaled_effect(
+        binding, operation_id="write-1", idempotency_key="write-1",
+        request={"value": "one"}, invoke=lambda: {"receipt": "one"},
+        receipt_key="receipt-one",
+    )
+    first = journal.restore_checkpoint("worker-run")
+    assert first is not None
+    assert first["generation"] == 0
+    assert first["effect_high_water"] == 1
+    journaled_effect(
+        binding, operation_id="write-2", idempotency_key="write-2",
+        request={"value": "two"}, invoke=lambda: {"receipt": "two"},
+        receipt_key="receipt-two",
+    )
+    second = journal.restore_checkpoint("worker-run")
+    assert second is not None
+    assert second["generation"] == 1
+    assert second["effect_high_water"] == 2
+
+
+def test_worker_checkpoint_behind_journal_restores_only_when_later_effects_settle(tmp_path):
+    # Semantics changed in the PR #523 review fix (P1-2): a checkpoint binds
+    # its settled prefix.  Later effects are acceptable only when terminal,
+    # and restore reports the journal position so the caller reads them via
+    # effects_since(); any unresolved later effect still refuses restart.
+    from sonder_runtime.application.execution.worker_bindings import AuthenticatedWorkerBinding
+
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    binding = JournalBinding(journal, "worker-run", "worker", 1, "/workspace")
+    first = binding.begin_request(
+        operation_id="first", idempotency_key="first", request_digest="a" * 64,
+    )
+    binding.complete(first, outcome_digest="b" * 64, receipt_key="receipt-first")
+    journal.append_checkpoint("worker-run", "state-one", worker_id="worker", owner_epoch=1)
+    second = binding.begin_request(
+        operation_id="second", idempotency_key="second", request_digest="c" * 64,
+    )
+    binding.complete(second, outcome_digest="d" * 64, receipt_key="receipt-second")
+    restored = journal.restore_checkpoint("worker-run")
+    assert (restored["effect_high_water"], restored["journal_high_water"]) == (1, 2)
+    later = journal.effects_since("worker-run", restored["effect_high_water"])
+    assert [(r.intent_id, r.receipt_key) for r in later.records] == [
+        (second.intent_id, "receipt-second"),
+    ]
+    binding.begin_request(
+        operation_id="third", idempotency_key="third", request_digest="e" * 64,
+    )
+    with pytest.raises(EffectJournalError, match="without a definitive outcome"):
+        journal.restore_checkpoint("worker-run")
+    with pytest.raises(EffectJournalError, match="reconciliation"):
+        AuthenticatedWorkerBinding(
+            journal, "worker-run", "worker", 2, "/workspace",
+        ).recover_before_restart()
+
+
+def test_recovered_owner_epoch_fences_old_binding_before_new_intent(tmp_path):
+    from sonder_runtime.application.execution.worker_bindings import (
+        AuthenticatedWorkerBinding, journaled_effect,
+    )
+
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    old = AuthenticatedWorkerBinding(journal, "run", "worker", 1, "/workspace")
+    journaled_effect(
+        old, operation_id="first", idempotency_key="first", request={"n": 1},
+        invoke=lambda: {"ok": 1}, receipt_key="receipt-first",
+    )
+    old.binding().begin_request(
+        operation_id="pending", idempotency_key="pending", request_digest="c" * 64,
+    )
+    current = AuthenticatedWorkerBinding(journal, "run", "worker", 2, "/workspace")
+    with pytest.raises(EffectJournalError, match="uncertain"):
+        current.recover_before_restart()
+    called = []
+    with pytest.raises(EffectJournalError, match="stale worker owner epoch"):
+        journaled_effect(
+            old, operation_id="old-after-recovery", idempotency_key="old-after-recovery",
+            request={"n": 2}, invoke=lambda: called.append(True), receipt_key="late",
+        )
+    assert called == []
+
+
+def test_outcome_and_checkpoint_roll_back_together_at_checkpoint_cut(tmp_path, monkeypatch):
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    binding = JournalBinding(journal, "run", "worker", 1, "/workspace")
+    intent = binding.begin_request(
+        operation_id="atomic", idempotency_key="atomic", request_digest="a" * 64,
+    )
+    outcome = EffectOutcome(
+        intent.intent_id, EffectState.COMPLETED, "b" * 64, "receipt",
+        worker_id="worker", owner_epoch=1,
+    )
+    original = journal._append_checkpoint_in_transaction
+
+    def fail_checkpoint(*args, **kwargs):
+        raise RuntimeError("injected checkpoint crash")
+
+    monkeypatch.setattr(journal, "_append_checkpoint_in_transaction", fail_checkpoint)
+    with pytest.raises(RuntimeError, match="checkpoint crash"):
+        journal.outcome_and_checkpoint(outcome, {"worker": {"step": 1}})
+    assert journal.get(intent.intent_id).state is EffectState.INTENT
+    assert journal.restore_checkpoint("run") is None
+    monkeypatch.setattr(journal, "_append_checkpoint_in_transaction", original)
+    journal.outcome_and_checkpoint(outcome, {"worker": {"step": 1}})
+    restored = journal.restore_checkpoint("run")
+    assert restored is not None
+    assert restored["state"] == {"worker": {"step": 1}}
+
+
+def test_recovery_refusal_blocks_new_effect_before_invocation(tmp_path):
+    from sonder_runtime.application.execution.worker_bindings import (
+        AuthenticatedWorkerBinding, journaled_effect,
+    )
+
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    old = AuthenticatedWorkerBinding(journal, "run", "worker", 1, "/workspace")
+    old_intent = old.binding().begin_request(
+        operation_id="op-1", idempotency_key="op-1", request_digest="a" * 64,
+    )
+    old.binding().mark_uncertain(old_intent, detail="crash after external effect")
+
+    current = AuthenticatedWorkerBinding(journal, "run", "worker", 2, "/workspace")
+    with pytest.raises(EffectJournalError, match="uncertain effects"):
+        current.recover_before_restart()
+
+    invoked = []
+    with pytest.raises(EffectJournalError, match="reconciliation"):
+        journaled_effect(
+            current, operation_id="op-2", idempotency_key="op-2",
+            request={"value": "must-not-run"},
+            invoke=lambda: invoked.append(True), receipt_key="receipt-op-2",
+        )
+    assert invoked == []
+
+
+def test_epoch_advance_cannot_clear_recovery_fence(tmp_path):
+    from sonder_runtime.application.execution.worker_bindings import (
+        AuthenticatedWorkerBinding, journaled_effect,
+    )
+
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    epoch_one = AuthenticatedWorkerBinding(journal, "run", "worker", 1, "/workspace")
+    intent = epoch_one.binding().begin_request(
+        operation_id="op-1", idempotency_key="op-1", request_digest="a" * 64,
+    )
+    epoch_one.binding().mark_uncertain(intent, detail="crash after effect")
+    epoch_two = AuthenticatedWorkerBinding(journal, "run", "worker", 2, "/workspace")
+    with pytest.raises(EffectJournalError, match="uncertain effects"):
+        epoch_two.recover_before_restart()
+
+    # Advancing the durable owner epoch is not reconciliation and must not
+    # reopen admission for a newer worker.
+    journal.claim_owner("run", "worker", 3)
+    invoked = []
+    epoch_three = AuthenticatedWorkerBinding(journal, "run", "worker", 3, "/workspace")
+    with pytest.raises(EffectJournalError, match="reconciliation"):
+        journaled_effect(
+            epoch_three, operation_id="op-2", idempotency_key="op-2",
+            request={"value": "must-not-run"},
+            invoke=lambda: invoked.append(True), receipt_key="receipt-op-2",
+        )
+    assert invoked == []
+
+
+def test_default_worker_checkpoint_projection_is_content_free(tmp_path):
+    from sonder_runtime.application.execution.worker_bindings import (
+        AuthenticatedWorkerBinding, journaled_effect,
+    )
+
+    private_output = "PRIVATE_OUTPUT_CANARY_872193"
+    private_prompt = "PRIVATE_PROMPT_CANARY_872193"
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    journaled_effect(
+        AuthenticatedWorkerBinding(journal, "run", "worker", 1, "/workspace"),
+        operation_id="op", idempotency_key="op", request={"prompt": private_prompt},
+        invoke=lambda: private_output, receipt_key="receipt",
+    )
+    raw = (tmp_path / "effects.db").read_bytes()
+    assert private_output.encode() not in raw
+    assert private_prompt.encode() not in raw
+
+
+class _ExternalVerifier:
+    verifier_id = "external-api-v1"
+    operation_ids = frozenset({"reconcile-op"})
+
+    def __init__(self, proof_factory=None):
+        self.proof_factory = proof_factory
+
+    def verify(self, intent):
+        if self.proof_factory is not None:
+            return self.proof_factory(intent)
+        return ReconciliationProof(
+            intent_id=intent.intent_id, operation_id=intent.operation_id,
+            receipt_key="external-receipt-1", outcome_digest="d" * 64,
+            state=EffectState.COMPLETED, verifier_id=self.verifier_id,
+            external_reference="external-op-1",
+        )
+
+
+def _uncertain_for_reconciliation(tmp_path, operation="reconcile-op"):
+    journal = SQLiteEffectJournal(
+        tmp_path / "effects.db",
+        reconciliation_verifiers={"reconcile-op": _ExternalVerifier()},
+    )
+    first = AuthenticatedWorkerBinding(journal, "run", "worker", 1, "/workspace")
+    intent = first.binding().begin_request(
+        operation_id=operation, idempotency_key="reconcile-key", request_digest="a" * 64,
+    )
+    first.binding().mark_uncertain(intent, detail="crash after external call")
+    journal.claim_owner("run", "worker", 2)
+    journal.recover("run", live_workers={})
+    return journal, intent
+
+
+def test_host_verifier_reconciles_exact_effect_and_clears_epoch_fence(tmp_path):
+    journal, intent = _uncertain_for_reconciliation(tmp_path)
+    resolved = journal.reconcile(intent.intent_id, owner_epoch=2)
+    assert resolved.state is EffectState.COMPLETED
+    assert resolved.operation_id == "reconcile-op"
+    assert resolved.receipt_key == "external-receipt-1"
+    resumed = AuthenticatedWorkerBinding(journal, "run", "worker", 2, "/workspace")
+    assert resumed.binding().begin_request(
+        operation_id="after-reconcile", idempotency_key="after-reconcile",
+        request_digest="b" * 64,
+    ).state is EffectState.INTENT
+
+
+def test_unsupported_operation_family_stays_fenced(tmp_path):
+    journal, intent = _uncertain_for_reconciliation(tmp_path, operation="unsupported-op")
+    with pytest.raises(EffectJournalError, match="no trusted reconciliation verifier"):
+        journal.reconcile(intent.intent_id, owner_epoch=2)
+    with pytest.raises(EffectJournalError, match="duplicate effect intent"):
+        journal.begin(EffectIntent(
+            "run:after", "run", "worker", "after", "/workspace", 2,
+            "after", "b" * 64,
+        ))
+
+
+def test_stale_epoch_cannot_reconcile_after_restart(tmp_path):
+    journal, intent = _uncertain_for_reconciliation(tmp_path)
+    with pytest.raises(EffectJournalError, match="stale reconciliation owner epoch"):
+        journal.reconcile(intent.intent_id, owner_epoch=1)
+    assert journal.get(intent.intent_id).state is EffectState.UNCERTAIN
+
+
+def test_conflicting_verifier_proof_is_rejected_and_fence_remains(tmp_path):
+    verifier = _ExternalVerifier(
+        lambda intent: ReconciliationProof(
+            intent_id="wrong", operation_id=intent.operation_id,
+            receipt_key="receipt", outcome_digest="e" * 64,
+            state=EffectState.COMPLETED, verifier_id="external-api-v1",
+            external_reference="external-op",
+        ),
+    )
+    journal = SQLiteEffectJournal(
+        tmp_path / "effects.db",
+        reconciliation_verifiers={"reconcile-op": verifier},
+    )
+    first = AuthenticatedWorkerBinding(journal, "run", "worker", 1, "/workspace")
+    intent = first.binding().begin_request(
+        operation_id="reconcile-op", idempotency_key="key", request_digest="a" * 64,
+    )
+    first.binding().mark_uncertain(intent, detail="crash")
+    journal.claim_owner("run", "worker", 2)
+    with pytest.raises(EffectJournalError, match="proof identity conflict"):
+        journal.reconcile(intent.intent_id, owner_epoch=2)
+    assert journal.get(intent.intent_id).state is EffectState.UNCERTAIN
+
+
+def test_reconciliation_is_idempotent_under_replay_and_concurrent_call(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    journal, intent = _uncertain_for_reconciliation(tmp_path)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(
+            lambda _: journal.reconcile(intent.intent_id, owner_epoch=2), range(2),
+        ))
+    assert {result.state for result in results} == {EffectState.COMPLETED}
+    replay = journal.reconcile(intent.intent_id, owner_epoch=2)
+    assert replay.receipt_key == "external-receipt-1"
+
+
+def test_post_construction_verifier_registration_is_unavailable(tmp_path):
+    journal, intent = _uncertain_for_reconciliation(tmp_path, operation="unsupported-op")
+    assert not hasattr(journal, "register_reconciliation_verifier")
+    with pytest.raises(EffectJournalError, match="no trusted reconciliation verifier"):
+        journal.reconcile(intent.intent_id, owner_epoch=2)
+
+
+def test_hung_verifier_does_not_block_journal_writes(tmp_path):
+    import threading
+    started = threading.Event()
+
+    class HungVerifier(_ExternalVerifier):
+        def verify(self, intent):
+            started.set()
+            threading.Event().wait(0.5)
+
+    journal = SQLiteEffectJournal(
+        tmp_path / "effects.db",
+        reconciliation_verifiers={"reconcile-op": HungVerifier()},
+    )
+
+    first = AuthenticatedWorkerBinding(journal, "run", "worker", 1, "/workspace")
+    intent = first.binding().begin_request(
+        operation_id="reconcile-op", idempotency_key="key", request_digest="a" * 64,
+    )
+    first.binding().mark_uncertain(intent, detail="crash")
+    journal.claim_owner("run", "worker", 2)
+    with pytest.raises(EffectJournalError, match="timed out"):
+        journal.reconcile(intent.intent_id, owner_epoch=2, timeout_seconds=0.05)
+    assert started.is_set()
+    # A separate write is immediately available despite the hung verifier.
+    assert journal.high_water("run") == 1
+
+
+def test_owner_epoch_race_invalidates_proof_before_atomic_clear(tmp_path):
+    import threading
+    started = threading.Event()
+    release = threading.Event()
+
+    class PausedVerifier(_ExternalVerifier):
+        def verify(self, intent):
+            started.set()
+            release.wait(2)
+            return super().verify(intent)
+
+    journal = SQLiteEffectJournal(
+        tmp_path / "effects.db",
+        reconciliation_verifiers={"reconcile-op": PausedVerifier()},
+    )
+
+    first = AuthenticatedWorkerBinding(journal, "run", "worker", 1, "/workspace")
+    intent = first.binding().begin_request(
+        operation_id="reconcile-op", idempotency_key="key", request_digest="a" * 64,
+    )
+    first.binding().mark_uncertain(intent, detail="crash")
+    journal.claim_owner("run", "worker", 2)
+    errors = []
+
+    def reconcile():
+        try:
+            journal.reconcile(intent.intent_id, owner_epoch=2)
+        except EffectJournalError as exc:
+            errors.append(str(exc))
+
+    thread = threading.Thread(target=reconcile)
+    thread.start()
+    assert started.wait(1)
+    journal.claim_owner("run", "worker", 3)
+    release.set()
+    thread.join(2)
+    assert errors == ["stale reconciliation owner epoch"]
+    assert journal.get(intent.intent_id).state is EffectState.UNCERTAIN
+
+
+def test_verifier_admission_is_bounded_across_journal_instances(tmp_path):
+    from sonder_runtime.adapters.persistence.sqlite import effect_journal as module
+    held = [module._VERIFIER_SLOTS.acquire(timeout=2) for _ in range(4)]
+    assert all(held)
+    try:
+        journal, intent = _uncertain_for_reconciliation(tmp_path)
+        with pytest.raises(EffectJournalError, match="capacity exhausted"):
+            journal.reconcile(intent.intent_id, owner_epoch=2, timeout_seconds=0.1)
+    finally:
+        for acquired in held:
+            if acquired:
+                module._VERIFIER_SLOTS.release()
+
+
+def test_production_process_registry_verifier_reconciles_after_restart(tmp_path):
+    class Registry:
+        def __init__(self, status):
+            self.status = status
+
+        def poll(self, job_id):
+            return JobRecord(
+                JobIdentity(job_id, "process", "launch", job_id),
+                self.status, revision=4,
+            )
+
+        def view(self, job_id):
+            return type("View", (), {
+                "record": self.poll(job_id),
+                "process_id": 77,
+                "metadata": {"process_request_digest": "a" * 64, "launch_state": "attached"},
+            })()
+
+    registry = Registry(JobStatus.SUCCEEDED)
+    journal = SQLiteEffectJournal(
+        tmp_path / "effects.db",
+        reconciliation_verifiers={
+            "process-start": DurableProcessEffectVerifier(lambda: registry),
+        },
+    )
+    old = AuthenticatedWorkerBinding(journal, "run", "process", 1, "/workspace")
+    intent = old.binding().begin_request(
+        operation_id="process-start:job-1", idempotency_key="job-1",
+        request_digest="a" * 64, reconciliation="idempotent",
+    )
+    old.binding().mark_uncertain(intent, detail="crash after process launch")
+    current = AuthenticatedWorkerBinding(journal, "run", "process", 2, "/workspace")
+    with pytest.raises(EffectJournalError, match="explicit reconciliation"):
+        current.recover_before_restart()
+    resolved = journal.reconcile(intent.intent_id, owner_epoch=2)
+    assert resolved.state is EffectState.COMPLETED
+    assert resolved.receipt_key == "job-1:77"
+    # Post-reconciliation restart is no longer wedged (review P1-2).
+    assert current.recover_before_restart().action == "resume"
+
+    registry.status = JobStatus.PENDING
+    old_two = AuthenticatedWorkerBinding(journal, "run-2", "process", 1, "/workspace")
+    pending = old_two.binding().begin_request(
+        operation_id="process-start:job-2", idempotency_key="job-2",
+        request_digest="a" * 64, reconciliation="idempotent",
+    )
+    old_two.binding().mark_uncertain(pending, detail="unknown process outcome")
+    current_two = AuthenticatedWorkerBinding(journal, "run-2", "process", 2, "/workspace")
+    with pytest.raises(EffectJournalError, match="explicit reconciliation"):
+        current_two.recover_before_restart()
+    with pytest.raises(EffectJournalError, match="host verifier returned no trusted proof"):
+        journal.reconcile(pending.intent_id, owner_epoch=2)
+
+
+def test_process_verifier_rejects_durable_identity_mismatch(tmp_path):
+    class Registry:
+        def poll(self, job_id):
+            return JobRecord(
+                JobIdentity(job_id, "unrelated-kind", "different-operation", "other-idempotency"),
+                JobStatus.SUCCEEDED, revision=3,
+            )
+
+    journal = SQLiteEffectJournal(
+        tmp_path / "effects.db",
+        reconciliation_verifiers={
+            "process-start": DurableProcessEffectVerifier(lambda: Registry()),
+        },
+    )
+    old = AuthenticatedWorkerBinding(journal, "run", "process", 1, "/workspace")
+    intent = old.binding().begin_request(
+        operation_id="process-start:job-1", idempotency_key="expected",
+        request_digest="a" * 64, reconciliation="idempotent",
+    )
+    old.binding().mark_uncertain(intent, detail="crash after process launch")
+    current = AuthenticatedWorkerBinding(journal, "run", "process", 2, "/workspace")
+    with pytest.raises(EffectJournalError, match="explicit reconciliation"):
+        current.recover_before_restart()
+    with pytest.raises(EffectJournalError, match="host verifier returned no trusted proof"):
+        journal.reconcile(intent.intent_id, owner_epoch=2)
+    assert journal.get(intent.intent_id).state is EffectState.UNCERTAIN
+
+
+def test_process_verifier_rejects_same_identity_with_changed_request_digest(tmp_path):
+    class Registry:
+        def view(self, job_id):
+            identity = JobIdentity(job_id, "process", "launch", "expected")
+            record = JobRecord(identity, JobStatus.SUCCEEDED, revision=3)
+            return type("View", (), {
+                "record": record,
+                "metadata": {"process_request_digest": "a" * 64},
+            })()
+
+    journal = SQLiteEffectJournal(
+        tmp_path / "effects.db",
+        reconciliation_verifiers={
+            "process-start": DurableProcessEffectVerifier(lambda: Registry()),
+        },
+    )
+    old = AuthenticatedWorkerBinding(journal, "run", "process", 1, "/workspace")
+    intent = old.binding().begin_request(
+        operation_id="process-start:job-1", idempotency_key="expected",
+        request_digest="b" * 64, reconciliation="idempotent",
+    )
+    old.binding().mark_uncertain(intent, detail="crash after process launch")
+    current = AuthenticatedWorkerBinding(journal, "run", "process", 2, "/workspace")
+    with pytest.raises(EffectJournalError, match="explicit reconciliation"):
+        current.recover_before_restart()
+    with pytest.raises(EffectJournalError, match="host verifier returned no trusted proof"):
+        journal.reconcile(intent.intent_id, owner_epoch=2)
+    assert journal.get(intent.intent_id).state is EffectState.UNCERTAIN

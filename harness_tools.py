@@ -18,6 +18,10 @@ import time
 from pathlib import Path
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
+from sonder_runtime.adapters.git_mutation_guard import (
+    ConcurrentGitMutation,
+    guard_git_mutation,
+)
 import sonder_logging
 import sonder_paths
 import unsafe_lab
@@ -731,6 +735,34 @@ def dependency_audit(root=".", timeout=60, extra_roots=""):
 # Git mutations
 # ---------------------------------------------------------------------------
 
+def _guarded_git_mutation(operation):
+    """Serialize host-driven Git mutations per working tree (Issue #510).
+
+    A refused mutation returns the same ``{"ok": False, "error": ...}`` shape
+    as any other Git failure, plus guard fields, and never runs Git.
+    """
+    def decorate(function):
+        def guarded(root=".", *args, **kwargs):
+            extra_roots = kwargs.get("extra_roots", "")
+            try:
+                key_root = _resolve_root(root, extra_roots)
+            except Exception:
+                # Let the unguarded function report its own path error.
+                return function(root, *args, **kwargs)
+            try:
+                with guard_git_mutation(key_root, operation):
+                    return function(root, *args, **kwargs)
+            except ConcurrentGitMutation as refusal:
+                return refusal.as_result()
+        guarded.__name__ = function.__name__
+        guarded.__qualname__ = function.__qualname__
+        guarded.__doc__ = function.__doc__
+        guarded.__wrapped__ = function
+        return guarded
+    return decorate
+
+
+@_guarded_git_mutation("git_commit")
 def git_commit(root=".", message="", paths_json="[]", all_tracked=False, timeout=30, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     if not message:
@@ -755,6 +787,7 @@ def git_commit(root=".", message="", paths_json="[]", all_tracked=False, timeout
     return result
 
 
+@_guarded_git_mutation("git_branch")
 def git_branch(root=".", name="", checkout=True, base="", timeout=10, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     if not name:
@@ -770,6 +803,7 @@ def git_branch(root=".", name="", checkout=True, base="", timeout=10, extra_root
     return _run_git(root, cmd, timeout=timeout)
 
 
+@_guarded_git_mutation("git_checkout")
 def git_checkout(root=".", ref="", timeout=10, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     if not ref:
@@ -777,6 +811,7 @@ def git_checkout(root=".", ref="", timeout=10, extra_roots=""):
     return _run_git(root, ["checkout", ref], timeout=timeout)
 
 
+@_guarded_git_mutation("git_stash")
 def git_stash(root=".", action="push", message="", include_untracked=True, timeout=10, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     if action == "push":
@@ -796,6 +831,7 @@ def git_stash(root=".", action="push", message="", include_untracked=True, timeo
     return _run_git(root, cmd, timeout=timeout)
 
 
+@_guarded_git_mutation("git_tag")
 def git_tag(root=".", name="", message="", delete=False, timeout=10, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     if not name:
@@ -809,6 +845,7 @@ def git_tag(root=".", name="", message="", delete=False, timeout=10, extra_roots
     return _run_git(root, cmd, timeout=timeout)
 
 
+@_guarded_git_mutation("git_merge")
 def git_merge(root=".", branch="", no_ff=True, message="", timeout=30, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     if not branch:
@@ -822,6 +859,7 @@ def git_merge(root=".", branch="", no_ff=True, message="", timeout=30, extra_roo
     return _run_git(root, cmd, timeout=timeout)
 
 
+@_guarded_git_mutation("git_cherry_pick")
 def git_cherry_pick(root=".", commits_json="[]", timeout=30, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     try:

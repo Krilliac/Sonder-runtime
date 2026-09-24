@@ -180,23 +180,23 @@
     },
     {
       "checked": false,
-      "claim": "Agent budgets are admitted and enforced at the application boundary.",
+      "claim": "Revisions 2 and 3 still apply; additionally, when codegen_build_loop clamps a caller-supplied attempt count, its report states the requested and applied values.",
       "requirement_id": "AGENT-007",
-      "revision": 2,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Delegated workspaces are isolated and bounded by parent context.",
+      "claim": "Revision 2 delegated-workspace isolation still applies; additionally, host-driven Git mutations (harness git tools and runtime-source update/stash) are serialized per working tree; an overlapping mutation or a foreign index.lock is refused without running Git and without deleting the lock, and the refusal directs re-inspection instead of a blind retry.",
       "requirement_id": "AGENT-008",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Structured delegation validates lineage, workspace, budgets, and result evidence.",
+      "claim": "Structured delegation validates lineage, workspace, budgets, and result evidence; delegated workers also carry a durable typed execution contract: success criteria, argv verification commands, inherit/scoped/clean context policy with digest-pinned inputs or inherited-context hash, owned files distinct from task scope, and an explicit speculative-lane flag; dispatch gates owned files to the write assignment, admission rejects overlapping active ownership, and integration fails closed on contract drift.",
       "requirement_id": "AGENT-009",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -355,30 +355,30 @@
     },
     {
       "checked": false,
-      "claim": "Non-destructive.",
+      "claim": "Selective context eviction remains non-destructive while long-session continuation reads the immutable source stream through bounded pages.",
       "requirement_id": "COMPACT-001",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Source range.",
+      "claim": "Compaction and continuation retain exact durable source ranges while recovering a complete bounded session history across adapter pages.",
       "requirement_id": "COMPACT-002",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Structured retention.",
+      "claim": "Structured compaction preserves protected requirements, decisions, and failures while evicting only bulky tool output references.",
       "requirement_id": "COMPACT-003",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Validation.",
+      "claim": "Continuation refuses incomplete or tampered durable history before model assembly and archives exactly the chain-verified snapshot, so a row changed after verification cannot reach the model through a second read; legacy events above the append cap remain verifiable and reportable.",
       "requirement_id": "COMPACT-004",
-      "revision": 3,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
@@ -474,9 +474,9 @@
     },
     {
       "checked": false,
-      "claim": "Priority selection and eviction are composed through the typed context selection policy.",
+      "claim": "Live continuation reads complete canonical session history through bounded pages before applying selective tool-output eviction, preserving protected requirements and decisions.",
       "requirement_id": "CTX-003",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -502,9 +502,9 @@
     },
     {
       "checked": false,
-      "claim": "The context facade exposes bounded overflow preparation and recovery without provider calls.",
+      "claim": "Bounded continuation recovery fails closed on unavailable, non-contiguous, tampered, or over-limit history while recovering complete history across adapter pages.",
       "requirement_id": "CTX-007",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -516,9 +516,9 @@
     },
     {
       "checked": false,
-      "claim": "A bounded local Ollama probe through the live AgentLaneService path observed scoped skill refresh invalidating the application prefix while preserving provider model identity and forwarding provider cache telemetry.",
+      "claim": "Live tool-enabled agent-lane requests keep the per-turn tool selection id outside the reusable prefix, so turns of one lane and independent worker processes on the same project derive one deterministic prefix identity; a bounded two-process loopback Ollama probe observed provider-reported prompt-cache reuse through the production gateway.",
       "requirement_id": "CTX-009",
-      "revision": 6,
+      "revision": 7,
       "status": "implemented_unverified"
     },
     {
@@ -859,16 +859,16 @@
     },
     {
       "checked": false,
-      "claim": "Transport retries are bounded and fenced to loop cancellation and idempotency evidence.",
+      "claim": "Revision 2 transport-retry bounds and the revision 3 web-repeat canary still apply. The codegen no-progress guard, corrected from revision 3, stops regenerating a file only when two consecutive comparable attempts produce an identical failing outcome (sorted error lines with duplicates kept) without a score improvement. Attempts whose errors are a host placeholder, truncated output, or masked by count_unreliable reset the streak and never count toward a stall.",
       "requirement_id": "LOOP-007",
-      "revision": 2,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Live agent tools and composed process, compute, local subagent, and self-mod worker adapters persist host-owned effect intents and outcomes; checkpoint restore validates journal high-water and unresolved effects.",
+      "claim": "Corrects revisions 12 and 13 after an independent review of 3d22e670. Concurrent effects in one shared run now always commit their terminal outcome and checkpoint only the settled high-water prefix; restore accepts later effects only when every effect in the run is terminal and reports journal_high_water, so restart succeeds after verified reconciliation; reconcile clears the run-wide recovery fence once nothing is unresolved; checkpoint writes require the current unfenced owner epoch and idempotent outcome replays append no generation; checkpoint generations are bounded per run; the process-start verifier reports an attached launch as completed with the live {job_id}:{pid} receipt shape.",
       "requirement_id": "LOOP-008",
-      "revision": 4,
+      "revision": 15,
       "status": "implemented_unverified"
     },
     {
@@ -887,9 +887,9 @@
     },
     {
       "checked": false,
-      "claim": "Host-current delegated verifier results can produce immutable project-scoped positive or verified-negative observations bound to an exact check, unchanged source manifest, cleanup proofs, authenticated child worker, and durable receipt.",
+      "claim": "Corrects revisions 4-5: the first verifier-observation insert now requires the exact private producer authorization type (a duck-typed matches() stand-in was accepted before); independence is keyed by authenticated principal and scope, so one principal's child lanes cannot reach FACT; promotion reads only indexed subject-scoped rows and a persisted verified negative demotes before any completeness bound; the managed boundary decision is sealed and resolved once; certified_after_return is refused explicitly; learning refusals carry a visible reason and cannot alter work outcomes.",
       "requirement_id": "MEM-003",
-      "revision": 4,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
@@ -1335,9 +1335,9 @@
     },
     {
       "checked": false,
-      "claim": "A reopened application can verify and deterministically replay a live captured turn; capture failure is fail-closed.",
+      "claim": "A long-session continuation can reopen and recover complete durable history across adapter pages from one read snapshot, including under the production default compaction wiring and with legacy events larger than the current append cap.",
       "requirement_id": "SESSION-005",
-      "revision": 2,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -1349,9 +1349,9 @@
     },
     {
       "checked": false,
-      "claim": "Resume and repair are exposed through the continuity boundary with fail-closed sequence verification.",
+      "claim": "Live continuation uses complete, integrity-verified durable history and leaves the lane recoverably blocked when the history cannot be proven.",
       "requirement_id": "SESSION-007",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "69f50d97e97c2adf8d36227e14e5a0d14a4d41f620c1ae7ae2a2299ccb82e198",
+    "ledger_sha256": "126ecd21479216c2abb96437f314859db25c1bb93694457204fdf95eb785ff64",
     "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
   }
 }
