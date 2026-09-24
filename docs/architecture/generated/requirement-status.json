@@ -91,9 +91,9 @@
       "verified": 0
     },
     "SEC": {
-      "checked": 0,
+      "checked": 1,
       "total": 9,
-      "verified": 0
+      "verified": 1
     },
     "SELFMOD": {
       "checked": 1,
@@ -127,13 +127,13 @@
     }
   },
   "overall": {
-    "checked": 6,
+    "checked": 7,
     "statuses": {
-      "implemented_unverified": 198,
-      "verified": 6
+      "implemented_unverified": 197,
+      "verified": 7
     },
     "total": 204,
-    "verified": 6
+    "verified": 7
   },
   "requirements": [
     {
@@ -1222,11 +1222,11 @@
       "status": "implemented_unverified"
     },
     {
-      "checked": false,
-      "claim": "Package and archive safety semantics are preserved in the packaged artifact-grounding adapter.",
+      "checked": true,
+      "claim": "Every production archive reader bounds member names, links and special files, member counts, per-entry and aggregate expansion, compression ratio, TAR header metadata, and preview scans before or while parsing, and an adversarial corpus drives each bound in the archive tools, update staging, and data-inspection readers.",
       "requirement_id": "SEC-004",
-      "revision": 2,
-      "status": "implemented_unverified"
+      "revision": 3,
+      "status": "verified"
     },
     {
       "checked": false,
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "554e2cf949786087e0c1e7e2079a9a98376c6d902335b06b98b780552311ac9d",
-    "spec_sha256": "3cb6b968be7fac6fb0293b1a787b4c18e2306debd9573aab3db1bbfa2a182915"
+    "ledger_sha256": "fb490d3f5b31e9647a6a393fee3a71a17dcbab3057b0439ce61ea2b48716992e",
+    "spec_sha256": "8279cfe6b4435ee89e097ecbaa5213e6469ea15ce541813b4448a495ea3638e3"
   }
 }
