@@ -346,7 +346,7 @@
       ]
     },
     {
-      "file_count": 331,
+      "file_count": 332,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -388,6 +388,7 @@
         "sonder_runtime/application/compaction/append_service.py",
         "sonder_runtime/application/compaction/legacy.py",
         "sonder_runtime/application/compaction/session_service.py",
+        "sonder_runtime/application/compaction_retention.py",
         "sonder_runtime/application/compute_fabric/__init__.py",
         "sonder_runtime/application/compute_fabric/artifact_spool.py",
         "sonder_runtime/application/compute_fabric/capacity.py",
