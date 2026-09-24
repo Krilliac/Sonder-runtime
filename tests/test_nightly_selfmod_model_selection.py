@@ -206,32 +206,33 @@ def test_regression_excludes_the_separate_held_out_suite(monkeypatch):
     ]
 
 
-def test_regression_partitions_cover_every_test_exactly_once():
+def test_candidate_gates_never_select_medium_integrity_tests():
     kinds = dict(nightly_selfmod._REGRESSION_PARTITIONS)
-    assert set(kinds) == {"regression", "regression_heavy", "regression_medium"}
+    assert set(kinds) == {"regression", "regression_heavy"}
+    assert nightly_selfmod.UNEVALUATED_PARTITION[0] == "regression_medium"
     for medium in (False, True):
         for heavy in (False, True):
             env = {"requires_medium_integrity": medium, "heavy_memory": heavy}
             selected = [k for k, expr in kinds.items() if eval(expr, {}, env)]
-            assert len(selected) == 1, (env, selected)
+            # Medium-integrity tests are never run against the candidate;
+            # every other test lands in exactly one gated partition.
+            assert len(selected) == (0 if medium else 1), (env, selected)
 
 
 def test_only_the_low_partition_runs_xdist(monkeypatch):
     _xdist(monkeypatch, True)
-    for kind in ("regression_heavy", "regression_medium"):
-        command = nightly_selfmod._regression_command("python", kind=kind, workers=8)
-        assert "-n" not in command
-        assert command[command.index("-m", 3) + 1] == dict(
-            nightly_selfmod._REGRESSION_PARTITIONS)[kind]
+    command = nightly_selfmod._regression_command("python", kind="regression_heavy", workers=8)
+    assert "-n" not in command
+    assert command[command.index("-m", 3) + 1] == dict(
+        nightly_selfmod._REGRESSION_PARTITIONS)["regression_heavy"]
 
 
-def test_regression_isolation_is_explicit_per_partition():
+def test_regression_isolation_never_leaves_low_integrity():
     low = nightly_selfmod._regression_isolation("regression", 6)
     assert "integrity" not in low and low["job_memory_mb"] >= 2048 * 6
     heavy = nightly_selfmod._regression_isolation("regression_heavy", 6)
     assert "integrity" not in heavy and heavy["process_memory_mb"] > 2048
-    assert nightly_selfmod._regression_isolation("regression_medium", 6) == {
-        "integrity": "medium"}
+    assert nightly_selfmod._regression_isolation("regression_medium", 6) == {}
 
 
 def test_regression_workers_are_bounded(monkeypatch):
@@ -239,6 +240,115 @@ def test_regression_workers_are_bounded(monkeypatch):
     assert nightly_selfmod._regression_workers() == 12
     monkeypatch.setenv("SONDER_SELFMOD_REGRESSION_WORKERS", "3")
     assert nightly_selfmod._regression_workers() == 3
+
+
+def test_default_workers_follow_commit_headroom(monkeypatch):
+    monkeypatch.delenv("SONDER_SELFMOD_REGRESSION_WORKERS", raising=False)
+    monkeypatch.setattr(nightly_selfmod.os, "cpu_count", lambda: 24)
+    monkeypatch.setattr(nightly_selfmod, "_commit_headroom_mb", lambda: 6 * 1024)
+    assert nightly_selfmod._regression_workers() == 1
+    monkeypatch.setattr(nightly_selfmod, "_commit_headroom_mb", lambda: 24 * 1024)
+    assert nightly_selfmod._regression_workers() == 4
+    monkeypatch.setattr(nightly_selfmod, "_commit_headroom_mb", lambda: 400 * 1024)
+    assert nightly_selfmod._regression_workers() == 8
+    monkeypatch.setattr(nightly_selfmod, "_commit_headroom_mb", lambda: None)
+    assert nightly_selfmod._regression_workers() == 2
+
+
+def _drive_to_gates(tmp_path, monkeypatch, *, mode="propose", on_gate=None, on_review=None):
+    """Run nightly_selfmod.run() to its gates with every external effect faked."""
+    workspace = tmp_path / "candidate"
+    workspace.mkdir()
+    original = "def selected(value):\n    return value\n"
+    edited = "def selected(value):\n    return value or 0\n"
+    (workspace / "reflection.py").write_text(original, encoding="utf-8")
+    calls = {"gates": [], "review": [], "approve": [], "deploy": [], "reject": [], "git": []}
+    s = nightly_selfmod.selfmod
+    monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
+    monkeypatch.setattr(s, "settings", lambda: {"enabled": True, "mode": mode})
+    monkeypatch.setattr(s, "_git_info", lambda _root: (True, "base", ""))
+    monkeypatch.setattr(nightly_selfmod, "propose_objective",
+                        lambda *_a, **_k: ("reflection.py", "Guard input.", "selected"))
+    monkeypatch.setattr(s, "create_plan", lambda *_a, **_k: {"id": "run-bind"})
+    for name in ("create_backup", "verify_backup", "prepare_workspace", "begin_testing"):
+        monkeypatch.setattr(s, name, lambda _run_id: None)
+    monkeypatch.setattr(s, "candidate_path", lambda _run_id: workspace)
+    monkeypatch.setattr(nightly_selfmod, "_ask", lambda *_a, **_k: edited)
+    monkeypatch.setattr(nightly_selfmod, "_rewrite_reply_objection", lambda _reply: None)
+    monkeypatch.setattr(nightly_selfmod, "_splice_function", lambda _o, reply, **_k: reply)
+    monkeypatch.setattr(nightly_selfmod, "_diff_objection", lambda _o, _e: None)
+    monkeypatch.setattr(s, "apply_candidate_changes", lambda _run_id, files: [
+        (workspace / rel).write_text(text, encoding="utf-8") for rel, text in files.items()])
+
+    def inspect(_run_id):
+        text = (workspace / "reflection.py").read_text(encoding="utf-8")
+        return {"diff": "diff:" + text, "changed_files": ["reflection.py"]}
+    monkeypatch.setattr(s, "inspect_diff", inspect)
+    monkeypatch.setattr(nightly_selfmod, "_test_python", lambda: "python")
+    monkeypatch.setattr(nightly_selfmod, "_ruff_command", lambda _py: None)
+    monkeypatch.setattr(nightly_selfmod, "_regression_workers", lambda: 1)
+    monkeypatch.setattr(nightly_selfmod.subprocess, "run", lambda *a, **k: type(
+        "Result", (), {"returncode": 1, "stdout": b""})())
+    monkeypatch.setattr(nightly_selfmod, "_prepare_held_out", lambda *_a: {
+        "source_paths": (), "command": ["python", "-c", "pass"], "cleanup": None,
+        "protected_paths": ()})
+
+    def gate(run_id, kind, command, **kwargs):
+        calls["gates"].append((kind, kwargs.get("isolation")))
+        if on_gate:
+            on_gate(kind, workspace)
+        return {"passed": True, "exit_code": 0}
+    monkeypatch.setattr(nightly_selfmod, "_record_candidate_test", gate)
+
+    def review(run_id, **kwargs):
+        calls["review"].append(kwargs)
+        if on_review:
+            on_review(workspace)
+        return {"phase": "reviewing"}
+    monkeypatch.setattr(s, "review", review)
+    monkeypatch.setattr(s, "approve", lambda run_id, **k: calls["approve"].append(run_id))
+    monkeypatch.setattr(s, "deploy", lambda run_id, **k: calls["deploy"].append(k))
+    monkeypatch.setattr(s, "get_run", lambda run_id: {"deployed_commit": ""})
+    monkeypatch.setattr(s, "reject", lambda run_id, reason="": calls["reject"].append(reason))
+    monkeypatch.setattr(s, "_git", lambda _ws, *args: (calls["git"].append(args), (0, "abc"))[1])
+    monkeypatch.setattr(nightly_selfmod, "_discard_workspace", lambda _run_id: None)
+    return calls
+
+
+def test_candidate_mutating_its_file_during_a_gate_is_rejected(tmp_path, monkeypatch):
+    def mutate(kind, workspace):
+        if kind == "regression":
+            (workspace / "reflection.py").write_text("def selected(value):\n    return 1\n")
+
+    calls = _drive_to_gates(tmp_path, monkeypatch, on_gate=mutate)
+    result = nightly_selfmod.run(object(), lambda _m: None, test_timeout=60, branch=True)
+
+    assert result.startswith("candidate rejected: tested bytes changed for reflection.py")
+    assert calls["review"] == [] and calls["git"] == []
+    assert calls["reject"] and "binding mismatch before review" in calls["reject"][0]
+
+
+def test_candidate_mutated_after_review_is_not_committed(tmp_path, monkeypatch):
+    def mutate(workspace):
+        (workspace / "reflection.py").write_text("def selected(value):\n    return 2\n")
+
+    calls = _drive_to_gates(tmp_path, monkeypatch, on_review=mutate)
+    result = nightly_selfmod.run(object(), lambda _m: None, test_timeout=60, branch=True)
+
+    assert "before commit" in result and calls["git"] == []
+
+
+def test_medium_tests_never_run_and_block_unattended_promotion(tmp_path, monkeypatch):
+    calls = _drive_to_gates(tmp_path, monkeypatch, mode="auto-low-risk")
+    result = nightly_selfmod.run(object(), lambda _m: None, test_timeout=60, branch=False)
+
+    kinds = [kind for kind, _ in calls["gates"]]
+    assert "regression_medium" not in kinds
+    assert all(not (iso or {}).get("integrity") for _, iso in calls["gates"])
+    assert calls["review"][0]["unevaluated"]
+    assert "regression_medium" in calls["review"][0]["unevaluated"][0]
+    assert calls["approve"] == [] and calls["deploy"] == []
+    assert "READY for review" in result and "NOT EVALUATED" in result
 
 
 def test_protected_and_missing_modules_are_not_eligible_candidates(tmp_path, monkeypatch):
@@ -676,3 +786,19 @@ def test_ast_splice_rejects_malformed_or_contract_changing_replies():
 
     assert nightly_selfmod._splice_function(original, "def sample(value):\n    if:\n") is None
     assert nightly_selfmod._splice_function(original, "def sample(other):\n    return other\n") is None
+
+
+def test_committed_digests_match_binding_for_real_git_commit(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for args in (["init", "-q"], ["config", "user.email", "t@example.invalid"],
+                 ["config", "user.name", "t"]):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    (repo / "reflection.py").write_bytes(b"def selected(value):\n    return value\n")
+    subprocess.run(["git", "add", "reflection.py"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "c"], cwd=repo, check=True, capture_output=True)
+    binding = nightly_selfmod._candidate_binding(repo, ["reflection.py"], "d")
+    assert nightly_selfmod._committed_digests(repo, binding["files"]) == binding["files"]
+    (repo / "reflection.py").write_bytes(b"changed\n")
+    changed = nightly_selfmod._candidate_binding(repo, ["reflection.py"], "d")
+    assert nightly_selfmod._committed_digests(repo, changed["files"]) != changed["files"]

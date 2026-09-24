@@ -8,7 +8,7 @@ store had grown by 4213 interactions and the code had not changed by one line.
 Meanwhile the machinery to change it already existed and was simply never
 called. `selfmod` creates a detached Git worktree, applies a candidate there,
 runs real test commands against it, and on deploy copies the files back and
-records `git commit -m "selfmod: <objective>"`, with an immutable backup and a
+records `git commit -m "selfmod: <objective>"`, with a tamper-evident backup and a
 rollback path. Five runs had been created by hand; none ever deployed. One of
 them -- "permission_rules.load silently degrades to default rules" -- named a
 real defect that a human later fixed independently, which is the clearest
@@ -31,13 +31,31 @@ WHY THERE ARE TWO TEST GATES
   Measured 2026-08-08: an agent lane produced four plausible fixes whose tests
   had never been executed, and running them revealed that one broke an
   architecture rule. The regression gate covers the repository suite except
-  for a target-specific held-out suite. The held-out gate runs a tamper-
-  evident snapshot outside the candidate's editable files. On Windows, both
-  candidate checks run through the low-integrity supervisor and the evaluator
-  files remain medium-integrity, so a candidate cannot rewrite or read the
-  evaluator truth. On unsupported hosts, the isolation helper fails closed
-  for the unattended check. If no matching suite exists, the evaluator is
-  unavailable and the candidate is rejected.
+  for a target-specific held-out suite and the tests that cannot run below
+  medium integrity. The held-out gate runs a tamper-evident snapshot outside
+  the candidate's editable files.
+
+WHAT THE GATES DO AND DO NOT PROVE
+  - Every verdict is the exit code of a process that runs candidate code.
+    A candidate that controls what pytest imports can influence that exit
+    code; the held-out snapshot and the digest manifest make tampering with
+    the evaluator's own files evident, not impossible to attempt.
+  - On Windows, every candidate check runs through the low-integrity
+    supervisor inside a Job. Low integrity bounds WRITES: the candidate cannot
+    modify medium-integrity files (the evaluator snapshot, the candidate
+    workspace, the selfmod database, the live checkout, .git). It does NOT
+    bound reads or network access, so confidentiality of anything the user
+    can read is not covered.
+  - Tests marked requires_medium_integrity (Git for Windows' MSYS2 cannot
+    start below medium integrity) are NOT run against the candidate. They are
+    recorded as not evaluated, and a run with unevaluated tests can never be
+    approved or deployed unattended; it stops for human review.
+  - The parent records SHA-256 digests of every changed file and of the diff
+    before the first gate and re-verifies them before review, before the
+    branch commit and before deployment. A mismatch rejects the candidate.
+  - On unsupported hosts the isolation helper fails closed for the
+    unattended check. If no matching held-out suite exists, the evaluator is
+    unavailable and the candidate is rejected.
 """
 from __future__ import annotations
 
@@ -183,34 +201,78 @@ def _ruff_command(py: str) -> list[str] | None:
     return [py, "-m", "ruff"] if probe.returncode == 0 else None
 
 
-# The regression suite is partitioned by marker into three separately
-# recorded, all-required gates. Nothing is skipped: every collected test lands
-# in exactly one partition.
+# The regression suite is partitioned by marker. Both gated partitions run
+# candidate code only at low integrity and are required:
 #   regression         low integrity, parallel workers inside one Job
 #   regression_heavy   low integrity, one process, larger Job memory limit
-#   regression_medium  medium integrity (MSYS2 cannot start below it); NOT
-#                      write-isolated from the evaluator -- see
-#                      docs/architecture/evidence/SELFMOD-002-LOW-INTEGRITY-BASELINE-2026-09-23.md
+# Tests marked requires_medium_integrity are deliberately NOT run against the
+# candidate: running candidate code at medium integrity would let it rewrite
+# its own tested bytes, the selfmod database, .git hooks or the live
+# checkout. They are recorded as not evaluated and block unattended
+# promotion (see UNEVALUATED_PARTITION and run()).
 _MEDIUM_MARK = "requires_medium_integrity"
 _HEAVY_MARK = "heavy_memory"
 _REGRESSION_PARTITIONS = (
     ("regression", "not %s and not %s" % (_MEDIUM_MARK, _HEAVY_MARK)),
     ("regression_heavy", "%s and not %s" % (_HEAVY_MARK, _MEDIUM_MARK)),
-    ("regression_medium", _MEDIUM_MARK),
 )
 REGRESSION_KINDS = tuple(kind for kind, _ in _REGRESSION_PARTITIONS)
+UNEVALUATED_PARTITION = (
+    "regression_medium",
+    "tests marked %s were not run against the candidate (they need medium "
+    "integrity, which would give candidate code write access to the "
+    "evaluator); requires human review" % _MEDIUM_MARK,
+)
 # Every partition is required. A partition whose marked tests are missing
 # exits 5 (no tests collected) and rejects the candidate: removing the marked
 # tests is not a way to shrink the gate. Tests whose optional dependencies are
 # absent are still collected and reported as skips.
 
 
+_WORKER_COMMIT_MB = 4096  # per-worker Job process limit, see _regression_isolation
+
+
+def _commit_headroom_mb() -> int | None:
+    """Available commit charge in MiB (Windows), or None when unknown."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+
+        class _MemoryStatus(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = _MemoryStatus()
+        status.dwLength = ctypes.sizeof(_MemoryStatus)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None
+        return int(status.ullAvailPageFile // (1024 * 1024))
+    except Exception:
+        return None
+
+
 def _regression_workers() -> int:
-    """Parallel workers for the low regression partition (bounded)."""
+    """Parallel workers for the low regression partition (bounded).
+
+    The default is sized from available commit charge, not a fixed count:
+    each worker may reach its 4 GiB Job process limit, and a quarter of the
+    headroom is reserved for the rest of the host. Unknown headroom falls
+    back to two workers.
+    """
     raw = os.environ.get("SONDER_SELFMOD_REGRESSION_WORKERS", "").strip()
     if raw.isdigit() and int(raw) > 0:
         return min(int(raw), 12)
-    return max(1, min(8, (os.cpu_count() or 2) // 2))
+    cpu_cap = max(1, min(8, (os.cpu_count() or 2) // 2))
+    headroom = _commit_headroom_mb()
+    if headroom is None:
+        return min(2, cpu_cap)
+    return max(1, min(cpu_cap, int(headroom * 0.75) // _WORKER_COMMIT_MB))
 
 
 def _regression_isolation(kind: str, workers: int) -> dict:
@@ -226,8 +288,6 @@ def _regression_isolation(kind: str, workers: int) -> dict:
                 "active_processes": min(128, 32 + 8 * workers)}
     if kind == "regression_heavy":
         return {"process_memory_mb": 6144, "job_memory_mb": 8192}
-    if kind == "regression_medium":
-        return {"integrity": "medium"}
     return {}
 
 
@@ -1142,6 +1202,57 @@ def propose_objective(
     return None
 
 
+def _candidate_binding(workspace: Path, changed_files, diff_text: str) -> dict:
+    """SHA-256 of every changed candidate file and of the diff text."""
+    files = {}
+    for rel in sorted(str(item) for item in changed_files):
+        path = Path(workspace) / rel
+        files[rel] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+    return {
+        "files": files,
+        "diff_sha256": hashlib.sha256(str(diff_text).encode("utf-8", "surrogatepass")).hexdigest(),
+    }
+
+
+def _binding_mismatch(run_id, workspace: Path, binding: dict) -> str | None:
+    """Re-derive the binding from disk; describe any difference."""
+    try:
+        diff = selfmod.inspect_diff(run_id)
+        current = _candidate_binding(workspace, diff.get("changed_files") or (), diff.get("diff") or "")
+    except Exception as exc:
+        return "binding could not be re-derived (%s)" % type(exc).__name__
+    if current == binding:
+        return None
+    changed = sorted(
+        rel for rel in set(current["files"]) | set(binding["files"])
+        if current["files"].get(rel) != binding["files"].get(rel)
+    )
+    if changed:
+        return "tested bytes changed for %s" % ", ".join(changed)
+    return "diff changed after testing"
+
+
+def _committed_digests(workspace: Path, expected_files: dict) -> dict:
+    """SHA-256 of each bound file as recorded in the candidate's HEAD commit."""
+    result = {}
+    for rel in expected_files:
+        completed = subprocess.run(
+            ["git", "show", "HEAD:%s" % rel], cwd=str(workspace),
+            capture_output=True, stdin=subprocess.DEVNULL, check=False, timeout=30,
+        )
+        result[rel] = hashlib.sha256(completed.stdout).hexdigest() if completed.returncode == 0 else None
+    return result
+
+
+def _reject_unbound(run_id, stage: str, mismatch: str) -> str:
+    """Fail closed when promoted bytes are not the tested bytes."""
+    try:
+        selfmod.reject(run_id, reason="binding mismatch %s: %s" % (stage, mismatch))
+    finally:
+        _discard_workspace(run_id)
+    return "candidate rejected: %s (%s)" % (mismatch, stage)
+
+
 def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     """Drive one selfmod lifecycle.
 
@@ -1195,7 +1306,7 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
         criteria=["the full test suite passes", "Python syntax compiles"],
         risk="low",
         expected_benefit="nightly autonomous improvement",
-        rollback_plan="selfmod rollback restores the immutable backup",
+        rollback_plan="selfmod rollback restores the best-effort backup",
     )
     run_id = run_id["id"] if isinstance(run_id, dict) else run_id
     log("  run: %s  target: %s" % (run_id, target))
@@ -1267,6 +1378,9 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
         return "candidate made no change"
 
     selfmod.begin_testing(run_id)
+    # Bind the bytes that will be tested to the bytes that may be promoted.
+    # Computed here, in the parent, before any candidate process runs.
+    binding = _candidate_binding(workspace, diff.get("changed_files") or (), diff.get("diff") or "")
     py = _test_python()
     results = []
     # The required kinds are "syntax" and "regression" for this unattended
@@ -1282,15 +1396,11 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     held_out = _prepare_held_out(target, workspace, test_timeout)
     workers = _regression_workers()
     for kind in REGRESSION_KINDS:
-        if kind == "regression_medium":
-            continue  # runs last; see below
         checks.append((kind, _regression_command(
             py, ignore_paths=held_out["source_paths"], kind=kind, workers=workers)))
     checks.append(("held_out", held_out["command"]))
-    # The medium partition is the only non-write-isolated gate, so it runs
-    # after every low-integrity verdict (including held-out) is recorded.
-    checks.append(("regression_medium", _regression_command(
-        py, ignore_paths=held_out["source_paths"], kind="regression_medium", workers=1)))
+    unevaluated_kind, unevaluated_reason = UNEVALUATED_PARTITION
+    log("  %s: NOT EVALUATED -- %s" % (unevaluated_kind, unevaluated_reason))
     try:
         for kind, command in checks:
             # cwd is deliberately NOT passed: the default is the candidate
@@ -1324,7 +1434,13 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     # were dead code for the branch deliverable. (They fired on nothing real
     # only because two of review's checks were also structurally unsatisfiable,
     # both fixed in selfmod.py alongside this.)
-    reviewed = selfmod.review(run_id, require_kinds={"syntax", "held_out", *REGRESSION_KINDS})
+    mismatch = _binding_mismatch(run_id, workspace, binding)
+    if mismatch:
+        return _reject_unbound(run_id, "before review", mismatch)
+    reviewed = selfmod.review(
+        run_id, require_kinds={"syntax", "held_out", *REGRESSION_KINDS},
+        unevaluated=("%s: %s" % UNEVALUATED_PARTITION,),
+    )
     # A PASS lands on reviewing and may auto-advance to approved under
     # auto-low-risk; a FAIL lands on rejected/restored with last_error set.
     # Key on the failure states, not one success phase -- an earlier version
@@ -1344,6 +1460,9 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
         # deleted without touching anything. `deploy` remains the path that
         # actually installs a change; this path only makes one reviewable.
         name = "selfmod/%s" % run_id
+        mismatch = _binding_mismatch(run_id, workspace, binding)
+        if mismatch:
+            return _reject_unbound(run_id, "before commit", mismatch)
         code, out = selfmod._git(workspace, "checkout", "-B", name)
         if code:
             return "candidate tested but branch checkout failed: %s" % out[:160]
@@ -1354,16 +1473,28 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
             workspace, "commit", "-m", "selfmod: %s" % objective[:100])
         if code:
             return "candidate tested but commit failed: %s" % out[:160]
+        committed = _committed_digests(workspace, binding["files"])
+        if committed != binding["files"]:
+            return ("candidate rejected: committed bytes differ from tested bytes "
+                    "on %s; branch %s must not be used" % (name, name))
         _, sha = selfmod._git(workspace, "rev-parse", "--short", "HEAD")
-        return "COMMITTED %s to %s (%s) -- review: git log -p %s" % (
-            sha.strip(), name, target, name)
+        return ("COMMITTED %s to %s (%s) -- %s NOT EVALUATED, human review "
+                "required: git log -p %s" % (sha.strip(), name, target,
+                                             unevaluated_kind, name))
 
-    if mode != "auto-low-risk":
-        return ("candidate READY for review: %s -- %s | approve with "
-                "/selfmod approve %s" % (run_id, target, run_id))
+    # Unattended promotion requires every partition to have been evaluated.
+    # The medium-integrity partition never is, so this stage stops for a
+    # human regardless of mode.
+    if mode != "auto-low-risk" or unevaluated_kind:
+        return ("candidate READY for review: %s -- %s | %s NOT EVALUATED | "
+                "approve with /selfmod approve %s" % (
+                    run_id, target, unevaluated_kind, run_id))
 
+    mismatch = _binding_mismatch(run_id, workspace, binding)
+    if mismatch:
+        return _reject_unbound(run_id, "before deploy", mismatch)
     selfmod.approve(run_id, approver="nightly")
-    selfmod.deploy(run_id)
+    selfmod.deploy(run_id, expected_digests=binding["files"])
     run = selfmod.get_run(run_id)
     return "DEPLOYED %s to %s (commit %s)" % (
         run_id, target, (run.get("deployed_commit") or "")[:10] or "none")

@@ -48,3 +48,37 @@ def test_nightly_candidate_helper_selects_low_integrity_explicitly(monkeypatch):
         "run-1", "regression", ["python", "-V"], timeout=10,
     )
     assert captured["low_integrity"] is True
+
+
+def test_deploy_refuses_bytes_that_differ_from_tested_digests(monkeypatch, tmp_path):
+    import contextlib
+    import hashlib
+
+    import selfmod
+
+    root, workspace = tmp_path / "root", tmp_path / "workspace"
+    root.mkdir()
+    workspace.mkdir()
+    (root / "reflection.py").write_text("old\n", encoding="utf-8")
+    (workspace / "reflection.py").write_text("tested\n", encoding="utf-8")
+    tested = {"reflection.py": hashlib.sha256(b"tested\n").hexdigest()}
+    # The candidate rewrote its file after the gates ran.
+    (workspace / "reflection.py").write_text("swapped\n", encoding="utf-8")
+    copies, phases = [], []
+    run = {"phase": "approved", "repository_root": str(root), "files": ["reflection.py"]}
+    monkeypatch.setattr(selfmod, "get_run", lambda _run_id: dict(run))
+    monkeypatch.setattr(selfmod, "deployment_lock", lambda _run_id: contextlib.nullcontext("owner"))
+    monkeypatch.setattr(selfmod, "verify_backup", lambda _run_id: None)
+    monkeypatch.setattr(selfmod, "_current_source_matches", lambda _run: (True, ""))
+    monkeypatch.setattr(selfmod, "inspect_diff", lambda _run_id: {"changed_files": ["reflection.py"]})
+    monkeypatch.setattr(selfmod, "_renew_deployment_lock", lambda _owner: None)
+    monkeypatch.setattr(selfmod, "candidate_path", lambda _run_id: workspace)
+    monkeypatch.setattr(selfmod, "_atomic_copy", lambda *a, **k: copies.append(a))
+    monkeypatch.setattr(selfmod, "_phase", lambda *a, **k: phases.append(a))
+    monkeypatch.setattr(selfmod, "restore", lambda *a, **k: None)
+
+    import pytest
+    with pytest.raises(RuntimeError, match="differ from tested bytes"):
+        selfmod.deploy("run-1", expected_digests=tested)
+    assert copies == []
+    assert (root / "reflection.py").read_text(encoding="utf-8") == "old\n"

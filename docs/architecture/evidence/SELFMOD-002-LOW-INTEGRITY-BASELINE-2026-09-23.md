@@ -93,22 +93,33 @@ pre-create that directory with a low label. That would let a low candidate
 plant named objects in the directory that the user's own medium-integrity
 MSYS2 processes (for example `git`) share. I rejected that approach.
 
-**Decision.** The 24 affected tests carry `@pytest.mark.requires_medium_integrity`
-and run in a separate required gate, `regression_medium`:
+**Decision (revised after the security review of `cb786816`).** The 24
+affected tests carry `@pytest.mark.requires_medium_integrity` and are **not
+run against the candidate at all** in the unattended gate.
 
-- It runs at medium integrity, inside the same Job, with the same privilege
-  stripping, allowlisted environment and protected-file digests.
-- **It is not write-isolated.** Candidate code imported by those tests can
-  write anything the user can, including evaluator state.
-- It runs last, after every low-integrity verdict (including held-out) has
-  been recorded.
-- Its recorded output carries `SELFMOD ISOLATION: {"integrity": "medium", ...}`.
+An interim design (`cb786816`) ran them against the candidate at medium
+integrity in a `regression_medium` gate. That was unsafe and has been
+removed. Medium-integrity candidate code could:
 
-This is a documented weakening of SELFMOD-002 for 24 of 16,587 tests. It is
-the reason SELFMOD-002 stays `implemented_unverified`.
+- rewrite its own tested file after the gates passed;
+- write the selfmod database;
+- plant `.git` hooks or refs that the nightly `git commit` then executes;
+- modify the live checkout or the scheduled task.
 
-`tests/test_selfmod_low_integrity.py::test_git_bash_needs_medium_integrity`
-pins this boundary.
+A Job object does not contain processes that it starts through WMI or the
+Task Scheduler. Most candidate modules are reachable from those tests
+(`tests/conftest.py` imports `server`), so "only candidates that do not touch
+imported modules" is not a meaningful restriction.
+
+The nightly stage now records these tests as `regression_medium: NOT
+EVALUATED -- requires human review`. `selfmod.review(..., unevaluated=...)`
+never auto-approves a run that has unevaluated checks, and the nightly stage
+never approves or deploys such a run unattended. In branch mode it still
+commits to a local, never-pushed `selfmod/<run-id>` branch for human review.
+The supervisor no longer has a medium-integrity mode.
+
+`tests/test_selfmod_low_integrity.py::test_git_bash_cannot_start_at_low_integrity`
+pins the OS boundary.
 
 ### Job memory
 
@@ -194,3 +205,46 @@ The one extra skip in the heavy and medium partitions is the module-level
 
 The low partition took 1,635 s with 2 workers, so the 900-second nightly cap
 is still not met at this worker count.
+
+## Security review fix (BLOCK on `cb786816`)
+
+The fixes, each covered by tests that failed against `cb786816`'s source and
+pass now (10 new tests, red before and green after):
+
+- **No candidate code at medium integrity.** `requires_medium_integrity`
+  tests are excluded from both candidate partitions and recorded as not
+  evaluated. Promotion of any run with unevaluated checks is blocked. The
+  `integrity` parameter and the medium token were removed from
+  `run_isolated()`.
+- **Tested bytes are bound to promoted bytes.** Before the first gate, the
+  parent records the SHA-256 of every changed file and of the diff. It
+  re-derives both from disk before review, before the branch commit (and
+  compares the committed blobs afterwards), and before deployment.
+  `selfmod.deploy(..., expected_digests=...)` checks the candidate bytes
+  before any copy and the installed bytes after it. Any mismatch fails
+  closed.
+- **Short scratch root.** The work directory lives under a short user-owned
+  root (`%USERPROFILE%\.sl`, or `SONDER_SELFMOD_SCRATCH_ROOT`) and is refused
+  above 48 characters. This addresses the `ERROR_DIRECTORY` (267) failures
+  from deep pytest temp paths.
+- **Worker count from commit headroom.** The default xdist worker count is
+  sized from available commit charge (4 GiB per worker, keeping 25% in
+  reserve) instead of a fixed 8.
+
+### What the gates still do not prove
+
+- Every verdict is the exit code of a process that runs candidate code. The
+  held-out snapshot and digest manifest make evaluator-file tampering
+  evident; they do not stop a candidate from trying to influence its own
+  low-integrity pytest run.
+- Low integrity bounds writes to medium-integrity objects. It does **not**
+  bound reads or network access, so the confidentiality of anything the user
+  can read is not covered.
+- 24 tests are not evaluated against any unattended candidate. So no
+  unattended candidate can be deployed without a human while those tests
+  exist.
+
+The full-baseline numbers above were measured at `1eb3ee25`. Because the
+medium partition no longer runs against the candidate, its "24 passed" row
+describes the trusted checkout only. It is not candidate evidence.
+

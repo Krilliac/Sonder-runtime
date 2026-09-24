@@ -1,7 +1,7 @@
 """Host-controlled, auditable self-improvement lifecycle.
 
 Candidate code never calls acceptance or deployment primitives directly. This
-module owns state transitions, immutable backups, deterministic checks, locks,
+module owns state transitions, tamper-evident backups, deterministic checks, locks,
 deployment, and rollback. It is stdlib-only so recovery remains available when
 the rest of Sonder cannot import.
 """
@@ -447,7 +447,7 @@ def create_plan(
               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (run_id, objective, problem or objective, _json(ev), _json(normalized),
              _json(acceptance), classification, expected_benefit or "bounded reliability improvement",
-             rollback_plan or "restore immutable backup bundle", str(root), phase, config["mode"],
+             rollback_plan or "restore tamper-evident backup bundle", str(root), phase, config["mode"],
              commit, git_status, fingerprint, int(config["mode"] != "auto-low-risk" or classification != "low"),
              int(bool(maintenance_authorized)), now, now, _json(limits), _json(_test_inventory(root))),
         )
@@ -576,7 +576,7 @@ def create_backup(run_id):
                 (run_id, record["path"], int(record["existed_before"]), record["sha256_before"],
                  record["size_before"], record["mode_before"], record["backup_path"], record["sha256_backup"]),
             )
-    updated = _phase(run_id, {"proposed"}, "backed_up", "backup", "immutable backup verified", backup_manifest=str(manifest_path))
+    updated = _phase(run_id, {"proposed"}, "backed_up", "backup", "tamper-evident backup verified", backup_manifest=str(manifest_path))
     verify_backup(run_id)
     return updated
 
@@ -1037,7 +1037,14 @@ def _backup_rehearsal(run_id):
     return True
 
 
-def review(run_id, *, require_kinds=None):
+def review(run_id, *, require_kinds=None, unevaluated=()):
+    """Deterministic acceptance review.
+
+    ``unevaluated`` names checks the caller deliberately did not run against
+    the candidate. A run with any unevaluated check can pass review but is
+    never auto-approved: it stops at ``reviewing`` for a human.
+    """
+    unevaluated = tuple(str(item)[:300] for item in (unevaluated or ()))
     run = get_run(run_id)
     if run["phase"] != "testing":
         raise RuntimeError("review requires testing phase")
@@ -1089,14 +1096,18 @@ def review(run_id, *, require_kinds=None):
     if not _backup_rehearsal(run_id):
         failures.append("rollback rehearsal failed")
     target = "rejected" if failures else "reviewing"
+    passed_note = "deterministic acceptance checks passed"
+    if unevaluated:
+        passed_note += "; NOT EVALUATED (human review required): " + "; ".join(unevaluated)
     updated = _phase(
         run_id, {"testing"}, target, "review",
-        "; ".join(failures) if failures else "deterministic acceptance checks passed",
+        "; ".join(failures) if failures else passed_note[:1000],
         test_inventory_after=_json(after_inventory), last_error="; ".join(failures),
     )
     if failures:
         restore(run_id, from_candidate_only=True)
-    elif updated["mode"] == "auto-low-risk" and updated["risk"] == "low" and not updated["approval_required"]:
+    elif (updated["mode"] == "auto-low-risk" and updated["risk"] == "low"
+          and not updated["approval_required"] and not unevaluated):
         approve(run_id, approver="host:auto-low-risk")
     return get_run(run_id)
 
@@ -1488,7 +1499,26 @@ def _verify_deployed_rollback(run_id, root, timeout):
     return ok, detail, probe, code, output, duration
 
 
-def deploy(run_id, *, health_command=None, commit=True):
+def _digest_mismatches(workspace: Path, changed_files, expected_digests) -> list:
+    """Return changed files whose candidate bytes differ from ``expected_digests``."""
+    expected = {str(key): value for key, value in dict(expected_digests).items()}
+    names = set(str(item) for item in changed_files) | set(expected)
+    mismatched = []
+    for rel in sorted(names):
+        path = Path(workspace) / rel
+        actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+        if rel not in expected or actual != expected[rel]:
+            mismatched.append(rel)
+    return mismatched
+
+
+def deploy(run_id, *, health_command=None, commit=True, expected_digests=None):
+    """Install an approved candidate.
+
+    ``expected_digests`` binds promotion to the bytes that were tested: the
+    SHA-256 of every changed file is re-checked immediately before any copy
+    and again on the installed bytes; any mismatch fails closed.
+    """
     run = get_run(run_id)
     if run["phase"] != "approved":
         raise RuntimeError("deployment requires explicit/host approval")
@@ -1502,6 +1532,12 @@ def deploy(run_id, *, health_command=None, commit=True):
         if set(diff["changed_files"]) - set(run["files"]):
             raise RuntimeError("candidate diff no longer matches approved scope")
         root, workspace = Path(run["repository_root"]), candidate_path(run_id)
+        if expected_digests is not None:
+            mismatched = _digest_mismatches(workspace, diff["changed_files"], expected_digests)
+            if mismatched:
+                raise RuntimeError(
+                    "candidate bytes differ from tested bytes: %s" % ", ".join(mismatched)
+                )
         try:
             for rel in diff["changed_files"]:
                 source, target = workspace / rel, root / rel
@@ -1512,6 +1548,12 @@ def deploy(run_id, *, health_command=None, commit=True):
                 elif target.exists():
                     target.unlink()
                     _remove_bytecode_cache(target)
+            if expected_digests is not None:
+                mismatched = _digest_mismatches(root, diff["changed_files"], expected_digests)
+                if mismatched:
+                    raise RuntimeError(
+                        "installed bytes differ from tested bytes: %s" % ", ".join(mismatched)
+                    )
             deployed_commit = ""
             git_mode, _, _ = _git_info(root)
             if git_mode and commit and not run["git_status_start"].strip():
