@@ -87,12 +87,93 @@ class EffectOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class ReconciliationProof:
+    """Host-verifier result bound to the exact external effect identity.
+
+    The journal accepts this value only from a verifier registered by trusted
+    host composition.  Free-form caller text is deliberately absent: the
+    verifier must return the operation, receipt, and outcome digest it
+    obtained from the external system.
+    """
+
+    intent_id: str
+    operation_id: str
+    receipt_key: str
+    outcome_digest: str
+    state: EffectState
+    verifier_id: str
+    external_reference: str
+
+    def __post_init__(self) -> None:
+        if self.state not in {EffectState.COMPLETED, EffectState.FAILED}:
+            raise EffectJournalError("reconciliation proof must be definitive")
+        for name in (
+            "intent_id", "operation_id", "receipt_key", "outcome_digest",
+            "verifier_id", "external_reference",
+        ):
+            if not isinstance(getattr(self, name), str) or not getattr(self, name).strip():
+                raise EffectJournalError(f"reconciliation proof {name} is required")
+
+
+class EffectReconciliationVerifier(Protocol):
+    """Host-owned verifier for one explicitly supported operation family."""
+
+    verifier_id: str
+    operation_ids: frozenset[str]
+
+    def verify(self, intent: EffectIntent) -> ReconciliationProof | None: ...
+
+
+@dataclass(frozen=True, slots=True)
 class RecoveryDecision:
     run_id: str
     action: str
     intent_ids: tuple[str, ...] = ()
     high_water: int = 0
     detail: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class EffectJournalPage:
+    """Read-only, bounded view of one run's journal after a checkpoint position.
+
+    ``records`` holds the intents with ``sequence > after_sequence`` in
+    sequence order (optionally only one worker's), at most ``limit`` of them.
+    ``high_water`` (the run's maximum sequence) and ``settled_high_water``
+    (see ``EffectJournalReader.settled_high_water``) are read in the same
+    snapshot as ``records`` and always cover the whole run, not the page.
+    ``truncated`` is true when more matching records exist; the caller must
+    page with ``after_sequence=records[-1].sequence`` before concluding
+    anything about the remainder.
+    """
+
+    run_id: str
+    after_sequence: int
+    records: tuple[EffectIntent, ...]
+    high_water: int
+    settled_high_water: int
+    truncated: bool
+
+    @property
+    def unresolved(self) -> tuple[EffectIntent, ...]:
+        """Records in this page with no definitive outcome (intent/uncertain)."""
+        return tuple(
+            record for record in self.records
+            if record.state in {EffectState.INTENT, EffectState.UNCERTAIN}
+        )
+
+
+class EffectJournalReader(Protocol):
+    """Read-only queries for binding a checkpoint to a journal position.
+
+    Neither method writes, claims ownership, or changes a recovery fence.
+    """
+
+    def settled_high_water(self, run_id: str) -> int: ...
+    def effects_since(
+        self, run_id: str, after_sequence: int, *, limit: int = 100,
+        worker_id: str | None = None,
+    ) -> EffectJournalPage: ...
 
 
 class EffectJournal(Protocol):
@@ -102,6 +183,15 @@ class EffectJournal(Protocol):
     def high_water(self, run_id: str) -> int: ...
     def recover(self, run_id: str, *, live_workers: Mapping[str, int], max_records: int = 100) -> RecoveryDecision: ...
     def validate_checkpoint(self, run_id: str, high_water: int) -> None: ...
+    def append_checkpoint(
+        self, run_id: str, state: object, *, worker_id: str, owner_epoch: int,
+    ) -> Mapping[str, object]: ...
+    def restore_checkpoint(self, run_id: str) -> Mapping[str, object] | None: ...
+    def claim_owner(self, run_id: str, worker_id: str, owner_epoch: int) -> None: ...
+    def outcome_and_checkpoint(
+        self, outcome: EffectOutcome, state: object,
+    ) -> Mapping[str, object] | None: ...
+    def reconcile(self, intent_id: str, *, owner_epoch: int) -> EffectIntent: ...
 
 
 @dataclass
@@ -160,5 +250,7 @@ def bound(binding: JournalBinding) -> Iterator[JournalBinding]:
         _CURRENT.reset(token)
 
 
-__all__ = ["EffectIntent", "EffectJournal", "EffectJournalError", "EffectOutcome",
-           "EffectState", "JournalBinding", "RecoveryDecision", "bound", "current"]
+__all__ = ["EffectIntent", "EffectJournal", "EffectJournalError", "EffectJournalPage",
+           "EffectJournalReader", "EffectOutcome",
+           "EffectReconciliationVerifier", "EffectState", "JournalBinding",
+           "ReconciliationProof", "RecoveryDecision", "bound", "current"]
