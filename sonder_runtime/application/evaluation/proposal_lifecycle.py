@@ -13,6 +13,7 @@ from enum import Enum
 import hashlib
 import json
 import math
+import re
 from types import MappingProxyType
 from typing import Any, Mapping, Protocol
 
@@ -391,6 +392,7 @@ class ProposalLifecycle:
         self._results: dict[str, EvaluationResult] = {}
         self._observations: dict[str, dict[EvaluationMode, ShadowCanaryObservation]] = {}
         self._evidence: dict[str, PromotionEvidence] = {}
+        self._reproduced_failures: dict[str, dict[str, str]] = {}
 
     def create(
         self, proposal_id: str, candidate: str, baseline: str, suite: EvaluationSuite,
@@ -409,6 +411,7 @@ class ProposalLifecycle:
         )
         self._proposals[proposal_id] = proposal
         self._observations[proposal_id] = {}
+        self._reproduced_failures[proposal_id] = {}
         return proposal
 
     def get(self, proposal_id: str) -> Proposal:
@@ -425,6 +428,37 @@ class ProposalLifecycle:
         """The accepted shadow or canary observation for this proposal, if any."""
         self.get(proposal_id)
         return self._observations[proposal_id].get(mode)
+
+    def record_reproduced_failure(
+        self, proposal_id: str, failure_digest: str, source_digest: str,
+    ) -> bool:
+        """Bind a retained replay divergence to this immutable candidate.
+
+        A changed candidate needs a new proposal. Reattaching the same
+        failure is idempotent; fresh failures revoke previously built gates.
+        """
+        proposal = self.get(proposal_id)
+        if proposal.state not in {
+            ProposalState.EVALUATING, ProposalState.SHADOW, ProposalState.CANARY,
+            ProposalState.READY_FOR_PROMOTION,
+        }:
+            raise EvaluationLifecycleError("replay failures require an active evaluation or approval")
+        if not all(
+            isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)
+            for digest in (failure_digest, source_digest)
+        ):
+            raise EvaluationLifecycleError("replay failure and source digests must be SHA-256 values")
+        failures = self._reproduced_failures[proposal_id]
+        if failure_digest in failures:
+            if failures[failure_digest] != source_digest:
+                raise EvaluationLifecycleError("retained replay failure identity changed")
+            return False
+        failures[failure_digest] = source_digest
+        self._evidence.pop(proposal_id, None)
+        self._gated.pop(proposal_id, None)
+        if proposal.state is ProposalState.READY_FOR_PROMOTION:
+            self._proposals[proposal_id] = replace(proposal, state=ProposalState.REJECTED, evidence_digest="")
+        return True
 
     def _transition(self, proposal_id: str, target: ProposalState) -> Proposal:
         current = self.get(proposal_id)
@@ -471,6 +505,10 @@ class ProposalLifecycle:
         self._results[result.result_id] = result
         if result.result_id not in proposal.result_ids:
             self._proposals[proposal_id] = replace(proposal, result_ids=proposal.result_ids + (result.result_id,))
+            # Evidence binds the exact accepted result set. A late canary
+            # result must be evaluated before the proposal can be approved.
+            self._evidence.pop(proposal_id, None)
+            self._gated.pop(proposal_id, None)
         return result
 
     def record_observation(self, proposal_id: str, observation: ShadowCanaryObservation) -> ShadowCanaryObservation:
@@ -478,6 +516,8 @@ class ProposalLifecycle:
         expected = ProposalState.SHADOW if observation.mode is EvaluationMode.SHADOW else ProposalState.CANARY
         if proposal.state is not expected:
             raise EvaluationLifecycleError(f"{observation.mode.value} observation requires {expected.value} state")
+        if not set(observation.result_ids).issubset(proposal.result_ids):
+            raise EvaluationLifecycleError("observation references results not recorded for this proposal")
         previous = self._observations[proposal_id].get(observation.mode)
         if previous is not None and previous != observation:
             raise EvaluationLifecycleError("observation mode already has an immutable record")
@@ -512,11 +552,13 @@ class ProposalLifecycle:
         proposal = self.get(proposal_id)
         if not proposal.promotion_kind or self._gate is None:
             raise EvaluationLifecycleError(f"proposal {proposal_id!r} has no promotion kind to gate")
+        if type(case_regressions) is not int or case_regressions < 0:
+            raise EvaluationLifecycleError("case_regressions must be a non-negative integer")
         decision = self._gate(
             proposal.promotion_kind,
             results=self.recorded_results(proposal_id),
             baseline_pass_rate=baseline_pass_rate,
-            case_regressions=case_regressions,
+            case_regressions=case_regressions + len(self._reproduced_failures[proposal_id]),
             shadow=self._observations[proposal_id].get(EvaluationMode.SHADOW),
             canary=self._observations[proposal_id].get(EvaluationMode.CANARY),
         )
@@ -592,8 +634,11 @@ class ProposalLifecycle:
             raise EvaluationLifecycleError(
                 "ungated approval of a proposal without a promotion kind requires allow_ungated_legacy=True",
             )
+        elif self._reproduced_failures[proposal_id]:
+            raise EvaluationLifecycleError("legacy approval cannot ignore a retained replay divergence")
         evidence = self._evidence.get(proposal_id)
-        if evidence is None or evidence.digest != evidence_digest or not evidence.accepted:
+        if (evidence is None or evidence.digest != evidence_digest
+            or evidence.result_ids != proposal.result_ids or not evidence.accepted):
             raise EvaluationLifecycleError("promotion evidence is absent, stale, or rejected")
         updated = self._transition(proposal_id, ProposalState.READY_FOR_PROMOTION)
         self._proposals[proposal_id] = replace(updated, evidence_digest=evidence.digest)

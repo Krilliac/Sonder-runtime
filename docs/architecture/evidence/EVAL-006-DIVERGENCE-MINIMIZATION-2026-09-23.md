@@ -49,7 +49,10 @@ superseded by revision 5 after independent review of pull request #546.
 - `sonder_runtime/application/evaluation/service.py`:
   `earliest_divergence`, `minimize_and_retain_failure`, `retained_failures`,
   and `reproduce_retained_failure`; the store is injected through the
-  `MinimizedFailureStore` port.
+  `MinimizedFailureStore` port. A caller that supplies `proposal_id` while
+  retaining a reproduced failure also records its failure and source digests
+  against that proposal. The lifecycle then counts this known regression in
+  EVAL-007 even if the caller reports zero other case regressions.
 
 ## Evidence
 
@@ -98,6 +101,9 @@ and is recorded as CI history only; it is not a verification of EVAL-006.
   and no operator command or live replay path minimizes or retains failures.
 - No live model session was replayed; all evaluators are deterministic fakes.
   A nondeterministic evaluator is refused rather than minimized.
+- A retained failure without an explicit `proposal_id` remains a standalone
+  EVAL-006 record, not promotion evidence. There is no live caller that binds
+  recorded model sessions or automatically supplies a proposal ID.
 - Differential minimization requires the caller to supply baseline behavior;
   with only a recording, minimization is limited to the reproducing prefix.
 - Meaningfulness is whatever the caller's `DivergencePolicy` declares.

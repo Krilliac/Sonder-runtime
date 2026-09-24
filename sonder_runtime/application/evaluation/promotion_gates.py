@@ -306,11 +306,15 @@ def evaluate_promotion_gate(
     if policy.require_replay_equivalence:
         gates["replay_equivalence"] = replay_equivalent
     if policy.require_shadow:
-        gates["shadow"] = shadow is not None and shadow.mode is EvaluationMode.SHADOW and shadow.healthy
+        gates["shadow"] = (
+            shadow is not None and shadow.mode is EvaluationMode.SHADOW and shadow.healthy
+            and all(result.passed for result in results if result.mode is EvaluationMode.SHADOW)
+        )
     if policy.require_canary:
         gates["canary"] = (
             canary is not None and canary.mode is EvaluationMode.CANARY and canary.healthy
             and canary.sample_count >= policy.min_canary_samples
+            and all(result.passed for result in results if result.mode is EvaluationMode.CANARY)
         )
     reasons = tuple(f"gate_failed:{name}" for name, ok in sorted(gates.items()) if not ok)
     if not offline:
