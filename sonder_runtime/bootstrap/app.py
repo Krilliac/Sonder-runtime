@@ -162,6 +162,43 @@ PROFILES = ("workstation-local", "server-private")
 from .application_graph import Application
 
 
+def compose_memory_unit_of_work(
+    config: SonderConfig,
+    *,
+    unit_of_work_type=UnitOfWorkAdapter,
+):
+    """Compose the live memory transaction factory for one runtime config.
+
+    Authoritative fact activation is tied to the same configuration that
+    declares the local memory source and project scope.  The returned factory
+    captures those immutable startup values so every application transaction
+    uses the same source fence and scope; activation still runs inside each
+    unit-of-work enter, where legacy rows can fail closed before any write.
+    """
+    if not isinstance(config, SonderConfig):
+        raise TypeError("config must be a SonderConfig")
+    if not callable(unit_of_work_type):
+        raise TypeError("unit_of_work_type must be callable")
+    if not config.memory_replication.enabled:
+        return unit_of_work_type
+
+    from ..adapters.persistence.sqlite.authoritative_memory import (
+        SQLiteAuthoritativeFactSource,
+    )
+
+    fact_source = SQLiteAuthoritativeFactSource(
+        config.memory_replication.local_node_id,
+        project_scope=config.memory_replication.project_scope,
+    )
+
+    def memory_unit_of_work(db_path=None):
+        return unit_of_work_type(
+            db_path, authoritative_fact_source=fact_source,
+        )
+
+    return memory_unit_of_work
+
+
 
 # Compatibility name for callers that used the bootstrap-private selector.
 _build_model_gateway = build_model_gateway
@@ -279,7 +316,13 @@ def build_application(
         # peer connection until its explicit receiver or replicate_once call.
         from .memory_replication import compose_memory_replication_service
 
-        memory_replication_service = compose_memory_replication_service(config)
+        # compose_memory_unit_of_work() activates the authoritative fact
+        # source for this same scope and memory database whenever
+        # replication is enabled, so a receiver here could never land a
+        # peer fact; the service refuses to expose one.
+        memory_replication_service = compose_memory_replication_service(
+            config, authoritative_fact_scope_owned=True,
+        )
     # Keep the transitional provider behind lazy closures: composing the
     # application must not import the historical root module.
     logger.debug("resolving legacy model provider factories")
@@ -1159,21 +1202,7 @@ def build_application(
             "running_count": sum(1 for item in experiments if item.state == "running"),
         },)
 
-    memory_unit_of_work = UnitOfWorkAdapter
-    if effective_config.memory_replication.enabled:
-        from ..adapters.persistence.sqlite.authoritative_memory import (
-            SQLiteAuthoritativeFactSource,
-        )
-
-        fact_source = SQLiteAuthoritativeFactSource(
-            effective_config.memory_replication.local_node_id,
-            project_scope=effective_config.memory_replication.project_scope,
-        )
-
-        def memory_unit_of_work(db_path=None):
-            return UnitOfWorkAdapter(
-                db_path, authoritative_fact_source=fact_source,
-            )
+    memory_unit_of_work = compose_memory_unit_of_work(effective_config)
 
     memory_facade = MemoryLearningFacade(
         memory_unit_of_work,

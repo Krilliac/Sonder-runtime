@@ -35,6 +35,7 @@ _MAX_EMBEDDING = 16_384
 _SAVEPOINT = "sonder_authoritative_fact_write"
 _MAX_MIGRATION_ROWS = 1024
 _MAX_MIGRATION_BYTES = 32 * 1024 * 1024
+_EVIDENCE_PAGE_SIZE = 256
 
 
 def _insert_fact_row(connection, fact_id: str, project: str, text: str, embedding) -> None:
@@ -92,6 +93,68 @@ def _fact_payload(text: object, embedding: object, metadata: AuthoritativeFactMe
     return payload
 
 
+def _verify_scoped_journal_evidence(connection, *, source_id: str, project_scope: str) -> None:
+    """Validate journal authenticity and payload against every scoped state row."""
+    last_fact_id = ""
+    while True:
+        rows = connection.execute(
+            "SELECT state.fact_id,state.version,state.tombstoned,"
+            "fact.text,fact.embedding FROM memory_authoritative_fact_state AS state "
+            "LEFT JOIN facts AS fact ON fact.project=state.project AND fact.id=state.fact_id "
+            "WHERE state.project=? AND state.source_id=? AND state.fact_id>? "
+            "ORDER BY state.fact_id LIMIT ?",
+            (project_scope, source_id, last_fact_id, _EVIDENCE_PAGE_SIZE),
+        ).fetchall()
+        if not rows:
+            return
+        for fact_id, version, tombstoned, text, embedding in rows:
+            operation = "delete" if tombstoned else "upsert"
+            journal_rows = connection.execute(
+                "SELECT source_id,source_epoch,sequence,entity_kind,entity_id,version,"
+                "operation,project,payload_json,recorded_at,digest FROM memory_replication_log "
+                "WHERE source_id=? AND project=? AND entity_kind='fact' AND entity_id=? "
+                "AND version=? AND operation=? LIMIT 2",
+                (source_id, project_scope, fact_id, version, operation),
+            ).fetchall()
+            if len(journal_rows) != 1:
+                raise MemoryReplicationError(
+                    "missing authoritative journal evidence (missing or ambiguous)"
+                )
+            row = journal_rows[0]
+            try:
+                record = MemoryMutation.from_dict({
+                    "schema": "sonder.memory-mutation.v1",
+                    "source_id": row[0], "source_epoch": row[1], "sequence": row[2],
+                    "entity_kind": row[3], "entity_id": row[4], "version": row[5],
+                    "operation": row[6], "project": row[7],
+                    "payload": json.loads(row[8]), "recorded_at": row[9],
+                    "digest": row[10],
+                })
+            except (MemoryReplicationError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise MemoryReplicationError(
+                    "missing authoritative journal evidence (malformed)"
+                ) from exc
+            if tombstoned:
+                if text is not None or record.payload:
+                    raise MemoryReplicationError(
+                        "missing authoritative journal evidence: tombstone conflicts with fact or journal payload"
+                    )
+                continue
+            if text is None:
+                raise MemoryReplicationError(
+                    "missing authoritative journal evidence: live state has no materialized fact"
+                )
+            expected = _fact_payload(text, embedding, None)
+            if (
+                record.payload.get("text") != expected["text"]
+                or record.payload.get("embedding") != expected["embedding"]
+            ):
+                raise MemoryReplicationError(
+                    "missing authoritative journal evidence: journal payload does not match fact"
+                )
+        last_fact_id = rows[-1][0]
+
+
 @dataclass(frozen=True)
 class LegacyFactMigrationPlan:
     """A content-addressed, operator-approved legacy fact adoption plan."""
@@ -132,6 +195,18 @@ def plan_legacy_fact_migration(connection, *, source_id: str, project_scope: str
     # Reject malformed identities before showing an operator an approvable
     # digest or creating any backup in the apply path.
     SQLiteAuthoritativeFactSource(source_id, project_scope=project_scope)
+    conflicting_state = connection.execute(
+        "SELECT 1 FROM memory_authoritative_fact_state AS state "
+        "WHERE state.project=? AND state.source_id<>? LIMIT 1",
+        (project_scope, source_id),
+    ).fetchone()
+    if conflicting_state is not None:
+        raise MemoryReplicationError(
+            "legacy fact migration found conflicting authoritative ownership"
+        )
+    _verify_scoped_journal_evidence(
+        connection, source_id=source_id, project_scope=project_scope,
+    )
     total_bytes = connection.execute(
         "SELECT COALESCE(SUM(COALESCE(length(CAST(fact.id AS BLOB)), 0) + "
         "COALESCE(length(CAST(fact.project AS BLOB)), 0) + "
@@ -274,7 +349,11 @@ def migrate_legacy_facts(
                 project_scope=plan.project_scope,
             )
         connection.commit()
-    except Exception:
+    except BaseException:
+        # Treat cancellation and interpreter shutdown like any other
+        # interrupted migration.  Keeping the connection in a transaction
+        # would make an operator retry fail with a misleading idle-connection
+        # error and would leave the caller holding the write lock.
         connection.rollback()
         raise
     return len(plan.rows)
@@ -323,7 +402,10 @@ class SQLiteAuthoritativeFactSource:
             connection.execute("BEGIN IMMEDIATE")
         try:
             yield
-        except Exception:
+        except BaseException:
+            # Cancellation must release the writer lock/savepoint too.  A
+            # caller may deliberately retry on the same connection after an
+            # interrupted authoritative operation.
             if nested:
                 connection.execute("ROLLBACK TO SAVEPOINT " + _SAVEPOINT)
                 connection.execute("RELEASE SAVEPOINT " + _SAVEPOINT)
@@ -360,10 +442,30 @@ class SQLiteAuthoritativeFactSource:
             # the explicit bounded migration first; leaving the marker absent
             # keeps a failed activation restartable and avoids claiming that
             # unjournaled facts are authoritative.
+            #
+            # The full per-row journal authentication (digest, payload, and
+            # embedding comparison) is linear in the scope and would run under
+            # the writer lock on every unit of work, so it is paid only when
+            # this source first claims the scope.  Once the marker names this
+            # source, fact mutations go through this source's atomic journal
+            # path and the legacy and replication writers are fenced; each
+            # later unit of work re-checks ownership and exact journal
+            # presence with indexed anti-joins instead.
+            active = connection.execute(
+                "SELECT source_id FROM memory_authoritative_fact_activation "
+                "WHERE project_scope=?",
+                (self.project_scope,),
+            ).fetchone()
+            already_active = active is not None and active[0] == self.source_id
             self._require_scoped_facts_authoritative(
-                connection, verify_journal_evidence=True,
+                connection,
+                verify_journal_evidence=not already_active,
+                check_journal_presence=already_active,
             )
-            self._activate_in_transaction(connection)
+            if already_active:
+                self._source_cursor(connection)
+            else:
+                self._activate_in_transaction(connection)
 
     def _activate_in_transaction(self, connection) -> None:
         existing = connection.execute(
@@ -407,6 +509,7 @@ class SQLiteAuthoritativeFactSource:
 
     def _require_scoped_facts_authoritative(
         self, connection, *, verify_journal_evidence: bool = False,
+        check_journal_presence: bool = False,
     ) -> None:
         """Refuse activation over facts with no matching source evidence.
 
@@ -426,26 +529,50 @@ class SQLiteAuthoritativeFactSource:
             raise MemoryReplicationError(
                 "existing project facts require authoritative migration"
             )
-        if not verify_journal_evidence:
-            return
-        missing_evidence = connection.execute(
-            "SELECT 1 FROM facts AS fact "
-            "JOIN memory_authoritative_fact_state AS state "
-            "ON state.project=fact.project AND state.fact_id=fact.id "
-            "WHERE fact.project=? AND state.source_id=? AND state.tombstoned=0 "
-            "AND NOT EXISTS ("
-            "SELECT 1 FROM memory_replication_log AS journal "
-            "WHERE journal.source_id=state.source_id "
-            "AND journal.project=fact.project AND journal.entity_kind='fact' "
-            "AND journal.entity_id=fact.id AND journal.version=state.version "
-            "AND journal.operation='upsert'"
-            ") LIMIT 1",
+        conflicting_state = connection.execute(
+            "SELECT 1 FROM memory_authoritative_fact_state "
+            "WHERE project=? AND source_id<>? LIMIT 1",
             (self.project_scope, self.source_id),
         ).fetchone()
-        if missing_evidence is not None:
+        if conflicting_state is not None:
+            raise MemoryReplicationError(
+                "existing project facts have conflicting authoritative ownership"
+            )
+        if check_journal_presence:
+            # Bounded per-transaction invariant: every owned state row has its
+            # exact versioned upsert/delete journal record, and every live
+            # state row still has its materialized fact.
+            missing = connection.execute(
+                "SELECT 1 FROM memory_authoritative_fact_state AS state "
+                "WHERE state.project=? AND state.source_id=? AND ("
+                "NOT EXISTS (SELECT 1 FROM memory_replication_log AS journal "
+                "WHERE journal.source_id=state.source_id "
+                "AND journal.project=state.project AND journal.entity_kind='fact' "
+                "AND journal.entity_id=state.fact_id "
+                "AND journal.version=state.version "
+                "AND journal.operation=CASE WHEN state.tombstoned<>0 "
+                "THEN 'delete' ELSE 'upsert' END) "
+                "OR (state.tombstoned=0 AND NOT EXISTS (SELECT 1 FROM facts AS fact "
+                "WHERE fact.project=state.project AND fact.id=state.fact_id))"
+                ") LIMIT 1",
+                (self.project_scope, self.source_id),
+            ).fetchone()
+            if missing is not None:
+                raise MemoryReplicationError(
+                    "existing project facts require authoritative journal evidence"
+                )
+        if not verify_journal_evidence:
+            return
+        try:
+            _verify_scoped_journal_evidence(
+                connection,
+                source_id=self.source_id,
+                project_scope=self.project_scope,
+            )
+        except MemoryReplicationError as exc:
             raise MemoryReplicationError(
                 "existing project facts require authoritative journal evidence"
-            )
+            ) from exc
 
     def _record(
         self,

@@ -438,10 +438,12 @@ def test_serve_main_uses_the_owned_service_before_listener_bind(tmp_path, monkey
     monkeypatch.setattr(serve.sonder_lifecycle, "get", lambda: lifecycle)
     monkeypatch.setattr(serve.server, "runtime_source_update_status", lambda refresh=False: "ok")
     try:
-        serve.main(_config(tmp_path), _server_factory=FakeServer)
+        serve.main(_config(tmp_path, receiver_enabled=False), _server_factory=FakeServer)
         assert observed["service"] is not None
         assert observed["service"].status()["started"] is True
-        assert observed["receiver"] is not None
+        # The live graph owns the authoritative fact scope, so it never
+        # exposes a receiver (see test_authoritative_live_fences.py).
+        assert observed["receiver"] is None
         assert observed["service"].status()["closed"] is True
     finally:
         bootstrap_app.reset_for_tests()
@@ -516,7 +518,7 @@ def test_serve_main_failure_detaches_routes_and_closes_the_default_graph(
         }[failure]
         with pytest.raises(error):
             serve.main(
-                _config(tmp_path),
+                _config(tmp_path, receiver_enabled=False),
                 _server_factory=refused_factory,
                 _after_configure=(
                     (lambda _application: (_ for _ in ()).throw(RuntimeError("handoff refused")))
@@ -574,7 +576,7 @@ def test_serve_main_external_graph_owner_only_detaches_memory_route(
     try:
         with pytest.raises(OSError, match="listener refused"):
             serve.main(
-                _config(tmp_path),
+                _config(tmp_path, receiver_enabled=False),
                 _server_factory=lambda *_args: (_ for _ in ()).throw(OSError("listener refused")),
                 _close_default_resources=False,
             )
@@ -633,7 +635,7 @@ def test_serve_main_refuses_a_clean_shutdown_when_probe_remains(
     )
     try:
         with pytest.raises(RuntimeError, match="ollama-probe"):
-            serve.main(_config(tmp_path), _server_factory=FakeServer)
+            serve.main(_config(tmp_path, receiver_enabled=False), _server_factory=FakeServer)
         assert serve._MEMORY_REPLICATION_SERVICE is None
         assert serve._MEMORY_REPLICATION_RECEIVER is None
         assert serve._ARTIFACT_TRANSFER_BINDING is None
@@ -690,11 +692,11 @@ def test_serve_main_removes_exact_thin_handlers_before_a_later_restart(
     marker = object()
     first_mapping = serve.configure_thin_handlers({"/v1/recall": marker})
     try:
-        serve.main(_config(tmp_path / "first"), _server_factory=FakeServer)
+        serve.main(_config(tmp_path / "first", receiver_enabled=False), _server_factory=FakeServer)
         assert observed == [{"/v1/recall": marker}]
         assert serve._THIN_HANDLERS == {}
 
-        serve.main(_config(tmp_path / "second"), _server_factory=FakeServer)
+        serve.main(_config(tmp_path / "second", receiver_enabled=False), _server_factory=FakeServer)
         assert observed[-1] == {}
         assert serve._THIN_HANDLERS == {}
         assert first_mapping is not serve._THIN_HANDLERS
