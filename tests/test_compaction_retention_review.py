@@ -13,7 +13,10 @@ import pytest
 from sonder_runtime.adapters.persistence.agent_lanes import SQLiteAgentLaneStore
 from sonder_runtime.adapters.persistence.session_repository import SQLiteSessionRepository
 from sonder_runtime.application.agents.interactive_lanes import AgentLaneService
-from sonder_runtime.application.compaction import SessionCompactionService
+from sonder_runtime.application.compaction import (
+    SessionCompactionError,
+    SessionCompactionService,
+)
 from sonder_runtime.application.compaction.legacy import canonical_summary
 from sonder_runtime.application.compaction.session_service import _json_value
 from sonder_runtime.application.compaction_retention import (
@@ -354,3 +357,32 @@ def test_broad_search_retains_only_the_newest_limit_matches_while_scanning():
     assert [hit.event.sequence for hit in hits] == [500, 499, 498]
     # Bounded by the result limit plus one page, not by the 500 matches.
     assert repo.peak_alive <= 3 + repo._max_read_limit * 2
+
+
+# ---------------------------------------------------------------- merge with #542
+
+
+def test_recover_source_uses_the_chain_verified_snapshot(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "s.db"
+    repo = SQLiteSessionRepository(path)
+    repo.append("s", "message.received", {"text": "plain chatter"}, event_id="chat")
+    repo.append("s", "tool.failed", {"call_id": "c", "error": "FAIL"}, event_id="f")
+    SessionCompactionService(repo, event_id_factory=lambda: "c1").compact(
+        "s", start_sequence=1, end_sequence=2,
+    )
+    assert [e.event_id for e in SessionCompactionService(repo).recover_source("s", "c1")] == [
+        "chat", "f",
+    ]
+    assert repo.close() is True
+    with sqlite3.connect(path) as conn:  # simulate out-of-band tampering
+        conn.execute("DROP TRIGGER session_event_no_update")
+        conn.execute(
+            "UPDATE session_event SET payload_json = ? WHERE event_id = 'chat'",
+            ('{"text":"TAMPERED"}',),
+        )
+    reopened = SQLiteSessionRepository(path)
+
+    with pytest.raises(SessionCompactionError, match="integrity"):
+        SessionCompactionService(reopened).recover_source("s", "c1")

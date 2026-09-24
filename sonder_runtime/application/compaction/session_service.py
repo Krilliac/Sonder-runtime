@@ -139,6 +139,34 @@ class SessionCompactionService:
         except (ValueError, TypeError) as exc:
             raise SessionCompactionError(str(exc)) from exc
 
+    def archive_verified_context(
+        self,
+        session_id: str,
+        events: Sequence[SessionEvent],
+        *,
+        budget_bytes: int,
+    ) -> ArchivedContext:
+        """Archive an already chain-verified, complete event snapshot.
+
+        The caller (the live lane) obtained ``events`` from
+        ``SessionRepository.read_complete``, which bounds and verifies the
+        whole history in one read transaction. Re-reading the range here
+        would reintroduce an unverified second read between verification and
+        provider assembly, so the verified tuple is archived as-is. The
+        archive service still enforces its own item bound and ordering.
+        """
+        values = tuple(events)
+        if not values or values[0].sequence != 1:
+            raise SessionCompactionError("verified context must start at the session head")
+        if any(right.sequence != left.sequence + 1 for left, right in zip(values, values[1:])):
+            raise SessionCompactionError("verified context must be contiguous")
+        try:
+            return self._archive.prepare_context(
+                session_id, values, budget_bytes=budget_bytes,
+            )
+        except (ValueError, TypeError) as exc:
+            raise SessionCompactionError(str(exc)) from exc
+
     def compact(
         self,
         session_id: str,
@@ -463,7 +491,10 @@ class SessionCompactionService:
 
         This is the lossless side of compaction: after a restart the covered
         range is re-read from the append-only log and the persisted summary is
-        re-validated against it before anything is returned.
+        re-validated against it before anything is returned.  When the
+        repository offers ``read_complete`` (the chain-verified snapshot the
+        live lane uses), the range is sliced from that verified snapshot, so a
+        row altered out of band fails integrity instead of being returned.
         """
         event = self._compaction_event(session_id, compaction_event_id)
         source = event.payload.get("source_range")
@@ -476,9 +507,21 @@ class SessionCompactionService:
             or start < 1 or end < start or end - start + 1 > self._max_events
         ):
             raise SessionCompactionError("persisted compaction source range is invalid")
-        events = self._repository.read_range(
-            session_id, start_sequence=start, end_sequence=end, limit=end - start + 1,
-        )
+        read_complete = getattr(self._repository, "read_complete", None)
+        if callable(read_complete):
+            try:
+                verified = read_complete(
+                    session_id, max_events=min(self._max_scan_events, 100_000),
+                )
+            except (TypeError, ValueError) as exc:
+                raise SessionCompactionError(
+                    "session history is unavailable or failed integrity verification"
+                ) from exc
+            events = tuple(item for item in verified if start <= item.sequence <= end)
+        else:
+            events = self._repository.read_range(
+                session_id, start_sequence=start, end_sequence=end, limit=end - start + 1,
+            )
         self.validate_persisted_event(event, events)
         return tuple(events)
 

@@ -1,7 +1,11 @@
 """Memory and learning application services (SPEC-5 WP4)."""
 
 from .facade import MemoryLearningFacade
-from .receipt_observation import ReceiptObservationProducer, VerifierReceipt
+from .receipt_observation import (
+    ReceiptObservationProducer,
+    VerifierReceipt,
+    VerifiedSubjectFactPromotion,
+)
 from .replication import (
     MemoryReplicationCoordinator,
     MemoryReplicationOutcome,
@@ -17,4 +21,5 @@ __all__ = [
     "SQLiteMemoryReplicationSink",
     "ReceiptObservationProducer",
     "VerifierReceipt",
+    "VerifiedSubjectFactPromotion",
 ]
