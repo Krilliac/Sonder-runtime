@@ -160,6 +160,7 @@ class AppWorkRecoveryHttpBinding:
             approve_verification=approve,
             private_paths=private_paths,
             model_writable_roots=model_roots,
+            learning=work.learning,
         )
 
     def perform(self, action, payload, *, account_token, control_token, publish):
