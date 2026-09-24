@@ -48,6 +48,10 @@ CREATE TRIGGER IF NOT EXISTS session_event_no_delete
     BEGIN SELECT RAISE(ABORT, 'session event history is append-only'); END;
 """
 
+_MAX_EVENT_PAYLOAD_BYTES = 8 * 1024 * 1024
+_MAX_COMPLETE_PAYLOAD_BYTES = 64 * 1024 * 1024
+_COMPLETE_PAGE_SIZE = 256
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -124,9 +128,21 @@ class SQLiteSessionRepository:
         if not isinstance(payload, Mapping):
             raise TypeError("payload must be a mapping")
         try:
-            return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         except (TypeError, ValueError) as exc:
             raise TypeError("payload must contain JSON-serializable values") from exc
+        # No size cap here: this encoding is also used to verify stored
+        # events, and a legacy event written before the append cap existed
+        # must stay verifiable and reportable. Appends enforce the cap; reads
+        # enforce the bounded total-bytes guard in ``read_complete``.
+        return encoded
+
+    @staticmethod
+    def _bounded_append_payload(payload: Mapping[str, object]) -> str:
+        encoded = SQLiteSessionRepository._canonical_payload(payload)
+        if len(encoded.encode("utf-8")) > _MAX_EVENT_PAYLOAD_BYTES:
+            raise ValueError("payload exceeds the session event byte bound")
+        return encoded
 
     @staticmethod
     def _hash(session_id: str, sequence: int, event_id: str, event_type: str,
@@ -147,7 +163,7 @@ class SQLiteSessionRepository:
             raise ValueError("session_id must be non-empty")
         if not isinstance(event_type, str) or not event_type.strip():
             raise ValueError("event_type must be non-empty")
-        payload_json = self._canonical_payload(payload)
+        payload_json = self._bounded_append_payload(payload)
         event_id = event_id or f"sev_{uuid.uuid4().hex}"
         occurred_at_utc = occurred_at_utc or _now()
         with self._lock, self._connect() as conn:
@@ -208,6 +224,71 @@ class SQLiteSessionRepository:
                 (session_id, limit),
             ).fetchall()
         return tuple(self._row_to_event(row) for row in reversed(rows))
+
+    def read_complete(self, session_id: str, *, max_events: int = 10_000) -> tuple[SessionEvent, ...]:
+        """Read and verify one complete bounded session history.
+
+        The adapter read ceiling applies to each SQL page, not to the
+        session's recoverable history.  This keeps continuation retrieval
+        bounded while allowing a long session to be reconstructed across
+        pages.  The chain is verified over the same immutable snapshot before
+        any caller can present it to a model.
+        """
+        if not isinstance(max_events, int) or isinstance(max_events, bool) or not 1 <= max_events <= 100_000:
+            raise ValueError("max_events must be between 1 and 100000")
+        page_size = min(max_events, self._max_read_limit, _COMPLETE_PAGE_SIZE)
+        events: list[SessionEvent] = []
+        recovered_payload_bytes = 0
+        # Keyset cursor: each page starts strictly after the last sequence
+        # actually observed, never at a count-derived offset, so a gap or a
+        # displaced row cannot make a page re-read (cycle over) recovered
+        # rows. Each page is chain-verified before the next is fetched.
+        last_sequence = 0
+        previous_hash: str | None = None
+        with self._connect() as conn:
+            conn.execute("BEGIN")
+            while len(events) <= max_events:
+                row = conn.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(payload_bytes), 0) FROM ("
+                    "SELECT length(CAST(payload_json AS BLOB)) AS payload_bytes "
+                    "FROM session_event WHERE session_id=? AND sequence>? "
+                    "ORDER BY sequence LIMIT ?) ",
+                    (session_id, last_sequence, page_size),
+                ).fetchone()
+                page_count, page_bytes = int(row[0]), int(row[1])
+                if page_count == 0:
+                    break
+                if len(events) + page_count > max_events:
+                    raise ValueError("session history exceeds recovery bound")
+                if recovered_payload_bytes + page_bytes > _MAX_COMPLETE_PAYLOAD_BYTES:
+                    raise ValueError("session history payload bytes exceed recovery bound")
+                rows = conn.execute(
+                    "SELECT session_id, sequence, event_id, event_type, occurred_at_utc, "
+                    "payload_json, previous_hash, event_hash "
+                    "FROM session_event WHERE session_id = ? AND sequence > ? "
+                    "ORDER BY sequence LIMIT ?",
+                    (session_id, last_sequence, page_size),
+                ).fetchall()
+                if len(rows) != page_count:
+                    raise ValueError("session history changed during recovery")
+                for item in rows:
+                    event = self._row_to_event(item)
+                    if event.sequence != last_sequence + 1 or event.previous_hash != previous_hash:
+                        raise ValueError("session history is not contiguous")
+                    calculated = self._hash(
+                        event.session_id, event.sequence, event.event_id,
+                        event.event_type, event.occurred_at_utc,
+                        self._canonical_payload(event.payload), event.previous_hash,
+                    )
+                    if calculated != event.event_hash:
+                        raise ValueError("session history failed integrity verification")
+                    events.append(event)
+                    last_sequence = event.sequence
+                    previous_hash = event.event_hash
+                recovered_payload_bytes += page_bytes
+                if len(rows) < page_size:
+                    break
+        return tuple(events)
 
     def search(self, *, session_id: str | None = None, event_type: str | None = None,
                text: str | None = None, limit: int | None = None) -> tuple[SessionEvent, ...]:

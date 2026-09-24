@@ -21,7 +21,7 @@ from ...application.ports.session_repository import SessionEvent, SessionReposit
 
 
 _TOOL_RESULT_TYPES = frozenset({"tool.result", "tool.completed"})
-_MAX_ITEMS = 256
+_MAX_ITEMS = 10_000
 _MAX_REFERENCE_BYTES = 2_000
 
 
