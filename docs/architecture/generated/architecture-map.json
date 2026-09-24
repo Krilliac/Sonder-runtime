@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 297,
+      "file_count": 296,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -72,7 +72,6 @@
         "sonder_runtime/adapters/backup.py",
         "sonder_runtime/adapters/backup_gateway.py",
         "sonder_runtime/adapters/bounded_cloud_generation.py",
-        "sonder_runtime/adapters/bounded_tar.py",
         "sonder_runtime/adapters/cli_options.py",
         "sonder_runtime/adapters/client_config.py",
         "sonder_runtime/adapters/client_endpoint.py",
@@ -346,7 +345,7 @@
       ]
     },
     {
-      "file_count": 330,
+      "file_count": 331,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -601,6 +600,7 @@
         "sonder_runtime/application/scenario_validation/github.py",
         "sonder_runtime/application/scenario_validation/runner.py",
         "sonder_runtime/application/security/__init__.py",
+        "sonder_runtime/application/security/bounded_archives.py",
         "sonder_runtime/application/security/credential_broker.py",
         "sonder_runtime/application/security/path_archive_safety.py",
         "sonder_runtime/application/security/prompt_provenance.py",

@@ -2195,6 +2195,22 @@ def _inspect_sqlite(p: Path) -> dict:
 def _inspect_zip(p: Path) -> dict:
     import zipfile
 
+    from sonder_runtime.application.security.bounded_archives import (
+        zip_central_directory,
+    )
+
+    # Read only the end-of-central-directory record first: zipfile builds
+    # one ZipInfo per declared entry when it opens the archive.
+    declared, _directory_bytes = zip_central_directory(p)
+    if declared > INSPECT_MAX_ARCHIVE_MEMBERS:
+        return {
+            "kind": "zip",
+            "members": declared,
+            "expanded_bytes": None,
+            "truncated": True,
+            "text": "(central directory declares %d entries; preview limit is %d)"
+            % (declared, INSPECT_MAX_ARCHIVE_MEMBERS),
+        }
     with zipfile.ZipFile(p) as archive:
         names = archive.namelist()
         total = sum(info.file_size for info in archive.infolist())
@@ -2205,12 +2221,13 @@ def _inspect_zip(p: Path) -> dict:
         "kind": "zip",
         "members": len(names),
         "expanded_bytes": total,
+        "truncated": False,
         "text": listing,
     }
 
 
 def _inspect_tar(p: Path) -> dict:
-    from sonder_runtime.adapters.bounded_tar import open_bounded
+    from sonder_runtime.application.security.bounded_archives import open_bounded
 
     names = []
     expanded = 0

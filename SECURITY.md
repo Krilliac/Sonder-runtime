@@ -108,7 +108,10 @@ Mitigations that are already in place and worth knowing about:
   reserved-device, control-character, duplicate and case- or
   normalization-colliding names, links, devices, member-count and
   expanded-byte overruns are rejected. Every TAR reader refuses long-name,
-  long-link, and PAX metadata records larger than 64 KiB before parsing them.
+  long-link, and PAX metadata records larger than 64 KiB, more than four
+  chained metadata records per member, and GNU sparse members before parsing
+  them. ZIP readers check the declared central-directory entry count before
+  opening the archive.
 - Self-modification backups, manifests, checksums, the `selfmod_events` audit
   table, and recovery evidence are tamper-evident only. They are written by the
   same OS user as Sonder, so they are not a security boundary against

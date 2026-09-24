@@ -404,3 +404,258 @@ def test_update_staging_rejects_file_that_is_an_ancestor(tmp_path, rows):
     with pytest.raises(ExtractionError, match="ancestor|collid"):
         safe_extract(archive, tmp_path / "out", max_expanded_bytes=1024)
     assert _tree(tmp_path / "out") == []
+
+
+# ---------------------------------------------------------------------------
+# Review round 2 (PR #548 @ eca9f597): GNU sparse, metadata chains, ZIP CD
+# ---------------------------------------------------------------------------
+
+import time
+
+WALL_BUDGET_SECONDS = 10.0
+
+
+def _gz_stream(path, blocks):
+    with gzip.open(path, "wb", compresslevel=9) as stream:
+        for block in blocks:
+            stream.write(block)
+        stream.write(b"\0" * 1024)
+    return path
+
+
+def _old_gnu_sparse_tar_gz(path, extension_blocks: int):
+    # Type "S" member whose header sets isextended; each following 512-byte
+    # extension block carries 21 (offset, numbytes) pairs and sets
+    # isextended again, so tarfile keeps reading and appending to the map.
+    header = bytearray(_raw_tar_header(b"sparse.bin", 0, b"S"))
+    header[482] = 1  # isextended
+    header[483:495] = b"%011o\0" % (1 << 30)  # realsize
+    header[148:156] = b" " * 8
+    header[148:156] = b"%06o\0 " % sum(header)
+
+    def extension(last: bool) -> bytes:
+        block = bytearray(512)
+        for index in range(21):
+            base = index * 24
+            block[base:base + 12] = b"%011o\0" % (index + 1)
+            block[base + 12:base + 24] = b"%011o\0" % 1
+        block[504] = 0 if last else 1
+        return bytes(block)
+
+    middle = extension(False)
+
+    def blocks():
+        yield bytes(header)
+        for _ in range(extension_blocks - 1):
+            yield middle
+        yield extension(True)
+
+    return _gz_stream(path, blocks())
+
+
+def _pax_record(key: str, value: str) -> bytes:
+    body = " %s=%s\n" % (key, value)
+    length = len(body) + 1
+    while len(str(length)) + len(body) != length:
+        length = len(str(length)) + len(body)
+    return (str(length) + body).encode()
+
+
+def _pax_block(records: bytes, typeflag: bytes = b"x") -> list:
+    padded = records + b"\0" * ((-len(records)) % 512)
+    return [_raw_tar_header(b"././@PaxHeader", len(records), typeflag), padded]
+
+
+def _pax_sparse_10_tar_gz(path, map_numbers: int):
+    # GNU sparse 1.0: the map lives at the start of the member's data and
+    # its declared length drives an unbounded read-and-parse loop.
+    records = b"".join((
+        _pax_record("GNU.sparse.major", "1"),
+        _pax_record("GNU.sparse.minor", "0"),
+        _pax_record("GNU.sparse.name", "sparse.bin"),
+        _pax_record("GNU.sparse.realsize", "1"),
+    ))
+    map_bytes = b"%d\n" % (map_numbers // 2) + b"0\n" * map_numbers
+    map_bytes += b"\0" * ((-len(map_bytes)) % 512)
+
+    def blocks():
+        yield from _pax_block(records)
+        yield _raw_tar_header(b"GNUSparseFile.0/sparse.bin", len(map_bytes), b"0")
+        for start in range(0, len(map_bytes), 1 << 20):
+            yield map_bytes[start:start + (1 << 20)]
+
+    return _gz_stream(path, blocks())
+
+
+def _chained_metadata_tar_gz(path, typeflag: bytes, links: int):
+    if typeflag == b"g":
+        one = b"".join(_pax_block(_pax_record("comment", "x" * 32), b"g"))
+    else:
+        payload = b"n" * 60 + b"\0"
+        one = _raw_tar_header(b"././@LongLink", len(payload), typeflag)
+        one += payload + b"\0" * ((-len(payload)) % 512)
+
+    def blocks():
+        for _ in range(links):
+            yield one
+        yield _raw_tar_header(b"payload.txt", 1, b"0")
+        yield b"x" + b"\0" * 511
+
+    return _gz_stream(path, blocks())
+
+
+def _measure(callable_):
+    """Return (peak traced bytes, seconds, exception or None)."""
+    tracemalloc.start()
+    started = time.perf_counter()
+    error = None
+    try:
+        callable_()
+    except BaseException as exc:  # RecursionError must be observed, not hidden
+        error = exc
+    elapsed = time.perf_counter() - started
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    return peak, elapsed, error
+
+
+def _within_budget(peak, elapsed):
+    return peak < PEAK_BUDGET_BYTES and elapsed < WALL_BUDGET_SECONDS
+
+
+def _assert_all_readers_reject(workspace, tmp_path, source):
+    name = source.name
+    peak, elapsed, error = _measure(lambda: archive_tools.list_archive(name))
+    assert error is None, repr(error)
+    assert _within_budget(peak, elapsed), ("archive_list", peak, elapsed)
+    assert archive_tools.list_archive(name)["valid"] is False
+
+    peak, elapsed, error = _measure(lambda: archive_tools.extract_archive(
+        name, "out", developer_authorized=True,
+    ))
+    assert isinstance(error, archive_tools.ArchiveRejected), repr(error)
+    assert _within_budget(peak, elapsed), ("archive_extract", peak, elapsed)
+    assert not (workspace / "out").exists()
+
+    peak, elapsed, error = _measure(lambda: safe_extract(
+        source, tmp_path / "stage", max_expanded_bytes=1 << 30,
+    ))
+    assert isinstance(error, ExtractionError), repr(error)
+    assert _within_budget(peak, elapsed), ("safe_extract", peak, elapsed)
+
+    peak, elapsed, error = _measure(lambda: file_ops._inspect_tar(source))
+    assert isinstance(error, tarfile.TarError), repr(error)
+    assert _within_budget(peak, elapsed), ("inspect", peak, elapsed)
+
+
+def test_old_gnu_sparse_members_are_rejected_before_the_map_is_read(workspace, tmp_path):
+    source = _old_gnu_sparse_tar_gz(workspace / "oldsparse.tar.gz", 4_000)
+    assert source.stat().st_size < 64 * 1024
+    _assert_all_readers_reject(workspace, tmp_path, source)
+
+
+def test_pax_gnu_sparse_10_map_is_rejected_before_it_is_read(workspace, tmp_path):
+    source = _pax_sparse_10_tar_gz(workspace / "paxsparse.tar.gz", 2_000_000)
+    assert source.stat().st_size < 64 * 1024
+    _assert_all_readers_reject(workspace, tmp_path, source)
+
+
+@pytest.mark.parametrize("key", ["GNU.sparse.map", "GNU.sparse.size", "GNU.sparse.offset"])
+def test_any_pax_gnu_sparse_key_is_rejected(workspace, tmp_path, key):
+    records = _pax_record(key, "0,1") + _pax_record("GNU.sparse.name", "s.bin")
+    source = _gz_stream(workspace / "paxkey.tar.gz", [
+        *_pax_block(records),
+        _raw_tar_header(b"s.bin", 1, b"0"),
+        b"x" + b"\0" * 511,
+    ])
+    _assert_all_readers_reject(workspace, tmp_path, source)
+
+
+def test_global_pax_gnu_sparse_key_is_rejected(workspace, tmp_path):
+    source = _gz_stream(workspace / "globalsparse.tar.gz", [
+        *_pax_block(_pax_record("GNU.sparse.major", "1"), b"g"),
+        _raw_tar_header(b"s.bin", 1, b"0"),
+        b"x" + b"\0" * 511,
+    ])
+    _assert_all_readers_reject(workspace, tmp_path, source)
+
+
+@pytest.mark.parametrize("typeflag", [b"L", b"K", b"g"])
+def test_chained_metadata_records_are_capped_not_recursed(workspace, tmp_path, typeflag):
+    source = _chained_metadata_tar_gz(workspace / "chain.tar.gz", typeflag, 3_000)
+    _assert_all_readers_reject(workspace, tmp_path, source)
+
+
+def test_short_metadata_chains_still_parse(workspace, tmp_path):
+    # A PAX header describing a long-named member is the normal shape; it
+    # must keep working under the chain cap.
+    name = "d/" + "n" * 150 + ".txt"
+    source = workspace / "normal.tar"
+    with tarfile.open(source, "w", format=tarfile.PAX_FORMAT) as tar:
+        info = tarfile.TarInfo(name)
+        info.size = 1
+        tar.addfile(info, io.BytesIO(b"x"))
+    gnu = workspace / "gnu.tar"
+    with tarfile.open(gnu, "w", format=tarfile.GNU_FORMAT) as tar:
+        info = tarfile.TarInfo(name)
+        info.linkname = ""
+        info.size = 1
+        tar.addfile(info, io.BytesIO(b"x"))
+    # archive_tools rejects every PAX header by policy; GNU long names are
+    # the shape it must keep accepting.
+    assert archive_tools.list_archive(gnu.name)["valid"] is True
+    for path in (source, gnu):
+        assert safe_extract(path, tmp_path / path.stem, max_expanded_bytes=16) == 1
+        assert file_ops._inspect_tar(path)["members"] == 1
+
+
+def _zip_with_entries(path, count):
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+        for index in range(count):
+            archive.writestr("e%05d" % index, b"")
+    return path
+
+
+def test_zip_readers_check_central_directory_count_before_materializing(
+    workspace, monkeypatch,
+):
+    source = _zip_with_entries(workspace / "many.zip", 300)
+    parsed = []
+    original = zipfile.ZipFile._RealGetContents
+
+    def counting(self):
+        parsed.append(self.filename)
+        return original(self)
+
+    monkeypatch.setattr(zipfile.ZipFile, "_RealGetContents", counting)
+
+    result = archive_tools.list_archive("many.zip", max_entries=100)
+    assert result["valid"] is False and "entry ceiling" in result["errors"][0]
+
+    monkeypatch.setattr(file_ops, "INSPECT_MAX_ARCHIVE_MEMBERS", 100)
+    preview = file_ops._inspect_zip(source)
+    assert preview["truncated"] is True and preview["members"] == 300
+
+    from sonder_runtime.adapters import artifact_grounding
+
+    monkeypatch.setattr(artifact_grounding, "MAX_OOXML_ENTRIES", 100)
+    checks = []
+    artifact_grounding._validate_ooxml(source, "docx", {}, checks)
+    assert checks and checks[-1]["name"] == "ooxml-entry-limit", checks
+    assert checks[-1]["ok"] is False
+
+    assert parsed == [], "a ZIP reader parsed the central directory before the count check"
+
+
+def test_path_archive_safety_inspect_tar_uses_bounded_reader(tmp_path):
+    from sonder_runtime.application.security import path_archive_safety
+
+    for source in (
+        _chained_metadata_tar_gz(tmp_path / "chain.tar.gz", b"L", 3_000),
+        _pax_sparse_10_tar_gz(tmp_path / "sparse.tar.gz", 2_000_000),
+    ):
+        peak, elapsed, error = _measure(lambda: path_archive_safety.inspect_tar(source))
+        assert isinstance(
+            error, (tarfile.TarError, path_archive_safety.ArchiveLimitError),
+        ), repr(error)
+        assert _within_budget(peak, elapsed), (source.name, peak, elapsed)
