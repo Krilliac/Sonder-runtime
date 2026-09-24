@@ -137,9 +137,19 @@ Generic agent-lane tests do not establish these Chat-specific acceptance criteri
   actual typed file-write crash refusal, local compute launch reconciliation,
   fresh-process context replay, shared rate admission, composed chat routing,
   durable HTTP handoff receipts and the real Codegen composition seam. Native
-  Docker and exact integrated hosted checks still gate publication/qualification.
-  The lint comparison has zero new groups (10,819 baseline / 10,816 current),
+  Docker and exact integrated hosted checks gate platform qualification.
+  The lint comparison has zero new groups (10,819 baseline / 10,814 current),
   retaining inherited diagnostics after mapping the moved isolated runner.
+- The final continuation code at `32cabd3b` (identical published tree at
+  `7fe42da7102f83fa6c9f0a8e489fa75ee16c0913`) passed the full Linux suite:
+  **17,441 passed, 169 skipped**, 3 warnings and 4 subtests passed in 344.35
+  seconds. Architecture, append-only requirement evidence, error signals,
+  history privacy, documentation links and documentation authority gates pass.
+  Earlier integration failures led to corrected chat expectations, owned
+  container readers and bounded partial-admission cleanup. A separate acceptance
+  regression fixed truncated skill metadata claiming a complete live prefix.
+  Native Windows and Docker results must be assessed at the final PR head;
+  this local run does not replace them. The Docker skips are explicit.
 - First combined defect/foundation run: 281 passed, 1 Windows-only skip.
 - Initial broad Linux run: 17,020 passed, 150 skipped, 3 failed. Generated
   documentation and the introduced error parser were subsequently corrected.
@@ -198,8 +208,9 @@ local negative probe confirmed that such code can read the private strategy seal
 key even with POSIX mode `0600`. Active Codegen now requires the opt-in
 [Linux container adapter](../security/CODEGEN-CONTAINER-BUILD.md), a pinned local
 image and exact host-granted source inputs. Default and Windows profiles refuse
-before build/model dispatch. Native Docker qualification remains pending until
-the dedicated workflow passes all four probes without skips.
+before build/model dispatch. Native Docker containment requires the dedicated
+workflow to pass all four probes without skips at the reviewed PR head; local
+adapter tests or skipped probes cannot qualify that boundary.
 
 The separate, non-gating Windows diagnostic job exercises dummy protected-state
 reads, inherited MIC labels and tampering, process handle access, a WMI broker,
