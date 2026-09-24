@@ -307,6 +307,7 @@ from sonder_runtime.domain.thinking_controls import (
     with_local_thinking_budget as _with_local_thinking_budget,
 )
 from sonder_runtime.domain import reasoning_continuation as _reasoning_continuation
+from sonder_runtime.domain import verification_progress
 from sonder_runtime.domain.fanout_receipts import (
     safe_answer as _fanout_safe_answer,
     snapshot_allows as _fanout_snapshot_allows_policy,
@@ -24692,7 +24693,9 @@ def codegen_build_loop(
         build_program: the build executable, e.g. "dotnet", "cargo", "make".
         build_args_json: argv for it as JSON, e.g. ["build", "-c", "Release"].
         tiers: comma-separated model tiers to ensemble. Default: all bound local tiers.
-        attempts: tries per file; the best-scoring one is kept.
+        attempts: tries per file; the best-scoring one is kept. Clamped to
+            1..6, and a file stops early when two consecutive attempts return
+            identical build errors (no progress).
         error_regex: how to recognise an error line in build output. Defaults to
             a generic error/fatal match; pass a stricter one for a noisy build.
         slips_json: [[regex, replacement], ...] rewrites applied to generated
@@ -24711,6 +24714,9 @@ def codegen_build_loop(
         re.compile(error_regex)
     except re.error as exc:
         return "ERROR: bad error_regex: %s" % exc
+    # Every attempt is at least one ensemble generation plus a full build;
+    # an unbounded caller-supplied count is a runaway loop, not a knob.
+    attempt_limit = verification_progress.bounded_attempts(attempts)
 
     # Set when a build fails to launch or is killed. Such a build says nothing
     # about the code, so its error list must never be scored against a real
@@ -24790,8 +24796,12 @@ def codegen_build_loop(
         note = "unchanged"
         siblings = {n: read(n) for n, _ in wanted if n != name}
         siblings = {n: t for n, t in siblings.items() if t.strip()}
+        # Issue #510 no-progress guard: identical failing builds on
+        # consecutive attempts mean the same prompt is not converging, so
+        # stop spending ensemble generations on this file.
+        progress_guard = verification_progress.VerificationProgressGuard()
 
-        for attempt in range(1, max(1, int(attempts)) + 1):
+        for attempt in range(1, attempt_limit + 1):
             prompt = "%s\n%s\nOutput only the contents of %s. Code only." % (
                 codegen_loop.dependency_brief(siblings), spec, name,
             )
@@ -24824,6 +24834,17 @@ def codegen_build_loop(
                     ", %d slip(s) rewritten" % hits if hits else "",
                 )
             if not attempt_errors:
+                break
+            if progress_guard.observe(attempt_errors):
+                note += (
+                    "; stopped after attempt %d: no progress (identical build "
+                    "errors on %d consecutive attempts, fingerprint %s) -- "
+                    "change the spec or approach instead of retrying"
+                    % (
+                        attempt, progress_guard.repeat_limit,
+                        progress_guard.stalled_fingerprint,
+                    )
+                )
                 break
 
         if best_code is not None:
