@@ -92,6 +92,15 @@ class EvaluationLifecycleService:
     def recorded_observation(self, proposal_id: str, mode: EvaluationMode) -> ShadowCanaryObservation | None:
         return self.lifecycle.recorded_observation(proposal_id, mode)
 
+    def record_reproduced_failure(
+        self, proposal_id: str, failure_digest: str, source_digest: str,
+    ) -> bool:
+        added = self.lifecycle.record_reproduced_failure(proposal_id, failure_digest, source_digest)
+        if added:
+            self._record(self.lifecycle.get(proposal_id), "evaluation.failure.retained",
+                         failure_digest=failure_digest, source_digest=source_digest)
+        return added
+
     def build_promotion_evidence(self, proposal_id: str, **kwargs: object) -> PromotionEvidence:
         evidence = self.lifecycle.build_promotion_evidence(proposal_id, **kwargs)
         self._record(self.lifecycle.get(proposal_id), "evaluation.evidence.attached",

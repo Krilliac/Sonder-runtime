@@ -37,6 +37,15 @@ recorded counts), never a model's subjective pass/fail.
   - `build_gated_promotion_evidence` runs the construction-time gate over the
     results and observations this lifecycle recorded, and records the
     evidence and decision digests as gated.
+  - A newly recorded result invalidates earlier evidence; failed shadow or
+    canary phase results reject the corresponding gate, even when a previously
+    recorded observation reported healthy. An observation that names an
+    unrecorded result is refused.
+  - A reproduced EVAL-006 failure explicitly linked to the proposal is
+    counted alongside caller-reported regressions. It invalidates earlier
+    evidence; if approval already occurred, the proposal is rejected before
+    an attended promotion can consume the stale digest. The durable lifecycle
+    records the linked failure and source digests in its event history.
   - For kind-bound proposals, caller-asserted `build_promotion_evidence` is
     refused and `approve` accepts only gated evidence; the legacy opt-in is
     refused too.
@@ -57,7 +66,7 @@ recorded counts), never a model's subjective pass/fail.
 
 ## Evidence
 
-`tests/test_eval007_promotion_gates.py` (19 tests, no model or live traffic):
+`tests/test_eval007_promotion_gates.py` (23 tests, no model or live traffic):
 
 - The Wilson bound matches the closed form for 10/10, is pinned at the
   interior rate 27/30 (0.77450), and separates 3/3 from 300/300.
@@ -78,6 +87,14 @@ recorded counts), never a model's subjective pass/fail.
 - Default sample floors are attainable; small or thin runs, regressions,
   pass-rate drops, missing replay equivalence, and missing or unhealthy
   shadow/canary observations each fail with a specific reason code.
+- A previously passing proposal refuses a stale approval after a late failed
+  canary result; a fresh gate reports `gate_failed:canary`. Observation result
+  IDs must refer to results already recorded for that proposal.
+- A deterministic reproduced divergence linked to a proposal invalidates its
+  old gate and causes `gate_failed:case_regressions` even if the caller passes
+  `case_regressions=0`. The event journal retains the failure/source digests;
+  a second identical retention is idempotent. A regression discovered after
+  approval rejects the proposal before attended promotion.
 
 Each review fix was preceded by a test or reproduction that failed on the
 previous code.
@@ -92,7 +109,12 @@ previous code.
   lifecycle fails closed (unknown proposal) rather than resuming.
 - The default thresholds are conservative starting values, not calibrated
   against live workload variance.
+- No production caller yet links retained replay failures to proposals;
+  isolated test evaluators exercise this boundary. The failure store and
+  lifecycle event journal are separate stores, and this slice does not claim
+  atomic cross-store commits or restart rehydration.
 - Pooling assumes offline results for one proposal are independent samples of
   the same suite; the gate does not model correlated cases.
-- `baseline_pass_rate` and `case_regressions` are caller-stated inputs, though
-  they must be stated explicitly.
+- `baseline_pass_rate` and additional `case_regressions` are caller-stated
+  inputs, though they must be stated explicitly. Linked retained failures are
+  counted independently of that caller-provided regression count.

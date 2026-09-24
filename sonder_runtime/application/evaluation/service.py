@@ -109,13 +109,18 @@ class EvaluationApplicationService:
         *,
         baseline_factory: EvaluatorFactory | None = None,
         max_evaluations: int = 256,
+        proposal_id: str | None = None,
     ) -> MinimizedFailure:
-        """Minimize a divergent replay, prove it reproduces, and retain it."""
+        """Retain a reproduced failure and optionally bind it to its proposal gate."""
         failure = minimize_failure(
             expected, evaluator_factory, policy,
             baseline_factory=baseline_factory, max_evaluations=max_evaluations,
         )
         self._failures.retain(failure)
+        if proposal_id is not None:
+            self._lifecycle.record_reproduced_failure(
+                proposal_id, failure.digest, failure.source_digest,
+            )
         return failure
 
     def retained_failures(self) -> tuple[str, ...]:

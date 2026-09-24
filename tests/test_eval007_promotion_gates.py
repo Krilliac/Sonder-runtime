@@ -33,6 +33,7 @@ from sonder_runtime.application.evaluation.durable_lifecycle import EvaluationLi
 from sonder_runtime.application.evaluation.service import EvaluationApplicationService
 from sonder_runtime.adapters.evaluation_lifecycle import SessionEvaluationLifecycleRepository
 from sonder_runtime.adapters.persistence.session_repository import SQLiteSessionRepository
+from sonder_runtime.application.evaluation.trajectory_replay import TrajectoryRecord, TrajectoryStep
 
 
 SUITE = EvaluationSuite("prompt-quality", "v1", (EvaluationDimension("split", "holdout"),), ("pass_rate",))
@@ -314,6 +315,91 @@ def test_second_service_over_the_same_lifecycle_cannot_bypass_the_gate() -> None
     with pytest.raises(ValueError, match="kind-bound"):
         second.approve("p-self", evidence.digest, allow_ungated_legacy=True)
     assert lifecycle.get("p-self").state is ProposalState.CANARY
+
+
+def test_late_canary_regression_revokes_a_previously_passing_gate() -> None:
+    service = _service()
+    _proposal_through_canary(service, "p1", [_result("ample", 40, 40)])
+    original = _gate(service, "p1")
+    assert original.accepted
+
+    # New evidence can arrive while the proposal remains in CANARY. Approval
+    # must never consume the old successful snapshot after that progress.
+    service.record_result("p1", _result("late-regression", 0, 20, mode=EvaluationMode.CANARY))
+    with pytest.raises(ValueError, match="stale|gated"):
+        service.approve("p1", original.digest)
+    refreshed = _gate(service, "p1")
+    assert not refreshed.accepted
+    assert service.promotion_gate_decision(
+        "p1", baseline_pass_rate=1.0, case_regressions=0,
+    ).reason_codes == ("gate_failed:canary",)
+    assert service._lifecycle.get("p1").state is ProposalState.CANARY
+
+
+def test_reproduced_divergence_revokes_gate_even_when_caller_reports_zero_regressions(tmp_path) -> None:
+    durable = EvaluationLifecycleService(
+        _gated_lifecycle(),
+        SessionEvaluationLifecycleRepository(SQLiteSessionRepository(tmp_path / "events.sqlite")),
+    )
+    service = EvaluationApplicationService(corpus=BoundedEvaluationCorpusScanner([]), lifecycle=durable)
+    _proposal_through_canary(service, "p1", [_result("ample", 40, 40)])
+    old_evidence = _gate(service, "p1")
+    assert old_evidence.accepted
+
+    reference = TrajectoryRecord.from_steps(
+        "session-1", (TrajectoryStep(0, {"x": 1}, {"answer": 2}),),
+    )
+    failure = service.minimize_and_retain_failure(
+        reference, lambda: lambda _request: {"answer": 3}, proposal_id="p1",
+    )
+    with pytest.raises(ValueError, match="stale|gated"):
+        service.approve("p1", old_evidence.digest)
+    assert not _gate(service, "p1").accepted
+    decision = service.promotion_gate_decision("p1", baseline_pass_rate=1.0, case_regressions=0)
+    assert decision.reason_codes == ("gate_failed:case_regressions",)
+    linked = [event for event in durable.history("p1") if event.event_type == "evaluation.failure.retained"]
+    assert len(linked) == 1
+    assert linked[0].payload["failure_digest"] == failure.digest
+    assert linked[0].payload["source_digest"] == reference.digest
+    assert service.minimize_and_retain_failure(
+        reference, lambda: lambda _request: {"answer": 3}, proposal_id="p1",
+    ).digest == failure.digest
+    assert len([event for event in durable.history("p1") if event.event_type == "evaluation.failure.retained"]) == 1
+    with pytest.raises(ValueError, match="non-negative"):
+        service.promotion_gate_decision("p1", baseline_pass_rate=1.0, case_regressions=-1)
+
+
+def test_reproduced_divergence_after_approval_revokes_promotion() -> None:
+    service = _service()
+    _proposal_through_canary(service, "p1", [_result("ample", 40, 40)])
+    approved = _gate(service, "p1")
+    assert service.approve("p1", approved.digest).state is ProposalState.READY_FOR_PROMOTION
+
+    reference = TrajectoryRecord.from_steps(
+        "session-1", (TrajectoryStep(0, {"x": 1}, {"answer": 2}),),
+    )
+    service.minimize_and_retain_failure(
+        reference, lambda: lambda _request: {"answer": 3}, proposal_id="p1",
+    )
+    assert service._lifecycle.get("p1").state is ProposalState.REJECTED
+    with pytest.raises(ValueError, match="approved"):
+        service.promote("p1", approved.digest, attended=True)
+
+
+def test_observation_cannot_claim_an_unrecorded_result() -> None:
+    service = _service()
+    service.register_suite(SUITE)
+    service.create_proposal("p1", "candidate", "baseline", SUITE, kind=PromotionKind.PROMPT)
+    service.submit("p1")
+    service.begin_evaluation("p1")
+    service.record_result("p1", _result("ample", 40, 40))
+    service.begin_shadow("p1")
+    ungrounded = ShadowCanaryObservation(
+        EvaluationMode.SHADOW, "s-missing", True, 20, {"error": 0}, 0,
+        ("some-other-proposal-result",),
+    )
+    with pytest.raises(ValueError, match="not recorded"):
+        service.record_observation("p1", ungrounded)
 
 
 def test_kindless_proposals_need_an_explicit_legacy_opt_in() -> None:
