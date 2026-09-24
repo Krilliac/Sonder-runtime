@@ -357,6 +357,24 @@ class ManagedStandaloneSession:
             )
         else:
             self.require_current()
+            from ..application.ports.terminal_eligibility import (
+                _HostVerifierAuthority,
+            )
+
+            # The authority is a sealed snapshot, so bind it here: it must have
+            # been issued by this exact session for this exact expected turn.
+            authority = getattr(eligibility, "authority", None)
+            if type(authority) is not _HostVerifierAuthority or not authority.issued_by(
+                self
+            ):
+                raise PermissionError(
+                    "verifier decision was not issued by this managed session"
+                )
+            sealed = authority.resolve()
+            if sealed.evidence.result.receipt.turn != expected_turn:
+                raise PermissionError(
+                    "verifier decision is bound to a different host turn"
+                )
         from ..application.memory.receipt_observation import ReceiptObservationProducer
 
         receipt, observation = ReceiptObservationProducer.from_terminal_eligibility(

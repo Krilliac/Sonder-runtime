@@ -55,6 +55,16 @@ class _FactSource:
         return connection.execute("DELETE FROM facts WHERE id=?", (fact_id,)).rowcount
 
 
+def _bound(value, owner):
+    """Issue a sealed authority for ``value`` bound to ``owner`` (test only)."""
+    sealed = {}
+    sealed["value"] = replace(
+        value,
+        authority=_issue_host_verifier_authority(lambda: sealed["value"], owner=owner),
+    )
+    return sealed["value"]
+
+
 def _connection():
     connection = sqlite3.connect(":memory:")
     connection.execute("CREATE TABLE facts(id TEXT PRIMARY KEY, project TEXT, text TEXT)")
@@ -207,14 +217,15 @@ def test_recorder_resolves_terminal_eligibility_once(tmp_path):
         resolutions.append(1)
         return sealed["value"]
 
-    sealed["value"] = replace(value, authority=_issue_host_verifier_authority(resolver))
-
     class Application:
         unit_of_work = staticmethod(lambda: UnitOfWorkAdapter(db_path))
 
     session = ManagedStandaloneSession.__new__(ManagedStandaloneSession)
     session._application = Application()
     session.require_current = lambda: None
+    sealed["value"] = replace(
+        value, authority=_issue_host_verifier_authority(resolver, owner=session)
+    )
     recomputed = []
 
     def terminal_eligibility(*args, **kwargs):
@@ -223,9 +234,11 @@ def test_recorder_resolves_terminal_eligibility_once(tmp_path):
 
     session.terminal_eligibility = terminal_eligibility
     recorder = ManagedLearningRecorder(Application(), verifier_factory=lambda *a: None)
-    outcome = recorder(session, object(), sealed["value"])
+    outcome = recorder(session, value.evidence.result.receipt.turn, sealed["value"])
     assert outcome.status == "persisted", outcome
-    assert recomputed == [] and len(resolutions) == 1
+    # The boundary is never re-run; the sealed snapshot is read by the
+    # session's owner/turn binding check and once by the producer.
+    assert recomputed == [] and len(resolutions) == 2
 
 
 # P2-1 visibility ----------------------------------------------------------
@@ -264,10 +277,53 @@ def test_promotion_refusal_reason_is_visible(tmp_path, caplog):
     session = ManagedStandaloneSession.__new__(ManagedStandaloneSession)
     session._application = Application()
     session.require_current = lambda: None
-    value = _eligibility(_evidence(project="repo-a"), worker_id="lane-a")
+    value = _bound(_eligibility(_evidence(project="repo-a"), worker_id="lane-a"), session)
     recorder = ManagedLearningRecorder(Application(), verifier_factory=lambda *a: None)
     with caplog.at_level("WARNING"):
-        outcome = recorder(session, object(), value)
+        outcome = recorder(session, value.evidence.result.receipt.turn, value)
     assert outcome.status == "persisted" and outcome.promotion == "refused"
     assert "snapshot is incomplete" in outcome.reason
     assert any("snapshot is incomplete" in record.getMessage() for record in caplog.records)
+
+
+# Re-review P3: owner and turn binding -------------------------------------
+def test_session_refuses_other_turn_or_other_session_decision(tmp_path):
+    from sonder_runtime.adapters.unit_of_work import UnitOfWorkAdapter
+
+    db_path = str(tmp_path / "memory.db")
+
+    class Application:
+        unit_of_work = staticmethod(lambda: UnitOfWorkAdapter(db_path))
+
+    def session():
+        value = ManagedStandaloneSession.__new__(ManagedStandaloneSession)
+        value._application = Application()
+        value.require_current = lambda: None
+        value.terminal_eligibility = lambda *a, **k: pytest.fail("boundary re-run")
+        return value
+
+    owner, other = session(), session()
+    decision = _bound(
+        _eligibility(_evidence(project="repo-a", run_id="run-1"), worker_id="lane-a"),
+        owner,
+    )
+    other_turn = _evidence(project="repo-a", run_id="run-2").result.receipt.turn
+    assert other_turn != decision.evidence.result.receipt.turn
+    with pytest.raises(PermissionError, match="different host turn"):
+        owner.persist_learning_observation_durable(
+            other_turn, verifier_factory=None, eligibility=decision
+        )
+    with pytest.raises(PermissionError, match="not issued by this managed session"):
+        other.persist_learning_observation_durable(
+            decision.evidence.result.receipt.turn,
+            verifier_factory=None,
+            eligibility=decision,
+        )
+    with UnitOfWorkAdapter(db_path) as scope:
+        assert SQLiteVerifierObservationRepository(scope.connection).list_pairs(limit=5) == ()
+    stored = owner.persist_learning_observation_durable(
+        decision.evidence.result.receipt.turn,
+        verifier_factory=None,
+        eligibility=decision,
+    )
+    assert stored.observation_id

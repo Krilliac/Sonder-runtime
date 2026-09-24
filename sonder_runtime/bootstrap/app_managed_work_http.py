@@ -178,8 +178,9 @@ class AppManagedWorkHttpBinding:
         self.authority = AppManagedAuthority(control, self.lanes)
         self.permission_engine = permission_engine
         self.ledger = permission_engine.approval_ledger().pinned()
-        # Verifier learning is host-owned: the same private verifier factory
-        # that decides terminal eligibility re-derives every observation.
+        # Verifier learning is host-owned: observations come only from the
+        # sealed decision the terminal eligibility boundary issued for the
+        # exact session and turn (a snapshot; the boundary is not re-run).
         self.learning = ManagedLearningRecorder(
             application,
             verifier_factory=lambda *args: self.runtime._standalone_verifier_factory(

@@ -20,7 +20,11 @@ found, and this revision fixes:
   unchanged source reached `FACT`. The independence key is now
   `sha256({principal_id, workspace_scope})`; two lanes of one principal are a
   single source. Promotion therefore needs two distinct authenticated
-  principals.
+  principals. In the app-control path the principal is the account
+  (`account:sha256(username)`, `app_control_http._principal`), so
+  independence is per account; additional accounts require admin
+  registration or opt-in, so one account cannot mint a second independent
+  source by itself.
 - **Promotion loaded a global snapshot.** It read up to 10,001 rows across all
   projects under `BEGIN IMMEDIATE`; past that bound it raised "snapshot is
   incomplete" before the negative-evidence branch, so a new verified negative
@@ -36,8 +40,8 @@ found, and this revision fixes:
   `terminal_eligibility` (publication, inventory and manifest capture) and the
   producer's resolver re-ran it again while the work lease was held. The
   boundary now seals the exact decision it produced into its authority; the
-  recorder passes that decision through and the producer resolves the sealed
-  value once.
+  recorder passes that decision through, and the session binding check and
+  the producer read the sealed snapshot without re-running the boundary.
 - **Learning hook isolation.** Both hook call sites now catch every failure,
   including non-`Exception` types, so learning cannot alter a completed work or
   recovery outcome. Refusals (persistence or promotion) are recorded with a
@@ -46,11 +50,16 @@ found, and this revision fixes:
 ## Design
 
 `ReceiptObservationProducer` requires the opaque `_HostVerifierAuthority`
-attached by the managed verifier boundary. That authority seals the exact
-decision the boundary derived from the current owner-bound durable host turn;
-the producer derives worker, scope, subject digest, and outcome only from
-that sealed value, so modified public fields on a copied eligibility are
-ignored and a copy without the authority is refused.
+attached by the managed verifier boundary. That authority is a sealed
+snapshot of the exact decision the boundary derived from the owner-bound
+durable host turn at issue time; it does not re-read the turn later. The
+producer derives worker, scope, subject digest, and outcome only from that
+sealed value, so modified public fields on a copied eligibility are ignored
+and a copy without the authority is refused. Because it is a snapshot, the
+managed session that persists it first requires that the authority was
+issued by that same session and that the sealed decision's host turn equals
+the expected turn (`test_session_refuses_other_turn_or_other_session_decision`,
+observed failing before the check was added).
 
 `SQLiteVerifierObservationRepository` accepts a first insert only with the
 producer's exact `_ObservationAuthorization` capability bound to the complete
@@ -117,7 +126,7 @@ whose project scope equals the receipt scope it runs
 promotion runs only when replication composition supplies an authoritative
 fact source (PR #538 / issue #514); the verified-failed dispatcher path has
 unit coverage but no live failing-check run; worker/model-class identity is
-not part of independence (principal only); hosted CI has not run this
+not part of independence (per account only); hosted CI has not run this
 revision.
 
 No semantic fact claim is accepted from `HostFinalFacts`; promotion is

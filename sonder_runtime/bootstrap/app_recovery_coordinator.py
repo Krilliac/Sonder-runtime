@@ -255,8 +255,9 @@ class AppWorkRecoveryAttempt:
 
     def _record_learning(self, prepared, eligible):
         if self._learning is not None and eligible.authority is not None:
-            # The recorder re-reads the attached session's durable turn and is
-            # fail-closed; it never changes the recovered work outcome.
+            # The recorder persists the sealed decision this session just
+            # issued (bound to this session and turn) and is fail-closed; it
+            # never changes the recovered work outcome.
             try:
                 self._learning(self._session, prepared.work.host_turn, eligible)
             except BaseException:
