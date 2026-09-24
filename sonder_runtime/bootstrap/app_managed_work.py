@@ -3,6 +3,7 @@
 from ..platform.runtime_threads import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 import hashlib
+import logging
 import threading
 import time
 import uuid
@@ -24,6 +25,8 @@ from ..application.ports.app_managed_work import (
 from ..application.ports.host_turn_links import FinalizedHostResult
 from ..application.ports.lane_continuation import GrantedApprovalEvidence
 from .managed_conversation import ManagedConversationLifetime
+
+_LOG = logging.getLogger(__name__)
 
 
 def dispatch_approval_arguments(work):
@@ -77,12 +80,15 @@ class AppManagedWorkDispatcher:
         max_workers=1,
         max_retained=32,
         application=None,
+        learning=None,
     ):
         if any(
             not callable(value)
             for value in (lifetime_factory, authorize_dispatch, terminal_eligibility)
         ):
             raise TypeError("trusted managed work callbacks required")
+        if learning is not None and not callable(learning):
+            raise TypeError("host-owned learning recorder must be callable")
         if (
             type(max_workers) is not int
             or not 1 <= max_workers <= 8
@@ -94,6 +100,9 @@ class AppManagedWorkDispatcher:
             raise TypeError("private authority and prepared workbench required")
         self.authority, self.workbench = authority, workbench
         self._application = application
+        # Bootstrap-owned verifier learning; None only for unowned legacy
+        # compositions.  It receives the exact lifetime, never request data.
+        self._learning = learning
         self._factory, self._authorize, self._eligibility = (
             lifetime_factory,
             authorize_dispatch,
@@ -436,6 +445,13 @@ class AppManagedWorkDispatcher:
                 )
             else:
                 self._unknown(entry.selection, entry.record, stage)
+            if self._learning is not None and eligibility.authority is not None:
+                # Isolated so no failure (including a non-Exception) in
+                # learning can reach the work outcome handler below.
+                try:
+                    self._learning(lifetime, entry.record.host_turn, eligibility)
+                except BaseException:
+                    _LOG.warning("managed learning hook failed", exc_info=True)
         except BaseException:
             self._unknown(entry.selection, entry.record, stage)
         finally:

@@ -86,6 +86,19 @@ class UnitOfWorkAdapter:
             raise RuntimeError("unit of work is not active")
         return self._conn
 
+    @property
+    def authoritative_fact_source(self):
+        """Return the composition-owned fact writer for application services."""
+        return self._authoritative_fact_source
+
+    @property
+    def verifier_observations(self):
+        """Return the verifier observation repository on this UoW connection."""
+        from .persistence.sqlite.verifier_observations import (
+            SQLiteVerifierObservationRepository,
+        )
+        return SQLiteVerifierObservationRepository(self.connection)
+
     def commit(self) -> None:
         if self._conn is not None:
             self._conn.commit()
