@@ -14,8 +14,8 @@ The requirement-wide audit is in [SEC-AUDIT-2026-09-23.md](SEC-AUDIT-2026-09-23.
 > Revision 6 withdrew that again after a round-3 re-review at `774c8965`
 > measured global PAX (`g`) keys accumulating into every later member and
 > per-member PAX (`x`) keys retained per member without an archive-wide
-> budget. The checkbox is cleared until the fix has a green CI run on its
-> exact SHA.
+> budget. Revision 7 re-verifies at `4d689fee`, which contains fixes 1 to
+> 13. The CI receipt is under Evidence.
 
 ## Production archive readers
 
@@ -227,7 +227,16 @@ passed at `e077dbf2`, which contained fixes 1 to 6. It was the basis of the
 withdrawn revision 3. The CI receipt for fixes 7 to 10 is recorded with the
 next verified ledger revision, which names its exact SHA.
 
-Re-verification receipt (revision 5): the pull request's exact-head run
+Re-verification receipt (revision 7): the pull request's exact-head run
+[`35951205702`](https://github.com/Krilliac/Sonder-runtime/actions/runs/35951205702)
+passed its `Validate master-spec evidence ledger`,
+`Validate evidence changes against pull request base`, and `Run test suite`
+steps (Ubuntu, 16883 passed, 125 skipped) at `4d689fee91980fecf6686aad7e367b79beeee423`. That head contains fixes
+1 to 13, all 54 corpus cases, and the merge of `main` through #519 and #552.
+The ledger's `verified_sha` names it. The checkbox and this receipt follow in
+a later commit, which is gated by CI on the pull request's final head.
+
+Superseded receipt (revision 5): the pull request's exact-head run
 [`35945618003`](https://github.com/Krilliac/Sonder-runtime/actions/runs/35945618003)
 passed its `Validate master-spec evidence ledger`,
 `Validate evidence changes against pull request base`, and `Run test suite`
