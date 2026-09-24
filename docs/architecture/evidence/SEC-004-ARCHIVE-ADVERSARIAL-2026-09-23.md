@@ -6,6 +6,13 @@ inventories every production archive reader, fixes the defects that an
 adversarial corpus exposed, and records the corpus as a regression gate.
 The requirement-wide audit is in [SEC-AUDIT-2026-09-23.md](SEC-AUDIT-2026-09-23.md).
 
+> **Status: verification withdrawn (ledger revision 4).** Revision 3 marked
+> SEC-004 verified at `e077dbf2`. A re-review at `eca9f597` then measured
+> unbounded parser work through GNU sparse members and uncaught recursion
+> through chained metadata records, neither of which the metadata cap
+> covered. The checkbox is cleared until those fixes have a green CI run on
+> their exact SHA.
+
 ## Production archive readers
 
 | Reader | Input trust | Bounds |
