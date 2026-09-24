@@ -1,7 +1,7 @@
 """Durable session compaction application service."""
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 from uuid import uuid4
 
@@ -108,6 +108,34 @@ class SessionCompactionService:
         try:
             return self._archive.prepare_context(
                 session_id, events, budget_bytes=budget_bytes,
+            )
+        except (ValueError, TypeError) as exc:
+            raise SessionCompactionError(str(exc)) from exc
+
+    def archive_verified_context(
+        self,
+        session_id: str,
+        events: Sequence[SessionEvent],
+        *,
+        budget_bytes: int,
+    ) -> ArchivedContext:
+        """Archive an already chain-verified, complete event snapshot.
+
+        The caller (the live lane) obtained ``events`` from
+        ``SessionRepository.read_complete``, which bounds and verifies the
+        whole history in one read transaction. Re-reading the range here
+        would reintroduce an unverified second read between verification and
+        provider assembly, so the verified tuple is archived as-is. The
+        archive service still enforces its own item bound and ordering.
+        """
+        values = tuple(events)
+        if not values or values[0].sequence != 1:
+            raise SessionCompactionError("verified context must start at the session head")
+        if any(right.sequence != left.sequence + 1 for left, right in zip(values, values[1:])):
+            raise SessionCompactionError("verified context must be contiguous")
+        try:
+            return self._archive.prepare_context(
+                session_id, values, budget_bytes=budget_bytes,
             )
         except (ValueError, TypeError) as exc:
             raise SessionCompactionError(str(exc)) from exc

@@ -1,0 +1,247 @@
+"""Issue #510 guard canaries: no-progress verification loop in codegen.
+
+``codegen_build_loop`` spends at least one ensemble generation plus a full
+build per attempt.  The canaries drive the real server entry point with a
+fake compiler that keeps returning the same errors (the loop is stuck) or an
+absurd attempt count (the loop is runaway) and count the model requests that
+actually happened.  The normal-traffic tests prove a converging loop and the
+default two-attempt contract are untouched.
+"""
+from __future__ import annotations
+
+import pytest
+
+import server
+from sonder_runtime.domain import verification_progress as vp
+
+
+def _build(ok, stdout):
+    return {
+        "ok": ok, "program": "build", "command": "build", "cwd": ".",
+        "returncode": 0 if ok else 1, "timed_out": False, "elapsed_ms": 1,
+        "stdout": stdout, "stderr": "",
+        "stdout_truncated": False, "stderr_truncated": False,
+    }
+
+
+def _prepare(monkeypatch, tmp_path, outcomes):
+    """``outcomes(n)`` gives the n-th build's (ok, stdout); n counts from 1."""
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
+    builds = []
+
+    def run_program(*args, **kwargs):
+        builds.append(1)
+        return _build(*outcomes(len(builds)))
+
+    monkeypatch.setattr(server.workbench, "run_program", run_program)
+    asked = []
+
+    def fake_ensemble(prompt, **kwargs):
+        asked.append(prompt)
+        return "int main(void) { return %d; }" % len(asked)
+
+    monkeypatch.setattr(server, "ensemble_answer", fake_ensemble)
+    return asked, builds
+
+
+def test_canary_identical_build_errors_stop_regeneration(monkeypatch, tmp_path):
+    stuck = "main.c:1: error: unknown type name 'widget'"
+    asked, _builds = _prepare(monkeypatch, tmp_path, lambda n: (False, stuck))
+
+    out = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build", attempts=5,
+    )
+
+    # Two identical failing attempts are enough evidence; attempts 3-5 would
+    # have re-sent the same prompt to the ensemble for the same verdict.
+    assert len(asked) == 2
+    assert "no progress" in out
+    assert vp.outcome_fingerprint([stuck]) in out
+    assert "BUILD SUCCEEDED" not in out
+
+
+def test_canary_runaway_attempt_count_is_clamped(monkeypatch, tmp_path):
+    # Every build fails differently, so only the attempt cap can stop it.
+    asked, _builds = _prepare(
+        monkeypatch, tmp_path,
+        lambda n: (False, "main.c:%d: error: moving target %d" % (n, n)),
+    )
+
+    out = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build", attempts=1000,
+    )
+
+    assert len(asked) == vp.MAX_VERIFICATION_ATTEMPTS
+    assert "no progress" not in out
+
+
+def test_normal_converging_loop_is_not_cut_short(monkeypatch, tmp_path):
+    # initial build, attempt 1, attempt 2 fail with different errors; the
+    # third attempt's build (build #4) and the final build (#5) are clean.
+    def outcomes(n):
+        if n <= 3:
+            return False, "main.c:%d: error: still wrong %d" % (n, n)
+        return True, "ok"
+
+    asked, _builds = _prepare(monkeypatch, tmp_path, outcomes)
+
+    out = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build", attempts=5,
+    )
+
+    assert len(asked) == 3
+    assert "no progress" not in out
+    assert "BUILD SUCCEEDED" in out
+
+
+def test_normal_default_two_attempts_are_unchanged(monkeypatch, tmp_path):
+    stuck = "main.c:1: error: same"
+    asked, _builds = _prepare(monkeypatch, tmp_path, lambda n: (False, stuck))
+
+    server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build",
+    )
+
+    assert len(asked) == 2
+
+
+def test_guard_resets_on_change_and_never_stalls_on_clean():
+    guard = vp.VerificationProgressGuard()
+    assert guard.observe(["a: error x"]) is False
+    assert guard.observe(["a: error y"]) is False
+    assert guard.observe([]) is False
+    assert guard.observe([]) is False
+    assert guard.observe(["a: error y"]) is False
+    # Order and whitespace do not make an identical outcome look new.
+    assert guard.observe(["  a:   error y "]) is True
+    assert guard.stalled_fingerprint == vp.outcome_fingerprint(["a: error y"])
+
+
+def test_bounded_attempts_rejects_nonsense():
+    assert vp.bounded_attempts(0) == 1
+    assert vp.bounded_attempts(-4) == 1
+    assert vp.bounded_attempts("3") == 3
+    assert vp.bounded_attempts("lots") == 2
+    assert vp.bounded_attempts(True) == 2
+    assert vp.bounded_attempts(10**9) == vp.MAX_VERIFICATION_ATTEMPTS
+
+
+# -- review follow-ups (PR #553) --------------------------------------------
+
+def test_duplicate_error_lines_are_not_collapsed_into_a_stall():
+    guard = vp.VerificationProgressGuard()
+    assert guard.observe(["a: error x", "a: error x", "a: error x"]) is False
+    # Two of three copies fixed is progress, not an identical outcome.
+    assert guard.observe(["a: error x"]) is False
+    assert vp.outcome_fingerprint(["e", "e"]) != vp.outcome_fingerprint(["e"])
+
+
+def test_an_improving_score_is_never_a_stall_even_with_an_equal_fingerprint():
+    guard = vp.VerificationProgressGuard()
+    assert guard.observe(["a: error x"], score=(1, 5, 1)) is False
+    assert guard.observe(["a: error x"], score=(1, 2, 1)) is False
+    assert guard.observe(["a: error x"], score=(1, 2, 1)) is True
+
+
+def test_reset_breaks_the_streak():
+    guard = vp.VerificationProgressGuard()
+    assert guard.observe(["a: error x"]) is False
+    guard.reset()
+    assert guard.observe(["a: error x"]) is False
+
+
+def _failing_exit_without_matching_lines(n):
+    return False, "Build FAILED. attempt %d restore problem" % n
+
+
+def test_placeholder_for_unmatched_failure_does_not_feed_the_guard(monkeypatch, tmp_path):
+    # error_regex matches nothing, so every failure becomes the same host
+    # placeholder even though the real output changes each time.
+    asked, _builds = _prepare(monkeypatch, tmp_path, _failing_exit_without_matching_lines)
+
+    out = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build",
+        attempts=4, error_regex=r"CS\d{4}",
+    )
+
+    assert len(asked) == 4
+    assert "no progress" not in out
+
+
+def test_truncated_build_output_does_not_feed_the_guard(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
+
+    def run_program(*args, **kwargs):
+        result = _build(False, "main.c:1: error: visible head of the output")
+        result["stdout_truncated"] = True
+        return result
+
+    monkeypatch.setattr(server.workbench, "run_program", run_program)
+    asked = []
+    monkeypatch.setattr(
+        server, "ensemble_answer",
+        lambda prompt, **kw: asked.append(prompt) or "int main(void) { return 0; }",
+    )
+
+    out = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build", attempts=4,
+    )
+
+    assert len(asked) == 4
+    assert "no progress" not in out
+
+
+def test_masked_parse_errors_do_not_feed_the_guard(monkeypatch, tmp_path):
+    masked = "main.c:1: error: expected ';' before '}' token"
+    asked, _builds = _prepare(monkeypatch, tmp_path, lambda n: (False, masked))
+
+    out = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build", attempts=4,
+    )
+
+    assert len(asked) == 4
+    assert "no progress" not in out
+
+
+def test_clamped_attempt_count_is_reported(monkeypatch, tmp_path):
+    _prepare(monkeypatch, tmp_path, lambda n: (False, "main.c:%d: error: moving %d" % (n, n)))
+
+    out = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build", attempts=1000,
+    )
+
+    assert "attempts clamped: requested 1000, ran at most %d" % vp.MAX_VERIFICATION_ATTEMPTS in out
+
+
+def test_unclamped_attempt_count_is_not_reported(monkeypatch, tmp_path):
+    _prepare(monkeypatch, tmp_path, lambda n: (False, "main.c:1: error: same"))
+
+    out = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build", attempts=3,
+    )
+
+    assert "attempts clamped" not in out
+
+
+@pytest.mark.parametrize("requested", [2, 2.0, "2", True])
+def test_equivalent_attempt_values_are_not_reported_as_clamped(monkeypatch, tmp_path, requested):
+    _prepare(monkeypatch, tmp_path, lambda n: (False, "main.c:1: error: same"))
+
+    out = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build", attempts=requested,
+    )
+
+    assert "attempts clamped" not in out
+
+
+@pytest.mark.parametrize("requested,applied", [(0, 1), (-3, 1), (7.9, 6), (1000, 6)])
+def test_out_of_range_attempt_values_are_reported_as_clamped(monkeypatch, tmp_path, requested, applied):
+    _prepare(monkeypatch, tmp_path, lambda n: (False, "main.c:%d: error: moving %d" % (n, n)))
+
+    out = server.codegen_build_loop(
+        str(tmp_path), '{"main.c": "an entry point"}', "build", attempts=requested,
+    )
+
+    assert "attempts clamped: requested %s, ran at most %d" % (requested, applied) in out

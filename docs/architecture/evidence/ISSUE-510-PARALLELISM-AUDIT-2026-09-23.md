@@ -15,7 +15,7 @@ Issue #510 section 3, "Bounded productive parallelism", asks for four things:
 
 | Master-spec requirement | Relation to section 3 | Claimed by this lane |
 |---|---|---|
-| `AGENT-007` Budgets (depth, child count, **concurrency**, tokens, time, model, execution resources) | Direct: concurrency caps and resource budgets | Yes: revision 3, `implemented_unverified` |
+| `AGENT-007` Budgets (depth, child count, **concurrency**, tokens, time, model, execution resources) | Direct: concurrency caps and resource budgets | Yes: revision 5, `implemented_unverified` (renumbered from 3 after PR #553 appended revisions 3 and 4) |
 | `AGENT-008` Isolated workspaces; reconcile concurrent Git changes without force-overwriting | Ownership-aware scheduling is the admission half: overlapping writers must not run together | No. The live fleet seam is read-only (see below), so no write lane exercises it yet |
 | `AGENT-002` Migrate existing modes to the shared contract | The fleet dispatcher is still a legacy root-module loop | No |
 | `JOB-001` / `JOB-002` Generic job registry and control | Section 3 caps should eventually apply to every job kind, not only fleet lanes | No |
