@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 297,
+      "file_count": 298,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -101,6 +101,7 @@
         "sonder_runtime/adapters/embeddings.py",
         "sonder_runtime/adapters/eval_history_reader.py",
         "sonder_runtime/adapters/evaluation_corpus.py",
+        "sonder_runtime/adapters/evaluation_failure_corpus.py",
         "sonder_runtime/adapters/evaluation_history_reader.py",
         "sonder_runtime/adapters/evaluation_history_store.py",
         "sonder_runtime/adapters/evaluation_lifecycle.py",
@@ -346,7 +347,7 @@
       ]
     },
     {
-      "file_count": 332,
+      "file_count": 334,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -417,8 +418,10 @@
         "sonder_runtime/application/evaluation/__init__.py",
         "sonder_runtime/application/evaluation/case_manifest.py",
         "sonder_runtime/application/evaluation/corpus_inventory.py",
+        "sonder_runtime/application/evaluation/divergence.py",
         "sonder_runtime/application/evaluation/durable_lifecycle.py",
         "sonder_runtime/application/evaluation/harness_outcomes.py",
+        "sonder_runtime/application/evaluation/promotion_gates.py",
         "sonder_runtime/application/evaluation/proposal_lifecycle.py",
         "sonder_runtime/application/evaluation/reproducible.py",
         "sonder_runtime/application/evaluation/service.py",
