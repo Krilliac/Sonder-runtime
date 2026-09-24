@@ -36,6 +36,31 @@ for that page. It does not say anything about interactions, outcomes,
 preferences, lessons, sessions, agent transcripts, embeddings/indexes,
 artifacts, configuration, or control state. Those are excluded.
 
+## Scope ownership blocks a live receiver
+
+An enabled typed application graph always activates its local authoritative
+fact source for the configured `project_scope` in its own `memory.db`. The
+receiver projects peer facts into that same database and scope, and
+configuration validation requires every peer scope to equal the local scope.
+The authoritative source owns every fact row in that scope, so a peer page
+cannot be projected there without bypassing the source journal.
+
+Consequently, **`receiver_enabled = true` is not supported on an application
+host in this release.** The application's replication service refuses to
+create a receiver and raises a `ConfigError` that names the scope; HTTP
+startup stops before the listener binds. Set `receiver_enabled = false` and
+remove `accepted_source_ids` on every application host.
+
+A configuration that enabled the receiver was already non-functional before
+this refusal. Earlier, a received page wrote unjournaled rows into the owned
+scope, and the next authoritative activation then failed closed with
+"existing project facts require authoritative migration", blocking local fact
+transactions. Later, the projection refused those pages and rolled them back,
+so the peer retried the same rejected page indefinitely. No fact was ever
+durably copied into an owned scope. An enabled host without a receiver still
+journals its own fact writes. Its explicit `replicate_once()` calls remain
+`pending` because no application host can receive them.
+
 The service has one exact project scope and at most 16 fixed peer identities.
 It constructs no outgoing client until the owner explicitly calls
 `replicate_once()`. One call exports at most the configured
@@ -57,7 +82,7 @@ authority over another host.
 | Deployment | Supported configuration | What the runtime proves | What it does not prove |
 | --- | --- | --- | --- |
 | One PC | Leave `[memory_replication].enabled = false`. An enabled service requires at least one fixed outbound peer. | The local SQLite store and any local authoritative fact transaction are durable according to their local storage contract. | A second durable copy, peer receipt, recovery after host/storage loss, ownership transfer, takeover, failback, or HA. |
-| Two PCs in one trusted private cluster | Each host has an enabled, reciprocal fixed-peer configuration for the same exact project scope and a private HTTPS receiver. | A page marked `replicated` has a matching durable receipt from the one configured peer, and the receiver has projected the supported fact page before that receipt. | An independent witness, quorum, fencing, merged control state, automatic 1-to-2-to-1 operation, controller recovery, takeover, failback, or HA. |
+| Two PCs in one trusted private cluster | **Live fact copy is not available in this release.** Each host may enable the service for local authoritative journaling with `receiver_enabled = false`; see [scope ownership blocks a live receiver](#scope-ownership-blocks-a-live-receiver). | Each host's own fact writes are journaled by its local authoritative source. | Any peer receipt, a second durable copy, an independent witness, quorum, fencing, merged control state, automatic 1-to-2-to-1 operation, controller recovery, takeover, failback, or HA. Explicit sends stay `pending`. |
 
 The deployment profile (`single-host`/`single-pc` or
 `pooled-pair`/`two-pc`) remains a separate control-state and compute
@@ -73,19 +98,19 @@ caller input cannot add or replace a peer, scope, identity, or origin. Secrets
 are accepted only from the configured secrets environment file or process
 environment and are rejected from TOML.
 
-This is a directional example for node A. Node B needs its own reciprocal
-section: its `local_node_id` is node B, its fixed peer is node A, and its
-`accepted_source_ids` contains node A. Replace the placeholder origin with a
-real canonical HTTPS origin with an explicit port; it is intentionally not an
-endpoint to copy from this document.
+This is a directional example for node A. Node B needs its own section: its
+`local_node_id` is node B and its fixed peer is node A. Both keep
+`receiver_enabled = false` with no `accepted_source_ids`, because an
+application host that owns the scope cannot run a receiver (see above).
+Replace the placeholder origin with a real canonical HTTPS origin with an
+explicit port; it is intentionally not an endpoint to copy from this document.
 
 ```toml
 [memory_replication]
 enabled = true
 local_node_id = "node-a"
 project_scope = "project-a"
-receiver_enabled = true
-accepted_source_ids = ["node-b"]
+receiver_enabled = false
 request_timeout_seconds = 5
 max_request_bytes = 8388608
 max_response_bytes = 65536
@@ -147,7 +172,10 @@ process against a live state directory merely to invoke the method.
 
 `POST /v1/memory/replication/batches` is an incoming fixed-peer receiver
 endpoint, not an operator send endpoint. It is unavailable when the typed
-service is disabled, rejects browser origins, and accepts only the configured
+service is disabled and, in this release, on every application host, because
+such a host owns its scope (see
+[scope ownership blocks a live receiver](#scope-ownership-blocks-a-live-receiver)).
+The lower-level receiver contract rejects browser origins and accepts only the configured
 bearer, fixed source identity, exact project scope, and bounded canonical
 batch. A successful `202` response contains a durable fact-projection receipt;
 it is not a takeover, failback, or HA signal.
@@ -199,6 +227,12 @@ threat must be addressed, use an independent external, TPM-backed, or remote
 monotonic anchor. Sonder does not configure or claim one.
 
 ## Two-host acceptance procedure — unexecuted template
+
+**Blocked in this release.** Steps 2, 5, 6, and 7 require an application
+host with `receiver_enabled = true`, which now fails at startup; see
+[scope ownership blocks a live receiver](#scope-ownership-blocks-a-live-receiver).
+Do not run this template until a supported receiver topology exists. It is
+retained for that future contract.
 
 This procedure is a reproducible operator checklist, **not evidence that an
 independent two-host deployment has been run by this repository**. The
