@@ -14,11 +14,11 @@ import pytest
 from sonder_runtime.adapters.evaluation_corpus import BoundedEvaluationCorpusScanner
 from sonder_runtime.adapters.evaluation_failure_corpus import JsonMinimizedFailureStore
 from sonder_runtime.application.evaluation.divergence import (
+    STRATEGY_DIFFERENTIAL,
+    STRATEGY_PREFIX,
     DivergenceError,
     DivergencePolicy,
     InMemoryMinimizedFailureStore,
-    STRATEGY_DIFFERENTIAL,
-    STRATEGY_PREFIX,
     MinimizedFailure,
     earliest_divergence,
     minimize_failure,
@@ -27,7 +27,10 @@ from sonder_runtime.application.evaluation.divergence import (
 )
 from sonder_runtime.application.evaluation.proposal_lifecycle import ProposalLifecycle
 from sonder_runtime.application.evaluation.service import EvaluationApplicationService
-from sonder_runtime.application.evaluation.trajectory_replay import TrajectoryRecord, TrajectoryStep
+from sonder_runtime.application.evaluation.trajectory_replay import (
+    TrajectoryRecord,
+    TrajectoryStep,
+)
 
 
 class _KeyValueSession:
@@ -303,7 +306,7 @@ class _TwoBugSession(_KeyValueSession):
 
 def test_minimization_preserves_the_originally_reported_divergence() -> None:
     expected = _recorded_session()
-    candidate = lambda: _TwoBugSession(truncate=True)  # noqa: E731
+    candidate = lambda: _TwoBugSession(truncate=True)
     original = replay_divergence(expected, candidate)
     assert original is not None and original.index == 6
     failure = minimize_failure(expected, candidate, baseline_factory=_fixed_candidate)

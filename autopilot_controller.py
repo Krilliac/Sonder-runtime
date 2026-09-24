@@ -9,11 +9,16 @@ which states/actions are legal and whether evidence satisfies completion gates.
 from __future__ import annotations
 
 import re
+import logging
 from dataclasses import dataclass
 from typing import Callable
 
 import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 from sonder_runtime.domain.runtime_policy import rules as _policy_rules
+from sonder_runtime.bootstrap.strategy_observers import observe_autopilot_task
+
+
+_LOG = logging.getLogger(__name__)
 
 
 TASK_KINDS = ("inspect", "research", "implement", "validate", "report")
@@ -53,6 +58,10 @@ class HostTaskResult:
     verification_certificate_id: str = ""
     verification_generation: int = 0
     verification_code: str = ""
+    # Host-owned proof that a provider returned a response to a prompt that
+    # contained the selected pre-model context. Transport failures do not
+    # establish that the model saw or used a selected strategy reference.
+    pre_model_context_response_observed: bool = False
 
     def receipt(self) -> dict:
         receipt = {
@@ -71,6 +80,8 @@ class HostTaskResult:
                 "code": self.verification_code,
                 "scope": "point_in_time_workspace_evidence",
             }
+        if self.pre_model_context_response_observed:
+            receipt["pre_model_context_response_observed"] = True
         return receipt
 
 
@@ -548,6 +559,8 @@ def execute_run(
     review_fn: Callable[[dict, str], dict],
     max_cycles: int = 6,
     plan_only: bool = False,
+    strategy_trace=None,
+    strategy_memory=None,
 ) -> dict:
     """Claim and advance one run on the caller thread.
 
@@ -561,18 +574,38 @@ def execute_run(
     )
     if not run:
         raise AutopilotError("run is unavailable, terminal, cancelled, or owned elsewhere")
+
+    def observe(task):
+        if strategy_trace is None:
+            return
+        try:
+            observe_autopilot_task(
+                strategy_trace, run=run, task=task, memory_service=strategy_memory,
+            )
+        except Exception as error:  # noqa: BLE001 - optional observer cannot change task state
+            # A separate observe checkpoint is never authority for the
+            # Autopilot task transition. The persisted run remains the truth.
+            _LOG.warning("autopilot strategy observation failed: %s", type(error).__name__)
+
     try:
         plan = [dict(task) for task in (run.get("plan") or [])]
+        for previous in plan:
+            observe(previous)
         uncertain_tasks = _mark_interrupted_tasks_uncertain(plan)
         if uncertain_tasks:
-            run = autopilot_store.save_progress(
+            saved = autopilot_store.save_progress(
                 run["id"], owner_id, plan=plan, status="running", phase="execute",
                 event_kind="interrupted_task_uncertain",
                 event_message=(
                     "%d interrupted task(s) retained as uncertain; "
                     "automatic replay refused" % uncertain_tasks
                 ),
-            ) or run
+            )
+            run = saved or run
+            if saved is not None:
+                for interrupted in plan:
+                    if interrupted.get("status") == "uncertain":
+                        observe(interrupted)
             report = format_report(
                 run,
                 "task outcome is uncertain; inspect its external effects, then cancel "
@@ -767,7 +800,7 @@ def execute_run(
                 result.receipt() if isinstance(result, HostTaskResult) else {}
             )
             plan[task_index] = task
-            run = autopilot_store.save_progress(
+            saved = autopilot_store.save_progress(
                 run["id"], owner_id,
                 plan=plan,
                 cycles_delta=1,
@@ -778,7 +811,10 @@ def execute_run(
                     "%s passed" % task["id"] if passed
                     else "%s failed: %s" % (task["id"], error)
                 ),
-            ) or run
+            )
+            run = saved or run
+            if saved is not None:
+                observe(task)
             invoked_cycles += 1
             if passed:
                 pending_index, _pending_task = _next_pending(run.get("plan") or [])

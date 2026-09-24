@@ -22,7 +22,8 @@ def test_depth_and_direct_child_count_fail_closed(tmp_path):
     service = DurableContinuationService(repo)
     limits = dict(max_depth=2, max_children=1, max_concurrency=2, max_steps=20, max_output_tokens=6000, max_wall_seconds=600)
     assert service.spawn(_request("parent", **limits), _ctx(), lambda *_: "ok").result(2).status is SubagentStatus.SUCCEEDED
-    assert service.spawn(_request("child", "parent", **limits), _ctx(), lambda *_: "ok").result(2).status is SubagentStatus.SUCCEEDED
+    child_limits = dict(limits, max_output_tokens=5999, max_wall_seconds=599)
+    assert service.spawn(_request("child", "parent", **child_limits), _ctx(), lambda *_: "ok").result(2).status is SubagentStatus.SUCCEEDED
     with pytest.raises(InvalidSubagentRequest, match="depth"):
         service.spawn(_request("grandchild", "child", **limits), _ctx(), lambda *_: "ok")
     with pytest.raises(InvalidSubagentRequest, match="child-count"):

@@ -1,0 +1,61 @@
+name: postgres-child-conformance
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/postgres-child-conformance.yml
+      - requirements-postgres.txt
+      - scripts/run_disposable_postgres_pair.py
+      - sonder_runtime/application/subagents/**
+      - sonder_runtime/application/ports/subagents.py
+      - sonder_runtime/application/ports/worker_registry.py
+      - sonder_runtime/application/worker_registry/**
+      - sonder_runtime/adapters/persistence/durable_continuation.py
+      - sonder_runtime/adapters/persistence/postgres*.py
+      - sonder_runtime/adapters/subagents.py
+      - tests/test_atomic_child_reservations.py
+      - tests/test_postgres_child_storage_integration.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  disposable-pair:
+    # Distinct optional check: the existing required `tests` job keeps its name.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            requirements-runtime.txt
+            requirements-postgres.txt
+      - name: Install pinned Python drivers and test dependencies
+        run: python -m pip install -r requirements-dev.txt -r requirements-postgres.txt
+      - name: Install PostgreSQL 18 from the official PGDG repository
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl postgresql-common
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --silent --show-error --location \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          cat <<'SOURCES' | sudo tee /etc/apt/sources.list.d/pgdg.sources > /dev/null
+          Types: deb
+          URIs: https://apt.postgresql.org/pub/repos/apt
+          Suites: noble-pgdg
+          Architectures: amd64
+          Components: main
+          Signed-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          SOURCES
+          # The harness starts exactly one owned pair on ephemeral ports.
+          printf 'create_main_cluster = false\n' | sudo tee /etc/postgresql-common/createcluster.conf > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y postgresql-18
+      - name: Run owned disposable primary and synchronous standby conformance
+        run: python -m scripts.run_disposable_postgres_pair --pg-bin /usr/lib/postgresql/18/bin

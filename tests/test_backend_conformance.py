@@ -1,27 +1,50 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
+from sonder_runtime.adapters.inference.openai_compat_gateway import (
+    OpenAICompatibleConfig,
+    OpenAICompatibleGateway,
+)
 from sonder_runtime.application.routing.backend_conformance import (
     DeterministicFakeProvider,
     RecentCapabilityEvidence,
     run_gateway_probes,
     run_smoke_probes,
 )
-from sonder_runtime.adapters.inference.openai_compat_gateway import (
-    OpenAICompatibleConfig,
-    OpenAICompatibleGateway,
-)
 from sonder_runtime.application.routing.capability_router import (
-    CapabilityRoutingError,
     CapabilityRouter,
+    CapabilityRoutingError,
     RoutingRequest,
 )
 from sonder_runtime.domain.agents.roles import AgentRole
-from sonder_runtime.domain.routing.capability_profiles import Capability, CapabilityProfile
-from sonder_runtime.domain.routing.backend_conformance import BackendConformanceRecord, ProbeResult, BackendCapability
+from sonder_runtime.domain.routing.backend_conformance import (
+    BackendCapability,
+    BackendConformanceRecord,
+    ProbeResult,
+)
+from sonder_runtime.domain.routing.capability_profiles import (
+    Capability,
+    CapabilityProfile,
+)
+
+
+def _legacy_store_fixture(*, backend="local", model="fixture", now=None):
+    """Only legacy store tests fabricate evidence; the smoke helper never does."""
+    return replace(run_smoke_probes(
+        DeterministicFakeProvider(), backend=backend, model=model, now=now,
+    ), synthetic=False)
+
+
+def test_offline_smoke_cannot_claim_live_inference():
+    with pytest.raises(ValueError, match="cannot certify live inference"):
+        run_smoke_probes(
+            DeterministicFakeProvider(), backend="local", model="fixture",
+            synthetic=False,
+        )
 
 
 def test_fake_provider_records_plain_structured_and_cancellation(tmp_path):
@@ -36,7 +59,7 @@ def test_fake_provider_records_plain_structured_and_cancellation(tmp_path):
     assert restored.synthetic is True
 
 
-def test_openai_compatible_gateway_emits_real_non_synthetic_route_evidence():
+def test_injected_openai_transport_records_probe_outcomes_as_synthetic():
     calls = []
 
     def transport(url, payload, headers, timeout):
@@ -54,7 +77,7 @@ def test_openai_compatible_gateway_emits_real_non_synthetic_route_evidence():
     )
     record = run_gateway_probes(gateway, backend="openai-compatible", model="contract-model", now=100)
 
-    assert record.synthetic is False
+    assert record.synthetic is True
     assert record.passed == frozenset({
         record.results[0].capability,
         record.results[1].capability,
@@ -113,7 +136,7 @@ def test_router_requires_recent_backend_evidence_and_reports_reason(tmp_path):
 
 def test_router_refuses_stale_evidence_then_accepts_recent_record(tmp_path):
     evidence = RecentCapabilityEvidence(tmp_path / "capabilities.json", max_age_seconds=10)
-    evidence.save(run_smoke_probes(DeterministicFakeProvider(), backend="local", model="fixture", now=1, synthetic=False))
+    evidence.save(_legacy_store_fixture(now=1))
     allowed, reason = evidence.check("fixture", frozenset({Capability.STRUCTURED}), now=20)
     assert not allowed and reason == "recent_capability_evidence_stale"
     stale_router = CapabilityRouter(
@@ -124,7 +147,7 @@ def test_router_refuses_stale_evidence_then_accepts_recent_record(tmp_path):
     with pytest.raises(CapabilityRoutingError) as failure:
         stale_router.route(RoutingRequest(AgentRole.INTEGRATOR))
     assert failure.value.reason_code == "recent_capability_evidence_stale"
-    evidence.save(run_smoke_probes(DeterministicFakeProvider(), backend="local", model="fixture", now=20, synthetic=False))
+    evidence.save(_legacy_store_fixture(now=20))
     router = CapabilityRouter(
         (CapabilityProfile("fixture", frozenset({Capability.EDIT, Capability.STRUCTURED})),),
         recent_evidence=evidence,
@@ -144,7 +167,7 @@ def test_router_rejects_synthetic_and_future_evidence(tmp_path):
     with pytest.raises(CapabilityRoutingError) as synthetic:
         router.route(RoutingRequest(AgentRole.INTEGRATOR))
     assert synthetic.value.reason_code == "synthetic_capability_evidence"
-    evidence.save(run_smoke_probes(DeterministicFakeProvider(), backend="local", model="fixture", now=10**12, synthetic=False))
+    evidence.save(_legacy_store_fixture(now=10**12))
     with pytest.raises(CapabilityRoutingError) as future:
         router.route(RoutingRequest(AgentRole.INTEGRATOR))
     assert future.value.reason_code == "future_capability_evidence"
@@ -152,9 +175,7 @@ def test_router_rejects_synthetic_and_future_evidence(tmp_path):
 
 def test_router_uses_profile_backend_identity(tmp_path):
     evidence = RecentCapabilityEvidence(tmp_path / "capabilities.json")
-    evidence.save(run_smoke_probes(
-        DeterministicFakeProvider(), backend="private-local", model="fixture", synthetic=False
-    ))
+    evidence.save(_legacy_store_fixture(backend="private-local"))
     router = CapabilityRouter(
         (CapabilityProfile(
             "fixture", frozenset({Capability.EDIT, Capability.STRUCTURED}),
@@ -194,9 +215,7 @@ def test_nonfinite_conformance_window_and_clock_fail_closed(tmp_path):
     with pytest.raises(ValueError, match="max_age_seconds"):
         RecentCapabilityEvidence(tmp_path / "capabilities.json", max_age_seconds=float("inf"))
     evidence = RecentCapabilityEvidence(tmp_path / "capabilities.json")
-    evidence.save(run_smoke_probes(
-        DeterministicFakeProvider(), backend="local", model="fixture", now=100, synthetic=False,
-    ))
+    evidence.save(_legacy_store_fixture(now=100))
     assert evidence.check("fixture", frozenset(), now=float("nan")) == (
         False, "recent_capability_evidence_missing",
     )
@@ -219,9 +238,7 @@ def test_malformed_persisted_record_does_not_block_fresh_evidence(tmp_path):
     }), encoding="utf-8")
     evidence = RecentCapabilityEvidence(path)
     assert evidence.load("local", "other") is None
-    evidence.save(run_smoke_probes(
-        DeterministicFakeProvider(), backend="local", model="fixture", now=100, synthetic=False,
-    ))
+    evidence.save(_legacy_store_fixture(now=100))
     assert evidence.check("fixture", frozenset(), now=100) == (
         True, "recent_capability_evidence_passed",
     )

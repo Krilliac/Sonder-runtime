@@ -17,8 +17,11 @@ from ...application.ports.continuation_mutations import (
     canonical,
 )
 from ...application.ports.continuation_records import DurableChildSession
+from ...application.subagents.admission import usage_is_monotonic, validate_admission
 from ...application.ports.subagents import (
     InvalidSubagentRequest,
+    SubagentError,
+    SubagentResult,
     SubagentStatus,
     TERMINAL_SUBAGENT_STATUSES,
 )
@@ -257,6 +260,26 @@ class PostgreSQLDurableContinuationRepository:
         return session_from_data(json.loads(bytes(row[0]))) if row else None
 
     @staticmethod
+    def _admission_records(connection):
+        rows = connection.execute("SELECT snapshot FROM sonder_child.child").fetchall()
+        return tuple(session_from_data(json.loads(bytes(row[0]))) for row in rows)
+
+    @staticmethod
+    def _check_active_keys(candidate, existing):
+        active = {SubagentStatus.CREATED, SubagentStatus.QUEUED, SubagentStatus.RUNNING}
+        for attribute, label in (("resume_key", "resume"), ("idempotency_key", "idempotency")):
+            key = getattr(candidate.request, attribute)
+            if key and any(
+                record.status in active
+                and record.request.parent_id == candidate.request.parent_id
+                and getattr(record.request, attribute) == key
+                for record in existing
+            ):
+                raise InvalidSubagentRequest(
+                    f"active child {label} key already exists for parent"
+                )
+
+    @staticmethod
     def _retained(connection, prepared):
         row = connection.execute(
             "SELECT digest FROM sonder_child.intent WHERE operation_id=%s",
@@ -339,6 +362,11 @@ class PostgreSQLDurableContinuationRepository:
             connection.commit()
             self._begin(connection)
             self._owner_row(connection)
+            # A child-specific row lock cannot protect an aggregate resource
+            # pool: two different child IDs could both read the old total.
+            # Serialize every state mutation before taking its child lock, so
+            # the validation snapshot and write share one PostgreSQL boundary.
+            connection.execute("SELECT id FROM sonder_child.meta WHERE id=1 FOR UPDATE").fetchone()
             self._lock_child(connection, prepared.child_id)
             prior = self._receipt(connection, prepared)
             if prior is not None:
@@ -357,6 +385,28 @@ class PostgreSQLDurableContinuationRepository:
             current = self._get(connection, prepared.child_id)
             try:
                 next_record, value = _apply(prepared.kind, current, args, kwargs)
+                if next_record is not None and prepared.kind in {"create", "claim_resume"}:
+                    existing = self._admission_records(connection)
+                    validate_admission(
+                        next_record, existing,
+                        resuming=prepared.kind == "claim_resume",
+                        new_execution=True,
+                    )
+                    if prepared.kind == "create":
+                        self._check_active_keys(next_record, existing)
+                if (next_record is not None and prepared.kind == "update"
+                        and next_record.status is SubagentStatus.SUCCEEDED
+                        and current.status not in TERMINAL_SUBAGENT_STATUSES):
+                    validate_admission(
+                        next_record, self._admission_records(connection), resuming=True,
+                    )
+                if next_record is not None and prepared.kind == "save_checkpoint":
+                    try:
+                        validate_admission(
+                            next_record, self._admission_records(connection), resuming=True,
+                        )
+                    except InvalidSubagentRequest:
+                        next_record, value = None, None
             except InvalidSubagentRequest as error:
                 next_record, value = None, None
                 outcome = ContinuationMutationOutcome(
@@ -438,6 +488,34 @@ class PostgreSQLDurableContinuationRepository:
 
     def get(self, child_id):
         return self._read(lambda connection: self._get(connection, child_id))
+
+    def _get_by_key(self, parent_id, key, namespace, *, active_only):
+        if not isinstance(parent_id, str) or not parent_id.strip() or not isinstance(key, str) or not key.strip():
+            raise InvalidSubagentRequest("parent_id and key are required")
+        field = {"resume": "resume_key", "idempotency": "idempotency_key"}.get(namespace)
+        if field is None:
+            raise InvalidSubagentRequest("key namespace must be resume or idempotency")
+
+        def lookup(connection):
+            rows = connection.execute(
+                "SELECT snapshot FROM sonder_child.child WHERE "
+                "convert_from(snapshot,'UTF8')::jsonb->'request'->>'parent_id'=%s "
+                "AND convert_from(snapshot,'UTF8')::jsonb->'request'->>%s=%s "
+                + ("AND status IN ('created','queued','running') " if active_only else "")
+                + "ORDER BY child_id LIMIT 2",
+                (parent_id, field, key),
+            ).fetchall()
+            if len(rows) > 1:
+                raise InvalidSubagentRequest("ambiguous durable worker key requires explicit recovery")
+            return session_from_data(json.loads(bytes(rows[0][0]))) if rows else None
+
+        return self._read(lookup)
+
+    def get_active_by_key(self, parent_id, key, namespace):
+        return self._get_by_key(parent_id, key, namespace, active_only=True)
+
+    def get_by_key(self, parent_id, key, namespace):
+        return self._get_by_key(parent_id, key, namespace, active_only=False)
 
     def reconcile(self, prepared):
         self._transport.require_reconcilable(prepared)
@@ -551,9 +629,12 @@ class PostgreSQLDurableContinuationRepository:
             prepare_call("claim_resume", child_id, expected_revision=expected_revision)
         ).value
 
-    def request_cancel(self, child_id, *, reason):
+    def request_cancel(self, child_id, *, reason, expected_revision=None, unstarted_only=False):
+        kwargs = {"reason": reason}
+        if unstarted_only or expected_revision is not None:
+            kwargs.update(expected_revision=expected_revision, unstarted_only=unstarted_only)
         return self.mutate(
-            prepare_call("request_cancel", child_id, reason=reason)
+            prepare_call("request_cancel", child_id, **kwargs)
         ).value
 
     def close(self, *, runners_stopped=False, timeout=5):
@@ -634,11 +715,26 @@ def _apply(kind, current, args, kwargs):
         if (
             current.cancellation_requested
             or current.status in TERMINAL_SUBAGENT_STATUSES
+            or (kwargs.get("unstarted_only", False) and (
+                current.status not in {SubagentStatus.CREATED, SubagentStatus.QUEUED}
+                or current.revision != kwargs["expected_revision"]
+            ))
         ):
             return None, False
+        unstarted = current.status in {SubagentStatus.CREATED, SubagentStatus.QUEUED}
+        result = (
+            SubagentResult(
+                current.request.child_id, current.request.parent_id,
+                SubagentStatus.CANCELLED,
+                error=SubagentError("cancelled_before_start", kwargs["reason"]),
+                usage=current.usage,
+            ) if unstarted else current.result
+        )
         return (
             replace(
                 current,
+                status=SubagentStatus.CANCELLED if unstarted else current.status,
+                result=result,
                 cancellation_requested=True,
                 cancellation_reason=kwargs["reason"],
                 revision=current.revision + 1,
@@ -666,14 +762,28 @@ def _apply(kind, current, args, kwargs):
             revision=current.revision + 1,
             result=None,
             recovery_required=False,
+            terminal_verification={},
         )
     else:
+        next_usage = kwargs.get("usage") or current.usage
         if (
             kwargs.get("expected_revision") is not None
             and current.revision != kwargs["expected_revision"]
         ) or (
+            current.result is not None and kwargs.get("result") is None
+            and next_usage != current.usage
+        ) or not usage_is_monotonic(current.usage, next_usage) or (
+            kwargs.get("result") is not None
+            and (kwargs["result"].usage != next_usage
+                 or kwargs["result"].status is not kwargs["status"]
+                 or kwargs["result"].child_id != current.request.child_id
+                 or kwargs["result"].parent_id != current.request.parent_id)
+        ) or (
+            current.cancellation_requested
+            and kwargs["status"] in (SubagentStatus.RUNNING, SubagentStatus.SUCCEEDED)
+        ) or (
             current.status in TERMINAL_SUBAGENT_STATUSES
-            and kwargs["status"] not in TERMINAL_SUBAGENT_STATUSES
+            and kwargs["status"] != current.status
         ):
             return None, None
         values = {

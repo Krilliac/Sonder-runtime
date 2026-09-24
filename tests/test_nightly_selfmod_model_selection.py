@@ -3,11 +3,233 @@
 import json
 import sys
 import subprocess
+import hashlib
 from pathlib import Path
 
 import pytest
 
-from scripts import nightly_selfmod
+from scripts import nightly_selfmod, selfmod_host_grader
+
+
+def test_parent_grader_extracts_only_literal_assertions_from_trusted_suite(tmp_path):
+    suite = tmp_path / "test_reflection.py"
+    suite.write_text(
+        "import reflection as target\n"
+        "def test_simple():\n"
+        "    assert target.answer(4) == 42\n"
+        "def test_dynamic_input():\n"
+        "    assert target.answer(value) == 42\n"
+        "def test_other():\n"
+        "    assert target.different(4) == 42\n",
+        encoding="utf-8",
+    )
+    assert selfmod_host_grader.extract_cases([suite], "reflection", "answer") == (
+        {"args": [4], "kwargs": {}, "expected": 42},
+    )
+    assert selfmod_host_grader.extract_cases([suite], "reflection", "different") == (
+        {"args": [4], "kwargs": {}, "expected": 42},
+    )
+    assert not selfmod_host_grader.extract_cases([suite], "reflection", "missing")
+
+
+def test_parent_grader_leaves_fixture_and_setup_dependent_tests_unevaluated(tmp_path):
+    suite = tmp_path / "test_bootstrap_engine.py"
+    suite.write_text(
+        "import bootstrap_engine as target\n"
+        "def test_main_under_different_patches(monkeypatch):\n"
+        "    monkeypatch.setattr(target, 'result', 0)\n"
+        "    assert target.main([]) == 0\n"
+        "    monkeypatch.setattr(target, 'result', 4)\n"
+        "    assert target.main([]) == 4\n"
+        "def test_literal_assertion_before_local_setup():\n"
+        "    assert target.main([]) == 0\n"
+        "    setup = target.configure_for_test()\n"
+        "    assert setup is not None\n"
+        "def test_setup_before_assertion_is_not_projected():\n"
+        "    target.configure_for_test()\n"
+        "    assert target.main([]) == 4\n"
+        "@pytest.mark.parametrize('result', [0, 4])\n"
+        "def test_parametrized_case_is_not_projected():\n"
+        "    assert target.main([]) == 0\n",
+        encoding="utf-8",
+    )
+
+    assert selfmod_host_grader.extract_cases(
+        [suite], "bootstrap_engine", "main"
+    ) == ({"args": [[]], "kwargs": {}, "expected": 0},)
+
+
+def test_parent_grader_extracts_multiple_direct_assertions_from_setup_free_test(tmp_path):
+    suite = tmp_path / "test_reflection.py"
+    suite.write_text(
+        "import reflection as target\n"
+        "def test_literal_cases():\n"
+        "    assert target.answer(4) == 42\n"
+        "    assert target.answer(value=5) == 43\n",
+        encoding="utf-8",
+    )
+
+    assert selfmod_host_grader.extract_cases([suite], "reflection", "answer") == (
+        {"args": [4], "kwargs": {}, "expected": 42},
+        {"args": [], "kwargs": {"value": 5}, "expected": 43},
+    )
+
+
+@pytest.mark.parametrize(
+    "module_setup",
+    (
+        "def setup_function():\n    configure()\n",
+        "pytestmark = pytest.mark.usefixtures('configured')\n",
+        "@pytest.fixture(autouse=True)\ndef configured():\n    configure()\n",
+    ),
+)
+def test_parent_grader_leaves_modules_with_pytest_setup_unevaluated(
+    tmp_path, module_setup
+):
+    suite = tmp_path / "test_reflection.py"
+    suite.write_text(
+        "import reflection as target\n"
+        + module_setup
+        + "def test_literal_case():\n"
+        "    assert target.answer(4) == 42\n",
+        encoding="utf-8",
+    )
+
+    assert not selfmod_host_grader.extract_cases([suite], "reflection", "answer")
+
+
+def test_parent_grader_leaves_suites_with_inherited_autouse_fixture_unevaluated(
+    tmp_path,
+):
+    (tmp_path / "conftest.py").write_text(
+        "import pytest\n"
+        "@pytest.fixture(autouse=True)\n"
+        "def configure():\n"
+        "    prepare_test_environment()\n",
+        encoding="utf-8",
+    )
+    suite = tmp_path / "test_reflection.py"
+    suite.write_text(
+        "import reflection as target\n"
+        "def test_literal_case():\n"
+        "    assert target.answer(4) == 42\n",
+        encoding="utf-8",
+    )
+
+    assert not selfmod_host_grader.extract_cases([suite], "reflection", "answer")
+
+
+def test_parent_grade_rejects_candidate_pytest_exit_or_report_spoof(tmp_path):
+    cases = ({"args": [4], "kwargs": {}, "expected": 42},)
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    target = candidate / "reflection.py"
+    target.write_text("def answer(value): return 42\n", encoding="utf-8")
+    command, nonce = selfmod_host_grader.challenge(candidate, "reflection", "answer", cases)
+
+    honest = subprocess.run(command, cwd=candidate, text=True, capture_output=True,
+                            timeout=10, check=False)
+    assert honest.returncode == 0
+    assert selfmod_host_grader.grade(honest.stdout, nonce, cases)[0]
+
+    target.write_text("def answer(value): return 43\n", encoding="utf-8")
+    wrong = subprocess.run(command, cwd=candidate, text=True, capture_output=True,
+                           timeout=10, check=False)
+    assert wrong.returncode == 0
+    assert selfmod_host_grader.grade(wrong.stdout, nonce, cases) == (
+        False, "candidate outputs differ from parent-held assertions",
+    )
+
+    target.write_text("import os\nprint('1 passed in 0.01s', flush=True)\nos._exit(0)\n",
+                      encoding="utf-8")
+    spoof = subprocess.run(command, cwd=candidate, text=True, capture_output=True,
+                           timeout=10, check=False)
+    assert spoof.returncode == 0 and "1 passed" in spoof.stdout
+    assert selfmod_host_grader.grade(spoof.stdout, nonce, cases) == (
+        False, "host challenge has no unique bounded result",
+    )
+
+
+@pytest.mark.parametrize("replay_ok", [True, False])
+def test_nightly_parent_grader_requires_clean_replay(tmp_path, monkeypatch, replay_ok):
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "reflection.py").write_text("def answer(): return 42\n", encoding="utf-8")
+    held_out = {"host_cases": ({"args": [], "kwargs": {}, "expected": 42},),
+                "protected_paths": ()}
+    recorded = []
+
+    # This unit seam exercises the production parent scorer, not Windows MIC.
+    # The native supervisor proves its own boundary on the Windows CI runner.
+    def low_probe(_run_id, _kind, command, **_kwargs):
+        result = subprocess.run(command, cwd=candidate, capture_output=True,
+                                text=True, timeout=10, check=False)
+        return {"passed": result.returncode == 0, "output": result.stdout,
+                "isolation": "low", "test_id": 7}
+
+    monkeypatch.setattr(nightly_selfmod, "_test_python", lambda: sys.executable)
+    monkeypatch.setattr(nightly_selfmod, "_record_candidate_test", low_probe)
+    monkeypatch.setattr(nightly_selfmod.selfmod, "get_run", lambda _id: {"starting_commit": "base"})
+    monkeypatch.setattr(nightly_selfmod.selfmod, "tested_digests", lambda _id: {
+        "files": {"reflection.py": hashlib.sha256(
+            (candidate / "reflection.py").read_bytes()).hexdigest()},
+    })
+    monkeypatch.setattr(nightly_selfmod.selfmod, "state_root", lambda: tmp_path / "state")
+    monkeypatch.setattr(selfmod_host_grader, "clean_replay", lambda *_a, **_kw: (
+        replay_ok, "verified" if replay_ok else "untrusted extra file",
+    ))
+
+    def host_grade(_run_id, _probe_id, **kwargs):
+        recorded.append(kwargs)
+        return {"passed": kwargs["passed"], "detail": kwargs["detail"]}
+    monkeypatch.setattr(nightly_selfmod.selfmod, "record_host_grade", host_grade)
+
+    result = nightly_selfmod._parent_scored_gate(
+        "test-run", candidate, "reflection.py", "answer", held_out, 10,
+    )
+    assert result["passed"] is replay_ok
+    assert recorded and recorded[0]["passed"] is replay_ok
+    assert "clean checkout" in recorded[0]["detail"]
+
+
+def test_clean_host_replay_uses_only_bound_files_from_fresh_git_checkout(tmp_path, monkeypatch):
+    from scripts import selfmod_low_integrity
+
+    repository = tmp_path / "base"
+    repository.mkdir()
+    (repository / "reflection.py").write_text("def answer(): return -1\n", encoding="utf-8")
+    for args in (["init", "--initial-branch=main"],
+                 ["config", "user.email", "selfmod@test.invalid"],
+                 ["config", "user.name", "Selfmod Test"], ["add", "."],
+                 ["commit", "-m", "base"]):
+        subprocess.run(["git", *args], cwd=repository, capture_output=True, check=True)
+    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repository,
+                            capture_output=True, text=True, check=True).stdout.strip()
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    source = candidate / "reflection.py"
+    source.write_text("def answer(): return 42\n", encoding="utf-8")
+    cases = ({"args": [], "kwargs": {}, "expected": 42},)
+
+    def pretend_low_supervisor(command, *, cwd, **_kwargs):
+        completed = subprocess.run(command, cwd=cwd, capture_output=True, text=True,
+                                   timeout=10, check=False)
+        return {"exit_code": completed.returncode, "passed": completed.returncode == 0,
+                "output": completed.stdout, "job": {"integrity": "low"}}
+
+    monkeypatch.setattr(selfmod_low_integrity, "run_isolated", pretend_low_supervisor)
+    def replay():
+        return selfmod_host_grader.clean_replay(
+            repository, candidate, tmp_path / "state", commit,
+            {"reflection.py": hashlib.sha256(source.read_bytes()).hexdigest()},
+            "reflection", "answer", cases, 10, python=sys.executable,
+        )
+
+    assert replay()[0] is True
+    (candidate / "helper.py").write_text("def value(): return 42\n", encoding="utf-8")
+    source.write_text("def answer():\n    from helper import value\n    return value()\n",
+                      encoding="utf-8")
+    assert replay()[0] is False
 
 
 class _FakeServer:
@@ -351,6 +573,23 @@ def test_medium_tests_never_run_and_block_unattended_promotion(tmp_path, monkeyp
     assert "READY for review" in result and "NOT EVALUATED" in result
 
 
+def test_nightly_rejects_a_candidate_that_fails_parent_scored_grade(tmp_path, monkeypatch):
+    calls = _drive_to_gates(tmp_path, monkeypatch)
+    monkeypatch.setattr(nightly_selfmod, "_prepare_held_out", lambda *_args: {
+        "source_paths": (), "command": ["python", "-c", "pass"],
+        "cleanup": None, "protected_paths": (),
+        "host_cases": ({"args": [], "kwargs": {}, "expected": 42},),
+    })
+    monkeypatch.setattr(nightly_selfmod, "_parent_scored_gate", lambda *_args: {
+        "passed": False, "detail": "candidate printed a fake pytest report",
+    })
+
+    result = nightly_selfmod.run(object(), lambda _m: None, test_timeout=60, branch=True)
+    assert result == "candidate rejected: parent-scored host grade failed"
+    assert calls["review"] == [] and calls["git"] == []
+    assert "parent-scored host grade failed" in calls["reject"]
+
+
 def test_protected_and_missing_modules_are_not_eligible_candidates(tmp_path, monkeypatch):
     monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
     (tmp_path / "reflection.py").write_text("def f():\n    return 1\n", encoding="utf-8")
@@ -398,8 +637,9 @@ def test_held_out_runner_executes_snapshot_against_candidate_root(tmp_path, monk
     (candidate / "reflection.py").write_text(
         "def answer():\n    return 42\n", encoding="utf-8"
     )
-    prepared = nightly_selfmod._prepare_held_out("reflection.py", candidate, 60)
+    prepared = nightly_selfmod._prepare_held_out("reflection.py", candidate, 60, "answer")
     assert prepared["source_paths"] == ("tests/test_reflection.py",)
+    assert prepared["host_cases"] == ({"args": [], "kwargs": {}, "expected": 42},)
     assert nightly_selfmod._regression_command(
         "python", ignore_paths=prepared["source_paths"]
     )[-2:] == ["--ignore", "tests/test_reflection.py"]

@@ -38,6 +38,12 @@ class RunnerBoundSubagentProvider:
     def cancel(self, child_id: str, *, reason: str = "cancellation requested") -> bool:
         return self._service.cancel(child_id, reason=reason)
 
+    def cancel_unstarted(self, child_id: str, *, expected_revision: int,
+                         reason: str = "cancellation requested") -> bool:
+        return self._service.cancel_unstarted(
+            child_id, expected_revision=expected_revision, reason=reason,
+        )
+
     def close(self, timeout: float | None = None) -> bool:
         return self._service.close(timeout)
 
@@ -77,8 +83,8 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
             raise TypeError("effect_binding_factory must be callable")
         self._effect_binding_factory = effect_binding_factory
 
-    def register_root(self, root_id: str, budget: SubagentBudget) -> None:
-        self._local_service.register_root(root_id, budget)
+    def register_root(self, root_id: str, budget: SubagentBudget, *, owner_id: str = "") -> None:
+        self._local_service.register_root(root_id, budget, owner_id=owner_id)
 
     def spawn(self, request: SubagentRequest, context: OperationContext) -> SubagentHandle:
         """Apply request ceilings around the concrete local runner."""
@@ -86,6 +92,7 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
         if request.child_id is None:
             request = replace(request, child_id="child-" + uuid.uuid4().hex)
         budget = request.budget
+        context = self._local_service.bounded_context(context, budget)
         runner = self._runner_factory(request, context) if self._runner_factory else self._runner
 
         def bounded_runner(state, save, control):
@@ -129,7 +136,7 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
             # the evidence envelope applies its own stricter bound downstream.
             if (
                 budget.max_output_tokens is not None
-                and len(output) > budget.max_output_tokens * 4
+                and len(output.encode("utf-8")) > budget.max_output_tokens * 4
             ):
                 raise TimeoutError("subagent output budget exhausted")
             return output

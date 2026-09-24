@@ -1,0 +1,51 @@
+name: managed-runtime-profile
+
+on:
+  pull_request:
+    paths:
+      - 'packaging/install_workstation_local.ps1'
+      - 'sonder_runtime/adapters/execution/runtime_*'
+      - 'sonder_runtime/adapters/execution/managed_runtime_*'
+      - 'tests/test_managed_runtime_*'
+      - 'tests/test_runtime_payload_budget.py'
+      - 'tests/_managed_runtime_layout.py'
+      - 'requirements-runtime.txt'
+      - 'requirements-dev.txt'
+      - '.github/workflows/managed-runtime-profile.yml'
+      - '.github/workflows/build-apps.yml'
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-profile:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            requirements-runtime.txt
+      - name: Install focused test dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Provision dedicated managed runtime through canonical installer
+        shell: pwsh
+        run: |
+          $python = (Get-Command python).Source
+          & powershell -NoProfile -File packaging\install_workstation_local.ps1 -Python $python -ManagedRuntime -SkipModelAlias
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify real Windows profile, owner and payload behavior
+        env:
+          SONDER_REQUIRE_MANAGED_RUNTIME_PROFILE: "1"
+        run: >-
+          python -m pytest -q
+          tests/test_managed_runtime_profile.py
+          tests/test_runtime_payload_budget.py
+          tests/test_managed_runtime_payload.py
+          tests/test_managed_runtime_owner.py::test_workstation_profile_launches_with_only_its_pinned_site

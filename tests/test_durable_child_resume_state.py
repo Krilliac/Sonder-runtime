@@ -6,6 +6,7 @@ import pytest
 
 from sonder_runtime.adapters.persistence.durable_continuation import SQLiteDurableContinuationRepository
 from sonder_runtime.application.context import local_owner_context
+from sonder_runtime.application.ports.continuation_mutations import ContinuationCommitAmbiguous
 from sonder_runtime.application.ports.subagents import (
     InvalidSubagentRequest, SubagentBudget, SubagentError, SubagentRequest,
     SubagentResult, SubagentStatus, SubagentUsage,
@@ -183,7 +184,20 @@ def test_two_services_claim_one_resumed_worker(tmp_path):
             for future in futures:
                 try:
                     outcomes.append(future.result(timeout=3))
-                except RuntimeError as error:
+                except ContinuationCommitAmbiguous as error:
+                    # The winner may have retained its claim intent while its
+                    # effect receipt is still pending. Only that exact claim
+                    # may be treated as a losing contender in this test.
+                    assert error.prepared.kind == "claim_resume"
+                    assert error.prepared.child_id == "child-1"
+                    assert error.prepared.payload == b'{"expected_revision":7}'
+                    outcomes.append(error)
+                except (RuntimeError, InvalidSubagentRequest) as error:
+                    assert type(error) in (RuntimeError, InvalidSubagentRequest)
+                    assert str(error) in {
+                        "child session is not recoverable",
+                        "child session state changed before launch",
+                    }
                     outcomes.append(error)
         assert entered.wait(3)
         handles = [value for value in outcomes if not isinstance(value, Exception)]
@@ -192,6 +206,12 @@ def test_two_services_claim_one_resumed_worker(tmp_path):
         assert len(errors) == 1
         assert calls == [{"step": 2}]
         assert seed_repository.get("child-1").status is SubagentStatus.RUNNING
+        for error in errors:
+            if isinstance(error, ContinuationCommitAmbiguous):
+                receipt = seed_repository.reconcile(error.prepared)
+                assert receipt is not None
+                assert receipt.disposition == "applied"
+                assert receipt.resulting_revision == 8
     finally:
         release.set()
         for service in services:

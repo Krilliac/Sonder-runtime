@@ -17,14 +17,21 @@ Windows Authenticode shell-out (so the publisher checks run on any host).
 from __future__ import annotations
 
 import http.server
+import io
 import json
+import ntpath
+import os
 import threading
 import urllib.parse
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import sonder_runtime.adapters.artifact_fetch as artifact_fetch
+
+REAL_AUTHENTICODE_SIGNATURE = artifact_fetch._authenticode_signature
 
 
 pytestmark = pytest.mark.unit
@@ -34,7 +41,10 @@ pytestmark = pytest.mark.unit
 
 
 PE_BODY = b"MZ\x90\x00\x03\x00\x00\x00" + b"\x00" * 500 + b"PE\x00\x00" + b"\xcc" * 2048
-ZIP_BODY = b"PK\x03\x04" + b"\x00" * 600
+_zip_fixture = io.BytesIO()
+with zipfile.ZipFile(_zip_fixture, "w", compression=zipfile.ZIP_STORED) as _archive:
+    _archive.writestr("fixture.bin", bytes(1024))
+ZIP_BODY = _zip_fixture.getvalue()
 PNG_BODY = b"\x89PNG\r\n\x1a\n" + b"\x00" * 4096
 
 AKAMAI_BLOCK = (
@@ -161,36 +171,37 @@ def _failed(result, check):
 # --- happy path -----------------------------------------------------------
 
 
-def test_good_binary_download_verifies_and_writes_provenance(
+def test_good_archive_download_verifies_and_writes_provenance(
     fixture_server, tmp_path,
 ):
-    url = fixture_server.route("/setup.exe", body=PE_BODY)
-    dest = tmp_path / "setup.exe"
+    url = fixture_server.route("/setup.zip", body=ZIP_BODY)
+    dest = tmp_path / "setup.zip"
 
-    result = artifact_fetch.fetch_artifact(url, str(dest), expect_type="pe")
+    result = artifact_fetch.fetch_artifact(url, str(dest), expect_type="zip")
 
     assert result["ok"], result["failures"]
     assert result["verdict"] == "verified"
     assert dest.exists()
-    assert dest.read_bytes() == PE_BODY
-    assert result["bytes"] == len(PE_BODY)
-    assert result["detected_type"] == "pe"
+    assert dest.read_bytes() == ZIP_BODY
+    assert result["bytes"] == len(ZIP_BODY)
+    assert result["detected_type"] == "zip"
     assert result["sha256"] == artifact_fetch.file_sha256(dest)
     assert not artifact_fetch._part_path(dest).exists()
 
     sidecar = Path(result["provenance_path"])
-    assert sidecar.name == "setup.exe.provenance.json"
+    assert sidecar.name == "setup.zip.provenance.json"
     record = json.loads(sidecar.read_text(encoding="utf-8"))
     assert record["url"] == url
     assert record["final_url"] == url
     assert record["sha256"] == result["sha256"]
-    assert record["bytes"] == len(PE_BODY)
+    assert record["bytes"] == len(ZIP_BODY)
     assert record["http_status"] == 200
     assert record["content_type"] == "application/octet-stream"
-    assert record["detected_type"] == "pe"
+    assert record["detected_type"] == "zip"
     assert record["verified"] is True
     assert record["verdict"] == "verified"
     assert "signature_status" in record and "publisher" in record
+    assert record["signature_verified"] is False
     assert any(row["check"] == "magic" for row in record["checks"])
 
 
@@ -426,6 +437,7 @@ def test_expect_publisher_match_is_accepted_case_insensitively(
     )
     assert record["publisher_common_name"] == "NVIDIA Corporation"
     assert record["signature_status"] == "Valid"
+    assert record["signature_verified"] is True
 
 
 def test_unsigned_binary_fails_an_expected_publisher(
@@ -463,20 +475,172 @@ def test_publisher_cannot_be_confirmed_without_a_verifier(
     assert "cannot confirm publisher" in _failed(result, "publisher")[0]["detail"]
 
 
+@pytest.mark.parametrize("filename,body", [
+    ("unverifiable.exe", PE_BODY),
+    ("unverifiable.msi", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + bytes(2048)),
+    ("unverifiable.cab", b"MSCF" + bytes(64)),
+])
+def test_windows_unavailable_verifier_rejects_signable_fetch_without_publisher(
+    fixture_server, tmp_path, monkeypatch, filename, body,
+):
+    url = fixture_server.route("/" + filename, body=body)
+    dest = tmp_path / filename
+    with monkeypatch.context() as windows:
+        windows.setattr(
+            artifact_fetch, "os", SimpleNamespace(name="nt", replace=os.replace),
+        )
+        windows.setattr(
+            artifact_fetch, "_authenticode_signature",
+            _signature(status="verifier_failed", supported=False),
+        )
+        result = artifact_fetch.fetch_artifact(url, str(dest))
+
+    assert not result["ok"]
+    assert result["verdict"] == "rejected"
+    assert not dest.exists()
+    assert not (tmp_path / (filename + ".provenance.json")).exists()
+    assert _failed(result, "signature")
+
+
+def test_unsupported_non_windows_signature_is_explicitly_unverified(
+    tmp_path, monkeypatch,
+):
+    target = tmp_path / "foreign.exe"
+    target.write_bytes(PE_BODY)
+    with monkeypatch.context() as non_windows:
+        non_windows.setattr(artifact_fetch, "os", SimpleNamespace(name="posix"))
+        result = artifact_fetch.verify_artifact(str(target), expect_type="pe")
+
+    assert result["ok"]
+    assert result["signature_verified"] is False
+    assert result["signature"]["status"] == "unsupported_platform"
+    assert any("no signer authentication" in row["detail"] for row in result["checks"])
+
+
+@pytest.mark.parametrize("status", ["NotSigned", "UnknownError"])
+def test_windows_invalid_signature_rejects_without_publisher(
+    tmp_path, monkeypatch, status,
+):
+    target = tmp_path / "bad.exe"
+    target.write_bytes(PE_BODY)
+    with monkeypatch.context() as windows:
+        windows.setattr(artifact_fetch, "os", SimpleNamespace(name="nt"))
+        windows.setattr(artifact_fetch, "_authenticode_signature", _signature(status=status))
+        result = artifact_fetch.verify_artifact(str(target), expect_type="pe")
+
+    assert not result["ok"]
+    assert result["signature_verified"] is False
+    assert status in _failed(result, "signature")[0]["detail"]
+
+
+@pytest.mark.parametrize("subject", [
+    "CN=Acme Application, O=Acme LLC, OU=Compatible with Microsoft Corporation, C=US",
+    "CN=Not Microsoft Corporation, O=Not Microsoft Corporation, C=US",
+    "CN=Microsoft Corporation, OU=Compatible with Microsoft Corporation, C=US",
+    "CN=Acme Application, O=Microsoft Corporation, O=Acme LLC, C=US",
+    "CN=Acme Application, O=Microsoft Corporation, OU=\"unterminated, C=US",
+])
+def test_publisher_pin_rejects_misleading_or_malformed_subject(
+    tmp_path, monkeypatch, subject,
+):
+    target = tmp_path / "misleading.exe"
+    target.write_bytes(PE_BODY)
+    monkeypatch.setattr(
+        artifact_fetch, "_authenticode_signature",
+        _signature(publisher=subject),
+    )
+
+    result = artifact_fetch.verify_artifact(
+        str(target), expect_type="pe", expect_publisher="Microsoft Corporation",
+    )
+
+    assert not result["ok"]
+    assert _failed(result, "publisher")
+
+
+def test_publisher_pin_accepts_exact_normalized_organization(
+    tmp_path, monkeypatch,
+):
+    target = tmp_path / "signed.exe"
+    target.write_bytes(PE_BODY)
+    monkeypatch.setattr(
+        artifact_fetch, "_authenticode_signature",
+        _signature(publisher="CN=Microsoft Windows, O=MICROSOFT Corporation, C=US"),
+    )
+
+    result = artifact_fetch.verify_artifact(
+        str(target), expect_type="pe", expect_publisher=" microsoft corporation ",
+    )
+
+    assert result["ok"]
+    assert result["signature_verified"] is True
+
+
+def test_publisher_pin_accepts_quoted_organization_with_a_comma(tmp_path, monkeypatch):
+    target = tmp_path / "quoted.exe"
+    target.write_bytes(PE_BODY)
+    monkeypatch.setattr(
+        artifact_fetch, "_authenticode_signature",
+        _signature(publisher='CN=Example App, O="Example, Incorporated", C=US'),
+    )
+
+    result = artifact_fetch.verify_artifact(
+        str(target), expect_type="pe", expect_publisher="Example, Incorporated",
+    )
+
+    assert result["ok"]
+    assert result["signature_verified"] is True
+
+
+def test_authenticode_process_ignores_inherited_powershell_module_path(monkeypatch):
+    environment = {
+        "SystemRoot": r"C:\Windows",
+        "WINDIR": r"C:\Windows",
+        "PATH": r"C:\Windows\System32",
+        "TEMP": r"C:\Temp",
+        "PSModulePath": r"C:\Untrusted\Modules",
+        "PYTHONPATH": r"C:\Untrusted\Python",
+    }
+    captured = {}
+
+    def run(argv, **kwargs):
+        captured.update(argv=argv, **kwargs)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"Status": "Valid", "Subject": "O=Trusted LLC", "Thumbprint": "AA"}),
+            stderr="",
+        )
+
+    with monkeypatch.context() as windows:
+        windows.setattr(
+            artifact_fetch, "os",
+            SimpleNamespace(name="nt", environ=environment, path=ntpath),
+        )
+        windows.setattr(artifact_fetch, "_authenticode_signature", REAL_AUTHENTICODE_SIGNATURE)
+        windows.setattr(artifact_fetch.subprocess, "run", run)
+        signature = artifact_fetch._authenticode_signature(r"C:\Temp\signed.exe")
+
+    assert signature["status"] == "Valid"
+    assert captured["argv"][0] == r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+    assert captured["env"]["SystemRoot"] == environment["SystemRoot"]
+    assert "PSModulePath" not in captured["env"]
+    assert "PYTHONPATH" not in captured["env"]
+
+
 # --- redirects, resume, idempotency --------------------------------------
 
 
 def test_redirect_chain_is_recorded(fixture_server, tmp_path):
-    final = fixture_server.route("/cdn/final.exe", body=PE_BODY)
+    final = fixture_server.route("/cdn/final.zip", body=ZIP_BODY)
     middle = fixture_server.route(
-        "/mirror.exe", status=302, body=b"", headers={"Location": final},
+        "/mirror.zip", status=302, body=b"", headers={"Location": final},
     )
     start = fixture_server.route(
-        "/download.exe", status=301, body=b"", headers={"Location": middle},
+        "/download.zip", status=301, body=b"", headers={"Location": middle},
     )
-    dest = tmp_path / "download.exe"
+    dest = tmp_path / "download.zip"
 
-    result = artifact_fetch.fetch_artifact(start, str(dest), expect_type="pe")
+    result = artifact_fetch.fetch_artifact(start, str(dest), expect_type="zip")
 
     assert result["ok"], result["failures"]
     assert result["final_url"] == final
@@ -505,45 +669,45 @@ def test_redirect_without_location_is_rejected(fixture_server, tmp_path):
 
 
 def test_resume_appends_to_an_existing_partial(fixture_server, tmp_path):
-    url = fixture_server.route("/resume.exe", body=PE_BODY)
-    dest = tmp_path / "resume.exe"
+    url = fixture_server.route("/resume.zip", body=ZIP_BODY)
+    dest = tmp_path / "resume.zip"
     part = artifact_fetch._part_path(dest)
-    part.write_bytes(PE_BODY[:1000])
+    part.write_bytes(ZIP_BODY[:100])
 
-    result = artifact_fetch.fetch_artifact(url, str(dest), expect_type="pe")
+    result = artifact_fetch.fetch_artifact(url, str(dest), expect_type="zip")
 
     assert result["ok"], result["failures"]
-    assert result["resumed_from"] == 1000
-    assert dest.read_bytes() == PE_BODY
+    assert result["resumed_from"] == 100
+    assert dest.read_bytes() == ZIP_BODY
     assert result["sha256"] == artifact_fetch.file_sha256(dest)
 
 
 def test_rerunning_a_completed_fetch_is_safe(fixture_server, tmp_path):
-    url = fixture_server.route("/idempotent.exe", body=PE_BODY)
-    dest = tmp_path / "idempotent.exe"
+    url = fixture_server.route("/idempotent.zip", body=ZIP_BODY)
+    dest = tmp_path / "idempotent.zip"
 
-    first = artifact_fetch.fetch_artifact(url, str(dest), expect_type="pe")
-    second = artifact_fetch.fetch_artifact(url, str(dest), expect_type="pe")
+    first = artifact_fetch.fetch_artifact(url, str(dest), expect_type="zip")
+    second = artifact_fetch.fetch_artifact(url, str(dest), expect_type="zip")
 
     assert first["ok"] and second["ok"]
     assert second["reused"] is True
     assert second["action"] == "reused"
     assert second["sha256"] == first["sha256"]
-    assert dest.read_bytes() == PE_BODY
+    assert dest.read_bytes() == ZIP_BODY
     assert sorted(p.name for p in tmp_path.iterdir()) == [
-        "idempotent.exe", "idempotent.exe.provenance.json",
+        "idempotent.zip", "idempotent.zip.provenance.json",
     ]
 
 
 def test_rerun_re_reports_a_destination_that_no_longer_verifies(
     fixture_server, tmp_path,
 ):
-    url = fixture_server.route("/drifted.exe", body=PE_BODY)
-    dest = tmp_path / "drifted.exe"
-    artifact_fetch.fetch_artifact(url, str(dest), expect_type="pe")
+    url = fixture_server.route("/drifted.zip", body=ZIP_BODY)
+    dest = tmp_path / "drifted.zip"
+    artifact_fetch.fetch_artifact(url, str(dest), expect_type="zip")
     dest.write_bytes(PLAIN_HTML)
 
-    again = artifact_fetch.fetch_artifact(url, str(dest), expect_type="pe")
+    again = artifact_fetch.fetch_artifact(url, str(dest), expect_type="zip")
 
     assert not again["ok"]
     assert again["action"] == "reused"
@@ -551,30 +715,30 @@ def test_rerun_re_reports_a_destination_that_no_longer_verifies(
 
 
 def test_overwrite_forces_a_fresh_download(fixture_server, tmp_path):
-    url = fixture_server.route("/refresh.exe", body=PE_BODY)
-    dest = tmp_path / "refresh.exe"
+    url = fixture_server.route("/refresh.zip", body=ZIP_BODY)
+    dest = tmp_path / "refresh.zip"
     dest.write_bytes(b"stale")
 
     result = artifact_fetch.fetch_artifact(
-        url, str(dest), expect_type="pe", overwrite=True,
+        url, str(dest), expect_type="zip", overwrite=True,
     )
 
     assert result["ok"], result["failures"]
-    assert dest.read_bytes() == PE_BODY
+    assert dest.read_bytes() == ZIP_BODY
 
 
 # --- verify_artifact against files already on disk ------------------------
 
 
-def test_verify_artifact_accepts_a_good_on_disk_binary(tmp_path):
-    target = tmp_path / "already-here.exe"
-    target.write_bytes(PE_BODY)
+def test_verify_artifact_accepts_a_good_on_disk_archive(tmp_path):
+    target = tmp_path / "already-here.zip"
+    target.write_bytes(ZIP_BODY)
 
-    result = artifact_fetch.verify_artifact(str(target), expect_type="pe")
+    result = artifact_fetch.verify_artifact(str(target), expect_type="zip")
 
     assert result["ok"], result["failures"]
-    assert result["detected_type"] == "pe"
-    assert result["bytes"] == len(PE_BODY)
+    assert result["detected_type"] == "zip"
+    assert result["bytes"] == len(ZIP_BODY)
     assert result["sha256"] == artifact_fetch.file_sha256(target)
     assert "VERIFIED" in artifact_fetch.format_verify_result(result)
 
@@ -623,14 +787,15 @@ def test_verify_artifact_reports_a_missing_file(tmp_path):
 def test_verify_artifact_surfaces_the_recorded_provenance(
     fixture_server, tmp_path,
 ):
-    url = fixture_server.route("/traced.exe", body=PE_BODY)
-    dest = tmp_path / "traced.exe"
-    artifact_fetch.fetch_artifact(url, str(dest), expect_type="pe")
+    url = fixture_server.route("/traced.zip", body=ZIP_BODY)
+    dest = tmp_path / "traced.zip"
+    fetched = artifact_fetch.fetch_artifact(url, str(dest), expect_type="zip")
+    assert fetched["ok"], fetched["failures"]
 
-    result = artifact_fetch.verify_artifact(str(dest), expect_type="pe")
+    result = artifact_fetch.verify_artifact(str(dest), expect_type="zip")
 
     assert result["ok"], result["failures"]
-    assert result["provenance_path"].endswith("traced.exe.provenance.json")
+    assert result["provenance_path"].endswith("traced.zip.provenance.json")
     assert artifact_fetch.read_provenance(dest)["url"] == url
 
 

@@ -9,41 +9,40 @@ started; a different owner or launch cannot claim it.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
+import hashlib
 import json
 import os
 import platform
 import threading
+from collections.abc import Mapping
 
+from sonder_runtime.application.owner_process import recorded_owner_is_dead
 from sonder_runtime.application.ports.continuation_records import (
     ChildSessionLineage,
     DurableChildSession,
 )
 from sonder_runtime.application.ports.subagents import (
+    TERMINAL_SUBAGENT_STATUSES,
     InvalidSubagentRequest,
     SubagentBudget,
-    SubagentError,
     SubagentRequest,
     SubagentResult,
     SubagentStatus,
-    SubagentUsage,
 )
 from sonder_runtime.application.ports.worker_registry import (
     DuplicateWorkerError,
+    WorkerContextInput,
+    WorkerContextPolicy,
+    WorkerExecutionContract,
     WorkerLaunch,
     WorkerRecord,
     WorkerRegistry,
     WorkerRegistryError,
-    WorkerContextInput,
-    WorkerContextPolicy,
-    WorkerExecutionContract,
     WorkerStatus,
 )
 from sonder_runtime.application.subagents.durable_continuation import (
     DurableContinuationRepository,
 )
-from sonder_runtime.application.owner_process import recorded_owner_is_dead
-
 
 _RESERVATION_MARKER = "worker_registry_admitted"
 _ADMISSION_LOCK = threading.Lock()
@@ -233,6 +232,16 @@ class ContinuationWorkerRegistry(WorkerRegistry):
         return self._owner_host
 
     def admit(self, launch: WorkerLaunch) -> WorkerRecord:
+        record, _ = self.admit_with_creation(launch)
+        return record
+
+    def admit_with_creation(self, launch: WorkerLaunch) -> tuple[WorkerRecord, bool]:
+        """Admit a worker and report whether this call created its reservation.
+
+        Existing same-scope reservations may be returned idempotently. Their
+        owner is still responsible for starting or releasing them, even when
+        another caller happens to receive the same WorkerRecord.
+        """
         request = _request_for(launch)
         existing = self._repository.get(launch.worker_id)
         if existing is None:
@@ -288,7 +297,7 @@ class ContinuationWorkerRegistry(WorkerRegistry):
                     # Return the persisted metadata, including its original
                     # nonce, so the provider can consume it after independently
                     # proving the old owner process is gone.
-                    return record
+                    return record, False
                 if record.status in {WorkerStatus.QUEUED, WorkerStatus.RUNNING}:
                     raise DuplicateWorkerError("active worker identity or scope already belongs to another launch")
                 if stable_scope_match and record.status in {
@@ -297,9 +306,9 @@ class ContinuationWorkerRegistry(WorkerRegistry):
                     # Stable keys identify the durable child; a retry may carry
                     # a fresh proposal child ID, but the provider must consume
                     # the canonical persisted worker identity.
-                    return record
+                    return record, False
                 raise WorkerRegistryError("worker identity is already bound to a different terminal launch")
-            return record
+            return record, False
 
         parent = self._repository.get(launch.parent_id)
         if parent is None:
@@ -324,7 +333,7 @@ class ContinuationWorkerRegistry(WorkerRegistry):
                 if active is not None:
                     raise DuplicateWorkerError("active worker resume key already exists") from exc
                 raise WorkerRegistryError("worker admission was rejected by durable child storage") from exc
-        return self._project(created)
+        return self._project(created), True
 
     def _reject_ownership_conflict(self, launch: WorkerLaunch) -> None:
         """Refuse a second active worker for the same owned files or task."""
@@ -341,6 +350,20 @@ class ContinuationWorkerRegistry(WorkerRegistry):
     def get(self, worker_id: str) -> WorkerRecord | None:
         record = self._repository.get(worker_id)
         return None if record is None else self._project(record)
+
+    def terminal_result(self, worker_id: str) -> SubagentResult | None:
+        """Read the canonical terminal child envelope, including output and usage."""
+        record = self._repository.get(worker_id)
+        if record is None or record.status not in TERMINAL_SUBAGENT_STATUSES:
+            return None
+        result = record.result
+        if (
+            result is None or result.status is not record.status
+            or result.child_id != worker_id or result.parent_id != record.request.parent_id
+            or result.usage != record.usage
+        ):
+            return None
+        return result
 
     def start(self, worker_id: str, *, expected_revision: int) -> WorkerRecord | None:
         raise WorkerRegistryError(
@@ -380,6 +403,54 @@ class ContinuationWorkerRegistry(WorkerRegistry):
             SubagentStatus.TIMED_OUT,
         }:
             return None
+        result = self.terminal_result(worker_id)
+        if result is None:
+            raise WorkerRegistryError("durable terminal result is missing or inconsistent")
+        canonical_output = result.output if result.status is SubagentStatus.SUCCEEDED else result.error.message
+        canonical = {
+            "status": "succeeded" if result.status is SubagentStatus.SUCCEEDED else "failed",
+            "terminal_status": result.status.value,
+            "output_digest": hashlib.sha256(canonical_output.encode("utf-8")).hexdigest(),
+            "usage_steps": result.usage.steps,
+            "usage": {
+                "steps": result.usage.steps,
+                "output_tokens": result.usage.output_tokens,
+                "wall_seconds": result.usage.wall_seconds,
+            },
+            "error_code": result.error.code if result.error else "",
+            "error_message": result.error.message if result.error else "",
+            "output": result.output,
+            "error": result.error.message if result.error else "",
+        }
+        for key in ("status", "output_digest", "usage_steps"):
+            if verification.get(key) != canonical[key]:
+                raise WorkerRegistryError(f"verification {key} contradicts durable terminal result")
+        for key in ("terminal_status", "usage", "error_code", "error_message", "output", "error"):
+            if key in verification and verification[key] != canonical[key]:
+                raise WorkerRegistryError(f"verification {key} contradicts durable terminal result")
+        contract = _contract_from_metadata(_metadata(current.request))
+        contract_fields = {
+            "success_criteria": contract.success_criteria,
+            "verification_commands": contract.verification_commands,
+            "context_policy": contract.context_policy.value,
+            "context_inputs": tuple(
+                (item.reference, item.sha256) for item in contract.context_inputs
+            ),
+            "inherited_context_sha256": contract.inherited_context_sha256,
+            "owned_files": contract.owned_files,
+            "task_scope": contract.task_scope,
+        }
+        for key, expected in contract_fields.items():
+            if key in verification and _compact(verification[key]) != _compact(expected):
+                raise WorkerRegistryError(f"verification {key} contradicts durable execution contract")
+        try:
+            encoded = _compact(verification)
+        except (TypeError, ValueError) as exc:
+            raise WorkerRegistryError("terminal verification is not serializable") from exc
+        if current.terminal_verification:
+            if _compact(current.terminal_verification) != encoded:
+                raise WorkerRegistryError("terminal verification was already recorded with different evidence")
+            return self._project(current)
         updated = self._repository.update(
             worker_id,
             status=current.status,
@@ -392,6 +463,11 @@ class ContinuationWorkerRegistry(WorkerRegistry):
     @staticmethod
     def _project(session: DurableChildSession) -> WorkerRecord:
         metadata = _metadata(session.request)
+        is_root = (
+            session.request.child_id == session.request.parent_id
+            and not session.lineage.ancestors
+            and metadata.get("provider_root") == "true"
+        )
         scope = tuple(filter(None, metadata.get("scope", "").split("|")))
         tools = tuple(filter(None, metadata.get("allowed_tools", "").split("|")))
         max_attempts = int(metadata.get("retry_max_attempts", "1"))
@@ -407,8 +483,11 @@ class ContinuationWorkerRegistry(WorkerRegistry):
             allowed_tools=tools or ("continuation",),
             budgets=_budget_values(session.request.budget),
             retry_policy={"max_attempts": max_attempts},
-            resume_key=session.request.resume_key,
-            idempotency_key=session.request.idempotency_key,
+            # A provider root is a durable admission anchor, not a launch:
+            # its request has no keys, while WorkerLaunch requires nonempty
+            # keys even for a read-only registry projection.
+            resume_key=session.request.resume_key or (session.request.child_id if is_root else ""),
+            idempotency_key=session.request.idempotency_key or (session.request.child_id if is_root else ""),
             prompt=session.request.prompt,
             owner_id=metadata.get("owner_id", ""),
             metadata=tuple(session.request.metadata),

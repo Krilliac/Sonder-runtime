@@ -303,16 +303,128 @@ def test_candidate_cannot_rewrite_existing_test_to_pass(isolated):
     assert "pre-existing required tests were modified" in result["last_error"]
 
 
-def test_explicit_approval_and_auto_low_risk(isolated):
+def test_explicit_approval_and_auto_low_risk(isolated, monkeypatch):
     root = repository(isolated)
     proposed = reviewed(root)
     assert proposed["phase"] == "reviewing" and proposed["approval_required"]
     assert selfmod.approve(proposed["id"], "user:test")["phase"] == "approved"
 
+    # The host's low-integrity supervisor owns the attestation. This seam
+    # proves the lifecycle wiring; Windows MIC itself is covered separately.
+    from scripts import selfmod_low_integrity
+
+    monkeypatch.setattr(selfmod_low_integrity, "run_isolated", lambda *_args, **_kwargs: {
+        "exit_code": 0, "output": "isolated candidate gate", "passed": True,
+        "job": {"integrity": "low"},
+    })
     root2 = repository(isolated / "second")
     automatic = reviewed(root2, mode="auto-low-risk")
-    assert automatic["phase"] == "approved"
-    assert automatic["approved_by"] == "host:auto-low-risk"
+    assert automatic["phase"] == "reviewing"
+    assert automatic["approved_by"] is None
+    assert automatic["auto_evaluation_eligible"] is False
+    with pytest.raises(PermissionError, match="qualified low-integrity"):
+        selfmod.approve(automatic["id"], "host:auto-low-risk")
+    assert selfmod.approve(automatic["id"], "user:test")["phase"] == "approved"
+
+
+def test_host_graded_candidate_still_requires_human_approval(isolated, monkeypatch):
+    from scripts import selfmod_low_integrity
+
+    monkeypatch.setattr(selfmod_low_integrity, "run_isolated", lambda *_args, **_kwargs: {
+        "exit_code": 0, "output": "candidate output", "passed": True,
+        "job": {"integrity": "low"},
+    })
+    root = repository(isolated)
+    selfmod.set_mode("auto-low-risk")
+    run = prepare(plan(root))
+    selfmod.apply_candidate_changes(run["id"], {"calc.py": "def add(a,b): return a+b\n"})
+    assert all(row["passed"] for row in validate(run["id"]))
+    probe = selfmod.record_test(
+        run["id"], "host_probe", [sys.executable, "-c", "print(5)"],
+        low_integrity=True,
+    )
+    assert selfmod.record_host_grade(
+        run["id"], probe["test_id"], passed=True,
+        detail="parent independently compared candidate output to 5",
+    )["passed"]
+    reviewed_run = selfmod.review(run["id"])
+    assert reviewed_run["phase"] == "reviewing"
+    assert reviewed_run["auto_evaluation_eligible"] is False
+    with pytest.raises(PermissionError, match="qualified low-integrity"):
+        selfmod.approve(run["id"], "host:auto-low-risk")
+    assert selfmod.approve(run["id"], "user:test")["phase"] == "approved"
+
+
+def test_candidate_cannot_invent_host_grade_with_record_test(isolated):
+    root = repository(isolated, use_git=False)
+    run = prepare(plan(root))
+    selfmod.apply_candidate_changes(run["id"], {"calc.py": "def add(a,b): return a+b\n"})
+    selfmod.begin_testing(run["id"])
+    with pytest.raises(PermissionError, match="host grade"):
+        selfmod.record_test(run["id"], "host_grade", [sys.executable, "-c", "pass"])
+
+
+def test_legacy_medium_results_cannot_auto_approve_with_forged_output(isolated):
+    root = repository(isolated)
+    selfmod.set_mode("propose")
+    run = prepare(plan(root))
+    selfmod.apply_candidate_changes(run["id"], {"calc.py": "def add(a,b): return a+b\n"})
+    assert all(row["passed"] for row in validate(run["id"]))
+
+    # Simulate a pre-migration auto-low-risk run after candidate code has
+    # printed an apparently valid low-integrity report to untrusted stdout.
+    with selfmod._tx() as conn:
+        conn.execute("UPDATE selfmod_runs SET mode='auto-low-risk', approval_required=0 WHERE id=?", (run["id"],))
+        conn.execute("UPDATE selfmod_tests SET output=? WHERE run_id=? AND kind!='reproducer_before'",
+                     ('SELFMOD ISOLATION: {"integrity": "low"}', run["id"]))
+
+    reviewed_run = selfmod.review(run["id"])
+    assert reviewed_run["phase"] == "reviewing"
+    assert reviewed_run["auto_evaluation_eligible"] is False
+    with pytest.raises(PermissionError, match="qualified low-integrity"):
+        selfmod.approve(run["id"], "host:auto-low-risk")
+    assert selfmod.approve(run["id"], "user:test")["phase"] == "approved"
+
+
+def test_testing_drops_old_candidate_bytecode_before_binding_source(isolated):
+    root = repository(isolated, use_git=False)
+    run = prepare(plan(root))
+    workspace = Path(run["workspace_path"])
+    original = workspace / "calc.py"
+    subprocess.run([sys.executable, "-c", "import calc"], cwd=workspace, check=True)
+    cache = next((workspace / "__pycache__").glob("calc*.pyc"))
+    timestamp = original.stat().st_mtime_ns
+    selfmod.apply_candidate_changes(run["id"], {
+        "calc.py": "def add(a, b):\n    return a + b\n",
+    })
+    os.utime(original, ns=(timestamp, timestamp))
+
+    selfmod.begin_testing(run["id"])
+    assert not cache.exists()
+    assert selfmod.record_test(
+        run["id"], "targeted",
+        [sys.executable, "-c", "import calc; assert calc.add(2,3) == 5"],
+    )["passed"]
+
+
+def test_unevaluated_candidate_blocks_direct_host_approval(isolated, monkeypatch):
+    from scripts import selfmod_low_integrity
+
+    monkeypatch.setattr(selfmod_low_integrity, "run_isolated", lambda *_args, **_kwargs: {
+        "exit_code": 0, "output": "isolated candidate gate", "passed": True,
+        "job": {"integrity": "low"},
+    })
+    root = repository(isolated)
+    selfmod.set_mode("auto-low-risk")
+    run = prepare(plan(root))
+    selfmod.apply_candidate_changes(run["id"], {"calc.py": "def add(a,b): return a+b\n"})
+    assert all(row["passed"] for row in validate(run["id"]))
+
+    reviewed_run = selfmod.review(run["id"], unevaluated=("requires_medium_integrity",))
+    assert reviewed_run["phase"] == "reviewing"
+    assert reviewed_run["auto_evaluation_eligible"] is False
+    with pytest.raises(PermissionError, match="qualified low-integrity"):
+        selfmod.approve(run["id"], "host:auto-low-risk")
 
 
 def test_high_risk_never_auto_approves(isolated):

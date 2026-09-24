@@ -22,9 +22,9 @@ installers by hand:
    a denial as data is worse than a 404 because it looks like it worked, so
    :func:`detect_block_page` names the denial explicitly and refuses to write.
 4. An NVIDIA lookup produced a **Tesla data-center driver whose version string
-   matched the GeForce one**. A version number is not an identity, so the
-   Authenticode signer subject -- not the filename or the version -- is what
-   ``expect_publisher`` matches against.
+   matched the GeForce one**. A version number is not an identity, so
+   ``expect_publisher`` matches the exact signer organization (O=) from a
+   valid Authenticode certificate, never the filename or a subject substring.
 
 Every fetch streams to a partial file beside the destination and is renamed
 into place only after the whole battery passes, so a failed fetch never leaves
@@ -45,6 +45,7 @@ import platform
 import re
 import subprocess
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -459,7 +460,23 @@ def _powershell_executable():
     override = os.environ.get("SONDER_POWERSHELL", "").strip()
     if override:
         return override
-    return "powershell.exe" if os.name == "nt" else "pwsh"
+    if os.name == "nt":
+        system_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+        if not system_root:
+            return ""  # Never resolve an untrusted powershell.exe from PATH.
+        return os.path.join(
+            system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe",
+        )
+    return "pwsh"
+
+
+def _powershell_environment():
+    """Keep Windows process basics without inherited PowerShell module hooks."""
+    keys = (
+        "SystemRoot", "WINDIR", "ComSpec", "PATH", "PATHEXT", "TEMP", "TMP",
+        "USERPROFILE", "APPDATA", "LOCALAPPDATA", "ProgramData",
+    )
+    return {key: os.environ[key] for key in keys if os.environ.get(key)}
 
 
 def _authenticode_signature(path, *, timeout=60.0):
@@ -504,6 +521,7 @@ def _authenticode_signature(path, *, timeout=60.0):
             text=True,
             timeout=timeout,
             check=False,
+            env=_powershell_environment(),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return {
@@ -541,6 +559,55 @@ def _authenticode_signature(path, *, timeout=60.0):
         "thumbprint": str(data.get("Thumbprint") or ""),
         "detail": str(data.get("StatusMessage") or ""),
     }
+
+
+def _signer_organization(subject):
+    """Extract one unambiguous O= value from a Windows certificate subject.
+
+    PowerShell exposes a distinguished-name string; commas inside quoted or
+    backslash-escaped values are part of the value, not field separators.
+    Missing, repeated, or malformed organization fields cannot prove a pin.
+    """
+    if not isinstance(subject, str) or not subject or len(subject) > 4096:
+        return ""
+    if any(ord(character) < 32 or ord(character) == 127 for character in subject):
+        return ""
+    fields = []
+    current = []
+    quoted = False
+    escaped = False
+    for character in subject:
+        if escaped:
+            current.append(character)
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif character == '"':
+            quoted = not quoted
+        elif character == "," and not quoted:
+            fields.append("".join(current).strip())
+            current = []
+        else:
+            current.append(character)
+    if escaped or quoted:
+        return ""
+    fields.append("".join(current).strip())
+    organizations = []
+    for field in fields:
+        key, separator, value = field.partition("=")
+        if not separator or not re.fullmatch(r"[A-Za-z][A-Za-z0-9.]*", key.strip()):
+            return ""
+        if not value.strip():
+            return ""
+        if key.strip().upper() == "O":
+            organizations.append(value.strip())
+    return organizations[0] if len(organizations) == 1 else ""
+
+
+def _normalized_publisher(value):
+    return " ".join(unicodedata.normalize("NFC", value).casefold().split())
+
+
 def _publisher_common_name(subject):
     match = re.search(r"CN=([^,]+)", str(subject or ""))
     return (match.group(1) if match else str(subject or "")).strip().strip('"')
@@ -585,6 +652,7 @@ def run_checks(
         "expected_types": [],
         "expected_from": "",
         "signature": {},
+        "signature_verified": False,
         "block": None,
     }
     if not path.exists() or not path.is_file():
@@ -692,6 +760,8 @@ def run_checks(
         status = str(signature.get("status") or "")
         publisher = str(signature.get("publisher") or "")
         valid = signature.get("supported") and status.lower() == "valid"
+        info["signature_verified"] = bool(valid)
+        organization = _signer_organization(publisher) if valid and want_publisher else ""
         if want_publisher:
             if not signature.get("supported"):
                 checks.append(_check(
@@ -705,18 +775,20 @@ def run_checks(
                     "signature status is %s, so publisher %r is unproven"
                     % (status, want_publisher),
                 ))
-            elif want_publisher.lower() in publisher.lower():
+            elif organization and (
+                _normalized_publisher(want_publisher)
+                == _normalized_publisher(organization)
+            ):
                 checks.append(_check(
                     "publisher", True,
-                    "signed by %s" % _publisher_common_name(publisher),
+                    "signed by organization %s" % organization,
                 ))
             else:
                 checks.append(_check(
                     "publisher", False,
-                    "signed by %s, which does not contain the required %r -- "
-                    "right file, wrong vendor"
-                    % (_publisher_common_name(publisher) or "(no subject)",
-                       want_publisher),
+                    "signer organization %r does not match required %r -- "
+                    "right file, wrong vendor (or invalid signer subject)"
+                    % (organization, want_publisher),
                 ))
         elif signature.get("supported"):
             checks.append(_check(
@@ -728,9 +800,12 @@ def run_checks(
                 ),
             ))
         else:
+            unsupported = status == "unsupported_platform" and os.name != "nt"
             checks.append(_check(
-                "signature", True,
-                "not checked: %s" % signature.get("detail", status),
+                "signature", unsupported,
+                "%s: %s; no signer authentication"
+                % ("unsupported platform" if unsupported else "verification unavailable",
+                   signature.get("detail") or status),
             ))
     return checks, info
 
@@ -803,6 +878,7 @@ def verify_artifact(
         "expected_types": info["expected_types"],
         "expected_from": info["expected_from"],
         "signature": info["signature"],
+        "signature_verified": info["signature_verified"],
         "block": info["block"],
         "checks": checks,
         "failures": failures,
@@ -918,6 +994,7 @@ def fetch_artifact(
         "expected_types": [],
         "expected_from": "",
         "signature": {},
+        "signature_verified": False,
         "block": download.get("block"),
         "checks": list(download.get("checks", [])),
         "failures": [],
@@ -947,6 +1024,7 @@ def fetch_artifact(
     result["expected_types"] = info["expected_types"]
     result["expected_from"] = info["expected_from"]
     result["signature"] = info["signature"]
+    result["signature_verified"] = info["signature_verified"]
     if info["block"] is not None:
         result["block"] = info["block"]
     failures = [row for row in result["checks"] if not row["ok"]]
@@ -1233,6 +1311,7 @@ def _write_provenance(dest, result, *, reused=False):
         "expected_types": result.get("expected_types", []),
         "expected_from": result.get("expected_from", ""),
         "signature_status": signature.get("status", ""),
+        "signature_verified": bool(result.get("signature_verified")),
         "publisher": signature.get("publisher", ""),
         "publisher_common_name": _publisher_common_name(
             signature.get("publisher", "")

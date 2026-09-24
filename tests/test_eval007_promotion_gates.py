@@ -9,6 +9,15 @@ import math
 import pytest
 
 from sonder_runtime.adapters.evaluation_corpus import BoundedEvaluationCorpusScanner
+from sonder_runtime.adapters.evaluation_lifecycle import (
+    SessionEvaluationLifecycleRepository,
+)
+from sonder_runtime.adapters.persistence.session_repository import (
+    SQLiteSessionRepository,
+)
+from sonder_runtime.application.evaluation.durable_lifecycle import (
+    EvaluationLifecycleService,
+)
 from sonder_runtime.application.evaluation.promotion_gates import (
     DEFAULT_PROMOTION_GATE_POLICIES,
     PromotionGateError,
@@ -21,7 +30,6 @@ from sonder_runtime.application.evaluation.promotion_gates import (
 )
 from sonder_runtime.application.evaluation.proposal_lifecycle import (
     EvaluationDimension,
-    EvaluationLifecycleError,
     EvaluationMode,
     EvaluationResult,
     EvaluationSuite,
@@ -29,12 +37,11 @@ from sonder_runtime.application.evaluation.proposal_lifecycle import (
     ProposalState,
     ShadowCanaryObservation,
 )
-from sonder_runtime.application.evaluation.durable_lifecycle import EvaluationLifecycleService
 from sonder_runtime.application.evaluation.service import EvaluationApplicationService
-from sonder_runtime.adapters.evaluation_lifecycle import SessionEvaluationLifecycleRepository
-from sonder_runtime.adapters.persistence.session_repository import SQLiteSessionRepository
-from sonder_runtime.application.evaluation.trajectory_replay import TrajectoryRecord, TrajectoryStep
-
+from sonder_runtime.application.evaluation.trajectory_replay import (
+    TrajectoryRecord,
+    TrajectoryStep,
+)
 
 SUITE = EvaluationSuite("prompt-quality", "v1", (EvaluationDimension("split", "holdout"),), ("pass_rate",))
 SHADOW = ShadowCanaryObservation(EvaluationMode.SHADOW, "s1", True, 20, {"error": 0}, 0)
@@ -53,7 +60,8 @@ def _result(result_id: str, passed: int, total: int, *, replay: bool | None = Tr
 def test_wilson_lower_bound_distinguishes_evidence_volume() -> None:
     small = wilson_lower_bound(3, 3, 0.95)
     large = wilson_lower_bound(300, 300, 0.95)
-    assert small < 0.6 < 0.98 < large <= 1.0
+    assert small < 0.6
+    assert 0.98 < large <= 1.0
     z = 1.6448536269514722
     assert math.isclose(wilson_lower_bound(10, 10, 0.95), 10 / (10 + z * z), rel_tol=1e-9)
     assert wilson_lower_bound(0, 10, 0.95) == 0.0
@@ -66,7 +74,7 @@ def test_wilson_lower_bound_distinguishes_evidence_volume() -> None:
 def test_default_table_covers_every_promotion_kind_with_attainable_confidence() -> None:
     assert set(DEFAULT_PROMOTION_GATE_POLICIES) == set(PromotionKind)
     assert {kind.value for kind in PromotionKind} == {
-        "runtime", "prompt", "skill", "route", "model", "memory", "selfmod",
+        "runtime", "prompt", "skill", "route", "model", "memory", "selfmod", "strategy",
     }
     validate_policy_table(DEFAULT_PROMOTION_GATE_POLICIES)
     for kind, policy in DEFAULT_PROMOTION_GATE_POLICIES.items():
