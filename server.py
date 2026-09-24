@@ -13393,10 +13393,10 @@ def fetch_artifact(
     way to acquire an installer, driver, ISO, or archive. Nothing lands at
     *dest* unless the payload passes every check: HTTP status, block/denial
     page detection, magic bytes against expect_type or the extension, a size
-    floor, an optional sha256, and -- on Windows for PE payloads -- the
-    Authenticode signer subject against expect_publisher. Success also writes
-    <dest>.provenance.json recording the URL, redirect chain, digest,
-    signature, and every verdict.
+    floor, an optional sha256, and -- on Windows for PE payloads -- an exact
+    match to the complete certificate organization (O=) value in
+    expect_publisher. Success also writes <dest>.provenance.json recording
+    the URL, redirect chain, digest, signature, and every verdict.
     """
     _maybe_live_reload()
     started = time.time()
@@ -13459,8 +13459,9 @@ def verify_artifact(
 
     Same code path as a fresh download: magic bytes vs expect_type or the
     extension, block/denial-page markers, a per-type size floor, an optional
-    sha256, and the Authenticode signer subject against expect_publisher. Use
-    it on anything staged earlier or acquired outside Sonder.
+    sha256, and an exact match to the complete certificate organization (O=)
+    value in expect_publisher. Use it on anything staged earlier or acquired
+    outside Sonder.
     """
     _maybe_live_reload()
     started = time.time()
@@ -16888,7 +16889,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - repo_blame: {"path": ".", "file_path": "<required contained relative file>", "revision": "HEAD", "start_line": 1, "end_line": 100, "timeout": 5, "max_bytes": 256000}
 - archive_list: {"path": "<task-relevant ZIP or TAR>", "max_entries": 2000, "max_total_bytes": 256000000, "max_ratio": 100, "max_results": 2500}
 - artifact_risk_inspect: {"path": "<task-relevant document, executable, script, or binary>", "max_scan_bytes": 16777216, "max_seconds": 5}
-- verify_artifact: {"path": "<task-relevant downloaded installer, archive, or image>", "expect_type": "pe|msi|zip|iso|elf", "expect_publisher": "<required signer substring>", "sha256": "<64-hex digest>"}
+- verify_artifact: {"path": "<task-relevant downloaded installer, archive, or image>", "expect_type": "pe|msi|zip|iso|elf", "expect_publisher": "<exact complete certificate organization O= value>", "sha256": "<64-hex digest>"}
 - log_inspect: {"path": "<task-relevant log file>", "tail_lines": 0, "context_lines": 2, "max_file_bytes": 64000000, "max_scan_bytes": 4000000, "max_lines": 10000, "max_line_bytes": 4096, "max_results": 100, "max_output_bytes": 256000, "timeout": 5}
 - text_search: {"query": "<exact task symbol or anchor>", "root": ".", "glob": "<task-relevant glob>", "max_results": 100}
 - script_search: {"query": "<task-relevant script name>", "root": ".", "max_results": 100}

@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "c380f47a608540b23ea2a6e752205ddc70bdc311f1647bb13848f457a08a0590",
+    "catalog_digest": "5599c9d0c78ad36e5490d5d450bb3c1c96216a1ec6edcedf17c28e1941172cf8",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "c380f47a608540b23ea2a6e752205ddc70bdc311f1647bb13848f457a08a0590",
+      "catalog_digest": "5599c9d0c78ad36e5490d5d450bb3c1c96216a1ec6edcedf17c28e1941172cf8",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -2362,7 +2362,7 @@
           "name": "extract_grounded"
         },
         {
-          "description": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- the\n    Authenticode signer subject against expect_publisher. Success also writes\n    <dest>.provenance.json recording the URL, redirect chain, digest,\n    signature, and every verdict.\n    ",
+          "description": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- an exact\n    match to the complete certificate organization (O=) value in\n    expect_publisher. Success also writes <dest>.provenance.json recording\n    the URL, redirect chain, digest, signature, and every verdict.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -6949,7 +6949,7 @@
           "name": "update_system_profile"
         },
         {
-          "description": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and the Authenticode signer subject against expect_publisher. Use\n    it on anything staged earlier or acquired outside Sonder.\n    ",
+          "description": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and an exact match to the complete certificate organization (O=)\n    value in expect_publisher. Use it on anything staged earlier or acquired\n    outside Sonder.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -17842,7 +17842,7 @@
     "schemas": 4,
     "tools": 214
   },
-  "digest": "a82212ecb1b33d9b535d992446700366c196122e4be95761d6dad614cd91045e",
+  "digest": "49f713136014b4c8e99e86244747a4782514361791f546986b11f956755fd849",
   "events": [
     {
       "name": "session.started",
@@ -18312,9 +18312,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "c380f47a608540b23ea2a6e752205ddc70bdc311f1647bb13848f457a08a0590",
+    "catalog_digest": "5599c9d0c78ad36e5490d5d450bb3c1c96216a1ec6edcedf17c28e1941172cf8",
     "client": {
-      "digest": "c380f47a608540b23ea2a6e752205ddc70bdc311f1647bb13848f457a08a0590",
+      "digest": "5599c9d0c78ad36e5490d5d450bb3c1c96216a1ec6edcedf17c28e1941172cf8",
       "events": [
         {
           "name": "approval.denied",
@@ -20031,7 +20031,7 @@
           {
             "name": "fetch_artifact",
             "schema_available": true,
-            "summary": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- the\n    Authenticode signer subject against expect_publisher. Success also writes\n    <dest>.provenance.json recording the URL, redirect chain, digest,\n    signature, and every verdict.\n    "
+            "summary": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- an exact\n    match to the complete certificate organization (O=) value in\n    expect_publisher. Success also writes <dest>.provenance.json recording\n    the URL, redirect chain, digest, signature, and every verdict.\n    "
           },
           {
             "name": "file_batch_write",
@@ -20711,7 +20711,7 @@
           {
             "name": "verify_artifact",
             "schema_available": true,
-            "summary": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and the Authenticode signer subject against expect_publisher. Use\n    it on anything staged earlier or acquired outside Sonder.\n    "
+            "summary": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and an exact match to the complete certificate organization (O=)\n    value in expect_publisher. Use it on anything staged earlier or acquired\n    outside Sonder.\n    "
           },
           {
             "name": "vision_analyze",
@@ -23054,7 +23054,7 @@
           "name": "extract_grounded"
         },
         {
-          "description": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- the\n    Authenticode signer subject against expect_publisher. Success also writes\n    <dest>.provenance.json recording the URL, redirect chain, digest,\n    signature, and every verdict.\n    ",
+          "description": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- an exact\n    match to the complete certificate organization (O=) value in\n    expect_publisher. Success also writes <dest>.provenance.json recording\n    the URL, redirect chain, digest, signature, and every verdict.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -27641,7 +27641,7 @@
           "name": "update_system_profile"
         },
         {
-          "description": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and the Authenticode signer subject against expect_publisher. Use\n    it on anything staged earlier or acquired outside Sonder.\n    ",
+          "description": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and an exact match to the complete certificate organization (O=)\n    value in expect_publisher. Use it on anything staged earlier or acquired\n    outside Sonder.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -31462,7 +31462,7 @@
           "name": "extract_grounded"
         },
         {
-          "description": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- the\n    Authenticode signer subject against expect_publisher. Success also writes\n    <dest>.provenance.json recording the URL, redirect chain, digest,\n    signature, and every verdict.\n    ",
+          "description": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- an exact\n    match to the complete certificate organization (O=) value in\n    expect_publisher. Success also writes <dest>.provenance.json recording\n    the URL, redirect chain, digest, signature, and every verdict.\n    ",
           "inputSchema": {
             "properties": {
               "approval": {
@@ -35777,7 +35777,7 @@
           "name": "update_system_profile"
         },
         {
-          "description": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and the Authenticode signer subject against expect_publisher. Use\n    it on anything staged earlier or acquired outside Sonder.\n    ",
+          "description": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and an exact match to the complete certificate organization (O=)\n    value in expect_publisher. Use it on anything staged earlier or acquired\n    outside Sonder.\n    ",
           "inputSchema": {
             "properties": {
               "approval": {
@@ -38607,7 +38607,7 @@
         },
         {
           "function": {
-            "description": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- the\n    Authenticode signer subject against expect_publisher. Success also writes\n    <dest>.provenance.json recording the URL, redirect chain, digest,\n    signature, and every verdict.\n    ",
+            "description": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- an exact\n    match to the complete certificate organization (O=) value in\n    expect_publisher. Success also writes <dest>.provenance.json recording\n    the URL, redirect chain, digest, signature, and every verdict.\n    ",
             "name": "fetch_artifact",
             "parameters": {
               "properties": {
@@ -43330,7 +43330,7 @@
         },
         {
           "function": {
-            "description": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and the Authenticode signer subject against expect_publisher. Use\n    it on anything staged earlier or acquired outside Sonder.\n    ",
+            "description": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and an exact match to the complete certificate organization (O=)\n    value in expect_publisher. Use it on anything staged earlier or acquired\n    outside Sonder.\n    ",
             "name": "verify_artifact",
             "parameters": {
               "properties": {
@@ -43856,7 +43856,7 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "001d641e23a925ddf9f99d62da323386f5e4ad223dbe39d795dfe672faaf4e7a",
+    "server.py": "b75b2c5898c168a0fb9bb6669a14ea000cfbb92e36220e17f72f1ab169180833",
     "sonder_runtime/application/tools/generated_catalogs.py": "57a490ddd581e3e7a5d4b7b73379d205048f1db6de8e7e73c71f1124c6d84900",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
@@ -46014,7 +46014,7 @@
       }
     },
     {
-      "description": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- the\n    Authenticode signer subject against expect_publisher. Success also writes\n    <dest>.provenance.json recording the URL, redirect chain, digest,\n    signature, and every verdict.\n    ",
+      "description": "Download a binary artifact to a guarded path and verify it atomically.\n\n    Unlike web_fetch this writes bytes, not text, so it is the only supported\n    way to acquire an installer, driver, ISO, or archive. Nothing lands at\n    *dest* unless the payload passes every check: HTTP status, block/denial\n    page detection, magic bytes against expect_type or the extension, a size\n    floor, an optional sha256, and -- on Windows for PE payloads -- an exact\n    match to the complete certificate organization (O=) value in\n    expect_publisher. Success also writes <dest>.provenance.json recording\n    the URL, redirect chain, digest, signature, and every verdict.\n    ",
       "name": "fetch_artifact",
       "parameters": {
         "properties": {
@@ -50329,7 +50329,7 @@
       }
     },
     {
-      "description": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and the Authenticode signer subject against expect_publisher. Use\n    it on anything staged earlier or acquired outside Sonder.\n    ",
+      "description": "Run fetch_artifact's verification battery against a file already on disk.\n\n    Same code path as a fresh download: magic bytes vs expect_type or the\n    extension, block/denial-page markers, a per-type size floor, an optional\n    sha256, and an exact match to the complete certificate organization (O=)\n    value in expect_publisher. Use it on anything staged earlier or acquired\n    outside Sonder.\n    ",
       "name": "verify_artifact",
       "parameters": {
         "properties": {

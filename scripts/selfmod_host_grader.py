@@ -1,9 +1,9 @@
-"""Parent-scored, bounded examples from trusted selfmod held-out suites.
+"""Conservative literal-case projection from selfmod held-out suites.
 
-Only literal assertions about the proposed function qualify. Candidate code
-runs in the existing low-integrity supervisor and receives inputs, never the
-parent's expected values. Unsupported tests remain unevaluated; this does not
-turn arbitrary Python/pytest execution into a trusted scorer.
+Only syntactically isolated literal assertions qualify. Suites with pytest
+configuration, fixtures, or setup hooks are left unevaluated. This projection
+is not an independent or complete scorer. Candidate code runs in the existing
+low-integrity supervisor and receives inputs, never expected values.
 """
 
 from __future__ import annotations
@@ -33,16 +33,86 @@ def _literal(node):
     return value, True
 
 
+def _direct_assertion_case(statement, module_aliases, function_aliases, function):
+    """Return one call/equality case, refusing every contextual expression."""
+    if (not isinstance(statement, ast.Assert)
+            or not isinstance(statement.test, ast.Compare)
+            or len(statement.test.ops) != 1
+            or not isinstance(statement.test.ops[0], ast.Eq)
+            or len(statement.test.comparators) != 1):
+        return None
+    call = statement.test.left
+    if not isinstance(call, ast.Call):
+        return None
+    target = call.func
+    if isinstance(target, ast.Name):
+        recognized = target.id in function_aliases
+    else:
+        recognized = (
+            isinstance(target, ast.Attribute) and target.attr == function
+            and isinstance(target.value, ast.Name)
+            and target.value.id in module_aliases
+        )
+    if not recognized or any(item.arg is None for item in call.keywords):
+        return None
+    args = []
+    kwargs = {}
+    for arg in call.args:
+        value, valid = _literal(arg)
+        if not valid:
+            return None
+        args.append(value)
+    for item in call.keywords:
+        value, valid = _literal(item.value)
+        if not valid:
+            return None
+        kwargs[item.arg] = value
+    expected, valid = _literal(statement.test.comparators[0])
+    if not valid:
+        return None
+    return {"args": args, "kwargs": kwargs, "expected": expected}
+
+
+def _has_applicable_conftest(path: Path) -> bool:
+    """Pytest configuration can add fixtures/hooks invisible in a test AST."""
+    return any((parent / "conftest.py").is_file() for parent in path.parents)
+
+
+def _module_is_setup_free(tree: ast.Module) -> bool:
+    """Require only imports and test functions at module scope.
+
+    Constants, helpers, hooks, fixtures, pytest marks, and other module
+    statements may change what an assertion means, so they disable projection
+    for the entire file.
+    """
+    for index, node in enumerate(tree.body):
+        if (index == 0 and isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+            continue
+        return False
+    return True
+
+
 def extract_cases(paths: Sequence[Path], module: str, function: str) -> tuple[dict, ...]:
-    """Extract independently scored calls; never import or execute test code."""
+    """Project direct literal test cases without importing or executing tests."""
     if not module or not function.isidentifier():
         return ()
     cases = []
     seen = set()
     for path in paths:
         try:
-            tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+            path = Path(path)
+            if _has_applicable_conftest(path):
+                return ()
+            tree = ast.parse(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, SyntaxError):
+            return ()
+        if not _module_is_setup_free(tree):
             return ()
         module_aliases = {
             alias.asname or alias.name.split(".")[0]
@@ -55,52 +125,36 @@ def extract_cases(paths: Sequence[Path], module: str, function: str) -> tuple[di
             for alias in node.names if alias.name == function
         }
         for test in tree.body:
-            if not isinstance(test, ast.FunctionDef) or not test.name.startswith("test_"):
+            if (not isinstance(test, ast.FunctionDef) or not test.name.startswith("test_")
+                    or test.decorator_list
+                    or test.args.posonlyargs or test.args.args or test.args.kwonlyargs
+                    or test.args.vararg is not None or test.args.kwarg is not None):
                 continue
-            for node in ast.walk(test):
-                if (not isinstance(node, ast.Assert)
-                        or not isinstance(node.test, ast.Compare)
-                        or len(node.test.ops) != 1
-                        or not isinstance(node.test.ops[0], ast.Eq)
-                        or len(node.test.comparators) != 1):
-                    continue
-                call = node.test.left
-                if not isinstance(call, ast.Call):
-                    continue
-                target = call.func
-                if isinstance(target, ast.Name):
-                    recognized = target.id in function_aliases
-                else:
-                    recognized = (
-                        isinstance(target, ast.Attribute) and target.attr == function
-                        and isinstance(target.value, ast.Name)
-                        and target.value.id in module_aliases
-                    )
-                if not recognized or any(item.arg is None for item in call.keywords):
-                    continue
-                args = []
-                kwargs = {}
-                for arg in call.args:
-                    value, valid = _literal(arg)
-                    if not valid:
-                        break
-                    args.append(value)
-                else:
-                    for item in call.keywords:
-                        value, valid = _literal(item.value)
-                        if not valid:
-                            break
-                        kwargs[item.arg] = value
-                    else:
-                        expected, valid = _literal(node.test.comparators[0])
-                        if valid:
-                            case = {"args": args, "kwargs": kwargs, "expected": expected}
-                            encoded = json.dumps(case, sort_keys=True, allow_nan=False)
-                            if encoded not in seen:
-                                cases.append(case)
-                                seen.add(encoded)
-                            if len(cases) >= MAX_CASES:
-                                return tuple(cases)
+            statements = list(test.body)
+            if statements and isinstance(statements[0], ast.Expr):
+                docstring = statements[0].value
+                if isinstance(docstring, ast.Constant) and isinstance(docstring.value, str):
+                    statements.pop(0)
+            # Only take a contiguous prefix of direct assertions. Once the
+            # test performs setup, control flow, or another contextual action,
+            # later assertions may depend on that state and are not projected.
+            test_cases = []
+            for statement in statements:
+                case = _direct_assertion_case(
+                    statement, module_aliases, function_aliases, function
+                )
+                if case is None:
+                    break
+                test_cases.append(case)
+            if not test_cases:
+                continue
+            for case in test_cases:
+                encoded = json.dumps(case, sort_keys=True, allow_nan=False)
+                if encoded not in seen:
+                    cases.append(case)
+                    seen.add(encoded)
+                if len(cases) >= MAX_CASES:
+                    return tuple(cases)
     if len(json.dumps(cases, allow_nan=False).encode("utf-8")) > MAX_PAYLOAD_BYTES:
         return ()
     return tuple(cases)

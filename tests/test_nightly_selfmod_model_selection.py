@@ -17,6 +17,7 @@ def test_parent_grader_extracts_only_literal_assertions_from_trusted_suite(tmp_p
         "import reflection as target\n"
         "def test_simple():\n"
         "    assert target.answer(4) == 42\n"
+        "def test_dynamic_input():\n"
         "    assert target.answer(value) == 42\n"
         "def test_other():\n"
         "    assert target.different(4) == 42\n",
@@ -29,6 +30,93 @@ def test_parent_grader_extracts_only_literal_assertions_from_trusted_suite(tmp_p
         {"args": [4], "kwargs": {}, "expected": 42},
     )
     assert not selfmod_host_grader.extract_cases([suite], "reflection", "missing")
+
+
+def test_parent_grader_leaves_fixture_and_setup_dependent_tests_unevaluated(tmp_path):
+    suite = tmp_path / "test_bootstrap_engine.py"
+    suite.write_text(
+        "import bootstrap_engine as target\n"
+        "def test_main_under_different_patches(monkeypatch):\n"
+        "    monkeypatch.setattr(target, 'result', 0)\n"
+        "    assert target.main([]) == 0\n"
+        "    monkeypatch.setattr(target, 'result', 4)\n"
+        "    assert target.main([]) == 4\n"
+        "def test_literal_assertion_before_local_setup():\n"
+        "    assert target.main([]) == 0\n"
+        "    setup = target.configure_for_test()\n"
+        "    assert setup is not None\n"
+        "def test_setup_before_assertion_is_not_projected():\n"
+        "    target.configure_for_test()\n"
+        "    assert target.main([]) == 4\n"
+        "@pytest.mark.parametrize('result', [0, 4])\n"
+        "def test_parametrized_case_is_not_projected():\n"
+        "    assert target.main([]) == 0\n",
+        encoding="utf-8",
+    )
+
+    assert selfmod_host_grader.extract_cases(
+        [suite], "bootstrap_engine", "main"
+    ) == ({"args": [[]], "kwargs": {}, "expected": 0},)
+
+
+def test_parent_grader_extracts_multiple_direct_assertions_from_setup_free_test(tmp_path):
+    suite = tmp_path / "test_reflection.py"
+    suite.write_text(
+        "import reflection as target\n"
+        "def test_literal_cases():\n"
+        "    assert target.answer(4) == 42\n"
+        "    assert target.answer(value=5) == 43\n",
+        encoding="utf-8",
+    )
+
+    assert selfmod_host_grader.extract_cases([suite], "reflection", "answer") == (
+        {"args": [4], "kwargs": {}, "expected": 42},
+        {"args": [], "kwargs": {"value": 5}, "expected": 43},
+    )
+
+
+@pytest.mark.parametrize(
+    "module_setup",
+    (
+        "def setup_function():\n    configure()\n",
+        "pytestmark = pytest.mark.usefixtures('configured')\n",
+        "@pytest.fixture(autouse=True)\ndef configured():\n    configure()\n",
+    ),
+)
+def test_parent_grader_leaves_modules_with_pytest_setup_unevaluated(
+    tmp_path, module_setup
+):
+    suite = tmp_path / "test_reflection.py"
+    suite.write_text(
+        "import reflection as target\n"
+        + module_setup
+        + "def test_literal_case():\n"
+        "    assert target.answer(4) == 42\n",
+        encoding="utf-8",
+    )
+
+    assert not selfmod_host_grader.extract_cases([suite], "reflection", "answer")
+
+
+def test_parent_grader_leaves_suites_with_inherited_autouse_fixture_unevaluated(
+    tmp_path,
+):
+    (tmp_path / "conftest.py").write_text(
+        "import pytest\n"
+        "@pytest.fixture(autouse=True)\n"
+        "def configure():\n"
+        "    prepare_test_environment()\n",
+        encoding="utf-8",
+    )
+    suite = tmp_path / "test_reflection.py"
+    suite.write_text(
+        "import reflection as target\n"
+        "def test_literal_case():\n"
+        "    assert target.answer(4) == 42\n",
+        encoding="utf-8",
+    )
+
+    assert not selfmod_host_grader.extract_cases([suite], "reflection", "answer")
 
 
 def test_parent_grade_rejects_candidate_pytest_exit_or_report_spoof(tmp_path):
