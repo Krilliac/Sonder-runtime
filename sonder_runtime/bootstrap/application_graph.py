@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from time import monotonic
 from ..application.tools.facade import ToolApplicationFacade
 from ..application.developer_tools import DeveloperToolServices
+from ..application.debugging.service import DebugDigestService
 from ..adapters.provider_bindings import ProviderBindings
 from ..application.chat.handle_chat import ChatService
 from ..application.vision import VisionService
@@ -141,6 +142,9 @@ class Application:
     # (bootstrap/developer_tools.py); None when this runtime did not compose
     # them, which every surface reports instead of failing.
     developer_tools: DeveloperToolServices | None = None
+    # Crash and profile digests (bootstrap/debug_tools.py); None when this
+    # runtime did not compose them, which every surface reports instead.
+    debug_tools: "DebugDigestService | None" = None
 
     def operational_capabilities(self):
         from ..domain.operational_capabilities import build_operational_capabilities

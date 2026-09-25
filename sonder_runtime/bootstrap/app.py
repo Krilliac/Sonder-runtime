@@ -170,6 +170,7 @@ from ..platform import paths as runtime_paths
 from ..platform.config import SonderConfig
 from .artifact_mobility_source import ArtifactMobilitySourceBinding
 from .build_tools import build_permission_resolvers, build_tool_executor
+from .debug_tools import debug_permission_resolvers, debug_tool_executor
 from .developer_tools import DeveloperToolPermissionEvaluator, developer_tool_executor
 from .typed_tools import POLICY_NAMES, typed_tool_policy, typed_tool_registry
 
@@ -284,12 +285,60 @@ def _compose_build_tools(config, runtime_redactor, developer_tools, get_job_regi
         return None
 
 
+def _compose_debug_tools(config, runtime_redactor, developer_tools, get_job_registry,
+                         get_process_job_provider):
+    """Compose the crash/profile digest tools, or None when this build lacks them.
+
+    They need the host tool inventory (from the developer tools) and the
+    pure crash/profile readers; a runtime without either keeps every other
+    tool and reports the debug tools as unavailable. Composition is lazy.
+    """
+    inventory = getattr(developer_tools, "inventory", None)
+    if inventory is None:
+        return None
+    try:
+        from .debug_tools import compose_debug_tools
+        from .diagnostics import job_output_reader
+    except ImportError:
+        logger.warning("debug tools are not composed: a required package is missing",
+                       exc_info=True)
+        return None
+    try:
+        return compose_debug_tools(
+            config=config, inventory=inventory,
+            digest_output_reader=job_output_reader(get_job_registry),
+            test_runs=getattr(developer_tools, "test_runs", None),
+            process_job_provider=get_process_job_provider,
+            job_registry=get_job_registry, redactor=runtime_redactor,
+        )
+    except Exception:
+        logger.error("debug tools could not be composed; they will report unavailable",
+                     exc_info=True)
+        return None
+
+
 def _build_grant_registry():
     """The in-process build-fix grant registry (never persisted)."""
     from ..adapters.security.permission_policy import permission_policy
     from .build_tools import BuildFixGrantRegistry
 
     return BuildFixGrantRegistry(current_mode=lambda: permission_policy.current_mode())
+
+
+def _tool_executor_chain(build_tools, build_grants, debug_tools, developer_tools):
+    """Build -> Debug -> Developer -> Packaged: each serves its own names, then delegates."""
+    return build_tool_executor(
+        build_tools,
+        debug_tool_executor(debug_tools,
+                            developer_tool_executor(developer_tools, PackagedToolExecutor())),
+        grants=build_grants,
+    )
+
+
+def _tool_permission_resolvers(build_tools, build_grants, debug_tools):
+    """The host-planned tools' permission resolvers: build and debug, one table."""
+    return {**build_permission_resolvers(build_tools, grants=build_grants),
+            **debug_permission_resolvers(debug_tools)}
 
 
 def build_application(
@@ -1092,13 +1141,10 @@ def build_application(
                 lane_test_catalog = LaneTestCatalog.load(catalog_path)
                 lane_tools = compose_lane_test_tools(
                     tools, lane_test_catalog, get_process_job_provider(), audit=tool_audit,
-                    files=build_tool_executor(
-                        build_tools,
-                        developer_tool_executor(developer_tools, PackagedToolExecutor()),
-                        grants=build_grants,
-                    ),
+                    files=_tool_executor_chain(build_tools, build_grants, debug_tools,
+                                               developer_tools),
                     developer_tools=developer_tools,
-                    resolvers=build_permission_resolvers(build_tools, grants=build_grants),
+                    resolvers=_tool_permission_resolvers(build_tools, build_grants, debug_tools),
                     grant_authorities=(build_grants,),
                 )
             def authorize_lane_grant(lane, context):
@@ -1664,6 +1710,11 @@ def build_application(
     developer_tools = _compose_developer_tools(
         config, runtime_redactor, get_job_registry, get_process_job_provider,
     )
+    # Crash and profile digests (bootstrap/debug_tools.py), over the same
+    # inventory, job registry and process provider; None when unavailable.
+    debug_tools = _compose_debug_tools(
+        config, runtime_redactor, developer_tools, get_job_registry, get_process_job_provider,
+    )
 
     # C++ build tools (bootstrap/build_tools.py): build model, build jobs and
     # the bounded build-fix loop, in front of the developer tools. The grant
@@ -1680,17 +1731,14 @@ def build_application(
 
     tools = ToolApplicationFacade.compose(
         typed_tool_registry(),
-        build_tool_executor(
-            build_tools, developer_tool_executor(developer_tools, PackagedToolExecutor()),
-            grants=build_grants,
-        ),
+        _tool_executor_chain(build_tools, build_grants, debug_tools, developer_tools),
         policy=typed_tool_policy(),
         redactor=PatternOutputRedactor(runtime_redactor.redact),
         receipts=ReceiptStore(),
         audit=tool_audit,
         permissions=(DeveloperToolPermissionEvaluator(
             developer_tools, policy_names=POLICY_NAMES,
-            resolvers=build_permission_resolvers(build_tools, grants=build_grants),
+            resolvers=_tool_permission_resolvers(build_tools, build_grants, debug_tools),
             grant_authorities=(build_grants,),
         ),),
     )
@@ -1797,6 +1845,7 @@ def build_application(
         ),
         remote_world_provider=None,
         developer_tools=developer_tools,
+        debug_tools=debug_tools,
     )
     if config is not None and config.child_storage.backend == 'postgresql':
         try:

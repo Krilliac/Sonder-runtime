@@ -796,7 +796,13 @@ def test_partial_policy_cannot_relax_an_omitted_deny(tmp_path, monkeypatch):
 
 
 def test_every_execution_tool_is_a_real_registered_tool(registered_tools):
-    stale = sorted(name for name in pm.EXECUTION_TOOLS if name not in registered_tools)
+    # The crash/profile digest host tools exist only on the typed gateway and
+    # the native MCP catalog (the legacy server registry is not extended).
+    from sonder_runtime.bootstrap.native_mcp import _DEBUG_TOOLS
+
+    typed_only = {descriptor.name for descriptor in _DEBUG_TOOLS}
+    stale = sorted(name for name in pm.EXECUTION_TOOLS
+                   if name not in registered_tools and name not in typed_only)
     assert not stale, (
         "permission_modes.EXECUTION_TOOLS names tools that no longer exist, so "
         "they silently classify nothing: %s" % ", ".join(stale)

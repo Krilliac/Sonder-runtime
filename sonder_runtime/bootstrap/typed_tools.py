@@ -51,7 +51,14 @@ BUILD_TOOLS = (
     "build_model",
 )
 
-TYPED_TOOLS = READ_ONLY_TOOLS + MUTATING_TOOLS + DEVELOPER_TOOLS + BUILD_TOOLS
+# Crash and profile digests (bootstrap/debug_tools.py), served by
+# ``DebugToolExecutor``. ``crash_digest`` and ``profile_capture_digest`` launch
+# host debuggers/profilers and are graded execution; the other three are safe.
+DEBUG_TOOLS = ("crash_triage", "crash_digest", "profile_digest", "profile_capture_digest",
+               "debug_run_result")
+
+TYPED_TOOLS = (READ_ONLY_TOOLS + MUTATING_TOOLS + DEVELOPER_TOOLS + BUILD_TOOLS
+               + DEBUG_TOOLS)
 
 # Canonical (typed) name -> the name the permission catalog grades.
 POLICY_NAMES = {
@@ -93,6 +100,11 @@ GUARD_KNOBS = {
     "build_job": (),
     "build_job_result": (),
     "build_model": (),
+    "crash_triage": (),
+    "crash_digest": (),
+    "profile_digest": (),
+    "profile_capture_digest": (),
+    "debug_run_result": (),
 }
 
 
@@ -160,11 +172,20 @@ def typed_tool_policy() -> ResourcePolicy:
         )
         for name in BUILD_TOOLS
     )
+    rules.extend(
+        PolicyRule(
+            "debug:%s" % name, Decision.ALLOW, tool=name,
+            reason="crash/profile digest; guarded captures and host-owned argv templates, and "
+                   "the permission gate grades the host tools as execution",
+        )
+        for name in DEBUG_TOOLS
+    )
     logger.info(f"typed tool policy built, rules={len(rules)}")
     return ResourcePolicy(rules)
 
 
 __all__ = [
-    "BUILD_TOOLS", "DEVELOPER_TOOLS", "GUARD_KNOBS", "LEGACY_TO_CANONICAL", "MUTATING_TOOLS", "POLICY_NAMES",
+    "BUILD_TOOLS", "DEBUG_TOOLS", "DEVELOPER_TOOLS", "GUARD_KNOBS", "LEGACY_TO_CANONICAL",
+    "MUTATING_TOOLS", "POLICY_NAMES",
     "READ_ONLY_TOOLS", "TYPED_TOOLS", "typed_tool_policy", "typed_tool_registry",
 ]

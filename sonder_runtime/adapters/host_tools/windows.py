@@ -189,11 +189,60 @@ def discover_windows_sdk(probes: HostProbes) -> list[ToolRecord]:
         if probes.is_file(path):
             records.append(_record(probes, exe, category, path, DiscoverySource.WINDOWS_SDK,
                                    newest, (("sdk_version", newest),)))
+    records.extend(_sdk_debuggers(probes, root, newest))
+    records.extend(_performance_toolkit(probes, root, newest))
+    return records
+
+
+def debugger_arch(probes: HostProbes) -> str:
+    """The Debuggers subdirectory matching the host (``arm64``, ``x64`` or ``x86``).
+
+    ``PROCESSOR_ARCHITEW6432`` names the native architecture when this process
+    runs under WOW64; ``PROCESSOR_ARCHITECTURE`` otherwise.
+    """
+    native = (probes.env_get("PROCESSOR_ARCHITEW6432") or probes.env_get("PROCESSOR_ARCHITECTURE")
+              or "").strip().upper()
+    if native == "ARM64":
+        return "arm64"
+    if native == "X86":
+        return "x86"
+    return "x64"
+
+
+def _sdk_debuggers(probes: HostProbes, root: str, version: str) -> list[ToolRecord]:
+    """cdb/windbg from ``Debuggers\\<host arch>``; the x86 cdb is an alternative (WOW64 dumps)."""
+    arch = debugger_arch(probes)
+    records: list[ToolRecord] = []
     for exe in ("cdb", "windbg"):
-        path = _join(root, "Debuggers", "x64", exe + ".exe")
+        path = _join(root, "Debuggers", arch, exe + ".exe")
+        if not probes.is_file(path):
+            continue
+        details: tuple[tuple[str, str], ...] = (("sdk_version", version), ("arch", arch))
+        record = _record(probes, exe, ToolCategory.DEBUGGER_PROFILER, path,
+                         DiscoverySource.WINDOWS_SDK, version, details)
+        if exe == "cdb" and arch != "x86":
+            wow64 = _join(root, "Debuggers", "x86", "cdb.exe")
+            if probes.is_file(wow64):
+                record = ToolRecord(
+                    name=record.name, category=record.category, path=record.path,
+                    source=record.source, on_path=record.on_path, version=record.version,
+                    version_status=record.version_status, identity=record.identity,
+                    alternatives=(wow64,), details=details + (("wow64_cdb", wow64),),
+                )
+        records.append(record)
+    return records
+
+
+def _performance_toolkit(probes: HostProbes, root: str, version: str) -> list[ToolRecord]:
+    """xperf, wpaexporter and wpr from ``<KitsRoot10>\\Windows Performance Toolkit`` (metadata only)."""
+    base = _join(root, "Windows Performance Toolkit")
+    records: list[ToolRecord] = []
+    for exe in ("xperf", "wpaexporter", "wpr"):
+        path = _join(base, exe + ".exe")
         if probes.is_file(path):
             records.append(_record(probes, exe, ToolCategory.DEBUGGER_PROFILER, path,
-                                   DiscoverySource.WINDOWS_SDK, newest, (("sdk_version", newest),)))
+                                   DiscoverySource.WINDOWS_SDK, version,
+                                   (("sdk_version", version),)))
     return records
 
 
@@ -276,6 +325,7 @@ def extra_dirs(probes: HostProbes) -> list[str]:
 
 __all__ = [
     "VSWHERE_ARGS",
+    "debugger_arch",
     "discover_app_paths",
     "discover_py_launcher",
     "discover_visual_studio",

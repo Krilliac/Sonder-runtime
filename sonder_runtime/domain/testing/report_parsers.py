@@ -12,7 +12,6 @@ import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Iterable, Sequence
-from xml.parsers import expat
 
 from ..common.errors import InvalidInput
 from .report import MAX_FAILURES, TestFailure, TestTotals
@@ -21,7 +20,6 @@ MAX_DOCUMENT_BYTES = 8 * 1024 * 1024
 MAX_TESTCASES = 20_000
 MAX_JSON_LINES = 200_000
 MAX_TEXT_CHARS = 16 * 1024 * 1024
-_FORBIDDEN_XML = re.compile(rb"<!\s*(?:DOCTYPE|ENTITY)", re.IGNORECASE)
 _PY_LOCATION = re.compile(r"^(?P<file>[^\s:][^:\n]*?\.py):(?P<line>\d+): ", re.MULTILINE)
 _GENERIC_LOCATION = re.compile(
     r"(?P<file>[A-Za-z0-9_./\\-]+\.[A-Za-z0-9]{1,8}):(?:line )?(?P<line>\d+)")
@@ -45,50 +43,15 @@ def _local(tag: str) -> str:
 
 
 def _guard_xml(data: bytes) -> ET.Element:
-    if not isinstance(data, (bytes, bytearray)):
-        raise InvalidInput("report must be bytes")
-    if len(data) > MAX_DOCUMENT_BYTES:
-        raise InvalidInput("report exceeds %d bytes" % MAX_DOCUMENT_BYTES)
-    if _FORBIDDEN_XML.search(data):
-        raise InvalidInput("report XML declares a DOCTYPE or ENTITY; refused")
-    # The byte scan only sees ASCII-compatible encodings; a UTF-16 (or other
-    # declared-encoding) document spells ``<!DOCTYPE`` in other bytes. The
-    # parser itself therefore refuses every declaration, in any encoding,
-    # before ``xml.etree`` builds (and would expand) anything.
-    _refuse_declarations(bytes(data))
-    try:
-        return ET.fromstring(bytes(data))
-    except ET.ParseError as exc:
-        raise InvalidInput("report XML is malformed: %s" % exc) from None
-    except (LookupError, ValueError) as exc:
-        raise InvalidInput("report XML is unreadable: %s" % type(exc).__name__) from None
+    """The shared hostile-XML guard (``domain.common.safe_xml``) at this module's size cap.
 
+    Size cap, a byte-level DOCTYPE/ENTITY pre-check, an expat pass refusing
+    every declaration in any encoding, and only then ``xml.etree``. Imported
+    at first use so this module (and the test-run tools) import on their own.
+    """
+    from ..common.safe_xml import parse_guarded_xml
 
-class _DeclarationRefused(Exception):
-    pass
-
-
-def _refuse(*_args) -> None:
-    raise _DeclarationRefused()
-
-
-def _refuse_declarations(data: bytes) -> None:
-    """Parse once with every DTD hook refusing; InvalidInput on any declaration."""
-    parser = expat.ParserCreate()
-    parser.StartDoctypeDeclHandler = _refuse
-    parser.EntityDeclHandler = _refuse
-    parser.UnparsedEntityDeclHandler = _refuse
-    parser.NotationDeclHandler = _refuse
-    parser.ExternalEntityRefHandler = _refuse
-    parser.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
-    try:
-        parser.Parse(data, True)
-    except _DeclarationRefused:
-        raise InvalidInput("report XML declares a DOCTYPE or ENTITY; refused") from None
-    except expat.ExpatError as exc:
-        raise InvalidInput("report XML is malformed: %s" % exc) from None
-    except (LookupError, ValueError) as exc:
-        raise InvalidInput("report XML is unreadable: %s" % type(exc).__name__) from None
+    return parse_guarded_xml(data, max_bytes=MAX_DOCUMENT_BYTES)
 
 
 def _relative(path: str, strip_prefix: str) -> str:

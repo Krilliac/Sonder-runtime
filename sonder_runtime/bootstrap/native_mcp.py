@@ -660,8 +660,103 @@ _BUILD_TOOLS = (
         effects=frozenset({ToolEffect.READ_FILES, ToolEffect.WRITE_FILES}),
     ),
 )
+_CRASH_ENGINES = ["auto", "cdb", "gdb", "lldb", "eu_stack", "minidump_stackwalk",
+                  "llvm_symbolizer", "pure"]
+_PROFILE_ENGINES = ["auto", "perf", "heaptrack_print", "tracy_csvexport", "xperf", "wpaexporter"]
+_SYMBOL_DIRS = {"type": "array", "maxItems": 8,
+                "items": {"type": "string", "maxLength": 1024}}
+# Crash and profile digests (bootstrap/debug_tools.py). The model chooses a
+# capture path, an engine, contained symbol dirs and bounded numbers; never
+# argv, environment, a symbol store or a debugger script. Symbol-server
+# lookups are console-only and refused from a model call.
+_DEBUG_TOOLS = (
+    ToolDescriptor(
+        "crash_triage",
+        "Read a crash capture without running anything: a Windows/Breakpad/Crashpad "
+        "minidump, an ELF core, a sanitizer (ASan/UBSan/TSan/MSVC-ASan) log, valgrind "
+        "memcheck XML or a macOS .ips; returns a typed crash report (exception, crashing "
+        "thread frames, modules with PDB/build ids, cause hints, signature). With a "
+        "directory path, reads up to 64 captures in it (non-recursive) and returns "
+        "buckets grouped by crash signature.",
+        {"type": "object", "properties": {
+            "path": {"type": "string", "maxLength": 1024},
+            "max_threads": {"type": "integer", "minimum": 1, "maximum": 16},
+        }, "required": ["path"], "additionalProperties": False},
+        effects=frozenset({ToolEffect.READ_FILES}),
+        execution_class=ExecutionClass.PURE,
+    ),
+    ToolDescriptor(
+        "crash_digest",
+        "Symbolize and walk a crash capture with a host debugger (cdb, gdb, lldb, "
+        "eu-stack, minidump-stackwalk or llvm-symbolizer on verified PE+PDB/ELF pairs) as "
+        "a background job over the pure reader's result; returns the merged crash "
+        "report or a run id to poll with debug_run_result. symbol_dirs must be local "
+        "directories inside the allowed roots. symbol_server=true is refused from a "
+        "tool call: the operator runs /crash <dump> --symbols-online at the console.",
+        {"type": "object", "properties": {
+            "path": {"type": "string", "maxLength": 1024},
+            "executable": {"type": "string", "maxLength": 1024},
+            "symbol_dirs": _SYMBOL_DIRS,
+            "engine": {"type": "string", "enum": _CRASH_ENGINES},
+            "symbol_server": _BOOL,
+            "timeout_seconds": {"type": "integer", "minimum": 10, "maximum": 900},
+            "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 120},
+        }, "required": ["path"], "additionalProperties": False},
+        effects=frozenset({ToolEffect.READ_FILES, ToolEffect.WRITE_FILES, ToolEffect.EXECUTE,
+                           ToolEffect.NETWORK}),
+        execution_class=ExecutionClass.HOST,
+    ),
+    ToolDescriptor(
+        "profile_digest",
+        "Digest a profiler capture in a pure format without running anything: "
+        "callgrind, Chrome trace JSON, Tracy csvexport CSV, WPA/PIX/Superluminal CSV, "
+        "heaptrack_print text or perf report text; returns hot functions (self/total), "
+        "hot paths, frame-time percentiles and spikes against a frame budget. Binary "
+        "captures (perf.data, .etl, .tracy, heaptrack .zst) give CAPTURE_NEEDS_HOST_TOOL: "
+        "use profile_capture_digest.",
+        {"type": "object", "properties": {
+            "path": {"type": "string", "maxLength": 1024},
+            "top_n": {"type": "integer", "minimum": 5, "maximum": 50},
+            "frame_budget_ms": {"type": "number", "minimum": 1, "maximum": 1000},
+            "thread": {"type": "string", "maxLength": 64},
+            "frame_zone": {"type": "string", "maxLength": 64},
+        }, "required": ["path"], "additionalProperties": False},
+        effects=frozenset({ToolEffect.READ_FILES}),
+        execution_class=ExecutionClass.PURE,
+    ),
+    ToolDescriptor(
+        "profile_capture_digest",
+        "Digest a binary profiler capture with a host tool (perf report, heaptrack_print, "
+        "tracy-csvexport, xperf) as a background job; returns the profile digest or a run "
+        "id to poll with debug_run_result.",
+        {"type": "object", "properties": {
+            "path": {"type": "string", "maxLength": 1024},
+            "executable": {"type": "string", "maxLength": 1024},
+            "engine": {"type": "string", "enum": _PROFILE_ENGINES},
+            "symbol_dirs": _SYMBOL_DIRS,
+            "top_n": {"type": "integer", "minimum": 5, "maximum": 50},
+            "frame_budget_ms": {"type": "number", "minimum": 1, "maximum": 1000},
+            "thread": {"type": "string", "maxLength": 64},
+            "frame_zone": {"type": "string", "maxLength": 64},
+            "timeout_seconds": {"type": "integer", "minimum": 10, "maximum": 900},
+            "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 120},
+        }, "required": ["path"], "additionalProperties": False},
+        effects=frozenset({ToolEffect.READ_FILES, ToolEffect.WRITE_FILES, ToolEffect.EXECUTE}),
+        execution_class=ExecutionClass.HOST,
+    ),
+    ToolDescriptor(
+        "debug_run_result",
+        "Wait (bounded) for a crash_digest or profile_capture_digest run you started and "
+        "return its result, or its status while it is still running.",
+        {"type": "object", "properties": {
+            "run_id": {"type": "string", "maxLength": 80},
+            "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 60},
+        }, "required": ["run_id"], "additionalProperties": False},
+    ),
+)
 _NATIVE_TOOLS += _INSPECTION_TOOLS + _COMPUTE_TOOLS + (_AGENT_LANE_TOOL,) + _DEVELOPER_TOOLS
 _NATIVE_TOOLS += _BUILD_TOOLS
+_NATIVE_TOOLS += _DEBUG_TOOLS
 # Only the inspections the inspection service can run go to it. The catalog
 # groups the web, weather, location, process and artifact tools with the
 # inspections for presentation, but they run through the packaged executor;
@@ -687,6 +782,8 @@ _TYPED_TOOL_NAMES = frozenset({
     "output_digest", "test_run", "test_run_result", "tool_inventory",
     "build_model", "build_job", "build_job_result",
     "build_fix", "build_fix_result", "build_fix_restore",
+    "crash_digest", "crash_triage", "debug_run_result", "profile_capture_digest",
+    "profile_digest",
 })
 
 _LEGACY_ALIASES = {

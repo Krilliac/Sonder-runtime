@@ -18035,11 +18035,11 @@
     "commands": 327,
     "configuration": 220,
     "events": 43,
-    "native_tools": 61,
+    "native_tools": 66,
     "schemas": 4,
     "tools": 216
   },
-  "digest": "9df582d627f439cb2a765e344344350fafb45e4d31df30777dc22b48d58dd4d7",
+  "digest": "47193049f81d532f153d55a73f4b44f97dfbf5125e2ac8176e8b16b2d8917245",
   "events": [
     {
       "name": "session.started",
@@ -19253,6 +19253,83 @@
       }
     },
     {
+      "description": "Symbolize and walk a crash capture with a host debugger (cdb, gdb, lldb, eu-stack, minidump-stackwalk or llvm-symbolizer on verified PE+PDB/ELF pairs) as a background job over the pure reader's result; returns the merged crash report or a run id to poll with debug_run_result. symbol_dirs must be local directories inside the allowed roots. symbol_server=true is refused from a tool call: the operator runs /crash <dump> --symbols-online at the console.",
+      "name": "crash_digest",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "engine": {
+            "enum": [
+              "auto",
+              "cdb",
+              "gdb",
+              "lldb",
+              "eu_stack",
+              "minidump_stackwalk",
+              "llvm_symbolizer",
+              "pure"
+            ],
+            "type": "string"
+          },
+          "executable": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "symbol_dirs": {
+            "items": {
+              "maxLength": 1024,
+              "type": "string"
+            },
+            "maxItems": 8,
+            "type": "array"
+          },
+          "symbol_server": {
+            "type": "boolean"
+          },
+          "timeout_seconds": {
+            "maximum": 900,
+            "minimum": 10,
+            "type": "integer"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Read a crash capture without running anything: a Windows/Breakpad/Crashpad minidump, an ELF core, a sanitizer (ASan/UBSan/TSan/MSVC-ASan) log, valgrind memcheck XML or a macOS .ips; returns a typed crash report (exception, crashing thread frames, modules with PDB/build ids, cause hints, signature). With a directory path, reads up to 64 captures in it (non-recursive) and returns buckets grouped by crash signature.",
+      "name": "crash_triage",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "max_threads": {
+            "maximum": 16,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
       "description": "Inspect a bounded data file",
       "name": "data_inspect",
       "parameters": {
@@ -19285,6 +19362,28 @@
         },
         "required": [
           "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Wait (bounded) for a crash_digest or profile_capture_digest run you started and return its result, or its status while it is still running.",
+      "name": "debug_run_result",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "run_id": {
+            "maxLength": 80,
+            "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 60,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "run_id"
         ],
         "type": "object"
       }
@@ -19859,6 +19958,109 @@
         },
         "required": [
           "pid"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Digest a binary profiler capture with a host tool (perf report, heaptrack_print, tracy-csvexport, xperf) as a background job; returns the profile digest or a run id to poll with debug_run_result.",
+      "name": "profile_capture_digest",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "engine": {
+            "enum": [
+              "auto",
+              "perf",
+              "heaptrack_print",
+              "tracy_csvexport",
+              "xperf",
+              "wpaexporter"
+            ],
+            "type": "string"
+          },
+          "executable": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "frame_budget_ms": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "frame_zone": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "symbol_dirs": {
+            "items": {
+              "maxLength": 1024,
+              "type": "string"
+            },
+            "maxItems": 8,
+            "type": "array"
+          },
+          "thread": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "maximum": 900,
+            "minimum": 10,
+            "type": "integer"
+          },
+          "top_n": {
+            "maximum": 50,
+            "minimum": 5,
+            "type": "integer"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Digest a profiler capture in a pure format without running anything: callgrind, Chrome trace JSON, Tracy csvexport CSV, WPA/PIX/Superluminal CSV, heaptrack_print text or perf report text; returns hot functions (self/total), hot paths, frame-time percentiles and spikes against a frame budget. Binary captures (perf.data, .etl, .tracy, heaptrack .zst) give CAPTURE_NEEDS_HOST_TOOL: use profile_capture_digest.",
+      "name": "profile_digest",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "frame_budget_ms": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "frame_zone": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "thread": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "top_n": {
+            "maximum": 50,
+            "minimum": 5,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
         ],
         "type": "object"
       }
@@ -46166,7 +46368,7 @@
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
     "server.py": "7b6c950fd4f525de26bffded5ceb423db6594674875774ff261101c3c38573f5",
     "sonder_runtime/application/tools/generated_catalogs.py": "57a490ddd581e3e7a5d4b7b73379d205048f1db6de8e7e73c71f1124c6d84900",
-    "sonder_runtime/bootstrap/native_mcp.py": "5868be2a4b0fcaeaa39f163825595e0a170ee16573352abb373b3143ff2bb675",
+    "sonder_runtime/bootstrap/native_mcp.py": "f88dcc1eb15ba75200359a06f9fb05b4673bbe5013dca64dfca3e158d873675d",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",

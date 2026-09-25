@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 338,
+      "file_count": 346,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -108,6 +108,14 @@
         "sonder_runtime/adapters/context_formatting.py",
         "sonder_runtime/adapters/context_planning.py",
         "sonder_runtime/adapters/conversational_subagents.py",
+        "sonder_runtime/adapters/debug_tools_executor.py",
+        "sonder_runtime/adapters/debugging/__init__.py",
+        "sonder_runtime/adapters/debugging/capture_source.py",
+        "sonder_runtime/adapters/debugging/launcher.py",
+        "sonder_runtime/adapters/debugging/planner.py",
+        "sonder_runtime/adapters/debugging/source_map.py",
+        "sonder_runtime/adapters/debugging/symbol_dirs.py",
+        "sonder_runtime/adapters/debugging/triage.py",
         "sonder_runtime/adapters/delegated_verification.py",
         "sonder_runtime/adapters/developer_tools_executor.py",
         "sonder_runtime/adapters/diagnostics/__init__.py",
@@ -387,7 +395,7 @@
       ]
     },
     {
-      "file_count": 368,
+      "file_count": 372,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -465,6 +473,10 @@
         "sonder_runtime/application/control_plane/service.py",
         "sonder_runtime/application/control_plane/snapshot.py",
         "sonder_runtime/application/control_state.py",
+        "sonder_runtime/application/debugging/__init__.py",
+        "sonder_runtime/application/debugging/ports.py",
+        "sonder_runtime/application/debugging/presenters.py",
+        "sonder_runtime/application/debugging/service.py",
         "sonder_runtime/application/developer_tools.py",
         "sonder_runtime/application/diagnostics/__init__.py",
         "sonder_runtime/application/diagnostics/ports.py",
@@ -761,7 +773,7 @@
       ]
     },
     {
-      "file_count": 61,
+      "file_count": 62,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -788,6 +800,7 @@
         "sonder_runtime/bootstrap/config_loading.py",
         "sonder_runtime/bootstrap/container.py",
         "sonder_runtime/bootstrap/control_state_rehearsal.py",
+        "sonder_runtime/bootstrap/debug_tools.py",
         "sonder_runtime/bootstrap/delegated_verification.py",
         "sonder_runtime/bootstrap/developer_tools.py",
         "sonder_runtime/bootstrap/diagnostics.py",
@@ -1150,7 +1163,7 @@
       ]
     },
     {
-      "file_count": 45,
+      "file_count": 47,
       "name": "platform",
       "python_files": [
         "sonder_runtime/platform/__init__.py",
@@ -1179,6 +1192,7 @@
         "sonder_runtime/platform/metrics.py",
         "sonder_runtime/platform/model_paths.py",
         "sonder_runtime/platform/model_retry_policy.py",
+        "sonder_runtime/platform/netns_probe.py",
         "sonder_runtime/platform/npu_policy.py",
         "sonder_runtime/platform/paths.py",
         "sonder_runtime/platform/private_cot_policy.py",
@@ -1194,6 +1208,7 @@
         "sonder_runtime/platform/spanda_http.py",
         "sonder_runtime/platform/spanda_rsc.py",
         "sonder_runtime/platform/speculation.py",
+        "sonder_runtime/platform/symbol_consent.py",
         "sonder_runtime/platform/system_profile.py",
         "sonder_runtime/platform/toolchain_policy.py",
         "sonder_runtime/platform/unsafe_lab_policy.py",

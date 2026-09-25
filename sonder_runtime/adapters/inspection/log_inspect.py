@@ -172,7 +172,14 @@ def _opened_handle_path(fd):
 
 
 @contextlib.contextmanager
-def _open_guarded_binary(path, extra_roots):
+def open_guarded_binary(path, extra_roots=""):
+    """Open *path* no-follow and yield ``(handle, stat)`` for a guarded read.
+
+    The opened handle's own path is resolved again and must be the same
+    regular file inside the allowed roots; after the body, a file that
+    changed (identity, size, mtime) or became a reparse point raises
+    ``PermissionError``. Public for the crash/profile capture source.
+    """
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
     if os.name == "nt":
         import msvcrt
@@ -239,6 +246,10 @@ def _open_guarded_binary(path, extra_roots):
             raise PermissionError("log changed while it was being inspected")
     finally:
         os.close(fd)
+
+
+# The historical private name; kept so existing callers and tests keep working.
+_open_guarded_binary = open_guarded_binary
 
 
 def _read_window(handle, size, max_scan_bytes, tail_lines, max_lines, deadline):

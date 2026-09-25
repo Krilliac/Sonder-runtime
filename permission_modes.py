@@ -415,6 +415,14 @@ NATIVE_MCP_WORK = {
     # own name, so an operator can deny network builds with one rule while
     # still allowing builds, and an approval of one never covers the other.
     "build_network": "execution",
+    # Crash and profile digests (bootstrap/debug_tools.py). ``crash_triage``
+    # and ``profile_digest`` run pure readers over guarded files and launch
+    # nothing; ``debug_run_result`` polls the caller's own run and cannot
+    # cancel it. ``crash_digest`` and ``profile_capture_digest`` launch host
+    # debuggers/profilers and are graded by ``EXECUTION_TOOLS``.
+    "crash_triage": "safe",
+    "profile_digest": "safe",
+    "debug_run_result": "safe",
 }
 
 # Native-only tools that start a host process. ``risk_of`` grades them
@@ -565,6 +573,7 @@ EXECUTION_TOOLS = frozenset({
     "game_generate_and_test", "game_generation_campaign", "game_reference_suite",
     "campaign_generate_compile_execute_record", "campaign_repo_repair",
     "self_heal_repair", "scaffold_project", "compiler_cache_status",
+    "crash_digest", "profile_capture_digest",
 })
 
 # The same class, for work that no *registered tool* fronts. ``EXECUTION_TOOLS``
