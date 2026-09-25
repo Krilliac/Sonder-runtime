@@ -17,7 +17,7 @@ import time
 import uuid
 from pathlib import Path
 
-from sonder_runtime.platform.private_files import ensure_private_dir
+from sonder_runtime.platform.private_files import ensure_private_dir, tighten_existing_stores
 
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:$")
 _LEGACY_DB_MIGRATION_POLL_SECONDS = 0.02
@@ -182,7 +182,9 @@ def _home_needs_candidate_traverse() -> bool:
 def _ensure_state_home(home: Path) -> Path:
     # The state home holds credentials, sessions and conversations; it is
     # owner-only on POSIX (see ``private_files`` for the exact rules).
-    return ensure_private_dir(home, traverse=_home_needs_candidate_traverse())
+    secured = ensure_private_dir(home, traverse=_home_needs_candidate_traverse())
+    tighten_existing_stores(secured)
+    return secured
 
 
 def ensure_home() -> Path:

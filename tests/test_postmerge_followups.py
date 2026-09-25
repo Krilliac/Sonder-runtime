@@ -33,3 +33,29 @@ def test_untrusted_mapped_peer_still_cannot_choose_its_address():
         trusted_networks=networks,
     )
     assert resolved == "::ffff:198.51.100.7"
+
+
+def test_existing_state_home_stores_are_tightened_once(tmp_path):
+    import os
+    import stat
+    import pytest
+    from sonder_runtime.platform import private_files
+    if not private_files.supported():
+        pytest.skip("POSIX modes only")
+    home = tmp_path / "home"
+    home.mkdir()
+    stores = [home / "child-sessions.db", home / "child-sessions.db-wal", home / "audit.jsonl"]
+    other = home / "notes.txt"
+    for path in stores + [other]:
+        path.write_text("x")
+        os.chmod(path, 0o644)
+    link = home / "linked.db"
+    link.symlink_to(other)
+    assert private_files.tighten_existing_stores(home) == len(stores)
+    for path in stores:
+        assert stat.S_IMODE(os.lstat(path).st_mode) == 0o600
+    # Unrelated files and symlink targets are left alone.
+    assert stat.S_IMODE(os.lstat(other).st_mode) == 0o644
+    # Second call in the same process is a no-op.
+    os.chmod(stores[0], 0o644)
+    assert private_files.tighten_existing_stores(home) == 0

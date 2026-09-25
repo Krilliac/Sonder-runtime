@@ -156,6 +156,51 @@ def ensure_private_dir(path: str | os.PathLike[str], *, traverse: bool = False) 
     return directory
 
 
+_STORE_SUFFIXES = (".db", ".jsonl", ".sqlite", ".sqlite3") + tuple(
+    ".db" + suffix for suffix in SQLITE_SIDECAR_SUFFIXES
+)
+_SWEPT_HOMES: set[str] = set()
+
+
+def tighten_existing_stores(home: str | os.PathLike[str]) -> int:
+    """Make the store files directly inside *home* owner-only, once per process.
+
+    Stores opened through ``prepare_private_sqlite``/``prepare_private_file``
+    are tightened at open, but several stores are created by code that does
+    not use those choke points, and homes created before this hardening keep
+    their old ``0644`` files. The ``0700`` home already blocks other accounts;
+    this removes the remaining group/other bits so the files are private on
+    their own too. Only regular files we own whose name ends in a store suffix
+    are touched, with the same rules as ``restrict_to_owner`` (never a
+    symlink, never another account's file, only ever removing bits). Returns
+    the number of files changed.
+    """
+    if not supported():
+        return 0
+    directory = os.fspath(home)
+    with _SECURED_DIRS_LOCK:
+        if directory in _SWEPT_HOMES:
+            return 0
+        _SWEPT_HOMES.add(directory)
+    changed = 0
+    try:
+        entries = list(os.scandir(directory))
+    except OSError:
+        return 0
+    for entry in entries:
+        name = entry.name.lower()
+        if not name.endswith(_STORE_SUFFIXES):
+            continue
+        try:
+            if not entry.is_file(follow_symlinks=False):
+                continue
+        except OSError:
+            continue
+        if restrict_to_owner(entry.path):
+            changed += 1
+    return changed
+
+
 def prepare_private_file(path: str | os.PathLike[str], *, create: bool = True) -> None:
     """Create *path* ``0600`` if missing, or tighten it if it already exists.
 
