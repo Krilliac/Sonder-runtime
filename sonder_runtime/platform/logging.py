@@ -263,14 +263,21 @@ class PrivateRotatingFileHandler(logging.handlers.RotatingFileHandler):
     """Rotating file whose every generation is created owner-only (0600)."""
 
     def _open(self):
+        # O_NOFOLLOW: a planted symlink must not redirect the log (and the
+        # chmod below) to another file; opening one fails and the caller
+        # falls back to logging without a file.
         fd = os.open(
             self.baseFilename,
-            os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0),
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND
+            | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
             REPL_LOG_FILE_MODE,
         )
         try:
             # A file created before this handler existed may be wider.
-            os.chmod(self.baseFilename, REPL_LOG_FILE_MODE)
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, REPL_LOG_FILE_MODE)
+            else:
+                os.chmod(self.baseFilename, REPL_LOG_FILE_MODE)
         except OSError:
             pass
         return os.fdopen(fd, "a", encoding=self.encoding, errors=self.errors)
@@ -348,8 +355,10 @@ def configure_repl_logging(
       to ``<home>/logs/repl.log`` as JSON, rotating 5 x 1 MB, mode 0600, and
       * ``interactive`` with a ``notice_sink``: WARNING+ goes to the sink;
       * else: ERROR+ goes to stderr as redacted text.
-    - If the log file cannot be opened, the stderr behaviour is used and the
-      reason is returned in the plan.
+    - If the log file cannot be opened, the same console handler is used
+      without a file (never JSON on an interactive terminal), a WARNING
+      naming the reason is logged through it, and the reason is returned in
+      the plan.
     """
     source = os.environ if env is None else env
     redactor = redactor or Redactor(env=source)
@@ -360,6 +369,9 @@ def configure_repl_logging(
                           redactor=redactor, stream=stream)
         return ReplLoggingPlan(CONSOLE_STDERR_JSON, None, None)
     file_level = _level_name(source.get("SONDER_REPL_LOG_LEVEL"), "INFO")
+    file_handler = None
+    path = None
+    fallback_reason = None
     try:
         from sonder_runtime.platform.private_files import ensure_private_dir
 
@@ -370,14 +382,12 @@ def configure_repl_logging(
             encoding="utf-8", errors="replace",
         )
     except (OSError, ValueError, TypeError) as exc:
-        configure_logging(level="WARNING", log_format=log_format,
-                          redactor=redactor, stream=stream)
-        return ReplLoggingPlan(
-            CONSOLE_STDERR_JSON, None, None,
-            fallback_reason="%s: %s" % (type(exc).__name__, exc),
-        )
-    file_handler.setLevel(getattr(logging, file_level))
-    file_handler.setFormatter(JsonFormatter(redactor))
+        file_handler = None
+        path = None
+        fallback_reason = "%s: %s" % (type(exc).__name__, exc)
+    if file_handler is not None:
+        file_handler.setLevel(getattr(logging, file_level))
+        file_handler.setFormatter(JsonFormatter(redactor))
     if interactive and notice_sink is not None:
         console = NoticeQueueHandler(notice_sink, redactor=redactor)
         console_kind = CONSOLE_NOTICES
@@ -386,14 +396,22 @@ def configure_repl_logging(
         console.setLevel(logging.ERROR)
         console.setFormatter(RedactingTextFormatter(redactor))
         console_kind = CONSOLE_STDERR_ERRORS
-    root.setLevel(min(file_handler.level, console.level))
+    handlers = [h for h in (file_handler, console) if h is not None]
+    root.setLevel(min(h.level for h in handlers))
     for old in list(root.handlers):
-        if old not in (file_handler, console):
+        if old not in handlers:
             try:
                 old.close()
             except Exception:
                 pass
-    root.handlers[:] = [file_handler, console]
+    root.handlers[:] = handlers
+    if fallback_reason is not None:
+        logging.getLogger("sonder.repl.logging").warning(
+            "REPL log file unavailable (%s); logs are not being saved",
+            fallback_reason,
+        )
+        return ReplLoggingPlan(console_kind, None, None,
+                               fallback_reason=fallback_reason)
     return ReplLoggingPlan(console_kind, path, file_level)
 
 

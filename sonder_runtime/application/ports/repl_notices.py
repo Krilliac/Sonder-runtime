@@ -28,6 +28,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 from threading import Lock
+import unicodedata
 
 DEFAULT_CAPACITY = 50
 _MESSAGE_LIMIT = 500
@@ -44,12 +45,32 @@ class ReplNotice:
     level: int
     levelname: str
     component: str
-    message: str
+    message: str  # redacted, terminal-safe (controls escaped), <= 500 chars
     created: float
 
     @property
     def is_error(self) -> bool:
         return self.level >= ERROR
+
+
+# Kept as-is; every other control, format (bidi override, isolate, zero
+# width), surrogate or line/paragraph separator code point is shown as an
+# escape so a log message can never drive the terminal it is drawn on.
+_KEEP = frozenset("\n\t")
+_ESCAPED_CATEGORIES = frozenset(("Cc", "Cf", "Cs", "Zl", "Zp"))
+
+
+def _terminal_safe(text: str) -> str:
+    """Escape C0/C1 controls, DEL and Cf characters as ``\\xNN``/``\\uNNNN``."""
+    out = []
+    for ch in text:
+        if ch in _KEEP or unicodedata.category(ch) not in _ESCAPED_CATEGORIES:
+            out.append(ch)
+        elif ord(ch) < 0x100:
+            out.append("\\x%02x" % ord(ch))
+        else:
+            out.append("\\u%04x" % ord(ch))
+    return "".join(out)
 
 
 class ReplNoticeQueue:
@@ -72,11 +93,15 @@ class ReplNoticeQueue:
         message: str,
         created: float,
     ) -> None:
-        text = str(message or "")
+        text = _terminal_safe(str(message or ""))
         if len(text) > _MESSAGE_LIMIT:
             text = text[: _MESSAGE_LIMIT - 3] + "..."
         notice = ReplNotice(
-            int(level), str(levelname), str(component or ""), text, float(created)
+            int(level),
+            _terminal_safe(str(levelname)),
+            _terminal_safe(str(component or "")),
+            text,
+            float(created),
         )
         with self._lock:
             if len(self._items) == self._items.maxlen:

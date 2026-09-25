@@ -245,3 +245,44 @@ def test_supports_mode_cycle_tracks_msvcrt(monkeypatch):
         expected = False
     assert slash_menu.supports_mode_cycle is expected
     assert isinstance(slash_menu.supports_mode_cycle, bool)
+
+
+# --- review fixes -----------------------------------------------------------
+
+
+@pytest.mark.parametrize("ch", ["\x9b", "\x85", "\u202e", "\u2066", "\u2069",
+                                "\u200b", "\ufeff", "\x07"])
+def test_typed_controls_and_format_chars_never_enter_the_buffer(ch):
+    state = slash_menu.MenuState(completer=_complete)
+    state.feed("a" + ch + "b")
+    assert state.buffer == "ab"
+
+
+def test_zero_width_joiners_are_kept_for_text():
+    state = slash_menu.MenuState(completer=_complete)
+    state.feed("\U0001F469\u200d\U0001F4BB x\u200cy")
+    assert "\u200d" in state.buffer and "\u200c" in state.buffer
+    pasted = slash_menu.MenuState(completer=_complete)
+    pasted.insert_text("a\u200db\u202ec\x9bd")
+    assert pasted.buffer == "a\u200dbcd"
+
+
+def test_ss3_cursor_keys_map():
+    fake = _FakeMsvcrt(["\x1b", "O", "A"], burst=True)
+    assert slash_menu.read_key(fake.getwch, fake.kbhit) == (
+        slash_menu.KIND_KEY, slash_menu.KEY_UP)
+
+
+def test_oversized_paste_overflow_is_discarded_not_replayed(monkeypatch):
+    monkeypatch.setattr(slash_menu, "PASTE_LIMIT", 4)
+    keys = ["\x1b", "[", "2", "0", "0", "~"] + list("abcdef\rgh") + list(
+        slash_menu.PASTE_END)
+    fake = _FakeMsvcrt(keys, burst=True)
+    assert slash_menu.read_key(fake.getwch, fake.kbhit) == (
+        slash_menu.KIND_PASTE, "abcd")
+    assert fake.kbhit() is False  # nothing left to be read as keys
+
+
+def test_unbracketed_crlf_paste_is_one_line_break(monkeypatch):
+    line, _out = _drive(monkeypatch, list("ab\r\ncd\r"), burst=True, vt=False)
+    assert line == "ab\ncd"

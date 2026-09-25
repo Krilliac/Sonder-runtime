@@ -132,16 +132,71 @@ def test_repl_log_level_env_controls_the_file(tmp_path):
     assert logging.getLogger().level == logging.DEBUG
 
 
-def test_unwritable_home_falls_back_to_stderr(tmp_path):
+def test_unwritable_home_keeps_json_off_the_interactive_terminal(tmp_path):
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    stream = io.StringIO()
+    queue = repl_notices.ReplNoticeQueue()
+    plan = runtime_logging.configure_repl_logging(
+        home=blocker, interactive=True, notice_sink=queue.push, env={},
+        stream=stream,
+    )
+    assert plan.console == runtime_logging.CONSOLE_NOTICES
+    assert plan.file_path is None
+    assert plan.fallback_reason
+    logging.getLogger("x").warning("later warning")
+    assert stream.getvalue() == ""
+    messages = [notice.message for notice in queue.drain()]
+    assert any("log file unavailable" in m for m in messages)
+    assert "later warning" in messages
+
+
+def test_unwritable_home_piped_run_keeps_errors_only_text(tmp_path):
     blocker = tmp_path / "file"
     blocker.write_text("x")
     stream = io.StringIO()
     plan = runtime_logging.configure_repl_logging(
-        home=blocker, interactive=True, notice_sink=lambda *a: None, env={},
-        stream=stream,
+        home=blocker, interactive=False, env={}, stream=stream,
     )
-    assert plan.console == runtime_logging.CONSOLE_STDERR_JSON
+    assert plan.console == runtime_logging.CONSOLE_STDERR_ERRORS
     assert plan.fallback_reason
+    logging.getLogger("x").error("broken")
+    out = stream.getvalue()
+    assert "broken" in out and "{" not in out
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="needs O_NOFOLLOW")
+def test_planted_symlink_log_is_not_followed(tmp_path):
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep")
+    os.chmod(victim, 0o644)
+    logs = tmp_path / "home" / "logs"
+    logs.mkdir(parents=True)
+    os.symlink(victim, logs / "repl.log")
+    plan = runtime_logging.configure_repl_logging(
+        home=tmp_path / "home", interactive=False, env={}, stream=io.StringIO(),
+    )
+    assert plan.file_path is None and plan.fallback_reason
+    logging.getLogger("x").error("must not land in the victim")
+    assert victim.read_text() == "keep"
+    assert stat.S_IMODE(os.stat(victim).st_mode) == 0o644
+
+
+def test_notice_queue_escapes_terminal_controls():
+    queue = repl_notices.ReplNoticeQueue()
+    queue.push(30, "WARNING", "comp\x1b[31m",
+               "a\x1b]52;c;eA==\x07b\x9b2Jc\u202e\u2066\u2069\u200bd\u2028e\nf\tg",
+               0.0)
+    (notice,) = queue.drain()
+    for text in (notice.message, notice.component):
+        assert not any(
+            ord(ch) < 0x20 and ch not in "\n\t" or 0x7f <= ord(ch) < 0xa0
+            or ch in "\u202e\u2066\u2069\u200b\u2028"
+            for ch in text
+        )
+    assert "\\x1b" in notice.message and "\\x9b" in notice.message
+    assert "\\u202e" in notice.message
+    assert "\nf\tg" in notice.message
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")

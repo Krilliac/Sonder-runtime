@@ -90,6 +90,29 @@ _VT_CSI_KEYS = {
     "[H": KEY_HOME, "[F": KEY_END, "[3~": KEY_DELETE, "[Z": KEY_MODE_CYCLE,
 }
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_SS3_KEYS = {
+    "A": KEY_UP, "B": KEY_DOWN, "C": KEY_RIGHT, "D": KEY_LEFT,
+    "H": KEY_HOME, "F": KEY_END,
+}
+# Zero-width (non-)joiners are format characters that real text needs
+# (emoji sequences, Persian and Indic scripts); every other format character
+# (bidi overrides and isolates, zero-width space, BOM) is never inserted.
+_TEXT_FORMAT_CHARS = frozenset(("\u200c", "\u200d"))
+
+
+def _insertable(ch: str) -> bool:
+    """Whether one typed or pasted code point may enter the buffer.
+
+    Controls (C0, DEL, C1 such as the 8-bit CSI ``\x9b``), surrogates and
+    format characters other than ZWJ/ZWNJ are refused, so the echoed buffer
+    can never carry a terminal sequence or reorder the prompt line.
+    """
+    category = unicodedata.category(ch)
+    if category in ("Cc", "Cs"):
+        return False
+    if category == "Cf":
+        return ch in _TEXT_FORMAT_CHARS
+    return True
 
 
 # --- the pure state machine ----------------------------------------------
@@ -374,7 +397,7 @@ class MenuState:
                 self.dismissed = False
             self._reset_selection()
             return CONTINUE
-        if len(ch) == 1 and (ch >= " " and ch != "\x7f"):
+        if len(ch) == 1 and _insertable(ch):
             self.buffer = self.buffer[:self.cursor] + ch + self.buffer[self.cursor:]
             self.cursor += 1
             self._reset_selection()
@@ -400,7 +423,7 @@ class MenuState:
         clean = "".join(
             ch if ch == "\n" else (" " if ch == "\t" else ch)
             for ch in raw
-            if ch in ("\n", "\t") or not unicodedata.category(ch).startswith("C")
+            if ch in ("\n", "\t") or _insertable(ch)
         )
         if not clean:
             return
@@ -855,21 +878,27 @@ KIND_PASTE = "paste"
 KIND_IGNORE = "ignore"
 
 
-def _read_paste(getwch) -> str:
-    """Collect pasted text up to the ``ESC [201~`` end marker."""
+def _read_paste(getwch, kbhit=None) -> str:
+    """Collect pasted text up to the ``ESC [201~`` end marker.
+
+    Past :data:`PASTE_LIMIT` the rest of the paste is read and discarded up
+    to the end marker (or until no input is pending), so the overflow is
+    never replayed as keys: a pasted line break must not submit the line.
+    """
     chunk: list[str] = []
     tail = ""
     size = 0
     while True:
         ch = getwch()
         tail = (tail + ch)[-len(PASTE_END):]
-        chunk.append(ch)
-        size += 1
+        if size < PASTE_LIMIT:
+            chunk.append(ch)
+            size += 1
         if tail == PASTE_END:
-            del chunk[-len(PASTE_END):]
+            if size < PASTE_LIMIT or chunk[-len(PASTE_END):] == list(PASTE_END):
+                del chunk[-len(PASTE_END):]
             return "".join(chunk)
-        if size >= PASTE_LIMIT:
-            # A runaway paste without an end marker still ends as text.
+        if size >= PASTE_LIMIT and (kbhit is None or not _pending(kbhit)):
             return "".join(chunk)
 
 
@@ -896,6 +925,10 @@ def read_key(getwch, kbhit) -> tuple[str, str]:
     if not _pending(kbhit):
         return KIND_KEY, _ESC
     first = getwch()
+    if first == "O" and _pending(kbhit):
+        # SS3 cursor keys (application cursor mode): ESC O A..D/H/F.
+        key = _SS3_KEYS.get(getwch())
+        return (KIND_KEY, key) if key is not None else (KIND_IGNORE, "")
     if first != "[":
         # Alt+key or an unknown sequence: never type the ESC as text.
         return KIND_IGNORE, ""
@@ -906,7 +939,7 @@ def read_key(getwch, kbhit) -> tuple[str, str]:
         if "@" <= nxt <= "~":
             break
     if seq == PASTE_START:
-        return KIND_PASTE, _read_paste(getwch)
+        return KIND_PASTE, _read_paste(getwch, kbhit)
     key = _VT_CSI_KEYS.get(seq)
     return (KIND_KEY, key) if key is not None else (KIND_IGNORE, "")
 
@@ -1220,10 +1253,14 @@ def _read_line_raw(prompt: str, completer=None, history=None, frame: str = "",
     paste_mode = enable_vt()
     if paste_mode:
         _set_bracketed_paste(stream, True)
+    pasted_cr = False
     try:
         _paint(state, prompt, stream)
         while True:
             kind, ch = read_key(msvcrt.getwch, kbhit)
+            after_pasted_cr, pasted_cr = pasted_cr, False
+            if after_pasted_cr and ch == "\n":
+                continue  # the LF of a pasted CRLF: one line break, not two
             if kind == KIND_IGNORE:
                 continue
             if kind == KIND_PASTE:
@@ -1245,6 +1282,7 @@ def _read_line_raw(prompt: str, completer=None, history=None, frame: str = "",
                 # as keys; an Enter with more input already queued behind it
                 # is a pasted line break, not a submit.
                 state.insert_text("\n")
+                pasted_cr = ch == "\r"
                 _paint(state, prompt, stream)
                 continue
             if ch == _CTRL_R:
