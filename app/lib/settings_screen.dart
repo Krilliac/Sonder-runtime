@@ -1,10 +1,8 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'account_session.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:http/http.dart' as http;
 
 import 'api.dart';
 import 'local_manager.dart';
@@ -146,10 +144,8 @@ class BootstrapSecretRequired implements Exception {
   String toString() => message;
 }
 
-/// Network actions Settings performs. Tests substitute a fake.
-///
-/// Lane A owns `lib/api/account.dart`; until it lands, [register] posts
-/// directly so it can send `X-Sonder-Bootstrap-Secret` and accept 201.
+/// Network actions Settings performs, all through lane A's [SonderApi].
+/// Tests substitute a fake.
 class SettingsConnection {
   const SettingsConnection();
 
@@ -166,7 +162,10 @@ class SettingsConnection {
           baseUrl: account.origin, apiKey: apiKey, accountSession: account)
       .logout();
 
-  /// Returns "Account <u> created (role <r>)." on 200 or 201.
+  /// Returns "Account <u> created (role <r>)." on 200 or 201, through lane
+  /// A's [SonderApi.register] (the secret travels only as
+  /// `X-Sonder-Bootstrap-Secret`). A first-admin 403 becomes
+  /// [BootstrapSecretRequired] so the card can ask for the secret.
   Future<String> register(
     String serverUrl,
     String apiKey,
@@ -174,59 +173,16 @@ class SettingsConnection {
     String password, {
     String? bootstrapSecret,
   }) async {
-    final origin = serverOrigin(serverUrl);
-    final headers = <String, String>{'Content-Type': 'application/json'};
-    if (apiKey.trim().isNotEmpty) {
-      headers['Authorization'] = 'Bearer ${apiKey.trim()}';
-    }
-    final secret = bootstrapSecret?.trim() ?? '';
-    if (secret.isNotEmpty) headers['X-Sonder-Bootstrap-Secret'] = secret;
-    final client = http.Client();
-    late http.Response response;
     try {
-      final request =
-          http.Request('POST', Uri.parse('$origin/v1/sonder/register'))
-            ..followRedirects = false
-            ..headers.addAll(headers)
-            ..body = jsonEncode({'username': username, 'password': password});
-      response = await http.Response.fromStream(
-          await client.send(request).timeout(const Duration(seconds: 20)));
-    } catch (error) {
-      throw SonderException('Account request could not be completed.',
-          cause: error);
-    } finally {
-      client.close();
-    }
-    Map<String, dynamic> body = const {};
-    try {
-      final decoded = jsonDecode(utf8.decode(response.bodyBytes));
-      if (decoded is Map<String, dynamic>) body = decoded;
-    } catch (_) {}
-    final error = body['error'];
-    final message =
-        (body['message'] ?? (error is Map ? error['message'] : error) ?? '')
-            .toString()
-            .trim();
-    if ((response.statusCode == 200 || response.statusCode == 201) &&
-        body['ok'] == true) {
-      final account = body['account'];
-      final name = account is Map ? account['username']?.toString() : null;
-      final role = account is Map ? account['role']?.toString() : null;
-      if (name != null && name.isNotEmpty) {
-        return role == null || role.isEmpty
-            ? 'Account $name created.'
-            : 'Account $name created (role $role).';
+      return await SonderApi(baseUrl: serverUrl, apiKey: apiKey).register(
+          username, password,
+          bootstrapSecret: bootstrapSecret?.trim() ?? '');
+    } on SonderException catch (error) {
+      if (error.needsBootstrapSecret) {
+        throw BootstrapSecretRequired(error.message);
       }
-      return message.isEmpty ? 'Account $username created.' : message;
+      rethrow;
     }
-    if (response.statusCode == 403 && message.contains('bootstrap')) {
-      throw BootstrapSecretRequired(message);
-    }
-    throw SonderException(
-      message.isEmpty ? 'Account request failed.' : message,
-      httpStatus: response.statusCode,
-      code: error is Map ? (error['code']?.toString() ?? '') : '',
-    );
   }
 }
 

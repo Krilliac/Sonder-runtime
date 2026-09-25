@@ -17,9 +17,9 @@ import 'golden_fonts.dart';
 /// Lane C goldens. Generate on Linux only:
 ///   flutter test --update-goldens --tags golden test/goldens/chat_golden_test.dart
 ///
-/// Fonts are the bundled Plex faces loaded from disk, so no network font is
-/// fetched. Status glyphs (◈ ⊘ ✓ ❯) are not in Plex; until lane B's
-/// SonderSymbols fallback lands they render with the engine's fallback.
+/// Fonts come from lane B's hermetic loader (Plex, Material Icons and the
+/// SonderSymbols subset for ◈ ⊘ ✓ ❯), so no network font is fetched and no
+/// glyph draws as tofu.
 
 const _phone = Size(390, 844);
 const _desk = Size(1440, 900);

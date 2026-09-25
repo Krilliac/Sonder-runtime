@@ -7,13 +7,12 @@ import '../api.dart' show WorkRun;
 import '../models.dart';
 import '../theme.dart';
 import '../workspace_ui.dart'
-    show StatusKind, WorkspaceNotice, conversationWidth;
+    show ConversationContent, StatusKind, WorkspaceNotice, conversationWidth;
 import 'backend.dart';
 import 'classify.dart';
 import 'controller.dart';
 import '../ui/status_line.dart';
 import 'live_line.dart';
-import 'markdown.dart';
 import 'refusal.dart';
 import 'work_run_card.dart';
 
@@ -306,8 +305,10 @@ class TranscriptTurn extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           if (message.content.isNotEmpty) ...[
-            ChatMarkdown(
-                key: const Key('streaming-text'), content: message.content),
+            ConversationContent(
+                key: const Key('streaming-text'),
+                content: message.content,
+                fullWidthCode: true),
             const SizedBox(height: 10),
           ],
           LiveLineView(live: live, onStop: actions.onStop),
@@ -444,7 +445,7 @@ class TranscriptTurn extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        ChatMarkdown(content: parsed.answer),
+        ConversationContent(content: parsed.answer, fullWidthCode: true),
         if (message.reasoning.trim().isNotEmpty) ...[
           const SizedBox(height: 8),
           CollapsedDetail(
