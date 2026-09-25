@@ -35,11 +35,13 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from ..common.errors import InvalidInput
+from .symbol_path import DEBUGINFOD_BY_DISTRO
 
 
 PLACEHOLDERS = ("nonce", "rundir", "input", "exe", "sympath", "imagepath", "solibpath")
 _PLACEHOLDER_RE = re.compile(r"\{(%s)\}" % "|".join(PLACEHOLDERS))
 _NONCE_RE = re.compile(r"^[0-9a-f]{16}$")
+_PATH_BINDINGS = frozenset({"rundir", "input", "exe"})
 CDB_SFLAGS = 0x022802B7
 SYMOPT_LOAD_ANYTHING = 0x40
 DEFAULT_TIMEOUT = 180
@@ -243,7 +245,14 @@ def wpaexporter_template(tool_path: str, profile_name: str, profile_path: str) -
 # ------------------------------------------------------------------ environment
 
 def posix_environment(*, network: bool, debuginfod_url: str = "") -> tuple[tuple[str, str], ...]:
-    """The complete POSIX environment (inherit_environment=False)."""
+    """The complete POSIX environment (inherit_environment=False).
+
+    With ``network`` the only accepted debuginfod URL is one of the fixed
+    ``DEBUGINFOD_BY_DISTRO`` servers; without it ``DEBUGINFOD_URLS`` is
+    explicitly empty.
+    """
+    if network and debuginfod_url not in DEBUGINFOD_BY_DISTRO.values():
+        raise TemplateError("debuginfod URL must be a fixed distro server")
     return (
         ("PATH", "/usr/bin:/bin"),
         ("HOME", "{rundir}/home"),
@@ -292,6 +301,10 @@ def _check_binding(name: str, value: str) -> str:
         raise TemplateError("binding %s contains a placeholder" % name)
     if name == "nonce" and not _NONCE_RE.match(text):
         raise TemplateError("nonce must be 16 lower-case hex digits")
+    if name in _PATH_BINDINGS and (not text or text.startswith("-")):
+        # gdb and lldb take {exe}/{input} as positional arguments: a value
+        # starting with "-" would be parsed as an option (e.g. "-x<script>").
+        raise TemplateError("binding %s must be a non-empty path not starting with '-'" % name)
     return text
 
 

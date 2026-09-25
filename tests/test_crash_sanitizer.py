@@ -140,3 +140,34 @@ def test_not_a_sanitizer_report():
     with pytest.raises(CaptureFormatError) as info:
         parse_sanitizer_report("hello\nworld\n")
     assert info.value.code == "NOT_SANITIZER"
+
+
+# ------------------------------------------------------------------ linear-time parsing (SEC-008)
+
+import time  # noqa: E402
+
+_SEGV_HEADER = "==1==ERROR: AddressSanitizer: SEGV on unknown address 0x000 (pc 0x1 T0)\n"
+
+
+@pytest.mark.parametrize("name,text", [
+    ("frame_blanks", _SEGV_HEADER + "    #0 0x1 in f" + " " * 400_000 + "x\n"),
+    ("frame_buildid", _SEGV_HEADER + "    #0 0x1 in f" + " (BuildId: " * 40_000 + "\n"),
+    ("tsan_warning_blanks", "WARNING: ThreadSanitizer: data race" + " " * 400_000 + "y\n"),
+    ("access_by_blanks", _SEGV_HEADER + "READ of size 1 at 0x1 by " + " " * 400_000 + "x\n"),
+], ids=["frame_blanks", "frame_buildid", "tsan_warning_blanks", "access_by_blanks"])
+def test_hostile_lines_parse_in_linear_time(name, text):
+    started = time.perf_counter()
+    try:
+        parse_sanitizer_report(text)
+    except CaptureFormatError:
+        pass
+    assert time.perf_counter() - started < 2.0, name
+
+
+def test_frame_suffixes_and_tsan_pid_suffix_still_parse():
+    report = parse_sanitizer_report(
+        _SEGV_HEADER + "    #0 0x5 in main (/opt/app/game+0x1a2b) (BuildId: 0123abcd)\n")
+    frame = report.crashing_thread().frames[0]
+    assert (frame.function, frame.module, frame.module_offset) == ("main", "game", 0x1A2B)
+    tsan = parse_sanitizer_report("WARNING: ThreadSanitizer: data race (pid=4242)\n")
+    assert tsan.pid == 4242 and tsan.exception.name == "data-race"

@@ -228,3 +228,66 @@ def test_symbolizer_never_uses_mismatched_pdb_plan_gate():
     # The planner (lane C) stages a module for llvm-symbolizer only when this is true.
     assert not pdb_matches(exe_a, pdb_b)
     assert os.path.basename(exe_a.pdb_path.replace("\\", "/")) == "spark_tiny.pdb"
+
+
+_HOSTILE_SOURCE = r'''
+asm(".pushsection \".debug_gdb_scripts\", \"MS\",%progbits,1\n"
+    ".byte 4\n"
+    ".ascii \"gdb.inlined-script\\n\"\n"
+    ".ascii \"import os\\n\"\n"
+    ".ascii \"open(os.environ['HOME'] + '/../pwn_inline', 'w').write('x')\\n\"\n"
+    ".byte 0\n"
+    ".popsection\n");
+int main() { volatile int *p = (int *)0; return *p; }
+'''
+
+
+def test_gdb_and_lldb_never_run_scripts_from_the_capture_or_binary_dirs(tmp_path):
+    """A hostile binary/dump directory: an inline ``.debug_gdb_scripts`` Python
+    script, ``<exe>-gdb.py``/``<exe>-gdb.gdb`` auto-load files and ``.gdbinit`` /
+    ``.lldbinit`` in the binary dir, cwd and HOME. The lane's templates must not
+    execute any of them; the control run proves the vectors are live here."""
+    gdb, compiler = _tool("gdb"), _tool("g++")
+    if gdb is None or compiler is None:
+        pytest.skip("gdb and g++ are required")
+    work = tmp_path / "dumps"
+    work.mkdir()
+    (work / "hostile.cpp").write_text(_HOSTILE_SOURCE)
+    binary = work / "hostile"
+    subprocess.run([compiler, "-g", "-O0", "-o", str(binary), str(work / "hostile.cpp")], check=True,
+                   capture_output=True, timeout=180)
+    core = work / "core.hostile"
+    subprocess.run([gdb, "-nx", "-batch", "-ex", "run", "-ex", "generate-core-file %s" % core, str(binary)],
+                   cwd=work, capture_output=True, timeout=180, env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
+    if not core.exists():
+        pytest.skip("gdb could not generate a core here")
+    rundir = _rundir(tmp_path)
+    marker = rundir / "pwn_inline"          # HOME/../pwn_inline for the inline script
+    (work / "hostile-gdb.py").write_text("open(%r, 'w').write('x')\n" % str(rundir / "pwn_objfile_py"))
+    (work / "hostile-gdb.gdb").write_text("shell touch %s\n" % (rundir / "pwn_objfile_gdb"))
+    for directory in (work, rundir / "cwd", rundir / "home"):
+        (directory / ".gdbinit").write_text("shell touch %s\n" % (rundir / "pwn_gdbinit"))
+        (directory / ".lldbinit").write_text("platform shell touch %s\n" % (rundir / "pwn_lldbinit"))
+    bindings = {"nonce": secrets.token_hex(8), "rundir": str(rundir), "input": str(core), "exe": str(binary),
+                "solibpath": ""}
+
+    engines = [gdb_template(gdb), gdb_template(gdb, network=True)]
+    lldb = _tool("lldb", "lldb-18")
+    if lldb is not None:
+        engines.append(lldb_template(lldb))
+    for template in engines:
+        output = _run(template, bindings, rundir, isolate=False)
+        assert "SONDER_%s" % bindings["nonce"] in output, output[-2000:]
+        assert not list(rundir.glob("pwn_*")), (template.engine, output[-2000:])
+
+    # Control: the same gdb with auto-load allowed does run the hostile scripts.
+    control = subprocess.run([gdb, "-nx", "-nh", "-batch", "-q", "-iex", "set auto-load safe-path /",
+                              "-ex", "bt 1", str(binary), str(core)], cwd=rundir / "cwd", capture_output=True,
+                             text=True, timeout=180,
+                             env={"PATH": "/usr/bin:/bin", "HOME": str(rundir / "home"), "LANG": "C.UTF-8"})
+    ran = {path.name for path in rundir.glob("pwn_*")}
+    if "Python scripting is not supported" in control.stdout + control.stderr:
+        assert "pwn_objfile_gdb" in ran, control.stderr[-2000:]
+    else:
+        assert {"pwn_inline", "pwn_objfile_py", "pwn_objfile_gdb"} <= ran, (ran, control.stderr[-2000:])
+    assert "pwn_gdbinit" not in ran and marker.exists() == ("pwn_inline" in ran)

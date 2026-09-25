@@ -84,13 +84,16 @@ def test_pdb_matches_pair_and_rejects_cross_built_pair():
     assert pdb_match_basis(exe_a, pdb_a) == "dbi_age"
 
 
-def test_pdb_age_rule_accepts_either_age_and_notes_which():
+def test_pdb_age_rule_uses_dbi_age_and_pdb_age_only_without_dbi():
     from dataclasses import replace
 
     exe = read_pe_identity(_reader(PE / "a" / "spark_tiny.exe"))
     pdb = read_pdb_identity(_reader(PE / "a" / "spark_tiny.pdb"))
     assert pdb_match_basis(exe, replace(pdb, dbi_age=None)) == "pdb_age"
-    assert pdb_match_basis(exe, replace(pdb, dbi_age=7)) == "pdb_age"
+    # A DBI age that disagrees with RSDS is a mismatch even when the
+    # PDB-stream age happens to equal it (stale PDB after an incremental link).
+    assert pdb_match_basis(exe, replace(pdb, dbi_age=7)) is None
+    assert not pdb_matches(exe, replace(pdb, dbi_age=7))
     assert pdb_match_basis(exe, replace(pdb, dbi_age=7, pdb_age=9)) is None
     assert pdb_match_basis(replace(exe, rsds_age=2), replace(pdb, dbi_age=2, pdb_age=1)) == "dbi_age"
 
@@ -226,3 +229,21 @@ def test_symstore_keys():
             pe_symbol_key(bad, GUID_A, 1)
     with pytest.raises(InvalidInput):
         elf_debug_path("abc")
+
+
+def test_elf_identity_charges_repeated_note_reads_to_a_budget():
+    # 65535 section headers that all name the same 1 MiB SHT_NOTE (one big
+    # non-GNU note): without a read budget this is 64 GiB of reads.
+    note_size = 1 << 20
+    note = struct.pack("<III", 0, note_size - 12, 1) + b"\0" * (note_size - 12)
+    shnum = 65535
+    phoff, note_off = 64, 64
+    shoff = note_off + note_size
+    header = b"\x7fELF" + bytes([2, 1, 1, 0]) + b"\0" * 8 + struct.pack(
+        "<HHIQQQIHHHHHH", 2, 62, 1, 0, 0, shoff, 0, 64, 56, 0, 64, shnum, 0)
+    section = struct.pack("<IIQQQQIIQQ", 0, 7, 0, 0, note_off, note_size, 0, 0, 4, 0)
+    data = header + note + section * shnum
+    assert len(header) == phoff
+    with pytest.raises(BinaryFormatError) as info:
+        read_elf_identity(BytesReader(data))
+    assert info.value.code == "LIMIT_EXCEEDED"

@@ -8,8 +8,8 @@ chased.
 
 ``pdb_matches`` is the gate that decides whether a PDB may be handed to a
 host symbolizer next to its PE: the GUIDs must be equal and the RSDS age
-must equal the DBI age, or the PDB-stream age (both are accepted until the
-MSVC incremental-link rule is confirmed; ``pdb_match_basis`` says which).
+must equal the DBI age; the PDB-stream age is used only when the PDB has no
+DBI stream (``pdb_match_basis`` says which age matched).
 """
 from __future__ import annotations
 
@@ -157,8 +157,11 @@ def pdb_match_basis(pe: PeIdentity, pdb: PdbIdentity) -> str | None:
     """"dbi_age" or "pdb_age" when the pair matches, else None."""
     if not pe.rsds_guid or pe.rsds_age is None or pe.rsds_guid.upper() != pdb.guid.upper():
         return None
-    if pdb.dbi_age is not None and pe.rsds_age == pdb.dbi_age:
-        return "dbi_age"
+    if pdb.dbi_age is not None:
+        # The DBI age is the one the linker writes into the PE's RSDS record;
+        # the PDB-stream age may run ahead of it after incremental links, so
+        # it is never a fallback when a DBI age exists (spec: pdb_matches).
+        return "dbi_age" if pe.rsds_age == pdb.dbi_age else None
     if pe.rsds_age == pdb.pdb_age:
         return "pdb_age"
     return None

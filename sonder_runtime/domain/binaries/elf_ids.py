@@ -12,7 +12,7 @@ import struct
 from dataclasses import dataclass
 
 from ..diagnostics.model import clean_text
-from .reader import BinaryFormatError, ByteRangeError, ByteReader, WallClock, c_string
+from .reader import BinaryFormatError, BudgetedReader, ByteRangeError, ByteReader, WallClock, c_string
 
 
 ET_CORE = 4
@@ -25,6 +25,7 @@ NT_GNU_BUILD_ID = 3
 MAX_PHDRS = 65_535
 MAX_SHDRS = 65_535
 MAX_NOTE_BYTES = 1 << 20
+MAX_IDENTITY_BYTES_READ = 16 << 20
 MACHINES = {3: "x86", 40: "arm", 62: "x86_64", 183: "aarch64", 243: "riscv", 8: "mips", 21: "ppc64"}
 TYPES = {1: "rel", 2: "exec", 3: "dyn", 4: "core"}
 
@@ -180,9 +181,16 @@ def build_id_from_notes(data: bytes, endian: str, align: int) -> str:
     return ""
 
 
-def read_elf_identity(reader: ByteReader, *, max_seconds: float = 2.0) -> ElfIdentity:
-    """Build-id, debuglink, machine and type of an ELF file."""
+def read_elf_identity(reader: ByteReader, *, max_seconds: float = 2.0,
+                      max_bytes_read: int = MAX_IDENTITY_BYTES_READ) -> ElfIdentity:
+    """Build-id, debuglink, machine and type of an ELF file.
+
+    Every read is charged to a ``max_bytes_read`` budget and the wall clock is
+    checked before each note blob: header counts and note sizes are attacker
+    controlled (65535 section headers each naming the same 1 MiB note).
+    """
     clock = WallClock(max_seconds)
+    reader = BudgetedReader(reader, max_bytes_read)
     header = read_elf_header(reader)
     build_id = ""
     for phdr in program_headers(reader, header, clock=clock):
@@ -190,6 +198,7 @@ def read_elf_identity(reader: ByteReader, *, max_seconds: float = 2.0) -> ElfIde
             continue
         if phdr.filesz > MAX_NOTE_BYTES:
             continue
+        clock.check()
         try:
             blob = reader.read(phdr.offset, phdr.filesz)
         except ByteRangeError:
@@ -217,6 +226,7 @@ def read_elf_identity(reader: ByteReader, *, max_seconds: float = 2.0) -> ElfIde
                 raise BinaryFormatError("TRUNCATED", "section header table beyond the file") from None
             name = c_string(names[name_off:], 64) if name_off < len(names) else b""
             if not build_id and s_type == SHT_NOTE and 0 < size <= MAX_NOTE_BYTES:
+                clock.check()
                 try:
                     build_id = build_id_from_notes(reader.read(offset, size), header.endian, 4)
                 except ByteRangeError:

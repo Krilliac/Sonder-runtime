@@ -250,6 +250,10 @@ def _read(reader: BudgetedReader, limits: CoreLimits, wall: WallClock, is_projec
             first_signal = cursig
         crashed = number == 0
         frames: list[StackFrame] = [frame_at(0, pc, module_index, FrameTrust.CONTEXT.value)]
+        if not crashed and number > MAX_OTHER_THREADS:
+            # Dropped by ``cap_threads``; do not spend the budgets walking it.
+            threads.append(ThreadSummary(thread_id=tid, crashed=False, frames=tuple(frames)))
+            continue
         max_frames = min(limits.max_scan_frames, (MAX_CRASHING_FRAMES if crashed else MAX_OTHER_FRAMES) - 1)
         walked = frame_pointer_walk(memory, sp, fp, module_index, max_frames=max_frames, clock=wall)
         if walked:

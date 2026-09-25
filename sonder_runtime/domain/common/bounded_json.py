@@ -31,9 +31,12 @@ from .errors import InvalidInput
 DEFAULT_MAX_DEPTH = 64
 DEFAULT_MAX_ITEM_BYTES = 65_536
 
-# A complete JSON string (unrolled loop: linear, no nested quantifier
-# backtracking) or one structural bracket.
-_DEPTH_TOKEN = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[\[\]{}]', re.S)
+# A JSON string, or an unterminated one running to the end of the text. The
+# pattern succeeds at *every* opening quote (unrolled loop, no nested
+# quantifier backtracking), so ``sub`` never fails after scanning ahead and
+# never restarts inside an unterminated string: ``"\"\"\"...`` stays linear.
+_STRING_TO_END = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*(?:"|\\?\Z)', re.S)
+_NOT_BRACKET = re.compile(r'[^\[\]{}]+')
 _STRUCTURAL = re.compile(r'[\[\]{}",:]')
 _IN_STRING = re.compile(r'["\\]')
 
@@ -60,17 +63,20 @@ def check_depth(text: str, max_depth: int = DEFAULT_MAX_DEPTH) -> int:
     Linear in ``len(text)``.
     """
     limit = max(1, int(max_depth))
+    # Both passes run inside ``re``: strings are blanked, then everything but
+    # brackets is dropped; only the bracket characters are walked in Python.
+    brackets = _NOT_BRACKET.sub("", _STRING_TO_END.sub("", _as_text(text)))
     depth = 0
     deepest = 0
-    for match in _DEPTH_TOKEN.finditer(_as_text(text)):
-        token = match.group()
+    for token in brackets:
         if token in "[{":
             depth += 1
             if depth > limit:
                 raise JsonBoundsExceeded("JSON nesting exceeds depth %d" % limit)
-            deepest = max(deepest, depth)
-        elif token in "]}":
-            depth = max(0, depth - 1)
+            if depth > deepest:
+                deepest = depth
+        elif depth:
+            depth -= 1
     return deepest
 
 

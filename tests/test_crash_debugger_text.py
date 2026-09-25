@@ -187,3 +187,107 @@ def test_invalid_nonce_rejected():
         parse_gdb("x", "short")
     with pytest.raises(InvalidInput):
         parse_lldb("x", "ZZZZZZZZZZZZZZZZ")
+
+
+# ------------------------------------------------------------------ linear-time parsing (SEC-008)
+#
+# Debugger output carries text the crashed process controls (symbol names,
+# thread names, module paths). A single hostile line must not make a parser
+# super-linear: each case below took minutes (or never finished) with the
+# lazy ``.*?``/``\s*`` regexes these parsers used before.
+
+import random  # noqa: E402
+import re  # noqa: E402
+import time  # noqa: E402
+
+from sonder_runtime.domain.crash import debugger_text as _dt  # noqa: E402
+from sonder_runtime.domain.crash.model import ModuleInfo  # noqa: E402
+
+
+def _section(name: str, body: str) -> str:
+    return "SONDER_%s_%s\n%s\nSONDER_%s_END\n" % (NONCE, name, body, NONCE)
+
+
+def _many(line: str) -> str:
+    """~1.5 MB of one hostile line (each just under the per-line clip)."""
+    return "\n".join([line[:_dt.MAX_LINE_CHARS]] * (1_500_000 // min(len(line), _dt.MAX_LINE_CHARS)))
+
+
+_N = 2000
+_HOSTILE_LINES = [
+    ("cdb_mismatch", lambda: parse_cdb(_section("ANALYZE", _many("mismatched " * _N)), NONCE)),
+    ("cdb_site_brackets", lambda: parse_cdb(_section("STACK", _many("00 00000000 00000000 m!f" + " [" * _N)),
+                                            NONCE)),
+    ("cdb_site_sources", lambda: parse_cdb(_section("STACK", _many("00 00000000 00000000 m!f" + " [a @ 1" * _N)),
+                                           NONCE)),
+    ("cdb_thread_blanks", lambda: parse_cdb(
+        _section("THREADS", _many(".  0  Id: 1.2 Suspend: 1 " + " " * 8000 + "x")), NONCE)),
+    ("cdb_thread_quotes", lambda: parse_cdb(
+        _section("THREADS", _many(".  0  Id: 1.2 Suspend: 1 " + '"' * 8000 + "x")), NONCE)),
+    ("lldb_image_blanks", lambda: parse_lldb(
+        "(SONDER_%s) image list\n%s\n" % (NONCE, _many("[  0] 0x1 a" + " " * 8000 + "b")), NONCE)),
+    ("lldb_frame_at", lambda: parse_lldb("(SONDER_%s) thread backtrace all\n* thread #1\n%s\n" % (
+        NONCE, _many("  frame #0: 0x1 a`f" + " at x" * _N)), NONCE)),
+    ("gdb_frame_at", lambda: parse_gdb(_section("BT", _many("#0  0x1 in f ()" + " at x" * _N)), NONCE)),
+]
+
+
+@pytest.mark.parametrize("name,parse", _HOSTILE_LINES, ids=[case[0] for case in _HOSTILE_LINES])
+def test_hostile_lines_parse_in_linear_time(name, parse):
+    started = time.perf_counter()
+    parse()
+    assert time.perf_counter() - started < 2.0, name
+
+
+def test_window_clips_overlong_lines():
+    text = _section("BT", "#0  0x1 in f () at a.cpp:12\n#1  0x2 in " + "g" * 50_000 + " () at b.cpp:3")
+    frames = parse_gdb(text, NONCE).frames_for(0)
+    assert frames[0].file == "a.cpp" and frames[0].line == 12
+    assert len(frames[1].function) <= _dt.MAX_LINE_CHARS
+
+
+# The replaced regexes, kept as a differential oracle: on short random lines
+# (where backtracking is cheap) the linear helpers must agree with them.
+_OLD_AT = re.compile(r" at (?P<file>\S.*?):(?P<line>\d+)$")
+_OLD_AT_COL = re.compile(r" at (?P<file>\S.*?):(?P<line>\d+)(?::(?P<col>\d+))?$")
+_OLD_CDB_SITE = re.compile(
+    r"^(?P<module>[\w.$~-]+)!(?P<func>.+?)(?:\+(?P<off>0x[0-9a-fA-F]+))?(?: \[(?P<file>.+) @ (?P<line>\d+)\])?$")
+_OLD_CDB_THREAD = re.compile(
+    r"^(?P<mark>[.#])?\s*(?P<num>\d+)\s+Id:\s*(?P<pid>[0-9a-fA-F]+)\.(?P<tid>[0-9a-fA-F]+)\s+Suspend:.*?"
+    r"(?:\"(?P<name>[^\"]*)\")?\s*$")
+_OLD_LLDB_IMAGE = re.compile(
+    r"^\[\s*(?P<idx>\d+)\]\s+(?:(?P<uuid>[0-9A-Fa-f-]{8,})\s+)?(?P<base>0x[0-9a-fA-F]+)\s+(?P<path>\S.*?)"
+    r"(?:\s+\(0x[0-9a-fA-F]+\))?\s*$")
+_PIECES = [" at ", ":", "1", "2", "a", " ", "[", "]", " @ ", "+0x1", "+", "!", '"', "(", ")", "0x1f", "x.cpp"]
+
+
+def _random_tail(rng: random.Random) -> str:
+    return "".join(rng.choice(_PIECES) for _ in range(rng.randint(0, 9)))
+
+
+def test_linear_helpers_agree_with_the_replaced_regexes():
+    rng = random.Random(20260925)
+    for _ in range(20_000):
+        text = _random_tail(rng)
+        for with_column, old in ((False, _OLD_AT), (True, _OLD_AT_COL)):
+            match = old.search(text)
+            expected = None if match is None else (
+                text[:match.start()], match.group("file"), int(match.group("line")),
+                int(match.group("col")) if with_column and match.group("col") else None)
+            assert _dt._split_source(text, with_column=with_column) == expected, repr(text)
+        site = "m!" + _random_tail(rng)
+        match = _OLD_CDB_SITE.match(site)
+        expected = None if match is None else (
+            match.group("module"), match.group("func"), match.group("file") or "",
+            int(match.group("line")) if match.group("file") else None)
+        assert _dt._cdb_site(site) == expected, repr(site)
+        header = (".  0  Id: 1.2 Suspend:" + _random_tail(rng)).strip()
+        old, new = _OLD_CDB_THREAD.match(header), _dt._CDB_THREAD_RE.match(header)
+        assert (old is None) == (new is None), repr(header)
+        if old is not None:
+            assert (old.group("name") or "") == _dt._cdb_thread_name(new.group("tail")), repr(header)
+        image = ("[  0] 0x1 " + _random_tail(rng)).strip()
+        old = _OLD_LLDB_IMAGE.match(image)
+        findings = parse_lldb("(SONDER_%s) image list\n%s\n" % (NONCE, image), NONCE)
+        expected = ModuleInfo(name="x", path=old.group("path")).path if old else None
+        assert expected == (findings.modules[0].path if findings.modules else None), repr(image)

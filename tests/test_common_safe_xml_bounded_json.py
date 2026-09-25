@@ -135,3 +135,25 @@ def test_iter_array_objects_element_depth_bomb_is_skipped():
     scan = iter_array_objects([doc], key=None, max_items=5)
     assert list(scan) == [{"b": 1}]
     assert scan.skipped_invalid == 1
+
+
+@pytest.mark.parametrize("text", [
+    '"' + '\\"' * 400_000,            # unterminated string of escaped quotes
+    '["' + '\\"' * 400_000 + ']',
+    '{"a":' + '"x",' * 200_000,
+], ids=["escaped_quotes", "escaped_quotes_in_array", "many_strings"])
+def test_check_depth_is_linear_on_hostile_strings(text):
+    started = time.perf_counter()
+    try:
+        check_depth(text)
+    except JsonBoundsExceeded:
+        pass
+    assert time.perf_counter() - started < 1.0
+
+
+def test_check_depth_ignores_brackets_in_strings_and_counts_real_ones():
+    assert check_depth('["[[[[", {"k": "}}}"}, "\\"[", ["x"]]') == 2
+    assert check_depth('["unterminated [[[[[[') == 1
+    with pytest.raises(JsonBoundsExceeded):
+        check_depth('[' * 65 + ']' * 65)
+    assert check_depth(']]]]' + '[' * 64) == 64

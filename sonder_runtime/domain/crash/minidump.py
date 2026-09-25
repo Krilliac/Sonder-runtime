@@ -364,19 +364,26 @@ def scan_stack(stack: bytes, stack_base: int, sp: int, modules, *, pointer_size:
     ``ModuleInfo``.
     """
     index = modules if isinstance(modules, ModuleIndex) else ModuleIndex(modules)
+    if not index.modules or max_frames <= 0:
+        return ()
     fmt = "<Q" if pointer_size == 8 else "<I"
     offset = sp - stack_base if stack_base <= sp < stack_base + len(stack) else 0
     offset -= offset % pointer_size
+    usable = (len(stack) - offset) // pointer_size * pointer_size
+    # Cheap range pre-filter: most stack words are not code pointers, so only
+    # words inside [lowest base, highest end) pay for the bisect lookup.
+    low = index.bases[0]
+    high = max(module.base + module.size for module in index.modules)
     frames: list[StackFrame] = []
     number = start_index
-    while offset + pointer_size <= len(stack) and len(frames) < max_frames:
-        if clock is not None:
-            clock.tick(4096)
-        (value,) = struct.unpack_from(fmt, stack, offset)
-        offset += pointer_size
-        if value and index.find(value) is not None:
+    for count, (value,) in enumerate(struct.iter_unpack(fmt, stack[offset:offset + usable]), 1):
+        if clock is not None and not count & 4095:
+            clock.check()
+        if low <= value < high and index.find(value) is not None:
             frames.append(frame_at(number, value, index, FrameTrust.SCAN.value))
             number += 1
+            if len(frames) >= max_frames:
+                break
     return tuple(frames)
 
 
@@ -612,6 +619,11 @@ def _read(dump: _Dump, is_project) -> MinidumpTriage:
     for raw in raw_threads:
         dump.clock.tick(64)
         crashed = crashing_tid is not None and raw.thread_id == crashing_tid
+        if not crashed and len(threads) >= MAX_OTHER_THREADS:
+            # ``cap_threads`` keeps only the first MAX_OTHER_THREADS others;
+            # reading and scanning the stacks of the rest would spend the
+            # time and read budgets on threads that are dropped anyway.
+            continue
         ctx_size, ctx_rva = (exc_ctx if crashed and exc_ctx[1] else (raw.context_size, raw.context_rva))
         pc, sp = _context_pc_sp(dump, arch, ctx_size, ctx_rva)
         frames: list[StackFrame] = []

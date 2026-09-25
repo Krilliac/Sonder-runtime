@@ -222,3 +222,22 @@ def test_lexical_store_and_cdb_symbol_path():
         build_cdb_symbol_path("C:\\c", ["C:\\d%d" % i for i in range(9)], network=False)
     with pytest.raises(SymbolStoreRejected):
         build_cdb_symbol_path("C:\\c", [], ["\\\\s\\a"] * 5, network=True)
+
+
+@pytest.mark.parametrize("name", ["input", "exe", "rundir"])
+@pytest.mark.parametrize("value", ["-x/tmp/evil.gdb", "--command=/tmp/x", ""])
+def test_materialize_refuses_option_like_path_bindings(name, value):
+    bindings = {"nonce": "0123456789abcdef", "input": "/r/in/core", "exe": "/r/in/app", "rundir": "/r",
+                "solibpath": ""}
+    bindings[name] = value
+    with pytest.raises(TemplateError):
+        materialize(gdb_template("/usr/bin/gdb"), bindings)
+
+
+def test_posix_environment_accepts_only_fixed_debuginfod_servers():
+    with pytest.raises(TemplateError):
+        posix_environment(network=True, debuginfod_url="https://attacker.example")
+    with pytest.raises(TemplateError):
+        posix_environment(network=True)
+    assert dict(posix_environment(network=False, debuginfod_url="https://attacker.example"))[
+        "DEBUGINFOD_URLS"] == ""

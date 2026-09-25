@@ -10,7 +10,7 @@ from sonder_runtime.domain.crash.minidump import MinidumpLimits, read_minidump, 
 from sonder_runtime.domain.crash.model import CaptureFormatError, ModuleInfo
 from tests.support.minidump_builder import (
     AMD64, ARM64, GAME_BASE, LINUX, NTDLL_BASE, STACK_BASE, X86, MinidumpBuilder, amd64_access_violation,
-    bpel_record, rsds_record, stack_with_returns,
+    bpel_record, stack_with_returns,
 )
 
 
@@ -262,3 +262,18 @@ def test_time_budget_enforced_with_injected_clock():
     ticks = iter(range(0, 10_000_000, 5))
     assert _code(amd64_access_violation(), MinidumpLimits(max_seconds=2.0), clock=lambda: next(ticks)) == \
         "TIME_EXCEEDED"
+
+
+def test_many_threads_scan_only_the_threads_that_are_kept():
+    # 1500 threads with 4 KiB stacks each: only the crashing thread and the
+    # first MAX_OTHER_THREADS others are kept, so only their stacks are read.
+    builder = MinidumpBuilder().system_info()
+    builder.module("C:\\b\\spark_game.exe", GAME_BASE, 0x20000)
+    for tid in range(1, 1501):
+        builder.thread(tid, pc=GAME_BASE + 5, sp=STACK_BASE, stack=b"\0" * 4096)
+    builder.exception(1000, 0xC0000005, params=(0, 0), pc=GAME_BASE + 5, sp=STACK_BASE)
+    triage = read_minidump(BytesReader(builder.build()))
+    assert triage.threads_total == 1500 and len(triage.threads) == 16
+    assert triage.threads[0].thread_id == 1000 and triage.threads[0].crashed
+    assert triage.truncated
+    assert triage.bytes_read < 256 << 10

@@ -37,20 +37,23 @@ _ERROR_RE = re.compile(
     r"^==(?P<pid>\d+)==\s*ERROR: (?P<san>AddressSanitizer|HWAddressSanitizer|LeakSanitizer"
     r"|MemorySanitizer|KernelAddressSanitizer): (?P<msg>.+)$")
 _WARNING_RE = re.compile(
-    r"^(?:==(?P<pid>\d+)==\s*)?WARNING: (?P<san>ThreadSanitizer|MemorySanitizer): (?P<msg>.+?)"
-    r"(?: \(pid=(?P<pid2>\d+)\))?\s*$")
+    r"^(?:==(?P<pid>\d+)==\s*)?WARNING: (?P<san>ThreadSanitizer|MemorySanitizer): (?P<msg>.+)$")
+_PID_SUFFIX_RE = re.compile(r" \(pid=(?P<pid>\d+)\)")
 _UBSAN_RE = re.compile(
     r"^(?P<file>[^\s:][^:]*?):(?P<line>\d+):(?P<col>\d+): runtime error: (?P<msg>.+)$")
 _UBSAN_WIN_RE = re.compile(
     r"^(?P<file>[A-Za-z]:\\[^:]*?):(?P<line>\d+):(?P<col>\d+): runtime error: (?P<msg>.+)$")
 _FRAME_RE = re.compile(r"^\s*#(?P<index>\d+)\s+(?:(?P<addr>0x[0-9a-fA-F]+)\s+(?:in\s+)?)?(?P<rest>.*)$")
-_BUILD_ID_RE = re.compile(r"\s*\(BuildId: [0-9a-fA-F]+\)\s*$")
-_MODULE_RE = re.compile(r"\s*\((?P<module>[^()]+?)\+(?P<offset>0x[0-9a-fA-F]+)\)\s*$")
+# Suffix patterns are only ever full-matched against the text after the last
+# "(" of a frame line (see ``_split_suffix``): a leading ``\s*`` in a
+# ``search`` would retry at every blank of a hostile line (quadratic).
+_BUILD_ID_RE = re.compile(r"\(BuildId: [0-9a-fA-F]+\)")
+_MODULE_RE = re.compile(r"\((?P<module>[^()]+?)\+(?P<offset>0x[0-9a-fA-F]+)\)")
 _LOCATION_RE = re.compile(r"^(?P<file>.+?):(?P<line>\d+)(?::(?P<col>\d+))?$")
 _ACCESS_RE = re.compile(
     r"^(?:==\d+==\s*)?(?P<kind>READ|WRITE|Read|Write|Atomic read|Atomic write|Previous read"
     r"|Previous write|Previous atomic read|Previous atomic write) of size (?P<size>\d+) at "
-    r"(?P<addr>0x[0-9a-fA-F]+)(?: thread (?P<thread>T\d+)| by (?P<by>.+?))?:?\s*$")
+    r"(?P<addr>0x[0-9a-fA-F]+)(?: thread (?P<thread>T\d+)| by (?P<by>.+))?:?\s*$")
 _SIGNAL_ACCESS_RE = re.compile(r"The signal is caused by a (?P<kind>READ|WRITE|UNKNOWN) memory access")
 _ADDRESS_RE = re.compile(r"on (?:unknown )?address (?P<addr>0x[0-9a-fA-F]+)")
 _PC_RE = re.compile(r"\bpc (?P<pc>0x[0-9a-fA-F]+)")
@@ -69,18 +72,31 @@ def _kind_from_message(sanitizer: str, message: str) -> str:
     return match.group("kind") if match else clean_text(text, 64)
 
 
+def _split_suffix(text: str, pattern: re.Pattern) -> tuple[str, re.Match | None]:
+    """``(head, match)`` when ``text`` ends with a parenthesized ``pattern``.
+
+    Linear: only the text after the last "(" is matched, once.
+    """
+    if not text.endswith(")"):
+        return text, None
+    start = text.rfind("(")
+    found = pattern.fullmatch(text, start) if start >= 0 else None
+    if found is None:
+        return text, None
+    return text[:start].rstrip(), found
+
+
 def _parse_frame(line: str, *, trust: str) -> StackFrame | None:
     match = _FRAME_RE.match(line)
     if match is None:
         return None
-    rest = _BUILD_ID_RE.sub("", match.group("rest").strip())
+    rest, _ = _split_suffix(match.group("rest").strip(), _BUILD_ID_RE)
     module = ""
     offset = None
-    found = _MODULE_RE.search(rest)
+    rest, found = _split_suffix(rest, _MODULE_RE)
     if found is not None:
         module = module_basename(found.group("module"))
         offset = int(found.group("offset"), 16)
-        rest = rest[:found.start()].rstrip()
     file_ = ""
     line_no = None
     col = None
@@ -122,7 +138,14 @@ def parse_sanitizer_report(text: str, *, source_label: str = "", input_sha256: s
         match = _ERROR_RE.match(line) or _WARNING_RE.match(line)
         if match is not None:
             start, sanitizer, message = number, match.group("san"), match.group("msg")
-            pid_text = match.group("pid") or (match.groupdict().get("pid2") or "")
+            pid_text = match.group("pid") or ""
+            if match.re is _WARNING_RE:
+                message = message.rstrip()
+                cut = message.rfind(" (pid=")
+                suffix = _PID_SUFFIX_RE.fullmatch(message, cut) if cut > 0 else None
+                if suffix is not None:
+                    message = message[:cut]
+                    pid_text = pid_text or suffix.group("pid")
             pid = int(pid_text) if pid_text else None
             break
         match = _UBSAN_RE.match(line) or _UBSAN_WIN_RE.match(line)

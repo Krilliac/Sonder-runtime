@@ -28,6 +28,7 @@ MAX_FRAMES_TOTAL = 4096
 MAX_THREADS = 1024
 MAX_FRAMES_PER_THREAD = 128
 MAX_MODULES = 4096
+MAX_LINE_CHARS = 8192
 _NONCE_RE = re.compile(r"^[0-9a-f]{16}$")
 
 
@@ -66,7 +67,30 @@ def _check_nonce(nonce: str) -> str:
 def _window(text: str) -> list[str]:
     if not isinstance(text, str):
         raise CaptureFormatError("PARSE_FAILED", "debugger output must be text")
-    return text[:MAX_TEXT_CHARS].splitlines()
+    return [line[:MAX_LINE_CHARS] for line in text[:MAX_TEXT_CHARS].splitlines()]
+
+
+# " at <file>:<line>[:<col>]" suffixes are located without regex search over
+# the whole line: a lazy ``" at (\S.*?):(\d+)$"`` search restarts at every
+# " at " and rescans to the end (quadratic on a hostile frame line).
+_LINE_SUFFIX_RE = re.compile(r":(?P<line>\d+)$")
+_LINE_COL_SUFFIX_RE = re.compile(r":(?P<line>\d+)(?::(?P<col>\d+))?$")
+
+
+def _split_source(rest: str, *, with_column: bool) -> tuple[str, str, int, int | None] | None:
+    """``(head, file, line, col)`` for the first `` at <file>:<line>`` suffix, else None."""
+    suffix = (_LINE_COL_SUFFIX_RE if with_column else _LINE_SUFFIX_RE).search(rest)
+    if suffix is None:
+        return None
+    limit = suffix.start()
+    index = rest.find(" at ")
+    while 0 <= index and index + 4 < limit:
+        if not rest[index + 4].isspace():
+            col = suffix.groupdict().get("col")
+            return (rest[:index], rest[index + 4:limit], int(suffix.group("line")),
+                    int(col) if col else None)
+        index = rest.find(" at ", index + 1)
+    return None
 
 
 def _marker_sections(text: str, nonce: str) -> tuple[dict[str, list[str]], list[str]]:
@@ -123,7 +147,6 @@ def _cut_args(text: str) -> str:
 # --------------------------------------------------------------------- gdb
 
 _GDB_FRAME_RE = re.compile(r"^#(?P<n>\d+)\s+(?:(?P<addr>0x[0-9a-fA-F]+) in )?(?P<rest>.+)$")
-_GDB_AT_RE = re.compile(r" at (?P<file>\S.*?):(?P<line>\d+)$")
 _GDB_FROM_RE = re.compile(r" from (?P<lib>\S.*)$")
 _GDB_THREAD_RE = re.compile(
     r"^Thread (?P<num>\d+) \((?:Thread 0x[0-9a-fA-F]+ \()?(?:LWP|process) (?P<lwp>\d+)\)?"
@@ -141,10 +164,9 @@ def _gdb_frame(line: str) -> StackFrame | None:
     file_ = ""
     line_no = None
     module = ""
-    at = _GDB_AT_RE.search(rest)
+    at = _split_source(rest, with_column=False)
     if at is not None:
-        file_, line_no = at.group("file"), int(at.group("line"))
-        rest = rest[:at.start()]
+        rest, file_, line_no, _ = at
     else:
         lib = _GDB_FROM_RE.search(rest)
         if lib is not None:
@@ -239,10 +261,9 @@ _LLDB_THREAD_RE = re.compile(
 _LLDB_FRAME_RE = re.compile(
     r"^\*?\s*frame #(?P<n>\d+): (?P<addr>0x[0-9a-fA-F]+)(?: (?P<module>[^`\s]+)`(?P<rest>.*))?"
     r"(?: (?P<bare>[^`\s]+))?$")
-_LLDB_AT_RE = re.compile(r" at (?P<file>\S.*?):(?P<line>\d+)(?::(?P<col>\d+))?$")
 _LLDB_IMAGE_RE = re.compile(
-    r"^\[\s*(?P<idx>\d+)\]\s+(?:(?P<uuid>[0-9A-Fa-f-]{8,})\s+)?(?P<base>0x[0-9a-fA-F]+)\s+(?P<path>\S.*?)"
-    r"(?:\s+\(0x[0-9a-fA-F]+\))?\s*$")
+    r"^\[\s*(?P<idx>\d+)\]\s+(?:(?P<uuid>[0-9A-Fa-f-]{8,})\s+)?(?P<base>0x[0-9a-fA-F]+)\s+(?P<path>\S.*)$")
+_HEX_IN_PARENS_RE = re.compile(r"\(0x[0-9a-fA-F]+\)")
 _LLDB_SIGNAL_RE = re.compile(r"signal (?P<sig>SIG[A-Z0-9]+)(?:: (?P<detail>[^(]*))?(?:\(fault address: (?P<addr>0x[0-9a-fA-F]+)\))?")
 
 
@@ -257,11 +278,9 @@ def _lldb_frame(line: str) -> StackFrame | None:
     file_ = ""
     line_no = None
     col = None
-    at = _LLDB_AT_RE.search(rest)
+    at = _split_source(rest, with_column=True)
     if at is not None:
-        file_, line_no = at.group("file"), int(at.group("line"))
-        col = int(at.group("col")) if at.group("col") else None
-        rest = rest[:at.start()]
+        rest, file_, line_no, col = at
     rest = re.sub(r" \+ \d+$", "", rest)
     function = _cut_args(rest)
     if function.startswith("___lldb_unnamed_symbol"):
@@ -332,6 +351,11 @@ def parse_lldb(text: str, nonce: str) -> DebuggerFindings:
         if match is None or len(modules) >= MAX_MODULES:
             continue
         path = match.group("path")
+        # Drop a trailing "(0x...)" slide without a lazy regex (quadratic on
+        # hostile whitespace runs): match only the text after the last "(".
+        cut = path.rfind("(")
+        if cut > 0 and path[cut - 1].isspace() and _HEX_IN_PARENS_RE.fullmatch(path, cut):
+            path = path[:cut].rstrip()
         modules.append(ModuleInfo(name=module_basename(path), path=path, base=_hex(match.group("base")) or 0,
                                   debug_id=(match.group("uuid") or "").replace("-", "").lower(),
                                   symbols="not_attempted"))
@@ -346,23 +370,57 @@ def parse_lldb(text: str, nonce: str) -> DebuggerFindings:
 _CDB_FRAME_RE = re.compile(
     r"^(?P<n>[0-9a-fA-F]{2,})\s+(?:\(Inline(?: Function)?\)\s+-+`?-+\s+-+`?-+|(?P<sp>[0-9a-fA-F`]+)\s+"
     r"(?P<ret>[0-9a-fA-F`]+))\s+(?P<site>\S.*)$")
-_CDB_SITE_RE = re.compile(
-    r"^(?P<module>[\w.$~-]+)!(?P<func>.+?)(?:\+(?P<off>0x[0-9a-fA-F]+))?(?: \[(?P<file>.+) @ (?P<line>\d+)\])?$")
+_CDB_MODULE_NAME_RE = re.compile(r"[\w.$~-]+")
+_CDB_SOURCE_SUFFIX_RE = re.compile(r" @ (?P<line>\d+)\]$")
+_CDB_OFFSET_SUFFIX_RE = re.compile(r"\+0x[0-9a-fA-F]+$")
 _CDB_MODOFF_RE = re.compile(r"^(?P<module>[\w.$~-]+)\+(?P<off>0x[0-9a-fA-F]+)$")
 _CDB_THREAD_RE = re.compile(
-    r"^(?P<mark>[.#])?\s*(?P<num>\d+)\s+Id:\s*(?P<pid>[0-9a-fA-F]+)\.(?P<tid>[0-9a-fA-F]+)\s+Suspend:.*?"
-    r"(?:\"(?P<name>[^\"]*)\")?\s*$")
+    r"^(?P<mark>[.#])?\s*(?P<num>\d+)\s+Id:\s*(?P<pid>[0-9a-fA-F]+)\.(?P<tid>[0-9a-fA-F]+)\s+Suspend:(?P<tail>.*)$")
 _CDB_MODULE_RE = re.compile(r"^(?P<start>[0-9a-fA-F`]{8,})\s+(?P<end>[0-9a-fA-F`]{8,})\s+(?P<name>[\w.$~-]+)\s*(?P<rest>.*)$")
 _CDB_NOT_LOADED_RE = re.compile(
     r"(?:symbols could not be loaded for|Defaulted to export symbols for|Unable to load image)\s+(?P<name>\S+)")
-_CDB_MISMATCH_RE = re.compile(r"(?:mismatched|WRONG_SYMBOLS|does not match).*?(?P<name>[\w.-]+\.(?:dll|exe|sys))",
-                              re.IGNORECASE)
+_CDB_MISMATCH_RE = re.compile(r"mismatched|WRONG_SYMBOLS|does not match", re.IGNORECASE)
+_CDB_IMAGE_TOKEN_RE = re.compile(r"[\w.-]+")
+_CDB_IMAGE_SUFFIXES = (".dll", ".exe", ".sys")
 _CDB_EXC_RE = re.compile(r"ExceptionCode:\s+(?P<code>[0-9a-fA-F]{8})")
 _CDB_EXC_ADDR_RE = re.compile(r"ExceptionAddress:\s+(?P<addr>[0-9a-fA-F`]+)")
 _CDB_ATTEMPT_RE = re.compile(r"Attempt to (?P<kind>read|write|execute) (?:from|to) address (?P<addr>[0-9a-fA-F`]+)")
 _CDB_PARAM_RE = re.compile(r"Parameter\[(?P<i>[01])\]:\s+(?P<value>[0-9a-fA-F`]+)")
 _CDB_KV_RE = re.compile(r"^(?P<key>FAILURE_BUCKET_ID|SYMBOL_NAME|MODULE_NAME|IMAGE_NAME|PROCESS_NAME"
                         r"|FAILURE_ID_HASH|EXCEPTION_CODE_STR):\s+(?P<value>\S.*)$")
+
+
+def _cdb_site(site: str) -> tuple[str, str, str, int | None] | None:
+    """``module!func[+0xoff][ [file @ line]]`` -> (module, func, file, line).
+
+    Procedural rather than one lazy regex: ``.+?`` followed by optional
+    suffix groups retries every " [" of a hostile frame line (quadratic).
+    """
+    bang = site.find("!")
+    if bang <= 0 or _CDB_MODULE_NAME_RE.fullmatch(site, 0, bang) is None:
+        return None
+    rest = site[bang + 1:]
+    head, file_, line_no = rest, "", None
+    source = _CDB_SOURCE_SUFFIX_RE.search(rest) if rest.endswith("]") else None
+    if source is not None:
+        start = rest.find(" [", 1)
+        if 0 < start and start + 2 < source.start():
+            head, file_, line_no = rest[:start], rest[start + 2:source.start()], int(source.group("line"))
+    offset = _CDB_OFFSET_SUFFIX_RE.search(head)
+    if offset is not None and offset.start() > 0:
+        head = head[:offset.start()]
+    if not head:
+        return None
+    return site[:bang], head, file_, line_no
+
+
+def _cdb_thread_name(tail: str) -> str:
+    """The last double-quoted string ending a ``~*`` thread header, if any."""
+    text = tail.rstrip()
+    if not text.endswith('"'):
+        return ""
+    start = text.rfind('"', 0, len(text) - 1)
+    return text[start + 1:-1] if start >= 0 else ""
 
 
 def _cdb_frame(line: str) -> StackFrame | None:
@@ -376,11 +434,9 @@ def _cdb_frame(line: str) -> StackFrame | None:
     offset = None
     file_ = ""
     line_no = None
-    parsed = _CDB_SITE_RE.match(site)
+    parsed = _cdb_site(site)
     if parsed is not None:
-        module, function = parsed.group("module"), parsed.group("func")
-        if parsed.group("file"):
-            file_, line_no = parsed.group("file"), int(parsed.group("line"))
+        module, function, file_, line_no = parsed
     else:
         bare = _CDB_MODOFF_RE.match(site)
         if bare is not None:
@@ -388,6 +444,25 @@ def _cdb_frame(line: str) -> StackFrame | None:
     return StackFrame(index=int(match.group("n"), 16), module=module, module_offset=offset,
                       function=function, file=file_, line=line_no, inline=inline,
                       trust=FrameTrust.DEBUGGER.value)
+
+
+def _cdb_mismatched_image(line: str) -> str:
+    """The first ``*.dll|exe|sys`` token after a symbol-mismatch phrase, lower-cased.
+
+    Linear on purpose: the phrase is found once and the rest of the line is
+    tokenized, so a debugger line repeating "mismatched" cannot trigger
+    regex backtracking over the 2 MB window.
+    """
+    found = _CDB_MISMATCH_RE.search(line)
+    if found is None:
+        return ""
+    for token in _CDB_IMAGE_TOKEN_RE.finditer(line, found.end()):
+        value = token.group(0).lower()
+        for suffix in _CDB_IMAGE_SUFFIXES:
+            index = value.find(suffix)
+            if index > 0:
+                return value[:index + len(suffix)]
+    return ""
 
 
 def parse_cdb(text: str, nonce: str) -> DebuggerFindings:
@@ -415,8 +490,9 @@ def parse_cdb(text: str, nonce: str) -> DebuggerFindings:
                 crashing = current_tid
             elif header.group("mark") == "#":
                 event_thread = current_tid
-            if header.group("name"):
-                names.append((current_tid, header.group("name")))
+            name = _cdb_thread_name(header.group("tail"))
+            if name:
+                names.append((current_tid, name))
             continue
         current.append(line)
     flush()
@@ -430,9 +506,9 @@ def parse_cdb(text: str, nonce: str) -> DebuggerFindings:
     status: dict[str, str] = {}
     for name in sections:
         for line in sections[name]:
-            match = _CDB_MISMATCH_RE.search(line)
-            if match is not None:
-                status[match.group("name").lower()] = "mismatch"
+            mismatched = _cdb_mismatched_image(line)
+            if mismatched:
+                status[mismatched] = "mismatch"
                 continue
             match = _CDB_NOT_LOADED_RE.search(line)
             if match is not None:
