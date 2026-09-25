@@ -614,6 +614,7 @@ def request_cancel(selector: str, request_owner: str | None = None) -> dict | No
                 """,
                 (now, now, row["id"]),
             )
+            _close_cancelled_tasks(conn, row["id"])
             message = "run cancelled"
         _event(conn, row["id"], "cancel", message, now)
         stored = conn.execute(
@@ -788,6 +789,56 @@ def heartbeat(
         return cursor.rowcount > 0
 
 
+# Task states a cancelled run can never leave on its own.  ``uncertain`` is
+# deliberately excluded: it records that a tool-side outcome is unknown, which
+# a later cancel does not resolve.
+_CANCELLABLE_TASK_STATUSES = ("pending", "running")
+
+
+def _cancelled_plan_json(plan_json: str) -> str | None:
+    """Rewrite a cancelled run's open tasks as ``cancelled``; None if unchanged.
+
+    Cancel used to leave the in-flight task shown as ``[running]`` (and the
+    rest as ``[pending]``) forever on a terminal run.
+    """
+    try:
+        plan = json.loads(plan_json or "[]")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(plan, list):
+        return None
+    changed = False
+    for task in plan:
+        if not isinstance(task, dict):
+            continue
+        status = str(task.get("status") or "")
+        if status not in _CANCELLABLE_TASK_STATUSES:
+            continue
+        task["status"] = "cancelled"
+        if status == "running":
+            task["error"] = (
+                "cancelled while running; its result was discarded and any "
+                "tool effects it already made are not rolled back"
+            )
+        else:
+            task["error"] = "cancelled before it started"
+        changed = True
+    return json.dumps(plan) if changed else None
+
+
+def _close_cancelled_tasks(conn, run_id: str) -> None:
+    row = conn.execute(
+        "SELECT plan_json FROM autopilot_runs WHERE id=?", (run_id,)
+    ).fetchone()
+    if row is None:
+        return
+    rewritten = _cancelled_plan_json(row["plan_json"])
+    if rewritten is not None:
+        conn.execute(
+            "UPDATE autopilot_runs SET plan_json=? WHERE id=?", (rewritten, run_id),
+        )
+
+
 def finish_run(
     run_id: str,
     owner_id: str,
@@ -851,6 +902,8 @@ def finish_run(
         )
         if cursor.rowcount <= 0:
             return None
+        if status == "cancelled":
+            _close_cancelled_tasks(conn, run_id)
         _event(conn, run_id, status, summary or status, now)
         row = conn.execute(
             "SELECT * FROM autopilot_runs WHERE id=?", (run_id,)

@@ -8,8 +8,10 @@ which states/actions are legal and whether evidence satisfies completion gates.
 """
 from __future__ import annotations
 
+import os
 import re
 import logging
+import time
 from dataclasses import dataclass
 from typing import Callable
 
@@ -29,6 +31,28 @@ POLICIES = ("observe", "workspace")
 # has no available model.
 LOCAL_TIERS = _policy_rules.LOCAL_TIERS
 MAX_TOTAL_CYCLES = 50
+# Per-invocation wall-clock budget, alongside the cycle budget.  Each cycle is
+# a full bounded agent run with no wall bound of its own, so ``max_cycles``
+# alone did not bound how long an invocation could hold the host.  Checked at
+# every host checkpoint before the next task or review starts, so one task in
+# flight may finish past it.  ``SONDER_AUTOPILOT_MAX_WALL_SECONDS`` overrides.
+DEFAULT_MAX_WALL_SECONDS = 3600
+MAX_WALL_SECONDS_CEILING = 24 * 60 * 60
+_monotonic = time.monotonic
+
+
+def max_wall_seconds(value=None) -> float:
+    """The wall-clock budget for one invocation, bounded to (0, 24h]."""
+    raw = value
+    if raw is None:
+        raw = os.environ.get("SONDER_AUTOPILOT_MAX_WALL_SECONDS", "").strip() or None
+    try:
+        seconds = float(raw) if raw is not None else float(DEFAULT_MAX_WALL_SECONDS)
+    except (TypeError, ValueError):
+        seconds = float(DEFAULT_MAX_WALL_SECONDS)
+    if seconds != seconds or seconds <= 0:  # NaN or non-positive
+        seconds = float(DEFAULT_MAX_WALL_SECONDS)
+    return min(seconds, float(MAX_WALL_SECONDS_CEILING))
 MAX_ADAPTIVE_CHECKPOINTS = 6
 MAX_TASK_OUTPUT = 32_000
 FAILURE_PREFIXES = (
@@ -566,14 +590,22 @@ def execute_run(
     plan_only: bool = False,
     strategy_trace=None,
     strategy_memory=None,
+    max_wall_seconds_budget: float | None = None,
 ) -> dict:
     """Claim and advance one run on the caller thread.
 
     ``plan_fn`` and ``review_fn`` are model-judgment boundaries. ``work_fn`` is
     expected to call the guarded workbench. Every transition, budget, evidence
     gate, and terminal status remains deterministic host logic.
+
+    Two per-invocation budgets bound the loop: ``max_cycles`` tasks and
+    ``max_wall_seconds_budget`` seconds of wall time (default
+    ``max_wall_seconds()``).  Reaching either pauses the run for an explicit
+    resume.
     """
     max_cycles = max(1, min(int(max_cycles or 6), 12))
+    wall_budget = max_wall_seconds(max_wall_seconds_budget)
+    wall_started = _monotonic()
     run = autopilot_store.claim_run(
         run_id, owner_id, owner_pid=owner_pid, request_owner=request_owner,
     )
@@ -670,6 +702,17 @@ def execute_run(
                 return autopilot_store.finish_run(
                     run["id"], owner_id, "paused",
                     summary="paused at a host checkpoint",
+                ) or run
+            elapsed = _monotonic() - wall_started
+            if elapsed >= wall_budget:
+                latest = autopilot_store.get_run(run["id"]) or run
+                return autopilot_store.finish_run(
+                    run["id"], owner_id, "paused",
+                    summary=(
+                        "per-invocation wall-clock budget reached (%.0fs of "
+                        "%.0fs); resume to continue" % (elapsed, wall_budget)
+                    ),
+                    final_report=format_report(latest),
                 ) or run
             run = autopilot_store.get_run(run["id"]) or run
             if int(run.get("cycles") or 0) >= MAX_TOTAL_CYCLES:

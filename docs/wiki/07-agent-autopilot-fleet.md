@@ -57,6 +57,11 @@ compare-and-set SQL is the concurrency authority. Invariants:
 - A dead owner's work transitions to interrupted (process-liveness probe);
   unknown liveness never causes two owners (no split-brain).
 - Terminal tasks do not replay. Budgets hold even when planners/models fail.
+- Each invocation is bounded by `max_cycles` tasks and a wall-clock budget
+  (`SONDER_AUTOPILOT_MAX_WALL_SECONDS`, default 3600s). Either one pauses
+  the run for an explicit resume.
+- A cancelled run closes its open tasks as `cancelled` and keeps
+  `passed`/`failed`/`uncertain` tasks as evidence.
 
 Control: `/autopilot status|resume|cancel`, or the master orchestrator
 tools. See [autopilot-interruption](../runbooks/autopilot-interruption.md).
