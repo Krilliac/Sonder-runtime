@@ -408,6 +408,8 @@ def cmd_doctor(args) -> int:
     ))
     replacements.update(sonder_doctor.ollama_checks(config))
     replacements["schemas"] = sonder_doctor.schema_check(config)
+    replacements["schema_epoch"] = sonder_doctor.schema_epoch_check(config)
+    replacements.update(sonder_doctor.memory_checks(config))
     replacements["backup"] = sonder_doctor.backup_check(config)
     checks = [
         (

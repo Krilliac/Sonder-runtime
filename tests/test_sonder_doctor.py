@@ -42,12 +42,18 @@ def test_config_check_preserves_config_error_diagnostic(monkeypatch):
     }
 
 
-def test_memory_quality_check_preserves_root_injection_compatibility(monkeypatch):
+def test_memory_quality_check_preserves_root_injection_compatibility(
+    monkeypatch, tmp_path
+):
     import sys
     import types
 
+    import sonder_runtime.adapters.memory_store as memory_store
+
     calls = []
-    monkeypatch.setenv("SONDER_DB", "memory.sqlite")
+    db = tmp_path / "memory.sqlite"
+    memory_store.connect(str(db)).close()  # an initialized store
+    monkeypatch.setenv("SONDER_DB", str(db))
     monkeypatch.setattr(
         sonder_doctor,
         "_summarize_memory_quality",
@@ -57,16 +63,14 @@ def test_memory_quality_check_preserves_root_injection_compatibility(monkeypatch
     fake_memory_quality = types.SimpleNamespace(audit=lambda _conn: {})
     monkeypatch.setitem(sys.modules, "memory_quality", fake_memory_quality)
 
-    import sonder_runtime.adapters.memory_store as memory_store
-
-    fake_connect = lambda path: path
-    monkeypatch.setattr(memory_store, "connect", fake_connect)
-
     assert sonder_doctor._check_memory_quality() == {
         "status": "ok",
         "detail": "delegated",
     }
-    assert calls == [(fake_connect, fake_memory_quality.audit, "memory.sqlite")]
+    # doctor is read-only: it must use the non-creating, non-migrating opener.
+    assert calls == [
+        (memory_store.connect_read_only, fake_memory_quality.audit, str(db))
+    ]
 
 
 def _ok(detail=""):
@@ -229,6 +233,7 @@ def test_default_checks_registry_is_read_only_pairs_and_stable():
         "storage_state",
         "storage_models",
         "schemas",
+        "schema_epoch",
         "backup",
         "self_heal",
         "memory_quality",

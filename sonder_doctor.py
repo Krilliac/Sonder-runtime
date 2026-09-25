@@ -142,35 +142,160 @@ def validated_config_check(config):
     return _validated_config_check(config)
 
 
-def _check_self_heal() -> dict:
+def _memory_db_target(config=None) -> tuple[str | None, str]:
+    """Resolve the memory database doctor inspects, without touching it.
+
+    ``SONDER_DB`` is the explicit override every runtime surface honours. When
+    it is unset the database is ``<state home>/memory.db`` -- the same file the
+    REPL and server use -- taken from the operator-selected configuration so
+    ``--config``/``--set`` select the same home the other checks inspect.
+    Unlike ``paths.memory_db_path`` this never creates the home or performs the
+    one-time legacy-database migration: doctor is read-only.
+    """
+    import os
+    from pathlib import Path
+
+    override = os.environ.get("SONDER_DB", "").strip()
+    if override:
+        return str(Path(override).expanduser()), "SONDER_DB"
+    cfg = config if config is not None else _load_config_or_none()
+    home = getattr(getattr(cfg, "state", None), "home", None) if cfg else None
+    if not home:
+        return None, "config unavailable to locate the state home"
+    return str(Path(home).expanduser() / "memory.db"), "state home"
+
+
+def _existing_memory_db(config=None) -> tuple[str | None, dict | None]:
+    """Return ``(path, None)`` for an existing DB, else ``(None, skip)``."""
+    import os
+
+    db_path, source = _memory_db_target(config)
+    if db_path is None:
+        return None, _skip(source)
+    if not os.path.isfile(db_path):
+        # Opening it would create an empty store; report instead of writing.
+        return None, _skip("no memory database yet (%s)" % source)
+    try:
+        import sonder_runtime.adapters.memory_store as memory_store
+
+        conn = memory_store.connect_read_only(db_path)
+        try:
+            initialized = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='lessons'"
+            ).fetchone() is not None
+        finally:
+            conn.close()
+    except Exception as exc:
+        return None, _skip(
+            "memory database unreadable (%s)" % exc.__class__.__name__
+        )
+    if not initialized:
+        # A store the runtime has not initialized yet has nothing to audit;
+        # initializing it here would break doctor's read-only contract.
+        return None, _skip("memory database not initialized yet (%s)" % source)
+    return db_path, None
+
+
+def _check_self_heal(config=None) -> dict:
     """Summarize self-heal findings without applying any repair (read-only)."""
     try:
         import self_heal
+        import sonder_runtime.adapters.memory_store as memory_store
     except Exception as exc:
         return _skip("self_heal unavailable (%s)" % exc)
-    import os
 
-    db_path = os.environ.get("SONDER_DB")
-    if not db_path:
-        return _skip("SONDER_DB not set")
-    return _summarize_self_heal(self_heal.check, db_path)
+    db_path, skipped = _existing_memory_db(config)
+    if skipped is not None:
+        return skipped
+
+    def inspect(path):
+        return self_heal.check(path, connect=memory_store.connect_read_only)
+
+    return _summarize_self_heal(inspect, db_path)
 
 
-def _check_memory_quality() -> dict:
+def _check_memory_quality(config=None) -> dict:
     """Compatibility delegate for the packaged memory-quality policy."""
-    import os
-
-    db_path = os.environ.get("SONDER_DB")
-    if not db_path:
-        return _skip("SONDER_DB not set")
+    db_path, skipped = _existing_memory_db(config)
+    if skipped is not None:
+        return skipped
     try:
         import memory_quality
         import sonder_runtime.adapters.memory_store as memory_store
     except Exception as exc:
         return _skip("memory quality surfaces unavailable (%s)" % exc)
     return _summarize_memory_quality(
-        memory_store.connect, memory_quality.audit, db_path
+        memory_store.connect_read_only, memory_quality.audit, db_path
     )
+
+
+def memory_checks(config) -> list[tuple[str, CheckCallable]]:
+    """Bind the memory-store checks to one already-validated configuration."""
+    return [
+        ("self_heal", lambda: _check_self_heal(config)),
+        ("memory_quality", lambda: _check_memory_quality(config)),
+    ]
+
+
+def schema_epoch_check(config=None):
+    """Bind a read-only check that ``serve`` would pass its epoch-2 gate.
+
+    ``serve`` refuses to start until ``migrate --adopt-epoch2`` has stamped
+    every SPEC-5 domain database at schema epoch 2, so an un-adopted home is a
+    FAIL here: a doctor that says WARN/rc 0 while serve refuses is lying about
+    whether the runtime can start. A home with no databases at all is also
+    un-adopted -- serve's own startup creates ``memory.db`` before the gate
+    and then refuses -- so it is reported the same way.
+    """
+    def check():
+        try:
+            from pathlib import Path
+
+            from sonder_runtime.adapters.persistence.sqlite.bridge_migration import (
+                EPOCH,
+                EPOCH2_DATABASES,
+                check_epoch,
+            )
+
+            cfg = config if config is not None else _load_config_or_none()
+            if cfg is None:
+                return _skip("config unavailable for schema-epoch inspection")
+            home = Path(cfg.state.home).expanduser()
+            # check_epoch returns None for a missing file without creating it.
+            epochs = {name: check_epoch(home / name) for name in EPOCH2_DATABASES}
+        except Exception as exc:
+            return {
+                "status": STATUS_FAIL,
+                "detail": "schema epoch inspection failed (%s)"
+                % exc.__class__.__name__,
+            }
+        future = sorted(
+            name for name, epoch in epochs.items()
+            if epoch is not None and epoch > EPOCH
+        )
+        if future:
+            return {
+                "status": STATUS_FAIL,
+                "detail": "future schema epoch in %s; this build cannot run it"
+                % ", ".join(future),
+            }
+        missing = sorted(name for name, epoch in epochs.items() if epoch != EPOCH)
+        if missing:
+            return {
+                "status": STATUS_FAIL,
+                "detail": (
+                    "schema epoch %d not adopted (%s); serve will refuse to "
+                    "start -- run `python -m sonder_runtime migrate "
+                    "--adopt-epoch2`" % (EPOCH, ", ".join(missing))
+                ),
+            }
+        return {
+            "status": STATUS_OK,
+            "detail": "schema epoch %d adopted (%d databases)"
+            % (EPOCH, len(epochs)),
+        }
+
+    return check
 
 
 def _check_runtime_policy() -> dict:
@@ -630,6 +755,7 @@ def default_checks() -> list[tuple[str, CheckCallable]]:
         ("config", _check_config),
         *storage_checks(),
         ("schemas", schema_check()),
+        ("schema_epoch", schema_epoch_check()),
         ("backup", backup_check()),
         ("self_heal", _check_self_heal),
         ("memory_quality", _check_memory_quality),

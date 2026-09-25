@@ -89,14 +89,20 @@ def _check_venv():
     return issues
 
 
-def check(db_path, module_names=None):
+def check(db_path, module_names=None, *, connect=None):
+    """Report issues without repairing them.
+
+    ``connect`` opens the memory store; it defaults to ``memory_store.connect``
+    (which creates/migrates the schema). Strictly read-only callers such as
+    ``doctor`` pass ``memory_store.connect_read_only``.
+    """
     issues = []
     issues.extend(_check_file_backed_config())
     issues.extend(_check_venv())
     if module_names:
         issues.extend(_check_live_reload(module_names))
     try:
-        conn = memory_store.connect(db_path)
+        conn = (connect or memory_store.connect)(db_path)
         try:
             ok, store_issues = store_integrity.check_store(conn)
         finally:

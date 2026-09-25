@@ -12,7 +12,7 @@ compatibility surfaces and delegate here.
 | `mcp` | Run the MCP adapter (tool surface for MCP clients). |
 | `repl` | Interactive REPL with slash commands. |
 | `preflight` | Run startup checks and report; opens no listener. |
-| `doctor` | Consolidated health report for config, state/model storage, schema migrations, backup freshness, self-heal, memory quality, runtime policy, and Ollama reachability. Storage inspection is read-only unless the explicit probe flag is supplied. |
+| `doctor` | Consolidated health report for config, state/model storage, schema migrations, schema-epoch adoption, backup freshness, self-heal, memory quality, runtime policy, and Ollama reachability. `schema_epoch` is FAIL (exit 1) until `migrate --adopt-epoch2` has run, because `serve` refuses to start before that. Self-heal and memory quality inspect `SONDER_DB` when set, otherwise `<state home>/memory.db` of the selected configuration; a missing or not-yet-initialized database is reported as skipped. Every check is read-only (databases are opened `mode=ro`); storage inspection writes only when the explicit probe flag is supplied. |
 | `status` | Local build / config / schema status. |
 | `diagnostics` | Redacted diagnostic bundle (config, schemas, preflight). |
 | `config` | Print the effective, redacted configuration. |
