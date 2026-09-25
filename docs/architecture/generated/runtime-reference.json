@@ -17869,11 +17869,11 @@
     "commands": 320,
     "configuration": 219,
     "events": 43,
-    "native_tools": 51,
+    "native_tools": 55,
     "schemas": 4,
     "tools": 214
   },
-  "digest": "c255bfee237b2f90d60fc141fb11b7acbef2de47dca1e44d2764359fa27915f8",
+  "digest": "3904118d2bed8a41ed3fa258f23d40c1ea9c632e6fe0d26a8be481052174888c",
   "events": [
     {
       "name": "session.started",
@@ -19352,6 +19352,34 @@
       }
     },
     {
+      "description": "Summarize a test-run job's output or a guarded log file: final summary line, counts, FAILED/ERROR lines, first unique errors (file:line), grouped diagnostics and the tail. Give exactly one of job_id or path.",
+      "name": "output_digest",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "maxLength": 80,
+            "type": "string"
+          },
+          "max_failure_lines": {
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "tail_lines": {
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
       "description": "List bounded process metadata after explicit opt-in",
       "name": "process_list",
       "parameters": {
@@ -19568,6 +19596,79 @@
       }
     },
     {
+      "description": "Run a project's test suite with a host-owned command for the detected runner (or the one named), optionally narrowed by a selector (pytest node id or k:<expr>, ctest name, cargo filter, ./go/pkg or run:TestName, dotnet filter, js path, jvm pattern), as a background job; returns a structured report (totals, failures with file:line) or a job id to poll with test_run_result.",
+      "name": "test_run",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "project": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "runner": {
+            "enum": [
+              "auto",
+              "pytest",
+              "unittest",
+              "ctest",
+              "cargo",
+              "go",
+              "dotnet",
+              "npm",
+              "pnpm",
+              "yarn",
+              "gradle",
+              "maven",
+              "make"
+            ],
+            "type": "string"
+          },
+          "selector": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "maximum": 1800,
+            "minimum": 10,
+            "type": "integer"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "workers": {
+            "maximum": 8,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "description": "Wait (bounded) for a test_run job you started and return its structured report, or its status while it is still running.",
+      "name": "test_run_result",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "maxLength": 80,
+            "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 60,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
       "description": "Preview or transactionally apply a bounded unified diff",
       "name": "text_patch",
       "parameters": {
@@ -19642,6 +19743,42 @@
         "required": [
           "query"
         ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "List developer tools installed on this host (compilers, build systems, test runners, linters, debuggers, package managers, runtimes, containers, VCS, DB clients, media/doc tools, cloud CLIs, editors, shells) with versions; filter by category or name; refresh re-probes with fixed read-only version switches.",
+      "name": "tool_inventory",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "enum": [
+              "compiler",
+              "build_system",
+              "test_runner",
+              "linter_formatter",
+              "debugger_profiler",
+              "package_manager",
+              "runtime",
+              "container_vm",
+              "vcs",
+              "db_client",
+              "media_doc",
+              "cloud_cli",
+              "editor_ide",
+              "shell"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "refresh": {
+            "type": "boolean"
+          }
+        },
         "type": "object"
       }
     },
@@ -45414,7 +45551,7 @@
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
     "server.py": "05b1d27f438805bc8413bc608104887c3c5de72541674f8fc39705eb5a19a425",
     "sonder_runtime/application/tools/generated_catalogs.py": "57a490ddd581e3e7a5d4b7b73379d205048f1db6de8e7e73c71f1124c6d84900",
-    "sonder_runtime/bootstrap/native_mcp.py": "2c844d1c44be71b8ee1940aa138de0a216c8ee10a6d55e5e143eb5899b00cc92",
+    "sonder_runtime/bootstrap/native_mcp.py": "c328e6f25a40df3a78633f99daec416d1269f91192acb104be63ddadbf1b31fa",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",

@@ -38,7 +38,12 @@ MUTATING_TOOLS = (
     "json_patch", "make_directory", "text_patch", "write_file",
 )
 
-TYPED_TOOLS = READ_ONLY_TOOLS + MUTATING_TOOLS
+# The developer tools (host tool inventory, structured test runs, output
+# digest). Their executor is ``DeveloperToolExecutor``; ``test_run`` is graded
+# as execution by the permission catalog, the other three are safe.
+DEVELOPER_TOOLS = ("output_digest", "test_run", "test_run_result", "tool_inventory")
+
+TYPED_TOOLS = READ_ONLY_TOOLS + MUTATING_TOOLS + DEVELOPER_TOOLS
 
 # Canonical (typed) name -> the name the permission catalog grades.
 POLICY_NAMES = {
@@ -70,6 +75,10 @@ GUARD_KNOBS = {
     "make_directory": ("extra_roots", "bypass", "developer_authorized"),
     "text_patch": ("extra_roots", "developer_authorized"),
     "write_file": ("extra_roots", "bypass", "developer_authorized"),
+    "output_digest": (),
+    "test_run": (),
+    "test_run_result": (),
+    "tool_inventory": (),
 }
 
 
@@ -120,11 +129,19 @@ def typed_tool_policy() -> ResourcePolicy:
         )
         for name in MUTATING_TOOLS
     )
+    rules.extend(
+        PolicyRule(
+            "developer:%s" % name, Decision.ALLOW, tool=name,
+            reason="developer tool; host-owned commands and guarded sources, and "
+                   "the permission gate grades test_run as execution",
+        )
+        for name in DEVELOPER_TOOLS
+    )
     logger.info(f"typed tool policy built, rules={len(rules)}")
     return ResourcePolicy(rules)
 
 
 __all__ = [
-    "GUARD_KNOBS", "LEGACY_TO_CANONICAL", "MUTATING_TOOLS", "POLICY_NAMES",
+    "DEVELOPER_TOOLS", "GUARD_KNOBS", "LEGACY_TO_CANONICAL", "MUTATING_TOOLS", "POLICY_NAMES",
     "READ_ONLY_TOOLS", "TYPED_TOOLS", "typed_tool_policy", "typed_tool_registry",
 ]

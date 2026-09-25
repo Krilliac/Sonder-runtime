@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 319,
+      "file_count": 324,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -97,6 +97,7 @@
         "sonder_runtime/adapters/context_planning.py",
         "sonder_runtime/adapters/conversational_subagents.py",
         "sonder_runtime/adapters/delegated_verification.py",
+        "sonder_runtime/adapters/developer_tools_executor.py",
         "sonder_runtime/adapters/embedding_cache.py",
         "sonder_runtime/adapters/embeddings.py",
         "sonder_runtime/adapters/eval_history_reader.py",
@@ -342,6 +343,10 @@
         "sonder_runtime/adapters/task_formatting.py",
         "sonder_runtime/adapters/task_repository.py",
         "sonder_runtime/adapters/task_store.py",
+        "sonder_runtime/adapters/testing/__init__.py",
+        "sonder_runtime/adapters/testing/artifacts.py",
+        "sonder_runtime/adapters/testing/detection.py",
+        "sonder_runtime/adapters/testing/launcher.py",
         "sonder_runtime/adapters/tool_executor.py",
         "sonder_runtime/adapters/training/__init__.py",
         "sonder_runtime/adapters/typed_tool_executor.py",
@@ -368,7 +373,7 @@
       ]
     },
     {
-      "file_count": 352,
+      "file_count": 356,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -438,6 +443,7 @@
         "sonder_runtime/application/control_plane/service.py",
         "sonder_runtime/application/control_plane/snapshot.py",
         "sonder_runtime/application/control_state.py",
+        "sonder_runtime/application/developer_tools.py",
         "sonder_runtime/application/errors.py",
         "sonder_runtime/application/evaluation/__init__.py",
         "sonder_runtime/application/evaluation/case_manifest.py",
@@ -688,6 +694,9 @@
         "sonder_runtime/application/subagents/durable_continuation.py",
         "sonder_runtime/application/tasks/__init__.py",
         "sonder_runtime/application/tasks/use_cases.py",
+        "sonder_runtime/application/testing/__init__.py",
+        "sonder_runtime/application/testing/ports.py",
+        "sonder_runtime/application/testing/service.py",
         "sonder_runtime/application/tools/__init__.py",
         "sonder_runtime/application/tools/audit.py",
         "sonder_runtime/application/tools/catalog_artifacts.py",
@@ -726,7 +735,7 @@
       ]
     },
     {
-      "file_count": 58,
+      "file_count": 59,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -753,6 +762,7 @@
         "sonder_runtime/bootstrap/container.py",
         "sonder_runtime/bootstrap/control_state_rehearsal.py",
         "sonder_runtime/bootstrap/delegated_verification.py",
+        "sonder_runtime/bootstrap/developer_tools.py",
         "sonder_runtime/bootstrap/doctor_checks.py",
         "sonder_runtime/bootstrap/doctor_formatting.py",
         "sonder_runtime/bootstrap/evaluation.py",
@@ -790,7 +800,7 @@
       ]
     },
     {
-      "file_count": 196,
+      "file_count": 201,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -970,6 +980,11 @@
         "sonder_runtime/domain/strategy/models.py",
         "sonder_runtime/domain/takeover_readiness.py",
         "sonder_runtime/domain/task_ledger.py",
+        "sonder_runtime/domain/testing/__init__.py",
+        "sonder_runtime/domain/testing/report.py",
+        "sonder_runtime/domain/testing/report_parsers.py",
+        "sonder_runtime/domain/testing/runners.py",
+        "sonder_runtime/domain/testing/selectors.py",
         "sonder_runtime/domain/thinking_controls.py",
         "sonder_runtime/domain/thinking_policy.py",
         "sonder_runtime/domain/tier_names.py",

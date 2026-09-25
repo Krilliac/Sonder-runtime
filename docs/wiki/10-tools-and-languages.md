@@ -141,6 +141,20 @@ Discovery never executes:
 See [Host tool inventory](../host-tool-inventory.md) for the sources, bounds,
 redaction rules and limitations.
 
+## Test runs — `test_run` / `test_run_result`
+
+`test_run` runs a project's test suite with a host-owned command for the
+detected runner (pytest, unittest, ctest, cargo, go, dotnet, npm/pnpm/yarn,
+gradle, maven, make). The model picks only the runner and an optional
+grammar-checked selector such as `test_mod.py::test_bad`, `k:fast` or
+`run:TestX`. The run is a permission-gated durable background job with a hard
+deadline.
+
+It returns a typed report: totals, failures with `file:line`, the runner's
+summary line and an output digest. A still-running job returns its id;
+`test_run_result` waits for it. See
+[Structured test runs](../structured-test-runs.md).
+
 ## Structured data — `data_inspect`
 
 Read-only, never-executing structured preview of a data file inside

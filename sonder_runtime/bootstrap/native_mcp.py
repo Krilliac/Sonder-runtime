@@ -34,7 +34,7 @@ from ..application.protocol.mcp_compatibility import (
     McpCompatibility,
 )
 from ..application.protocol.mcp_tasks import McpTaskHandler
-from ..domain.tools.descriptors import ToolEffect
+from ..domain.tools.descriptors import ExecutionClass, ToolEffect
 from ..interfaces.mcp.transport import McpTransportError, StdioMcpTransport
 from ..platform.version import runtime_version
 
@@ -469,7 +469,74 @@ _AGENT_LANE_TOOL = ToolDescriptor(
         "parent_token": {"type": "string", "maxLength": 256},
     }, "required": ["action", "payload"], "additionalProperties": False},
 )
-_NATIVE_TOOLS += _INSPECTION_TOOLS + _COMPUTE_TOOLS + (_AGENT_LANE_TOOL,)
+_TOOL_CATEGORIES = [
+    "compiler", "build_system", "test_runner", "linter_formatter", "debugger_profiler",
+    "package_manager", "runtime", "container_vm", "vcs", "db_client", "media_doc",
+    "cloud_cli", "editor_ide", "shell",
+]
+_TEST_RUNNERS = [
+    "auto", "pytest", "unittest", "ctest", "cargo", "go", "dotnet", "npm", "pnpm",
+    "yarn", "gradle", "maven", "make",
+]
+# Developer tools (bootstrap/developer_tools.py). The model chooses a category
+# or name, a runner and a grammar-checked selector; never argv, env or paths
+# to executables.
+_DEVELOPER_TOOLS = (
+    ToolDescriptor(
+        "tool_inventory",
+        "List developer tools installed on this host (compilers, build systems, test "
+        "runners, linters, debuggers, package managers, runtimes, containers, VCS, DB "
+        "clients, media/doc tools, cloud CLIs, editors, shells) with versions; filter by "
+        "category or name; refresh re-probes with fixed read-only version switches.",
+        {"type": "object", "properties": {
+            "category": {"type": "string", "enum": _TOOL_CATEGORIES},
+            "name": {"type": "string", "maxLength": 64},
+            "refresh": _BOOL,
+        }, "additionalProperties": False},
+        effects=frozenset({ToolEffect.EXECUTE}),
+        execution_class=ExecutionClass.HOST,
+    ),
+    ToolDescriptor(
+        "test_run",
+        "Run a project's test suite with a host-owned command for the detected runner "
+        "(or the one named), optionally narrowed by a selector (pytest node id or "
+        "k:<expr>, ctest name, cargo filter, ./go/pkg or run:TestName, dotnet filter, "
+        "js path, jvm pattern), as a background job; returns a structured report "
+        "(totals, failures with file:line) or a job id to poll with test_run_result.",
+        {"type": "object", "properties": {
+            "project": {"type": "string", "maxLength": 1024},
+            "runner": {"type": "string", "enum": _TEST_RUNNERS},
+            "selector": {"type": "string", "maxLength": 200},
+            "timeout_seconds": {"type": "integer", "minimum": 10, "maximum": 1800},
+            "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 120},
+            "workers": {"type": "integer", "minimum": 1, "maximum": 8},
+        }, "additionalProperties": False},
+        effects=frozenset({ToolEffect.READ_FILES, ToolEffect.WRITE_FILES, ToolEffect.EXECUTE}),
+        execution_class=ExecutionClass.HOST,
+    ),
+    ToolDescriptor(
+        "test_run_result",
+        "Wait (bounded) for a test_run job you started and return its structured report, "
+        "or its status while it is still running.",
+        {"type": "object", "properties": {
+            "job_id": {"type": "string", "maxLength": 80},
+            "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 60},
+        }, "required": ["job_id"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "output_digest",
+        "Summarize a test-run job's output or a guarded log file: final summary line, "
+        "counts, FAILED/ERROR lines, first unique errors (file:line), grouped "
+        "diagnostics and the tail. Give exactly one of job_id or path.",
+        {"type": "object", "properties": {
+            "job_id": {"type": "string", "maxLength": 80},
+            "path": {"type": "string", "maxLength": 1024},
+            "tail_lines": {"type": "integer", "minimum": 1, "maximum": 200},
+            "max_failure_lines": {"type": "integer", "minimum": 1, "maximum": 200},
+        }, "additionalProperties": False},
+    ),
+)
+_NATIVE_TOOLS += _INSPECTION_TOOLS + _COMPUTE_TOOLS + (_AGENT_LANE_TOOL,) + _DEVELOPER_TOOLS
 # Only the inspections the inspection service can run go to it. The catalog
 # groups the web, weather, location, process and artifact tools with the
 # inspections for presentation, but they run through the packaged executor;
@@ -492,6 +559,7 @@ _TYPED_TOOL_NAMES = frozenset({
     "read_file", "script_search", "text_search",
     "edit_file", "file_batch_write", "file_copy", "file_delete", "file_move",
     "json_patch", "make_directory", "text_patch", "write_file",
+    "output_digest", "test_run", "test_run_result", "tool_inventory",
 })
 
 _LEGACY_ALIASES = {

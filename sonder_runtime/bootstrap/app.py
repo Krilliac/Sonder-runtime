@@ -60,7 +60,6 @@ from ..adapters.provider_bindings import ProviderBindings, provider_bindings_fro
 from ..adapters.recall_gateway import LegacyRecallGateway
 from ..adapters.runtime_policy_repository import RuntimePolicyRepository
 from ..adapters.security import permission_receipts
-from ..adapters.security.permission_evaluator import PermissionModesEvaluator
 from ..adapters.subagents import LocalSubagentProvider
 from ..adapters.system_clock import SystemClock
 from ..adapters.tool_executor import ToolExecutorAdapter
@@ -170,6 +169,7 @@ from ..domain.provider_override_policy import ProviderOverridePolicy
 from ..platform import paths as runtime_paths
 from ..platform.config import SonderConfig
 from .artifact_mobility_source import ArtifactMobilitySourceBinding
+from .developer_tools import DeveloperToolPermissionEvaluator, developer_tool_executor
 from .typed_tools import POLICY_NAMES, typed_tool_policy, typed_tool_registry
 
 PROFILES = ("workstation-local", "server-private")
@@ -218,6 +218,36 @@ def compose_memory_unit_of_work(
 
 # Compatibility name for callers that used the bootstrap-private selector.
 _build_model_gateway = build_model_gateway
+
+
+def _compose_developer_tools(config, runtime_redactor, get_job_registry, get_process_job_provider):
+    """Compose the developer-tool services, or None when this build lacks them.
+
+    The inventory (host_tools) and digest (diagnostics) packages are optional
+    at this seam: a runtime without them keeps every other tool and reports
+    the developer tools as unavailable. Composition itself is lazy.
+    """
+    try:
+        from .developer_tools import compose_developer_tools
+        from .diagnostics import compose_output_digest_service
+        from .host_tools import compose_host_tool_inventory, install_agent_brief_summary
+    except ImportError:
+        logger.warning("developer tools are not composed: a required package is missing",
+                       exc_info=True)
+        return None
+    try:
+        inventory = compose_host_tool_inventory(config, redactor=runtime_redactor)
+        install_agent_brief_summary(inventory)
+        digest = compose_output_digest_service(get_job_registry, redactor=runtime_redactor)
+        return compose_developer_tools(
+            config=config, inventory=inventory, digest=digest,
+            process_job_provider=get_process_job_provider,
+            job_registry=get_job_registry, redactor=runtime_redactor,
+        )
+    except Exception:
+        logger.error("developer tools could not be composed; they will report unavailable",
+                     exc_info=True)
+        return None
 
 
 def build_application(
@@ -1019,6 +1049,8 @@ def build_application(
                 lane_test_catalog = LaneTestCatalog.load(catalog_path)
                 lane_tools = compose_lane_test_tools(
                     tools, lane_test_catalog, get_process_job_provider(), audit=tool_audit,
+                    files=developer_tool_executor(developer_tools, PackagedToolExecutor()),
+                    developer_tools=developer_tools,
                 )
             def authorize_lane_grant(lane, context):
                 from ..adapters.filesystem.file_ops import allowed_roots
@@ -1576,14 +1608,22 @@ def build_application(
         limits=ToolAuditLimits(),
     )
 
+    # Developer tools: host tool inventory, structured test runs and the
+    # output digest. Composition is lazy -- nothing probes, reads a project or
+    # launches here -- and a runtime that cannot compose them still serves
+    # every other tool; their surfaces then report them as unavailable.
+    developer_tools = _compose_developer_tools(
+        config, runtime_redactor, get_job_registry, get_process_job_provider,
+    )
+
     tools = ToolApplicationFacade.compose(
         typed_tool_registry(),
-        PackagedToolExecutor(),
+        developer_tool_executor(developer_tools, PackagedToolExecutor()),
         policy=typed_tool_policy(),
         redactor=PatternOutputRedactor(runtime_redactor.redact),
         receipts=ReceiptStore(),
         audit=tool_audit,
-        permissions=(PermissionModesEvaluator(policy_names=POLICY_NAMES),),
+        permissions=(DeveloperToolPermissionEvaluator(developer_tools, policy_names=POLICY_NAMES),),
     )
 
     from .artifact_mobility import compose_artifact_mobility
@@ -1686,6 +1726,7 @@ def build_application(
             ContainerWorldConfig(world_id="default-container", image="sonder-sandbox:latest"),
         ),
         remote_world_provider=None,
+        developer_tools=developer_tools,
     )
     if config is not None and config.child_storage.backend == 'postgresql':
         try:

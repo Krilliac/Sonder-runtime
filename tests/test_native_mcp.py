@@ -114,8 +114,9 @@ def test_native_catalog_is_bounded_and_deterministic():
         "directory_create", "directory_digest", "directory_tree", "edit_file", "fetch_artifact",
         "file_batch_write", "file_copy", "file_delete", "file_digest", "file_edit",
         "file_find", "file_move", "file_read", "file_read_range", "file_write", "image_inspect",
-        "json_patch", "log_inspect", "make_directory", "process_list", "process_memory_risk_inspect",
-        "program_search", "project_detect", "read_file", "run_program", "run_script", "script_search", "secret_scan", "text_patch", "text_search",
+        "json_patch", "log_inspect", "make_directory", "output_digest", "process_list", "process_memory_risk_inspect",
+        "program_search", "project_detect", "read_file", "run_program", "run_script", "script_search", "secret_scan",
+        "test_run", "test_run_result", "text_patch", "text_search", "tool_inventory",
         "verify_artifact", "vision_analyze", "weather_lookup", "web_fetch", "web_search", "workspace_compare", "workspace_run", "write_file",
     ]
 
@@ -142,7 +143,11 @@ def test_native_catalog_has_exact_packaged_adapter_executor_parity():
             "sonder_runtime.bootstrap.native_mcp", fromlist=["_LEGACY_ALIASES"]
         )._LEGACY_ALIASES.items() if name != target
     }
-    canonical_native = native_names - compatibility_aliases - {
+    # The developer tools are served by DeveloperToolExecutor through the typed
+    # gateway (tests/test_developer_tool_typed_gateway.py), not the packaged one.
+    developer_tools = {"output_digest", "test_run", "test_run_result", "tool_inventory"}
+    assert developer_tools <= native_names
+    canonical_native = native_names - compatibility_aliases - developer_tools - {
         "vision_analyze", "compute_submit", "compute_status", "compute_cancel",
         "compute_artifact_fetch", "agent_lane",
     }

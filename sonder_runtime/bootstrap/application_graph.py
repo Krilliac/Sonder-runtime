@@ -7,6 +7,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from time import monotonic
 from ..application.tools.facade import ToolApplicationFacade
+from ..application.developer_tools import DeveloperToolServices
 from ..adapters.provider_bindings import ProviderBindings
 from ..application.chat.handle_chat import ChatService
 from ..application.vision import VisionService
@@ -136,6 +137,10 @@ class Application:
     _artifact_mobility_available: Callable[[], bool] | None = field(default=None, repr=False)
     # Shared with the typed gateway to record native MCP compatibility calls.
     tool_audit: ToolAuditRepository | None = field(default=None, repr=False)
+    # Host tool inventory, structured test runs and the output digest
+    # (bootstrap/developer_tools.py); None when this runtime did not compose
+    # them, which every surface reports instead of failing.
+    developer_tools: DeveloperToolServices | None = None
 
     def operational_capabilities(self):
         from ..domain.operational_capabilities import build_operational_capabilities

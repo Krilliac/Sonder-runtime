@@ -388,6 +388,14 @@ NATIVE_MCP_WORK = {
     "compute_submit": "execution",
     "agent_lane": "execution",
     "compute_cancel": "mutation",
+    # Developer tools (bootstrap/developer_tools.py). ``tool_inventory`` runs
+    # only fixed read-only version switches of allowlisted host tools;
+    # ``output_digest`` reads a guarded file window or the caller's own
+    # test-run job; ``test_run_result`` polls the caller's own job. The
+    # launching tool, ``test_run``, is graded by ``EXECUTION_TOOLS``.
+    "tool_inventory": "safe",
+    "output_digest": "safe",
+    "test_run_result": "safe",
 }
 
 # Risk classes an unattended caller is refused for when the mode says ``ask``.
