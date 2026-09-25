@@ -68,6 +68,12 @@ data, or probe every mounted volume.
 - `0` success; `1` operational failure (e.g. preflight/migration/backup
   failed); `2` configuration/usage error (fails before any side effect);
   `130` interrupted.
+- Exception by design: `status` and `diagnostics` are always-available
+  reports for collecting evidence from a broken install. On an invalid or
+  missing `--config`/`--secrets` they still exit `0` and emit their payload,
+  with the problems under `config_errors` and a `WARNING: configuration is
+  invalid` line on stderr. Gate scripts on `config`, `doctor` or `preflight`,
+  which exit `2` for the same input.
 
 `serve` startup order is **preflight → MIGRATING → migrations → READY →
 bind**. A failed required check or a failed migration means no socket ever

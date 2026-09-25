@@ -438,6 +438,23 @@ def cmd_doctor(args) -> int:
     return 1 if report.get("overall") == STATUS_FAIL else 0
 
 
+def _warn_config_errors_reported(args) -> None:
+    """Flag an invalid configuration on stderr for always-available reports.
+
+    ``status`` and ``diagnostics`` deliberately still exit 0 and emit their
+    payload when the configuration is invalid -- they are what an operator
+    collects from a broken install -- but the failure must not be visible
+    only inside the payload. stdout stays a parseable report.
+    """
+    print(
+        "WARNING: configuration is invalid (see config_errors); this %s "
+        "report still exits 0 -- use `config`, `doctor` or `preflight` "
+        "(exit 2) to gate on configuration validity"
+        % getattr(args, "command", "status"),
+        file=sys.stderr,
+    )
+
+
 def cmd_status(args) -> int:
     import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 
@@ -458,6 +475,7 @@ def cmd_status(args) -> int:
             )
     except sonder_config.ConfigError as exc:
         payload["config_errors"] = list(exc.errors)
+        _warn_config_errors_reported(args)
     try:
         payload["schemas"] = {
             store: {
@@ -486,6 +504,7 @@ def cmd_diagnostics(args) -> int:
         _export_runtime_environment(config)
     except sonder_config.ConfigError as exc:
         payload["config_errors"] = list(exc.errors)
+        _warn_config_errors_reported(args)
     try:
         payload["schemas"] = {
             store: {

@@ -234,3 +234,20 @@ def test_unreadable_config_is_a_config_error(home, tmp_path, capsys):
     rc = main(["config", "--config", str(config)])
     assert rc == 2
     assert "invalid configuration" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "argv", [["status", "--json"], ["diagnostics", "--json", "--skip-ollama"]]
+)
+def test_always_available_reports_flag_invalid_config_but_exit_zero(
+    home, tmp_path, capsys, argv
+):
+    # Documented contract: status/diagnostics stay available on a broken
+    # install (exit 0, config_errors in the payload), but the failure is also
+    # announced on stderr instead of being visible only inside the payload.
+    rc = main([*argv, "--config", str(tmp_path / "missing.toml")])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert rc == 0
+    assert payload["config_errors"]
+    assert "configuration is invalid" in captured.err
