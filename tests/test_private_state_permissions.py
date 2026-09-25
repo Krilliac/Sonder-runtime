@@ -182,3 +182,39 @@ def test_selfmod_candidate_host_home_is_traverse_only(tmp_path, monkeypatch, loo
     finally:
         paths.reset_home()
     assert _mode(existing) == 0o711
+
+
+def test_operator_traverse_only_home_is_not_undone(tmp_path, monkeypatch, loose_umask):
+    """A runtime without the candidate uid must not re-close an 0711 home.
+
+    The nightly selfmod stage runs with ``SONDER_SELFMOD_CANDIDATE_UID`` set;
+    the served runtime and REPL usually do not. The operator's one-time
+    ``chmod 0711`` must survive their next start, while a legacy ``0755``
+    home is still closed to ``0700``.
+    """
+    monkeypatch.delenv("SONDER_SELFMOD_CANDIDATE_UID", raising=False)
+    home = tmp_path / "operator-home"
+    home.mkdir()
+    os.chmod(home, 0o711)
+    paths.configure_home(home)
+    try:
+        paths.state_path("goals.db")
+    finally:
+        paths.reset_home()
+    assert _mode(home) == 0o711
+    legacy = tmp_path / "legacy-home"
+    legacy.mkdir()
+    os.chmod(legacy, 0o751)
+    paths.configure_home(legacy)
+    try:
+        paths.state_path("goals.db")
+    finally:
+        paths.reset_home()
+    assert _mode(legacy) == 0o700
+
+
+def test_in_memory_sqlite_path_is_never_created_as_a_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    private_files.prepare_private_sqlite(":memory:")
+    private_files.prepare_private_sqlite("")
+    assert list(tmp_path.iterdir()) == []

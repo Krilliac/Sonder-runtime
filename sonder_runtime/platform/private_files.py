@@ -12,8 +12,11 @@ The rules, applied at the state-home and store-open choke points:
   host that runs uid-separated self-modification candidates
   (``SONDER_SELFMOD_CANDIDATE_UID`` set), the candidate uid must traverse the
   home to reach its workspace under ``selfmod/workspaces``, so the home is
-  ``0711`` there -- traverse only, no listing, no read -- and every store in
-  it is still ``0600``;
+  ``0711`` there -- traverse only, no listing, no read -- and every store
+  opened through the SQLite factory is still ``0600``. An existing home whose
+  group/other bits are already traverse-only is left as it is by every
+  process, so the operator's ``chmod 0711`` is not undone by a runtime started
+  without that variable;
 * SQLite databases (and their ``-wal``/``-shm``/``-journal`` sidecars) and the
   JSONL audit stores are created ``0600``; existing ones owned by the current
   user are tightened to owner-only when they are opened. SQLite creates new
@@ -107,6 +110,26 @@ def restrict_to_owner(path: str | os.PathLike[str], *, keep_traverse: bool = Fal
     return True
 
 
+def _is_traverse_only(path: Path) -> bool:
+    """True for an existing directory whose group/other bits are execute only.
+
+    That mode (``0711``/``0701``/``0710``) is never a build default; it is the
+    operator's deliberate choice for uid-separated selfmod candidates. A
+    process started without ``SONDER_SELFMOD_CANDIDATE_UID`` (the served
+    runtime, the REPL) must not undo it, or the next nightly candidate could
+    no longer reach its workspace. It lists and reads nothing, so leaving it
+    is not a widening.
+    """
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISDIR(info.st_mode):
+        return False
+    group_other = stat.S_IMODE(info.st_mode) & _GROUP_OTHER_BITS
+    return bool(group_other) and not group_other & _GROUP_OTHER_READ_WRITE_BITS
+
+
 def ensure_private_dir(path: str | os.PathLike[str], *, traverse: bool = False) -> Path:
     """Create *path* (and parents) and make the leaf directory owner-only.
 
@@ -125,7 +148,9 @@ def ensure_private_dir(path: str | os.PathLike[str], *, traverse: bool = False) 
         parents=True, exist_ok=True,
         mode=TRAVERSE_DIR_MODE if traverse else PRIVATE_DIR_MODE,
     )
-    restrict_to_owner(directory, keep_traverse=traverse)
+    restrict_to_owner(
+        directory, keep_traverse=traverse or _is_traverse_only(directory),
+    )
     with _SECURED_DIRS_LOCK:
         _SECURED_DIRS.add(key)
     return directory
@@ -159,6 +184,10 @@ def prepare_private_sqlite(path: str | os.PathLike[str], *, create: bool = True)
     if not supported():
         return
     text = os.fspath(path)
+    if not text or text == ":memory:" or text.startswith("file:"):
+        # In-memory databases have no file; a URI is not a filesystem path
+        # (``owned_sqlite`` decodes URIs before calling here).
+        return
     prepare_private_file(text, create=create)
     for suffix in SQLITE_SIDECAR_SUFFIXES:
         restrict_to_owner(text + suffix)

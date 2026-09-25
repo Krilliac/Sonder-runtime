@@ -151,7 +151,9 @@ of the model — an uncensored or "abliterated" model changes what it will
   workspace under `selfmod/workspaces` but cannot list or read it, and the
   stores stay `0600`. A home already tightened to `0700` before that uid was
   configured is never widened automatically: run `chmod 0711 "$SONDER_HOME"`
-  once when enabling Linux candidate isolation.
+  once when enabling Linux candidate isolation. A home whose group/other bits
+  are already traverse-only is left alone by every process (the served
+  runtime usually runs without that variable), so that step is not undone.
 
 ## Update trust
 

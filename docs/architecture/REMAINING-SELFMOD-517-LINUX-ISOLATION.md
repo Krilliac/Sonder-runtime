@@ -205,10 +205,14 @@ so it skips them.
    the candidate must be able to read in order to run them, are readable by
    the candidate uid. Only write access is denied. The Sonder state home is
    `0711` on a host with `SONDER_SELFMOD_CANDIDATE_UID` configured (`0700`
-   otherwise) and its SQLite/JSONL stores are `0600`, so the candidate can
-   traverse to its workspace under `selfmod/workspaces` without being able
-   to list the home or read the stores. A home created `0700` before the uid
-   was configured must be made `0711` by the operator once.
+   otherwise) and the SQLite stores opened through the connection factory
+   (`memory.db`, `sessions.db`, ...), `goals.db` and the tool-audit JSONL are
+   `0600`, so the candidate can traverse to its workspace under
+   `selfmod/workspaces` without being able to list the home or read those
+   stores. Other files in the home keep their own modes and are readable by
+   name if they are world-readable. A home created `0700` before the uid was
+   configured must be made `0711` by the operator once; no Sonder process
+   re-closes a traverse-only home, even one started without the variable.
 4. **Atomic job memory.** Job memory is sampled RSS, not a cgroup v2
    `memory.max`. A burst shorter than the 100 ms sampling interval can
    briefly exceed it. The per-process `RLIMIT_AS` still applies.
