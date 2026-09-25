@@ -48,7 +48,7 @@ class WorkRunCard extends StatefulWidget {
   State<WorkRunCard> createState() => _WorkRunCardState();
 }
 
-class _WorkRunCardState extends State<WorkRunCard> {
+class _WorkRunCardState extends State<WorkRunCard> with WidgetsBindingObserver {
   WorkRunInfo? _info;
 
   /// Seconds on screen, for runs whose start the server has not told us yet.
@@ -61,18 +61,64 @@ class _WorkRunCardState extends State<WorkRunCard> {
   int _step = 0;
   Timer? _poll;
   Timer? _tick;
+  bool _resolved = false;
+
+  /// False while the app is backgrounded or a route covers the chat
+  /// (TickerMode off): the card then issues no requests and no rebuilds.
+  bool _appVisible = true;
+  bool _tickersOn = true;
+
+  bool get _visible => _appVisible && _tickersOn;
 
   @override
   void initState() {
     super.initState();
-    _schedule();
+    final state = WidgetsBinding.instance.lifecycleState;
+    _appVisible = state == null || state == AppLifecycleState.resumed;
+    WidgetsBinding.instance.addObserver(this);
+    _resume(refreshNow: false);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final on = TickerMode.valuesOf(context).enabled;
+    if (on == _tickersOn) return;
+    _tickersOn = on;
+    _visible ? _resume(refreshNow: true) : _pause();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final visible = state == AppLifecycleState.resumed;
+    if (visible == _appVisible) return;
+    _appVisible = visible;
+    _visible ? _resume(refreshNow: true) : _pause();
+  }
+
+  void _pause() {
+    _poll?.cancel();
+    _tick?.cancel();
+    _poll = null;
+    _tick = null;
+  }
+
+  void _resume({required bool refreshNow}) {
+    if (!_visible || _resolved || !mounted) return;
+    _tick?.cancel();
     _tick = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) setState(() => _ticks++);
     });
+    if (refreshNow) {
+      unawaited(_refresh(manual: true));
+    } else {
+      _schedule();
+    }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _poll?.cancel();
     _tick?.cancel();
     super.dispose();
@@ -80,7 +126,7 @@ class _WorkRunCardState extends State<WorkRunCard> {
 
   void _schedule() {
     _poll?.cancel();
-    if (_forbidden || !mounted) return;
+    if (_forbidden || _resolved || !_visible || !mounted) return;
     final delays = widget.backoff;
     final delay = delays[_step < delays.length ? _step : delays.length - 1];
     _step++;
@@ -102,6 +148,7 @@ class _WorkRunCardState extends State<WorkRunCard> {
         _error = '';
       });
       if (!info.isRunning) {
+        _resolved = true;
         _poll?.cancel();
         _tick?.cancel();
         widget.onResolved(info);
@@ -157,6 +204,9 @@ class _WorkRunCardState extends State<WorkRunCard> {
         _error = '';
       });
       if (!info.isRunning) {
+        _resolved = true;
+        _poll?.cancel();
+        _tick?.cancel();
         widget.onResolved(info);
         return;
       }

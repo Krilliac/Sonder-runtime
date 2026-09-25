@@ -253,11 +253,14 @@ class _ApprovalSheetState extends State<_ApprovalSheet> {
           ),
           const SizedBox(height: 12),
           Row(children: [
-            Text('Valid for', style: text.bodySmall),
+            Text('Valid for', style: tokens.mono(12, color: tokens.muted)),
             const SizedBox(width: 12),
             DropdownButton<int>(
               key: const Key('approval-ttl'),
               value: _minutes,
+              isDense: true,
+              style: tokens.mono(12, color: tokens.text),
+              dropdownColor: tokens.panel,
               items: const [5, 15, 60]
                   .map((m) => DropdownMenuItem(value: m, child: Text('$m min')))
                   .toList(),

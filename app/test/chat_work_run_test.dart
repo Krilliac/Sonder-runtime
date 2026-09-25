@@ -89,6 +89,26 @@ void main() {
     await unmountChat(tester);
   });
 
+  testWidgets('no work-run polling while the app is hidden', (tester) async {
+    final backend = FakeChatBackend();
+    await pumpChat(tester, backend);
+    await _sendLongTurn(tester, backend);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump(const Duration(seconds: 60));
+    expect(backend.workRunGets, isEmpty);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(backend.workRunGets, hasLength(1),
+        reason: 'returning refreshes at once');
+    await unmountChat(tester);
+  });
+
   testWidgets('Stop asks first, then cancels exactly once', (tester) async {
     final backend = FakeChatBackend();
     await pumpChat(tester, backend);

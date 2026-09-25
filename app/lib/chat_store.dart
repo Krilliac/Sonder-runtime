@@ -6,6 +6,27 @@ import 'chat/store_files_stub.dart'
     if (dart.library.io) 'chat/store_files_io.dart' as files;
 import 'models.dart';
 
+final RegExp _accountLine = RegExp(
+    r'^\s*(/(?:login|register|admin_login))(?:\s+(\S+))?(\s+\S[\s\S]*)?$',
+    caseSensitive: false);
+
+/// True when [text] is a `/login`, `/register` or `/admin_login` line that
+/// may carry a password. Such a line must never be stored or sent as chat.
+bool isAccountSecretLine(String text) => _accountLine.hasMatch(text);
+
+/// [message] with any typed password removed: a user line such as
+/// `/login bob hunter2` (from an app version before the composer
+/// intercepted it) keeps only the command and the user name, so it is never
+/// persisted again nor re-sent as history.
+ChatMessage redactAccountSecret(ChatMessage message) {
+  if (message.role != Role.user) return message;
+  final m = _accountLine.firstMatch(message.content);
+  if (m == null || m.group(3) == null) return message;
+  final user = m.group(2) ?? '';
+  return message.copyWith(
+      content: '${m.group(1)!.toLowerCase()} $user [password removed]');
+}
+
 /// Where chat history bytes live. One named blob per thread, so a corrupt
 /// blob costs one thread, never the whole history.
 abstract class ChatStoreBackend {
@@ -120,9 +141,11 @@ class ChatStore {
         if (decoded is! Map<String, dynamic>) {
           throw const FormatException('thread is not an object');
         }
-        final thread = ChatThread.fromJson(decoded);
+        final parsed = ChatThread.fromJson(decoded);
+        final thread = _redactThread(parsed);
         threads.add(thread);
-        _written[thread.id] = raw;
+        // A thread that needed redaction is rewritten on the next save.
+        if (identical(thread, parsed)) _written[thread.id] = raw;
       } catch (_) {
         await _setAside(name);
       }
@@ -165,10 +188,26 @@ class ChatStore {
     await backend.write(_migratedName, DateTime.now().toIso8601String());
   }
 
+  static ChatThread _redactThread(ChatThread thread) {
+    var changed = false;
+    final messages = [
+      for (final m in thread.messages)
+        () {
+          final r = redactAccountSecret(m);
+          if (!identical(r, m)) changed = true;
+          return r;
+        }(),
+    ];
+    return changed ? thread.copyWith(messages: messages) : thread;
+  }
+
   /// Cap one thread: newest [maxMessages] messages, then drop oldest until
   /// the serialized thread fits [maxThreadBytes].
   static ChatThread capThread(ChatThread thread) {
-    var messages = thread.messages.where((m) => !m.pending).toList();
+    var messages = thread.messages
+        .where((m) => !m.pending)
+        .map(redactAccountSecret)
+        .toList();
     if (messages.length > maxMessages) {
       messages = messages.sublist(messages.length - maxMessages);
     }

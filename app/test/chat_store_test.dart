@@ -149,4 +149,35 @@ void main() {
     expect(File('${dir.path}/chats/thread-chat-f.json.corrupt').existsSync(),
         isTrue);
   });
+
+  test('a stored /login password is removed on load and never saved again',
+      () async {
+    // What an app version before the composer intercept could have stored.
+    final legacy = _thread('t1', [
+      _user('/login bob hunter2'),
+      const ChatMessage(role: Role.assistant, content: 'Login failed.'),
+      _user('/REGISTER alice s3cret words'),
+      _user('/login carol'),
+    ]);
+    await ChatStore.backend
+        .write('thread-t1.json', jsonEncode(legacy.toJson()));
+
+    final loaded = await ChatStore.load();
+    final text = loaded.single.messages.map((m) => m.content).join('\n');
+    expect(text, isNot(contains('hunter2')));
+    expect(text, isNot(contains('s3cret')));
+    expect(text, contains('/login bob [password removed]'));
+    expect(text, contains('/login carol'));
+
+    await ChatStore.save(loaded);
+    expect(await ChatStore.backend.read('thread-t1.json'),
+        isNot(contains('hunter2')));
+  });
+
+  test('isAccountSecretLine', () {
+    expect(isAccountSecretLine('/login bob pw'), isTrue);
+    expect(isAccountSecretLine('  /Admin_Login x y'), isTrue);
+    expect(isAccountSecretLine('/loginfoo'), isFalse);
+    expect(isAccountSecretLine('how do I /login?'), isFalse);
+  });
 }

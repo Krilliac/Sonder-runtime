@@ -604,6 +604,10 @@ class ChatController extends ChangeNotifier {
   Future<void> send(String text) {
     final trimmed = text.trim();
     if (trimmed.isEmpty || sending) return Future.value();
+    // Defence in depth for P0-5: whatever path reaches here (a preset, a
+    // retry, a future caller), an account line with a password is never
+    // added to the transcript, stored or sent.
+    if (isAccountSecretLine(trimmed)) return Future.value();
 
     final localReply = localToggle(trimmed);
     if (localReply != null) {

@@ -134,6 +134,18 @@ void main() {
     c.dispose();
   });
 
+  testWidgets('send() itself refuses an account line with a password',
+      (tester) async {
+    final backend = FakeChatBackend();
+    final c = await _start(tester, backend);
+    final before = c.entries.length;
+    await c.send('/login bob hunter2');
+    await tester.pump();
+    expect(backend.turns, isEmpty);
+    expect(c.entries.length, before);
+    c.dispose();
+  });
+
   testWidgets('cancelling the first turn rotates the session', (tester) async {
     final backend = FakeChatBackend();
     final c = await _start(tester, backend);

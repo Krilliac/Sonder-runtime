@@ -29,6 +29,8 @@ void main() {
       expect((classifyIntercept('/permissions plan') as ModeIntercept).target,
           'plan');
       expect(classifyIntercept('/elevate'), isA<ModeIntercept>());
+      expect(
+          (classifyIntercept('/perms auto') as ModeIntercept).target, 'auto');
     });
 
     test('everything else is sent', () {

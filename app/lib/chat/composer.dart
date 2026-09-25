@@ -66,7 +66,7 @@ ComposerIntercept? classifyIntercept(String text) {
   if (_modeCommands.contains(command)) {
     return ModeIntercept(args.isEmpty ? null : canonicalMode(args.first));
   }
-  if (command == '/permissions' && args.isNotEmpty) {
+  if ((command == '/permissions' || command == '/perms') && args.isNotEmpty) {
     final mode = canonicalMode(args.first);
     if (mode != null) return ModeIntercept(mode);
   }
