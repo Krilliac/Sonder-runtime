@@ -4,7 +4,8 @@ class AccountSession {
   final String origin;
   AccountSession({required this.token, required String origin})
       : origin = serverOrigin(origin) {
-    if (token.isEmpty || token.length > 512 ||
+    if (token.isEmpty ||
+        token.length > 512 ||
         token.codeUnits.any((unit) => unit < 33 || unit > 126)) {
       throw ArgumentError('Invalid account session');
     }
@@ -29,7 +30,8 @@ String serverOrigin(String value) {
   }
   final host = uri.host;
   final octets = host.split('.');
-  final ipv4Loopback = octets.length == 4 && octets.first == '127' &&
+  final ipv4Loopback = octets.length == 4 &&
+      octets.first == '127' &&
       octets.every((part) {
         final n = int.tryParse(part);
         return n != null && n >= 0 && n <= 255 && n.toString() == part;

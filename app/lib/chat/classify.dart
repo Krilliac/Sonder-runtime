@@ -70,7 +70,10 @@ RefusalInfo? refusalOf(ChatMessage message) {
   final text = message.content.trim();
   final head = _refusedHead.firstMatch(text);
   final status = message.responseMetadata?.status ?? '';
-  if (head == null && status != 'refused') return null;
+  // Server S1 puts the refusal in `sonder_receipt.refusal` (lane A's
+  // ChatRefusal); the text patterns are the fallback for older servers.
+  final structured = message.responseMetadata?.refusal;
+  if (head == null && status != 'refused' && structured == null) return null;
   var body = head == null ? text : text.substring(head.end);
   var mode = '';
   final approve = _approveId.firstMatch(text);
@@ -81,22 +84,31 @@ RefusalInfo? refusalOf(ChatMessage message) {
     body =
         firstLine.substring(0, tail.start) + body.substring(firstLine.length);
   }
+  final structuredId = structured?.callId ?? '';
+  final structuredTool = structured?.tool ?? '';
   return RefusalInfo(
-    subject: head?.group(1) ?? '',
+    subject: head?.group(1) ?? structuredTool,
     reason: body.trim(),
     mode: mode,
-    callId: approve?.group(1) ?? '',
+    callId: structuredId.isNotEmpty ? structuredId : approve?.group(1) ?? '',
   );
 }
 
 /// The work run [message] hands off to, or null.
 ///
-/// Matches the server's hand-off sentence ("Work is still running as work
-/// run wr-… Fetch the answer with GET /v1/work-runs/wr-…") and, once lane A
-/// exposes `sonder_receipt.chat_work`, callers should prefer that id.
+/// Prefers lane A's `sonder_receipt.chat_work` metadata; falls back to the
+/// server's hand-off sentence ("Work is still running as work run wr-…
+/// Fetch the answer with GET /v1/work-runs/wr-…") for older servers.
 WorkRunRef? workRunOf(ChatMessage message) {
   if (message.role != Role.assistant || message.error || message.pending) {
     return null;
+  }
+  // Lane A's `sonder_receipt.chat_work` metadata names the run directly.
+  final metadata = message.responseMetadata;
+  if (metadata != null && metadata.workRunning) {
+    final budget =
+        int.tryParse(_budget.firstMatch(message.content)?.group(1) ?? '');
+    return WorkRunRef(metadata.workRunId, budgetSeconds: budget);
   }
   final text = message.content;
   if (!text.contains('work run') && !text.contains('/v1/work-runs/')) {

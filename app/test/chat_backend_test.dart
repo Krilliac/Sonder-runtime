@@ -196,7 +196,8 @@ void main() {
     expect(_lastUser(seen.single), '/accept');
   });
 
-  test('SonderApi.chatDetailed sends history only when asked; bad values '
+  test(
+      'SonderApi.chatDetailed sends history only when asked; bad values '
       'never reach the wire', () async {
     final bodies = <String>[];
     await recordClients(() async {

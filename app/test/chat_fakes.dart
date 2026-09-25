@@ -145,8 +145,7 @@ class FakeChatBackend implements ChatBackend {
   Future<WorkRun> cancelWorkRun(String id) async {
     workRunCancels.add(id);
     return (cancelWorkRunResult ??
-        (i) =>
-            WorkRun(id: i, status: 'running', cancelRequested: true))(id);
+        (i) => WorkRun(id: i, status: 'running', cancelRequested: true))(id);
   }
 
   List<WorkRun> runningWork = const [];

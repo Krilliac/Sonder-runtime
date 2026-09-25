@@ -2,9 +2,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../theme.dart';
+import '../workspace_ui.dart' show StatusKind, WorkspaceNotice;
 import 'connection.dart';
 import 'drawer.dart' show SonderMark, connectionColor;
-import 'notice.dart';
 
 /// The empty conversation. Its connection line is driven by the same state
 /// as the rail (P0-3): `Connecting…` (muted), `Connected to X` (ok), or the
@@ -151,9 +151,10 @@ class OfflineNotice extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final kind = status.state == ConnState.unreachable
-        ? ChatStatusKind.fail
-        : ChatStatusKind.warn;
-    return ChatNotice(
+        ? StatusKind.fail
+        : StatusKind.warn;
+    return WorkspaceNotice(
+      framed: false,
       kind: kind,
       // The REPL's words: "✗ error  Can't reach mypc", "! refused  …".
       word: status.state == ConnState.unreachable ? 'error' : status.word,

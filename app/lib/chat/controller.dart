@@ -867,7 +867,10 @@ class ChatController extends ChangeNotifier {
         next = ChatMessage(
           role: Role.assistant,
           content: run.output.isEmpty ? '(empty response)' : run.output,
-          responseMetadata: old.responseMetadata,
+          // The run is settled: keep the receipt, but it no longer marks a
+          // running work run (workRunOf reads it first).
+          responseMetadata:
+              old.responseMetadata?.withWork(workStatus: run.status),
         );
       default:
         final label = switch (run.status) {

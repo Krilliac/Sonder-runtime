@@ -5,6 +5,8 @@ import '../safety_colors.dart';
 import '../theme.dart';
 import 'permission_rules.dart';
 
+export '../ui/raise_mode_sheet.dart'
+    show RaiseModeSheet, confirmModeChange, showRaiseModeSheet;
 export 'permission_rules.dart';
 
 /// The always-visible autonomy indicator in the composer: what the agent
@@ -307,112 +309,6 @@ class PermissionModeDialog extends StatelessWidget {
           child: const Text('Close'),
         ),
       ],
-    );
-  }
-}
-
-/// The raise sheet (§2.5): the person confirming a switch to a mode that
-/// asks less. Returns true only on the explicit confirm button.
-///
-/// Lane B owns the shared presentational `lib/ui/raise_mode_sheet.dart`;
-/// this is chat's copy of the same layout until that lands.
-Future<bool> confirmModeRaise(
-  BuildContext context, {
-  required String from,
-  required String to,
-  required String host,
-}) async {
-  final wide = MediaQuery.sizeOf(context).width >= 600;
-  Widget body(BuildContext ctx) =>
-      RaiseModeSheet(from: from, to: to, host: host);
-  final bool? result;
-  if (wide) {
-    result = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => Dialog(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 480),
-          child: body(ctx),
-        ),
-      ),
-    );
-  } else {
-    result = await showModalBottomSheet<bool>(
-      context: context,
-      isScrollControlled: true,
-      builder: (ctx) => SafeArea(child: body(ctx)),
-    );
-  }
-  return result == true;
-}
-
-class RaiseModeSheet extends StatelessWidget {
-  final String from;
-  final String to;
-  final String host;
-
-  const RaiseModeSheet({
-    super.key,
-    required this.from,
-    required this.to,
-    required this.host,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final tokens = SonderTokens.of(context);
-    final text = Theme.of(context).textTheme;
-    final danger = to == 'auto';
-    final tone = danger ? tokens.danger : tokens.warn;
-    return Padding(
-      key: const Key('raise-mode-sheet'),
-      padding: const EdgeInsets.fromLTRB(20, 18, 20, 12),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Semantics(
-            header: true,
-            label: 'warn: raise mode from $from to $to',
-            child: ExcludeSemantics(
-              child: Text.rich(TextSpan(children: [
-                TextSpan(
-                    text: '! raise mode   ',
-                    style: tokens.mono(13,
-                        color: tokens.warn, weight: FontWeight.w600)),
-                TextSpan(
-                    text: '$from → $to',
-                    style: tokens.mono(13, color: tokens.text)),
-              ])),
-            ),
-          ),
-          const SizedBox(height: 14),
-          Text(raiseEffect(to, host),
-              style: text.bodyMedium?.copyWith(color: tokens.text2)),
-          const SizedBox(height: 18),
-          OverflowBar(
-            alignment: MainAxisAlignment.end,
-            spacing: 8,
-            overflowAlignment: OverflowBarAlignment.end,
-            children: [
-              TextButton(
-                key: const Key('raise-mode-cancel'),
-                onPressed: () => Navigator.of(context).pop(false),
-                child: const Text('Cancel'),
-              ),
-              FilledButton(
-                key: const Key('raise-mode-confirm'),
-                style: FilledButton.styleFrom(
-                  backgroundColor: tone,
-                  foregroundColor: tokens.canvas,
-                ),
-                onPressed: () => Navigator.of(context).pop(true),
-                child: Text('Switch to $to'),
-              ),
-            ],
-          ),
-        ],
-      ),
     );
   }
 }

@@ -363,7 +363,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<void> _changeMode(String target) async {
     final (outcome, message) = await _chat.requestModeChange(
       target,
-      confirm: (from, to) => confirmModeRaise(context,
+      confirm: (from, to) => confirmModeChange(context,
           from: from,
           to: to,
           host: ConnectionStatus.hostOf(widget.settings.serverUrl)),

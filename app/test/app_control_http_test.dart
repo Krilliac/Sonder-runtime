@@ -52,7 +52,7 @@ void main() {
           });
           request.response.write(jsonEncode({
             'ok': true,
-              'work': work_data.work(),
+            'work': work_data.work(),
             'receipt': {
               'command_id': value['command_id'],
               'action': 'prepare_work',

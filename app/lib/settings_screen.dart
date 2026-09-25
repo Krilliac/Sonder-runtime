@@ -16,16 +16,16 @@ import 'workspace_ui.dart';
 /// What "Test connection" found, as one status word plus one-line remedy
 /// (plan P1-3, P0-2).
 enum ServerReachability {
-  reachable('reachable', RuntimeStatus.ok),
-  refused('refused (421)', RuntimeStatus.refused),
-  needsHttps('needs HTTPS for sign-in', RuntimeStatus.warn),
-  unauthorized('needs a key', RuntimeStatus.warn),
-  rateLimited('wait', RuntimeStatus.warn),
-  unreachable('unreachable', RuntimeStatus.fail),
-  failed('error', RuntimeStatus.fail);
+  reachable('reachable', StatusKind.ok),
+  refused('refused (421)', StatusKind.refused),
+  needsHttps('needs HTTPS for sign-in', StatusKind.warn),
+  unauthorized('needs a key', StatusKind.warn),
+  rateLimited('wait', StatusKind.warn),
+  unreachable('unreachable', StatusKind.fail),
+  failed('error', StatusKind.fail);
 
   final String word;
-  final RuntimeStatus status;
+  final StatusKind status;
   const ServerReachability(this.word, this.status);
 }
 
@@ -794,32 +794,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const SizedBox(height: 10),
             WorkspaceNotice(
               key: const Key('settings-connection-notice'),
-              message: [
-                diagnosis.title,
-                if (diagnosis.detail.isNotEmpty) diagnosis.detail,
-                if (diagnosis.adbHint != null) diagnosis.adbHint!,
-              ].join('\n'),
-              tone: diagnosis.ok ? NoticeTone.success : NoticeTone.warning,
-              action: diagnosis.serverSetting == null
-                  ? null
-                  : Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: Wrap(
-                        spacing: 8,
-                        runSpacing: 4,
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        children: [
-                          SelectableText(diagnosis.serverSetting!,
-                              style: tokens.mono(12)),
-                          TextButton.icon(
-                            onPressed: () =>
-                                _copyServerSetting(diagnosis.serverSetting!),
-                            icon: const Icon(Icons.copy, size: 16),
-                            label: const Text('Copy server setting'),
-                          ),
-                        ],
-                      ),
-                    ),
+              kind: diagnosis.state.status,
+              title: diagnosis.title,
+              detail: diagnosis.detail.isEmpty ? null : diagnosis.detail,
+              hint: diagnosis.adbHint,
+              actions: [
+                if (diagnosis.serverSetting != null) ...[
+                  SelectableText(diagnosis.serverSetting!,
+                      style: tokens.mono(12)),
+                  TextButton.icon(
+                    onPressed: () =>
+                        _copyServerSetting(diagnosis.serverSetting!),
+                    icon: const Icon(Icons.copy, size: 16),
+                    label: const Text('Copy server setting'),
+                  ),
+                ],
+              ],
             ),
           ],
         ],

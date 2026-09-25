@@ -232,8 +232,14 @@ void main() {
     await tester.pumpWidget(MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: SonderTheme.dark,
-      home: const Scaffold(
-        body: RaiseModeSheet(from: 'manual', to: 'acceptEdits', host: 'mypc'),
+      // Lane B's presentational sheet: the parent owns confirm/cancel.
+      home: Scaffold(
+        body: RaiseModeSheet(
+            from: 'manual',
+            to: 'acceptEdits',
+            host: 'mypc',
+            onConfirm: () {},
+            onCancel: () {}),
       ),
     ));
     await _golden(tester, 'raise_sheet_widget_accept_edits');

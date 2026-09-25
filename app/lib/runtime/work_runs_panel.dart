@@ -10,13 +10,13 @@ import '../theme.dart';
 import 'overview.dart';
 import 'status_word.dart';
 
-RuntimeStatus workRunStatus(WorkRun run) => switch (run.status) {
-      'running' => RuntimeStatus.running,
-      'returned' => RuntimeStatus.ok,
-      'refused' => RuntimeStatus.refused,
-      'cancelled' => RuntimeStatus.skipped,
-      'failed' || 'budget_exceeded' || 'interrupted' => RuntimeStatus.fail,
-      _ => RuntimeStatus.unknown,
+StatusKind workRunStatus(WorkRun run) => switch (run.status) {
+      'running' => StatusKind.running,
+      'returned' => StatusKind.ok,
+      'refused' => StatusKind.refused,
+      'cancelled' => StatusKind.skipped,
+      'failed' || 'budget_exceeded' || 'interrupted' => StatusKind.fail,
+      _ => StatusKind.unknown,
     };
 
 String workRunWord(WorkRun run) => switch (run.status) {
@@ -94,7 +94,7 @@ class WorkRunsPanel extends StatelessWidget {
     final failure = error;
     if (failure is SonderException && failure.httpStatus == 403) {
       return const RuntimePanelNote(
-        status: RuntimeStatus.skipped,
+        status: StatusKind.skipped,
         word: 'n/a',
         text: 'Work runs need a developer or admin account.',
       );
@@ -102,7 +102,7 @@ class WorkRunsPanel extends StatelessWidget {
     final children = <Widget>[];
     if (failure != null) {
       children.add(RuntimePanelNote(
-        status: RuntimeStatus.fail,
+        status: StatusKind.fail,
         text: failure is SonderException
             ? failure.message
             : 'Could not load work runs.',
@@ -114,12 +114,12 @@ class WorkRunsPanel extends StatelessWidget {
     final list = runs;
     if (list == null && failure == null) {
       children.add(RuntimePanelNote(
-          status: RuntimeStatus.unknown,
+          status: StatusKind.unknown,
           word: loading ? 'checking' : null,
           text: loading ? 'Loading work runs…' : 'Not loaded yet.'));
     } else if (list != null && list.isEmpty) {
       children.add(const RuntimePanelNote(
-          status: RuntimeStatus.note, text: 'No work runs'));
+          status: StatusKind.note, text: 'No work runs'));
     }
     for (final run in list ?? const <WorkRun>[]) {
       final detail = workRunDetail(run, clock);
@@ -165,7 +165,7 @@ class WorkRunsPanel extends StatelessWidget {
 
 /// A one-line `<glyph> <word>  text` note inside a Runtime detail panel.
 class RuntimePanelNote extends StatelessWidget {
-  final RuntimeStatus status;
+  final StatusKind status;
   final String? word;
   final String text;
   final Widget? action;

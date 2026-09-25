@@ -13,23 +13,23 @@ import 'runtime_data.dart';
 import 'status_word.dart';
 import 'work_runs_panel.dart';
 
-RuntimeStatus _lifecycleStatus(String status) {
+StatusKind _lifecycleStatus(String status) {
   if (const {'running', 'pending', 'queued', 'started', 'active'}
       .contains(status)) {
-    return RuntimeStatus.running;
+    return StatusKind.running;
   }
   if (const {'completed', 'succeeded', 'done', 'answered', 'healthy'}
       .contains(status)) {
-    return RuntimeStatus.ok;
+    return StatusKind.ok;
   }
   if (const {'failed', 'error', 'unhealthy', 'interrupted'}.contains(status)) {
-    return RuntimeStatus.fail;
+    return StatusKind.fail;
   }
   if (const {'cancelled', 'skipped'}.contains(status)) {
-    return RuntimeStatus.skipped;
+    return StatusKind.skipped;
   }
-  if (const {'degraded', 'stale'}.contains(status)) return RuntimeStatus.warn;
-  return RuntimeStatus.unknown;
+  if (const {'degraded', 'stale'}.contains(status)) return StatusKind.warn;
+  return StatusKind.unknown;
 }
 
 class JobsPanel extends StatelessWidget {
@@ -83,7 +83,7 @@ class JobsPanel extends StatelessWidget {
           empty: 'No compute nodes configured',
           row: (node) => _Row(
             status: node.stale && node.health == 'unknown'
-                ? RuntimeStatus.unknown
+                ? StatusKind.unknown
                 : _lifecycleStatus(node.health),
             word: node.health.isEmpty ? null : node.health,
             text: [
@@ -101,7 +101,7 @@ class JobsPanel extends StatelessWidget {
 }
 
 class _Row extends StatelessWidget {
-  final RuntimeStatus status;
+  final StatusKind status;
   final String? word;
   final String text;
   const _Row({required this.status, required this.text, this.word});
@@ -170,19 +170,19 @@ class _LazyListState<T> extends State<_LazyList<T>> {
     if (error is SonderException &&
         (error.httpStatus == 403 || error.httpStatus == 401)) {
       return const RuntimePanelNote(
-          status: RuntimeStatus.skipped,
+          status: StatusKind.skipped,
           word: 'n/a',
           text: 'Needs an administrator account.');
     }
     if (error is SonderException && error.httpStatus == 404) {
       return const RuntimePanelNote(
-          status: RuntimeStatus.skipped,
+          status: StatusKind.skipped,
           word: 'n/a',
           text: 'Not available on this server.');
     }
     if (error != null) {
       return RuntimePanelNote(
-        status: RuntimeStatus.fail,
+        status: StatusKind.fail,
         text: error is SonderException ? error.message : 'Could not load.',
         action: TextButton(onPressed: _fetch, child: const Text('Retry')),
       );
@@ -190,10 +190,10 @@ class _LazyListState<T> extends State<_LazyList<T>> {
     final items = _items;
     if (items == null) {
       return const RuntimePanelNote(
-          status: RuntimeStatus.unknown, word: 'checking', text: 'Loading…');
+          status: StatusKind.unknown, word: 'checking', text: 'Loading…');
     }
     if (items.isEmpty) {
-      return RuntimePanelNote(status: RuntimeStatus.note, text: widget.empty);
+      return RuntimePanelNote(status: StatusKind.note, text: widget.empty);
     }
     return Column(
         crossAxisAlignment: CrossAxisAlignment.start,

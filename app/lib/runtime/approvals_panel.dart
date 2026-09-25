@@ -23,13 +23,13 @@ class ApprovalsPanel extends StatelessWidget {
     if (failure is SonderException &&
         (failure.httpStatus == 403 || failure.httpStatus == 401)) {
       return const RuntimePanelNote(
-          status: RuntimeStatus.skipped,
+          status: StatusKind.skipped,
           word: 'n/a',
           text: 'Approvals need a developer or admin account.');
     }
     if (failure != null) {
       return RuntimePanelNote(
-          status: RuntimeStatus.fail,
+          status: StatusKind.fail,
           text: failure is SonderException
               ? failure.message
               : 'Could not load approvals.');
@@ -37,21 +37,20 @@ class ApprovalsPanel extends StatelessWidget {
     final current = page;
     if (current == null) {
       return const RuntimePanelNote(
-          status: RuntimeStatus.unknown, text: 'Not loaded yet.');
+          status: StatusKind.unknown, text: 'Not loaded yet.');
     }
     if (!current.supported) {
       return const RuntimePanelNote(
-          status: RuntimeStatus.skipped,
+          status: StatusKind.skipped,
           word: 'n/a',
           text: 'This server cannot approve over HTTP. Approve from the '
               'console with /approve <call id>.');
     }
     if (current.pending.isEmpty && current.open.isEmpty) {
       return const RuntimePanelNote(
-          status: RuntimeStatus.ok, word: 'ok', text: 'Nothing waiting.');
+          status: StatusKind.ok, word: 'ok', text: 'Nothing waiting.');
     }
-    Widget row(RuntimeStatus status, String? word, List<String> parts) =>
-        Padding(
+    Widget row(StatusKind status, String? word, List<String> parts) => Padding(
           padding: const EdgeInsets.symmetric(vertical: 3),
           child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
             RuntimeStatusWord(status, word: word, width: 116),
@@ -65,13 +64,12 @@ class ApprovalsPanel extends StatelessWidget {
             ),
           ]),
         );
-    Widget pendingRow(PendingApproval item) => row(RuntimeStatus.ask, null, [
+    Widget pendingRow(PendingApproval item) => row(StatusKind.ask, null, [
           item.tool.isEmpty ? 'call' : item.tool,
           if (item.callId.isNotEmpty) 'call ${item.callId}',
           if (item.preview.isNotEmpty) item.preview,
         ]);
-    Widget openRow(IssuedApproval item) =>
-        row(RuntimeStatus.ok, 'approved', [
+    Widget openRow(IssuedApproval item) => row(StatusKind.ok, 'approved', [
           item.tool.isEmpty ? 'call' : item.tool,
           if (item.callId.isNotEmpty) 'call ${item.callId}',
           if (item.ttlSeconds > 0) '${item.ttlSeconds}s once',

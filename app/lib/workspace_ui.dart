@@ -115,6 +115,14 @@ class WorkspaceNotice extends StatelessWidget {
 
   final StatusKind? _kind;
 
+  /// Draw the panel and hairline border. Chat's transcript passes false so
+  /// a notice sits in the reading column like a turn (plan §2.2).
+  final bool framed;
+
+  /// Announce changes to assistive technology. A transcript full of old
+  /// notices passes false for all but the newest outcome.
+  final bool liveRegion;
+
   const WorkspaceNotice({
     super.key,
     String? title,
@@ -126,6 +134,8 @@ class WorkspaceNotice extends StatelessWidget {
     this.word,
     this.action,
     this.actions = const <Widget>[],
+    this.framed = true,
+    this.liveRegion = true,
   })  : assert(title != null || message != null,
             'WorkspaceNotice needs a title (or the legacy message)'),
         title = title ?? message ?? '',
@@ -169,13 +179,17 @@ class WorkspaceNotice extends StatelessWidget {
     final buttons = [if (action != null) action!, ...actions];
     return Semantics(
         container: true,
-        liveRegion: true,
+        liveRegion: liveRegion,
         child: Container(
-          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-          decoration: BoxDecoration(
-              color: tokens.panel,
-              border: Border.all(color: tokens.hairline),
-              borderRadius: BorderRadius.circular(SonderRadius.row)),
+          padding: framed
+              ? const EdgeInsets.fromLTRB(12, 10, 12, 10)
+              : EdgeInsets.zero,
+          decoration: framed
+              ? BoxDecoration(
+                  color: tokens.panel,
+                  border: Border.all(color: tokens.hairline),
+                  borderRadius: BorderRadius.circular(SonderRadius.row))
+              : null,
           child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,

@@ -4,9 +4,9 @@ import 'package:flutter/material.dart';
 
 import '../api.dart';
 import '../theme.dart';
+import '../workspace_ui.dart' show StatusKind, WorkspaceNotice;
 import 'classify.dart';
-import 'lines.dart';
-import 'notice.dart';
+import '../ui/status_line.dart';
 
 export 'classify.dart' show WorkRunRef, workRunOf;
 
@@ -235,9 +235,11 @@ class _WorkRunCardState extends State<WorkRunCard> with WidgetsBindingObserver {
     final title = 'work run ${widget.run.shortId} · '
         '${elapsedLabel(elapsed)}$budgetText';
     if (_forbidden) {
-      return const ChatNotice(
+      return const WorkspaceNotice(
+        framed: false,
+        liveRegion: false,
         key: Key('work-run-forbidden'),
-        kind: ChatStatusKind.warn,
+        kind: StatusKind.warn,
         title: 'Work runs need a developer or admin account',
         detail: 'This turn is still running on the PC. Sign in with a '
             'developer or admin account to follow it here.',
@@ -247,8 +249,10 @@ class _WorkRunCardState extends State<WorkRunCard> with WidgetsBindingObserver {
       key: const Key('work-run-card'),
       container: true,
       label: 'working: $title',
-      child: ChatNotice(
-        kind: ChatStatusKind.running,
+      child: WorkspaceNotice(
+        framed: false,
+        liveRegion: false,
+        kind: StatusKind.running,
         title: title,
         detail: _stopRequested
             ? 'Stop requested. Waiting for the run to finish its current step.'
@@ -358,10 +362,17 @@ class _RunningWorkDialogState extends State<_RunningWorkDialog> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   if (_error.isNotEmpty)
-                    ChatNotice(kind: ChatStatusKind.warn, title: _error),
+                    WorkspaceNotice(
+                        framed: false,
+                        liveRegion: false,
+                        kind: StatusKind.warn,
+                        title: _error),
                   if (runs != null && runs.isEmpty)
-                    const ChatNotice(
-                        kind: ChatStatusKind.note, title: 'No work runs'),
+                    const WorkspaceNotice(
+                        framed: false,
+                        liveRegion: false,
+                        kind: StatusKind.note,
+                        title: 'No work runs'),
                   for (final run in runs ?? const <WorkRun>[])
                     Row(children: [
                       Expanded(

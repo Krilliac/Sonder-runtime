@@ -41,17 +41,20 @@ class RaiseModeSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SonderSheetFrame(
+      key: const Key('raise-mode-sheet'),
       kind: StatusKind.warn,
       word: SonderStrings.raiseModeWord,
       title: SonderStrings.raiseTitle(from, to),
       semanticsLabel: '${SonderStrings.raiseModeWord} $from to $to',
       actions: [
         TextButton(
+          key: const Key('raise-mode-cancel'),
           onPressed: busy ? null : onCancel,
           style: TextButton.styleFrom(minimumSize: const Size(0, 44)),
           child: const Text(SonderStrings.cancel),
         ),
         ToneButton(
+          key: const Key('raise-mode-confirm'),
           label: SonderStrings.switchTo(to),
           role: to == 'auto' ? StatusRole.danger : StatusRole.warning,
           busy: busy,

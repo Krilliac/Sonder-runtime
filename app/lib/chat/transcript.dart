@@ -6,14 +6,14 @@ import 'package:flutter/services.dart';
 import '../api.dart' show WorkRun;
 import '../models.dart';
 import '../theme.dart';
-import '../workspace_ui.dart' show conversationWidth;
+import '../workspace_ui.dart'
+    show StatusKind, WorkspaceNotice, conversationWidth;
 import 'backend.dart';
 import 'classify.dart';
 import 'controller.dart';
-import 'lines.dart';
+import '../ui/status_line.dart';
 import 'live_line.dart';
 import 'markdown.dart';
-import 'notice.dart';
 import 'refusal.dart';
 import 'work_run_card.dart';
 
@@ -235,6 +235,9 @@ class ToolCallRow {
   const ToolCallRow(this.title, {this.ok = true, this.elapsedMs});
 }
 
+/// The footer wraps in the reading column, so it is not cut to a width.
+const _noLimit = 1 << 20;
+
 /// The answer footer (P2-7): `done 61.2s · 2 model calls · 2.6k→143 tok`.
 /// Null when there is nothing honest to say (an old message with no
 /// receipt and no measured time).
@@ -244,17 +247,19 @@ String? footerFor(ChatEntry entry, ParsedAnswer? parsed) {
   final elapsed = (m?.elapsedMs ?? 0) > 0 ? m!.elapsedMs : entry.elapsedMs;
   if (entry.message.error) {
     if (elapsed == null) return null;
-    return footerLine(FooterState(elapsedMs: elapsed, ok: false));
+    return footerLine(FooterState(elapsedMs: elapsed, ok: false), _noLimit);
   }
   if (elapsed == null && m == null && stats.isEmpty) return null;
   int? pick(int? a, String key) => (a != null && a > 0) ? a : (stats[key] ?? a);
-  return footerLine(FooterState(
-    elapsedMs: elapsed ?? 0,
-    modelCalls: pick(m?.modelCalls, 'model_calls'),
-    toolCalls: pick(m?.toolCalls, 'tool_calls'),
-    tokensIn: pick(m?.promptTokens, 'tokens_in'),
-    tokensOut: pick(m?.completionTokens, 'tokens_out'),
-  ));
+  return footerLine(
+      FooterState(
+        elapsedMs: elapsed ?? 0,
+        modelCalls: pick(m?.modelCalls, 'model_calls'),
+        toolCalls: pick(m?.toolCalls, 'tool_calls'),
+        tokensIn: pick(m?.promptTokens, 'tokens_in'),
+        tokensOut: pick(m?.completionTokens, 'tokens_out'),
+      ),
+      _noLimit);
 }
 
 /// One turn: a gutter glyph (❯ you, ◈ Sonder, ⊘/✗ refusal or failure) and
@@ -360,9 +365,10 @@ class TranscriptTurn extends StatelessWidget {
       children: [
         // Plain text, never Markdown: error text carries server URLs that
         // must not become tappable links.
-        ChatNotice(
+        WorkspaceNotice(
+          framed: false,
           key: const Key('error-notice'),
-          kind: ChatStatusKind.fail,
+          kind: StatusKind.fail,
           liveRegion: true,
           title: title,
           detail: detail,

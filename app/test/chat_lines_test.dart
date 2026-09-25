@@ -1,8 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sonder_runtime/chat/lines.dart';
+import 'package:sonder_runtime/ui/status_line.dart';
 
-/// Exact-string tests for chat's ports of sonder_runtime/interfaces/repl/
-/// style.py. Expected values were produced by style.py itself (colour off,
+/// Exact-string tests for the style.py ports chat renders with (lane B's
+/// lib/ui/status_line.dart, which replaced chat's private copy). Expected values were produced by style.py itself (colour off,
 /// unicode glyphs) or copied from tests/repl/test_style.py.
 void main() {
   // style.compact_count
@@ -14,9 +14,13 @@ void main() {
   });
 
   // style.duration_label
-  test('fixed1 rounds exact ties half to even like CPython', () {
-    expect([1.25, 1.35, 0.15, 2.75, 8.192, 0.05].map(fixed1),
-        ['1.2', '1.4', '0.1', '2.8', '8.2', '0.1']);
+  test('one-decimal labels round exact ties half to even like CPython', () {
+    // Was chat's fixed1(); lane B keeps the rounding private, so check it
+    // through the labels that use it.
+    expect([1250, 1350, 2750, 8192].map(durationLabel),
+        ['1.2s', '1.4s', '2.8s', '8.2s']);
+    expect([1250, 1350, 2750, 8192].map(compactCount),
+        ['1.2k', '1.4k', '2.8k', '8.2k']);
   });
 
   test('durationLabel matches style.duration_label', () {
@@ -78,7 +82,7 @@ void main() {
   test('the mode word survives at 320 px worth of cells', () {
     // 320 px / ~6.6 px per 11 px mono cell ≈ 48 cells; test far narrower.
     for (final width in [8, 12, 20, 32, 48]) {
-      final fields = statusLineFields(
+      final fields = statusSegments(
           const StatusState(
               mode: 'acceptEdits',
               model: 'qwen2.5-coder:7b-instruct-q4_K_M',
@@ -86,7 +90,7 @@ void main() {
               ctxLimit: 32768,
               agents: 2),
           width);
-      expect(fields.any((f) => f.kind == StatusFieldKind.mode), isTrue,
+      expect(fields.any((f) => f.field == StatusField.mode), isTrue,
           reason: 'width $width');
     }
   });
@@ -107,40 +111,46 @@ void main() {
               modelCalls: 2,
               tokensIn: 2600,
               tokensOut: 43,
-              rate: 'full'),
-          width: 80),
+              action: 'rate: /pass /fail'),
+          80),
       'done 75.7s · 2 model calls · 2.6k→43 tok · rate: /pass /fail',
     );
     expect(
       footerLine(
           const FooterState(elapsedMs: 231, ok: false, hint: 'start ollama'),
-          width: 80),
+          80),
       'failed after 231ms · hint: start ollama',
     );
     expect(
-        footerLine(const FooterState(elapsedMs: 1200, rate: 'short'),
-            width: 80),
+        footerLine(
+            const FooterState(elapsedMs: 1200, action: '/pass /fail'), 80),
         'done 1.2s · /pass /fail');
     // Generated with style.footer(rate='').
     expect(
-      footerLine(const FooterState(
-          elapsedMs: 61200, modelCalls: 2, tokensIn: 2600, tokensOut: 143)),
+      footerLine(
+          const FooterState(
+              elapsedMs: 61200, modelCalls: 2, tokensIn: 2600, tokensOut: 143),
+          1 << 20),
       'done 61.2s · 2 model calls · 2.6k→143 tok',
     );
     expect(
       footerLine(
-          const FooterState(
-              elapsedMs: 61200,
-              modelCalls: 2,
-              tokensIn: 2600,
-              tokensOut: 143,
-              toolCalls: 3),
-          width: 30),
+              const FooterState(
+                  elapsedMs: 61200,
+                  modelCalls: 2,
+                  tokensIn: 2600,
+                  tokensOut: 143,
+                  toolCalls: 3),
+              30,
+              // style.footer's two-cell indent counts toward the width.
+              indent: '  ')
+          .trimLeft(),
       'done 61.2s · 2 model calls',
     );
     expect(
       footerLine(
-          const FooterState(elapsedMs: 12000, ok: false, hint: 'start ollama')),
+          const FooterState(elapsedMs: 12000, ok: false, hint: 'start ollama'),
+          1 << 20),
       'failed after 12.0s · hint: start ollama',
     );
   });
@@ -150,13 +160,13 @@ void main() {
     expect(
       liveLine(
           const LiveState(
-              phase: 'routing', elapsedSeconds: 12, model: 'sonder:latest'),
+              phase: 'routing', elapsedS: 12, model: 'sonder:latest'),
           80),
       '◈ working · routing · 12s · sonder:latest',
     );
     const slow = LiveState(
         phase: 'model call 1/2',
-        elapsedSeconds: 42,
+        elapsedS: 42,
         model: 'sonder:latest',
         tokensIn: 2600,
         slow: true);
@@ -172,7 +182,7 @@ void main() {
         '◈ working · model call 1/2 · 42s · slow local model? try the fast route');
     expect(liveLine(slow, 40), '◈ working · model call 1/2 · 42s');
     expect(
-      liveLine(const LiveState(phase: 'routing', elapsedSeconds: 75), 40),
+      liveLine(const LiveState(phase: 'routing', elapsedS: 75), 40),
       '◈ working · routing · 1m 15s',
     );
   });

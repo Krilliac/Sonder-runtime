@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../theme.dart';
+import '../ui/approval_sheet.dart'
+    show ApprovalReceipt, ApprovalRequest, showApprovalSheet;
+import '../workspace_ui.dart' show StatusKind, WorkspaceNotice;
 import 'backend.dart';
 import 'classify.dart';
-import 'notice.dart';
 
 export 'classify.dart' show RefusalInfo, refusalOf, classifyReply, ReplyKind;
 
@@ -45,7 +46,7 @@ class _RefusalNoticeState extends State<RefusalNotice> {
     final callId = widget.refusal.callId;
     final approve = widget.onApprove;
     if (callId.isEmpty || approve == null || _busy) return;
-    final ttl = await showApprovalSheet(context, widget.refusal);
+    final ttl = await showRefusalApprovalSheet(context, widget.refusal);
     if (ttl == null || !mounted) return;
     setState(() => _busy = true);
     final outcome = await approve(callId, ttl);
@@ -66,9 +67,11 @@ class _RefusalNoticeState extends State<RefusalNotice> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        ChatNotice(
+        WorkspaceNotice(
+          framed: false,
+          liveRegion: false,
           key: const Key('refusal-notice'),
-          kind: ChatStatusKind.refused,
+          kind: StatusKind.refused,
           title: title,
           detail: r.reason,
           hint: r.mode.isEmpty ? '' : 'mode: ${r.mode}',
@@ -99,33 +102,22 @@ class _RefusalNoticeState extends State<RefusalNotice> {
       BuildContext context, ApprovalOutcome outcome, RefusalInfo r) {
     switch (outcome.status) {
       case ApprovalStatus.approved:
-        final minutes = (outcome.ttlSeconds > 0
-                ? Duration(seconds: outcome.ttlSeconds)
-                : _ttl)
-            .inMinutes;
-        return ChatNotice(
+        return ApprovalReceipt(
           key: const Key('approval-approved'),
-          kind: ChatStatusKind.ok,
-          word: 'approved',
-          liveRegion: true,
-          title: '${r.subject.isEmpty ? 'call' : '${r.subject} call'} '
-              '${r.callId} once'
-              '${outcome.nonce.isEmpty ? '' : ' · nonce ${outcome.nonce}'}'
-              ' · valid $minutes min',
-          actions: [
-            if (widget.onRetry != null)
-              FilledButton.tonal(
-                key: const Key('approval-retry'),
-                onPressed: widget.onRetry,
-                child: const Text('Retry the request'),
-              ),
-          ],
+          tool: r.subject.isEmpty ? 'call' : r.subject,
+          callId: r.callId,
+          nonce: outcome.nonce,
+          ttl: outcome.ttlSeconds > 0
+              ? Duration(seconds: outcome.ttlSeconds)
+              : _ttl,
+          onRetry: widget.onRetry,
         );
       case ApprovalStatus.unsupported:
         final command = '/approve ${r.callId}';
-        return ChatNotice(
+        return WorkspaceNotice(
+          framed: false,
           key: const Key('approval-console'),
-          kind: ChatStatusKind.note,
+          kind: StatusKind.note,
           liveRegion: true,
           title: 'Approve from the console: $command',
           detail: 'This server cannot take approvals from the app yet. Run '
@@ -140,16 +132,18 @@ class _RefusalNoticeState extends State<RefusalNotice> {
           ],
         );
       case ApprovalStatus.forbidden:
-        return const ChatNotice(
+        return const WorkspaceNotice(
+          framed: false,
           key: Key('approval-forbidden'),
-          kind: ChatStatusKind.warn,
+          kind: StatusKind.warn,
           liveRegion: true,
           title: 'Approvals need a developer or admin account',
         );
       case ApprovalStatus.failed:
-        return ChatNotice(
+        return WorkspaceNotice(
+          framed: false,
           key: const Key('approval-failed'),
-          kind: ChatStatusKind.fail,
+          kind: StatusKind.fail,
           liveRegion: true,
           title: 'The approval was not recorded',
           detail: outcome.message,
@@ -158,140 +152,17 @@ class _RefusalNoticeState extends State<RefusalNotice> {
   }
 }
 
-/// The §2.5 approval sheet: exactly one call, once. Returns the chosen
-/// validity, or null when cancelled. A bottom sheet on phones, a dialog on
-/// desktop.
-///
-/// Lane B owns the shared presentational `lib/ui/approval_sheet.dart`; this
-/// is chat's copy of the same layout until that lands.
-Future<Duration?> showApprovalSheet(BuildContext context, RefusalInfo r) {
-  final wide = MediaQuery.sizeOf(context).width >= 600;
-  Widget body(BuildContext ctx) => _ApprovalSheet(refusal: r);
-  if (wide) {
-    return showDialog<Duration>(
-      context: context,
-      builder: (ctx) => Dialog(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 480),
-          child: body(ctx),
-        ),
-      ),
+/// The §2.5 approval sheet for [r], drawn by lane B's [ApprovalSheet]:
+/// exactly one call, once. Returns the chosen validity, or null when
+/// cancelled.
+Future<Duration?> showRefusalApprovalSheet(
+        BuildContext context, RefusalInfo r) =>
+    showApprovalSheet(context, request: approvalRequestFor(r));
+
+/// The approval sheet's view model for a refusal.
+ApprovalRequest approvalRequestFor(RefusalInfo r) => ApprovalRequest(
+      tool: r.subject.isEmpty ? 'call' : r.subject,
+      callId: r.callId,
+      mode: r.mode.isEmpty ? 'the current' : r.mode,
+      reason: r.reason.isEmpty ? null : r.reason,
     );
-  }
-  return showModalBottomSheet<Duration>(
-    context: context,
-    isScrollControlled: true,
-    builder: (ctx) => SafeArea(child: body(ctx)),
-  );
-}
-
-class _ApprovalSheet extends StatefulWidget {
-  final RefusalInfo refusal;
-  const _ApprovalSheet({required this.refusal});
-
-  @override
-  State<_ApprovalSheet> createState() => _ApprovalSheetState();
-}
-
-class _ApprovalSheetState extends State<_ApprovalSheet> {
-  int _minutes = 15;
-
-  @override
-  Widget build(BuildContext context) {
-    final tokens = SonderTokens.of(context);
-    final text = Theme.of(context).textTheme;
-    final r = widget.refusal;
-    final mode = r.mode.isEmpty ? 'the current mode' : r.mode;
-    Widget row(String label, String value) => Padding(
-          padding: const EdgeInsets.symmetric(vertical: 2),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              SizedBox(
-                width: 72,
-                child: Text(label, style: tokens.mono(12, color: tokens.muted)),
-              ),
-              Expanded(
-                child: Text(value, style: tokens.mono(12, color: tokens.text)),
-              ),
-            ],
-          ),
-        );
-    return Padding(
-      key: const Key('approval-sheet'),
-      padding: const EdgeInsets.fromLTRB(20, 18, 20, 12),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Semantics(
-            header: true,
-            label: 'approve: ${r.subject} call ${r.callId}',
-            child: ExcludeSemantics(
-              child: Text.rich(TextSpan(children: [
-                TextSpan(
-                    text: '? approve   ',
-                    style: tokens.mono(13,
-                        color: tokens.warn, weight: FontWeight.w600)),
-                TextSpan(
-                    text:
-                        '${r.subject.isEmpty ? 'call' : r.subject} · call ${r.callId}',
-                    style: tokens.mono(13, color: tokens.text)),
-              ])),
-            ),
-          ),
-          const SizedBox(height: 12),
-          if (r.subject.isNotEmpty) row('call', r.subject),
-          if (r.reason.isNotEmpty) row('refused', r.reason),
-          row('mode', mode),
-          const SizedBox(height: 12),
-          Text(
-            'Runs this exact call once, from any surface, within $_minutes '
-            'minutes. Changing any argument needs a new approval. Your mode '
-            'stays $mode.',
-            style: text.bodyMedium?.copyWith(color: tokens.text2),
-          ),
-          const SizedBox(height: 12),
-          Row(children: [
-            Text('Valid for', style: tokens.mono(12, color: tokens.muted)),
-            const SizedBox(width: 12),
-            DropdownButton<int>(
-              key: const Key('approval-ttl'),
-              value: _minutes,
-              isDense: true,
-              style: tokens.mono(12, color: tokens.text),
-              dropdownColor: tokens.panel,
-              items: const [5, 15, 60]
-                  .map((m) => DropdownMenuItem(value: m, child: Text('$m min')))
-                  .toList(),
-              onChanged: (v) => setState(() => _minutes = v ?? 15),
-            ),
-          ]),
-          const SizedBox(height: 12),
-          OverflowBar(
-            alignment: MainAxisAlignment.end,
-            spacing: 8,
-            overflowAlignment: OverflowBarAlignment.end,
-            children: [
-              TextButton(
-                key: const Key('approval-cancel'),
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text('Cancel'),
-              ),
-              FilledButton(
-                key: const Key('approval-confirm'),
-                style: FilledButton.styleFrom(
-                  backgroundColor: tokens.warn,
-                  foregroundColor: tokens.canvas,
-                ),
-                onPressed: () =>
-                    Navigator.of(context).pop(Duration(minutes: _minutes)),
-                child: const Text('Approve once'),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}

@@ -128,18 +128,21 @@ class _ApprovalSheetState extends State<ApprovalSheet> {
         );
     final console = SonderStrings.approveCommand(request.callId);
     return SonderSheetFrame(
+      key: const Key('approval-sheet'),
       kind: StatusKind.ask,
       word: 'approve',
       title: SonderStrings.approvalTitle(request.tool, request.callId),
       semanticsLabel: SonderStrings.approvalSheetLabel,
       actions: [
         TextButton(
+          key: const Key('approval-cancel'),
           onPressed: widget.busy ? null : widget.onCancel,
           style: TextButton.styleFrom(minimumSize: const Size(0, 44)),
           child: const Text(SonderStrings.cancel),
         ),
         if (!widget.consoleFallback)
           ToneButton(
+            key: const Key('approval-confirm'),
             label: SonderStrings.approveOnce,
             role: StatusRole.warning,
             busy: widget.busy,
@@ -177,6 +180,7 @@ class _ApprovalSheetState extends State<ApprovalSheet> {
                 style: text.bodyMedium?.copyWith(color: tokens.text2)),
             const SizedBox(width: 12),
             DropdownButton<Duration>(
+              key: const Key('approval-ttl'),
               value: _ttl,
               underline: const SizedBox.shrink(),
               onChanged: widget.busy
@@ -256,11 +260,14 @@ class ApprovalReceipt extends StatelessWidget {
       actions: [
         if (onRetry != null)
           FilledButton(
+              key: const Key('approval-retry'),
               onPressed: onRetry,
               child: const Text(SonderStrings.retryTheRequest)),
         if (onRevoke != null)
           OutlinedButton(
-              onPressed: onRevoke, child: const Text(SonderStrings.revoke)),
+              key: const Key('approval-revoke'),
+              onPressed: onRevoke,
+              child: const Text(SonderStrings.revoke)),
       ],
     );
   }

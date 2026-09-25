@@ -3,7 +3,8 @@ import 'package:flutter/material.dart';
 
 import '../theme.dart';
 import 'controller.dart';
-import 'lines.dart';
+import '../ui/status_line.dart';
+import '../ui/status_vocab.dart';
 
 /// Seconds after which the live line suggests a faster route.
 const slowTurnSeconds = 20;
@@ -27,7 +28,7 @@ class LiveLineView extends StatelessWidget {
         final seconds = turn?.elapsedSeconds ?? 0;
         final state = LiveState(
           phase: turn?.phase ?? 'working',
-          elapsedSeconds: seconds,
+          elapsedS: seconds,
           model: turn?.model ?? '',
           tokensIn: turn?.tokensIn,
           slow: seconds >= slowTurnSeconds,
@@ -40,7 +41,7 @@ class LiveLineView extends StatelessWidget {
           final room = constraints.maxWidth - (onStop == null ? 0 : 88);
           final cols = cell <= 0 ? 80 : (room / cell).floor();
           final text = liveLine(state, cols);
-          final slowHint = state.slow ? LiveState.defaultSlowHint : '';
+          final slowHint = state.slow ? state.slowHint : '';
           return Semantics(
             key: const Key('live-line'),
             container: true,
@@ -82,14 +83,15 @@ class LiveLineView extends StatelessWidget {
   /// Head in accent, the slow hint in warn, the rest muted.
   static InlineSpan _paint(
       String text, String slowHint, SonderTokens tokens, TextStyle style) {
-    const head = '$markGlyph working';
+    final head = '${StatusKind.running.glyph} working';
     final spans = <InlineSpan>[];
     var rest = text;
     if (rest.startsWith(head)) {
       spans.add(TextSpan(
           text: head,
           style: style.copyWith(
-              color: tokens.accent, fontWeight: FontWeight.w600)));
+              color: StatusKind.running.color(tokens),
+              fontWeight: FontWeight.w600)));
       rest = rest.substring(head.length);
     }
     final i = slowHint.isEmpty ? -1 : rest.indexOf(slowHint);

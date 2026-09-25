@@ -8,11 +8,12 @@ import 'package:flutter/material.dart';
 import '../api.dart';
 import '../theme.dart';
 import 'runtime_data.dart';
+import '../ui/status_row.dart';
 import 'status_word.dart';
 
 /// One overview row, computed from the snapshots the screen already holds.
 class OverviewRow {
-  final RuntimeStatus status;
+  final StatusKind status;
   final String? word;
   final String label;
   final String value;
@@ -32,7 +33,7 @@ class OverviewRow {
 /// One line of the recent-activity list.
 class ActivityLine {
   final String time;
-  final RuntimeStatus status;
+  final StatusKind status;
   final String word;
   final String text;
   const ActivityLine(this.time, this.status, this.word, this.text);
@@ -59,33 +60,33 @@ String serverLabel(String serverUrl) {
   return uri.hasPort ? '${uri.host}:${uri.port}' : uri.host;
 }
 
-RuntimeStatus _eventStatus(ExecutionFeedEvent event) {
-  if (event.ok == true) return RuntimeStatus.ok;
-  if (event.ok == false) return RuntimeStatus.fail;
+StatusKind _eventStatus(ExecutionFeedEvent event) {
+  if (event.ok == true) return StatusKind.ok;
+  if (event.ok == false) return StatusKind.fail;
   final state = '${event.phase} ${event.responseStatus}'.toLowerCase();
-  if (state.contains('refus')) return RuntimeStatus.refused;
+  if (state.contains('refus')) return StatusKind.refused;
   if (state.contains('fail') || state.contains('error')) {
-    return RuntimeStatus.fail;
+    return StatusKind.fail;
   }
-  if (state.contains('cancel')) return RuntimeStatus.skipped;
+  if (state.contains('cancel')) return StatusKind.skipped;
   if (state.contains('run') ||
       state.contains('start') ||
       state.contains('active')) {
-    return RuntimeStatus.running;
+    return StatusKind.running;
   }
   if (state.contains('complet') ||
       state.contains('done') ||
       state.contains('finish') ||
       state.contains('succe')) {
-    return RuntimeStatus.ok;
+    return StatusKind.ok;
   }
-  return RuntimeStatus.note;
+  return StatusKind.note;
 }
 
-String _eventWord(RuntimeStatus status) => switch (status) {
-      RuntimeStatus.ok => 'done',
-      RuntimeStatus.skipped => 'cancelled',
-      _ => status.word,
+String _eventWord(StatusKind status) => switch (status) {
+      StatusKind.ok => 'done',
+      StatusKind.skipped => 'cancelled',
+      _ => status.runtimeWord,
     };
 
 /// The feed's newest [limit] events, newest first.
@@ -131,22 +132,20 @@ List<OverviewRow> overviewRows({
 
   if (offline) {
     rows.add(OverviewRow(
-        status: RuntimeStatus.fail,
-        label: 'Server',
-        value: "Can't reach $host"));
+        status: StatusKind.fail, label: 'Server', value: "Can't reach $host"));
   } else if (info == null && serverError != null && serverError.isNotEmpty) {
     rows.add(OverviewRow(
-        status: RuntimeStatus.fail, label: 'Server', value: serverError));
+        status: StatusKind.fail, label: 'Server', value: serverError));
   } else if (info == null) {
     rows.add(OverviewRow(
-        status: RuntimeStatus.unknown,
+        status: StatusKind.unknown,
         word: loading ? 'checking' : null,
         label: 'Server',
         value: loading ? 'Connecting to $host…' : 'No status from $host yet'));
   } else {
     final summary = info.status.split('\n').first.trim();
     rows.add(OverviewRow(
-        status: RuntimeStatus.ok,
+        status: StatusKind.ok,
         label: 'Server',
         value: [host, if (summary.isNotEmpty) summary].join(' · ')));
   }
@@ -167,10 +166,10 @@ List<OverviewRow> overviewRows({
         caps.healthyWorkerCount < caps.workerCount;
     rows.add(OverviewRow(
         status: models.isEmpty
-            ? RuntimeStatus.warn
+            ? StatusKind.warn
             : degraded
-                ? RuntimeStatus.warn
-                : RuntimeStatus.ok,
+                ? StatusKind.warn
+                : StatusKind.ok,
         label: 'Models',
         value: [modelText, if (pool.isNotEmpty) pool].join(' · ')));
   }
@@ -178,21 +177,21 @@ List<OverviewRow> overviewRows({
   if (approvals != null) {
     if (!approvals.supported) {
       rows.add(const OverviewRow(
-          status: RuntimeStatus.skipped,
+          status: StatusKind.skipped,
           word: 'n/a',
           label: 'Approvals',
           value: 'approve from the console (/approvals)'));
     } else if (approvals.pending.isNotEmpty) {
       final n = approvals.pending.length;
       rows.add(OverviewRow(
-          status: RuntimeStatus.warn,
+          status: StatusKind.warn,
           label: 'Approvals',
           value: '$n call${n == 1 ? '' : 's'} waiting',
           actionLabel: 'Review',
           onAction: onReviewApprovals));
     } else {
       rows.add(OverviewRow(
-          status: RuntimeStatus.ok,
+          status: StatusKind.ok,
           label: 'Approvals',
           value: approvals.open.isEmpty
               ? 'none waiting'
@@ -204,7 +203,7 @@ List<OverviewRow> overviewRows({
 
   if (workRunsError is SonderException && workRunsError.httpStatus == 403) {
     rows.add(const OverviewRow(
-        status: RuntimeStatus.skipped,
+        status: StatusKind.skipped,
         word: 'n/a',
         label: 'Work runs',
         value: 'need a developer or admin account'));
@@ -212,7 +211,7 @@ List<OverviewRow> overviewRows({
     final running = workRuns.where((run) => run.isRunning).toList();
     if (running.isEmpty) {
       rows.add(OverviewRow(
-          status: RuntimeStatus.note,
+          status: StatusKind.note,
           label: 'Work runs',
           value: workRuns.isEmpty
               ? 'No work runs'
@@ -222,7 +221,7 @@ List<OverviewRow> overviewRows({
     } else {
       final first = running.first;
       rows.add(OverviewRow(
-          status: RuntimeStatus.running,
+          status: StatusKind.running,
           label: 'Work runs',
           value: '${running.length} running · ${first.shortId} '
               '${compactDuration(first.elapsed(clock) ?? Duration.zero)}',
@@ -231,7 +230,7 @@ List<OverviewRow> overviewRows({
     }
   } else if (workRunsError != null) {
     rows.add(const OverviewRow(
-        status: RuntimeStatus.unknown,
+        status: StatusKind.unknown,
         label: 'Work runs',
         value: 'could not load'));
   }
@@ -242,10 +241,10 @@ List<OverviewRow> overviewRows({
     final resumable = autopilot?.resumableRuns ?? 0;
     rows.add(OverviewRow(
         status: active > 0
-            ? RuntimeStatus.running
+            ? StatusKind.running
             : resumable > 0
-                ? RuntimeStatus.warn
-                : RuntimeStatus.skipped,
+                ? StatusKind.warn
+                : StatusKind.skipped,
         label: 'Autopilot',
         value: active > 0
             ? '$active running'
@@ -258,10 +257,10 @@ List<OverviewRow> overviewRows({
     final interrupted = agents?.interruptedAgents ?? 0;
     rows.add(OverviewRow(
         status: activeAgents > 0
-            ? RuntimeStatus.running
+            ? StatusKind.running
             : interrupted > 0
-                ? RuntimeStatus.warn
-                : RuntimeStatus.note,
+                ? StatusKind.warn
+                : StatusKind.note,
         label: 'Agents',
         value: activeAgents > 0
             ? '$activeAgents running'
@@ -327,7 +326,7 @@ class RuntimeOverview extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 6),
               child: Row(children: [
-                const RuntimeStatusWord(RuntimeStatus.note),
+                const RuntimeStatusWord(StatusKind.note),
                 Expanded(
                     child: Text('No recent activity',
                         style: text.bodyMedium?.copyWith(color: tokens.text2))),
@@ -362,6 +361,8 @@ class RuntimeOverview extends StatelessWidget {
   }
 }
 
+/// One overview row on lane B's [StatusRow]: `✓ ok  Server  value [Open]`,
+/// the value stacking under the label on narrow widths.
 class _OverviewRowView extends StatelessWidget {
   final OverviewRow row;
   final bool narrow;
@@ -369,12 +370,6 @@ class _OverviewRowView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final tokens = SonderTokens.of(context);
-    final labelStyle = Theme.of(context).textTheme.labelLarge;
-    final value = Text(row.value,
-        style: tokens.mono(12.5, color: tokens.text),
-        maxLines: narrow ? 3 : 2,
-        overflow: TextOverflow.ellipsis);
     final action = row.actionLabel == null
         ? null
         : TextButton(
@@ -384,47 +379,14 @@ class _OverviewRowView extends StatelessWidget {
                 tapTargetSize: MaterialTapTargetSize.padded),
             child: Text(row.actionLabel!),
           );
-    final status = RuntimeStatusWord(row.status, word: row.word);
-    return Semantics(
-      container: true,
-      label: '${row.word ?? row.status.word}, ${row.label}',
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: 36),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 4),
-          child: narrow
-              ? Row(
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(children: [
-                            status,
-                            Flexible(child: Text(row.label, style: labelStyle)),
-                          ]),
-                          Padding(
-                              padding: const EdgeInsets.only(left: 92, top: 2),
-                              child: value),
-                        ],
-                      ),
-                    ),
-                    if (action != null) action,
-                  ],
-                )
-              : Row(
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    status,
-                    SizedBox(
-                        width: 110, child: Text(row.label, style: labelStyle)),
-                    Expanded(child: value),
-                    if (action != null) action,
-                  ],
-                ),
-        ),
-      ),
+    return StatusRow(
+      kind: row.status,
+      word: row.word ?? row.status.runtimeWord,
+      label: row.label,
+      value: row.value,
+      trailing: action,
+      // The overview decides narrow/wide from its own width.
+      stackBelow: narrow ? double.infinity : 0,
     );
   }
 }

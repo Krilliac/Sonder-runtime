@@ -339,8 +339,7 @@ class LocalManager {
       );
     }
     final system = bundledSystemDirectory();
-    final managedReachable =
-        managedReachabilityProbe ?? defaultServerReachable;
+    final managedReachable = managedReachabilityProbe ?? defaultServerReachable;
     if (await managedReachable()) {
       return const LocalActionResult(
         true,
@@ -352,8 +351,8 @@ class LocalManager {
       return const LocalActionResult(
         false,
         'A service is already listening on 127.0.0.1:11435, but it is not '
-            'verified as this app-managed Sonder server. Stop that service '
-            'before starting a managed local server.',
+        'verified as this app-managed Sonder server. Stop that service '
+        'before starting a managed local server.',
       );
     }
     if (!await system.exists()) {

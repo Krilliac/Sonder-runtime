@@ -68,18 +68,22 @@ void main() {
   group('status vocabulary mirrors style.py', () {
     test('glyphs and words', () {
       // style.py _UNICODE_GLYPHS + NOTICE_KINDS and plan §2.1.
-      expect(RuntimeStatus.ok.glyph, '✓');
-      expect(RuntimeStatus.fail.glyph, '✗');
-      expect(RuntimeStatus.fail.word, 'error');
-      expect(RuntimeStatus.refused.glyph, '⊘');
-      expect(RuntimeStatus.warn.glyph, '!');
-      expect(RuntimeStatus.skipped.glyph, '–');
-      expect(RuntimeStatus.skipped.word, 'off');
-      expect(RuntimeStatus.note.glyph, '·');
-      expect(RuntimeStatus.running.glyph, '◈');
-      expect(RuntimeStatus.running.word, 'working');
-      expect(RuntimeStatus.skipped.isProblem, isFalse);
-      expect(RuntimeStatus.refused.isProblem, isTrue);
+      expect(StatusKind.ok.glyph, '✓');
+      expect(StatusKind.fail.glyph, '✗');
+      expect(StatusKind.fail.word, 'error');
+      expect(StatusKind.refused.glyph, '⊘');
+      expect(StatusKind.warn.glyph, '!');
+      expect(StatusKind.skipped.glyph, '–');
+      // The shared word is style.py's "skipped"; Runtime shows the "off"
+      // synonym from the same row (plan §2.1, §2.4).
+      expect(StatusKind.skipped.word, 'skipped');
+      expect(StatusKind.skipped.runtimeWord, 'off');
+      expect(StatusKind.ok.runtimeWord, 'ok');
+      expect(StatusKind.note.glyph, '·');
+      expect(StatusKind.running.glyph, '◈');
+      expect(StatusKind.running.word, 'working');
+      expect(StatusKind.skipped.isProblem, isFalse);
+      expect(StatusKind.refused.isProblem, isTrue);
     });
   });
 
@@ -96,16 +100,16 @@ void main() {
         now: runtimeNow,
       );
       final byLabel = {for (final row in rows) row.label: row};
-      expect(byLabel['Server']!.status, RuntimeStatus.ok);
+      expect(byLabel['Server']!.status, StatusKind.ok);
       expect(
           byLabel['Server']!.value, startsWith('192.168.1.20:11435 · ready'));
       expect(byLabel['Models']!.value, 'sonder:latest, code');
-      expect(byLabel['Approvals']!.status, RuntimeStatus.warn);
+      expect(byLabel['Approvals']!.status, StatusKind.warn);
       expect(byLabel['Approvals']!.value, '1 call waiting');
       expect(byLabel['Approvals']!.actionLabel, 'Review');
-      expect(byLabel['Work runs']!.status, RuntimeStatus.running);
+      expect(byLabel['Work runs']!.status, StatusKind.running);
       expect(byLabel['Work runs']!.value, '1 running · wr-7c1e… 4m');
-      expect(byLabel['Autopilot']!.status, RuntimeStatus.skipped);
+      expect(byLabel['Autopilot']!.status, StatusKind.skipped);
       expect(byLabel['Autopilot']!.value, 'off');
       expect(byLabel['Agents']!.value, '1 running');
     });
@@ -113,7 +117,7 @@ void main() {
     test('offline keeps a word, never a green dot', () {
       final rows = overviewRows(
           serverUrl: 'http://mypc.local:11435', info: null, offline: true);
-      expect(rows.single.status, RuntimeStatus.fail);
+      expect(rows.single.status, StatusKind.fail);
       expect(rows.single.value, "Can't reach mypc.local:11435");
     });
 
@@ -126,8 +130,8 @@ void main() {
         approvals: const ApprovalsPage(supported: false),
       );
       final byLabel = {for (final row in rows) row.label: row};
-      expect(byLabel['Work runs']!.status, RuntimeStatus.skipped);
-      expect(byLabel['Approvals']!.status, RuntimeStatus.skipped);
+      expect(byLabel['Work runs']!.status, StatusKind.skipped);
+      expect(byLabel['Approvals']!.status, StatusKind.skipped);
       expect(rows.where((row) => row.status.isProblem), isEmpty);
     });
 
@@ -515,7 +519,7 @@ void main() {
     expect(workRunWord(run), 'working');
     expect(workRunDetail(run, runtimeNow), '4m of 30m budget');
     expect(workRunStatus(const WorkRun(id: 'x', status: 'budget_exceeded')),
-        RuntimeStatus.fail);
+        StatusKind.fail);
   });
 
   testWidgets('live refresh reads status, updates, extensions and extras',

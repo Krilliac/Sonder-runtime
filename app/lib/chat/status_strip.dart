@@ -3,7 +3,8 @@ import 'package:flutter/material.dart';
 
 import '../api.dart';
 import '../theme.dart';
-import 'lines.dart';
+import '../ui/status_line.dart';
+import '../ui/status_vocab.dart';
 import 'live_line.dart' show monoCellWidth;
 
 /// Build the REPL status state from what chat knows.
@@ -81,8 +82,8 @@ class ChatStatusStrip extends StatelessWidget {
               final cell = monoCellWidth(context, base);
               final cols =
                   cell <= 0 ? 80 : (constraints.maxWidth / cell).floor();
-              final fields = statusLineFields(state, cols);
-              final line = joinStatusFields(fields);
+              final fields = statusSegments(state, cols);
+              final line = statusLine(state, cols);
               return Semantics(
                 label: 'Status: $line',
                 child: ExcludeSemantics(
@@ -103,40 +104,57 @@ class ChatStatusStrip extends StatelessWidget {
   }
 
   static List<InlineSpan> _spans(
-      List<StatusField> fields, SonderTokens tokens, TextStyle base) {
+      List<StatusSegment> fields, SonderTokens tokens, TextStyle base) {
     final spans = <InlineSpan>[];
     for (var i = 0; i < fields.length; i++) {
       final f = fields[i];
       if (i > 0) {
-        spans.add(TextSpan(
-            text: f.kind == StatusFieldKind.elevated ? ' ' : ' $sepGlyph ',
-            style: base));
+        spans.add(TextSpan(text: ' ${statusGlyphs['sep']} ', style: base));
+      }
+      if (f.field == StatusField.elevated) {
+        // Lane B keeps "manual ELEVATED (reason)" as one segment, like the
+        // REPL; the mode word keeps its role, the badge is reversed danger.
+        final cut = f.text.indexOf(' ELEVATED');
+        final word = cut < 0 ? f.text : f.text.substring(0, cut);
+        spans.add(TextSpan(text: word, style: _mode(word, tokens, base)));
+        if (cut >= 0) {
+          spans.add(TextSpan(text: ' ', style: base));
+          spans.add(TextSpan(
+              text: f.text.substring(cut + 1),
+              style: base.copyWith(
+                  color: tokens.canvas,
+                  backgroundColor:
+                      modeStyle(word, elevated: true).color(tokens),
+                  fontWeight: FontWeight.w600)));
+        }
+        continue;
       }
       spans.add(TextSpan(text: f.text, style: _style(f, tokens, base)));
     }
     return spans;
   }
 
+  /// The mode word in its role (lane B's [modeStyle], style.py mode_roles).
+  static TextStyle _mode(String word, SonderTokens tokens, TextStyle base) {
+    final style = modeStyle(word);
+    return base.copyWith(
+        color: style.color(tokens),
+        fontWeight: style.strong ? FontWeight.w700 : FontWeight.w500);
+  }
+
   /// Only the tier (info) and the mode word (its mode role) carry colour.
-  static TextStyle _style(StatusField f, SonderTokens tokens, TextStyle base) {
-    switch (f.kind) {
-      case StatusFieldKind.tier:
+  static TextStyle _style(
+      StatusSegment f, SonderTokens tokens, TextStyle base) {
+    switch (f.field) {
+      case StatusField.tier:
         return base.copyWith(color: tokens.info);
-      case StatusFieldKind.mode:
-        return switch (f.text) {
-          'plan' => base.copyWith(color: tokens.muted),
-          'acceptEdits' => base.copyWith(color: tokens.warn),
-          'auto' =>
-            base.copyWith(color: tokens.warn, fontWeight: FontWeight.w700),
-          _ => base.copyWith(color: tokens.text, fontWeight: FontWeight.w500),
-        };
-      case StatusFieldKind.elevated:
-        return base.copyWith(
-            color: tokens.canvas,
-            backgroundColor: tokens.danger,
-            fontWeight: FontWeight.w600);
-      case StatusFieldKind.model:
-      case StatusFieldKind.other:
+      case StatusField.mode:
+      case StatusField.elevated:
+        return _mode(f.text, tokens, base);
+      case StatusField.model:
+      case StatusField.ctx:
+      case StatusField.agents:
+      case StatusField.project:
         return base;
     }
   }

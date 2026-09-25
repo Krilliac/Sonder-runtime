@@ -9,6 +9,7 @@ import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/settings.dart';
 import 'package:sonder_runtime/settings_screen.dart';
 import 'package:sonder_runtime/theme.dart';
+import 'package:sonder_runtime/ui/status_row.dart';
 
 class MemoryCredentials implements CredentialStore {
   final values = <String, String>{};
@@ -180,7 +181,11 @@ void main() {
     await pumpSettings(tester,
         connection: connection, serverUrl: 'http://127.0.0.1:11435');
     await tapTest(tester);
-    expect(find.textContaining('✓ reachable'), findsOneWidget);
+    // Lane B's StatusMark draws the glyph and the word as separate texts.
+    final reachable = find.widgetWithText(StatusMark, 'reachable');
+    expect(reachable, findsOneWidget);
+    expect(find.descendant(of: reachable, matching: find.text('✓')),
+        findsOneWidget);
     connection.testError = SonderException('Cannot reach server: refused');
     await tapTest(tester);
     expect(find.textContaining('unreachable'), findsOneWidget);
