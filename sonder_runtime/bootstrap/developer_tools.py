@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from ..adapters.developer_tools_executor import (
     DEVELOPER_TYPED_TOOLS,
@@ -73,26 +73,102 @@ def developer_tool_executor(services: DeveloperToolServices | None, fallback):
     return DeveloperToolExecutor(services, fallback, inventory_wire=inventory_wire)
 
 
-class DeveloperToolPermissionEvaluator(PermissionModesEvaluator):
-    """Grade ``test_run`` on the host-resolved command, not on its arguments.
+@dataclass(frozen=True)
+class ToolResolver:
+    """How one tool's request is resolved before the permission modes decide.
 
-    Before the permission modes decide, a ``test_run`` request is planned and
-    its arguments carry ``resolved_command`` (runner, redacted display argv,
-    project label, command digest). An operator's one-shot approval of a call
-    is therefore bound to the exact command: another project, selector or
-    runner digests differently and needs its own approval. A plan the host
-    refuses (bad selector, no runner, project outside the roots) is refused
-    here, before anyone is asked.
+    ``resolve(request) -> request`` plans the call and returns the request the
+    modes grade (typically with ``resolved_command`` injected, so a one-shot
+    approval binds to the host-resolved command). It raises ``Forbidden`` for
+    a plan the host refuses, before anyone is asked.
+
+    ``on_surface``: also resolve when an in-process surface already decided
+    the call (``gate="surface"``). The decision is then the surface's, but a
+    resolver whose ``after_allow`` mints authority (``build_fix``) still needs
+    the plan.
+
+    ``after_allow(request, verdict)`` runs once the call is allowed, with the
+    resolved request and the policy match; it may raise ``Forbidden`` to add a
+    second, separate decision (``build_network``) or record authority tied to
+    this approval (a build-fix grant).
     """
 
-    def __init__(self, services: DeveloperToolServices | None, *, policy_names) -> None:
+    resolve: Callable[[Any], Any]
+    on_surface: bool = False
+    after_allow: Callable[[Any, str], None] | None = None
+
+
+def _as_resolver(value) -> ToolResolver:
+    if isinstance(value, ToolResolver):
+        return value
+    if callable(value):
+        return ToolResolver(value)
+    raise TypeError("a permission resolver must be callable or a ToolResolver")
+
+
+class DeveloperToolPermissionEvaluator(PermissionModesEvaluator):
+    """Grade host-planned tools on the host-resolved command, not their arguments.
+
+    Resolution is a map from tool name to ``ToolResolver``; ``test_run`` is one
+    entry, and ``build_job``/``build_fix`` are added by the build tools
+    (``bootstrap.build_tools.build_permission_resolvers``). Before the
+    permission modes decide, a resolved request carries ``resolved_command``
+    (runner or template, redacted display argv, project label, command
+    digest). An operator's one-shot approval of a call is therefore bound to
+    the exact command: another project, selector, target, config or platform
+    digests differently and needs its own approval. A plan the host refuses
+    (bad selector, unknown target, project outside the roots) is refused here,
+    before anyone is asked.
+
+    ``grant_authorities`` are consulted first, for requests that carry an
+    in-process grant token (``approval_token``) minted by an earlier approval
+    -- the build-fix grant. An authority answers with a policy match for a call
+    its grant covers, or ``""`` to fall through to normal grading; it can
+    never widen a call it does not recognise.
+    """
+
+    def __init__(self, services: DeveloperToolServices | None, *, policy_names,
+                 resolvers: Mapping[str, Any] | None = None,
+                 grant_authorities: tuple[Any, ...] = ()) -> None:
         super().__init__(policy_names=policy_names)
         self._developer_services = services
+        table: dict[str, ToolResolver] = {"test_run": ToolResolver(self._resolved)}
+        for name, resolver in dict(resolvers or {}).items():
+            table[str(name)] = _as_resolver(resolver)
+        self._resolvers = table
+        self._grant_authorities = tuple(grant_authorities)
+
+    @property
+    def resolvers(self) -> Mapping[str, ToolResolver]:
+        return dict(self._resolvers)
+
+    def add_resolvers(self, resolvers: Mapping[str, Any]) -> None:
+        """Register more resolvers (composition only; never from a tool call)."""
+        for name, resolver in dict(resolvers or {}).items():
+            self._resolvers[str(name)] = _as_resolver(resolver)
+
+    def add_grant_authority(self, authority) -> None:
+        """Register a grant authority (composition only)."""
+        if not callable(getattr(authority, "authorize_granted", None)):
+            raise TypeError("a grant authority must define authorize_granted(request)")
+        self._grant_authorities = (*self._grant_authorities, authority)
 
     def authorize_request(self, request):
-        if request.tool_name == "test_run" and getattr(request.scope, "gate", "gateway") != "surface":
-            request = self._resolved(request)
-        return super().authorize_request(request)
+        if getattr(request, "approval_token", None):
+            for authority in self._grant_authorities:
+                match = authority.authorize_granted(request)
+                if match:
+                    return match
+        resolver = self._resolvers.get(request.tool_name)
+        surface = getattr(request.scope, "gate", "gateway") == "surface"
+        resolved = request
+        if resolver is not None and (not surface or resolver.on_surface):
+            resolved = resolver.resolve(request)
+        verdict = super().authorize_request(resolved)
+        if resolver is not None and resolver.after_allow is not None \
+                and (not surface or resolver.on_surface):
+            resolver.after_allow(resolved, verdict)
+        return verdict
 
     def _resolved(self, request):
         services = self._developer_services
@@ -112,6 +188,6 @@ class DeveloperToolPermissionEvaluator(PermissionModesEvaluator):
 
 
 __all__ = [
-    "DEVELOPER_TYPED_TOOLS", "DeveloperToolPermissionEvaluator", "compose_developer_tools",
-    "developer_tool_executor",
+    "DEVELOPER_TYPED_TOOLS", "DeveloperToolPermissionEvaluator", "ToolResolver",
+    "compose_developer_tools", "developer_tool_executor",
 ]

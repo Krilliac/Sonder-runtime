@@ -16830,6 +16830,12 @@
       "type": "SpandaConfig"
     },
     {
+      "default": null,
+      "field": "build_tools",
+      "section": "root",
+      "type": "BuildToolsConfig"
+    },
+    {
       "default": "[redacted]",
       "field": "api_key",
       "section": "secrets",
@@ -18007,13 +18013,13 @@
   "counts": {
     "capabilities": 216,
     "commands": 325,
-    "configuration": 219,
+    "configuration": 220,
     "events": 43,
-    "native_tools": 55,
+    "native_tools": 61,
     "schemas": 4,
     "tools": 216
   },
-  "digest": "f3dfc14465ef46d6a12840969d089cf5b8d9de0a6b6364d2b3d4e2b230009322",
+  "digest": "874f0fd13711a050934e21e6b98f4a04f2ce36b2cb94c36fc44349aeea27e282",
   "events": [
     {
       "name": "session.started",
@@ -18750,6 +18756,283 @@
         "required": [
           "path"
         ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Repair a failing C/C++ build target with a bounded loop: compile the focus file, propose a patch confined to editable project sources (never build scripts or build-time-tool sources), verify with compile_one then a target build, keep the best candidate and revert regressions. Returns a job id for build_fix_result.",
+      "name": "build_fix",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_network": {
+            "type": "boolean"
+          },
+          "apply": {
+            "type": "boolean"
+          },
+          "attempts": {
+            "maximum": 8,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "build_dir": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "config": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "editable_globs": {
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 16,
+            "type": "array"
+          },
+          "focus_file": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "platform": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "project": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "revert_after": {
+            "type": "boolean"
+          },
+          "target": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "maximum": 14400,
+            "minimum": 60,
+            "type": "integer"
+          },
+          "verify_dependents": {
+            "type": "boolean"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Write a build_fix job's stored original files back (all, or the named ones) when each file still has the content the fix left; refuses a file changed since.",
+      "name": "build_fix_restore",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "files": {
+            "items": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 6,
+            "type": "array"
+          },
+          "job_id": {
+            "pattern": "^build-fix-[0-9a-f]{16,32}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Wait (bounded) for a build_fix job you started and return its report: status, stop reason, attempts, per-file digests and diffs, and the final build; cancel=true stops your own fix and its child build instead.",
+      "name": "build_fix_result",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "cancel": {
+            "type": "boolean"
+          },
+          "job_id": {
+            "pattern": "^build-fix-[0-9a-f]{16,32}$",
+            "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Configure, build, compile one file, or trace one file's includes, with a host-owned command rendered from closed templates for the project's build system; every value must name a member of build_model. Runs as a background job and returns typed, attributed diagnostics or a job id for build_job_result.",
+      "name": "build_job",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "configure",
+              "build",
+              "compile_one",
+              "include_trace"
+            ],
+            "type": "string"
+          },
+          "allow_network": {
+            "type": "boolean"
+          },
+          "build_dir": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "build_preset": {
+            "pattern": "^[A-Za-z0-9_.-]{1,128}$",
+            "type": "string"
+          },
+          "config": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "file": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "generator": {
+            "enum": [
+              "Ninja",
+              "Ninja Multi-Config",
+              "Unix Makefiles",
+              "NMake Makefiles",
+              "Visual Studio 17 2022",
+              "Visual Studio 16 2019"
+            ],
+            "type": "string"
+          },
+          "jobs": {
+            "maximum": 256,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "platform": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "preset": {
+            "pattern": "^[A-Za-z0-9_.-]{1,128}$",
+            "type": "string"
+          },
+          "profile": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "project": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "target": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "maximum": 7200,
+            "minimum": 30,
+            "type": "integer"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "description": "Wait (bounded) for a build_job you started and return its report, or its status while it is still running; cancel=true stops your own job instead.",
+      "name": "build_job_result",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "cancel": {
+            "type": "boolean"
+          },
+          "job_id": {
+            "pattern": "^build-job-[0-9a-f]{16,32}$",
+            "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Describe a C/C++ project's build without running anything: build system, generator, configs, platforms, targets (utility and build-time-tool flags), toolchains, compile units, PCH and presets, read from the CMake File API reply, compile_commands.json or .sln/.vcxproj. Labels only, no host paths.",
+      "name": "build_model",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "build_dir": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "detail": {
+            "enum": [
+              "summary",
+              "targets",
+              "compile_units",
+              "toolchain",
+              "presets"
+            ],
+            "type": "string"
+          },
+          "max_items": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "preset": {
+            "pattern": "^[A-Za-z0-9_.-]{1,128}$",
+            "type": "string"
+          },
+          "project": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "refresh": {
+            "type": "boolean"
+          },
+          "target": {
+            "maxLength": 128,
+            "type": "string"
+          }
+        },
         "type": "object"
       }
     },
@@ -45863,11 +46146,11 @@
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
     "server.py": "7b6c950fd4f525de26bffded5ceb423db6594674875774ff261101c3c38573f5",
     "sonder_runtime/application/tools/generated_catalogs.py": "57a490ddd581e3e7a5d4b7b73379d205048f1db6de8e7e73c71f1124c6d84900",
-    "sonder_runtime/bootstrap/native_mcp.py": "c328e6f25a40df3a78633f99daec416d1269f91192acb104be63ddadbf1b31fa",
+    "sonder_runtime/bootstrap/native_mcp.py": "212ce648df8a7b78552a022d4bd9018bb199c3e900ae90cb908cd58be7566b1a",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",
-    "sonder_runtime/platform/config.py": "ea8e87527a8f6502387abc2561d1f8154ffc99dca7ac55f9cf8da68b30755d62",
+    "sonder_runtime/platform/config.py": "ab3bb22d1ec7ccebd23406c202daaaf48352ae7eeebab9ea72af3056177ab7ac",
     "sonder_runtime/platform/memory_replication_config.py": "f9fc0a642812bdc456ac082f0f8c52f051822f0160e16882b634895feb0cea61"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",

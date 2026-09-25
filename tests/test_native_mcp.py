@@ -110,6 +110,7 @@ def test_native_catalog_is_bounded_and_deterministic():
     assert [item.name for item in native_tool_registry().list_all()] == [
         "agent_lane",
         "approximate_location_lookup", "archive_create", "archive_extract", "archive_list", "artifact_risk_inspect",
+        "build_fix", "build_fix_restore", "build_fix_result", "build_job", "build_job_result", "build_model",
         "compute_artifact_fetch", "compute_cancel", "compute_status", "compute_submit", "data_inspect", "data_query", "dependency_inventory",
         "directory_create", "directory_digest", "directory_tree", "edit_file", "fetch_artifact",
         "file_batch_write", "file_copy", "file_delete", "file_digest", "file_edit",
@@ -147,7 +148,12 @@ def test_native_catalog_has_exact_packaged_adapter_executor_parity():
     # gateway (tests/test_developer_tool_typed_gateway.py), not the packaged one.
     developer_tools = {"output_digest", "test_run", "test_run_result", "tool_inventory"}
     assert developer_tools <= native_names
-    canonical_native = native_names - compatibility_aliases - developer_tools - {
+    # The C++ build tools are served by BuildToolExecutor through the typed
+    # gateway (tests/test_build_executor.py), not the packaged one.
+    build_tools = {"build_model", "build_job", "build_job_result", "build_fix",
+                   "build_fix_result", "build_fix_restore"}
+    assert build_tools <= native_names
+    canonical_native = native_names - compatibility_aliases - developer_tools - build_tools - {
         "vision_analyze", "compute_submit", "compute_status", "compute_cancel",
         "compute_artifact_fetch", "agent_lane",
     }

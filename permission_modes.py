@@ -396,7 +396,33 @@ NATIVE_MCP_WORK = {
     "tool_inventory": "safe",
     "output_digest": "safe",
     "test_run_result": "safe",
+    # C++ build tools (bootstrap/build_tools.py). The two readers of the
+    # caller's own jobs and the model reader never write or launch;
+    # ``build_fix_restore`` writes pre-images back, so it is a mutation.
+    "build_model": "safe",
+    "build_job_result": "safe",
+    "build_fix_result": "safe",
+    "build_fix_restore": "mutation",
+    # ``build_job`` and ``build_fix`` launch host processes (the build, and
+    # through it the project's own custom commands). They are execution by
+    # ``NATIVE_EXECUTION_TOOLS`` below; they are native-only names, so they
+    # cannot sit in ``EXECUTION_TOOLS``, whose drift test pins it to the
+    # legacy MCP registry.
+    "build_job": "execution",
+    "build_fix": "execution",
+    # Not a tool: the separate decision a build asking for network access
+    # needs (``allow_network=true``). Graded like the build itself, but on its
+    # own name, so an operator can deny network builds with one rule while
+    # still allowing builds, and an approval of one never covers the other.
+    "build_network": "execution",
 }
+
+# Native-only tools that start a host process. ``risk_of`` grades them
+# ``execution`` exactly like ``EXECUTION_TOOLS``; they live apart only because
+# ``EXECUTION_TOOLS`` is pinned to the legacy registry by a drift test and
+# these names (``build_job``/``build_fix``) deliberately do not exist there --
+# the legacy ``build_run`` keeps its own name and meaning.
+NATIVE_EXECUTION_TOOLS = frozenset({"build_job", "build_fix"})
 
 # Risk classes an unattended caller is refused for when the mode says ``ask``.
 # ``safe`` never reaches the ask branch; ``ask`` proceeds on the record (see
@@ -1013,7 +1039,7 @@ def risk_of(tool_name: str) -> str:
         catalogued = command.risk
     if catalogued == "dangerous":
         return "dangerous"
-    if name in EXECUTION_TOOLS or name in EXECUTION_COMMANDS:
+    if name in EXECUTION_TOOLS or name in EXECUTION_COMMANDS or name in NATIVE_EXECUTION_TOOLS:
         return "execution"
     if catalogued:
         return catalogued

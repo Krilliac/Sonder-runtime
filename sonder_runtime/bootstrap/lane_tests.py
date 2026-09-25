@@ -36,11 +36,14 @@ class CatalogPermissionEvaluator(DeveloperToolPermissionEvaluator):
     """Bind operator approval to the host-resolved command, not its short alias.
 
     Both the catalog's ``run_tests`` and the developer ``test_run`` are graded
-    on the command the host resolved for them.
+    on the command the host resolved for them; so are ``build_job`` and
+    ``build_fix`` when the build tools pass their ``resolvers`` (and the
+    build-fix grant authority) in, exactly as the main facade's evaluator.
     """
 
-    def __init__(self, catalog, services=None):
-        super().__init__(services, policy_names={**POLICY_NAMES, "run_tests": "workspace_run"})
+    def __init__(self, catalog, services=None, *, resolvers=None, grant_authorities=()):
+        super().__init__(services, policy_names={**POLICY_NAMES, "run_tests": "workspace_run"},
+                         resolvers=resolvers, grant_authorities=tuple(grant_authorities))
         self.catalog = catalog
 
     def authorize_request(self, request):
@@ -63,7 +66,7 @@ class CatalogPermissionEvaluator(DeveloperToolPermissionEvaluator):
 
 
 def compose_lane_test_tools(base, catalog, process_provider, *, audit, files=None,
-                            developer_tools=None):
+                            developer_tools=None, resolvers=None, grant_authorities=()):
     """Add a fixed test catalog while retaining the runtime permission gate.
 
     Empty catalogs leave the original facade untouched. This host composition
@@ -71,7 +74,8 @@ def compose_lane_test_tools(base, catalog, process_provider, *, audit, files=Non
     themselves. The current operator policy also has to admit workspace_run.
     ``files`` serves every other tool of the lane graph (the developer tools
     included); ``developer_tools`` lets the evaluator bind ``test_run``
-    approvals to its resolved command in lanes too.
+    approvals to its resolved command in lanes too; ``resolvers`` and
+    ``grant_authorities`` do the same for the build tools.
     """
     if not isinstance(catalog, LaneTestCatalog):
         raise TypeError("catalog must be a validated LaneTestCatalog")
@@ -96,7 +100,10 @@ def compose_lane_test_tools(base, catalog, process_provider, *, audit, files=Non
         registry,
         LaneTestExecutor(catalog, process_provider, files=files),
         policy=policy,
-        permissions=(CatalogPermissionEvaluator(catalog, developer_tools),),
+        permissions=(CatalogPermissionEvaluator(
+            catalog, developer_tools, resolvers=resolvers,
+            grant_authorities=grant_authorities,
+        ),),
         redactor=PatternOutputRedactor(Redactor().redact),
         receipts=ReceiptStore(),
         audit=audit,

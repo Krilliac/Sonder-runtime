@@ -169,6 +169,7 @@ from ..domain.provider_override_policy import ProviderOverridePolicy
 from ..platform import paths as runtime_paths
 from ..platform.config import SonderConfig
 from .artifact_mobility_source import ArtifactMobilitySourceBinding
+from .build_tools import build_permission_resolvers, build_tool_executor
 from .developer_tools import DeveloperToolPermissionEvaluator, developer_tool_executor
 from .typed_tools import POLICY_NAMES, typed_tool_policy, typed_tool_registry
 
@@ -248,6 +249,47 @@ def _compose_developer_tools(config, runtime_redactor, get_job_registry, get_pro
         logger.error("developer tools could not be composed; they will report unavailable",
                      exc_info=True)
         return None
+
+
+def _compose_build_tools(config, runtime_redactor, developer_tools, get_job_registry,
+                         get_process_job_provider, grants, *, tools_getter, model_gateway_getter):
+    """Compose the C++ build tools, or None when this build lacks them.
+
+    They sit on the developer tools' inventory and digest; without those, or
+    without the build packages, the build tools report unavailable and every
+    other tool is unaffected. Composition itself is lazy (no probes, reads or
+    launches), and a failure here never blocks the runtime.
+    """
+    if developer_tools is None:
+        return None
+    try:
+        from .build_tools import compose_build_tools, install_build_brief
+    except ImportError:
+        logger.warning("build tools are not composed: a required package is missing",
+                       exc_info=True)
+        return None
+    try:
+        services = compose_build_tools(
+            config=config, inventory=developer_tools.inventory, digest=developer_tools.digest,
+            process_job_provider=get_process_job_provider, job_registry=get_job_registry,
+            redactor=runtime_redactor, grants=grants, tools_getter=tools_getter,
+            model_gateway_getter=model_gateway_getter,
+        )
+        if services is not None:
+            install_build_brief(services, developer_tools.inventory)
+        return services
+    except Exception:
+        logger.error("build tools could not be composed; they will report unavailable",
+                     exc_info=True)
+        return None
+
+
+def _build_grant_registry():
+    """The in-process build-fix grant registry (never persisted)."""
+    from ..adapters.security.permission_policy import permission_policy
+    from .build_tools import BuildFixGrantRegistry
+
+    return BuildFixGrantRegistry(current_mode=lambda: permission_policy.current_mode())
 
 
 def build_application(
@@ -1050,8 +1092,14 @@ def build_application(
                 lane_test_catalog = LaneTestCatalog.load(catalog_path)
                 lane_tools = compose_lane_test_tools(
                     tools, lane_test_catalog, get_process_job_provider(), audit=tool_audit,
-                    files=developer_tool_executor(developer_tools, PackagedToolExecutor()),
+                    files=build_tool_executor(
+                        build_tools,
+                        developer_tool_executor(developer_tools, PackagedToolExecutor()),
+                        grants=build_grants,
+                    ),
                     developer_tools=developer_tools,
+                    resolvers=build_permission_resolvers(build_tools, grants=build_grants),
+                    grant_authorities=(build_grants,),
                 )
             def authorize_lane_grant(lane, context):
                 from ..adapters.filesystem.file_ops import allowed_roots
@@ -1617,15 +1665,36 @@ def build_application(
         config, runtime_redactor, get_job_registry, get_process_job_provider,
     )
 
+    # C++ build tools (bootstrap/build_tools.py): build model, build jobs and
+    # the bounded build-fix loop, in front of the developer tools. The grant
+    # registry holds the narrow authority a build_fix approval mints for its
+    # own in-scope writes; the fix loop's typed writes reach this facade
+    # through the getter once it exists.
+    typed_tools_ref: dict = {}
+    build_grants = _build_grant_registry()
+    build_tools = _compose_build_tools(
+        config, runtime_redactor, developer_tools, get_job_registry, get_process_job_provider,
+        build_grants, tools_getter=lambda: typed_tools_ref.get("tools"),
+        model_gateway_getter=lambda: gateway,
+    )
+
     tools = ToolApplicationFacade.compose(
         typed_tool_registry(),
-        developer_tool_executor(developer_tools, PackagedToolExecutor()),
+        build_tool_executor(
+            build_tools, developer_tool_executor(developer_tools, PackagedToolExecutor()),
+            grants=build_grants,
+        ),
         policy=typed_tool_policy(),
         redactor=PatternOutputRedactor(runtime_redactor.redact),
         receipts=ReceiptStore(),
         audit=tool_audit,
-        permissions=(DeveloperToolPermissionEvaluator(developer_tools, policy_names=POLICY_NAMES),),
+        permissions=(DeveloperToolPermissionEvaluator(
+            developer_tools, policy_names=POLICY_NAMES,
+            resolvers=build_permission_resolvers(build_tools, grants=build_grants),
+            grant_authorities=(build_grants,),
+        ),),
     )
+    typed_tools_ref["tools"] = tools
 
     from .artifact_mobility import compose_artifact_mobility
     mobility_binding, mobility_status, mobility_list, mobility_available, mobility_close = (

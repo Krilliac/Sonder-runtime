@@ -536,7 +536,132 @@ _DEVELOPER_TOOLS = (
         }, "additionalProperties": False},
     ),
 )
+# C++ build tools (bootstrap/build_tools.py; docs/architecture/CPP-BUILD-FIX.md).
+# The model names members of the parsed build model (targets, configs,
+# platforms, presets, files) and a closed action set; the host renders the
+# argv from closed templates. None of these names is a legacy tool name: the
+# legacy ``build_run(root, command)`` keeps its own name and meaning.
+_BUILD_GENERATORS = [
+    "Ninja", "Ninja Multi-Config", "Unix Makefiles", "NMake Makefiles",
+    "Visual Studio 17 2022", "Visual Studio 16 2019",
+]
+_BUILD_DETAILS = ["summary", "targets", "compile_units", "toolchain", "presets"]
+_BUILD_ACTIONS = ["configure", "build", "compile_one", "include_trace"]
+_BUILD_PRESET = {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"}
+_BUILD_PROJECT = {"type": "string", "maxLength": 1024}
+_BUILD_TARGET = {"type": "string", "maxLength": 128}
+_BUILD_WAIT = {"type": "integer", "minimum": 0, "maximum": 120}
+_BUILD_JOB_ID = {"type": "string", "pattern": "^build-job-[0-9a-f]{16,32}$"}
+_BUILD_FIX_ID = {"type": "string", "pattern": "^build-fix-[0-9a-f]{16,32}$"}
+_BUILD_TOOLS = (
+    ToolDescriptor(
+        "build_model",
+        "Describe a C/C++ project's build without running anything: build system, "
+        "generator, configs, platforms, targets (utility and build-time-tool flags), "
+        "toolchains, compile units, PCH and presets, read from the CMake File API "
+        "reply, compile_commands.json or .sln/.vcxproj. Labels only, no host paths.",
+        {"type": "object", "properties": {
+            "project": _BUILD_PROJECT,
+            "build_dir": _BUILD_PROJECT,
+            "preset": _BUILD_PRESET,
+            "detail": {"type": "string", "enum": _BUILD_DETAILS},
+            "target": _BUILD_TARGET,
+            "max_items": {"type": "integer", "minimum": 1, "maximum": 500},
+            "refresh": _BOOL,
+        }, "additionalProperties": False},
+        effects=frozenset({ToolEffect.READ_FILES}),
+        execution_class=ExecutionClass.PURE,
+    ),
+    ToolDescriptor(
+        "build_job",
+        "Configure, build, compile one file, or trace one file's includes, with a "
+        "host-owned command rendered from closed templates for the project's build "
+        "system; every value must name a member of build_model. Runs as a background "
+        "job and returns typed, attributed diagnostics or a job id for build_job_result.",
+        {"type": "object", "properties": {
+            "project": _BUILD_PROJECT,
+            "build_dir": _BUILD_PROJECT,
+            "action": {"type": "string", "enum": _BUILD_ACTIONS},
+            "target": _BUILD_TARGET,
+            "config": {"type": "string", "maxLength": 64},
+            "platform": {"type": "string", "maxLength": 64},
+            "preset": _BUILD_PRESET,
+            "build_preset": _BUILD_PRESET,
+            "file": _BUILD_PROJECT,
+            "generator": {"type": "string", "enum": _BUILD_GENERATORS},
+            "profile": {"type": "string", "maxLength": 64},
+            "jobs": {"type": "integer", "minimum": 1, "maximum": 256},
+            "timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 7200},
+            "wait_seconds": _BUILD_WAIT,
+            "allow_network": _BOOL,
+        }, "additionalProperties": False},
+        effects=frozenset({ToolEffect.READ_FILES, ToolEffect.WRITE_FILES, ToolEffect.EXECUTE}),
+        execution_class=ExecutionClass.HOST,
+    ),
+    ToolDescriptor(
+        "build_job_result",
+        "Wait (bounded) for a build_job you started and return its report, or its "
+        "status while it is still running; cancel=true stops your own job instead.",
+        {"type": "object", "properties": {
+            "job_id": _BUILD_JOB_ID,
+            "wait_seconds": _BUILD_WAIT,
+            "cancel": _BOOL,
+        }, "required": ["job_id"], "additionalProperties": False},
+        effects=frozenset({ToolEffect.READ_FILES}),
+    ),
+    ToolDescriptor(
+        "build_fix",
+        "Repair a failing C/C++ build target with a bounded loop: compile the focus "
+        "file, propose a patch confined to editable project sources (never build "
+        "scripts or build-time-tool sources), verify with compile_one then a target "
+        "build, keep the best candidate and revert regressions. Returns a job id for "
+        "build_fix_result.",
+        {"type": "object", "properties": {
+            "project": _BUILD_PROJECT,
+            "build_dir": _BUILD_PROJECT,
+            "target": _BUILD_TARGET,
+            "config": {"type": "string", "maxLength": 64},
+            "platform": {"type": "string", "maxLength": 64},
+            "focus_file": _BUILD_PROJECT,
+            "attempts": {"type": "integer", "minimum": 1, "maximum": 8},
+            "apply": _BOOL,
+            "revert_after": _BOOL,
+            "editable_globs": {"type": "array", "maxItems": 16,
+                               "items": {"type": "string", "minLength": 1, "maxLength": 128}},
+            "timeout_seconds": {"type": "integer", "minimum": 60, "maximum": 14400},
+            "verify_dependents": _BOOL,
+            "wait_seconds": _BUILD_WAIT,
+            "allow_network": _BOOL,
+        }, "required": ["target"], "additionalProperties": False},
+        effects=frozenset({ToolEffect.READ_FILES, ToolEffect.WRITE_FILES, ToolEffect.EXECUTE}),
+        execution_class=ExecutionClass.HOST,
+    ),
+    ToolDescriptor(
+        "build_fix_result",
+        "Wait (bounded) for a build_fix job you started and return its report: status, "
+        "stop reason, attempts, per-file digests and diffs, and the final build; "
+        "cancel=true stops your own fix and its child build instead.",
+        {"type": "object", "properties": {
+            "job_id": _BUILD_FIX_ID,
+            "wait_seconds": _BUILD_WAIT,
+            "cancel": _BOOL,
+        }, "required": ["job_id"], "additionalProperties": False},
+        effects=frozenset({ToolEffect.READ_FILES}),
+    ),
+    ToolDescriptor(
+        "build_fix_restore",
+        "Write a build_fix job's stored original files back (all, or the named ones) "
+        "when each file still has the content the fix left; refuses a file changed since.",
+        {"type": "object", "properties": {
+            "job_id": _BUILD_FIX_ID,
+            "files": {"type": "array", "maxItems": 6,
+                      "items": {"type": "string", "minLength": 1, "maxLength": 1024}},
+        }, "required": ["job_id"], "additionalProperties": False},
+        effects=frozenset({ToolEffect.READ_FILES, ToolEffect.WRITE_FILES}),
+    ),
+)
 _NATIVE_TOOLS += _INSPECTION_TOOLS + _COMPUTE_TOOLS + (_AGENT_LANE_TOOL,) + _DEVELOPER_TOOLS
+_NATIVE_TOOLS += _BUILD_TOOLS
 # Only the inspections the inspection service can run go to it. The catalog
 # groups the web, weather, location, process and artifact tools with the
 # inspections for presentation, but they run through the packaged executor;
@@ -560,6 +685,8 @@ _TYPED_TOOL_NAMES = frozenset({
     "edit_file", "file_batch_write", "file_copy", "file_delete", "file_move",
     "json_patch", "make_directory", "text_patch", "write_file",
     "output_digest", "test_run", "test_run_result", "tool_inventory",
+    "build_model", "build_job", "build_job_result",
+    "build_fix", "build_fix_result", "build_fix_restore",
 })
 
 _LEGACY_ALIASES = {

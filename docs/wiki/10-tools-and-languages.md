@@ -324,6 +324,35 @@ In the REPL:
 
 The details are in [Build diagnostics and output digest](../build-diagnostics-digest.md).
 
+## C/C++ builds — `build_model` / `build_job` / `build_fix`
+
+These three tools let an agent inspect, build and repair a C/C++ project.
+
+- **`build_model`** describes the build without running anything. It reads the
+  CMake File API reply, `compile_commands.json` or `.sln`/`.vcxproj`, and
+  returns targets, configs, platforms, toolchains, compile units, PCH and
+  presets as labels.
+- **`build_job`** runs `configure`, `build`, `compile_one` or `include_trace`
+  as a permission-gated background job. `build_job_result` waits for the
+  typed, attributed report.
+- **`build_fix`** repairs a failing target. It runs a bounded loop that edits
+  only project sources: never build scripts, generated files or the sources of
+  build-time tools. Each attempt is verified with `compile_one`, then with a
+  target build. `build_fix_restore` writes the stored originals back.
+
+The host builds every command from closed templates. The model only names
+things the parsed model contains. Utility and custom targets such as `deploy`
+are refused unless the operator allows them.
+
+Under the default `manual` mode, a build from the console is asked once. The
+same build from HTTP or native MCP is refused and the refusal names the
+remedies. Approving a `build_fix` lets that fix's own in-scope writes proceed
+without further prompts, until the fix job ends.
+
+The REPL facade provides `/build`, `/fix-build` and `/fix-build-restore`. See
+[C++ build model, build jobs and the build-fix loop](../architecture/CPP-BUILD-FIX.md)
+and [Build tools security](../security/BUILD-TOOLS.md).
+
 ## Other tool families
 
 - **Local service probe:** `local_service_probe` performs bounded,

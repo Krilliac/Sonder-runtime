@@ -43,7 +43,15 @@ MUTATING_TOOLS = (
 # as execution by the permission catalog, the other three are safe.
 DEVELOPER_TOOLS = ("output_digest", "test_run", "test_run_result", "tool_inventory")
 
-TYPED_TOOLS = READ_ONLY_TOOLS + MUTATING_TOOLS + DEVELOPER_TOOLS
+# The C++ build tools (bootstrap/build_tools.py). Their executor is
+# ``BuildToolExecutor``; ``build_job`` and ``build_fix`` are graded execution,
+# ``build_fix_restore`` mutation and the other three safe (permission_modes).
+BUILD_TOOLS = (
+    "build_fix", "build_fix_restore", "build_fix_result", "build_job", "build_job_result",
+    "build_model",
+)
+
+TYPED_TOOLS = READ_ONLY_TOOLS + MUTATING_TOOLS + DEVELOPER_TOOLS + BUILD_TOOLS
 
 # Canonical (typed) name -> the name the permission catalog grades.
 POLICY_NAMES = {
@@ -79,6 +87,12 @@ GUARD_KNOBS = {
     "test_run": (),
     "test_run_result": (),
     "tool_inventory": (),
+    "build_fix": (),
+    "build_fix_restore": (),
+    "build_fix_result": (),
+    "build_job": (),
+    "build_job_result": (),
+    "build_model": (),
 }
 
 
@@ -137,11 +151,20 @@ def typed_tool_policy() -> ResourcePolicy:
         )
         for name in DEVELOPER_TOOLS
     )
+    rules.extend(
+        PolicyRule(
+            "build:%s" % name, Decision.ALLOW, tool=name,
+            reason="build tool; host-rendered commands from closed templates over the "
+                   "parsed build model, and the permission gate grades build_job and "
+                   "build_fix as execution",
+        )
+        for name in BUILD_TOOLS
+    )
     logger.info(f"typed tool policy built, rules={len(rules)}")
     return ResourcePolicy(rules)
 
 
 __all__ = [
-    "DEVELOPER_TOOLS", "GUARD_KNOBS", "LEGACY_TO_CANONICAL", "MUTATING_TOOLS", "POLICY_NAMES",
+    "BUILD_TOOLS", "DEVELOPER_TOOLS", "GUARD_KNOBS", "LEGACY_TO_CANONICAL", "MUTATING_TOOLS", "POLICY_NAMES",
     "READ_ONLY_TOOLS", "TYPED_TOOLS", "typed_tool_policy", "typed_tool_registry",
 ]

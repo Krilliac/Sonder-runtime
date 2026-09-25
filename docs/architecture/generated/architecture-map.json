@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 336,
+      "file_count": 338,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -74,8 +74,10 @@
         "sonder_runtime/adapters/bounded_cloud_generation.py",
         "sonder_runtime/adapters/build/__init__.py",
         "sonder_runtime/adapters/build/candidates.py",
+        "sonder_runtime/adapters/build/clangd.py",
         "sonder_runtime/adapters/build/collector.py",
         "sonder_runtime/adapters/build/environment.py",
+        "sonder_runtime/adapters/build/executor.py",
         "sonder_runtime/adapters/build/launcher.py",
         "sonder_runtime/adapters/build/network.py",
         "sonder_runtime/adapters/build/planner.py",
@@ -759,7 +761,7 @@
       ]
     },
     {
-      "file_count": 60,
+      "file_count": 61,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -777,6 +779,7 @@
         "sonder_runtime/bootstrap/artifact_mobility.py",
         "sonder_runtime/bootstrap/artifact_mobility_source.py",
         "sonder_runtime/bootstrap/artifact_transfer.py",
+        "sonder_runtime/bootstrap/build_tools.py",
         "sonder_runtime/bootstrap/capabilities.py",
         "sonder_runtime/bootstrap/child_migration.py",
         "sonder_runtime/bootstrap/child_migration_activation.py",
@@ -1049,7 +1052,7 @@
       ]
     },
     {
-      "file_count": 54,
+      "file_count": 56,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -1072,6 +1075,7 @@
         "sonder_runtime/interfaces/http/facades/a2a_jsonrpc.py",
         "sonder_runtime/interfaces/http/facades/agent_lanes.py",
         "sonder_runtime/interfaces/http/facades/artifact_transfer.py",
+        "sonder_runtime/interfaces/http/facades/build_tools.py",
         "sonder_runtime/interfaces/http/facades/compute_fabric.py",
         "sonder_runtime/interfaces/http/facades/compute_inventory.py",
         "sonder_runtime/interfaces/http/facades/control_plane.py",
@@ -1095,6 +1099,7 @@
         "sonder_runtime/interfaces/repl/command_router.py",
         "sonder_runtime/interfaces/repl/facades/__init__.py",
         "sonder_runtime/interfaces/repl/facades/agent_lanes.py",
+        "sonder_runtime/interfaces/repl/facades/build_tools.py",
         "sonder_runtime/interfaces/repl/facades/developer_tools.py",
         "sonder_runtime/interfaces/repl/facades/status_model.py",
         "sonder_runtime/interfaces/repl/handler.py",

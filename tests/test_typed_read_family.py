@@ -523,7 +523,9 @@ def test_the_family_is_declared_once_and_matches_the_native_route():
     # The developer tools are typed too but front no legacy file handler; they
     # are pinned by tests/test_developer_tool_typed_gateway.py.
     file_family = typed_tools.READ_ONLY_TOOLS + typed_tools.MUTATING_TOOLS
-    assert set(typed_tools.TYPED_TOOLS) - set(file_family) == set(typed_tools.DEVELOPER_TOOLS)
+    # The C++ build tools likewise (tests/test_build_tool_descriptors.py).
+    assert set(typed_tools.TYPED_TOOLS) - set(file_family) == (
+        set(typed_tools.DEVELOPER_TOOLS) | set(typed_tools.BUILD_TOOLS))
     legacy = {typed_tools.POLICY_NAMES.get(name, name) for name in file_family}
     assert legacy == LEGACY_HANDLERS
     # The native surface grades an approved call by the same name the typed

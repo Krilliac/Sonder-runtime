@@ -446,6 +446,130 @@ class Secrets:
         }
 
 
+# --- C++ build tools (bootstrap/build_tools.py) ---------------------------------
+#
+# The SONDER_BUILD_* keys. Everything here is operator configuration: a model
+# never reaches any of it. Unset keys keep the conservative defaults; a
+# malformed value is a configuration error, never a silent widening.
+BUILD_NETWORK_MODES = ("enforce", "default", "advisory")
+BUILD_FIX_WORLDS = ("host", "container")
+BUILD_MAX_TIMEOUT_CAP_SECONDS = 86_400
+BUILD_DEFAULT_MAX_TIMEOUT_SECONDS = 7_200
+BUILD_DEFAULT_FIX_MODEL_ROUTE = "codegen"
+_BUILD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_().]{0,127}$")
+_BUILD_TARGET_RE = re.compile(r"^[A-Za-z0-9_.+-]{1,128}$")
+_BUILD_ROUTE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$")
+_BUILD_MAX_NAMES = 64
+
+
+@dataclass(frozen=True)
+class BuildToolsConfig:
+    """Operator settings for build_model/build_job/build_fix (SONDER_BUILD_*)."""
+
+    # SONDER_BUILD_PROFILES: path of the operator profile file (0600 on POSIX).
+    profiles_file: str = ""
+    # SONDER_BUILD_ENV_PASSTHROUGH: extra variable names a job may inherit;
+    # the adapter's denylist (proxies, symbol servers, secrets) still applies.
+    env_passthrough: tuple[str, ...] = ()
+    # SONDER_BUILD_NETWORK: enforce | default | advisory.
+    network: str = "default"
+    # SONDER_BUILD_MAX_TIMEOUT_SECONDS: operator cap on a job's deadline.
+    max_timeout_seconds: int = BUILD_DEFAULT_MAX_TIMEOUT_SECONDS
+    # SONDER_BUILD_FIX_WORLD: host | container.
+    fix_world: str = "host"
+    # SONDER_BUILD_UTILITY_TARGETS: utility/custom targets the operator allows.
+    utility_targets: tuple[str, ...] = ()
+    # SONDER_BUILD_USER_PRESETS: read CMakeUserPresets.json (default on).
+    user_presets: bool = True
+    # SONDER_BUILD_CLANGD_CONFIG: let clangd read a project .clangd (default off).
+    clangd_config: bool = False
+    # SONDER_BUILD_FIX_MODEL_ROUTE: the model route build_fix proposes with.
+    fix_model_route: str = BUILD_DEFAULT_FIX_MODEL_ROUTE
+    # SONDER_BUILD_FIX_PROPOSE_ONLY_OK: allow build_fix apply=false.
+    fix_propose_only_ok: bool = False
+
+
+def _build_names(raw: str, key: str, pattern: re.Pattern, errors: list[str]) -> tuple[str, ...]:
+    names: list[str] = []
+    for part in raw.replace(";", ",").split(","):
+        name = part.strip()
+        if not name:
+            continue
+        if not pattern.fullmatch(name):
+            errors.append(f"{key} entry {name[:40]!r} is not a valid name")
+            continue
+        if name not in names:
+            names.append(name)
+    if len(names) > _BUILD_MAX_NAMES:
+        errors.append(f"{key} lists more than {_BUILD_MAX_NAMES} names")
+        names = names[:_BUILD_MAX_NAMES]
+    return tuple(names)
+
+
+def build_tools_config_from_env(env, errors: list[str] | None = None) -> BuildToolsConfig:
+    """Parse the SONDER_BUILD_* keys of ``env``; problems go to ``errors``.
+
+    A bad value keeps the default for that key (which is always the narrower
+    choice) and is reported, so a typo never widens what a build may do.
+    """
+    problems = errors if errors is not None else []
+    config = BuildToolsConfig()
+    text = {key: str(value) for key, value in dict(env or {}).items()
+            if isinstance(key, str) and key.startswith("SONDER_BUILD_")}
+    profiles = text.get("SONDER_BUILD_PROFILES", "").strip()
+    if profiles:
+        if "\x00" in profiles or len(profiles) > 4096:
+            problems.append("SONDER_BUILD_PROFILES is not a usable path")
+        else:
+            config = replace(config, profiles_file=profiles)
+    passthrough = text.get("SONDER_BUILD_ENV_PASSTHROUGH", "")
+    if passthrough.strip():
+        config = replace(config, env_passthrough=_build_names(
+            passthrough, "SONDER_BUILD_ENV_PASSTHROUGH", _BUILD_NAME_RE, problems))
+    network = text.get("SONDER_BUILD_NETWORK", "").strip().lower()
+    if network:
+        if network in BUILD_NETWORK_MODES:
+            config = replace(config, network=network)
+        else:
+            problems.append("SONDER_BUILD_NETWORK must be one of %s" % ", ".join(BUILD_NETWORK_MODES))
+    timeout = text.get("SONDER_BUILD_MAX_TIMEOUT_SECONDS", "").strip()
+    if timeout:
+        try:
+            value = int(timeout)
+        except ValueError:
+            problems.append("SONDER_BUILD_MAX_TIMEOUT_SECONDS is not an integer")
+        else:
+            if 30 <= value <= BUILD_MAX_TIMEOUT_CAP_SECONDS:
+                config = replace(config, max_timeout_seconds=value)
+            else:
+                problems.append("SONDER_BUILD_MAX_TIMEOUT_SECONDS must be within 30..%d"
+                                % BUILD_MAX_TIMEOUT_CAP_SECONDS)
+    world = text.get("SONDER_BUILD_FIX_WORLD", "").strip().lower()
+    if world:
+        if world in BUILD_FIX_WORLDS:
+            config = replace(config, fix_world=world)
+        else:
+            problems.append("SONDER_BUILD_FIX_WORLD must be host or container")
+    utility = text.get("SONDER_BUILD_UTILITY_TARGETS", "")
+    if utility.strip():
+        config = replace(config, utility_targets=_build_names(
+            utility, "SONDER_BUILD_UTILITY_TARGETS", _BUILD_TARGET_RE, problems))
+    if "SONDER_BUILD_USER_PRESETS" in text and text["SONDER_BUILD_USER_PRESETS"].strip():
+        config = replace(config, user_presets=env_bool(text["SONDER_BUILD_USER_PRESETS"]))
+    if "SONDER_BUILD_CLANGD_CONFIG" in text and text["SONDER_BUILD_CLANGD_CONFIG"].strip():
+        config = replace(config, clangd_config=env_bool(text["SONDER_BUILD_CLANGD_CONFIG"]))
+    route = text.get("SONDER_BUILD_FIX_MODEL_ROUTE", "").strip()
+    if route:
+        if _BUILD_ROUTE_RE.fullmatch(route):
+            config = replace(config, fix_model_route=route)
+        else:
+            problems.append("SONDER_BUILD_FIX_MODEL_ROUTE is not a valid route name")
+    if text.get("SONDER_BUILD_FIX_PROPOSE_ONLY_OK", "").strip():
+        config = replace(config, fix_propose_only_ok=env_bool(
+            text["SONDER_BUILD_FIX_PROPOSE_ONLY_OK"]))
+    return config
+
+
 @dataclass(frozen=True)
 class SonderConfig:
     schema_version: int = 1
@@ -481,6 +605,7 @@ class SonderConfig:
         default_factory=ControlStateRehearsalConfig
     )
     spanda: SpandaConfig = field(default_factory=SpandaConfig)
+    build_tools: BuildToolsConfig = field(default_factory=BuildToolsConfig)
 
     def as_redacted_dict(self) -> dict:
         out: dict = {
@@ -1385,6 +1510,7 @@ def _apply_environment(
         features=features,
         secrets=secrets,
         child_storage=apply_child_storage_environment(config.child_storage, env, errors),
+        build_tools=build_tools_config_from_env(env, errors),
     )
 
 

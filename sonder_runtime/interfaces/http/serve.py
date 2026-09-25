@@ -4755,6 +4755,61 @@ class Handler(BaseHTTPRequestHandler):
                 "Idempotency-Key must be at most %d characters" % _MAX_IDEMPOTENCY_KEY_LENGTH,
             )
 
+    def _handle_build_request(self, method, path, payload=None):
+        """``/v1/build/*``: C++ build tools through the typed gateway.
+
+        Developer authority is required (these routes run host builds). The
+        call runs as the authenticated principal with ``source="http"``, so the
+        permission modes grade it unattended: under ``manual`` a build is
+        refused with the standard remedies. See
+        ``interfaces/http/facades/build_tools.py``.
+        """
+        if not isinstance(path, str) or not path.startswith("/v1/build/"):
+            return False
+        auth = self._request_auth_context()
+        if not auth.get("authorized"):
+            self._send_auth_error()
+            return True
+        if not _developer_authorized(auth):
+            self._send_json_payload({"error": {"code": "FORBIDDEN",
+                                               "message": "developer or admin authority is required"}},
+                                    status=403)
+            return True
+        from sonder_runtime.bootstrap.app import default_app
+        from sonder_runtime.interfaces.http.facades.build_tools import BuildHttpRoutes
+
+        try:
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query,
+                                          keep_blank_values=True, max_num_fields=16)
+        except ValueError:
+            self._send_json_payload({"error": {"code": "INVALID_BUILD_REQUEST"}}, status=400)
+            return True
+        if method == "GET" and self._unread_request_body_bytes() != 0:
+            self._send_json_payload({"error": {"code": "INVALID_BUILD_REQUEST",
+                                               "message": "build reads do not accept a body"}},
+                                    status=400)
+            return True
+        account = auth.get("account")
+        if account is not None:
+            identity = _account_identity(account)
+            if not identity:
+                self._send_json_payload({"error": {"code": "FORBIDDEN"}}, status=403)
+                return True
+            principal = "account:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        else:
+            principal = "owner"
+        application = default_app()
+        state = getattr(getattr(application, "config", None), "state", None)
+        roots = tuple(str(Path(root).resolve()) for root in getattr(state, "workspace_roots", ())) \
+            if _admin_authorized(auth) else ()
+        routes = BuildHttpRoutes(lambda: getattr(application, "tools", None))
+        status, body = routes.dispatch(
+            method, path, query, payload, principal_id=principal, workspace_roots=roots,
+            auth_level="admin" if _admin_authorized(auth) else "developer",
+        )
+        self._send_json_payload(body, status=status, headers={"Cache-Control": "no-store"})
+        return True
+
     def _handle_agent_lane_request(self, method, path, payload=None):
         """Bind lane commands to authenticated identity and configured scope."""
         if path != "/v1/agent-lanes" and not path.startswith("/v1/agent-lanes/"):
@@ -4950,6 +5005,8 @@ class Handler(BaseHTTPRequestHandler):
         if self._auth_rate_limited():
             return
         if self._handle_agent_lane_request("GET", path):
+            return
+        if self._handle_build_request("GET", path):
             return
         if path == "/v1/compute/nodes":
             self._with_compute_inventory_admission(self._handle_compute_inventory_read)
@@ -6172,6 +6229,8 @@ class Handler(BaseHTTPRequestHandler):
             if callable(operation_context) else None
         )
         if self._handle_agent_lane_request("POST", path, req):
+            return
+        if self._handle_build_request("POST", path, req):
             return
         compute_route = _compute_job_route(path)
         if compute_route is not None and compute_route[0] in ("submit", "cancel"):
