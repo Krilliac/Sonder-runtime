@@ -608,7 +608,26 @@ def _report_problems(
     return 0
 
 
+def _backup_failure(verb: str, exc: BaseException) -> int:
+    """Report an expected backup/restore fault without a traceback."""
+    detail = str(exc) or type(exc).__name__
+    if isinstance(exc, OSError) and exc.strerror:
+        detail = "%s: %s" % (exc.strerror, exc.filename or "")
+        detail = detail.rstrip(": ")
+    print("%s failed: %s" % (verb, detail), file=sys.stderr)
+    return 1
+
+
 def cmd_backup(args) -> int:
+    from .adapters.backup import BackupError
+
+    try:
+        return _cmd_backup(args)
+    except (BackupError, OSError) as exc:
+        return _backup_failure("backup", exc)
+
+
+def _cmd_backup(args) -> int:
     from .bootstrap.app import default_app
 
     config = None
@@ -664,6 +683,15 @@ def cmd_backup(args) -> int:
 
 
 def cmd_restore(args) -> int:
+    from .adapters.backup import BackupError
+
+    try:
+        return _cmd_restore(args)
+    except (BackupError, OSError) as exc:
+        return _backup_failure("restore", exc)
+
+
+def _cmd_restore(args) -> int:
     from .bootstrap.app import default_app
 
     backups = default_app().backup
@@ -688,10 +716,13 @@ def cmd_restore(args) -> int:
             return 2
         restored = backups.restore_to_empty(args.path, args.destination)
         _emit({"restored": restored}, as_json=args.json)
+        # --json promises one parseable document on stdout; keep the
+        # operator hint visible without corrupting it.
         print(
             "State restored. Point SONDER_HOME at the destination (or move "
             "it into place with the service stopped) per "
             "docs/runbooks/backup-restore.md.",
+            file=sys.stderr if args.json else sys.stdout,
         )
         return 0
     raise AssertionError(args.restore_command)
@@ -734,6 +765,9 @@ def cmd_smoke(args) -> int:
             failures.append("operations store roundtrip failed")
     except Exception as exc:
         failures.append(f"operations store: {exc}")
+    if getattr(args, "json", False):
+        _emit({"ok": not failures, "failures": failures}, as_json=True)
+        return 1 if failures else 0
     if failures:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
@@ -1247,6 +1281,7 @@ def cmd_update(args) -> int:
             print(
                 "Rollback complete. Restart the service to run the restored "
                 "release.",
+                file=sys.stderr if args.json else sys.stdout,
             )
             return 0
         if args.update_command == "cancel":

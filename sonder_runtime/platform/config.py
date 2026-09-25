@@ -1874,6 +1874,14 @@ def load_config(
             raise ConfigError([f"configuration file not found: {path}"]) from None
         except tomllib.TOMLDecodeError as exc:
             raise ConfigError([f"{path}: TOML parse error: {exc}"]) from None
+        except UnicodeDecodeError:
+            raise ConfigError([f"{path}: TOML parse error: not valid UTF-8"]) from None
+        except IsADirectoryError:
+            raise ConfigError([f"configuration path is a directory: {path}"]) from None
+        except OSError as exc:
+            raise ConfigError([
+                f"configuration file unreadable: {path} ({exc.strerror or type(exc).__name__})"
+            ]) from None
         _walk_toml_for_secrets(raw, "", errors)
         sources.append(str(path))
         for key, value in raw.items():
@@ -1926,6 +1934,8 @@ def load_config(
         private_source_paths.append(str(spath.resolve()))
         if not spath.exists():
             errors.append(f"secrets file not found: {spath}")
+        elif not spath.is_file():
+            errors.append(f"secrets path is not a regular file: {spath}")
         else:
             if os.name == "posix":
                 mode = spath.stat().st_mode & 0o777
@@ -1939,6 +1949,11 @@ def load_config(
                 sources.append(str(spath))
             except ConfigError as exc:
                 errors.extend(exc.errors)
+            except OSError as exc:
+                errors.append(
+                    f"secrets file unreadable: {spath} "
+                    f"({exc.strerror or type(exc).__name__})"
+                )
 
     process_env = dict(os.environ) if env is None else dict(env)
     merged_env.update(process_env)
@@ -1975,6 +1990,17 @@ def load_config(
 
 
 _OVERRIDE_PATTERN = re.compile(r"^[a-z_]+\.[a-z_]+$")
+_OVERRIDE_TRUE = frozenset({"1", "true", "yes", "on"})
+_OVERRIDE_FALSE = frozenset({"0", "false", "no", "off"})
+
+
+def _override_bool(raw_value: str) -> bool:
+    normalized = raw_value.strip().lower()
+    if normalized in _OVERRIDE_TRUE:
+        return True
+    if normalized in _OVERRIDE_FALSE:
+        return False
+    raise ValueError("not a boolean")
 
 
 def _apply_overrides(
@@ -1995,9 +2021,15 @@ def _apply_overrides(
         current = getattr(section, key)
         try:
             if isinstance(current, bool):
-                value: object = _env_bool(raw_value)
+                # Explicit operator input is exact: the lenient environment
+                # reading turned any typo (``maybe``) into ``false``.
+                value: object = _override_bool(raw_value)
             elif isinstance(current, int):
                 value = int(raw_value)
+            elif isinstance(current, float):
+                value = float(raw_value)
+                if not math.isfinite(value):
+                    raise ValueError("non-finite float")
             elif isinstance(current, tuple):
                 value = tuple(
                     part.strip() for part in raw_value.split(",") if part.strip()
