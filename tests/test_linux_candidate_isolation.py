@@ -441,3 +441,26 @@ def test_selfmod_records_linux_uid_attestation_from_real_supervisor(area, monkey
     assert result["passed"] is True, result
     assert result["isolation"] == "linux-uid"
     assert records and records[0][-1] == "linux-uid"
+
+
+def test_concurrent_supervisor_claim_on_same_uid_fails_closed(area):
+    """A second run on a uid that another supervisor holds must not launch.
+
+    Two runs sharing a candidate uid could ptrace or signal each other's
+    candidates, and each teardown would kill the other's tree.
+    """
+    from scripts import selfmod_linux_isolation as linux
+
+    claim = linux._claim_identity(CANDIDATE_UID)
+    try:
+        marker = area / "launched"
+        with pytest.raises(linux.LinuxIsolationUnavailable, match="claimed by another"):
+            _run(_python(f"open({str(marker)!r}, 'w').close()"), area)
+        assert not marker.exists()
+    finally:
+        os.close(claim)
+    info = linux._CLAIM_DIR.lstat()
+    assert info.st_uid == 0 and not info.st_mode & 0o022
+    result = _run(_python("pass"), area)
+    assert result["passed"] is True, result
+    assert _no_candidate_processes()

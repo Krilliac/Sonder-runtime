@@ -72,6 +72,11 @@ _TEARDOWN_SECONDS = 10.0
 _REAPER_EXIT_SECONDS = 10.0
 _MAX_PROTECTED_ENTRIES = 20_000
 _REAPER_BUFFER_BYTES = 64 * 1024
+# Root-only directory holding one flock per candidate uid.  Two supervisors
+# sharing a uid would let one candidate ptrace or signal the other's process
+# (same uid) and would make each teardown kill the other's tree, so the
+# spare-uid check and the whole run happen under an exclusive claim.
+_CLAIM_DIR = Path("/run/sonder-selfmod-candidate")
 
 # prctl(2) options (linux/prctl.h); stable kernel ABI.
 _PR_SET_PDEATHSIG = 1
@@ -354,6 +359,39 @@ def _require_spare_identity(uid: int, gid: int) -> None:
         )
 
 
+def _claim_identity(uid: int) -> int:
+    """Take the exclusive per-uid claim; return its fd (release by closing).
+
+    The claim lives in a root-owned, not group/other-writable directory so
+    that no candidate can pre-create or hold it.  A busy claim fails closed.
+    """
+    import fcntl
+
+    try:
+        _CLAIM_DIR.mkdir(mode=0o700, exist_ok=True)
+        info = _CLAIM_DIR.lstat()
+    except OSError as exc:
+        raise LinuxIsolationUnavailable(
+            f"cannot create candidate claim directory {_CLAIM_DIR}: {type(exc).__name__}"
+        ) from exc
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
+            or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+        raise LinuxIsolationUnavailable(f"candidate claim directory is not root-only: {_CLAIM_DIR}")
+    try:
+        fd = os.open(_CLAIM_DIR / f"{uid}.lock",
+                     os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError as exc:
+        raise LinuxIsolationUnavailable(f"cannot open candidate claim: {type(exc).__name__}") from exc
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        raise LinuxIsolationUnavailable(
+            f"candidate uid {uid} is claimed by another supervisor run"
+        ) from None
+    return fd
+
+
 def _candidate_environment(home: Path, tmp: Path) -> dict[str, str]:
     env = {"PATH": _DEFAULT_PATH}
     for name in _PASSTHROUGH_ENV:
@@ -447,6 +485,25 @@ def run_isolated(
     """
     _require_host()
     uid, gid = candidate_identity(candidate_uid, candidate_gid)
+    if uid <= 0 or gid <= 0:
+        raise LinuxIsolationUnavailable("candidate uid/gid must be unprivileged (non-zero)")
+    claim = _claim_identity(uid)
+    try:
+        return _run_claimed(
+            command, cwd=cwd, timeout=timeout, protected_paths=protected_paths,
+            process_memory_mb=process_memory_mb, job_memory_mb=job_memory_mb,
+            active_processes=active_processes, uid=uid, gid=gid,
+        )
+    finally:
+        os.close(claim)
+
+
+def _run_claimed(
+    command: Sequence[str], *, cwd: str | os.PathLike[str], timeout: int,
+    protected_paths: Sequence[str | os.PathLike[str]],
+    process_memory_mb: int | None, job_memory_mb: int | None,
+    active_processes: int | None, uid: int, gid: int,
+) -> dict[str, object]:
     _require_spare_identity(uid, gid)
     process_memory_mb = _bounded(process_memory_mb, DEFAULT_PROCESS_MEMORY_MB, _MAX_PROCESS_MEMORY_MB, "process_memory_mb")
     job_memory_mb = _bounded(job_memory_mb, DEFAULT_JOB_MEMORY_MB, _MAX_JOB_MEMORY_MB, "job_memory_mb")
