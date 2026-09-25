@@ -2712,6 +2712,8 @@ def _runtime_command(arg: str) -> str:
     text = str(arg or "").strip()
     if not text or text.lower() in {"status", "show", "list"}:
         return runtime_policy_status()
+    if text.lower().split() == ["status", "refresh"]:
+        return _runtime_policy_refresh_status()
     action, _, rest = text.partition(" ")
     action = action.lower()
     rest = rest.strip()
@@ -2754,7 +2756,8 @@ def _runtime_command(arg: str) -> str:
     if action in {"help", "?"}:
         return (
             "runtime policy commands:\n"
-            "  /runtime status\n"
+            "  /runtime status   (cached model readiness; no model call)\n"
+            "  /runtime status refresh   (re-check the local model inventory now)\n"
             "  /runtime set fast=<model> code=<model> general=<model>\n"
             "  /runtime set reasoning=<model> vision=<model>   (specialist "
             "tiers; assign an empty value to leave one unset)\n"
@@ -19784,9 +19787,12 @@ _WORK_INSPECTION_TOOLS = frozenset({
 # Membership was established by running each tool in a cold interpreter against
 # traps on file writes, process spawns, outbound sockets and non-DDL SQL, on its
 # SUCCESS path. Candidates that look read-only and failed that check are
-# deliberately absent: debug_inspect and npu_status spawn PowerShell,
-# apply_learned writes the embedding cache and calls the model endpoint, and
-# runtime_policy_status calls the model endpoint. admin_accounts is absent
+# deliberately absent: debug_inspect and npu_status spawn PowerShell, and
+# apply_learned writes the embedding cache and calls the model endpoint.
+# runtime_policy_status used to call the model endpoint too; it now renders
+# cached readiness (the live probe moved to `/runtime status refresh`) and was
+# re-verified by tests/test_runtime_policy_status_trap_check.py, which runs it
+# under audit-hook traps in a fresh interpreter. admin_accounts is absent
 # because it answers "login required" and its success path could not be
 # exercised -- unverified is not the same as verified-safe. permission_mode is
 # absent because with a mode argument it rewrites the saved mode, which would
@@ -19800,6 +19806,7 @@ _RUNTIME_OBSERVATION_TOOLS = frozenset({
     "learn_tiers", "live_reload_status", "mcp_runtime_status",
     "reasoning_show", "sonder_sessions", "sonder_stats",
     "turn_inspect", "workflow_list", "memory_export",
+    "runtime_policy_status",
 })
 
 # Tools that resolve a caller-supplied root through harness_tools._resolve_root,
@@ -22988,16 +22995,105 @@ def runtime_policy_data() -> dict:
                 data["capability_errors"]["embedding"] = "does not declare embedding capability"
     except Exception as exc:
         data["inventory_error"] = "%s: %s" % (type(exc).__name__, exc)
+    _remember_runtime_readiness(data)
     return data
 
 
-@mcp.tool()
-def runtime_policy_status() -> str:
-    """Show shared local model mappings and execution-lane tier choices."""
-    _maybe_live_reload()
-    data = runtime_policy_data()
+# The last live model-inventory result, kept in process memory only.
+#
+# ``runtime_policy_status`` is graded ``safe`` (``_RUNTIME_OBSERVATION_TOOLS``)
+# on the strength of an execution check: no file write, no process spawn, no
+# outbound socket, no non-DDL SQL. Asking the model endpoint for its catalog is
+# an outbound socket, so the default status renders this snapshot and its age
+# instead, and the live probe is the separate ``/runtime status refresh``
+# action, which keeps the ``/runtime`` branch's strictest grade. Never persist
+# this to disk: a status read that writes a cache file would fail that same
+# check.
+_RUNTIME_READINESS_CACHE: dict = {}
+
+
+def _runtime_readiness_key(data) -> tuple:
+    """What a readiness verdict was computed against: the configured models."""
+    local_models = data.get("local_models") or {}
+    return (
+        tuple(sorted((str(k), str(v or "")) for k, v in local_models.items())),
+        str(data.get("embedding_model") or ""),
+    )
+
+
+def _remember_runtime_readiness(data) -> None:
+    _RUNTIME_READINESS_CACHE.clear()
+    _RUNTIME_READINESS_CACHE.update({
+        "key": _runtime_readiness_key(data),
+        "checked_at": time.monotonic(),
+        "fields": {
+            "missing_models": list(data.get("missing_models") or ()),
+            "capability_errors": dict(data.get("capability_errors") or {}),
+            "inventory_error": str(data.get("inventory_error") or ""),
+        },
+    })
+
+
+def _runtime_readiness_age(seconds) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return "%ds ago" % seconds
+    if seconds < 3600:
+        return "%dm ago" % (seconds // 60)
+    if seconds < 86400:
+        return "%dh %dm ago" % (seconds // 3600, (seconds % 3600) // 60)
+    return "%dd ago" % (seconds // 86400)
+
+
+def _runtime_policy_cached_data() -> dict:
+    """Policy plus the cached readiness verdict, touching no socket or file.
+
+    ``create=False`` so a missing policy file renders the defaults rather than
+    being written by a read. A cached verdict computed for different models
+    than the policy now names is not reused.
+    """
+    policy = _refresh_runtime_policy(create=False)
+    data = {
+        **policy,
+        "local_models": dict(policy["local_models"]),
+        "routing": dict(policy["routing"]),
+        "embedding_model": policy["embedding_model"],
+        "missing_models": [],
+        "capability_errors": {},
+    }
+    cached = dict(_RUNTIME_READINESS_CACHE)
+    if not cached:
+        data["readiness_state"] = "unchecked"
+    elif cached.get("key") != _runtime_readiness_key(data):
+        data["readiness_state"] = "stale"
+    else:
+        fields = cached.get("fields") or {}
+        data["missing_models"] = list(fields.get("missing_models") or ())
+        data["capability_errors"] = dict(fields.get("capability_errors") or {})
+        if fields.get("inventory_error"):
+            data["inventory_error"] = fields["inventory_error"]
+        data["readiness_state"] = "cached"
+        data["readiness_age_seconds"] = time.monotonic() - float(cached["checked_at"])
+    return data
+
+
+def _format_runtime_policy_status(data, *, live=False) -> str:
     output = runtime_policy.format_policy(data)
+    state = "live" if live else data.get("readiness_state", "unchecked")
+    if state == "unchecked":
+        return output + "\n  readiness: not checked yet \u00b7 /runtime status refresh"
+    if state == "stale":
+        return output + (
+            "\n  readiness: not checked for the current models \u00b7 "
+            "/runtime status refresh"
+        )
     output += "\n" + "\n".join(_runtime_model_readiness_lines(data))
+    if live:
+        output += "\n  checked: just now (live model inventory)"
+    else:
+        output += "\n  checked: %s (cached) \u00b7 /runtime status refresh" % (
+            _runtime_readiness_age(data.get("readiness_age_seconds") or 0)
+        )
     if data.get("missing_models"):
         output += "\n  WARNING missing local model(s): %s" % ", ".join(
             sorted(set(data["missing_models"]))
@@ -23005,6 +23101,29 @@ def runtime_policy_status() -> str:
     if data.get("inventory_error"):
         output += "\n  WARNING model inventory unavailable: %s" % data["inventory_error"]
     return output
+
+
+@mcp.tool()
+def runtime_policy_status() -> str:
+    """Show shared local model mappings, execution-lane tiers and cached model readiness.
+
+    Read-only: renders the last model-inventory result with its age and never
+    contacts the model endpoint. ``/runtime status refresh`` re-checks it.
+    """
+    _maybe_live_reload()
+    return _format_runtime_policy_status(_runtime_policy_cached_data())
+
+
+def _runtime_policy_refresh_status() -> str:
+    """Probe the local model inventory now, then render the policy.
+
+    Not a registered tool and not a read-only one: it opens a socket to the
+    model endpoint. ``/runtime status refresh`` reaches it, and
+    ``command_catalog.narrow_branch_tools`` deliberately leaves that form at
+    the ``/runtime`` branch's strictest grade.
+    """
+    _maybe_live_reload()
+    return _format_runtime_policy_status(runtime_policy_data(), live=True)
 
 
 def npu_fallback_status_data() -> dict:
@@ -23153,7 +23272,9 @@ def runtime_policy_update(
         _refresh_runtime_policy(create=False)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         return "ERROR: %s" % exc
-    return runtime_policy_status()
+    # The update already validated against the live catalog; show (and cache)
+    # the live readiness it now implies rather than a verdict for old models.
+    return _runtime_policy_refresh_status()
 
 
 @mcp.tool()

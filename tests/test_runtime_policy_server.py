@@ -372,15 +372,17 @@ def test_runtime_model_readiness_is_unknown_without_inventory():
     }) == ["  readiness: unknown (local model inventory unavailable)"]
 
 
-def test_runtime_policy_status_includes_live_model_readiness(
+def test_runtime_status_refresh_includes_live_model_readiness_and_caches_it(
     isolated_runtime_policy, monkeypatch,
 ):
     policy = runtime_policy.load(create=True)
     runtime_policy.update(local_models={"reasoning": "", "vision": ""})
+    monkeypatch.setattr(server, "_RUNTIME_READINESS_CACHE", {})
+    probes = []
     monkeypatch.setattr(
         server,
         "_runtime_installed_model_records",
-        lambda: tuple(
+        lambda: probes.append(1) or tuple(
             (model, {"capabilities": ["embedding"]})
             if model == policy["embedding_model"]
             else (model, {"capabilities": ["completion"]})
@@ -390,13 +392,33 @@ def test_runtime_policy_status_includes_live_model_readiness(
         ),
     )
 
-    status = server.runtime_policy_status()
+    assert "readiness: not checked yet \u00b7 /runtime status refresh" in (
+        server.runtime_policy_status()
+    )
+    assert probes == []
 
+    status = server._runtime_command("status refresh")
+
+    assert probes == [1]
     assert "  readiness:" in status
     assert "    local chat/code: ready" in status
     assert "    semantic memory: ready (%s)" % policy["embedding_model"] in status
     assert "    reasoning: not configured (optional)" in status
     assert "    vision: not configured (optional)" in status
+    assert "  checked: just now (live model inventory)" in status
+
+    cached = server.runtime_policy_status()
+
+    assert probes == [1]
+    assert "    local chat/code: ready" in cached
+    assert "s ago (cached) \u00b7 /runtime status refresh" in cached
+
+    # A verdict computed for other models is not presented as current.
+    runtime_policy.update(local_models={"vision": "other-vision:latest"})
+    assert "readiness: not checked for the current models" in (
+        server.runtime_policy_status()
+    )
+    assert probes == [1]
 
 
 def test_installed_model_check_requires_the_requested_tag():

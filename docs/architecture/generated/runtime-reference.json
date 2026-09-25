@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "5258b79008b27955ade6c64d0c033b90699134d28d8d514d862598649b601429",
+    "catalog_digest": "fde833ea03d58de3c8aa3defd408f48aaa3093b50047e429242bb190f4288ffa",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "5258b79008b27955ade6c64d0c033b90699134d28d8d514d862598649b601429",
+      "catalog_digest": "fde833ea03d58de3c8aa3defd408f48aaa3093b50047e429242bb190f4288ffa",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -5571,7 +5571,7 @@
           "name": "run_project"
         },
         {
-          "description": "Show shared local model mappings and execution-lane tier choices.",
+          "description": "Show shared local model mappings, execution-lane tiers and cached model readiness.\n\n    Read-only: renders the last model-inventory result with its age and never\n    contacts the model endpoint. ``/runtime status refresh`` re-checks it.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -14329,8 +14329,8 @@
       "name": "/runtime_policy_status",
       "native": false,
       "params": [],
-      "risk": "ask",
-      "summary": "Show shared local model mappings and execution-lane tier choices.",
+      "risk": "safe",
+      "summary": "Show shared local model mappings, execution-lane tiers and cached model readiness.",
       "tool": "runtime_policy_status"
     },
     {
@@ -18059,7 +18059,7 @@
     "schemas": 4,
     "tools": 216
   },
-  "digest": "c0188a07cdef15452c61ba933b46aa5aef1a98d7b3949fc09fd974bd323d5dbe",
+  "digest": "b8c13a048388952337bc7bfb2e69b50cc93f3ff813aefde83e5f24a5cd29f093",
   "events": [
     {
       "name": "session.started",
@@ -20670,9 +20670,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "5258b79008b27955ade6c64d0c033b90699134d28d8d514d862598649b601429",
+    "catalog_digest": "fde833ea03d58de3c8aa3defd408f48aaa3093b50047e429242bb190f4288ffa",
     "client": {
-      "digest": "5258b79008b27955ade6c64d0c033b90699134d28d8d514d862598649b601429",
+      "digest": "fde833ea03d58de3c8aa3defd408f48aaa3093b50047e429242bb190f4288ffa",
       "events": [
         {
           "name": "approval.denied",
@@ -22846,7 +22846,7 @@
           {
             "name": "runtime_policy_status",
             "schema_available": true,
-            "summary": "Show shared local model mappings and execution-lane tier choices."
+            "summary": "Show shared local model mappings, execution-lane tiers and cached model readiness.\n\n    Read-only: renders the last model-inventory result with its age and never\n    contacts the model endpoint. ``/runtime status refresh`` re-checks it.\n    "
           },
           {
             "name": "runtime_policy_update",
@@ -28633,7 +28633,7 @@
           "name": "run_project"
         },
         {
-          "description": "Show shared local model mappings and execution-lane tier choices.",
+          "description": "Show shared local model mappings, execution-lane tiers and cached model readiness.\n\n    Read-only: renders the last model-inventory result with its age and never\n    contacts the model endpoint. ``/runtime status refresh`` re-checks it.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -36913,7 +36913,7 @@
           "name": "run_project"
         },
         {
-          "description": "Show shared local model mappings and execution-lane tier choices.",
+          "description": "Show shared local model mappings, execution-lane tiers and cached model readiness.\n\n    Read-only: renders the last model-inventory result with its age and never\n    contacts the model endpoint. ``/runtime status refresh`` re-checks it.\n    ",
           "inputSchema": {
             "properties": {},
             "title": "runtime_policy_statusArguments",
@@ -44381,7 +44381,7 @@
         },
         {
           "function": {
-            "description": "Show shared local model mappings and execution-lane tier choices.",
+            "description": "Show shared local model mappings, execution-lane tiers and cached model readiness.\n\n    Read-only: renders the last model-inventory result with its age and never\n    contacts the model endpoint. ``/runtime status refresh`` re-checks it.\n    ",
             "name": "runtime_policy_status",
             "parameters": {
               "properties": {},
@@ -46386,7 +46386,7 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "7b6c950fd4f525de26bffded5ceb423db6594674875774ff261101c3c38573f5",
+    "server.py": "3204bb0c1de1f388fc776c50923f1e7513bfa055d7f5f8add7ac17145a2fb0fd",
     "sonder_runtime/application/tools/generated_catalogs.py": "57a490ddd581e3e7a5d4b7b73379d205048f1db6de8e7e73c71f1124c6d84900",
     "sonder_runtime/bootstrap/native_mcp.py": "f88dcc1eb15ba75200359a06f9fb05b4673bbe5013dca64dfca3e158d873675d",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
@@ -51572,7 +51572,7 @@
       }
     },
     {
-      "description": "Show shared local model mappings and execution-lane tier choices.",
+      "description": "Show shared local model mappings, execution-lane tiers and cached model readiness.\n\n    Read-only: renders the last model-inventory result with its age and never\n    contacts the model endpoint. ``/runtime status refresh`` re-checks it.\n    ",
       "name": "runtime_policy_status",
       "parameters": {
         "properties": {},
