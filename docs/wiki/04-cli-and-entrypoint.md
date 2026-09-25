@@ -21,7 +21,7 @@ compatibility surfaces and delegate here.
 | `restore` | `verify` / `smoke` / `apply` a backup. |
 | `smoke` | Minimal end-to-end check (config, migrate, ops roundtrip). |
 | `drain` | Request graceful drain of a running server. |
-| `rotate-key` | Rotate `SONDER_API_KEY` with an overlap window. |
+| `rotate-key` | Rotate `SONDER_API_KEY` with an overlap window. The secrets file is `--secrets`, else `SONDER_SECRETS`, else `sonder.env` in the state home. `--config`/`--set` choose the state home that receives `secrets/rotation.json` and the `API_KEY_ROTATED` audit event; the configuration is validated as `serve` validates it, and an invalid one exits 2 before anything is rotated. |
 | `update` | `status` / `build` / `import` / `install` / `rollback` / `cancel` (see [Update Manager](13-update-manager.md)). |
 
 Common flags: `--config <toml>`, `--secrets <env>`, `--set section.key=value`

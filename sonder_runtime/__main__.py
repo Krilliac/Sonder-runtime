@@ -37,7 +37,7 @@ from sonder_runtime.application.command_surface import McpCommand
 from sonder_runtime.bootstrap.legacy_mcp import build_legacy_server_mcp_runtime
 
 
-def _load_config(args) -> "sonder_config.SonderConfig":
+def _cli_overrides(args) -> dict:
     overrides = {}
     for item in getattr(args, "set", None) or []:
         if "=" not in item:
@@ -46,6 +46,11 @@ def _load_config(args) -> "sonder_config.SonderConfig":
             )
         key, _, value = item.partition("=")
         overrides[key.strip()] = value.strip()
+    return overrides
+
+
+def _load_config(args) -> "sonder_config.SonderConfig":
+    overrides = _cli_overrides(args)
     # Preserve the legacy ``python sonder_serve.py [port]`` launcher contract
     # for the packaged ``python -m sonder_runtime serve [port]`` entrypoint.
     if getattr(args, "port", None) is not None:
@@ -1354,12 +1359,32 @@ def cmd_update(args) -> int:
 def cmd_rotate_key(args) -> int:
     import sonder_runtime.adapters.secrets as sonder_secrets
 
-    if not args.secrets:
-        print("rotate-key requires --secrets <path>", file=sys.stderr)
+    # Resolve the secrets file exactly like every other command does:
+    # --secrets, then SONDER_SECRETS, then <state home>/sonder.env. Only
+    # --secrets used to count, so an operator whose runtime reads its key via
+    # SONDER_SECRETS was refused.
+    secrets_path = _configured_path(args.secrets, "SONDER_SECRETS", "sonder.env")
+    if not secrets_path:
+        print(
+            "rotate-key requires --secrets <path> (or SONDER_SECRETS, or a "
+            "sonder.env in the state home)",
+            file=sys.stderr,
+        )
         return 2
+    # --config/--set select the state home that receives the rotation state
+    # and the audit event; both used to land in the environment's home. The
+    # configuration is validated exactly as serve validates it (including the
+    # secrets file), so a key is never rotated under a configuration the
+    # restarted server would reject.
+    try:
+        config = _load_config(args)
+    except sonder_config.ConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    _configure_typed_home(config)
     try:
         report = sonder_secrets.rotate_api_key(
-            args.secrets, overlap_seconds=args.overlap_seconds
+            secrets_path, overlap_seconds=args.overlap_seconds
         )
     except sonder_secrets.RotationError as exc:
         print(f"rotation failed: {exc}", file=sys.stderr)

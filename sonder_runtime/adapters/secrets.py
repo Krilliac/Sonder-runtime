@@ -140,6 +140,10 @@ def rotate_api_key(
     path = Path(secrets_file).expanduser()
     if not path.exists():
         raise RotationError(f"secrets file not found: {path}")
+    if not path.is_file():
+        # A directory used to reach the mode check below and be misreported
+        # as "group/world accessible".
+        raise RotationError(f"secrets path is not a regular file: {path}")
     if os.name == "posix":
         mode = path.stat().st_mode & 0o777
         if mode & 0o077:

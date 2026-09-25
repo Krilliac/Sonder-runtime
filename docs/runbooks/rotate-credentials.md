@@ -18,6 +18,11 @@ What happens:
   can be updated without an outage. After expiry only the new key works —
   no cleanup job required.
 - The rotation is recorded in operations.db as `API_KEY_ROTATED`.
+- The state home comes from the same `--config`/`--set`/`SONDER_CONFIG`
+  selection the server uses, so pass the server's `--config` when it is not
+  the default. The secrets file may also come from `SONDER_SECRETS` instead of
+  `--secrets`. An invalid configuration, including a secrets file that is
+  group/world accessible, is refused with exit 2 and nothing is rotated.
 
 Update each client with the new key before the overlap expires.
 
