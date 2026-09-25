@@ -50,7 +50,12 @@ class HostToolInventoryService:
         self._ttl = ttl_seconds
         self._redact = redact_path
         self._guard = executable_guard
-        self._lock = threading.Lock()
+        # Two locks: ``_refresh_lock`` serialises discovery (single-flight,
+        # up to the discovery budget); ``_state_lock`` guards the cached
+        # snapshot only and is never held across discovery, so ``cached()``
+        # and the agent-brief summary never wait behind a running refresh.
+        self._refresh_lock = threading.Lock()
+        self._state_lock = threading.Lock()
         self._snapshot: InventorySnapshot | None = None
         self._store_checked = False
         self._generation = 0
@@ -61,26 +66,36 @@ class HostToolInventoryService:
 
     # -- snapshots ---------------------------------------------------------
 
-    def _load_store_locked(self) -> None:
-        if self._snapshot is None and not self._store_checked:
-            self._store_checked = True
-            try:
-                self._snapshot = self._store.load()
-            except Exception as error:  # the port promises not to raise
-                _logger.warning("host tool snapshot load failed: %s", type(error).__name__)
-                self._snapshot = None
+    def _current(self) -> InventorySnapshot | None:
+        """The cached snapshot, loading the store once; never discovers."""
+        with self._state_lock:
+            if self._snapshot is None and not self._store_checked:
+                self._store_checked = True
+                try:
+                    self._snapshot = self._store.load()
+                except Exception as error:  # the port promises not to raise
+                    _logger.warning("host tool snapshot load failed: %s", type(error).__name__)
+                    self._snapshot = None
+            return self._snapshot
+
+    def _publish(self, snapshot: InventorySnapshot, *, new_generation: bool) -> None:
+        with self._state_lock:
+            self._snapshot = snapshot
+            if new_generation:
+                self._generation += 1
 
     def snapshot(self, *, refresh: bool = False, full: bool = False) -> InventorySnapshot:
         """Return the current snapshot, discovering when missing/stale/forced.
 
         Concurrent callers share one discovery: a caller that waited for the
-        lock while another caller discovered returns that fresh result.
+        refresh lock while another caller discovered returns that fresh result.
         """
-        observed = self._generation
-        with self._lock:
-            self._load_store_locked()
-            current = self._snapshot
-            fresh_elsewhere = self._generation != observed and current is not None
+        with self._state_lock:
+            observed = self._generation
+        with self._refresh_lock:
+            current = self._current()
+            with self._state_lock:
+                fresh_elsewhere = self._generation != observed and current is not None
             needs = (
                 current is None
                 or is_stale(current, now=self._clock(), ttl_seconds=self._ttl)
@@ -101,11 +116,10 @@ class HostToolInventoryService:
                         created_at=current.created_at, duration_ms=current.duration_ms,
                         tools=current.tools, notes=(*notes, note)[-16:], truncated=current.truncated,
                     )
-                    self._snapshot = kept
+                    self._publish(kept, new_generation=False)
                     return kept
                 raise DependencyUnavailable("host tool discovery is unavailable") from error
-            self._snapshot = discovered
-            self._generation += 1
+            self._publish(discovered, new_generation=True)
             try:
                 self._store.save(discovered)
             except Exception as error:
@@ -113,10 +127,9 @@ class HostToolInventoryService:
             return discovered
 
     def cached(self) -> InventorySnapshot | None:
-        """Return the in-memory or persisted snapshot; never discovers."""
-        with self._lock:
-            self._load_store_locked()
-            return self._snapshot
+        """Return the in-memory or persisted snapshot; never discovers or waits
+        for a running discovery."""
+        return self._current()
 
     # -- lookups and views -------------------------------------------------
 

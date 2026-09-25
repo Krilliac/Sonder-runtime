@@ -2,7 +2,7 @@
 
 Discovery code receives every host interaction through :class:`HostProbes`
 so each OS-specific discoverer is testable with fakes on any platform.  The
-default probes are thin, bounded wrappers over ``shutil.which``, ``os.stat``,
+default probes are thin, bounded wrappers over a single-directory lookup, ``os.stat``,
 bounded directory listings and reads, the bounded process runner, and (on
 Windows only) a read-only registry reader.
 """
@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 import getpass
 import os
 import platform as host_platform
-import shutil
 import stat
 import sys
 from typing import Callable, Mapping, Protocol
@@ -84,6 +83,12 @@ PINNED_PROBE_ENV: tuple[tuple[str, str], ...] = (
     ("npm_config_update_notifier", "false"),
     ("PIP_DISABLE_PIP_VERSION_CHECK", "1"),
     ("GH_NO_UPDATE_NOTIFIER", "1"),
+    # ``go`` must never download and exec a toolchain named by a go.mod or a
+    # user GOTOOLCHAIN setting just to print a version.
+    ("GOTOOLCHAIN", "local"),
+    # cmd.exe (and a batch shim it runs) must not resolve bare command names
+    # from the current directory before PATH.
+    ("NoDefaultCurrentDirectoryInExePath", "1"),
 )
 
 
@@ -99,11 +104,51 @@ def probe_environment(
     return env
 
 
-def _which(name: str, search_path: str) -> str | None:
-    try:
-        return shutil.which(name, path=search_path)
-    except (OSError, ValueError):
+# Launchable extensions on Windows, in the default PATHEXT order.  The
+# environment's PATHEXT is not trusted: entries such as .JS/.VBS/.PS1 name
+# files CreateProcess cannot start directly.
+_WINDOWS_EXECUTABLE_EXTENSIONS = (".com", ".exe", ".bat", ".cmd")
+
+
+def which_in_directory(
+    name: str, directory: str, *, windows: bool | None = None,
+) -> str | None:
+    """Absolute path of executable *name* in exactly one absolute *directory*.
+
+    Unlike ``shutil.which`` this never consults the current directory (which
+    ``shutil.which`` prepends on Windows even when ``path`` is given) and never
+    reads PATHEXT from the environment.
+    """
+    windows = (os.name == "nt") if windows is None else windows
+    if (
+        not isinstance(name, str) or not isinstance(directory, str)
+        or not name or not directory or "\x00" in name or "\x00" in directory
+        or "/" in name or "\\" in name or name in (".", "..")
+        or not os.path.isabs(directory)
+    ):
         return None
+    if windows:
+        if os.path.splitext(name)[1].lower() in _WINDOWS_EXECUTABLE_EXTENSIONS:
+            candidates = [name]
+        else:
+            candidates = [name + ext for ext in _WINDOWS_EXECUTABLE_EXTENSIONS]
+    else:
+        candidates = [name]
+    for candidate in candidates:
+        full = os.path.join(directory, candidate)
+        try:
+            if not os.path.isfile(full):
+                continue
+            if not windows and not os.access(full, os.X_OK):
+                continue
+        except (OSError, ValueError):
+            continue
+        return full
+    return None
+
+
+def _which(name: str, search_path: str) -> str | None:
+    return which_in_directory(name, search_path)
 
 
 def _is_file(path: str) -> bool:
@@ -260,6 +305,7 @@ __all__ = [
     "HostProbes",
     "PINNED_PROBE_ENV",
     "probe_environment",
+    "which_in_directory",
     "MAX_LIST_ENTRIES",
     "MAX_REGISTRY_SUBKEYS",
     "MAX_SMALL_READ_BYTES",

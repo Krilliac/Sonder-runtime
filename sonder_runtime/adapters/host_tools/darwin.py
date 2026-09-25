@@ -54,11 +54,28 @@ def _absolute(path: str) -> bool:
     return path.startswith("/") and "\x00" not in path and ".." not in path.split("/")
 
 
+def _launchable(probes: HostProbes, path: str) -> bool:
+    """A metadata executable may run only when it is not project-local.
+
+    A ``brew`` found first on PATH, or an ``xcodebuild`` under a developer
+    directory chosen by ``DEVELOPER_DIR``, could sit inside a writable
+    project root; such a file is never started (fail closed on error).
+    """
+    try:
+        return not probes.project_local(path)
+    except Exception:
+        return False
+
+
 def discover_brew(probes: HostProbes, brew: str | None = None) -> list[str]:
     """``<prefix>/bin``, ``<prefix>/sbin`` and ``<prefix>/opt/*/bin`` directories."""
     candidates = [brew] if brew else []
     candidates += ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
-    executable = next((item for item in candidates if item and probes.is_file(item)), "")
+    executable = next(
+        (item for item in candidates
+         if item and probes.is_file(item) and _launchable(probes, item)),
+        "",
+    )
     if not executable:
         return []
     env = probe_environment(probes, (("HOMEBREW_NO_AUTO_UPDATE", "1"),))
@@ -122,7 +139,7 @@ def discover_xcode(probes: HostProbes) -> list[ToolRecord]:
     if ".app/Contents/Developer" in developer_dir and developer_dir.split("/")[-3].endswith(".app"):
         xcodebuild = developer_dir + "/usr/bin/xcodebuild"
         version = ""
-        if probes.is_file(xcodebuild):
+        if probes.is_file(xcodebuild) and _launchable(probes, xcodebuild):
             result = probes.run((xcodebuild, "-version"), PROBE_TIMEOUT_SECONDS, env)
             if result.outcome == "ok":
                 version = parse_version(result.output, r"Xcode (\d+(?:\.\d+){0,3})")

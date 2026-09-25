@@ -93,11 +93,26 @@ registry:
 - 3 s and 2,000 characters of output per probe
 - whole process-tree termination on timeout or overflow
 - at most 160 probes, 4 workers, and 30 s per discovery
+- a neutral working directory (`/` on POSIX, `%SystemRoot%` on Windows), never
+  the server's current directory. Many toolchains read project files from the
+  current directory before printing a version: a `go.mod` `toolchain` line, a
+  `.yarnrc` `yarnPath`, a `rust-toolchain.toml`, Maven's `.mvn/jvm.config`,
+  and on Windows a `.cmd` shim resolving a bare command from the current
+  directory. A project checkout as the working directory would let project
+  files choose what a version probe runs.
+- executables are looked up in one directory at a time, with a fixed
+  Windows extension list (`.com`, `.exe`, `.bat`, `.cmd`). The current
+  directory is never searched and the environment's `PATHEXT` is ignored.
+
+The same guards apply to the metadata commands: a `brew`, `xcodebuild` or
+`vswhere` inside a project file root is not run.
 
 The probe environment is the scrubbed child environment (secrets, control
 variables and `SONDER_*` removed), with these values pinned: `NO_COLOR=1`,
 `TERM=dumb`, `CI=1`, `CHECKPOINT_DISABLE=1`, the .NET/Homebrew/npm/pip/gh
-update-check and telemetry opt-outs, and the spec's own host-owned constants.
+update-check and telemetry opt-outs, `GOTOOLCHAIN=local` (no toolchain
+download), `NoDefaultCurrentDirectoryInExePath=1` (no current-directory
+command search in `cmd.exe`), and the spec's own host-owned constants.
 For example, terraform gets `CHECKPOINT_DISABLE=1`.
 
 ## Snapshot, TTL and refresh
@@ -137,7 +152,9 @@ Every path shown to a model or returned over HTTP goes through `redact_path`:
 - any remaining path segment equal to the user name becomes `<user>`
 
 Version text passes through the runtime credential redactor. Notes and details
-are redacted too.
+are redacted too. Every text field in a view is also reduced to printable
+characters, so a tampered snapshot cannot carry line breaks or terminal
+control sequences into model-visible output.
 
 The model context line (below) contains no paths at all. The local REPL
 operator sees full paths.

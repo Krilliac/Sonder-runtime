@@ -82,3 +82,26 @@ def test_app_bundle_versions_from_plist_are_never_launched():
         previous=None, full=False)
     assert {r.name for r in snapshot.tools} == {"code", "pycharm"}
     assert host.runs == []
+
+
+def test_project_local_brew_is_never_run():
+    host = _mac(path="/work/proj/bin:/usr/bin")
+    planted = host.add_exe("/work/proj/bin/brew", "9:9")
+    host.outputs[(planted, "--prefix")] = BoundedRun("ok", "/opt/homebrew\n", 0, 5)
+    host.local.add("/work/proj")
+    assert darwin.discover_brew(host.probes(), planted) == []
+    assert host.runs == []
+
+
+def test_project_local_xcodebuild_is_never_run():
+    developer = "/work/proj/Fake.app/Contents/Developer"
+    host = _mac()
+    host.add_exe("/usr/bin/xcode-select", "1:1")
+    host.dirs.add(developer)
+    host.add_exe(developer + "/usr/bin/xcodebuild", "3:3")
+    host.outputs[("/usr/bin/xcode-select", "-p")] = BoundedRun("ok", developer + "\n", 0, 5)
+    host.outputs[(developer + "/usr/bin/xcodebuild", "-version")] = BoundedRun("ok", "Xcode 99.0\n", 0, 5)
+    host.local.add("/work/proj")
+    records = darwin.discover_xcode(host.probes())
+    assert records[0].version == ""
+    assert host.runs == [("/usr/bin/xcode-select", "-p")]

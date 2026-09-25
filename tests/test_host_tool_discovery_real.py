@@ -52,4 +52,14 @@ def test_full_registry_discovery_is_bounded_and_digest_stable_with_cache():
     stable = tuple(spec for spec in HOST_TOOL_SPECS if spec.name in stable_names)
     subset = _discover(stable)
     again = _discover(stable, previous=subset)
-    assert again.digest == subset.digest
+    # Every record probed OK is reused verbatim from the cache (no relaunch).
+    # A probe that timed out under CPU contention is re-probed and may change,
+    # so the whole-snapshot digest is compared only when all records were OK.
+    subset_by_name = {record.name: record for record in subset.tools}
+    again_by_name = {record.name: record for record in again.tools}
+    cached = [r for r in subset.tools if r.version_status is VersionStatus.OK]
+    assert cached, "no tool was probed OK twice on this host"
+    for record in cached:
+        assert again_by_name[record.name] == record, record.name
+    if all(r.version_status is VersionStatus.OK for r in subset_by_name.values()):
+        assert again.digest == subset.digest

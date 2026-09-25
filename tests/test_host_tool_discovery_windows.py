@@ -192,3 +192,12 @@ def test_batch_launcher_with_unsafe_arguments_is_refused():
     safe = HostToolDiscovery(host.probes(), specs=(spec_for("gradle"),)).discover(previous=None, full=False)
     assert _names(safe)["gradle"].version == "8.5"
     assert host.runs == [("C:\\tools\\gradle.bat", "--version")]
+
+
+def test_project_local_vswhere_is_never_run():
+    host = _vswhere_host()
+    host.local.add(PF86)
+    notes = []
+    assert windows.discover_visual_studio(host.probes(), notes) == []
+    assert host.runs == []
+    assert any("project root" in note for note in notes)

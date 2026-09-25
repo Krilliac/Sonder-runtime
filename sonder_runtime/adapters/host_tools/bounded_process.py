@@ -7,6 +7,17 @@ runner: callers pass only argv built from host-owned constants.
 Bounds: no shell, stdin closed, a shared stdout+stderr character budget, a
 wall-clock timeout, and whole process-tree termination (POSIX process group
 or Windows ``taskkill /T``) when either bound is exceeded.
+
+Working directory: unless a caller passes ``cwd``, the child starts in a
+neutral, administrator-owned directory (``/`` on POSIX, ``%SystemRoot%`` on
+Windows) rather than inheriting the server's working directory.  Many
+toolchains read configuration from the current directory and its ancestors
+before printing a version -- ``go`` honours a ``go.mod`` ``toolchain`` line
+(download and exec), ``yarn`` a ``.yarnrc`` ``yarnPath``, rustup proxies a
+``rust-toolchain.toml``, Maven ``.mvn/jvm.config``, and a Windows ``.cmd``
+shim resolves bare commands from the current directory first.  Inheriting a
+project checkout as the working directory would let project files choose what
+a "version probe" actually runs.
 """
 from __future__ import annotations
 
@@ -25,6 +36,21 @@ import sonder_runtime.platform.runtime_threads as runtime_threads
 OUTCOMES = ("ok", "error", "timeout", "output_limit", "start_failed")
 _POLL_SECONDS = 0.02
 _READ_CHUNK = 1024
+
+
+def neutral_cwd(os_module=os) -> str | None:
+    """An administrator-owned directory with no project configuration.
+
+    POSIX: ``/``.  Windows: ``%SystemRoot%`` (normally ``C:\\Windows``) when it
+    is an absolute existing directory.  ``None`` (inherit) only when neither is
+    available, which happens only under a simulated ``os`` in tests.
+    """
+    if os_module.name != "nt":
+        return "/" if os.name != "nt" else None
+    root = os.environ.get("SystemRoot") or os.environ.get("windir") or ""
+    if root and os.path.isabs(root) and os.path.isdir(root):
+        return root
+    return None
 
 
 @dataclass(frozen=True)
@@ -62,8 +88,9 @@ def run_bounded(
         "shell": False,
         "close_fds": True,
     }
-    if cwd is not None:
-        kwargs["cwd"] = cwd
+    workdir = cwd if cwd is not None else neutral_cwd(os_module)
+    if workdir is not None:
+        kwargs["cwd"] = workdir
     if os_module.name == "nt":
         kwargs["creationflags"] = getattr(subprocess_module, "CREATE_NEW_PROCESS_GROUP", 0)
     else:
@@ -157,4 +184,4 @@ def run_bounded(
     return BoundedRun(outcome, output, exit_code, int((time.monotonic() - started) * 1000))
 
 
-__all__ = ["BoundedRun", "OUTCOMES", "run_bounded"]
+__all__ = ["BoundedRun", "OUTCOMES", "neutral_cwd", "run_bounded"]

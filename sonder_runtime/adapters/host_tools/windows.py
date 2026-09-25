@@ -93,6 +93,13 @@ def discover_visual_studio(probes: HostProbes, notes: list[str] | None = None) -
     vswhere = vswhere_path(probes)
     if not probes.is_file(vswhere):
         return []
+    try:
+        planted = bool(probes.project_local(vswhere))
+    except Exception:
+        planted = True  # fail closed: an unverifiable path is never run
+    if planted:
+        notes.append("vswhere is inside a project root; not run")
+        return []
     run = probes.run((vswhere, *VSWHERE_ARGS), VSWHERE_TIMEOUT_SECONDS, probe_environment(probes),
                      max_output_chars=VSWHERE_MAX_OUTPUT_CHARS)
     if run.outcome != "ok":

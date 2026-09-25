@@ -426,10 +426,16 @@ def _prefix_replace(path: str, prefix: str, replacement: str, *, fold: bool) -> 
     prefix = _strip_sep(prefix)
     if not prefix or prefix in ("/", "\\"):
         return None
-    candidate, base = (path.casefold(), prefix.casefold()) if fold else (path, prefix)
-    if candidate == base:
+    # Compare an equal-length slice: casefold() can change a string's length
+    # (``"ß"`` -> ``"ss"``), so folding the whole path and then indexing by
+    # the prefix length would mis-slice or raise.
+    head = path[:len(prefix)]
+    same = head.casefold() == prefix.casefold() if fold else head == prefix
+    if not same:
+        return None
+    if len(path) == len(prefix):
         return replacement
-    if candidate.startswith(base) and path[len(prefix)] in "/\\":
+    if path[len(prefix)] in "/\\":
         return replacement + path[len(prefix):]
     return None
 
@@ -514,6 +520,13 @@ def build_view(
     name: str | None = None,
     redact: Callable[[str], str],
 ) -> InventoryView:
+    """Filtered, redacted projection of *snapshot* for model or HTTP callers.
+
+    Every free-text field (version, paths, details, notes) is redacted and
+    then clipped to printable characters: the snapshot file lives in a state
+    home a model may write, so its text must not carry line breaks or control
+    characters into model-visible output.
+    """
     parsed_category, wanted = _validate_filters(category, name)
     tools: Iterable[ToolRecord] = snapshot.tools
     filtered = []
@@ -535,13 +548,18 @@ def build_view(
         ToolView(
             name=record.name,
             category=record.category.value,
-            version=redact(record.version) if record.version else "",
+            version=_clip(redact(record.version), MAX_VERSION_CHARS) if record.version else "",
             version_status=record.version_status.value,
             source=record.source.value,
             on_path=record.on_path,
-            path_display=redact(record.path),
-            alternatives_display=tuple(redact(item) for item in record.alternatives),
-            details=tuple((key, redact(value)) for key, value in record.details),
+            path_display=_clip(redact(record.path), MAX_PATH_CHARS),
+            alternatives_display=tuple(
+                _clip(redact(item), MAX_PATH_CHARS) for item in record.alternatives
+            ),
+            details=tuple(
+                (_clip(key, MAX_DETAIL_KEY_CHARS), _clip(redact(value), MAX_DETAIL_VALUE_CHARS))
+                for key, value in record.details
+            ),
         )
         for record in tools
     )
@@ -555,7 +573,7 @@ def build_view(
         counts=tuple((c.value, counts[c.value]) for c in CATEGORY_ORDER if c.value in counts),
         tools=views,
         filtered_by=",".join(filtered),
-        notes=tuple(redact(note) for note in snapshot.notes),
+        notes=tuple(_clip(redact(note), MAX_NOTE_CHARS) for note in snapshot.notes),
         truncated=snapshot.truncated,
     )
 

@@ -166,3 +166,49 @@ def test_real_same_script_outside_roots_is_probed_control(tmp_path, monkeypatch)
     assert record.version_status is VersionStatus.OK and record.version == "3.99.0"
     assert marker.exists()
     assert not guards.project_local(record.path)
+
+
+def _cwd_hook_tool(directory, name):
+    """A host tool that, like yarn's ``yarnPath`` or go's ``toolchain``
+    directive, executes a helper named by a file in its working directory."""
+    script = directory / name
+    script.write_text(
+        "#!/bin/sh\n"
+        "if [ -x ./.probe-hook ]; then ./.probe-hook; fi\n"
+        "echo 'python3 3.98.0'\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return script
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shebang script")
+def test_real_probe_does_not_run_in_the_project_working_directory(tmp_path, monkeypatch):
+    # The host tool lives outside every file root, so it IS probed; the server
+    # process, however, sits in a project checkout that plants a hook file.
+    host_bin = tmp_path / "host-bin"
+    host_bin.mkdir()
+    _cwd_hook_tool(host_bin, "python3")
+    project = tmp_path / "project"
+    project.mkdir()
+    marker = tmp_path / "marker-cwd-hook"
+    hook = project / ".probe-hook"
+    hook.write_text(f"#!/bin/sh\necho planted > '{marker}'\n")
+    hook.chmod(0o755)
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(project))
+    monkeypatch.setenv("PATH", f"{host_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.chdir(project)
+    snapshot = HostToolDiscovery(default_host_probes(), specs=_specs("python3"), budget_seconds=20,
+                                 probe_timeout_seconds=5).discover(previous=None, full=False)
+    record = _by_name(snapshot)["python3"]
+    assert record.version_status is VersionStatus.OK and record.version == "3.98.0"
+    assert not marker.exists(), "a version probe ran with the project as its working directory"
+
+
+def test_probe_environment_pins_go_toolchain_and_cmd_search():
+    host = FakeHost(path="/usr/bin", env={"GOTOOLCHAIN": "go1.99.0+auto"})
+    host.add_exe("/usr/bin/go", "1:1", "go version go1.22.1 linux/amd64")
+    HostToolDiscovery(host.probes(), specs=_specs("go")).discover(previous=None, full=False)
+    assert host.runs == [("/usr/bin/go", "version")]
+    env = host.envs[-1]
+    assert env["GOTOOLCHAIN"] == "local"
+    assert env["NoDefaultCurrentDirectoryInExePath"] == "1"

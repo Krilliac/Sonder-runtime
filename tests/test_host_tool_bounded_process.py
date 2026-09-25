@@ -120,3 +120,57 @@ def test_legacy_wrapper_maps_start_failure_to_oserror(monkeypatch):
                         lambda argv, **kwargs: bounded_process.BoundedRun("start_failed", "", None, 0))
     with pytest.raises(OSError):
         toolchain_status._run_bounded(["missing"])
+
+
+def test_run_starts_in_a_neutral_directory_not_the_server_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    result = bounded_process.run_bounded(
+        (sys.executable, "-c", "import os; print(os.getcwd())"), timeout_seconds=20,
+    )
+    assert result.outcome == "ok"
+    reported = result.output.strip()
+    assert os.path.realpath(reported) != os.path.realpath(str(tmp_path))
+    assert os.path.realpath(reported) == os.path.realpath(bounded_process.neutral_cwd())
+
+
+def test_explicit_cwd_is_honoured(tmp_path):
+    result = bounded_process.run_bounded(
+        (sys.executable, "-c", "import os; print(os.getcwd())"), timeout_seconds=20,
+        cwd=str(tmp_path),
+    )
+    assert os.path.realpath(result.output.strip()) == os.path.realpath(str(tmp_path))
+
+
+def test_which_in_directory_never_consults_the_current_directory(tmp_path, monkeypatch):
+    from sonder_runtime.adapters.host_tools.probes import which_in_directory
+
+    planted = tmp_path / "cwd"
+    planted.mkdir()
+    for name in ("tool.exe", "tool"):
+        (planted / name).write_text("x")
+        (planted / name).chmod(0o755)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.chdir(planted)
+    monkeypatch.setenv("PATHEXT", ".JS;.EXE")
+    assert which_in_directory("tool", str(empty), windows=True) is None
+    assert which_in_directory("tool", str(empty), windows=False) is None
+    host = tmp_path / "host"
+    host.mkdir()
+    (host / "tool.js").write_text("x")
+    assert which_in_directory("tool", str(host), windows=True) is None  # PATHEXT ignored
+    (host / "tool.cmd").write_text("x")
+    assert which_in_directory("tool", str(host), windows=True) == str(host / "tool.cmd")
+    assert which_in_directory("tool", "relative", windows=True) is None
+    assert which_in_directory("../tool", str(host), windows=True) is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX execute bit")
+def test_which_in_directory_requires_the_execute_bit_on_posix(tmp_path):
+    from sonder_runtime.adapters.host_tools.probes import which_in_directory
+
+    (tmp_path / "tool").write_text("x")
+    (tmp_path / "tool").chmod(0o644)
+    assert which_in_directory("tool", str(tmp_path)) is None
+    (tmp_path / "tool").chmod(0o755)
+    assert which_in_directory("tool", str(tmp_path)) == str(tmp_path / "tool")

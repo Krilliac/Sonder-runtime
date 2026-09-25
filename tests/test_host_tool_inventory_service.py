@@ -151,3 +151,32 @@ def test_lookup_applies_the_executable_guard():
     raising = _service(Discovery(lambda: now[0]), Store(_snapshot(990.0)), now,
                        guard=lambda p: (_ for _ in ()).throw(OSError()))
     assert raising.lookup("gcc") is None
+
+
+def test_cached_and_summary_do_not_wait_behind_a_running_discovery():
+    now = [1000.0]
+    started = threading.Event()
+    release = threading.Event()
+
+    class Slow:
+        def discover(self, *, previous, full):
+            started.set()
+            release.wait(10)
+            return _snapshot(now[0], names=("gcc", "clang"))
+
+    service = _service(Slow(), Store(_snapshot(990.0)), now)
+    worker = threading.Thread(target=lambda: service.snapshot(refresh=True))
+    worker.start()
+    try:
+        assert started.wait(5)
+        began = time.monotonic()
+        cached = service.cached()
+        summary = service.capability_summary()
+        elapsed = time.monotonic() - began
+        assert cached is not None and cached.created_at == 990.0
+        assert summary.startswith("compilers: gcc")
+        assert elapsed < 1.0, "the agent brief blocked behind a discovery"
+    finally:
+        release.set()
+        worker.join(10)
+    assert service.cached().created_at == 1000.0
