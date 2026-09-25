@@ -91,6 +91,19 @@ prints a warning before the reply. Set `SONDER_FALLBACK_LOCAL=0` to disable
 that fallback. HTTP errors from the hosted server, such as bad API keys or
 account bans, do not fall back.
 
+If the server answers `421 HOST_NOT_ALLOWED`, it is an unauthenticated
+`local-open` server that does not know the name in your URL. Use its IP
+address, or add the name to `[server].allowed_hosts` / `SONDER_ALLOWED_HOSTS`
+on the server. A server that requires an API key or accounts accepts any
+name.
+
+A reply that begins `refused /write:` (or another tool) was stopped by the
+server's permission mode because nobody was at its console to answer the
+prompt. The response's `sonder_receipt.refusal.call_id` names the call; a
+developer or administrator can approve it once with
+`POST /v1/approvals/<call_id>` and then resend the same request. See
+[HTTP API & lifecycle](docs/wiki/05-http-api-and-lifecycle.md#one-shot-approvals-over-http).
+
 `--server`/`--key` argv flags also work and override the env vars:
 
 ```bash

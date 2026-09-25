@@ -216,10 +216,13 @@ reference nginx configuration terminates TLS, limits requests, and forwards to
 the loopback listener. Never expose the runtime port directly: possession of a
 valid credential grants access to the runtime's powerful tool surface.
 
-The listener refuses any request whose `Host` header does not name it
-(`421 HOST_NOT_ALLOWED`): loopback names, IP literals on a non-loopback bind,
-and `[server].allowed_hosts`. This stops DNS-rebinding pages from reading the
-unauthenticated loopback surface. `X-Forwarded-For` is trusted only with
+The listener checks the `Host` header before routing (`421
+HOST_NOT_ALLOWED`). IP literals, loopback names, the machine's own names and
+`[server].allowed_hosts` are always accepted; any other name is accepted only
+when the listener requires credentials, and never earns the loopback-peer
+exemptions. This stops DNS-rebinding pages from reading the unauthenticated
+loopback surface, since rebinding needs an attacker-controlled name and a
+listener that answers without credentials. `X-Forwarded-For` is trusted only with
 `tls_terminated_by_proxy = true` and a peer inside `trusted_proxy_cidrs`.
 See [HTTP API & lifecycle](docs/wiki/05-http-api-and-lifecycle.md).
 

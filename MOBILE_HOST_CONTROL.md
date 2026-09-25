@@ -33,6 +33,12 @@ for single-user desktops, but it prints a `WARNING: ... WITHOUT
 authentication` line on stderr at startup: any local process or user can then
 start, stop, and restart Sonder through it. Set a token on shared machines.
 
+The launcher checks the `Host` header the same way the main server does, to
+stop DNS-rebinding pages in a local browser from driving it: IP addresses and
+the PC's own names are accepted on any port, and any other name is accepted
+only when a token is set or the name is listed in the comma-separated
+`SONDER_LAUNCHER_ALLOWED_HOSTS`. Otherwise it answers `421 HOST_NOT_ALLOWED`.
+
 ## Windows host setup
 
 Run these commands in a terminal opened in the repository. Generate and store
@@ -99,6 +105,33 @@ In **Settings → Connection**, enter:
    entered explicitly; Sonder Runtime never derives a credential-bearing control
    endpoint from the chat server URL.
 4. Host launcher token.
+
+### Reaching the PC from a phone
+
+Connect by address when you can: `https://192.168.1.20`, a Tailscale `100.x`
+address, or `http://10.0.2.2:11435` from the Android emulator (or
+`127.0.0.1:11435` after `adb reverse tcp:11435 tcp:11435`). IP addresses are
+accepted on any port, as are the PC's own names (host name, FQDN,
+`<hostname>.local`). Other names, such as a Tailscale MagicDNS name or a proxy
+name, are accepted whenever the server requires credentials (`SONDER_API_KEY`
+or accounts). Only an unauthenticated `local-open` server refuses them with
+`421 HOST_NOT_ALLOWED`; the response names the fix, which is to connect by IP
+or add the name to `[server].allowed_hosts` / `SONDER_ALLOWED_HOSTS` on the PC.
+See the [server-private install runbook](docs/runbooks/install-server-private.md)
+for proxies that keep the `Host` name.
+
+### Approving a refused change from the phone
+
+In `manual` mode a file change or host program asked for over HTTP is refused,
+because nobody is at the console to answer the prompt. The chat reply keeps
+its text, and `sonder_receipt.refusal` names the refused call (`tool`,
+`call_id`, `reason`, `remedies`). A developer or administrator can approve
+exactly that call once with `POST /v1/approvals/<call_id>` (body `{}` or
+`{"ttl_seconds": 900}`); then send the same request again. The approval runs
+the unchanged call once, expires, and leaves the mode as it was. Changing any
+argument needs a new approval. `GET /v1/approvals` lists what is waiting,
+and `POST /v1/approvals/revoke/<nonce>` withdraws an approval. See
+[HTTP API & lifecycle](docs/wiki/05-http-api-and-lifecycle.md#one-shot-approvals-over-http).
 
 Save, open **System**, and verify that **Host Launcher** says `ready`. The
 Start, Stop, and Restart controls then operate the host. A control request is
@@ -230,6 +263,9 @@ implementation work is tracked only in the
 | Durable command acknowledgement protocol | Implemented | Admission and replay journal; polling still observes the terminal state. |
 | Automatic retry of an `uncertain` command receipt | Unsupported | Reconcile it manually from the durable operation ledger. |
 | Wake-on-LAN | Unsupported | The host must be powered on with the launcher already running. |
+| Reaching the main server by IP, emulator alias, or the PC's own name | Implemented | Any port; other names need credentials on the server or an `allowed_hosts` entry. |
+| Approving one refused call from the phone | Implemented | Developer or administrator credential; one exact pending call, once, expiring. |
+| Launcher `Host` allowlist | Implemented | Same policy as the main server; without a token, other names need `SONDER_LAUNCHER_ALLOWED_HOSTS`. |
 | Automatic operating-system firewall changes | Unsupported | Open only the TLS proxy and launcher ports yourself. |
 | Setup engine, Git updates, or local training from client-only devices | Unsupported | These operations require direct host file access. |
 | Mobile stream resume and desktop-equivalent durable state | Proposed | API-007; bounded reconnect shares the typed protocol graph, but full parity is not a current contract. |

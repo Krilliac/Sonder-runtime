@@ -50,6 +50,13 @@ from sonder_runtime.application.lifecycle import (
     normalize_context_size,
 )
 from sonder_runtime.platform.paths import state_path
+from sonder_runtime.platform.runtime_threads import run_bounded
+from sonder_runtime.interfaces.http.host_policy import (
+    HOST_NOT_ALLOWED_REMEDY,
+    host_decision,
+    machine_host_names,
+    normalize_allowed_host,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -1900,16 +1907,63 @@ class LauncherController:
             return payload
 
 
+_LAUNCHER_MACHINE_NAMES = None
+_LAUNCHER_MACHINE_NAMES_LOCK = threading.Lock()
+
+
+def launcher_machine_names(timeout=1.0):
+    """This machine's own Host names, computed once (bounded FQDN lookup)."""
+    global _LAUNCHER_MACHINE_NAMES
+    with _LAUNCHER_MACHINE_NAMES_LOCK:
+        if _LAUNCHER_MACHINE_NAMES is None:
+            try:
+                hostname = socket.gethostname()
+            except OSError:
+                hostname = ""
+            fqdn = ""
+            if hostname:
+                value, error, finished = run_bounded(
+                    lambda: socket.getfqdn(hostname), timeout,
+                    name="sonder-launcher-fqdn",
+                )
+                if finished and error is None and isinstance(value, str):
+                    fqdn = value
+            _LAUNCHER_MACHINE_NAMES = machine_host_names(hostname, fqdn)
+        return _LAUNCHER_MACHINE_NAMES
+
+
+def parse_launcher_allowed_hosts(value):
+    """``SONDER_LAUNCHER_ALLOWED_HOSTS``: comma-separated names; junk is dropped."""
+    parsed = []
+    for part in str(value or "").split(","):
+        if not part.strip():
+            continue
+        try:
+            parsed.append(normalize_allowed_host(part.strip()))
+        except ValueError:
+            print("ignoring malformed SONDER_LAUNCHER_ALLOWED_HOSTS entry", file=sys.stderr)
+    return tuple(dict.fromkeys(parsed))
+
+
 class LauncherServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
     def __init__(
-        self, address, handler, *, controller, token, command_journal=None
+        self, address, handler, *, controller, token, command_journal=None,
+        allowed_hosts=None, local_names=None,
     ):
         super().__init__(address, handler)
         self.controller = controller
         self.token = token
+        # DNS-rebinding defence, same policy as the main listener: addresses
+        # and this machine's names always; other names only when a token is
+        # required or they are listed in SONDER_LAUNCHER_ALLOWED_HOSTS.
+        self.allowed_hosts = (
+            parse_launcher_allowed_hosts(os.environ.get("SONDER_LAUNCHER_ALLOWED_HOSTS", ""))
+            if allowed_hosts is None else tuple(allowed_hosts)
+        )
+        self.local_names = launcher_machine_names() if local_names is None else frozenset(local_names)
         if command_journal is None and getattr(controller, "db_path", None):
             journal_path = os.environ.get(
                 "SONDER_LAUNCHER_COMMAND_JOURNAL", ""
@@ -1952,6 +2006,31 @@ class LauncherHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _host_refused(self):
+        """Answer 421 HOST_NOT_ALLOWED for a name a rebinding page could use."""
+        values = self.headers.get_all("Host") or []
+        if len(values) > 1:
+            decision = None
+        else:
+            decision = host_decision(
+                values[0] if values else None,
+                allowed_hosts=getattr(self.server, "allowed_hosts", ()),
+                local_names=getattr(self.server, "local_names", ()),
+                credentials_required=bool(self.server.token),
+            )
+        if decision is not None:
+            return False
+        self.close_connection = True
+        self._send({
+            "ok": False, "error": "host is not allowed for this launcher",
+            "code": "HOST_NOT_ALLOWED",
+            "remedy": HOST_NOT_ALLOWED_REMEDY.replace(
+                "[server].allowed_hosts / SONDER_ALLOWED_HOSTS",
+                "SONDER_LAUNCHER_ALLOWED_HOSTS",
+            ),
+        }, 421, headers={"Connection": "close"})
+        return True
+
     def _auth(self):
         if self._authorized():
             return True
@@ -1979,6 +2058,8 @@ class LauncherHandler(BaseHTTPRequestHandler):
         return "command:" + digest
 
     def do_GET(self):
+        if self._host_refused():
+            return
         path = self.path.split("?", 1)[0].rstrip("/")
         is_status = path in {"", "/v1/launcher/status"}
         operation_id = ""
@@ -2002,6 +2083,8 @@ class LauncherHandler(BaseHTTPRequestHandler):
         self._send(self.server.controller.operation_payload(operation))
 
     def do_POST(self):
+        if self._host_refused():
+            return
         path = self.path.split("?", 1)[0].rstrip("/")
         action = path.rsplit("/", 1)[-1]
         is_ack = path == "/v1/launcher/commands/ack"

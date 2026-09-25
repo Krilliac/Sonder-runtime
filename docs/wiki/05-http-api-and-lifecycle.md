@@ -22,23 +22,43 @@ production lifecycle and admission layer (`sonder_lifecycle.py`).
 | `GET /v1/sonder/status` | admin/owner | Rich host-wide runtime/stats snapshot, including the configured deployment profile and honest capability availability. Ordinary hosted accounts receive only their account and the model catalog. |
 | `GET /v1/work-runs`, `GET /v1/work-runs/<id>` | developer/admin (own runs only) | Routed-work runs started by this principal: status (`running`, `returned`, `unknown`, `refused`, `cancelled`, `budget_exceeded`, `interrupted`, `failed`) and, for one run, its persisted answer. |
 | `POST /v1/work-runs/<id>/cancel` | developer/admin (own runs only) | Cancel a routed-work run: its effect fence stops holding, so every further file change, host program, or destructive tool is refused. |
+| `GET /v1/approvals` | developer/admin | Calls refused unattended that can be approved once (`pending`: call id, tool, redacted preview, count) and open approvals (`approvals`); `?limit=1..200`, `?include_spent=1` adds spent, revoked and expired ones. |
+| `POST /v1/approvals/<call_id>` | developer/admin | Approve exactly one refused, still-pending call once (body `{}` or `{"ttl_seconds": 60..86400}`, default 900; optional `tool`/`digest` must match). `201` with the approval. See [One-shot approvals over HTTP](#one-shot-approvals-over-http). |
+| `POST /v1/approvals/revoke/<nonce>` | developer/admin | Withdraw one open approval (body `{}`). |
+| `GET /v1/sessions` | admin | Durable sessions, newest activity first: `id`, redacted `title` (first user message, one line, at most 80 characters), `turns`, `events`, `created`, `updated`; `?limit=1..100` (default 20) and `?after=<next_cursor>`. Ids are storage ids, the same ones `/v1/sessions/<id>/{events,export,replay}` take. |
+| `POST /v1/sonder/register` | bootstrap secret, or admin when additional registration is enabled | Create an account; `201 {"ok": true, "account": {...}, "message": "Account <u> created (role <r>)."}`. |
 | `GET /v1/sonder/feed` | any authorized caller | Owner-scoped live execution feed: the caller's own active and recently completed responses (category/name, state, elapsed, redacted summary, current operation). Never exposes prompts, tool arguments, paths, outputs, reasoning, or another principal's work. |
 
 `/live` may be unauthenticated so an external check never needs the key;
 everything else requires the bearer key unless the peer is loopback (the
 reverse proxy restricts those paths to loopback upstream).
 
-**Host allowlist (DNS-rebinding defence).** Before any routing, every request
-whose `Host` header does not name this listener is refused with
-`421 HOST_NOT_ALLOWED` and the connection is closed. Accepted names are
-`localhost` and loopback IP literals (a port, when present, must be the bound
-port), any IP literal when the listener itself binds a non-loopback address,
-and the operator's `[server].allowed_hosts` / `SONDER_ALLOWED_HOSTS` entries
-(`name` accepts any port, `name:port` only that port). A request with no
-`Host` header (HTTP/1.0 tooling; browsers always send one) is accepted. A
-reverse proxy that forwards the public name in `Host` (`proxy_set_header Host
-$host`) must list that name in `allowed_hosts`; the reference nginx
-configuration forwards the upstream address and needs nothing.
+**Host allowlist (DNS-rebinding defence).** Before any routing, the `Host`
+header is checked. DNS rebinding needs a hostname the attacker controls and a
+listener that answers without credentials, so:
+
+- any IP literal is accepted on any port (`10.0.2.2` from the Android
+  emulator, LAN and Tailscale addresses, `127.0.0.1:<forwarded port>`), except
+  the unspecified `0.0.0.0` / `[::]`;
+- `localhost`, `*.localhost` and this machine's own names are accepted on any
+  port. The machine names are the host name, its FQDN and `<hostname>.local`,
+  computed once at startup from `gethostname`/`getfqdn` (the FQDN lookup is
+  bounded to one second and dropped if it does not finish);
+- `[server].allowed_hosts` / `SONDER_ALLOWED_HOSTS` entries are accepted
+  (`name` on any port, `name:port` on that port only);
+- any other well-formed name is accepted when the listener requires
+  credentials (`api-key`, `account`, `both` or `either`), because a rebinding
+  page holds none; in the unauthenticated `local-open` mode it is refused.
+
+A refusal is `421` with `error.code = "HOST_NOT_ALLOWED"` and an
+`error.remedy` naming `[server].allowed_hosts` / `SONDER_ALLOWED_HOSTS`, and
+the connection is closed. The server logs a WARNING with the refused name, at
+most once a minute per name. Malformed or repeated `Host` headers are always
+refused; a request with no `Host` header (HTTP/1.0 tooling; browsers always
+send one) is accepted. A name accepted only because credentials are required
+does not earn the loopback-peer conveniences: through it, `/ready`, `/health`,
+`/version` and `/metrics` need the key even from a local browser, and the
+local log page is not served.
 
 **Client address.** `X-Forwarded-For` is consulted only when
 `tls_terminated_by_proxy = true` *and* the socket peer is inside
@@ -80,7 +100,10 @@ POST /v1/chat/completions
 A full chat UI owns conversation state (resends the transcript). A thin
 client that names a `session` but sends only the current message gets
 server-side history rebuilt from the stored session — so both contracts
-work. `choices[0].message.content` contains only the answer; bounded
+work. A client that owns its transcript and must never have server history
+injected (for example after it cancelled a thread's first turn) sends
+`"history": "client"`; the default is `"auto"`, and any other value is a
+`400`. `choices[0].message.content` contains only the answer; bounded
 observable execution metadata is returned separately as `sonder_activity`.
 
 The administrator-only `/v1/sonder/status` snapshot also contains
@@ -109,7 +132,8 @@ There is no public HTTP endpoint that invokes `replicate_once()`. The batch
 route above is only the inbound fixed-peer receiver.
 
 The supported chat subset currently includes `model`, `messages`, `stream`,
-`session`, `project`, `context_size`, and the consented location fields.
+`session`, `project`, `history`, `context_size`, and the consented location
+fields.
 `project` scopes durable facts, which the served route namespaces per
 principal. When the value names an existing directory inside the
 deployment's configured file roots (`SONDER_FILE_ROOTS` and the roots
@@ -163,8 +187,10 @@ autopilot) runs as a **work run** with id `wr-…`:
 - The request waits at most `[server].work_wait_seconds` (default 240,
   `SONDER_HTTP_WORK_WAIT_SECONDS`). A run that finishes in time answers
   inline; otherwise the reply names the run id and `sonder_receipt.chat_work`
-  carries `status: "running"` and `work_run_id`. The answer is persisted and
-  returned by `GET /v1/work-runs/<id>` (bounded to 256 KiB, retained 7 days).
+  carries `status: "running"`, `work_run_id`, and the routes as data
+  (`get_url`, `cancel_url`); the reply text itself names no HTTP routes. The
+  answer is persisted and returned by `GET /v1/work-runs/<id>` (bounded to
+  256 KiB, retained 7 days).
 - `[server].work_budget_seconds` (default 1800,
   `SONDER_HTTP_WORK_BUDGET_SECONDS`) is a wall-clock budget. After it, or
   after `POST /v1/work-runs/<id>/cancel`, the run's effect fence no longer
@@ -185,6 +211,57 @@ autopilot) runs as a **work run** with id `wr-…`:
   is refused with `429 WORK_CAPACITY_EXHAUSTED` and `Retry-After`.
 - A run left `running` by a stopped process is reported `interrupted` after
   restart.
+
+## One-shot approvals over HTTP
+
+When the permission gate refuses a file change, host program or destructive
+tool because nobody is present to answer the mode's ask, and the call carried
+arguments, the refusal names the call (`/approve <call id>` in the text) and
+notes it as pending in the approval ledger. The chat response then also
+carries it as data, in `sonder_receipt.refusal`:
+
+```json
+{ "kind": "refused", "tool": "file_write", "call_id": "3f9a12c0d4e5b6a7",
+  "risk": "mutation", "mode": "manual", "mode_label": "manual",
+  "reason": "file_write changes files and nobody is here to answer ...",
+  "remedies": [
+    {"kind": "approve_once", "call_id": "3f9a12c0d4e5b6a7", "method": "POST",
+     "path": "/v1/approvals/3f9a12c0d4e5b6a7", "console": "/approve 3f9a12c0d4e5b6a7"},
+    {"kind": "switch_mode", "modes": ["acceptEdits", "auto"]},
+    {"kind": "allow_rule", "console": "/permissions"},
+    {"kind": "console", "detail": "run it from the console and answer the prompt"} ] }
+```
+
+The text is unchanged. `/write`, `/append` and `/edit` typed in chat name
+their call the same way the catalogued `/file_write path=… content=… mode=…`
+spelling does, so either spelling is approved by the same id. When a turn
+refuses several calls, the last is described and `refusals_in_turn` counts
+them.
+
+`POST /v1/approvals/<call_id>` is the attended answer to that ask. The
+security decision: an authenticated developer or administrator POST is an
+attended approval surface, the same precedent as `POST /v1/permission-mode`.
+The person holding the credential approves one exact call:
+
+- only a call that was refused and is still pending can be approved; there is
+  no approve-in-advance over HTTP (the console's `/approve call` keeps that);
+- the path takes the 16-character call id or the full 64-character digest,
+  never a shorter prefix, and a body `digest` or `tool` that differs from the
+  pending call is refused with `409 CALL_DIGEST_MISMATCH`. Changing any
+  argument makes a new call that needs its own approval;
+- a call has at most one open approval: a second POST answers
+  `409 APPROVAL_ALREADY_OPEN` with the existing one. An `Idempotency-Key`
+  retry replays the first response, with the refusal codes listed below;
+- the ledger spends the approval atomically on the next unchanged call from
+  any surface and it expires after `ttl_seconds`; the mode is not changed;
+- the approver is recorded as `developer:<username>`, `admin-key` (the
+  deployment API key) or `local-open`, with surface `http`, and the action is
+  audited on the direct-tool path as `permission_approve`.
+
+Errors: `401` without credentials, `403 FORBIDDEN` for an ordinary account,
+`400 INVALID_CALL_ID` / `INVALID_TTL` / `INVALID_REQUEST`,
+`404 CALL_NOT_PENDING` (already approved and run, aged out, or never refused),
+`404 APPROVAL_NOT_OPEN` on revoke, and `503 APPROVALS_UNAVAILABLE`.
 
 `response_format` is available only for an isolated direct-model turn:
 
@@ -281,14 +358,15 @@ non-numeric `Content-Length`, or a transfer coding, neither of which is
 supported. Nothing beyond the accepted request-size limit is ever read.
 
 An optional `Idempotency-Key` header on a POST makes a served action (slash
-work controls, permission-mode changes, fanout controls, drain) replay-safe
+work controls, permission-mode changes, approvals, fanout controls, drain) replay-safe
 for that principal and action. A key longer than 512 characters, or a repeated
 `Idempotency-Key` header, is rejected with `400 invalid_request` before
 dispatch rather than running the action without replay protection.
 
 One key names one request. Reusing a key for a *different* request (another
 action, mode, fanout model, or session) is refused and nothing runs. On
-`/v1/permission-mode` and `/v1/fanout/<id>/{cancel,resume,synthesize}` a
+`/v1/permission-mode`, `/v1/approvals/…` and
+`/v1/fanout/<id>/{cancel,resume,synthesize}` a
 refusal is never a `200`; it answers with `error.code`:
 
 | Code | Status | Meaning |

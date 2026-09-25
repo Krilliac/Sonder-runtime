@@ -14,6 +14,8 @@ def dispatch_session_route(
 ) -> HttpSessionResult | None:
     """Dispatch one bounded read-only durable-session route."""
     route = path.split("?", 1)[0].rstrip("/")
+    if route == "/v1/sessions":
+        return _list_sessions(facade, query or {})
     prefix = "/v1/sessions/"
     if not route.startswith(prefix):
         return None
@@ -77,6 +79,24 @@ def dispatch_session_route(
         return HttpSessionResult(400, {"error": "invalid_session_query"})
     logger.debug(f"dispatch_session_route: unrecognized operation={operation!r}")
     return HttpSessionResult(404, {"error": "not_found"})
+
+
+def _list_sessions(facade: HttpSessionFacade,
+                   values: Mapping[str, Sequence[str]]) -> HttpSessionResult:
+    """``GET /v1/sessions?limit=&after=``: a page of sessions, newest first."""
+    lister = getattr(facade, "list_sessions", None)
+    if not callable(lister):
+        return HttpSessionResult(501, {"error": "session_list_unavailable"})
+    unknown = set(values) - {"limit", "after"}
+    if unknown or any(len(items) != 1 for items in values.values()):
+        return HttpSessionResult(400, {"error": "invalid_session_query"})
+    raw_limit = (values.get("limit") or ["20"])[0] or "20"
+    try:
+        limit = int(raw_limit)
+    except ValueError:
+        return HttpSessionResult(400, {"error": "invalid_session_query"})
+    after = (values.get("after") or [""])[0] or None
+    return lister(limit=limit, after=after)
 
 
 __all__ = ["dispatch_session_route"]

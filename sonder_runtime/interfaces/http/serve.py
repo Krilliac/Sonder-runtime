@@ -13,10 +13,12 @@ Point your chat UI's OpenAI API base at http://127.0.0.1:<port>/v1 (any api key)
 """
 
 from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+from sonder_runtime.platform.runtime_threads import run_bounded
 import json
 import functools
 import inspect
 import contextlib
+import contextvars
 import hmac
 import hashlib
 import ipaddress
@@ -36,7 +38,8 @@ from pathlib import Path
 
 from sonder_runtime.interfaces.http.artifact_transfer import handle_artifact_transfer, is_artifact_route
 from sonder_runtime.interfaces.http.host_policy import (
-    forwarded_client_ip, host_allowed, normalize_allowed_host,
+    HOST_NOT_ALLOWED_REMEDY, HOST_TRUSTED, forwarded_client_ip, host_decision,
+    machine_host_names, normalize_allowed_host, parse_host_header,
 )
 from sonder_runtime.interfaces.http.memory_replication import (
     handle_memory_replication,
@@ -115,6 +118,9 @@ from sonder_runtime.interfaces.http.facades.a2a_jsonrpc import (
     dispatch_a2a_jsonrpc_route,
 )
 from sonder_runtime.interfaces.http.facades.control_plane import ControlPlaneFacade
+from sonder_runtime.interfaces.http.facades.approvals import (
+    approvals_payload, approve_call, refusal_receipt, revoke_approval,
+)
 from sonder_runtime.interfaces.http.facades.extensions import dispatch_extension_route
 from sonder_runtime.interfaces.http.facades.model_request import (
     ModelFacadeError,
@@ -709,10 +715,87 @@ def _parse_allowed_hosts(values):
 
 
 # Public names a proxy or remote client may put in ``Host`` besides loopback
-# names (DNS-rebinding defence; see host_policy.host_allowed).
+# names and IP literals (DNS-rebinding defence; see host_policy.host_decision).
+# They matter only in local-open mode: a listener that requires credentials
+# accepts any well-formed name, since a rebinding page has no credentials.
 ALLOWED_HOSTS = _parse_allowed_hosts(
     part for part in os.environ.get("SONDER_ALLOWED_HOSTS", "").split(",") if part.strip()
 )
+_MACHINE_NAME_TIMEOUT_SECONDS = 1.0
+_MACHINE_HOST_NAMES = None
+_MACHINE_HOST_NAMES_LOCK = threading.Lock()
+
+
+def _compute_machine_host_names(timeout=_MACHINE_NAME_TIMEOUT_SECONDS):
+    """This machine's own names, from ``gethostname``/``getfqdn`` only.
+
+    ``getfqdn`` may consult the resolver, so it runs behind a bounded
+    timeout; a slow or failing lookup costs the FQDN, never a request.  No
+    other network lookup is made.
+    """
+    import socket
+
+    try:
+        hostname = socket.gethostname()
+    except OSError:
+        hostname = ""
+    fqdn = ""
+    if hostname:
+        value, error, finished = run_bounded(
+            lambda: socket.getfqdn(hostname), timeout, name="sonder-host-fqdn",
+        )
+        if finished and error is None and isinstance(value, str):
+            fqdn = value
+        else:
+            _serve_logger.info("machine FQDN lookup did not finish; using the host name only")
+    return machine_host_names(hostname, fqdn)
+
+
+def _machine_host_names():
+    """Computed once per process (startup warms it); never recomputed."""
+    global _MACHINE_HOST_NAMES
+    names = _MACHINE_HOST_NAMES
+    if names is not None:
+        return names
+    with _MACHINE_HOST_NAMES_LOCK:
+        if _MACHINE_HOST_NAMES is None:
+            try:
+                _MACHINE_HOST_NAMES = _compute_machine_host_names()
+            except Exception:
+                _serve_logger.warning("machine host names unavailable", exc_info=True)
+                _MACHINE_HOST_NAMES = frozenset()
+        return _MACHINE_HOST_NAMES
+
+
+_REJECTED_HOST_LOG_INTERVAL_SECONDS = 60.0
+_REJECTED_HOST_LOG = OrderedDict()
+_REJECTED_HOST_LOG_LOCK = threading.Lock()
+
+
+def _log_rejected_host(value):
+    """Warn about a refused Host name, at most once a minute per name.
+
+    Only a well-formed name is logged (it is attacker-chosen text), so an
+    operator can see which name to add to ``allowed_hosts``.
+    """
+    parsed = parse_host_header(value) if value is not None else None
+    name = parsed[0] if parsed is not None else "(malformed or repeated Host header)"
+    now = time.monotonic()
+    with _REJECTED_HOST_LOG_LOCK:
+        last = _REJECTED_HOST_LOG.get(name)
+        if last is not None and now - last < _REJECTED_HOST_LOG_INTERVAL_SECONDS:
+            return
+        _REJECTED_HOST_LOG[name] = now
+        _REJECTED_HOST_LOG.move_to_end(name)
+        while len(_REJECTED_HOST_LOG) > 64:
+            _REJECTED_HOST_LOG.popitem(last=False)
+    _serve_logger.warning(
+        f"request refused (421 HOST_NOT_ALLOWED): Host {name!r} is not an address, "
+        "a loopback or machine name, or listed in [server].allowed_hosts, and this "
+        "listener runs without credentials"
+    )
+
+
 # The validated serve entry point sets this whenever a TLS-terminating proxy
 # fronts the otherwise-loopback runtime. Peer-address checks alone cannot tell
 # that proxy apart from a direct local browser.
@@ -1868,6 +1951,52 @@ def _ollama_pool_admin_page(context, params):
     return result, 400 if "error" in result else 200
 
 
+def _http_approver(context):
+    """Who issued an HTTP approval, as the ledger records it."""
+    if context.get("mode") == "local-open":
+        return "local-open"
+    account = context.get("account")
+    if account:
+        username = str(account.get("username") or "") if isinstance(account, dict) else str(
+            getattr(account, "username", "") or "")
+        return "developer:%s" % (username or "account")
+    if context.get("api_key"):
+        return "admin-key"
+    return "http"
+
+
+def _audit_http_approval(action, approval, started):
+    """Record an HTTP approve/revoke on the existing direct-tool audit path."""
+    record = getattr(server, "_record_direct_tool", None)
+    if not callable(record):
+        return
+    try:
+        if action == "revoke":
+            record(
+                "permission_approve", {"revoke": approval.get("nonce", "")}, ok=True,
+                started=started,
+                summary="revoked %s call %s via http" % (
+                    approval.get("tool", ""), approval.get("call_id", "")),
+            )
+        else:
+            record(
+                "permission_approve",
+                {"tool": approval.get("tool", ""), "call_id": approval.get("call_id", ""),
+                 "ttl_seconds": approval.get("ttl_seconds", 0), "surface": "http"},
+                ok=True, started=started, summary=approval.get("nonce", ""),
+            )
+    except Exception:
+        _serve_logger.warning("approval audit record failed", exc_info=True)
+
+
+def _account_created_message(account):
+    """The human sentence a 201 registration carries next to the account."""
+    account = account if isinstance(account, dict) else {}
+    username = str(account.get("username") or "").strip() or "(unnamed)"
+    role = str(account.get("role") or "").strip() or "user"
+    return "Account %s created (role %s)." % (username, role)
+
+
 def _system_operation_authority_error(operation, context):
     """Return a role-boundary refusal, or "" when this caller may proceed."""
     required = SYSTEM_OPERATION_ROLES.get(str(operation or ""))
@@ -2301,6 +2430,10 @@ def _history_from_messages(messages):
 
 
 SERVER_SIDE_HISTORY_TURNS = 8
+# ``history`` on a chat request: "auto" (default) lets a session-named request
+# with no prior messages continue from the durable transcript; "client" means
+# the messages sent are the whole history and nothing is injected.
+_CHAT_HISTORY_SOURCES = ("auto", "client")
 
 
 def _durable_session_history(storage_session, limit):
@@ -2597,7 +2730,84 @@ def _http_slash_refusal(cmd, argument="", context=None):
     # that it will take the read-only branch; the rules live in the catalog so
     # this chain and `server.control_command` cannot disagree about a read.
     tools = command_catalog.narrow_branch_tools(cmd, argument, tools)
-    return _http_tool_refusal(tools, cmd, context=context)
+    return _http_tool_refusal(
+        tools, cmd, context=context, arguments=_slash_call_arguments(cmd, argument),
+    )
+
+
+def _slash_call_arguments(cmd, argument):
+    """The tool arguments a file-changing slash command will call with, or None.
+
+    Mirrors the branches of ``_handle_slash`` exactly (``/write`` and
+    ``/append`` call ``file_write``, ``/edit`` calls ``file_edit``), so an
+    unattended refusal names the call (a call id an operator can approve once)
+    and the same call digests identically whether it is typed ``/write a b``
+    or ``/file_write path=a content=b mode=create``. The caller's token is a
+    credential knob and never part of the digest.
+    """
+    text = str(argument or "")
+    if cmd in ("/write", "/append"):
+        parts = text.split(None, 1)
+        if len(parts) != 2:
+            return None
+        return {"path": parts[0], "content": parts[1],
+                "mode": "append" if cmd == "/append" else "create"}
+    if cmd == "/edit":
+        pieces = text.split("|", 2)
+        if len(pieces) != 3:
+            return None
+        return {"path": pieces[0].strip(), "old": pieces[1], "new": pieces[2]}
+    return None
+
+
+# S1. Refusals observed during one chat turn. The permission gate reports
+# every unattended decision to its observers; this one keeps the refusals
+# that name a call (an effect-class tool with arguments, already noted as
+# pending in the approval ledger) for the turn that is collecting them.
+_CHAT_REFUSALS = contextvars.ContextVar("sonder_http_chat_refusals", default=None)
+_MAX_TURN_REFUSALS = 8
+
+
+def _capture_unattended_refusal(decision, _surface):
+    sink = _CHAT_REFUSALS.get()
+    if sink is None or len(sink) >= _MAX_TURN_REFUSALS:
+        return
+    if (
+        getattr(decision, "action", "") == "deny"
+        and getattr(decision, "source", "") == "unattended"
+        and getattr(decision, "call_id", "")
+    ):
+        sink.append(decision)
+
+
+def _ensure_refusal_observer():
+    """Idempotent: the gate de-duplicates observers by identity."""
+    try:
+        permission_policy.add_decision_observer(_capture_unattended_refusal)
+    except Exception:
+        _serve_logger.warning("refusal observer unavailable; receipts omit refusal", exc_info=True)
+
+
+def _modes_allowing_risk(risk):
+    try:
+        return list(permission_policy._modes_allowing(risk))
+    except Exception:
+        return []
+
+
+def _turn_refusal_receipt(refusals):
+    """The structured refusal for the last nameable refusal of a turn, or None."""
+    if not refusals:
+        return None
+    decision = refusals[-1]
+    try:
+        label = permission_policy.mode_label(decision.mode)
+    except Exception:
+        label = str(decision.mode or "")
+    return refusal_receipt(
+        decision, mode_label=label, modes_allowing=_modes_allowing_risk(decision.risk),
+        count=len(refusals),
+    )
 
 
 def _loop_global_operation_refusal(actions_json, context=None):
@@ -3321,11 +3531,12 @@ def _work_run_record(result):
 
 
 def _work_run_pending_text(run_id):
+    # Client-neutral: this text is shown as the answer in chat apps, so it
+    # names no HTTP routes. The routes are data in the receipt
+    # (``sonder_receipt.chat_work.get_url`` / ``cancel_url``).
     return (
-        "Work is still running as work run %s (wall-clock budget %d s). "
-        "Fetch the answer with GET /v1/work-runs/%s, or stop further changes "
-        "with POST /v1/work-runs/%s/cancel."
-        % (run_id, _WORK_RUNNER.budget_seconds, run_id, run_id)
+        "Work is still running as work run %s (wall-clock budget %d s); "
+        "check on it or cancel it from your client." % (run_id, _WORK_RUNNER.budget_seconds)
     )
 
 
@@ -4307,29 +4518,37 @@ class Handler(BaseHTTPRequestHandler):
         return BOUND_PORT or CONFIGURED_PORT
 
     def _reject_disallowed_host(self):
-        """Refuse a request whose Host does not name this listener (421).
+        """Refuse a request whose Host could be a DNS-rebinding name (421).
 
         Runs before any routing, including the private transfer and
         replication surfaces, so a DNS-rebinding page can reach nothing.
+        Records whether the name was trusted outright: a name accepted only
+        because this listener requires credentials must not also unlock the
+        loopback-peer conveniences (``_peer_is_loopback``), since a browser
+        on this machine is exactly where a rebinding page runs.
         """
+        self._host_trusted = False
         headers = getattr(self, "headers", None)
         if headers is None:
             return False
         values = headers.get_all("Host") if hasattr(headers, "get_all") else None
         if values is not None and len(values) > 1:
-            allowed = False
+            decision = None
         else:
-            allowed = host_allowed(
-                headers.get("Host"), bind_host=HOST,
-                bound_port=self._listener_port(), allowed_hosts=ALLOWED_HOSTS,
+            decision = host_decision(
+                headers.get("Host"), allowed_hosts=ALLOWED_HOSTS,
+                local_names=_machine_host_names(),
+                credentials_required=_effective_auth_mode() != "local-open",
             )
-        if allowed:
+        if decision is not None:
+            self._host_trusted = decision == HOST_TRUSTED
             return False
-        _serve_logger.warning("request refused: Host header does not name this listener")
+        _log_rejected_host(headers.get("Host"))
         self.close_connection = True
         self._send_json_payload(
             {"error": {"message": "host is not allowed for this listener",
-                       "type": "invalid_request", "code": "HOST_NOT_ALLOWED"}},
+                       "type": "invalid_request", "code": "HOST_NOT_ALLOWED",
+                       "remedy": HOST_NOT_ALLOWED_REMEDY}},
             status=421, headers={"Connection": "close", "Cache-Control": "no-store"},
         )
         return True
@@ -4418,7 +4637,9 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _peer_is_loopback(self):
-        return _is_loopback_host(self._peer())
+        # A loopback peer earns its conveniences only through a trusted Host
+        # name; see ``_reject_disallowed_host``.
+        return getattr(self, "_host_trusted", True) and _is_loopback_host(self._peer())
 
     def _handle_lifecycle_get(self, path):
         """SPEC-2 WP3 endpoints. Returns True when the path was handled.
@@ -4974,11 +5195,15 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_ollama_pool_admin("GET")
             return
         _serve_logger.debug(f"do_GET: path={path!r}, peer={self._peer()!r}")
-        if path == "/" and _local_log_dashboard_allowed(self._peer()):
+        log_page_allowed = (
+            getattr(self, "_host_trusted", True)
+            and _local_log_dashboard_allowed(self._peer())
+        )
+        if path == "/" and log_page_allowed:
             self._send_local_log_page()
             return
         if path == "/v1/local/server-log":
-            if not _local_log_dashboard_allowed(self._peer()):
+            if not log_page_allowed:
                 self._send_not_found()
             else:
                 self._send_json_payload({"log": _local_server_log_tail()})
@@ -5180,7 +5405,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json_payload(result.body, status=result.status_code)
             return
         _maybe_live_reload()
-        if path.startswith("/v1/sessions/"):
+        if path == "/v1/sessions" or path.startswith("/v1/sessions/"):
             context = self._request_auth_context()
             if not context["authorized"]:
                 self._send_auth_error()
@@ -5580,6 +5805,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._handle_commands_get():
             return
+        if self._handle_approvals_get():
+            return
         if self._handle_permission_mode_get():
             return
         if self._handle_fanout_get():
@@ -5633,6 +5860,125 @@ class Handler(BaseHTTPRequestHandler):
             payload = _commands_index_payload(context=context)
         self._send_json_payload(payload)
         return True
+
+    def _approvals_access(self, context):
+        """(ledger, done): ``done`` when an error response was already sent.
+
+        Approving a refused call is the attended answer to the gate's ask, the
+        same authority ``/approve`` needs at the console: a developer or
+        administrator (``_developer_authorized``; the single-user local-open
+        listener counts, exactly as for ``/v1/permission-mode``).
+        """
+        if not context["authorized"]:
+            self._send_auth_error()
+            return None, True
+        if not _developer_authorized(context):
+            self._send_json_payload(
+                sonder_lifecycle.error_envelope(
+                    "FORBIDDEN",
+                    "developer or administrator authorization is required "
+                    "to review or approve calls",
+                    self._correlation(),
+                    retryable=False,
+                ),
+                status=403,
+            )
+            return None, True
+        try:
+            ledger = permission_policy.approval_ledger()
+        except Exception:
+            _serve_logger.error("approval ledger unavailable", exc_info=True)
+            ledger = None
+        if ledger is None:
+            self._send_json_payload(
+                {"error": {"message": "one-shot approvals are not available in this process",
+                           "type": "server_error", "code": "APPROVALS_UNAVAILABLE"}},
+                status=503,
+            )
+            return None, True
+        return ledger, False
+
+    def _handle_approvals_get(self):
+        """``GET /v1/approvals``: refused calls waiting for approval, and approvals."""
+        split = urllib.parse.urlsplit(self.path)
+        if (split.path.rstrip("/") or "/") != "/v1/approvals":
+            return False
+        ledger, done = self._approvals_access(self._request_auth_context())
+        if done:
+            return True
+        query = urllib.parse.parse_qs(split.query, keep_blank_values=True)
+        try:
+            limit = int((query.get("limit") or ["20"])[0])
+        except ValueError:
+            limit = 0
+        if not 1 <= limit <= 200:
+            self._send_json_payload(
+                {"error": {"message": "limit must be between 1 and 200",
+                           "type": "invalid_request"}}, status=400)
+            return True
+        include_spent = (query.get("include_spent") or [""])[0].lower() in ("1", "true", "yes")
+        try:
+            payload = approvals_payload(ledger, limit=limit, include_spent=include_spent)
+        except Exception:
+            _serve_logger.error("approval ledger read failed", exc_info=True)
+            self._send_json_payload(
+                {"error": {"message": "one-shot approvals are not available",
+                           "type": "server_error", "code": "APPROVALS_UNAVAILABLE"}},
+                status=503)
+            return True
+        self._send_json_payload(payload)
+        return True
+
+    def _handle_approvals_post(self, path, req, context):
+        """``POST /v1/approvals/<call_id>`` and ``POST /v1/approvals/revoke/<nonce>``.
+
+        An authenticated developer/administrator POST is an attended approval
+        surface, like ``POST /v1/permission-mode``: the person holding the
+        credential answered the gate's ask for exactly one refused call. The
+        approval is bound to that call's digest, single-use and expiring (see
+        ``facades.approvals``), recorded as approver ``developer:<user>``,
+        ``admin-key`` or ``local-open`` with surface ``http``, and audited on
+        the direct-tool path as ``permission_approve``.
+        """
+        parts = path[len("/v1/approvals"):].strip("/").split("/")
+        if len(parts) == 2 and parts[0] == "revoke" and parts[1]:
+            action, target = "revoke", parts[1]
+        elif len(parts) == 1 and parts[0] and parts[0] != "revoke":
+            action, target = "approve", parts[0]
+        else:
+            self._send_not_found()
+            return
+        ledger, done = self._approvals_access(context)
+        if done:
+            return
+        approver = _http_approver(context)
+        started = time.time()
+
+        def run():
+            if action == "revoke":
+                return revoke_approval(ledger, target)
+            return approve_call(ledger, target, req, approver=approver, surface="http")
+
+        action_text = "approval\0%s\0%s\0%s" % (
+            action, target.lower(), json.dumps(req, sort_keys=True, default=str),
+        )
+        try:
+            result = _idempotent_http_action(
+                context, self.headers.get("Idempotency-Key", ""), action_text, run,
+            )
+        except Exception:
+            _serve_logger.error("approval request failed", exc_info=True)
+            self._send_json_payload(
+                {"error": {"message": "one-shot approvals are not available",
+                           "type": "server_error", "code": "APPROVALS_UNAVAILABLE"}},
+                status=503)
+            return
+        if _send_idempotency_refusal(self, result):
+            return
+        if result.status < 300:
+            approval = (result.body or {}).get("approval") or {}
+            _audit_http_approval(action, approval, started)
+        self._send_json_payload(dict(result.body), status=result.status)
 
     def _handle_permission_mode_get(self):
         """Current autonomy mode, so a client can show it before you send.
@@ -6571,6 +6917,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._handle_work_run_request("POST", path, context=context):
             return
+        if path == "/v1/approvals" or path.startswith("/v1/approvals/"):
+            self._handle_approvals_post(path, req, context)
+            return
         if path == "/v1/permission-mode":
             if not context["authorized"]:
                 self._send_auth_error()
@@ -6608,7 +6957,12 @@ class Handler(BaseHTTPRequestHandler):
                     allow_additional=ALLOW_REGISTRATION,
                     actor=context["account"] if context["authorized"] else None,
                 )
-                self._send_json_payload({"ok": True, "account": account}, status=201)
+                # ``message`` lets a client that only reads ``ok``/``message``
+                # (older apps) report the success instead of a bare 201.
+                self._send_json_payload({
+                    "ok": True, "account": account,
+                    "message": _account_created_message(account),
+                }, status=201)
             except PermissionError as error:
                 self._send_json_payload({"ok": False, "message": str(error)}, status=403)
             except sqlite3.IntegrityError:
@@ -6929,9 +7283,20 @@ class Handler(BaseHTTPRequestHandler):
                 status=error.status,
             )
             return
+        history_source = req.get("history")
+        if history_source is not None and history_source not in _CHAT_HISTORY_SOURCES:
+            record_early_chat_metric("invalid_history")
+            self._send_json_payload({"error": {
+                "message": "history must be \"client\" (use only the messages "
+                           "sent) or \"auto\" (the default)",
+                "type": "invalid_request",
+            }}, status=400)
+            return
         history = _history_from_messages(messages)
-        if not history and storage_session:
-            # Thin client: named a session, resent no transcript.
+        if not history and storage_session and history_source != "client":
+            # Thin client: named a session, resent no transcript. A client
+            # that owns its transcript (``history: "client"``) opts out, so a
+            # turn it cancelled or dropped is never re-injected.
             history = _server_side_history(storage_session)
         account_header = self.headers.get("X-Sonder-Account-Token", "")
         auth_header = self.headers.get("Authorization", "")
@@ -6952,6 +7317,11 @@ class Handler(BaseHTTPRequestHandler):
         response_tier = ""
         activity_response = None
         chat_work_receipt = None
+        # S1: unattended refusals of a nameable call during this turn, so the
+        # receipt can carry the call id a client needs to approve it once.
+        turn_refusals = []
+        refusal_scope = _CHAT_REFUSALS.set(turn_refusals)
+        _ensure_refusal_observer()
         _lifecycle = sonder_lifecycle.get()
         _request_started = time.monotonic()
         # Selecting a concrete model is an API routing contract.  The default
@@ -7339,6 +7709,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         finally:
+            _CHAT_REFUSALS.reset(refusal_scope)
             _release_http_conversation_state(state, state_pinned)
 
         # The handler timer starts before body parsing, authentication, and
@@ -7363,6 +7734,9 @@ class Handler(BaseHTTPRequestHandler):
             receipt["cache"] = turn.cache
         if chat_work_receipt is not None:
             receipt["chat_work"] = chat_work_receipt
+        refusal = _turn_refusal_receipt(turn_refusals)
+        if refusal is not None:
+            receipt["refusal"] = refusal
         if stream:
             streamed = self._send_stream(
                 content, model, iid=response_iid, elapsed_ms=elapsed_ms,
@@ -7722,6 +8096,9 @@ def main(
             print("startup failed before bind: %s" % error, file=sys.stderr)
             raise SystemExit(1)
         lifecycle.begin_ollama_probe()
+        # Resolve the machine's own Host names before the first request, so
+        # no request ever waits on the bounded FQDN lookup.
+        _machine_host_names()
         try:
             factory = ServeHTTPServer if _server_factory is None else _server_factory
             httpd = factory((HOST, port), Handler)

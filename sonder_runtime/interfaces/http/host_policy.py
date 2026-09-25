@@ -3,12 +3,15 @@
 Two decisions live here because both are about *which peer and which name*
 a request really came through, and both must be made before routing:
 
-* ``host_allowed`` defeats DNS rebinding.  A loopback-bound, local-open
+* ``host_decision`` defeats DNS rebinding.  A loopback-bound, local-open
   listener needs no credentials, and a same-origin browser ``GET`` sends no
   ``Origin`` header, so the origin check alone cannot tell a rebinding page
   (``http://rebind.attacker.example:11435``) from the operator's own tools.
   The ``Host`` header can: a browser always sends the name it resolved, and a
   rebinding attack only works through a hostname the attacker controls.
+  Addresses and the machine's own names are therefore always accepted, and
+  other names are refused only where they could matter: on a listener that
+  answers without credentials.
 * ``forwarded_client_ip`` decides whether ``X-Forwarded-For`` may name the
   client.  It may only when the operator declared a TLS-terminating proxy
   *and* the raw socket peer lies inside the trusted proxy CIDRs; otherwise
@@ -24,8 +27,13 @@ import re
 from typing import Iterable
 
 __all__ = [
+    "HOST_CREDENTIALED",
+    "HOST_NOT_ALLOWED_REMEDY",
+    "HOST_TRUSTED",
     "forwarded_client_ip",
     "host_allowed",
+    "host_decision",
+    "machine_host_names",
     "normalize_allowed_host",
     "parse_host_header",
 ]
@@ -116,33 +124,81 @@ def _ip(name: str):
 
 
 def _is_loopback_name(name: str) -> bool:
-    if name == "localhost":
+    if name == "localhost" or name.endswith(".localhost"):
         return True
     address = _ip(name)
     return bool(address is not None and address.is_loopback)
 
 
-def host_allowed(value, *, bind_host: str, bound_port: int | None,
-                 allowed_hosts: Iterable = ()) -> bool:
-    """Whether a request's ``Host`` header names this listener.
+def machine_host_names(hostname="", fqdn="") -> frozenset:
+    """The names this machine answers to: host name, FQDN and ``<host>.local``.
 
-    A missing header is accepted: HTTP/1.0 tooling may omit it and no browser
-    can, so it cannot carry a rebinding attack.  Otherwise the name must be
+    Pure: the caller (the listener, once at startup) supplies what
+    ``socket.gethostname``/``socket.getfqdn`` returned.  Values that are not
+    valid DNS names, and names that are really IP literals, are dropped; an
+    IP literal is accepted on its own terms anyway.
+    """
+    names = set()
+    for raw in (hostname, fqdn):
+        if not isinstance(raw, str):
+            continue
+        name = _normalize_name(raw)
+        if not name or _ip(name) is not None or not _valid_dns_name(name):
+            continue
+        names.add(name)
+        short = name.split(".", 1)[0]
+        if short and _valid_dns_name(short):
+            names.add(short)
+            names.add(short + ".local")
+    return frozenset(names)
 
-    * a configured public host (``[server].allowed_hosts``); an entry without
-      a port accepts any port, an entry with a port only that port;
-    * ``localhost`` or a loopback IP literal; or
-    * any IP literal when the listener itself is bound to a non-loopback
-      address (remote clients reach it by address; DNS rebinding needs a name).
 
-    For the last two a port, when present, must be the bound port.
+# Host decisions. ``TRUSTED`` names cannot carry a DNS-rebinding attack (a
+# literal address, a loopback or own-machine name, an operator-listed name,
+# or no Host at all); ``CREDENTIALED`` is any other well-formed name, accepted
+# only because the listener demands credentials a rebinding page never has.
+HOST_TRUSTED = "trusted"
+HOST_CREDENTIALED = "credentialed"
+
+# The remedy a refused client can act on; the 421 body carries it verbatim.
+HOST_NOT_ALLOWED_REMEDY = (
+    "connect with the server's IP address (or 127.0.0.1), or add this name "
+    "to [server].allowed_hosts / SONDER_ALLOWED_HOSTS on the server"
+)
+
+
+def host_decision(value, *, allowed_hosts: Iterable = (), local_names: Iterable = (),
+                  credentials_required: bool = False) -> str | None:
+    """Classify a request's ``Host`` header; ``None`` means refuse (421).
+
+    DNS rebinding only works through a hostname the attacker controls, and
+    only against a listener that answers without credentials. So:
+
+    * a missing header is accepted: HTTP/1.0 tooling may omit it and no
+      browser can, so it cannot carry a rebinding attack;
+    * a malformed header, or more than one, is refused;
+    * any IP literal is accepted on any port (emulator ``10.0.2.2``, LAN and
+      Tailscale addresses, port forwards), except the unspecified address,
+      which browsers historically routed to localhost;
+    * ``localhost``, ``*.localhost``, and this machine's own names
+      (``local_names``: host name, FQDN, ``<host>.local``) on any port;
+    * ``[server].allowed_hosts`` entries (``name`` on any port, ``name:port``
+      on that port only);
+    * any other well-formed name is ``CREDENTIALED`` when the listener
+      requires credentials (API key or accounts) and refused in the
+      unauthenticated local-open mode.
     """
     if value is None:
-        return True
+        return HOST_TRUSTED
     parsed = parse_host_header(value)
     if parsed is None:
-        return False
+        return None
     name, port = parsed
+    address = _ip(name)
+    if address is not None:
+        return None if address.is_unspecified else HOST_TRUSTED
+    if _is_loopback_name(name):
+        return HOST_TRUSTED
     for entry in allowed_hosts or ():
         try:
             allowed_name, allowed_port = (
@@ -151,18 +207,19 @@ def host_allowed(value, *, bind_host: str, bound_port: int | None,
         except ValueError:
             continue
         if name == allowed_name and (allowed_port is None or allowed_port == port):
-            return True
-    port_ok = port is None or bound_port is None or port == bound_port
-    if not port_ok:
-        return False
-    if _is_loopback_name(name):
-        return True
-    bind_loopback = _is_loopback_name(_normalize_name(str(bind_host or "").strip("[]")))
-    if not bind_loopback and _ip(name) is not None:
-        # The unspecified address is never a name a client should use for
-        # this listener; browsers historically routed 0.0.0.0 to localhost.
-        return not _ip(name).is_unspecified
-    return False
+            return HOST_TRUSTED
+    if name in {_normalize_name(str(item)) for item in (local_names or ())}:
+        return HOST_TRUSTED
+    return HOST_CREDENTIALED if credentials_required else None
+
+
+def host_allowed(value, *, allowed_hosts: Iterable = (), local_names: Iterable = (),
+                 credentials_required: bool = False) -> bool:
+    """Whether a request's ``Host`` header may reach this listener at all."""
+    return host_decision(
+        value, allowed_hosts=allowed_hosts, local_names=local_names,
+        credentials_required=credentials_required,
+    ) is not None
 
 
 def forwarded_client_ip(peer: str, forwarded_for: str, *, proxy_declared: bool,

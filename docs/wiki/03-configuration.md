@@ -45,7 +45,7 @@ max_concurrent_requests = 4
 request_timeout_seconds = 300
 tls_terminated_by_proxy = true      # reference TLS-proxy deployment; also hides the local log dashboard
 trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]  # X-Forwarded-For is read only with tls_terminated_by_proxy = true
-allowed_hosts = []                  # extra Host names ("name" or "name:port"); others get 421
+allowed_hosts = []                  # extra Host names ("name" or "name:port"); only local-open refuses other names (421)
 work_wait_seconds = 240             # routed chat work: wait before answering with a work-run id
 work_budget_seconds = 1800          # routed chat work: wall-clock budget, then effects are refused
 work_max_running = 2                # concurrent routed work runs

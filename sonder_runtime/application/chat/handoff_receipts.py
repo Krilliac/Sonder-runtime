@@ -52,7 +52,13 @@ class ChatWorkResult:
             "return_event_id": self.return_event_id,
             "source_event_id": self.source_event_id,
         }
-        return {key: value for key, value in fields.items() if value}
+        receipt = {key: value for key, value in fields.items() if value}
+        if self.work_run_id:
+            # The routes a client uses to fetch or stop the run; the chat
+            # text itself stays client-neutral.
+            receipt["get_url"] = "/v1/work-runs/%s" % self.work_run_id
+            receipt["cancel_url"] = "/v1/work-runs/%s/cancel" % self.work_run_id
+        return receipt
 
 
 class ChatWorkReceiptService:
