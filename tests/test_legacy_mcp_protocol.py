@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import threading
+import time
 import os
 import subprocess
 import sys
@@ -218,15 +220,49 @@ def test_real_stdio_answers_every_malformed_frame_and_keeps_serving(tmp_path):
         "A" * (LEGACY_MCP_MAX_FRAME_BYTES + 1) + smuggled,
         json.dumps({"jsonrpc": "2.0", "id": 9, "method": "ping"}),
     ]
-    completed = subprocess.run(
-        [sys.executable, str(server_path)],
-        input=("\n".join(frames) + "\n").encode("utf-8"),
-        capture_output=True, cwd=str(tmp_path), timeout=240,
-        env={**os.environ, "PYTHONPATH": repo_root, "SONDER_HOME": str(sonder_home),
-             "SONDER_LIVE_RELOAD": "0"},
-    )
-    rows = [json.loads(line) for line in completed.stdout.decode("utf-8").splitlines() if line.strip()]
-    assert rows[0]["id"] == 1 and "result" in rows[0], completed.stderr[-2000:]
+    # Behave like a real client: keep stdin open until the final ping is
+    # answered. Closing stdin right after the last frame races the upstream
+    # stdio loop's EOF shutdown against that ping's reply.
+    stderr_path = tmp_path / "server.stderr"
+    with open(stderr_path, "wb") as stderr_file:
+        process = subprocess.Popen(
+            [sys.executable, str(server_path)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr_file,
+            cwd=str(tmp_path),
+            env={**os.environ, "PYTHONPATH": repo_root, "SONDER_HOME": str(sonder_home),
+                 "SONDER_LIVE_RELOAD": "0"},
+        )
+        payload = ("\n".join(frames) + "\n").encode("utf-8")
+        # A separate writer so a 12 MB frame cannot deadlock against the
+        # server's own output.
+        writer = threading.Thread(
+            target=lambda: (process.stdin.write(payload), process.stdin.flush()),
+            daemon=True,
+        )
+        writer.start()
+        rows = []
+        try:
+            deadline = time.monotonic() + 240
+            while time.monotonic() < deadline:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                if not line.strip():
+                    continue
+                rows.append(json.loads(line))
+                if rows[-1].get("id") == 9:
+                    break
+        finally:
+            writer.join(60)
+            process.stdin.close()
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            process.stdout.close()
+    stderr_tail = stderr_path.read_bytes()
+    assert rows and rows[0]["id"] == 1 and "result" in rows[0], stderr_tail[-2000:]
     errors = [(row.get("id"), row["error"]["code"]) for row in rows[1:] if "error" in row]
     assert errors == [
         (None, -32700),  # not json
