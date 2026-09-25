@@ -5802,7 +5802,8 @@ class Handler(BaseHTTPRequestHandler):
             application = default_app()
             handler = _A2A_REQUEST_HANDLER or build_application_a2a_handler(
                 application,
-                base_url=os.environ.get("SONDER_A2A_BASE_URL", "").strip(),
+                # Serve the same endpoint the agent card advertises.
+                base_url=_a2a_discovery_base_url(),
                 card_facade=_A2A_AGENT_CARD_FACADE,
             )
             result = dispatch_a2a_jsonrpc_route(handler, "POST", path, req)
