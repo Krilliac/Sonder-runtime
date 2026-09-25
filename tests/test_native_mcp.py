@@ -709,7 +709,7 @@ _UNGATED_BEFORE = {
     # native name -> (arguments, the name the permission catalog grades)
     "run_program": ({"program": "id"}, "workspace_run"),
     "workspace_run": ({"program": "id"}, "workspace_run"),
-    "run_script": ({"path": "tool.py"}, "run_script"),
+    "run_script": ({"path": "tool.py"}, "script_run"),
     "archive_create": ({"root": "p", "inputs_json": "[]", "destination": "a.zip"}, "archive_create"),
     "archive_extract": ({"source": "a.zip", "destination": "out"}, "archive_extract"),
     "fetch_artifact": ({"url": "https://example.test/a.bin", "dest": "a.bin"}, "fetch_artifact"),
@@ -786,3 +786,25 @@ def test_native_entrypoint_exit_status_is_not_the_frame_count(monkeypatch):
     monkeypatch.setattr(native_mcp, "run_native_mcp", lambda _app, **_kwargs: 41)
 
     assert entrypoint.cmd_mcp(SimpleNamespace(native=True)) == 0
+
+
+def test_native_run_script_is_graded_as_the_legacy_execution_tool():
+    """`run_script` must grade as `script_run`, not fall through unclassified.
+
+    Unclassified tools are refused in every mode, so an ungraded `run_script`
+    stayed refused even under `auto`, where the legacy `script_run` runs.
+    """
+    from sonder_runtime.adapters.security.permission_policy import permission_policy
+    from sonder_runtime.bootstrap import native_mcp
+
+    graded = native_mcp._GRADED_NAMES.get("run_script", "run_script")
+    decision = permission_policy.decide_for_caller(
+        graded, interactive=False, gate_control_exempt=False,
+        surface="native-mcp", record=False, mode="auto", arguments={},
+    )
+    assert decision is None or decision.action == permission_policy.allow_action()
+    manual = permission_policy.decide_for_caller(
+        graded, interactive=False, gate_control_exempt=False,
+        surface="native-mcp", record=False, mode="manual", arguments={},
+    )
+    assert manual is not None and manual.action != permission_policy.allow_action()

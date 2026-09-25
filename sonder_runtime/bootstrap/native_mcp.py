@@ -515,6 +515,11 @@ _GRADED_NAMES = {
     canonical: legacy for legacy, canonical in _LEGACY_ALIASES.items()
     if legacy != canonical
 }
+# Native tools with no legacy alias whose legacy counterpart the catalog
+# grades under another name. ``run_script`` runs the same workbench backend as
+# the legacy ``script_run`` (an execution tool); ungraded, it is unclassified
+# and refused in every mode, even ``auto``.
+_GRADED_NAMES["run_script"] = "script_run"
 
 
 def native_tool_registry() -> InMemoryToolRegistry:
@@ -983,7 +988,7 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                     "evidence": {"tool": canonical_name,
                                  "call_id": getattr(decision, "call_id", "")},
                 }
-        cloud_consent =bool(canonical_arguments.pop("consent", False)) if canonical_name in {"web_fetch", "web_search", "weather_lookup", "approximate_location_lookup"} else False
+        cloud_consent = bool(canonical_arguments.pop("consent", False)) if canonical_name in {"web_fetch", "web_search", "weather_lookup", "approximate_location_lookup"} else False
         if cloud_consent:
             context = local_owner_context(
                 correlation_id=context.correlation_id,

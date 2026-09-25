@@ -257,3 +257,33 @@ def test_oversized_response_is_a_bounded_error_not_a_dead_session():
     assert rows[1] == {"jsonrpc": "2.0", "id": 2, "error": {
         "code": -32603, "message": "MCP response exceeds max_frame_bytes"}}
     assert rows[2]["id"] == 3 and rows[2]["result"]["output"] == "xx"
+
+
+def test_oversized_response_with_frame_sized_id_still_answers():
+    """The bounded error echoes the id; an id that fills a frame must not kill serve().
+
+    A compact request whose string id nearly fills a frame fits the bound, but
+    the -32603 envelope echoing that id does not, and the second write raised
+    out of serve().
+    """
+    big_id = "i" * 910
+    frames = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2.0"}},
+        {"jsonrpc": "2.0", "id": big_id, "method": "tools/call", "params": {"name": "echo", "arguments": {}}},
+        {"jsonrpc": "2.0", "id": 3, "method": "ping"},
+    ]
+    lines = [json.dumps(frame, separators=(",", ":")) for frame in frames]
+    assert len(lines[1]) + 1 <= 1_000
+    output = io.StringIO()
+    transport = StdioMcpTransport(
+        io.StringIO("\n".join(lines) + "\n"), output,
+        compatibility=McpCompatibility(capabilities=("tools", "notifications")),
+        tool_catalog=({"name": "echo", "description": "echo", "inputSchema": {"type": "object"}},),
+        tool_handler=lambda name, arguments: {"output": "x" * 200},
+        limits=McpTransportLimits(max_frame_bytes=1_000),
+    )
+    assert transport.serve() == 3
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert rows[1] == {"jsonrpc": "2.0", "id": None, "error": {
+        "code": -32603, "message": "MCP response exceeds max_frame_bytes"}}
+    assert rows[2] == {"jsonrpc": "2.0", "id": 3, "result": {}}

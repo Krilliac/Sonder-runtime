@@ -207,7 +207,14 @@ class StdioMcpTransport:
                     logger.error(
                         f"MCP response dropped connection_id={self._connection_id!r}: {exc}"
                     )
-                    self._write(self._error(response.get("id"), -32603, str(exc)))
+                    error = self._error(response.get("id"), -32603, str(exc))
+                    try:
+                        self._write(error)
+                    except McpTransportError:
+                        # The echoed id alone can fill a frame (ids are
+                        # unbounded strings); answer without it rather than
+                        # letting the error escape and end the session.
+                        self._write(self._error(None, -32603, str(exc)))
         if self._router is not None:
             self._router.unsubscribe(self._connection_id)
         logger.debug(f"serve loop ended connection_id={self._connection_id!r} frames_processed={count}")
