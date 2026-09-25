@@ -2,8 +2,9 @@
 
 Only syntactically isolated literal assertions qualify. Suites with pytest
 configuration, fixtures, or setup hooks are left unevaluated. This projection
-is not an independent or complete scorer. Candidate code runs in the existing
-low-integrity supervisor and receives inputs, never expected values.
+is not an independent or complete scorer. Candidate code runs in the host's
+candidate supervisor (Windows low integrity, or the Linux uid-separated
+supervisor when configured) and receives inputs, never expected values.
 """
 
 from __future__ import annotations
@@ -235,13 +236,16 @@ def clean_replay(
 ) -> tuple[bool, str]:
     """Repeat a challenge from a fresh base worktree plus only tested files.
 
-    The checkout and expected answers live in the medium-integrity parent.
-    Candidate code executes exclusively in the low supervisor, including on
-    replay; a missing OS boundary is a failed grade.
+    The checkout and expected answers live in the supervisor-owned parent.
+    Candidate code executes exclusively in the selected candidate supervisor,
+    including on replay, and only that supervisor's own attestation counts;
+    a missing OS boundary is a failed grade.
     """
     if not starting_commit or not tested_files:
         return False, "clean replay has no bound base commit and candidate files"
-    from scripts.selfmod_low_integrity import run_isolated
+    from scripts.selfmod_linux_isolation import candidate_supervisor
+
+    run_isolated, attestation = candidate_supervisor()
 
     repository = Path(repository).resolve()
     workspace = Path(workspace).resolve()
@@ -285,8 +289,8 @@ def clean_replay(
             )
             if (isolated.get("exit_code") != 0 or isolated.get("passed") is not True
                     or isolated.get("integrity_failed")
-                    or (isolated.get("job") or {}).get("integrity") != "low"):
-                result = (False, "fresh checkout lacked a successful low-integrity probe")
+                    or (isolated.get("job") or {}).get("integrity") != attestation):
+                result = (False, "fresh checkout lacked a successful isolated probe")
             else:
                 result = grade(str(isolated.get("output") or ""), nonce, cases)
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:

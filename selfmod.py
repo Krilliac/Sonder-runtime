@@ -64,11 +64,16 @@ SENSITIVE_PREFIXES = (
     "tests/test_control_plane", "tests/test_read_only_agent_policy",
     "tests/test_selfmod",
     "scripts/selfmod_low_integrity.py",
+    "scripts/selfmod_linux_isolation.py", "tests/test_linux_candidate_isolation",
+    "tests/test_517_linux_uid_separated_candidate_evaluator",
 )
 SENSITIVE_PARTS = (
     ".env", "credential", "secret", "token", "account", "migration",
     "permissions.json", "selfmod_policy", "selfmod.db", "audit",
 )
+# Attestations a candidate supervisor may build.  Each is accepted only from
+# the supervisor that constructs it (see ``_record_command``).
+_ISOLATED_ATTESTATIONS = frozenset({"low", "linux-uid"})
 DEFAULT_BUDGETS = {
     "max_files_inspected": 80,
     "max_files_changed": 8,
@@ -865,9 +870,14 @@ def _record_command(
         if low_integrity is None else bool(low_integrity)
     )
     if use_low_integrity:
-        from scripts.selfmod_low_integrity import run_isolated
         started = time.monotonic()
+        expected = "low"
         try:
+            # Windows low-integrity Job, or (once a dedicated candidate uid is
+            # configured on Linux) the uid-separated supervisor.  Only the
+            # attestation the selected supervisor builds is accepted.
+            from scripts.selfmod_linux_isolation import candidate_supervisor
+            run_isolated, expected = candidate_supervisor()
             isolated = run_isolated(
                 command, cwd=cwd_path, timeout=seconds,
                 protected_paths=protected_paths, **dict(isolation or {}),
@@ -879,23 +889,35 @@ def _record_command(
             # constructs this report from the process handle and Job. A
             # missing/conflicting report is an isolation failure even if
             # candidate-controlled output claims low integrity or exit 0.
-            if (not isinstance(job, dict) or job.get("integrity") != "low"
-                    or isolated.get("passed") is not (code == 0)):
+            if (not isinstance(job, dict) or job.get("integrity") != expected
+                    or isolated.get("passed") is not (code == 0)
+                    or (expected == "linux-uid" and (
+                        type(job.get("uid")) is not int or job["uid"] <= 0
+                        or job["uid"] == os.geteuid()))):
                 raise RuntimeError("invalid supervisor attestation")
             if isolated.get("integrity_failed"):
                 raise RuntimeError("evaluator integrity failed")
-            attestation = "low"
+            attestation = expected
             output = (output + "\nSELFMOD ISOLATION: %s\n" % _json(job))[-100_000:]
         except Exception as exc:
             # A missing token/ACL/Job capability rejects this check.  It
             # cannot accidentally count as a successful negative reproducer.
             code = 125
-            reason = "unsupported platform" if os.name != "nt" else (
-                str(exc) if type(exc) is RuntimeError and str(exc) in {
-                    "invalid supervisor attestation", "evaluator integrity failed",
-                } else type(exc).__name__
+            known = type(exc) is RuntimeError and str(exc) in {
+                "invalid supervisor attestation", "evaluator integrity failed",
+            }
+            if expected == "linux-uid":
+                # The Linux supervisor's fail-closed errors carry host facts
+                # (not root, uid in use, candidate-writable truth), never
+                # candidate output.
+                reason = str(exc)[:300] if isinstance(exc, RuntimeError) else type(exc).__name__
+            else:
+                reason = "unsupported platform" if os.name != "nt" else (
+                    str(exc) if known else type(exc).__name__
+                )
+            output = "%s isolation unavailable: %s" % (
+                "linux-uid" if expected == "linux-uid" else "low-integrity", reason,
             )
-            output = "low-integrity isolation unavailable: %s" % reason
             isolation_failed = True
         duration = int((time.monotonic() - started) * 1000)
     else:
@@ -970,7 +992,7 @@ def record_host_grade(run_id, probe_id, *, passed: bool, detail: str) -> dict:
             (run_id, probe_id),
         ).fetchone()
         if (probe is None or probe["kind"] != "host_probe" or not probe["passed"]
-                or probe["isolation"] != "low"):
+                or probe["isolation"] not in _ISOLATED_ATTESTATIONS):
             raise PermissionError("host grade requires a passing attested probe")
         prior = conn.execute(
             "SELECT id FROM selfmod_tests WHERE run_id=? AND kind='host_grade'", (run_id,),
@@ -980,7 +1002,7 @@ def record_host_grade(run_id, probe_id, *, passed: bool, detail: str) -> dict:
         conn.execute(
             "INSERT INTO selfmod_tests(run_id,kind,command_json,exit_code,duration_ms,output,passed,created_ts,isolation) VALUES(?,?,?,?,?,?,?,?,?)",
             (run_id, "host_grade", _json({"probe_id": probe_id}), 0 if passed else 1,
-             0, str(detail)[:100_000], int(bool(passed)), time.time(), "low"),
+             0, str(detail)[:100_000], int(bool(passed)), time.time(), probe["isolation"]),
         )
         _event(conn, run_id, "host_grade", "parent-scored challenge %s" % ("passed" if passed else "failed"))
     return {"kind": "host_grade", "passed": bool(passed), "detail": str(detail)[:100_000]}
@@ -1247,7 +1269,7 @@ def review(run_id, *, require_kinds=None, unevaluated=()):
         and run["mode"] == "auto-low-risk" and run["risk"] == "low"
         and not run["approval_required"]
         and len(host_grades) == 1 and host_grades[0]["passed"]
-        and all(row["isolation"] == "low" for row in candidate_results)
+        and all(row["isolation"] in _ISOLATED_ATTESTATIONS for row in candidate_results)
     )
     target = "rejected" if failures else "reviewing"
     passed_note = "deterministic acceptance checks passed"
