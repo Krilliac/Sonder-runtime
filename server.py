@@ -13330,7 +13330,10 @@ def secret_scan(
     ]
     for f in findings:
         lines.append("  %s:%d  [%s]  %s" % (f["file"], f["line"], f["type"], f["match"]))
-    if data.get("truncated"):
+    if data.get("timed_out"):
+        lines.append("  ... (incomplete: stopped at the %ss timeout; raise timeout "
+                     "to scan the rest)" % data.get("timeout", timeout))
+    elif data.get("truncated"):
         lines.append("  ... (truncated at 100 findings)")
     output = "\n".join(lines)
     _record_direct_tool(

@@ -1071,7 +1071,17 @@ def secret_scan(root=".", timeout=30, extra_roots=""):
 
     findings = []
     scanned = 0
+    # ``timeout`` is a wall-clock budget for the whole walk, checked before
+    # each entry and between patterns: a large tree used to be walked to the
+    # end whatever the caller asked for. On expiry the partial result is
+    # returned and marked, as the packaged adapter (adapters/secret_scan.py)
+    # does, so a caller never mistakes a cut-short scan for a clean one.
+    deadline = time.monotonic() + timeout
+    timed_out = False
     for path in root.rglob("*"):
+        if time.monotonic() >= deadline:
+            timed_out = True
+            break
         if not path.is_file() or path.stat().st_size > 1_000_000:
             continue
         rel = str(path.relative_to(root))
@@ -1086,6 +1096,9 @@ def secret_scan(root=".", timeout=30, extra_roots=""):
         except OSError:
             continue
         for pattern_str, label in secret_patterns:
+            if time.monotonic() >= deadline:
+                timed_out = True
+                break
             for m in re.finditer(pattern_str, content):
                 line_no = content[:m.start()].count("\n") + 1
                 # Never echo the matched text: a 40-character prefix of a
@@ -1097,6 +1110,10 @@ def secret_scan(root=".", timeout=30, extra_roots=""):
                     "match": _REDACTED_CREDENTIAL,
                 })
                 if len(findings) >= 100:
-                    return {"ok": True, "findings": findings, "files_scanned": scanned, "truncated": True}
+                    return {"ok": True, "findings": findings, "files_scanned": scanned,
+                            "truncated": True, "timed_out": False}
+        if timed_out:
+            break
 
-    return {"ok": True, "findings": findings, "files_scanned": scanned, "truncated": False}
+    return {"ok": True, "findings": findings, "files_scanned": scanned,
+            "truncated": timed_out, "timed_out": timed_out, "timeout": timeout}

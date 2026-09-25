@@ -450,3 +450,38 @@ def test_resolve_root_invalid(tmp_path):
     missing = tmp_path / "not_created"
     with pytest.raises(ValueError, match="not a directory"):
         harness_tools._resolve_root(str(missing))
+
+
+# ---------------------------------------------------------------------------
+# secret_scan timeout
+# ---------------------------------------------------------------------------
+
+
+def test_secret_scan_honours_timeout_and_marks_result_incomplete(tmp_path, monkeypatch):
+    """``timeout`` bounds the walk; an expired scan is marked, never "clean".
+
+    The scan used to validate ``timeout`` and then walk the whole tree. A fake
+    monotonic clock that jumps past the 5-second budget after a couple of
+    reads proves the deadline is actually consulted.
+    """
+    for index in range(20):
+        (tmp_path / ("f%02d.txt" % index)).write_text("nothing here\n", encoding="utf-8")
+    clock = {"now": 1000.0}
+
+    def fake_monotonic():
+        clock["now"] += 3.0
+        return clock["now"]
+
+    monkeypatch.setattr(harness_tools.time, "monotonic", fake_monotonic)
+    result = harness_tools.secret_scan(root=str(tmp_path), timeout=5)
+    assert result.get("timed_out") is True
+    assert result["truncated"] is True
+    assert result["files_scanned"] < 20
+
+
+def test_secret_scan_without_expiry_reports_complete(tmp_path):
+    (tmp_path / "a.txt").write_text("nothing here\n", encoding="utf-8")
+    result = harness_tools.secret_scan(root=str(tmp_path), timeout=30)
+    assert result["timed_out"] is False
+    assert result["truncated"] is False
+    assert result["files_scanned"] == 1
