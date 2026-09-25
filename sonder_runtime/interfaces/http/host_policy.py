@@ -181,7 +181,7 @@ def forwarded_client_ip(peer: str, forwarded_for: str, *, proxy_declared: bool,
         return peer
     networks = tuple(trusted_networks or ())
     try:
-        peer_address = ipaddress.ip_address(peer)
+        peer_address = _unmapped(ipaddress.ip_address(peer))
     except ValueError:
         return peer
     if not any(peer_address in net for net in networks):
@@ -189,9 +189,20 @@ def forwarded_client_ip(peer: str, forwarded_for: str, *, proxy_declared: bool,
     hops = [part.strip() for part in str(forwarded_for or "").split(",") if part.strip()]
     for hop in reversed(hops):
         try:
-            address = ipaddress.ip_address(hop)
+            address = _unmapped(ipaddress.ip_address(hop))
         except ValueError:
             return peer
         if not any(address in net for net in networks):
             return str(address)
     return peer
+
+
+def _unmapped(address):
+    """IPv4 view of an IPv4-mapped IPv6 address (``::ffff:a.b.c.d``).
+
+    A dual-stack listener reports IPv4 peers in mapped form, which never
+    matches an IPv4 trusted-proxy network, so a declared IPv4 proxy would be
+    silently ignored.
+    """
+    mapped = getattr(address, "ipv4_mapped", None)
+    return mapped if mapped is not None else address

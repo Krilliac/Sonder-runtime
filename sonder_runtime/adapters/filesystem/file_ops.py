@@ -54,7 +54,7 @@ SECRET_FILES = {
     "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_rsa",
 }
 SECRET_SUFFIXES = {".key", ".p12", ".pem", ".pfx"}
-SENSITIVE_READ_DIRECTORIES = {".git", ".ssh", ".aws", ".azure", ".kube"}
+SENSITIVE_READ_DIRECTORIES = {".git", ".ssh", ".aws", ".azure", ".gnupg", ".kube"}
 # Credential stores the direct read tools (file_read, file_read_range,
 # data_inspect, image_inspect, file_copy/move sources) deny by default even
 # inside an allowed root, and even with a developer token or bypass: a key
@@ -394,7 +394,9 @@ def _control_plane_paths() -> set[Path]:
 def _is_secret_path(path: Path) -> bool:
     name = path.name.lower()
     suffix = path.suffix.lower()
-    if name in SECRET_FILES or suffix in SECRET_SUFFIXES:
+    # CREDENTIAL_READ_FILES is the direct-read deny list; folding it in here
+    # keeps archive/scan/compare exclusions from drifting behind it.
+    if name in SECRET_FILES or name in CREDENTIAL_READ_FILES or suffix in SECRET_SUFFIXES:
         return True
     if name == ".env" or name.startswith(".env."):
         return True
