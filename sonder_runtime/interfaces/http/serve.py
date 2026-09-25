@@ -46,6 +46,9 @@ from sonder_runtime.interfaces.http.memory_replication import (
 _APP_CONTROL_BINDING = None
 _APP_CONTROL_CONFIG = None
 from sonder_runtime.interfaces.http.app_control import handle_app_control, is_app_control_route
+from sonder_runtime.interfaces.http.work_runs import (
+    WorkCapacityExhausted, WorkRunner, current_run_id as current_work_run_id,
+)
 
 _ARTIFACT_TRANSFER_BINDING = None
 _ARTIFACT_TRANSFER_CONFIG = None
@@ -80,7 +83,9 @@ from sonder_runtime.adapters.command_completion import (
 from sonder_runtime.adapters.content_services import feedback, intents, training_tasks
 from sonder_runtime.adapters.execution_tools import code_runner, grounding
 from sonder_runtime.adapters.model_transport import ModelCallError
+from sonder_runtime.adapters.execution import effect_fence
 from sonder_runtime.adapters.persistence import served_action_receipts
+from sonder_runtime.adapters.persistence import http_work_runs
 from sonder_runtime.adapters.security import unsafe_lab
 from sonder_runtime.adapters.security.account_auth import account_auth as admin_auth
 from sonder_runtime.adapters.web import live_reload
@@ -999,6 +1004,11 @@ def configure_typed_config(config) -> None:
         1, min(HTTP_SESSION_STATE_LIMIT - 1, server_config.session_state_owner_limit)
     )
     TRAIN_MAX_N = max(1, server_config.train_max_n)
+    _WORK_RUNNER.configure(
+        wait_seconds=server_config.work_wait_seconds,
+        budget_seconds=server_config.work_budget_seconds,
+        max_running=server_config.work_max_running,
+    )
     global _HEALTH_STATUS_FACADE, _TRUSTED_PROXY_NETWORKS
     _HEALTH_STATUS_FACADE = HealthStatusFacade(
         metrics_path=config.observability.metrics_path,
@@ -3252,6 +3262,47 @@ def _work_project_for_request(project, storage_project):
     return server.served_work_project(project) or storage_project
 
 
+_WORK_RUNNER = WorkRunner(
+    store=http_work_runs, effects=effect_fence,
+    wait_seconds=_env_int("SONDER_HTTP_WORK_WAIT_SECONDS", 240),
+    budget_seconds=_env_int("SONDER_HTTP_WORK_BUDGET_SECONDS", 1800),
+    max_running=_env_int("SONDER_HTTP_WORK_MAX_RUNNING", 2),
+)
+
+
+def _work_run_record(result):
+    """Durable (status, answer) for one finished work run."""
+    if isinstance(result, ChatWorkResult):
+        status = result.status if result.status in ("returned", "unknown", "refused") else "unknown"
+        return status, result.text
+    if isinstance(result, str):
+        return "refused", result
+    return "unknown", ""
+
+
+def _work_run_pending_text(run_id):
+    return (
+        "Work is still running as work run %s (wall-clock budget %d s). "
+        "Fetch the answer with GET /v1/work-runs/%s, or stop further changes "
+        "with POST /v1/work-runs/%s/cancel."
+        % (run_id, _WORK_RUNNER.budget_seconds, run_id, run_id)
+    )
+
+
+def _bind_current_activity():
+    """Carry the request's activity span into the work-run thread."""
+    response_id = activity_tracker.current_response_id()
+    if not response_id:
+        return None
+
+    def wrap(body):
+        def bound():
+            with activity_tracker.bind_response(response_id):
+                body()
+        return bound
+    return wrap
+
+
 def _handle_work_intent(content, project="", authorized=False, context=None,
                         idempotency_key="", session_id="", session_ref="",
                         correlation_id="", with_receipt=False):
@@ -3331,17 +3382,44 @@ def _handle_work_intent(content, project="", authorized=False, context=None,
                 decision.lane, session_ref, admission.event_id,
                 terminal.event_id, source.event_id if source else "",
                 routing_reason=decision.reason,
+                # Bound inside the replay guard so a cached replay names the
+                # run that actually produced the answer.
+                work_run_id=current_work_run_id(),
             )
 
-        result = _idempotent_http_action(context, idempotency_key, action, run_admitted_work)
+        # The lane runs as a bounded work run: a wall-clock budget and an
+        # explicit cancel stop its effects, and a client that stops waiting
+        # can still fetch the persisted answer by run id.
+        try:
+            outcome = _WORK_RUNNER.run(
+                _state_principal(context),
+                lambda: _idempotent_http_action(
+                    context, idempotency_key, action, run_admitted_work,
+                ),
+                classify=_work_run_record,
+                thread_wrapper=_bind_current_activity(),
+            )
+        except WorkCapacityExhausted as error:
+            raise sonder_lifecycle.AdmissionRejected(
+                429, "WORK_CAPACITY_EXHAUSTED",
+                "routed work capacity is busy (%s); retry later, or cancel a run "
+                "with POST /v1/work-runs/<id>/cancel" % error,
+                retryable=True,
+            ) from None
+        if not outcome.finished:
+            return ChatWorkResult(
+                _work_run_pending_text(outcome.run_id), "running",
+                session_ref=session_ref, work_run_id=outcome.run_id,
+            )
+        result = outcome.result
         if isinstance(result, ChatWorkResult):
-            return result
+            return result if result.work_run_id else replace(result, work_run_id=outcome.run_id)
         # A plain string can only originate in the existing durable replay
         # guard, which refused or could not re-run the action; no new lane
         # return or admission receipt is claimed for it.
         return ChatWorkResult(
             result if isinstance(result, str) else "", "refused" if isinstance(result, str) else "unknown",
-            session_ref=session_ref,
+            session_ref=session_ref, work_run_id=outcome.run_id,
         )
     return _idempotent_http_action(
         context, idempotency_key, action,
@@ -5396,6 +5474,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._handle_fanout_get():
             return
+        if self._handle_work_run_request("GET", path):
+            return
         self._send_not_found()
 
     def _send_local_log_page(self):
@@ -5478,6 +5558,61 @@ class Handler(BaseHTTPRequestHandler):
                 # Do not disclose another developer's run identifier.
                 return None, (404, "fanout run was not found")
         return run, None
+
+    def _handle_work_run_request(self, method, path, context=None):
+        """``GET /v1/work-runs[/<id>]`` and ``POST /v1/work-runs/<id>/cancel``.
+
+        Runs are visible only to the principal that started them.  Cancel
+        stops the run's effects (files, programs, destructive tools) at the
+        next attempt; model steps already admitted finish to their step bound.
+        """
+        route = path.rstrip("/")
+        if route != "/v1/work-runs" and not route.startswith("/v1/work-runs/"):
+            return False
+        parts = route[len("/v1/work-runs"):].strip("/").split("/") if route != "/v1/work-runs" else []
+        if context is None:
+            context = self._request_auth_context()
+        if not context["authorized"]:
+            self._send_auth_error()
+            return True
+        if not _developer_authorized(context):
+            self._send_json_payload({"error": {
+                "message": "developer or admin authentication is required for work runs",
+                "type": "forbidden", "code": "FORBIDDEN"}}, status=403)
+            return True
+        run_id = parts[0] if parts else ""
+        if run_id and not re.fullmatch(r"wr-[0-9a-f]{32}", run_id):
+            self._send_json_payload({"error": {"message": "invalid work run id",
+                                               "type": "invalid_request"}}, status=400)
+            return True
+        principal = _state_principal(context)
+        try:
+            if method == "GET" and not parts:
+                self._send_json_payload({"runs": _WORK_RUNNER.recent(principal)},
+                                        headers={"Cache-Control": "no-store"})
+                return True
+            if method == "GET" and len(parts) == 1:
+                record = _WORK_RUNNER.get(run_id, principal)
+            elif method == "POST" and len(parts) == 2 and parts[1] == "cancel":
+                record = _WORK_RUNNER.cancel(run_id, principal)
+            else:
+                self._send_json_payload({"error": {"message": "method not allowed",
+                                                   "type": "invalid_request"}}, status=405)
+                return True
+        except (OSError, sqlite3.Error):
+            _serve_logger.error("work run store unavailable", exc_info=True)
+            self._send_json_payload({"error": {"message": "work run store unavailable",
+                                               "type": "server_error",
+                                               "code": "WORK_RUN_STORE_UNAVAILABLE"}},
+                                    status=503, headers={"Retry-After": "1"})
+            return True
+        if record is None:
+            self._send_json_payload({"error": {"message": "work run not found",
+                                               "type": "not_found", "code": "NOT_FOUND"}},
+                                    status=404)
+            return True
+        self._send_json_payload(record, headers={"Cache-Control": "no-store"})
+        return True
 
     def _handle_fanout_get(self):
         route = urllib.parse.urlsplit(self.path).path.rstrip("/")
@@ -6241,6 +6376,8 @@ class Handler(BaseHTTPRequestHandler):
             if model_operation == "responses":
                 path = "/v1/chat/completions"
         if self._handle_fanout_post(path, req, context):
+            return
+        if self._handle_work_run_request("POST", path, context=context):
             return
         if path == "/v1/permission-mode":
             if not context["authorized"]:
@@ -7297,6 +7434,10 @@ def main(
                 target=httpd.shutdown, daemon=True, name="sonder-httpd-shutdown"
             ).start()
         )
+        try:
+            _WORK_RUNNER.reconcile()
+        except Exception:
+            _serve_logger.error("HTTP work run reconciliation failed at startup", exc_info=True)
         BOUND_PORT = port
         url = "http://%s:%d" % (HOST, port)
         _serve_logger.info(f"Server listening on {url}, auth_mode={_effective_auth_mode()!r}")

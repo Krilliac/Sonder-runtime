@@ -37,10 +37,14 @@ class ChatWorkResult:
     source_event_id: str = ""
     # Host classifier reason for the lane choice; never user or model text.
     routing_reason: str = ""
+    # Opaque id of the served work run holding the durable answer, when the
+    # turn was executed as a bounded HTTP work run.
+    work_run_id: str = ""
 
     def public_receipt(self) -> dict[str, str]:
         fields = {
             "status": self.status,
+            "work_run_id": self.work_run_id,
             "requested_mode": self.requested_mode,
             "routing_reason": self.routing_reason,
             "session_ref": self.session_ref,

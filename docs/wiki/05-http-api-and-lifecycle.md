@@ -18,6 +18,8 @@ production lifecycle and admission layer (`sonder_lifecycle.py`).
 | `GET /v1/admin/updates/status` | admin | Durable update state (System page). |
 | `POST /v1/memory/replication/batches` | fixed configured peer only | Disabled unless the typed fact-only receiver is enabled; accepts one bounded authenticated replication batch and returns its durable receipt. It is not an operator send, takeover, or failback endpoint. |
 | `GET /v1/sonder/status` | admin/owner | Rich host-wide runtime/stats snapshot, including the configured deployment profile and honest capability availability. Ordinary hosted accounts receive only their account and the model catalog. |
+| `GET /v1/work-runs`, `GET /v1/work-runs/<id>` | developer/admin (own runs only) | Routed-work runs started by this principal: status (`running`, `returned`, `unknown`, `refused`, `cancelled`, `budget_exceeded`, `interrupted`, `failed`) and, for one run, its persisted answer. |
+| `POST /v1/work-runs/<id>/cancel` | developer/admin (own runs only) | Cancel a routed-work run: its effect fence stops holding, so every further file change, host program, or destructive tool is refused. |
 | `GET /v1/sonder/feed` | any authorized caller | Owner-scoped live execution feed: the caller's own active and recently completed responses (category/name, state, elapsed, redacted summary, current operation). Never exposes prompts, tool arguments, paths, outputs, reasoning, or another principal's work. |
 
 `/live` may be unauthenticated so an external check never needs the key;
@@ -192,7 +194,9 @@ STARTING → MIGRATING → READY ⇄ DEGRADED → DRAINING → STOPPING
 5. Header/body-size limits.
 6. Bounded concurrency slot; queue-depth cap; admission deadline.
 7. Parse/validate; resolve privilege.
-8. Execute under a deadline + cancellation token.
+8. Execute. Model turns are bounded by the provider timeout; routed work runs
+   by the wall-clock budget and cancel surface above, which fence effects but
+   cannot preempt a model call already in flight.
 9. Structured completion + metrics.
 
 Rejections use one standard envelope:

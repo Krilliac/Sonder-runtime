@@ -21,6 +21,7 @@ STATE_DATABASES = (
     ("extensions.db", "SONDER_EXTENSIONS_DB"),
     ("queued_actions.db", "SONDER_QUEUED_ACTION_DB"),
     ("served_action_receipts.db", "SONDER_SERVED_ACTION_RECEIPTS_DB"),
+    ("http_work_runs.db", "SONDER_HTTP_WORK_RUNS_DB"),
     ("operations.db", "SONDER_OPERATIONS_DB"),
     ("autopilot.db", "SONDER_AUTOPILOT_DB"),
     ("composition.db", "SONDER_COMPOSITION_DB"),

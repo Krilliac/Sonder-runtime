@@ -310,6 +310,7 @@ def error_envelope(
         "MAINTENANCE_MODE": "server_error",
         "DRAINING": "server_error",
         "AUTH_RATE_LIMITED": "rate_limit_error",
+        "WORK_CAPACITY_EXHAUSTED": "rate_limit_error",
         "UNAUTHENTICATED": "auth",
     }.get(code, "server_error")
     return {
