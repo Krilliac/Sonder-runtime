@@ -85,6 +85,16 @@ Statuses `queued → running → done | failed | cancelled | interrupted`, with
 compare-and-set; heartbeats detect stale owners. Two model instances (e.g.
 two `facts.` sticks) roughly double fleet throughput.
 
+A lane that makes no progress within the progress deadline is declared
+stalled and the fleet result becomes uncertain. The default deadline is
+`max(120, SONDER_TIMEOUT + 60)` seconds (360 with the default 300-second
+model timeout). An explicit `SONDER_FLEET_PROGRESS_DEADLINE_SECONDS` is
+honored as given. A lane inside a model call does not update its row until
+the call returns, so it is never declared stalled before that call's own
+timeout plus 60 seconds, whatever shorter deadline is configured. The old
+fixed 120-second default was shorter than the model timeout, so slow CPU
+hosts discarded valid late results.
+
 Research tasks can opt into deterministic provenance checks with bounded,
 standalone marker lines:
 
