@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import replace
-from threading import Event
+from threading import Event, Lock
 from time import monotonic
 
 from ..application.context import OperationContext
@@ -160,6 +160,13 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
             raise TypeError("effect_binding_factory requires a dispatch_verifier")
         self._effect_binding_factory = effect_binding_factory
         self._dispatch_verifier = dispatch_verifier
+        # Journaled dispatch is serialized per provider, and children whose
+        # runner this provider launched are tracked until the runner exits.
+        # A repeat spawn of such a child must not compose a fresh binding:
+        # composition runs restart recovery, which would fence the live
+        # runner's in-flight inner effects as uncertain.
+        self._dispatch_lock = Lock()
+        self._live_runners: set[str] = set()
 
     def register_root(self, root_id: str, budget: SubagentBudget, *, owner_id: str = "") -> None:
         self._local_service.register_root(root_id, budget, owner_id=owner_id)
@@ -179,18 +186,53 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
         budget = request.budget
         context = self._local_service.bounded_context(context, budget)
         runner = self._runner_factory(request, context) if self._runner_factory else self._runner
-        binding = (
-            self._effect_binding_factory(request, context)
-            if self._effect_binding_factory is not None else None
-        )
-        if binding is not None and not isinstance(binding, AuthenticatedWorkerBinding):
-            raise TypeError("effect_binding_factory returned an invalid binding")
-        gate = _DispatchGate()
-        if binding is None:
+        if self._effect_binding_factory is None:
+            return self._local_service.spawn(
+                request, context, self._bounded_runner(request, context, runner, None, None),
+            )
+        child_id = request.child_id
+        with self._dispatch_lock:
+            if child_id in self._live_runners:
+                # The service returns the live handle for a compatible repeat
+                # request, or refuses; it can never start a second runner.
+                return self._local_service.spawn(request, context, _refuse_redispatch)
+            binding = self._effect_binding_factory(request, context)
+            if not isinstance(binding, AuthenticatedWorkerBinding):
+                raise TypeError("effect_binding_factory returned an invalid binding")
+            gate = _DispatchGate()
+            bounded_runner = self._bounded_runner(request, context, runner, binding, gate)
+            self._live_runners.add(child_id)
+            try:
+                handle, launched = self._journaled_dispatch(
+                    binding, request, context, bounded_runner,
+                )
+            except BaseException:
+                self._live_runners.discard(child_id)
+                gate.abort()
+                raise
+            if not launched:
+                self._live_runners.discard(child_id)
             gate.publish()
+            return handle
+
+    def _bounded_runner(
+        self, request: SubagentRequest, context: OperationContext, runner: Runner,
+        binding: AuthenticatedWorkerBinding | None, gate: _DispatchGate | None,
+    ) -> Runner:
+        budget = request.budget
+        child_id = request.child_id
 
         def bounded_runner(state, save, control):
-            gate.wait(self._receipt_wait(context))
+            if gate is None:
+                return run(state, save, control)
+            try:
+                gate.wait(self._receipt_wait(context))
+                return run(state, save, control)
+            finally:
+                with self._dispatch_lock:
+                    self._live_runners.discard(child_id)
+
+        def run(state, save, control):
             steps = 0
 
             def bounded_save(next_state, cursor=None):
@@ -218,21 +260,16 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
                 raise TimeoutError("subagent output budget exhausted")
             return output
 
-        if binding is None:
-            return self._local_service.spawn(request, context, bounded_runner)
-        try:
-            handle = self._journaled_dispatch(binding, request, context, bounded_runner)
-        except BaseException:
-            gate.abort()
-            raise
-        gate.publish()
-        return handle
+        return bounded_runner
 
     def _journaled_dispatch(
         self, binding: AuthenticatedWorkerBinding, request: SubagentRequest,
         context: OperationContext, bounded_runner: Runner,
-    ) -> SubagentHandle:
-        """Journal admission only; the caller keeps the runner gated."""
+    ) -> tuple[SubagentHandle, bool]:
+        """Journal admission only; the caller keeps the runner gated.
+
+        Returns the handle and whether this call admitted a new runner.
+        """
         verifier = self._dispatch_verifier
         child_id = request.child_id
         if verifier is None or child_id is None:
@@ -263,7 +300,7 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
                 raise EffectJournalError(
                     "settled subagent dispatch is not provable from the child store"
                 )
-            return self._local_service.spawn(request, context, _refuse_redispatch)
+            return self._local_service.spawn(request, context, _refuse_redispatch), False
 
         dispatched: dict[str, object] = {}
 
@@ -310,7 +347,7 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
         handle = dispatched.get("handle")
         if handle is None:
             raise EffectJournalError("subagent dispatch returned no child handle")
-        return handle  # type: ignore[return-value]
+        return handle, True  # type: ignore[return-value]
 
 
 __all__ = [

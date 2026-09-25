@@ -224,6 +224,50 @@ def test_settled_dispatch_reuse_returns_the_admitted_child_without_second_runner
     assert fresh.get(CHILD) is None
 
 
+def test_repeat_spawn_of_live_child_does_not_fence_its_inner_effects(tmp_path):
+    """A repeat spawn must not re-run binding composition for a live child.
+
+    Bootstrap composition runs ``recover_before_restart``, which treats every
+    unresolved intent of the run as orphaned.  Re-composing the binding for a
+    child whose runner is mid-effect would mark that live inner effect
+    uncertain and refuse its receipt.
+    """
+    repository, verifier, journal = _stores(tmp_path)
+    started, release = threading.Event(), threading.Event()
+    outcome: dict[str, object] = {}
+
+    def runner(_state, _save, _control):
+        bound = effect_journal.current()
+        intent = bound.begin_request(
+            operation_id="write:live.txt", idempotency_key="live-1",
+            request_digest="0" * 64,
+        )
+        started.set()
+        release.wait(10)
+        bound.complete(intent, outcome_digest="1" * 64, receipt_key="live-receipt")
+        outcome["completed"] = True
+        return "done"
+
+    provider, _binding, _service = _provider(
+        repository, verifier, journal, runner, recover=True,
+    )
+    first = provider.spawn(_request(), _context())
+    assert started.wait(10)
+    again = provider.spawn(_request(), _context())
+    assert again.child_id == CHILD
+    release.set()
+    assert first.result(timeout=10).status is SubagentStatus.SUCCEEDED
+    assert outcome == {"completed": True}
+    states = {
+        record.operation_id: record.state
+        for record in journal.effects_since(RUN_ID, 0).records
+    }
+    assert states == {
+        OPERATION: EffectState.COMPLETED,
+        "write:live.txt": EffectState.COMPLETED,
+    }
+
+
 def test_synchronous_admission_refusal_is_a_failed_dispatch_not_a_fence(tmp_path):
     repository, verifier, journal = _stores(tmp_path)
     calls: list[str] = []

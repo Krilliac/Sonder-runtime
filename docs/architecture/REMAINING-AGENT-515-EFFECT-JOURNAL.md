@@ -382,7 +382,11 @@ without a retained admission record all produce no proof. Terminal status text
 alone is not used. A synchronous admission refusal with no durable admission
 is recorded as a `failed` dispatch, not a fence. Reuse of a settled dispatch
 returns the existing child only while the child store still proves that
-admission, and it cannot start a runner. Production composition registers the
+admission, and it cannot start a runner. A repeat spawn of a child whose runner
+this provider launched and which is still live does not compose a new binding
+(composition runs restart recovery, which would fence the live runner's
+in-flight inner effects); it only returns the live handle or is refused, and
+dispatch is serialized per provider. Production composition registers the
 verifier in `get_worker_effect_journal` through a lazy continuation-repository
 getter, and passes the same kind of verifier to the provider.
 
@@ -409,7 +413,7 @@ dispatch remains non-resuming.
 
 The child checkpoint CAS in `application/subagents/durable_continuation.py`
 stores no journal provenance. Existing restart paths correctly require owner
-cleanup and fence the unresolved outer effect. They prevent duplicate execution
+cleanup and refuse a second runner. They prevent duplicate execution
 but cannot continue from the saved child state. The next implementation needs:
 
 1. Implemented as described above: a bounded dispatch effect whose receipt
