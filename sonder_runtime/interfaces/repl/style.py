@@ -334,7 +334,10 @@ def link(text: Any, url: str, c: Optional[Caps] = None) -> str:
     """OSC 8 hyperlink when the terminal is on the allow-list, else text."""
     c = _c(c)
     value = str(text)
-    if not c.links or not url or any(ord(ch) < 32 or ch in "\x1b\x9c" for ch in url):
+    # Any C0/C1 control or format character in the URL could end the OSC
+    # early (ESC, BEL, 8-bit ST/CSI/OSC) or hide text; such URLs stay plain.
+    if not c.links or not url or any(
+            unicodedata.category(ch) in ("Cc", "Cf") for ch in url):
         return value
     return "\x1b]8;;%s\x1b\\%s\x1b]8;;\x1b\\" % (url, value)
 
@@ -377,7 +380,7 @@ def _sep(c: Caps) -> str:
 def _char_cells(ch: str) -> int:
     if not ch or unicodedata.combining(ch):
         return 0
-    if 0xFE00 <= ord(ch) <= 0xFE0F or ch == "‍":
+    if 0xFE00 <= ord(ch) <= 0xFE0F or ch in "\u200c\u200d":
         return 0
     return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
 
@@ -410,17 +413,25 @@ def truncate(text: Any, width: int, c: Optional[Caps] = None) -> str:
     room = width - cell_width(mark)
     if room <= 0:
         return mark[:width]
-    out, used, escaped = [], 0, False
+    out, used, escaped, link_open = [], 0, False, False
     for unit, size in _units(value):
         if size == 0 and unit.startswith("\x1b"):
             out.append(unit)
-            escaped = True
+            if unit.startswith("\x1b]8;"):
+                # "\x1b]8;;\x1b\\" closes a link; anything longer opens one.
+                link_open = not unit.startswith("\x1b]8;;\x1b") and not unit.startswith("\x1b]8;;\x07")
+            else:
+                escaped = True
             continue
         if used + size > room:
             break
         out.append(unit)
         used += size
     tail = _RESET if escaped and c.color != "none" else ""
+    if link_open:
+        # Cutting inside a hyperlink must still close it, or everything
+        # printed afterwards stays clickable.
+        tail += "\x1b]8;;\x1b\\"
     return "".join(out) + tail + mark
 
 
@@ -610,6 +621,11 @@ def table(rows: Sequence[Sequence[Any]], cols: Sequence[Any], width: int,
     left -- all of it with ``fill=True`` -- and is elided with the ellipsis
     glyph.  The other columns shrink toward their minimum, right to left,
     when the flexible column could not get its own minimum.
+
+    Cells may carry styling from :func:`s`, so they are *not* sanitised
+    here: pass untrusted values (tool arguments, paths, model text) through
+    :func:`safe_text` first, or an escape sequence inside them reaches the
+    terminal as a zero-width unit.
     """
     c = _c(c)
     if not rows:
@@ -725,8 +741,18 @@ def notice(kind: str, title: Any, detail: Any = None, hint: Any = None,
     room = width - 1
     lines = wrap(title_text, room, indent=lead, hanging="  ", c=c) if title_text else [head]
     if detail:
-        for chunk in safe_text(detail).split("\n"):
-            lines.extend(wrap(chunk, room, indent="  ", hanging="    ", c=c))
+        for chunk in safe_text(detail).expandtabs(4).split("\n"):
+            chunk = chunk.rstrip()
+            if not (_verbatim(chunk) or _FENCE.match(chunk)):
+                lines.extend(wrap(chunk, room, indent="  ", hanging="    ", c=c))
+                continue
+            # Preformatted detail (traceback, table row) keeps its own
+            # indentation under the notice's two cells and is hard-broken
+            # rather than word-wrapped, so the notice still fits.
+            body = chunk.lstrip(" ")
+            lead = "  " + " " * min(len(chunk) - len(body), max(0, room // 2 - 2))
+            lines.extend(lead + piece
+                         for piece in _hard_break(body, max(1, room - len(lead))))
     if hint:
         label = s("hint:", "muted", c=c)
         text = " ".join(safe_text(hint).split())
@@ -1084,7 +1110,9 @@ def _identity_line(st: BannerState, width: int, c: Caps) -> str:
         line = build(**opts)
         if cell_width(line) <= limit:
             return line
-    # Shorten the model to whatever room remains, then drop pieces.
+    # Shorten the model to whatever room remains, then drop pieces.  A dead
+    # endpoint is the one fact on this line the user must act on, so
+    # "not listening" outlives the model name; a live endpoint goes first.
     for with_endpoint in (True, False):
         probe = build(model="", with_tier=False, with_persona=False, keep_scheme=False,
                       short_endpoint=True, with_endpoint=with_endpoint)
@@ -1093,6 +1121,11 @@ def _identity_line(st: BannerState, width: int, c: Caps) -> str:
             return build(model=truncate(model_text, room, c), with_tier=False,
                          with_persona=False, keep_scheme=False, short_endpoint=True,
                          with_endpoint=with_endpoint)
+        if with_endpoint and not st.live:
+            line = build(model=None, with_tier=False, with_persona=False,
+                         keep_scheme=False, short_endpoint=True)
+            if cell_width(line) <= limit:
+                return line
     line = build(model=None, with_tier=False, with_persona=False, keep_scheme=False,
                  short_endpoint=True, with_endpoint=False)
     return truncate(line, limit, c)

@@ -545,3 +545,42 @@ def test_style_module_imports_only_stdlib():
         elif isinstance(node, ast.Import):
             assert not any(a.name.startswith("sonder_runtime") for a in node.names)
     assert not re.search(r"\bthreading\b|\bprint\(", source)
+
+
+# --- review follow-ups ------------------------------------------------------
+
+_LINKS = S.Caps(color="truecolor", theme="dark", glyphs="unicode", links=True)
+
+
+def test_truncate_inside_hyperlink_closes_it():
+    text = S.link("abcdefgh", "http://x", _LINKS) + "tail"
+    cut = S.truncate(text, 4, _LINKS)
+    assert S.cell_width(cut) == 4
+    assert cut.endswith("\x1b]8;;\x1b\\" + "…")
+
+
+@pytest.mark.parametrize("bad", ["\x9b", "\x9d", "\x07", "‮", "​"])
+def test_link_rejects_c1_and_format_chars_in_url(bad):
+    assert S.link("x", "http://a%sb" % bad, _LINKS) == "x"
+
+
+def test_joiners_are_zero_width():
+    assert S.cell_width("a‌b‍c") == 3
+
+
+@pytest.mark.parametrize("width", (40, 50))
+def test_dead_endpoint_outlives_model_name(width):
+    st = S.BannerState(persona="coder", model="sonder:latest", live=False)
+    first = S.strip_ansi(S.banner(st, width, _LINKS)).split("\n")[0]
+    assert "not listening" in first
+    assert S.cell_width(first) <= width - 1
+
+
+@pytest.mark.parametrize("width", (30, 40, 80))
+def test_notice_preformatted_detail_still_fits(width):
+    detail = "plain words\n    " + "x" * 120 + "\n\tindented\n| a | b | " + "y" * 90
+    text = S.notice("error", "boom", detail, width=width, c=S.Caps())
+    lines = text.split("\n")
+    assert all(S.cell_width(line) <= width - 1 for line in lines)
+    assert all(line.startswith("  ") for line in lines[1:])
+    assert "\t" not in text
