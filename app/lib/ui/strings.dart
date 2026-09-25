@@ -44,9 +44,13 @@ abstract final class SonderStrings {
       '${nonce == null || nonce.isEmpty ? '' : ' · nonce $nonce'}'
       ' · valid ${durationWords(ttl)}';
 
-  /// Shown when the server has no HTTP approval endpoint (a 404).
-  static String approveFromConsole(String callId) =>
-      'Approve from the console: /approve $callId';
+  /// Shown when the server has no HTTP approval endpoint (a 404), above the
+  /// `/approve <id>` command (drawn in mono so it never wraps mid-command).
+  static const approveFromConsole = 'Approve from the console:';
+
+  /// The console command that approves [callId] (the full id, never the
+  /// shortened one).
+  static String approveCommand(String callId) => '/approve $callId';
 
   static const approvalsNeedRole =
       'Approvals need a developer or admin account';

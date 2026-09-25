@@ -161,6 +161,28 @@ void main() {
       expect(await result, isFalse);
     });
 
+    testWidgets('case and prefix spellings of a raise still ask',
+        (tester) async {
+      _phone(tester);
+      late BuildContext ctx;
+      await tester.pumpWidget(_host(Builder(builder: (context) {
+        ctx = context;
+        return const SizedBox();
+      })));
+      // The server resolves `AUTO` and `au` to auto; the sheet must too.
+      for (final spelling in ['AUTO', 'au', ' Auto ', 'accept-edits']) {
+        final result = confirmModeChange(ctx, from: 'manual', to: spelling);
+        await tester.pumpAndSettle();
+        expect(find.byType(RaiseModeSheet), findsOneWidget, reason: spelling);
+        expect(find.textContaining('manual → '), findsOneWidget);
+        await tester.tap(find.text('Cancel'));
+        await tester.pumpAndSettle();
+        expect(await result, isFalse, reason: spelling);
+      }
+      expect(await confirmModeChange(ctx, from: 'AUTO', to: 'Plan'), isTrue);
+      expect(find.byType(RaiseModeSheet), findsNothing);
+    });
+
     testWidgets('Switch to <mode> confirms; auto is danger, edits warn',
         (tester) async {
       _phone(tester);
@@ -267,8 +289,9 @@ void main() {
           onCancel: () {},
         ),
       )));
-      expect(find.text('Approve from the console: /approve 3f9a12c0d4e5'),
-          findsOneWidget);
+      expect(find.text('Approve from the console:'), findsOneWidget);
+      // The full call id, in one unbroken mono run (never the short id).
+      expect(find.text('/approve 3f9a12c0d4e5'), findsOneWidget);
       expect(find.text('Approve once'), findsNothing);
       await tester.tap(find.text('Copy'));
       await tester.pumpAndSettle();

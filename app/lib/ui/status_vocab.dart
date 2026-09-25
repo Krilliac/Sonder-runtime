@@ -200,14 +200,39 @@ const modeBlurbs = <String, String>{
 /// The position of [mode] in [permissionModes], or -1 when unknown.
 int modeRank(String mode) => permissionModes.indexOf(mode);
 
+/// The mode [name] selects, resolved exactly as the server's
+/// `permission_modes.resolve_mode` does: case-insensitive, spaces and dashes
+/// ignored, and an unambiguous prefix accepted (`AUTO`, `au`, `accept-edits`
+/// all select a mode). Returns null when nothing or more than one mode
+/// matches, which the server rejects.
+String? resolvePermissionMode(String name) {
+  final wanted =
+      name.trim().toLowerCase().replaceAll(' ', '').replaceAll('-', '');
+  if (wanted.isEmpty) return null;
+  for (final mode in permissionModes) {
+    if (mode.toLowerCase() == wanted) return mode;
+  }
+  final hits =
+      permissionModes.where((m) => m.toLowerCase().startsWith(wanted)).toList();
+  return hits.length == 1 ? hits.single : null;
+}
+
 /// Whether switching [from] → [to] raises autonomy and so needs the raise
 /// confirmation sheet: any move up to `acceptEdits` or `auto`. Lowering, or
-/// moving between plan and manual, needs no sheet. An unknown current mode
-/// is treated as the most restrictive, so a move to acceptEdits/auto from it
-/// still asks.
+/// moving between plan and manual, needs no sheet.
+///
+/// Both names are resolved like the server resolves them
+/// ([resolvePermissionMode]), so `/mode AUTO` or `/mode au` cannot slip past
+/// the sheet as an "unknown" target the server then accepts as `auto`. A
+/// target that does not resolve is treated as a raise (ask rather than
+/// guess). An unknown current mode is treated as the most restrictive, so a
+/// move to acceptEdits/auto from it still asks.
 bool isModeRaise(String from, String to) {
-  final target = modeRank(to);
+  final resolvedTo = resolvePermissionMode(to);
+  if (resolvedTo == null) return true;
+  final target = modeRank(resolvedTo);
   if (target < modeRank('acceptEdits')) return false;
-  final current = modeRank(from);
+  final resolvedFrom = resolvePermissionMode(from);
+  final current = resolvedFrom == null ? -1 : modeRank(resolvedFrom);
   return current < target;
 }

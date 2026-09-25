@@ -126,7 +126,7 @@ class _ApprovalSheetState extends State<ApprovalSheet> {
                         : valueStyle.copyWith(color: color))),
           ]),
         );
-    final console = '/approve ${request.callId}';
+    final console = SonderStrings.approveCommand(request.callId);
     return SonderSheetFrame(
       kind: StatusKind.ask,
       word: 'approve',
@@ -155,8 +155,11 @@ class _ApprovalSheetState extends State<ApprovalSheet> {
         if (widget.consoleFallback)
           WorkspaceNotice(
             kind: StatusKind.note,
-            title: SonderStrings.approveFromConsole(request.callId),
+            title: SonderStrings.approveFromConsole,
             actions: [
+              SelectableText(console,
+                  style: tokens.mono(13,
+                      color: tokens.text, weight: FontWeight.w500)),
               OutlinedButton.icon(
                 onPressed: () async {
                   await Clipboard.setData(ClipboardData(text: console));

@@ -86,9 +86,14 @@ Future<bool> showRaiseModeSheet(BuildContext context,
 
 /// The single entry point for a mode change from any surface (picker,
 /// Shift+Tab, `/mode`): a raise ([isModeRaise]) asks with the sheet, a
-/// lowering or sideways move returns true without asking.
+/// lowering or sideways move returns true without asking. Pass [to] exactly
+/// as it will be sent to the server; it is resolved the way the server
+/// resolves it (case, prefix), and the sheet names the resolved mode.
 Future<bool> confirmModeChange(BuildContext context,
     {required String from, required String to, String host = ''}) {
   if (!isModeRaise(from, to)) return Future.value(true);
-  return showRaiseModeSheet(context, from: from, to: to, host: host);
+  return showRaiseModeSheet(context,
+      from: resolvePermissionMode(from) ?? from,
+      to: resolvePermissionMode(to) ?? to,
+      host: host);
 }

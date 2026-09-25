@@ -147,4 +147,23 @@ void main() {
     expect(isModeRaise('auto', 'auto'), isFalse);
     expect(modeBlurbs.keys, permissionModes);
   });
+
+  test('mode names resolve like permission_modes.resolve_mode', () {
+    expect(resolvePermissionMode('AUTO'), 'auto');
+    expect(resolvePermissionMode('au'), 'auto');
+    expect(resolvePermissionMode('accept-edits'), 'acceptEdits');
+    expect(resolvePermissionMode('accept edits'), 'acceptEdits');
+    expect(resolvePermissionMode(' Plan '), 'plan');
+    expect(resolvePermissionMode('a'), isNull); // ambiguous
+    expect(resolvePermissionMode(''), isNull);
+    expect(resolvePermissionMode('yolo'), isNull);
+    // A spelling the server accepts as a raise must never skip the sheet.
+    expect(isModeRaise('manual', 'AUTO'), isTrue);
+    expect(isModeRaise('manual', 'au'), isTrue);
+    expect(isModeRaise('manual', 'accept-edits'), isTrue);
+    expect(isModeRaise('Manual', 'Plan'), isFalse);
+    expect(isModeRaise('AUTO', 'acceptEdits'), isFalse);
+    // An unresolvable target asks rather than guesses.
+    expect(isModeRaise('manual', 'a'), isTrue);
+  });
 }
