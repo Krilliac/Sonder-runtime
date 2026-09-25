@@ -247,3 +247,30 @@ def test_emotion_command_leaves_the_tracked_repo_file_untouched():
         assert handle.read() == before
     assert server.emotion_vectors.read_vectors()["joy"] == 1.0
     assert os.path.exists(server.emotion_vectors.state_path())
+
+
+def test_override_cannot_name_other_state_home_files(monkeypatch, tmp_path):
+    """Only the live vectors copy is admitted inside the state home.
+
+    The state home also holds keys, databases and the file-roots grant; the
+    write target must never be able to name (and so overwrite) any of them.
+    """
+    import pytest
+
+    from sonder_runtime.platform import paths as runtime_paths
+
+    _bundled(monkeypatch, tmp_path)
+    home = tmp_path / "state-home"
+    home.mkdir()
+    monkeypatch.setattr(runtime_paths, "default_home", lambda: home)
+    victim = home / "file_roots.txt"
+    victim.write_text("/granted\n", encoding="utf-8")
+
+    monkeypatch.setenv("SONDER_EMOTION_VECTORS", str(victim))
+    with pytest.raises(ValueError, match="state-home copy"):
+        emotion_vectors.update_vectors({"calm": 0.3}, mode="replace")
+    assert victim.read_text(encoding="utf-8") == "/granted\n"
+
+    monkeypatch.delenv("SONDER_EMOTION_VECTORS")
+    _vectors, path = emotion_vectors.update_vectors({"calm": 0.3}, mode="replace")
+    assert path == str((home / "emotion_vectors.json").resolve())

@@ -177,11 +177,15 @@ def _resolve_path(path=None):
     if not candidate.is_absolute():
         candidate = root / candidate
     resolved = _canonical(candidate)
-    home = _canonical(runtime_paths.default_home())
-    if not (_inside_workspace(resolved, root) or _inside_workspace(resolved, home)):
+    # Inside the state home only the one live vectors file is admitted: the
+    # home also holds keys, databases and the file-roots grant, and a vectors
+    # path (including the SONDER_EMOTION_VECTORS override) must never be able
+    # to name -- and so overwrite -- any of them.
+    live = _canonical(state_path())
+    if not (_inside_workspace(resolved, root) or resolved == live):
         raise ValueError(
-            "emotion vector path must stay inside workspace or the Sonder"
-            " state home: %r" % str(resolved)
+            "emotion vector path must stay inside workspace or be the Sonder"
+            " state-home copy %r: %r" % (str(live), str(resolved))
         )
     return str(resolved)
 
