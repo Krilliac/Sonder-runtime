@@ -46,6 +46,7 @@ from ..adapters.build.executor import (
     build_fix_request,
     build_job_request,
     error_code_for,
+    os_error_text,
 )
 from ..adapters.security.permission_evaluator import SURFACES
 from ..application.context import LOCAL_OWNER
@@ -499,7 +500,7 @@ class _PlanStash:
 def _plan_refused(tool: str, exc: BaseException) -> Forbidden:
     code = error_code_for(exc) if isinstance(exc, (SonderError, ValueError, TypeError)) else (
         "PROJECT_OUTSIDE_ROOTS" if isinstance(exc, PermissionError) else "BUILD_MODEL_UNAVAILABLE")
-    error = Forbidden("%s refused before execution (%s): %s" % (tool, code, exc))
+    error = Forbidden("%s refused before execution (%s): %s" % (tool, code, os_error_text(exc)))
     error.decision = {"tool": tool, "error_code": code, "stage": "plan"}
     error.policy_match = "build:plan-refused"
     return error

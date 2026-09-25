@@ -436,6 +436,7 @@ def test_every_build_error_code_maps_through(port_doubles, code):
     (Conflict("held"), "BUILD_DIR_BUSY"), (Forbidden("no"), "BUILD_TREE_REJECTED"),
     (DependencyUnavailable("x"), "BUILD_MODEL_UNAVAILABLE"), (InvalidInput("bad"), "INVALID_INPUT"),
     (PermissionError("outside"), "PROJECT_OUTSIDE_ROOTS"),
+    (PermissionError(13, "Permission denied", "/home/secret/build"), "PROJECT_OUTSIDE_ROOTS"),
     (FileNotFoundError("/home/secret/tree"), "BUILD_TREE_MISSING"),
     (OSError("/home/secret/path failed"), "HOST_IO_FAILURE"),
     (ValueError("bad value"), "INVALID_INPUT"),
@@ -449,8 +450,8 @@ def test_uncoded_failures_get_stable_codes_and_no_host_paths(port_doubles, exc, 
     services.jobs.run = refuse
     result = _execute(BuildToolExecutor(services, PackagedToolExecutor()), "build_job", {"target": "game"})
     assert result.error_code == code
-    if isinstance(exc, OSError) and not isinstance(exc, PermissionError):
-        assert "/home/secret" not in result.output
+    assert "/home/secret" not in result.output
+    assert "/home/secret" not in (result.error or "")
 
 
 def test_handlers_map_arguments_to_requests(port_doubles):
@@ -472,6 +473,61 @@ def test_handlers_map_arguments_to_requests(port_doubles):
         name = "build_model" if "detail" in bad else "build_job"
         refused = _execute(executor, name, bad)
         assert not refused.success and refused.error_code == "INVALID_INPUT", bad
+
+
+@pytest.mark.parametrize("tool, arguments", [
+    ("build_job", {"target": "-DCMAKE_CXX_COMPILER=/tmp/evil"}),
+    ("build_job", {"target": "--target"}),
+    ("build_job", {"target": "@/tmp/response.rsp"}),
+    ("build_job", {"target": "game;rm -rf ~"}),
+    ("build_job", {"target": "game\ninstall"}),
+    ("build_job", {"target": "$(touch x)"}),
+    ("build_job", {"target": "game install"}),
+    ("build_job", {"target": "game:Rebuild"}),
+    ("build_job", {"target": "a:b:Build"}),
+    ("build_job", {"target": "\\\\server\\share"}),
+    ("build_job", {"config": "Debug|x64"}),
+    ("build_job", {"config": "/p:Configuration=Release"}),
+    ("build_job", {"platform": " x64"}),
+    ("build_job", {"platform": "x64\t--"}),
+    ("build_job", {"preset": "--trace-expand"}),
+    ("build_job", {"build_preset": "-P"}),
+    ("build_job", {"profile": "p=1"}),
+    ("build_job", {"generator": "Ninja\n-DX=1"}),
+    ("build_job", {"file": "@src/a.rsp"}),
+    ("build_job", {"file": "-include/etc/passwd"}),
+    ("build_job", {"build_dir": "\\\\server\\share\\build"}),
+    ("build_job", {"build_dir": "//server/share/build"}),
+    ("build_job", {"project": "src\n..", "target": "game"}),
+    ("build_model", {"preset": "--debug-trycompile"}),
+    ("build_model", {"target": "-t"}),
+    ("build_fix", {"target": "--target"}),
+    ("build_fix", {"target": "game", "editable_globs": ["../outside/*.cpp"]}),
+    ("build_fix", {"target": "game", "editable_globs": ["/etc/*"]}),
+    ("build_fix", {"target": "game", "editable_globs": ["C:\\Windows\\*.dll"]}),
+    ("build_fix", {"target": "game", "focus_file": "\\\\host\\share\\a.cpp"}),
+])
+def test_option_and_command_shaped_names_are_refused_before_planning(port_doubles, tool, arguments):
+    services = fake_services()
+    executor = BuildToolExecutor(services, PackagedToolExecutor())
+    refused = _execute(executor, tool, arguments)
+    assert not refused.success and refused.error_code == "INVALID_INPUT", refused.output
+    assert not services.jobs.runs and not services.jobs.planned and not services.model.views
+
+
+@pytest.mark.parametrize("arguments", [
+    {"target": "game", "config": "RelWithDebInfo", "platform": "Gaming.Xbox.Scarlett.x64"},
+    {"target": "Engine_Core:Build", "config": "Debug", "platform": "Any CPU"},
+    {"target": "my-lib.test", "preset": "ninja-debug", "build_preset": "ninja_debug2"},
+    {"target": "Tools\\ShaderGen", "file": "src/a b.cpp"},
+])
+def test_legitimate_model_names_still_pass(port_doubles, arguments):
+    services = fake_services()
+    executor = BuildToolExecutor(services, PackagedToolExecutor())
+    result = _execute(executor, "build_job", arguments)
+    # The surface admits them; membership in the model is the planner's call.
+    assert result.success or result.error_code != "INVALID_INPUT", result.output
+    assert services.jobs.runs or result.error_code == "UNKNOWN_TARGET"
 
 
 def test_results_and_cancel_are_owner_scoped(port_doubles):

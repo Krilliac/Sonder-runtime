@@ -68,7 +68,7 @@ def test_enums_and_bounds_match_the_contract():
     assert (job["jobs"]["minimum"], job["jobs"]["maximum"]) == (1, 256)
     assert (job["timeout_seconds"]["minimum"], job["timeout_seconds"]["maximum"]) == (30, 7200)
     assert job["wait_seconds"]["maximum"] == 120
-    assert job["preset"]["pattern"] == "^[A-Za-z0-9_.-]{1,128}$"
+    assert job["preset"]["pattern"] == "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
     assert "command" not in job and "argv" not in job and "env" not in job
     model = _schema("build_model")["properties"]
     assert model["detail"]["enum"] == ["summary", "targets", "compile_units", "toolchain", "presets"]

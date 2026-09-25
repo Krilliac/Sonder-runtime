@@ -171,6 +171,26 @@ def test_plan_mode_is_never_lifted_by_the_grant(stack, monkeypatch):
         _write(stack, "text_patch", {"root": str(stack.root), "patch": PATCH})
 
 
+def test_an_explicit_deny_rule_outranks_the_grant(stack, monkeypatch):
+    # The grant answers the mode's unattended ask; it never softens a written deny.
+    monkeypatch.setattr(pm, "_rule_lookup", lambda _tool: {"action": "deny", "pattern": "*"})
+    with pytest.raises(Forbidden) as caught:
+        _write(stack, "text_patch", {"root": str(stack.root), "patch": PATCH})
+    assert caught.value.decision["source"] == "rule"
+    assert (stack.root / "src/core/math.cpp").read_text() == SOURCE
+
+
+def test_a_lost_effect_fence_outranks_the_grant(stack):
+    from sonder_runtime.adapters.execution import effect_fence
+
+    lost = effect_fence.Fence("test lease", lambda: "lease lost")
+    with effect_fence.held(lost), pytest.raises(Forbidden) as caught:
+        _write(stack, "write_file", {"path": str(stack.root / "src/f0.cpp"), "content": "int z;\n",
+                                     "mode": "overwrite"})
+    assert caught.value.decision["source"] == "fence"
+    assert (stack.root / "src/f0.cpp").read_text() == "int f0;\n"
+
+
 def test_file_and_line_budgets_hold(stack):
     for index in range(6):
         path = stack.root / "src" / ("f%d.cpp" % index)

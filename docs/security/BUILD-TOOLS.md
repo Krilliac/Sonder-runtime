@@ -13,7 +13,10 @@ never supplies argv, environment entries, executable paths or build scripts.
 - The host renders every argv from a closed template set, or from an operator
   profile.
 - Any value that starts with `-` or `/`, or contains a shell or MSBuild
-  metacharacter, is refused.
+  metacharacter, is refused. The typed executor checks this itself before
+  anything is planned (`INVALID_INPUT`): the gateway's schema check does not
+  evaluate `pattern`. Paths refuse a leading `-` or `@` and UNC or device
+  prefixes; editable globs must be project-relative with no `..` segment.
 - Utility targets, custom targets and VS Makefile/Utility projects are refused
   (`UTILITY_TARGET_REFUSED`) unless the operator lists them in
   `SONDER_BUILD_UTILITY_TARGETS`. This includes `install`, `package` and
@@ -65,6 +68,10 @@ The grant never:
 - adds roots;
 - honours guard knobs (`extra_roots`, `bypass`, `developer_authorized`);
 - lifts `plan` mode;
+- overrides an explicit deny rule, a lost effect fence or a missing privilege.
+  The grant answers only the mode's unattended ask: before it admits a call,
+  the evaluator asks the permission modes (without recording or spending an
+  approval) and keeps any other refusal;
 - creates, deletes or renames files;
 - covers the network unless the fix was approved with it.
 

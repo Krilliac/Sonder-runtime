@@ -18,7 +18,8 @@ from ..adapters.developer_tools_executor import (
     DeveloperToolExecutor,
     test_run_request,
 )
-from ..adapters.security.permission_evaluator import PermissionModesEvaluator
+from ..adapters.execution import effect_fence
+from ..adapters.security.permission_evaluator import SURFACES, PermissionModesEvaluator
 from ..adapters.testing.artifacts import ReportArtifactCollector
 from ..adapters.testing.detection import REPORT_ROOT_NAME, ProjectTestPlanner
 from ..adapters.testing.launcher import ProcessTestLauncher
@@ -158,6 +159,7 @@ class DeveloperToolPermissionEvaluator(PermissionModesEvaluator):
             for authority in self._grant_authorities:
                 match = authority.authorize_granted(request)
                 if match:
+                    self._grant_preflight(request)
                     return match
         resolver = self._resolvers.get(request.tool_name)
         surface = getattr(request.scope, "gate", "gateway") == "surface"
@@ -169,6 +171,36 @@ class DeveloperToolPermissionEvaluator(PermissionModesEvaluator):
                 and (not surface or resolver.on_surface):
             resolver.after_allow(resolved, verdict)
         return verdict
+
+    def _grant_preflight(self, request) -> None:
+        """Refuse a granted call anything but the unattended ask would refuse.
+
+        A grant stands in for the operator's answer to the mode's ``ask`` --
+        nothing more. An explicit deny rule, ``plan``, a lost effect fence or a
+        missing privilege still refuse the call, exactly as without a grant.
+        The preflight neither records a receipt nor spends a one-shot approval.
+        """
+        if getattr(request.scope, "gate", "gateway") == "surface":
+            return
+        name = self._policy_names.get(request.tool_name, request.tool_name)
+        surface, exempt = SURFACES.get(getattr(request.scope, "source", "repl"), ("system", False))
+        decision = self._policy.decide_for_caller(
+            name, interactive=False, gate_control_exempt=exempt, surface=surface,
+            record=False, arguments=dict(request.arguments), fence=effect_fence.current(),
+        )
+        if decision is None or decision.action == self._policy.allow_action():
+            return
+        if getattr(decision, "source", "") == "unattended":
+            return  # the ask nobody is present to answer: what the grant answers
+        error = Forbidden("permission gate refused %s despite the build-fix grant: %s"
+                          % (name, decision.reason))
+        error.decision = {
+            "tool": name, "mode": decision.mode, "risk": decision.risk,
+            "source": decision.source, "action": decision.action,
+            "call_id": getattr(decision, "call_id", ""),
+        }
+        error.policy_match = "permission:%s" % decision.source
+        raise error
 
     def _resolved(self, request):
         services = self._developer_services

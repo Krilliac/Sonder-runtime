@@ -547,7 +547,7 @@ _BUILD_GENERATORS = [
 ]
 _BUILD_DETAILS = ["summary", "targets", "compile_units", "toolchain", "presets"]
 _BUILD_ACTIONS = ["configure", "build", "compile_one", "include_trace"]
-_BUILD_PRESET = {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"}
+_BUILD_PRESET = {"type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"}
 _BUILD_PROJECT = {"type": "string", "maxLength": 1024}
 _BUILD_TARGET = {"type": "string", "maxLength": 128}
 _BUILD_WAIT = {"type": "integer", "minimum": 0, "maximum": 120}

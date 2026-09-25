@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any, Callable, Mapping
 
@@ -132,14 +133,67 @@ def _str(arguments: Mapping[str, Any], name: str, default: str = "", limit: int 
     return value
 
 
+# Defence in depth for the model-supplied names (docs/security/BUILD-TOOLS.md
+# section 1). The planner still requires every value to be a member of the
+# parsed build model; these checks refuse option-, response-file- and
+# shell-shaped values at the surface, before any tree is read, because the
+# gateway's schema check does not evaluate ``pattern``.
+_NAME_FORBIDDEN = frozenset("=;,%\"'`$&|<>^\x00")
+_NAME_LEADING = ("-", "/", "@", "\\", "+", "~")
+_MSBUILD_SUFFIX = ":Build"
+_PATH_LEADING = ("-", "@")
+_UNC_PREFIXES = ("\\\\", "//", "\\??\\", "\\\\?\\", "\\\\.\\")
+_DRIVE = re.compile(r"^[A-Za-z]:")
+BUILD_GENERATORS = (
+    "Ninja", "Ninja Multi-Config", "Unix Makefiles", "NMake Makefiles",
+    "Visual Studio 17 2022", "Visual Studio 16 2019",
+)
+
+
+def _name(arguments: Mapping[str, Any], name: str, *, limit: int, spaces: bool = False,
+          msbuild_suffix: bool = False) -> str:
+    """A build-model member name (target, config, platform, preset, profile)."""
+    value = _str(arguments, name, limit=limit)
+    if not value:
+        return value
+    body = value
+    if msbuild_suffix and body.endswith(_MSBUILD_SUFFIX):
+        body = body[: -len(_MSBUILD_SUFFIX)]
+    if (not body or body.startswith(_NAME_LEADING) or ":" in body
+            or any(ch in _NAME_FORBIDDEN or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in body)
+            or (not spaces and any(ch.isspace() for ch in body))
+            or (spaces and (body != body.strip() or "  " in body
+                            or any(ch.isspace() and ch != " " for ch in body)))):
+        raise InvalidInput("%s must name a member of the build model, not an option or a "
+                           "command fragment" % name)
+    return value
+
+
+def _path(arguments: Mapping[str, Any], name: str, default: str = "") -> str:
+    """A project, build-dir or file path: no option, response-file or UNC shape."""
+    value = _str(arguments, name, default)
+    if value and (value.startswith(_PATH_LEADING) or value.startswith(_UNC_PREFIXES)
+                  or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)):
+        raise InvalidInput("%s must be a local project path" % name)
+    return value
+
+
+def _glob(glob: str) -> bool:
+    normalized = glob.replace("\\", "/")
+    return (bool(glob) and len(glob) <= 128 and "\x00" not in glob
+            and not normalized.startswith(("/", "-", "@", "~")) and not _DRIVE.match(normalized)
+            and ".." not in normalized.split("/")
+            and not any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in glob))
+
+
 def build_model_request(arguments: Mapping[str, Any]):
     """``build_model`` arguments -> ``application.build.ports.BuildModelRequest``."""
     from ...application.build.ports import BuildModelRequest
 
     return BuildModelRequest(
-        project=_str(arguments, "project", ".") or ".",
-        build_dir=_str(arguments, "build_dir"),
-        preset=_str(arguments, "preset", limit=128),
+        project=_path(arguments, "project", ".") or ".",
+        build_dir=_path(arguments, "build_dir"),
+        preset=_name(arguments, "preset", limit=128),
         refresh=_bool(arguments, "refresh", False),
     )
 
@@ -155,18 +209,21 @@ def build_job_request(arguments: Mapping[str, Any]):
     action = _str(arguments, "action", "build", limit=32) or "build"
     if action not in JOB_ACTIONS:
         raise InvalidInput("action must be one of %s" % ", ".join(JOB_ACTIONS))
+    generator = _str(arguments, "generator", limit=64)
+    if generator and generator not in BUILD_GENERATORS:
+        raise InvalidInput("generator must be one of %s" % ", ".join(BUILD_GENERATORS))
     return BuildJobRequest(
-        project=_str(arguments, "project", ".") or ".",
-        build_dir=_str(arguments, "build_dir"),
+        project=_path(arguments, "project", ".") or ".",
+        build_dir=_path(arguments, "build_dir"),
         action=action,
-        target=_str(arguments, "target", limit=128),
-        config=_str(arguments, "config", limit=64),
-        platform=_str(arguments, "platform", limit=64),
-        preset=_str(arguments, "preset", limit=128),
-        build_preset=_str(arguments, "build_preset", limit=128),
-        file=_str(arguments, "file"),
-        generator=_str(arguments, "generator", limit=64),
-        profile=_str(arguments, "profile", limit=64),
+        target=_name(arguments, "target", limit=128, msbuild_suffix=True),
+        config=_name(arguments, "config", limit=64),
+        platform=_name(arguments, "platform", limit=64, spaces=True),
+        preset=_name(arguments, "preset", limit=128),
+        build_preset=_name(arguments, "build_preset", limit=128),
+        file=_path(arguments, "file"),
+        generator=generator,
+        profile=_name(arguments, "profile", limit=64),
         jobs=_int(arguments, "jobs", None, 1, 256),
         timeout_seconds=_int(arguments, "timeout_seconds", None, 30, 86_400),
         allow_network=_bool(arguments, "allow_network", False),
@@ -179,19 +236,18 @@ def build_fix_request(arguments: Mapping[str, Any]):
 
     globs = arguments.get("editable_globs", ()) or ()
     if not isinstance(globs, (list, tuple)) or len(globs) > MAX_EDITABLE_GLOBS or any(
-            not isinstance(glob, str) or not glob or len(glob) > 128 or "\x00" in glob
-            for glob in globs):
-        raise InvalidInput("editable_globs must be at most 16 relative globs")
-    target = _str(arguments, "target", limit=128)
+            not isinstance(glob, str) or not _glob(glob) for glob in globs):
+        raise InvalidInput("editable_globs must be at most 16 project-relative globs")
+    target = _name(arguments, "target", limit=128, msbuild_suffix=True)
     if not target:
         raise InvalidInput("build_fix needs a target")
     return BuildFixRequest(
-        project=_str(arguments, "project", ".") or ".",
-        build_dir=_str(arguments, "build_dir"),
+        project=_path(arguments, "project", ".") or ".",
+        build_dir=_path(arguments, "build_dir"),
         target=target,
-        config=_str(arguments, "config", limit=64),
-        platform=_str(arguments, "platform", limit=64),
-        focus_file=_str(arguments, "focus_file"),
+        config=_name(arguments, "config", limit=64),
+        platform=_name(arguments, "platform", limit=64, spaces=True),
+        focus_file=_path(arguments, "focus_file"),
         attempts=_int(arguments, "attempts", 4, 1, 8),
         apply=_bool(arguments, "apply", True),
         revert_after=_bool(arguments, "revert_after", False),
@@ -219,6 +275,19 @@ def result_to_wire(result: Any) -> dict:
     if callable(to_wire):
         return dict(to_wire())
     raise TypeError("build service returned an unrenderable %s" % kind)
+
+
+def os_error_text(exc: BaseException) -> str:
+    """Text of an error safe for the wire: an OS error names its kind, never its path.
+
+    ``OSError`` raised by the operating system carries the host path it failed
+    on (``[Errno 13] Permission denied: '/home/...'``); a guard that raises
+    ``PermissionError("project is outside the roots")`` itself has no errno
+    and keeps its message.
+    """
+    if isinstance(exc, OSError) and (exc.errno is not None or exc.filename is not None):
+        return type(exc).__name__
+    return str(exc) or type(exc).__name__
 
 
 def error_code_for(exc: BaseException) -> str:
@@ -272,7 +341,7 @@ class BuildToolExecutor:
         except SonderError as exc:
             return self._failure(name, error_code_for(exc), str(exc), started)
         except PermissionError as exc:
-            return self._failure(name, "PROJECT_OUTSIDE_ROOTS", str(exc) or "refused", started)
+            return self._failure(name, "PROJECT_OUTSIDE_ROOTS", os_error_text(exc), started)
         except (FileNotFoundError, IsADirectoryError, NotADirectoryError) as exc:
             return self._failure(name, "BUILD_TREE_MISSING", type(exc).__name__, started)
         except (ValueError, TypeError) as exc:
@@ -297,7 +366,7 @@ class BuildToolExecutor:
             raise InvalidInput("detail must be one of %s" % ", ".join(MODEL_DETAILS))
         payload = dict(self._services.model.view(
             build_model_request(arguments), context, detail=detail,
-            target=_str(arguments, "target", limit=128),
+            target=_name(arguments, "target", limit=128, msbuild_suffix=True),
             max_items=_int(arguments, "max_items", 100, 1, 500),
         ))
         payload.setdefault("ok", True)
@@ -389,7 +458,7 @@ class BuildToolExecutor:
 
 
 __all__ = [
-    "BUILD_TOOLS_UNAVAILABLE", "BUILD_TYPED_TOOLS", "BuildToolExecutor", "KNOWN_ERROR_CODES",
+    "BUILD_GENERATORS", "BUILD_TOOLS_UNAVAILABLE", "BUILD_TYPED_TOOLS", "BuildToolExecutor", "KNOWN_ERROR_CODES",
     "build_fix_request", "build_job_request", "build_model_request", "error_code_for",
-    "fit_payload", "result_to_wire",
+    "fit_payload", "os_error_text", "result_to_wire",
 ]
