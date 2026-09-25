@@ -121,13 +121,34 @@ name no test mentions. A vacuous selection exits 2, as the selector does --
 it is an infrastructure failure, never "nothing to run". When `origin/main`
 is unavailable the selector's own default base is used.
 
+## Slow tests that were waste (2026-09-25 capture)
+
+A full `-n 3` capture ranked with `slow_tests.py` found two avoidable costs:
+
+- `fanout_store`'s URI-credential redaction was quadratic on long letter
+  runs; one 100k-character answer took ~90 s. `test_fanout_store.py` and
+  `test_model_fanout.py` (~449 s of recorded time) now run in ~22 s wall.
+- `test_app_recovery_http.py` polled with a fixed 10 s sleep; it now backs
+  off from 0.5 s to the same cap (96 s -> 62 s back to back).
+
+The rest of the top of the ranking is real work: nested processes, the
+architecture checker on copied trees, and `app_control_http`'s private-scope
+fingerprinting (`_private_scope_digest`, ~52k calls and ~76 s cumulative in
+`test_managed_learning_principal_qualification.py` alone), which is a
+product hot path, not test overhead.
+
 ## Where the fixed costs live
 
 - **Collection (~19 s)** is dominated by importing 770+ test modules, most of
-  which import `server` (a ~22k-line module) and, transitively, the `mcp`
-  package. `-k`/file selection does not avoid collection of the rest;
+  which import `server` (a ~22k-line module). Since 2026-09-25 that no
+  longer imports the `mcp` SDK: `server.mcp` is a
+  `reloadable_mcp.LazyReloadableMCPServer` that records registrations and
+  builds the real registry on first use (`tests/test_lazy_mcp_import.py`
+  pins it). On the shared 4-CPU container, `import server` went from a
+  2.66 s to a 1.02 s median (9 interleaved runs each; noisy host).
+  `-k`/file selection does not avoid collection of the rest;
   pointing pytest at explicit files (as `select_regression_tests.py --format
   args` does) does.
-- **Per-process interpreter setup** (~1 s for `import server`) is paid once
+- **Per-process interpreter setup** (`import server`, see above) is paid once
   per pytest process and once per xdist worker; it is why very small `-n`
   values amortize better than one worker per test file would.
