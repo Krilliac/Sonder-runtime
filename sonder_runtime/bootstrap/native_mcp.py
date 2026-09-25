@@ -989,6 +989,10 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                                  "call_id": getattr(decision, "call_id", "")},
                 }
         cloud_consent = bool(canonical_arguments.pop("consent", False)) if canonical_name in {"web_fetch", "web_search", "weather_lookup", "approximate_location_lookup"} else False
+        if canonical_name == "approximate_location_lookup":
+            # The location adapter demands the explicit consent flag as well as
+            # cloud permission; the other web adapters take no such keyword.
+            canonical_arguments["consent"] = cloud_consent
         if cloud_consent:
             context = local_owner_context(
                 correlation_id=context.correlation_id,

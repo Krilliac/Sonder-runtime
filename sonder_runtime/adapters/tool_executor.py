@@ -11,6 +11,7 @@ import json
 
 from ..application.context import OperationContext
 from ..application.ports.tool_executor import ToolCall, ToolResult
+from ..application.ports.web import WebToolsDisabled
 from .filesystem.typed import GuardedFileSystemAdapter
 
 
@@ -283,6 +284,12 @@ class ToolExecutorAdapter:
         except (PermissionError, ValueError, OSError, KeyError, TypeError) as exc:
             return ToolResult(
                 ok=False, error_code=type(exc).__name__, output=str(exc)
+            )
+        except WebToolsDisabled as exc:
+            # The default-off egress gate is a refusal, not a fault: report it
+            # like any other guard so no surface turns it into an internal error.
+            return ToolResult(
+                ok=False, error_code="WebToolsDisabled", output=str(exc)
             )
         except RuntimeError as exc:
             # The transactional primitives (batch write, JSON patch, text

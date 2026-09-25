@@ -5,6 +5,7 @@ import importlib
 import re
 
 from ..application.context import OperationContext
+from ..application.ports.web import WebToolsDisabled
 
 
 def _web_tools():
@@ -45,7 +46,7 @@ def normalize_location_hint(data):
 
 def approximate_location_lookup(timeout=10):
     if not _web_tools().enabled():
-        raise RuntimeError("web tools disabled by SONDER_WEB_TOOLS")
+        raise WebToolsDisabled()
     return normalize_location_hint(_json_request(IP_LOCATION_URL, timeout=timeout))
 
 
