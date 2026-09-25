@@ -96,7 +96,7 @@ def test_an_explicit_root_naming_the_store_allows_it(workspace, monkeypatch):
     assert file_ops.read_file(str(config))["text"] == "CREDENTIAL-MATERIAL"
     # A key file is also a classified secret: naming the store lifts the
     # credential default-deny, and the developer token is still required.
-    with pytest.raises(PermissionError, match="protected Sonder secret"):
+    with pytest.raises(PermissionError, match="without an authenticated developer token"):
         file_ops.read_file(str(key))
     assert file_ops.read_file(str(key), developer_authorized=True)["text"] == "CREDENTIAL-MATERIAL"
 

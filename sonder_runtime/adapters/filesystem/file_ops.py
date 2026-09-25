@@ -529,9 +529,13 @@ def _require_credential_read_access(path: Path) -> None:
         # The path goes before the phrase so the output redactor never reads
         # "token: <path>" as a credential assignment.
         raise PermissionError(
-            "refusing to read %s: %s is a credential store, denied by default. "
-            "To allow it, add that exact file or directory as a file root "
-            "(file_roots.local or SONDER_FILE_ROOTS)" % (path, component)
+            # Keeps the established "protected Sonder secret/control-plane"
+            # and "secret or control state" phrasing callers match on.
+            "refusing to read protected Sonder secret/control-plane path %s: "
+            "%s is a credential store (secret or control state), denied by "
+            "default even with a developer token or bypass. To allow it, add "
+            "that exact file or directory as a file root (file_roots.local or "
+            "SONDER_FILE_ROOTS)" % (path, component)
         )
 
 
