@@ -23,6 +23,7 @@ from contextlib import contextmanager, redirect_stdout
 
 from sonder_runtime.domain.common.errors import DependencyUnavailable
 from sonder_runtime.application import foreground_turns
+from sonder_runtime.domain.runtime_model_configuration import OPTIONAL_LOCAL_TIERS
 from sonder_runtime.adapters.filesystem import file_ops
 from sonder_runtime.platform import paths as server_paths
 import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
@@ -1722,6 +1723,12 @@ def _branch_usage_error(cmd, arg):
                 return "usage: /todo plan <title> | <step> | <step> ..."
         if action in ("depend", "dep", "blockedby") and len(rest.split()) != 2:
             return "usage: /todo depend <task-id> <depends-on-id>"
+    elif command in ("/goal", "/goals"):
+        action, _, rest = text.partition(" ")
+        if action.lower() in ("adopt", "decline") and not rest.strip():
+            return "usage: /goal %s <proposal-id>  (list them with /goal proposals)" % (
+                action.lower(),
+            )
     elif command in ("/mcp", "/convergence"):
         action = text.lower()
         if action and action not in _MCP_ACTIONS:
@@ -2648,6 +2655,18 @@ def main(*, machine_output=False):
                 withheld, withheld_reason), _Ansi.red))
             return
 
+        # An optional local tier with no model bound is absent from the tier
+        # table.  Say that, instead of "no installed model named 'vision'".
+        configured = {str(name).casefold() for name in server.TIERS}
+        unbound = dict(OPTIONAL_LOCAL_TIERS).get(arg.casefold())
+        if unbound and arg.casefold() not in configured:
+            print(_paint(
+                "tier %r has no model configured; set %s to an installed"
+                " model and restart Sonder to enable it" % (arg.casefold(), unbound),
+                _Ansi.red,
+            ))
+            return
+
         if installed is None:
             print(_paint(
                 "cannot verify installed models because Ollama did not answer; model selection was not changed",
@@ -2658,14 +2677,23 @@ def main(*, machine_output=False):
         names = [name for name, _size in installed]
         model_names = {str(name).casefold(): name for name in names}
         selected_model = model_names.get(arg.casefold())
+        if selected_model is None and ":" not in arg:
+            # Ollama treats a bare name as its ":latest" tag.
+            selected_model = model_names.get(arg.casefold() + ":latest")
         if selected_model is None:
             # Refuse rather than rebind to something that will fail on the next
             # turn with an opaque ollama error. Suggest, because a near miss is
             # usually a tag typo (":7b" vs ":latest"). Match the command's own
             # case-insensitive resolution, and never suggest from an empty base
             # (an arg like ":latest"), which would match every installed tag.
+            # Never suggest a model the selection below would refuse (an
+            # embedding model cannot serve chat).
             base = arg.split(":")[0].casefold()
-            near = [name for name in names if base and base in name.casefold()]
+            near = [
+                name for name in names
+                if base and base in name.casefold()
+                and not _model_selection_ineligibility(name)
+            ]
             print(_paint("no installed model named %r" % arg, _Ansi.red))
             if near:
                 print("did you mean: %s" % ", ".join(near[:5]))

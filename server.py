@@ -3085,6 +3085,8 @@ def _goal_command(arg: str, project: str = "", request_owner: str = "") -> str:
                 "\n(adopt with /goal adopt <id>; dismiss with "
                 "/goal decline <id>)"
             )
+        if action in ("adopt", "decline") and not rest:
+            return "usage: /goal %s <proposal-id>  (list them with /goal proposals)" % action
         if action == "adopt":
             return "adopted\n" + _format_goal(goal_store.adopt(rest, actor="user"))
         if action == "decline":

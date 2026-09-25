@@ -15,6 +15,15 @@ from typing import Mapping
 logger = logging.getLogger(__name__)
 
 
+# Local tiers that exist only when the operator binds a model to them.  An
+# unbound one is absent from the tier table, which made "/model vision" read
+# like an unknown model name instead of an unconfigured tier.
+OPTIONAL_LOCAL_TIERS = (
+    ("reasoning", "SONDER_REASONING"),
+    ("vision", "SONDER_VISION"),
+)
+
+
 @dataclass(frozen=True)
 class RuntimeModelConfiguration:
     """Typed, immutable projection of the runtime's model/tier defaults."""
@@ -60,11 +69,10 @@ class RuntimeModelConfiguration:
             f"cloud_code={cloud_code!r}, cloud_general={cloud_general!r}, "
             f"stable_alias={stable_alias!r}"
         )
-        empty_local_tiers = []
-        if not str(env.get("SONDER_REASONING", "")).strip():
-            empty_local_tiers.append("reasoning")
-        if not str(env.get("SONDER_VISION", "")).strip():
-            empty_local_tiers.append("vision")
+        empty_local_tiers = [
+            tier for tier, variable in OPTIONAL_LOCAL_TIERS
+            if not str(env.get(variable, "")).strip()
+        ]
         if empty_local_tiers:
             logger.warning(f"local tiers with no model configured: {empty_local_tiers} -- requests needing these capabilities will fall back to general-purpose models")
         return cls(
@@ -91,4 +99,4 @@ class RuntimeModelConfiguration:
         return dict(self.tier_bindings)
 
 
-__all__ = ["RuntimeModelConfiguration"]
+__all__ = ["OPTIONAL_LOCAL_TIERS", "RuntimeModelConfiguration"]
