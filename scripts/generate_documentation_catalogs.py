@@ -61,6 +61,7 @@ def _source_hashes() -> dict[str, str]:
         ROOT / "server.py",
         PACKAGE / "domain" / "operational_capabilities.py",
         PACKAGE / "interfaces" / "sdk" / "discovery.py",
+        PACKAGE / "bootstrap" / "native_mcp.py",
     )
     return {path.relative_to(ROOT).as_posix(): _sha(path) for path in paths if path.is_file()}
 
@@ -114,6 +115,20 @@ def _runtime_reference() -> dict[str, Any]:
     except Exception as exc:
         raise RuntimeError("runtime tool source unavailable") from exc
     result["tool_source"] = "server.mcp._tool_manager.list_tools"
+    # The opt-in ``mcp --native`` surface has its own, much smaller catalog.
+    # Hand-written migration notes drifted from it (they kept saying a tool
+    # was absent after it shipped), so it is projected here like the legacy
+    # one and the notes point at this table instead of enumerating names.
+    native_mcp = importlib.import_module("sonder_runtime.bootstrap.native_mcp")
+    result["native_tools"] = sorted(({
+        "description": descriptor.description or "",
+        "name": descriptor.name,
+        "parameters": _jsonable(dict(descriptor.input_schema or {})),
+    } for descriptor in native_mcp.native_tool_registry().list_all()),
+        key=lambda item: item["name"])
+    result["native_tool_source"] = (
+        "sonder_runtime.bootstrap.native_mcp.native_tool_registry"
+    )
 
     events = importlib.import_module("sonder_runtime.domain.common.events")
     result["events"] = [{
@@ -195,7 +210,7 @@ def _runtime_reference() -> dict[str, Any]:
     }
     result["counts"] = {
         name: len(result[name])
-        for name in ("commands", "tools", "events", "configuration")
+        for name in ("commands", "tools", "native_tools", "events", "configuration")
     } | {
         "schemas": 4,
         "capabilities": len(result["capabilities"]["sdk"]["tools"]),
@@ -256,6 +271,7 @@ def _markdown_reference(reference: dict[str, Any]) -> str:
         "", f"Digest: `{reference['digest']}`", "",
         "| Reference | Count | Source |", "|---|---:|---|",
         f"| Tools | {reference['counts']['tools']} | `{reference['tool_source'] if isinstance(reference['tool_source'], str) else 'unavailable'}` |",
+        f"| Native MCP tools | {reference['counts']['native_tools']} | `{reference['native_tool_source']}` |",
         f"| Commands | {reference['counts']['commands']} | `command_catalog.catalog()` |",
         f"| Events | {reference['counts']['events']} | `EventKind` and `payload_schema()` |",
         f"| Configuration fields | {reference['counts']['configuration']} | `{reference['configuration_source']}` |",
@@ -265,6 +281,12 @@ def _markdown_reference(reference: dict[str, Any]) -> str:
     ]
     for item in reference["tools"]:
         description = str(item["description"]).splitlines()[0].replace("|", "\\|")
+        lines.append(f"| `{item['name']}` | {description} |")
+    lines += ["", "## Native MCP tools", "",
+              "Served by `python -m sonder_runtime mcp --native`; the table above is the legacy default surface.",
+              "", "| Name | Description |", "|---|---|"]
+    for item in reference["native_tools"]:
+        description = (str(item["description"]).splitlines() or [""])[0].replace("|", "\\|")
         lines.append(f"| `{item['name']}` | {description} |")
     lines += ["", "## Commands", "", "| Name | Category | Risk | Tool |", "|---|---|---|---|"]
     for item in reference["commands"]:

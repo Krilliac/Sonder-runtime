@@ -4,6 +4,36 @@ Sonder exposes a guarded tool surface to the model (and to MCP clients).
 Everything is host-policed: workspace containment, permission rules,
 bounded output, and activity evidence apply to every call.
 
+## MCP client contract
+
+Both MCP surfaces (`python -m sonder_runtime mcp`, the default, and
+`mcp --native`) follow the same call contract:
+
+- **Failures are tool errors.** A refused or failed call returns a
+  `CallToolResult` with `isError: true` and the reason as its text. On the
+  default surface this covers every tool reply that starts with `ERROR:`
+  (for example a path outside the allowed roots, web tools disabled by
+  `SONDER_WEB_TOOLS`, an agent that ran out of steps) as well as permission
+  gate refusals. Clients that treated `ERROR:` text as success must check
+  `isError` instead; the text is unchanged.
+- **Unknown arguments are refused.** An argument name the tool's
+  `inputSchema` does not list is rejected (`isError: true`, naming the
+  accepted arguments) before the permission gate and before anything runs.
+  A misspelt option no longer silently falls back to its default.
+- **Frames are bounded and always answered.** The default surface refuses a
+  stdio frame over 2,065,536 bytes (room for a `file_write` at its 1 MB cap)
+  and answers every malformed frame (invalid JSON or UTF-8, a batch array,
+  `"jsonrpc": "1.0"`, an `id` that is not a string or integer, an unpaired
+  surrogate escape) with a JSON-RPC `-32700`/`-32600` error, echoing the
+  request `id` when it can be read. The native surface bounds frames at
+  256,000 bytes.
+- **`initialize`** reports the server's own capabilities (a client that sends
+  `capabilities: {}` still sees `tools`) and the runtime build version as
+  `serverInfo.version`. MCP Tasks on the native surface still require the
+  client to advertise `tasks`.
+- The native tool list is generated in
+  [`runtime-reference.md`](../architecture/generated/runtime-reference.md#native-mcp-tools).
+
 ## Code execution — `run_code` / `/run`
 
 Runs a bounded snippet and returns `{ok, returncode, stdout, stderr,

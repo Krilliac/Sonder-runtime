@@ -41,6 +41,27 @@ def test_generated_runtime_reference_covers_available_metadata():
     assert "operational" in reference["capabilities"]
 
 
+def test_generated_runtime_reference_projects_the_native_mcp_catalog():
+    """The ``mcp --native`` catalog is generated, so notes cannot drift from it.
+
+    The hand-written migration note kept saying ``vision_analyze`` was not
+    exposed after it shipped, and its counts lagged; nothing generated the
+    native catalog to check it against.
+    """
+    from sonder_runtime.bootstrap.native_mcp import native_tool_registry
+
+    reference = json.loads((GENERATED / "runtime-reference.json").read_text(encoding="utf-8"))
+    live = sorted(tool.name for tool in native_tool_registry().list_all())
+    assert [row["name"] for row in reference["native_tools"]] == live
+    assert reference["counts"]["native_tools"] == len(live)
+    assert "vision_analyze" in live
+    markdown = (GENERATED / "runtime-reference.md").read_text(encoding="utf-8")
+    assert "## Native MCP tools" in markdown and "| `vision_analyze` |" in markdown
+    note = (ROOT / "docs" / "architecture" / "WP8-NATIVE-MCP-MIGRATION.md").read_text(encoding="utf-8")
+    assert "generated/runtime-reference.md" in note
+    assert "does not expose `vision_analyze`" not in note
+
+
 def test_generated_runtime_reference_covers_specialized_memory_replication_contract():
     reference = catalogs._runtime_reference()
     configuration: dict[str, set[tuple[str, str]]] = {}
