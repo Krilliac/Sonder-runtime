@@ -61,6 +61,15 @@ compare-and-set SQL is the concurrency authority. Invariants:
 Control: `/autopilot status|resume|cancel`, or the master orchestrator
 tools. See [autopilot-interruption](../runbooks/autopilot-interruption.md).
 
+Steering (`/autopilot steer|clarify <id> <message>`) is owner-scoped and
+fails closed for unowned runs. Runs started from the console
+(`/autopilot plan|run`, `/mission start`) carry an opaque console owner
+(`rc-<digest of OS user and state home>`, stable across console restarts),
+so the console can steer them. Status, pause, resume, and cancel from the
+console stay unscoped and still reach every local run. Runs started before
+this change are unowned and cannot be steered; cancel and restart them if
+they need steering.
+
 ## Fleet
 
 Parallel worker execution (`fleet.db`, `fleet_store.py`) for fan-out work.

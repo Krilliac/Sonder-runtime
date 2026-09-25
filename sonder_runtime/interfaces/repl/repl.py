@@ -10,6 +10,7 @@ it at import time.
 from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 import json
 import getpass
+import hashlib
 import inspect
 import os
 import re
@@ -23,6 +24,7 @@ from contextlib import contextmanager, redirect_stdout
 from sonder_runtime.domain.common.errors import DependencyUnavailable
 from sonder_runtime.application import foreground_turns
 from sonder_runtime.adapters.filesystem import file_ops
+from sonder_runtime.platform import paths as server_paths
 import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
 from sonder_runtime.adapters.observability.repl_formatting import (
     elapsed_label as _elapsed_label,
@@ -485,6 +487,43 @@ def _gate_tools(tools, label):
     if _confirm("run %s? %s." % (label, worst.reason)):
         return True, ""
     return False, "skipped %s" % label
+
+
+# Autopilot actions that create a run or steer one.  Only these carry the
+# console's owner: status/resume/pause/cancel stay unscoped exactly as before,
+# so the console still sees and controls every local run, including legacy
+# unowned ones.
+_AUTOPILOT_OWNER_ACTIONS = frozenset({"run", "start", "plan", "steer", "clarify"})
+
+
+def _repl_console_owner():
+    """A stable opaque owner for runs this OS user starts from the console.
+
+    Steering is owner-scoped and fails closed for unowned runs, and the
+    console used to create every run unowned, so ``/autopilot steer`` and
+    ``clarify`` were advertised but always refused.  The owner is a digest of
+    the OS user and the Sonder state home: stable across console restarts,
+    distinct from the ``ta-`` account scopes the served API derives, and never
+    a name a remote caller can present.
+    """
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = str(getattr(os, "getuid", lambda: "")())
+    material = "repl-console-autopilot-owner\0%s\0%s" % (
+        user, os.path.realpath(str(server_paths.default_home())),
+    )
+    return "rc-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _repl_autopilot_owner(cmd, arg):
+    """The owner to pass for one ``/autopilot`` or ``/mission`` line, or None."""
+    words = str(arg or "").split(None, 1)
+    action = words[0].lower() if words else ""
+    command = str(cmd or "").lower()
+    if command == "/mission":
+        return _repl_console_owner() if action == "start" else None
+    return _repl_console_owner() if action in _AUTOPILOT_OWNER_ACTIONS else None
 
 
 def _help_policy_note(topic):
@@ -3145,6 +3184,7 @@ def main(*, machine_output=False):
                     elif cmd in ("/autopilot", "/auto", "/mission"):
                         print(server.control_command(
                             line, session=session_id, project=project,
+                            autopilot_request_owner=_repl_autopilot_owner(cmd, arg),
                         ))
                     elif cmd in (
                         "/runtime", "/models", "/mcp", "/convergence",
