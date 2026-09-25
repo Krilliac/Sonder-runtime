@@ -1365,7 +1365,9 @@ def _parent_scored_gate(run_id: str, workspace: Path, target: str,
                 REPO, workspace, selfmod.state_root(), run["starting_commit"],
                 bound["files"] if bound else {},
                 _module_name_for_target(target) or "", function_name, cases,
-                timeout, held_out.get("protected_paths", ()), python=_test_python(),
+                # The replay runs the same candidate bytes, so it must leave
+                # the same evaluator truth untouched as the probe did.
+                timeout, tuple(protected_paths), python=_test_python(),
             )
         except (OSError, RuntimeError, ValueError) as exc:
             clean_passed, clean_detail = False, f"clean replay unavailable ({type(exc).__name__})"

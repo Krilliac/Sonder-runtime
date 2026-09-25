@@ -206,6 +206,14 @@ def test_linux_nightly_dry_cycle_runs_candidate_under_uid_supervisor(host, monke
     live = _digest(repo / "reflection.py")
     stages = _stages(host["home"])
     logs: list[str] = []
+    replay_truth: list[tuple[str, ...]] = []
+    real_replay = nightly_selfmod.selfmod_host_grader.clean_replay
+
+    def recording_replay(*args, **kwargs):
+        replay_truth.append(tuple(str(path) for path in args[9]))
+        return real_replay(*args, **kwargs)
+
+    monkeypatch.setattr(nightly_selfmod.selfmod_host_grader, "clean_replay", recording_replay)
 
     result = nightly_selfmod.run(object(), logs.append, test_timeout=120, stages=stages)
 
@@ -228,6 +236,10 @@ def test_linux_nightly_dry_cycle_runs_candidate_under_uid_supervisor(host, monke
     assert "SELFMOD HELD-OUT CANARY PASSED" in probe_output
     # The parent-scored gate accepted the linux-uid attestation.
     assert "clean checkout: " in by_kind["host_grade"]["output"]
+    # The clean replay runs the same candidate bytes under the same
+    # evaluator truth as the gates, including the sealed backup bundle.
+    assert len(replay_truth) == 1
+    assert str(selfmod._backup_dir(run["id"])) in replay_truth[0]
 
     # Every mutating stage went through the bootstrap-composed journal, with
     # per-attempt identities for the repeatable stages.

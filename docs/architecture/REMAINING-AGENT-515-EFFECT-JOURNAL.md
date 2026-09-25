@@ -292,21 +292,25 @@ Remaining limits:
   launcher, compute provider, subagent runner, and legacy self-mod adapter. The
   earlier real child-process test covers only the process family's real OS
   launch.
-- Legacy self-mod stages other than deploy and rollback still run outside the
-  journal: `create_backup`, `prepare_workspace`, `record_reproducer_before`,
-  `begin_testing`, `record_test`, `review`, and `approve`. This change is
-  described here but not made. `_mutating_call` hardcodes a deploy-shaped
-  success predicate and one `"{operation}:{run_id}"` operation ID per run. Each
-  stage would need its own success predicate. Repeatable stages such as
-  `record_test` also need a per-attempt operation identity, so that a
-  legitimate retry is not refused as a duplicate. Without that identity, the
-  journal would fence every retried test. This work belongs in
-  `selfmod_service.py`, not in the #519 low-integrity nightly harness files.
-- `compute-cancel` uses one operation ID per job. A second cancel of the same
-  job is refused as a duplicate intent, even after a
-  `cancellation_requested` receipt whose cleanup was pending. This was
-  confirmed by a direct run. Retrying cancellation needs a per-attempt identity
-  or a query-based reconciliation strategy.
+- Legacy self-mod stages now have per-stage success predicates, phase
+  preconditions and, for repeatable stages (`record_reproducer_before`,
+  `begin_testing`, `record_test`), per-attempt identities
+  (`selfmod-record-test:<run>:attempt-<n>`) in `selfmod_service.py`. The
+  unattended driver `scripts/nightly_selfmod.run` routes `create_backup`,
+  `prepare_workspace`, `begin_testing`, every candidate gate including the
+  host probe, `review`, `approve` and `deploy` through the bootstrap-composed
+  service (`GuardedLegacySelfmodService.journaled_stage`), exercised by
+  `tests/test_wiring_selfmod_linux_nightly.py`. Still outside the journal:
+  `verify_backup`, `record_host_grade`, `reject`, `cancel`, the host grader's
+  clean replay, and the operator `/selfmod` path in `server.py`
+  (`_selfmod_command`, `_execute_selfmod_run`), which calls the legacy module
+  directly.
+- `compute-cancel` retries get a journal-derived per-attempt identity
+  (`ComputeJobWorker._next_cancel_attempt`). Attempt 1 keeps the historical
+  operation ID. The serve route reaches it through
+  `dispatch_compute_job_cancel` on the bootstrap-composed worker, exercised by
+  `tests/test_wiring_selfmod_compute_cancel_attempts.py` (only the systemd
+  containment seam is replaced).
 - Compute-cancel and self-mod operation families still have no provider
   verifier, so their fences can be cleared only by future trusted composition.
   Compute-submit and subagent-dispatch verifiers are described below; they

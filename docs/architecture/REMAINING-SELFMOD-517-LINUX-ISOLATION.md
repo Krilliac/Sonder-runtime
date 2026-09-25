@@ -94,7 +94,8 @@ on a Linux host where `SONDER_SELFMOD_CANDIDATE_UID` is configured.
   database holds the baseline, tested digests and decisions, so it and its
   directory chain must be closed to the candidate uid.
 - Every candidate gate (`syntax`, both regression partitions, `held_out`,
-  `host_probe`) receives `_evaluator_truth_paths(run_id, held_out)` as
+  `host_probe`, and the host grader's clean replay of the same bytes)
+  receives `_evaluator_truth_paths(run_id, held_out)` as
   protected truth. That set is the held-out snapshot plus the sealed backup
   bundle and its manifest, which hold the rollback point and baseline hashes.
   The supervisor refuses to launch if any of it is candidate-writable, and
