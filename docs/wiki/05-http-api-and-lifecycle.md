@@ -128,6 +128,56 @@ terminal usage chunk with:
 That final chunk has an empty `choices` array and a `usage` object. It appears
 immediately before `[DONE]`; ordinary streams remain unchanged.
 
+For an ordinary model turn with `stream: true`, the response commits to SSE
+as soon as generation starts: the `200` headers and an SSE comment
+(`: keep-alive`) are sent immediately and repeated every
+`[server].stream_heartbeat_seconds` (default 15, `SONDER_STREAM_HEARTBEAT_SECONDS`)
+until the answer is ready, so client and proxy idle timeouts no longer expire
+during a slow CPU generation. The answer itself still arrives as one content
+chunk: the generation pipeline (retrieval, critic and retry passes,
+escalation) produces it only when the turn completes, so it is not
+token-streamed. `X-Sonder-Elapsed-Ms` on such a stream is the time to the
+headers; the final chunk's `sonder_elapsed_ms` is the full duration. Because
+the status is already `200`, a model or capture failure after that point is
+delivered as one terminal SSE event with `"object": "error"` and an
+`error.code` (`MODEL_CALL_<status>`, `SESSION_CAPTURE_UNAVAILABLE`,
+`INTERNAL_ERROR`), followed by `[DONE]`. Slash, web, work, structured, and
+multi-sample (Spanda) turns keep the previous framing, and non-streaming
+responses are unchanged.
+
+`context_size` must be absent, `null`, `""`, or a positive token count
+(`8192`, `"32k"`, `"1m"`); anything else is `400 invalid_request` instead of
+silently selecting the default window. Surrounding whitespace in `model` is
+ignored and not echoed back. On the default `sonder` route, a message that is
+only one unknown `/word` is answered with a short "no command with that name"
+reply instead of a model call; a sentence that merely starts with `/` still
+reaches the model.
+
+## Routed work runs
+
+A chat turn that the host routes to an execution lane (workbench, fleet, or
+autopilot) runs as a **work run** with id `wr-…`:
+
+- The request waits at most `[server].work_wait_seconds` (default 240,
+  `SONDER_HTTP_WORK_WAIT_SECONDS`). A run that finishes in time answers
+  inline; otherwise the reply names the run id and `sonder_receipt.chat_work`
+  carries `status: "running"` and `work_run_id`. The answer is persisted and
+  returned by `GET /v1/work-runs/<id>` (bounded to 256 KiB, retained 7 days).
+- `[server].work_budget_seconds` (default 1800,
+  `SONDER_HTTP_WORK_BUDGET_SECONDS`) is a wall-clock budget. After it, or
+  after `POST /v1/work-runs/<id>/cancel`, the run's effect fence no longer
+  holds: the permission gate refuses every further file change, host program,
+  or destructive tool, and the run ends as `budget_exceeded` or `cancelled`.
+  A model step already in flight cannot be preempted from the HTTP layer; the
+  lane's remaining steps run to their step bound without effects. Fleet
+  workers and autopilot runs keep their own cancel surfaces (`/master_cancel`,
+  `/autopilot cancel`).
+- At most `[server].work_max_running` (default 2,
+  `SONDER_HTTP_WORK_MAX_RUNNING`) runs execute at once; another routed turn
+  is refused with `429 WORK_CAPACITY_EXHAUSTED` and `Retry-After`.
+- A run left `running` by a stopped process is reported `interrupted` after
+  restart.
+
 `response_format` is available only for an isolated direct-model turn:
 
 ```json

@@ -42,6 +42,7 @@ from sonder_runtime.interfaces.http.memory_replication import (
     handle_memory_replication,
     is_memory_replication_route,
 )
+from sonder_runtime.interfaces.http.sse import KEEPALIVE_FRAME, SSEKeepAlive
 
 _APP_CONTROL_BINDING = None
 _APP_CONTROL_CONFIG = None
@@ -745,6 +746,8 @@ STREAM_IDLE_TIMEOUT_SECONDS = max(1, _env_int(
 # the 413 bound meaningful and ends the connection (RFC 9112 6.3). The read is
 # given its own short deadline so an error path never inherits the full
 # per-connection wait above.
+# Interval of SSE keep-alive comment frames while a streamed turn generates.
+STREAM_HEARTBEAT_SECONDS = max(1, min(300, _env_int("SONDER_STREAM_HEARTBEAT_SECONDS", 15)))
 MAX_DISCARDED_BODY_BYTES = min(MAX_REQUEST_BYTES, 64 * 1024)
 DISCARD_BODY_TIMEOUT_SECONDS = 5
 # Closing a socket whose receive buffer still holds body bytes makes the OS
@@ -999,6 +1002,8 @@ def configure_typed_config(config) -> None:
     MAX_DISCARDED_BODY_BYTES = min(MAX_REQUEST_BYTES, 64 * 1024)
     REQUEST_TIMEOUT_SECONDS = max(5, server_config.request_timeout_seconds)
     STREAM_IDLE_TIMEOUT_SECONDS = max(1, server_config.stream_idle_timeout_seconds)
+    global STREAM_HEARTBEAT_SECONDS
+    STREAM_HEARTBEAT_SECONDS = max(1, min(300, server_config.stream_heartbeat_seconds))
     HTTP_SESSION_STATE_LIMIT = max(2, min(1024, server_config.session_state_limit))
     HTTP_SESSION_STATE_OWNER_LIMIT = max(
         1, min(HTTP_SESSION_STATE_LIMIT - 1, server_config.session_state_owner_limit)
@@ -6973,7 +6978,12 @@ class Handler(BaseHTTPRequestHandler):
                             response_model = turn.resolved_model
                             response_tier = turn.resolved_tier
                         else:
-                            turn = _run_prompt(
+                            if stream:
+                                # Commit to SSE now and keep the connection
+                                # alive while the turn generates.
+                                self._begin_early_stream()
+                            try:
+                                turn = self._run_streamable_prompt(
                                 prompt,
                                 history,
                                 model_selector,
@@ -6999,7 +7009,9 @@ class Handler(BaseHTTPRequestHandler):
                                 # principal-namespaced above.
                                 augment=not bool(context.get("account")),
                                 metrics=_lifecycle.metrics,
-                            )
+                                )
+                            finally:
+                                self._pause_early_stream()
                             content = turn.content
                             response_iid = turn.iid
                             response_reasoning = turn.thinking
@@ -7044,6 +7056,9 @@ class Handler(BaseHTTPRequestHandler):
                 _lifecycle, rejection.code.lower(),
                 getattr(self, "_request_started", _request_started),
             )
+            if self._end_early_stream_with_error(
+                    str(rejection), "server_error", rejection.code, model):
+                return
             self._send_json_payload(
                 sonder_lifecycle.error_envelope(
                     rejection.code,
@@ -7085,6 +7100,9 @@ class Handler(BaseHTTPRequestHandler):
             message = error.detail
             if error.cloud and error.status == 429:
                 message = server._format_model_call_error(error)
+            if self._end_early_stream_with_error(
+                    message, error_type, "MODEL_CALL_%s" % status, model):
+                return
             self._send_json_payload(
                 {
                     "error": {
@@ -7102,6 +7120,10 @@ class Handler(BaseHTTPRequestHandler):
                 _lifecycle, "session_capture_failed",
                 getattr(self, "_request_started", _request_started),
             )
+            if self._end_early_stream_with_error(
+                    "durable session capture unavailable", "server_error",
+                    "SESSION_CAPTURE_UNAVAILABLE", model):
+                return
             self._send_json_payload(
                 {"error": {
                     "message": "durable session capture unavailable",
@@ -7119,6 +7141,9 @@ class Handler(BaseHTTPRequestHandler):
                 _lifecycle, "error",
                 getattr(self, "_request_started", _request_started),
             )
+            if self._end_early_stream_with_error(
+                    "internal server error", "server_error", "INTERNAL_ERROR", model):
+                return
             self._send_json_payload(
                 {"error": {"message": "internal server error",
                            "type": "server_error",
@@ -7221,8 +7246,15 @@ class Handler(BaseHTTPRequestHandler):
             else (server.activity_tracker.public_snapshot(include_detail=False) or {}).get("latest")
         )
         headers_sent = False
+        early = getattr(self, "_early_stream", None)
+        if early is not None:
+            # Headers went out before generation; only data frames remain.
+            if not early.stop():
+                self.close_connection = True
+                return False
+            headers_sent = True
         connection = getattr(self, "connection", None)
-        if connection is not None:
+        if connection is not None and early is None:
             try:
                 connection.settimeout(STREAM_IDLE_TIMEOUT_SECONDS)
             except (AttributeError, OSError):
@@ -7231,6 +7263,11 @@ class Handler(BaseHTTPRequestHandler):
                 # still protects those paths.
                 pass
         try:
+            if early is not None:
+                return Handler._write_stream_body(
+                    self, iid, model, content, elapsed_ms, receipt, usage, activity,
+                    lock=early.lock,
+                )
             self.send_response(200)
             self._cors()
             self.send_header("Content-Type", "text/event-stream")
@@ -7249,15 +7286,9 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             self.end_headers()
             headers_sent = True
-            self.wfile.write(_chunk(iid, model, {"role": "assistant", "content": content}).encode("utf-8"))
-            self.wfile.write(_chunk(
-                iid, model, {}, finish_reason="stop", elapsed_ms=elapsed_ms,
-                receipt=receipt, activity=activity,
-            ).encode("utf-8"))
-            if usage is not None:
-                self.wfile.write(_chunk(iid, model, {}, usage=usage).encode("utf-8"))
-            self.wfile.write(b"data: [DONE]\n\n")
-            return True
+            return Handler._write_stream_body(
+                self, iid, model, content, elapsed_ms, receipt, usage, activity,
+            )
         except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
             # Header writes can fail before the first event just as body writes
             # can.  Return the same cancellation signal so the caller records
@@ -7276,16 +7307,96 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return None
 
-    def _send_stream_terminal_error(self, iid, model):
+    def _write_stream_body(self, iid, model, content, elapsed_ms, receipt, usage,
+                           activity, lock=None):
+        with lock if lock is not None else contextlib.nullcontext():
+            self.wfile.write(_chunk(iid, model, {"role": "assistant", "content": content}).encode("utf-8"))
+            self.wfile.write(_chunk(
+                iid, model, {}, finish_reason="stop", elapsed_ms=elapsed_ms,
+                receipt=receipt, activity=activity,
+            ).encode("utf-8"))
+            if usage is not None:
+                self.wfile.write(_chunk(iid, model, {}, usage=usage).encode("utf-8"))
+            self.wfile.write(b"data: [DONE]\n\n")
+        return True
+
+    def _run_streamable_prompt(self, *args, **kwargs):
+        """The plain model turn; a seam kept separate from stream framing."""
+        return _run_prompt(*args, **kwargs)
+
+    def _begin_early_stream(self):
+        """Send SSE headers before generation and start keep-alive frames.
+
+        Model errors after this point can no longer change the HTTP status;
+        they are delivered as one terminal SSE error event followed by
+        ``[DONE]`` (see ``_end_early_stream_with_error``).
+        """
+        connection = getattr(self, "connection", None)
+        if connection is not None:
+            try:
+                connection.settimeout(STREAM_IDLE_TIMEOUT_SECONDS)
+            except (AttributeError, OSError):
+                pass
+
+        def write(frame):
+            self.wfile.write(frame)
+            flush = getattr(self.wfile, "flush", None)
+            if callable(flush):
+                flush()
+
+        keepalive = SSEKeepAlive(write, STREAM_HEARTBEAT_SECONDS)
+        self._early_stream = keepalive
+        self.close_connection = True
+        try:
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            # Ask buffering reverse proxies (nginx) to pass frames through.
+            self.send_header("X-Accel-Buffering", "no")
+            started = getattr(self, "_request_started", None)
+            elapsed_ms = int((time.monotonic() - started) * 1000) if started else 0
+            self.send_header("X-Sonder-Elapsed-Ms", str(max(0, elapsed_ms)))
+            if getattr(self, "_correlation_id", ""):
+                self.send_header("X-Sonder-Correlation-Id", self._correlation_id)
+            self.send_header("Connection", "close")
+            self.end_headers()
+            write(KEEPALIVE_FRAME)
+        except (OSError, ValueError):
+            keepalive.client_gone = True
+            return keepalive
+        return keepalive.start()
+
+    def _pause_early_stream(self):
+        early = getattr(self, "_early_stream", None)
+        if early is not None:
+            early.stop()
+
+    def _end_early_stream_with_error(self, message, error_type, code, model):
+        """Deliver an error on an already-committed SSE response; else ``False``."""
+        early = getattr(self, "_early_stream", None)
+        if early is None:
+            return False
+        self.close_connection = True
+        if early.stop():
+            with early.lock:
+                Handler._send_stream_terminal_error(
+                    self, uuid.uuid4().hex[:12], model or "sonder",
+                    message=message, error_type=error_type, code=code,
+                )
+        return True
+
+    def _send_stream_terminal_error(self, iid, model, *, message=None,
+                                    error_type="server_error", code="STREAM_INTERRUPTED"):
         """Best-effort terminal SSE error after an already-started stream."""
         payload = {
             "id": "chatcmpl-%s" % iid,
             "object": "error",
             "model": model,
             "error": {
-                "message": "stream interrupted before completion",
-                "type": "server_error",
-                "code": "STREAM_INTERRUPTED",
+                "message": message or "stream interrupted before completion",
+                "type": error_type,
+                "code": code,
             },
         }
         try:

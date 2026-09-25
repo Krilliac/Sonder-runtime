@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 309,
+      "file_count": 310,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -235,6 +235,7 @@
         "sonder_runtime/adapters/persistence/fanout_store.py",
         "sonder_runtime/adapters/persistence/fleet_registry.py",
         "sonder_runtime/adapters/persistence/fleet_store.py",
+        "sonder_runtime/adapters/persistence/http_work_runs.py",
         "sonder_runtime/adapters/persistence/lane_owner.py",
         "sonder_runtime/adapters/persistence/migration_rehearsal.py",
         "sonder_runtime/adapters/persistence/migrations.py",
@@ -974,7 +975,7 @@
       ]
     },
     {
-      "file_count": 48,
+      "file_count": 51,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -1006,9 +1007,12 @@
         "sonder_runtime/interfaces/http/facades/observability.py",
         "sonder_runtime/interfaces/http/facades/session.py",
         "sonder_runtime/interfaces/http/handlers.py",
+        "sonder_runtime/interfaces/http/host_policy.py",
         "sonder_runtime/interfaces/http/memory_replication.py",
         "sonder_runtime/interfaces/http/serve.py",
         "sonder_runtime/interfaces/http/serve_policy.py",
+        "sonder_runtime/interfaces/http/sse.py",
+        "sonder_runtime/interfaces/http/work_runs.py",
         "sonder_runtime/interfaces/mcp/__init__.py",
         "sonder_runtime/interfaces/mcp/handlers.py",
         "sonder_runtime/interfaces/mcp/transport.py",

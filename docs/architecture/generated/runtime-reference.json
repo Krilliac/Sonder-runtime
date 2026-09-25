@@ -17773,6 +17773,36 @@
       "type": "bool"
     },
     {
+      "default": [],
+      "field": "allowed_hosts",
+      "section": "server",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": 240,
+      "field": "work_wait_seconds",
+      "section": "server",
+      "type": "int"
+    },
+    {
+      "default": 1800,
+      "field": "work_budget_seconds",
+      "section": "server",
+      "type": "int"
+    },
+    {
+      "default": 2,
+      "field": "work_max_running",
+      "section": "server",
+      "type": "int"
+    },
+    {
+      "default": 15,
+      "field": "stream_heartbeat_seconds",
+      "section": "server",
+      "type": "int"
+    },
+    {
       "default": false,
       "field": "enabled",
       "section": "spanda",
@@ -17837,12 +17867,12 @@
   "counts": {
     "capabilities": 214,
     "commands": 320,
-    "configuration": 214,
+    "configuration": 219,
     "events": 43,
     "schemas": 4,
     "tools": 214
   },
-  "digest": "03fe4e2849cb9a8533a4877fb556cd8960e8e7907cb748c49db31219c9844ab7",
+  "digest": "8b54cf83c1b6a8734de7b46c3ed31aafa5f6992e1be49284bf3429d7b2e42084",
   "events": [
     {
       "name": "session.started",
@@ -43861,7 +43891,7 @@
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",
-    "sonder_runtime/platform/config.py": "e1fb3ddff082b2611c47a0f459b94f07a721b8ec0aa4ec62150a352619c6678f",
+    "sonder_runtime/platform/config.py": "ea8e87527a8f6502387abc2561d1f8154ffc99dca7ac55f9cf8da68b30755d62",
     "sonder_runtime/platform/memory_replication_config.py": "f9fc0a642812bdc456ac082f0f8c52f051822f0160e16882b634895feb0cea61"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
