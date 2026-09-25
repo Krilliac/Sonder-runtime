@@ -247,6 +247,45 @@ def test_production_config_checks_final_command_line_host_override(monkeypatch):
         )
 
 
+@pytest.mark.parametrize("source", ["override", "toml"])
+def test_production_config_refuses_cloud_enabled_outside_the_environment(source, tmp_path):
+    # The runtime exports the *effective* features.cloud as SONDER_ALLOW_CLOUD
+    # only after validation, so the lab check must judge the resolved value.
+    toml_path = None
+    overrides = None
+    if source == "toml":
+        toml_path = tmp_path / "sonder.toml"
+        toml_path.write_text("[features]\ncloud = true\n", encoding="utf-8")
+    else:
+        overrides = {"features.cloud": "true"}
+    with pytest.raises(sonder_config.ConfigError, match="hosted/cloud"):
+        sonder_config.load_config(
+            toml_path, env={unsafe_lab.ACK_ENV: ACK}, overrides=overrides,
+        )
+
+
+def test_production_config_refuses_remote_ollama_from_config_file(tmp_path):
+    toml_path = tmp_path / "sonder.toml"
+    toml_path.write_text(
+        '[ollama]\nurl = "https://10.1.2.3:11434"\nallow_remote = true\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(sonder_config.ConfigError, match="loopback OLLAMA_HOST"):
+        sonder_config.load_config(toml_path, env={unsafe_lab.ACK_ENV: ACK})
+
+
+def test_production_config_effective_check_only_adds_refusals():
+    # A truthy environment opt-in is still refused even when a later
+    # override turns the effective value off: the check never relaxes.
+    with pytest.raises(sonder_config.ConfigError, match="hosted/cloud"):
+        sonder_config.load_config(
+            env={unsafe_lab.ACK_ENV: ACK, "SONDER_ALLOW_CLOUD": "1"},
+            overrides={"features.cloud": "false"},
+        )
+    config = sonder_config.load_config(env={unsafe_lab.ACK_ENV: ACK})
+    assert config.features.cloud is False
+
+
 def test_served_unsafe_mode_refuses_remote_even_with_strong_auth(monkeypatch):
     monkeypatch.setenv(unsafe_lab.ACK_ENV, ACK)
     monkeypatch.setattr(unsafe_lab, "is_privileged", lambda: False)

@@ -1969,6 +1969,19 @@ def load_config(
     # CLI overrides. Otherwise an exact unsafe acknowledgement plus
     # --host=0.0.0.0 could evade the lab's stricter loopback-only rule.
     lab_error = unsafe_lab_policy.validation_error(merged_env, host=config.server.host)
+    if not lab_error:
+        # The raw environment is not the whole story: a config file or a
+        # command-line override can enable cloud models or point [ollama].url
+        # at a remote host, and the runtime exports those *effective* values
+        # as SONDER_ALLOW_CLOUD/OLLAMA_HOST only after validation.  Judge the
+        # resolved settings too, so this check can only add refusals.
+        effective_env = dict(merged_env)
+        if config.features.cloud:
+            effective_env["SONDER_ALLOW_CLOUD"] = "1"
+        effective_env["OLLAMA_HOST"] = config.ollama.url
+        lab_error = unsafe_lab_policy.validation_error(
+            effective_env, host=config.server.host
+        )
     if lab_error:
         errors.append(lab_error)
 
