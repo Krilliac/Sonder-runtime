@@ -190,3 +190,70 @@ def test_mcp_tasks_fail_closed_without_negotiation_or_handler():
     rows = [json.loads(line) for line in output.getvalue().splitlines()]
     assert rows[1]["error"]["code"] == -32602
     assert "not negotiated" in rows[1]["error"]["message"]
+
+
+def test_oversized_frame_is_discarded_through_its_newline():
+    """The tail of an oversized line is not a second frame.
+
+    readline(limit + 1) stops mid-line; the rest of that line used to be read
+    back as the next frame, so one oversized request produced several errors
+    and a request hidden past the limit was executed.
+    """
+    limit = 200
+    smuggled = json.dumps({"jsonrpc": "2.0", "id": 7, "method": "initialize",
+                           "params": {"protocolVersion": "2.0"}})
+    assert len(smuggled) < limit
+    valid = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                        "params": {"protocolVersion": "2.0"}})
+    output = io.StringIO()
+    transport = StdioMcpTransport(
+        io.StringIO("A" * (limit + 1) + smuggled + "\n" + "B" * (5 * limit) + "\n" + valid + "\n"),
+        output, compatibility=McpCompatibility(), tool_catalog=(), tool_handler=lambda *_: {},
+        limits=McpTransportLimits(max_frame_bytes=limit),
+    )
+    assert transport.serve() == 3
+    result = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert [item.get("id") for item in result] == [None, None, 1]
+    assert [item["error"]["message"] for item in result[:2]] == [
+        "MCP frame exceeds max_frame_bytes"] * 2
+    assert result[2]["result"]["protocolVersion"] == "2.0"
+
+
+def test_ping_is_answered_before_and_after_initialize():
+    transport, output = _transport([
+        {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+        {"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {"protocolVersion": "2.0"}},
+        {"jsonrpc": "2.0", "id": 3, "method": "ping", "params": {}},
+    ])
+    transport.serve()
+    result = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert result[0] == {"jsonrpc": "2.0", "id": 1, "result": {}}
+    assert result[2] == {"jsonrpc": "2.0", "id": 3, "result": {}}
+
+
+def test_unknown_method_error_names_the_method_plainly():
+    transport, output = _transport([
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2.0"}},
+        {"jsonrpc": "2.0", "id": 2, "method": "resources/list"},
+    ])
+    transport.serve()
+    error = [json.loads(line) for line in output.getvalue().splitlines()][1]["error"]
+    assert error == {"code": -32601, "message": "method not found: resources/list"}
+
+
+def test_oversized_response_is_a_bounded_error_not_a_dead_session():
+    """A tool result larger than a frame used to raise out of serve()."""
+    def handler(name, arguments):
+        return {"output": "x" * (2 if arguments.get("small") else 5_000)}
+
+    transport, output = _transport([
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2.0"}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "echo", "arguments": {}}},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+         "params": {"name": "echo", "arguments": {"small": True}}},
+    ], handler=handler, limits=McpTransportLimits(max_frame_bytes=1_000))
+    assert transport.serve() == 3
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert rows[1] == {"jsonrpc": "2.0", "id": 2, "error": {
+        "code": -32603, "message": "MCP response exceeds max_frame_bytes"}}
+    assert rows[2]["id"] == 3 and rows[2]["result"]["output"] == "xx"

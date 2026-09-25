@@ -37,6 +37,10 @@ class McpTransportError(ValueError):
     """A bounded transport or protocol violation."""
 
 
+class _MethodNotFound(KeyError):
+    """The request named a JSON-RPC method this transport does not serve."""
+
+
 class McpProvider(Protocol):
     """Provider-neutral one-shot MCP exchange port.
 
@@ -182,6 +186,11 @@ class StdioMcpTransport:
                 continue
             count += 1
             try:
+                if self._oversized(raw):
+                    # readline stopped mid-line: discard the rest of this line
+                    # so its tail is never read back as a separate frame.
+                    self._discard_rest_of_line()
+                    raise McpTransportError("MCP frame exceeds max_frame_bytes")
                 response = self._dispatch(self._decode_frame(raw))
             except McpTransportError as exc:
                 logger.error(
@@ -190,12 +199,31 @@ class StdioMcpTransport:
                 )
                 response = self._error(None, -32700, str(exc))
             if response is not None:
-                self._write(response)
+                try:
+                    self._write(response)
+                except McpTransportError as exc:
+                    # An oversized result must not end the session; answer
+                    # the request with a bounded error instead.
+                    logger.error(
+                        f"MCP response dropped connection_id={self._connection_id!r}: {exc}"
+                    )
+                    self._write(self._error(response.get("id"), -32603, str(exc)))
         if self._router is not None:
             self._router.unsubscribe(self._connection_id)
         logger.debug(f"serve loop ended connection_id={self._connection_id!r} frames_processed={count}")
         logger.info(f"MCP serve loop ended connection_id={self._connection_id!r}, frames_processed={count}")
         return count
+
+    def _oversized(self, raw: str | bytes) -> bool:
+        """Whether readline hit the frame bound before the line ended."""
+        newline = b"\n" if isinstance(raw, bytes) else "\n"
+        return len(raw) > self._limits.max_frame_bytes and not raw.endswith(newline)
+
+    def _discard_rest_of_line(self) -> None:
+        while True:
+            chunk = self._input.readline(self._limits.max_frame_bytes + 1)
+            if chunk in (b"", "") or chunk.endswith(b"\n" if isinstance(chunk, bytes) else "\n"):
+                return
 
     def _decode_frame(self, raw: str | bytes) -> dict[str, Any]:
         if isinstance(raw, bytes):
@@ -237,6 +265,8 @@ class StdioMcpTransport:
             return self._error(request_id, -32602, str(exc))
         except McpTaskNotFound as exc:
             return self._error(request_id, -32601, str(exc))
+        except _MethodNotFound as exc:
+            return self._error(request_id, -32601, "method not found: %s" % exc.args[0])
         except KeyError as exc:
             return self._error(request_id, -32601, str(exc))
         except Exception:
@@ -257,6 +287,9 @@ class StdioMcpTransport:
 
     def _call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         logger.debug(f"_call method={method!r}")
+        if method == "ping":
+            # MCP liveness check: valid in any session state, empty result.
+            return {}
         if method == "initialize":
             versions = params.get("protocolVersions", params.get("protocolVersion"))
             if isinstance(versions, str):
@@ -323,7 +356,7 @@ class StdioMcpTransport:
             if self._router is not None:
                 self._router.unsubscribe(self._connection_id, event if isinstance(event, str) else None)
             return {"unsubscribed": event}
-        raise KeyError(method)
+        raise _MethodNotFound(method)
 
     @staticmethod
     def _valid_id(value: Any) -> bool:
