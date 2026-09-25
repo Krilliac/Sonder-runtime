@@ -3122,7 +3122,10 @@ def _handle_work_intent(content, project="", authorized=False, context=None,
             if not decision.is_execution:
                 raise ValueError("admitted work must have an execution handoff")
             try:
-                admission = receipts.admit(session_id, decision.handoff, source)
+                admission = receipts.admit(
+                    session_id, decision.handoff, source,
+                    routing_reason=decision.reason,
+                )
             except Exception as error:
                 raise _LiveSessionCaptureFailure from error
             try:
@@ -3145,6 +3148,7 @@ def _handle_work_intent(content, project="", authorized=False, context=None,
                 output if isinstance(output, str) else "", status,
                 decision.lane, session_ref, admission.event_id,
                 terminal.event_id, source.event_id if source else "",
+                routing_reason=decision.reason,
             )
 
         result = _idempotent_http_action(context, idempotency_key, action, run_admitted_work)

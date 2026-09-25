@@ -113,6 +113,20 @@ _WORK_DIRECT_RE = re.compile(
     r"deploy it|refactor it|update it|ship it|clean it up|set it up|start it|"
     r"finish it|get it working|get it done|make it work)\b"
 )
+# A creative text form as the direct object of the action is a content request
+# even when its topic names a workspace noun: "write a poem about a database"
+# is conversation, not a workbench run.  The exemption does not apply when the
+# turn names a file or chains a second action ("... and fix the parser").
+_CONTENT_ONLY_RE = re.compile(
+    r"^(?:write|compose|create|generate|make|draft)\s+(?:me\s+|us\s+)?"
+    r"(?:(?:a|an|another|some|one|two|three|few|short|long|funny|little|quick|"
+    r"brief|silly)\s+)*"
+    r"(?:poem|poems|haiku|haikus|limerick|limericks|sonnet|sonnets|song|songs|"
+    r"lyrics|story|stories|joke|jokes|riddle|riddles|rap|verse|verses|ode)\b"
+)
+_CONTENT_ONLY_FOLLOWUP_RE = re.compile(
+    r"(?:\b(?:and|then|also)\b|[;:])\s+(?:then\s+|also\s+)?" + _WORK_ACTION_RE.pattern
+)
 _PATH_LIKE_RE = re.compile(
     r"(?:[a-zA-Z]:[\\/]|[./~][\\/]|[\\/][\w.-]+|\.[a-zA-Z0-9]{1,8}\b)"
 )
@@ -311,6 +325,10 @@ def classify_work(text):
         return False
     if _WORK_DIRECT_RE.search(candidate):
         return True
+    if (_CONTENT_ONLY_RE.match(candidate)
+            and not _CONTENT_ONLY_FOLLOWUP_RE.search(candidate)
+            and not _FILE_LIKE_RE.search(value)):
+        return False
     action = _WORK_ACTION_RE.search(candidate)
     if not action:
         return bool(_WORK_FILE_READ_RE.search(candidate) and _FILE_LIKE_RE.search(value))

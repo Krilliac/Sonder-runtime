@@ -35,11 +35,14 @@ class ChatWorkResult:
     admission_event_id: str = ""
     return_event_id: str = ""
     source_event_id: str = ""
+    # Host classifier reason for the lane choice; never user or model text.
+    routing_reason: str = ""
 
     def public_receipt(self) -> dict[str, str]:
         fields = {
             "status": self.status,
             "requested_mode": self.requested_mode,
+            "routing_reason": self.routing_reason,
             "session_ref": self.session_ref,
             "admission_event_id": self.admission_event_id,
             "return_event_id": self.return_event_id,
@@ -72,12 +75,17 @@ class ChatWorkReceiptService:
 
     def admit(
         self, session_id: str, handoff: ChatHandoff,
-        source: ChatSourceEvent | None,
+        source: ChatSourceEvent | None, *, routing_reason: str = "",
     ) -> SessionEvent:
+        if not isinstance(routing_reason, str) or len(routing_reason) > 240:
+            raise ValueError("routing_reason must be bounded text")
         provenance = handoff.provenance
         return self._repository.append(session_id, "chat.work.admitted", {
             "version": 1,
             "requested_mode": handoff.requested_mode,
+            # The lane decision's host reason keeps the admitted route
+            # explainable from the durable stream without any request text.
+            "routing_reason": routing_reason,
             "objective_sha256": hashlib.sha256(handoff.objective.encode("utf-8")).hexdigest(),
             "project_sha256": hashlib.sha256(handoff.project.encode("utf-8")).hexdigest(),
             "correlation_id": provenance.correlation_id if provenance else "",
