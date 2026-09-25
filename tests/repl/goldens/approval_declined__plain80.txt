@@ -1,0 +1,9 @@
+/runtime status
+? approve  /runtime status                                               [asks]
+  Inspect or guarded-edit shared local model mappings and execution-lane tiers;
+  cloud remains separate.
+  manual mode asks before commands that contact services or touch the workspace
+  run it? [y/N] /env
+- skipped  /runtime status
+  your /env was not run; press Up to recall it
+>

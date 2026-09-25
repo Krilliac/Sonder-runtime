@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "8dbc50388ca04a55837cfbd8d371eef75feb79ece4082975aa75fc5ce9808975",
+    "catalog_digest": "8d6d692ec68ca2232dfb2b6b32b5eac85c92e2041efcea10cc6279bf304d5ab3",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "8dbc50388ca04a55837cfbd8d371eef75feb79ece4082975aa75fc5ce9808975",
+      "catalog_digest": "8d6d692ec68ca2232dfb2b6b32b5eac85c92e2041efcea10cc6279bf304d5ab3",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -7516,6 +7516,16 @@
   },
   "commands": [
     {
+      "aliases": [],
+      "category": "diagnostics",
+      "name": "/about",
+      "native": true,
+      "params": [],
+      "risk": "safe",
+      "summary": "show source provenance, endpoint, session and mode details",
+      "tool": ""
+    },
+    {
       "aliases": [
         "/accepted",
         "/used",
@@ -7532,7 +7542,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "admin",
       "name": "/access_request_preview",
       "native": false,
       "params": [
@@ -7565,7 +7575,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/activity",
       "native": true,
       "params": [],
@@ -7575,7 +7585,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/activity_status",
       "native": false,
       "params": [
@@ -7769,7 +7779,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/agent_lane",
       "native": false,
       "params": [
@@ -8198,7 +8208,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/artifact-mobility",
       "native": true,
       "params": [],
@@ -8658,7 +8668,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/calibration_status",
       "native": false,
       "params": [],
@@ -8902,7 +8912,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/cloud",
       "native": true,
       "params": [],
@@ -9037,7 +9047,7 @@
       "aliases": [
         "/cmds"
       ],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/commands",
       "native": true,
       "params": [],
@@ -9059,7 +9069,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/compiler_cache_status",
       "native": false,
       "params": [],
@@ -9243,7 +9253,7 @@
         "/chainofthought",
         "/thoughts"
       ],
-      "category": "system",
+      "category": "admin",
       "name": "/cot",
       "native": true,
       "params": [],
@@ -9492,7 +9502,7 @@
       "aliases": [
         "/inspect"
       ],
-      "category": "system",
+      "category": "admin",
       "name": "/debug",
       "native": true,
       "params": [],
@@ -9502,7 +9512,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "admin",
       "name": "/debug_inspect",
       "native": false,
       "params": [
@@ -9710,7 +9720,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/diagnostics",
       "native": false,
       "params": [],
@@ -9930,7 +9940,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/dump",
       "native": true,
       "params": [],
@@ -10091,7 +10101,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/ensemble_codegen_build_loop",
       "native": false,
       "params": [
@@ -10146,7 +10156,7 @@
       "aliases": [
         "/environment"
       ],
-      "category": "system",
+      "category": "runtime",
       "name": "/env",
       "native": true,
       "params": [],
@@ -10156,7 +10166,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/environment_status",
       "native": false,
       "params": [
@@ -10346,7 +10356,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "updates",
       "name": "/fetch_artifact",
       "native": false,
       "params": [
@@ -11518,7 +11528,7 @@
       "aliases": [
         "/goals"
       ],
-      "category": "system",
+      "category": "runtime",
       "name": "/goal",
       "native": true,
       "params": [],
@@ -11551,7 +11561,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/hardware",
       "native": true,
       "params": [],
@@ -11561,7 +11571,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/hardware_profile",
       "native": false,
       "params": [
@@ -11602,7 +11612,7 @@
       "aliases": [
         "/inspectimage"
       ],
-      "category": "system",
+      "category": "runtime",
       "name": "/image",
       "native": true,
       "params": [],
@@ -11649,7 +11659,7 @@
       "aliases": [
         "/improvements"
       ],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/improve",
       "native": true,
       "params": [],
@@ -11844,7 +11854,7 @@
       "aliases": [
         "/recover"
       ],
-      "category": "system",
+      "category": "runtime",
       "name": "/lanes",
       "native": true,
       "params": [],
@@ -11990,7 +12000,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "updates",
       "name": "/live_reload_status",
       "native": false,
       "params": [],
@@ -12000,7 +12010,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/local_service_probe",
       "native": false,
       "params": [
@@ -12029,7 +12039,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/location",
       "native": true,
       "params": [],
@@ -12039,7 +12049,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/log_inspect",
       "native": false,
       "params": [
@@ -12134,6 +12144,16 @@
       "params": [],
       "risk": "dangerous",
       "summary": "login for admin/debug commands",
+      "tool": ""
+    },
+    {
+      "aliases": [],
+      "category": "diagnostics",
+      "name": "/logs",
+      "native": true,
+      "params": [],
+      "risk": "safe",
+      "summary": "show the last n records of this session's REPL log",
       "tool": ""
     },
     {
@@ -12336,7 +12356,7 @@
       "aliases": [
         "/convergence"
       ],
-      "category": "system",
+      "category": "updates",
       "name": "/mcp",
       "native": true,
       "params": [],
@@ -12346,7 +12366,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "updates",
       "name": "/mcp_runtime_status",
       "native": false,
       "params": [],
@@ -12611,7 +12631,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/mode",
       "native": true,
       "params": [],
@@ -12631,7 +12651,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/model_fanout",
       "native": false,
       "params": [
@@ -12684,7 +12704,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/model_fanout_cancel",
       "native": false,
       "params": [
@@ -12707,7 +12727,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/model_fanout_recent",
       "native": false,
       "params": [
@@ -12736,7 +12756,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/model_fanout_resume",
       "native": false,
       "params": [
@@ -12771,7 +12791,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/model_fanout_status",
       "native": false,
       "params": [
@@ -12794,7 +12814,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/model_fanout_synthesize",
       "native": false,
       "params": [
@@ -12833,7 +12853,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/npu_status",
       "native": false,
       "params": [
@@ -12921,7 +12941,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "admin",
       "name": "/ollama_pool_admin_status",
       "native": false,
       "params": [
@@ -13323,7 +13343,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/policy_explain",
       "native": false,
       "params": [
@@ -13398,7 +13418,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "admin",
       "name": "/process_list",
       "native": false,
       "params": [
@@ -13596,7 +13616,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/reasoning_show",
       "native": false,
       "params": [
@@ -13636,7 +13656,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/recovery",
       "native": true,
       "params": [],
@@ -14039,7 +14059,7 @@
       "aliases": [
         "/endreport"
       ],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/report",
       "native": true,
       "params": [],
@@ -14275,7 +14295,7 @@
       "aliases": [
         "/models"
       ],
-      "category": "system",
+      "category": "runtime",
       "name": "/runtime",
       "native": true,
       "params": [],
@@ -14285,7 +14305,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/runtime_policy_status",
       "native": false,
       "params": [],
@@ -14295,7 +14315,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "updates",
       "name": "/runtime_policy_update",
       "native": false,
       "params": [
@@ -14637,7 +14657,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "updates",
       "name": "/self_heal_check",
       "native": false,
       "params": [],
@@ -14647,7 +14667,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "updates",
       "name": "/self_heal_repair",
       "native": false,
       "params": [
@@ -14666,7 +14686,7 @@
       "aliases": [
         "/selfmodify"
       ],
-      "category": "system",
+      "category": "updates",
       "name": "/selfmod",
       "native": true,
       "params": [],
@@ -14837,7 +14857,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "admin",
       "name": "/sonder_authoritative_indexes",
       "native": false,
       "params": [
@@ -15092,9 +15112,9 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/status",
-      "native": false,
+      "native": true,
       "params": [],
       "risk": "safe",
       "summary": "Report cached inference capacity without contacting Ollama workers.",
@@ -15102,7 +15122,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/strict",
       "native": true,
       "params": [],
@@ -15112,7 +15132,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/system_improvement_report",
       "native": false,
       "params": [
@@ -15695,7 +15715,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/tool_capability_manifest",
       "native": false,
       "params": [],
@@ -15705,7 +15725,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/tool_inventory",
       "native": false,
       "params": [
@@ -15744,7 +15764,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/toolchain_status",
       "native": false,
       "params": [
@@ -15767,7 +15787,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/tools",
       "native": true,
       "params": [],
@@ -15779,7 +15799,7 @@
       "aliases": [
         "/toolversion"
       ],
-      "category": "system",
+      "category": "runtime",
       "name": "/toolstatus",
       "native": true,
       "params": [],
@@ -15789,7 +15809,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/trace",
       "native": true,
       "params": [],
@@ -15858,7 +15878,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/turn_inspect",
       "native": false,
       "params": [
@@ -15922,7 +15942,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/unload",
       "native": false,
       "params": [
@@ -16007,7 +16027,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "updates",
       "name": "/verify_artifact",
       "native": false,
       "params": [
@@ -16072,7 +16092,7 @@
       "aliases": [
         "/analyzeimage"
       ],
-      "category": "system",
+      "category": "runtime",
       "name": "/vision",
       "native": true,
       "params": [],
@@ -16082,7 +16102,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "runtime",
       "name": "/vision_analyze",
       "native": false,
       "params": [
@@ -16233,7 +16253,7 @@
     },
     {
       "aliases": [],
-      "category": "system",
+      "category": "diagnostics",
       "name": "/why",
       "native": true,
       "params": [],
@@ -18012,14 +18032,14 @@
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
     "capabilities": 216,
-    "commands": 325,
+    "commands": 327,
     "configuration": 220,
     "events": 43,
     "native_tools": 61,
     "schemas": 4,
     "tools": 216
   },
-  "digest": "305c669107f468aea6070f75a455b122b9bda505f6a903ae43271a6831afe9fd",
+  "digest": "9df582d627f439cb2a765e344344350fafb45e4d31df30777dc22b48d58dd4d7",
   "events": [
     {
       "name": "session.started",
@@ -20428,9 +20448,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "8dbc50388ca04a55837cfbd8d371eef75feb79ece4082975aa75fc5ce9808975",
+    "catalog_digest": "8d6d692ec68ca2232dfb2b6b32b5eac85c92e2041efcea10cc6279bf304d5ab3",
     "client": {
-      "digest": "8dbc50388ca04a55837cfbd8d371eef75feb79ece4082975aa75fc5ce9808975",
+      "digest": "8d6d692ec68ca2232dfb2b6b32b5eac85c92e2041efcea10cc6279bf304d5ab3",
       "events": [
         {
           "name": "approval.denied",

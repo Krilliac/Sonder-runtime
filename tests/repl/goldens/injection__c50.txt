@@ -1,0 +1,8 @@
+please inject something
+◈ answer ────────────────────────────────────────
+safe start \x1b]52;c;SGVsbG8=\x07 clip \x1b[2J
+wipe \x9b31m csi \u202eevil\u202c end
+  done <t> · 1 model call · rate: /pass /fail
+
+code · sonder:latest · manual · ctx 80/8.2k
+❯

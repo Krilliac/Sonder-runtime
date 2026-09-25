@@ -1,0 +1,37 @@
+/help
+sonder commands · ### in ## groups
+  in manual: [asks] asks first
+  [writes] changes files · [runs] runs a program
+  [danger] destructive
+    /model [tier|name]  switch model or tier
+    /mode <name>        plan, manual, acceptEdit…
+    /read <path>        show a file
+    /run                run the last ans…  [runs]
+    /todo               list tasks (add/done cha…
+    /status             session, model, endpoint…
+    /pass  /fail        rate the last answer (te…
+    /exit               quit (or Ctrl-D)
+  groups · /help <group> · /help all · /help sta…
+    admin         #  cot, debug
+    agents       ##  work, agents
+    basic        ##  help, new
+    chat          #  model, route
+    context      ##  context, compact
+    creative     ##  game, asset
+    data          #  data_query, data_convert
+    dev          ##  test, digest
+    diagnostics  ##  commands, activity
+    execution    ##  run, scripts
+    filesystem   ##  read, search
+    memory       ##  stats, fact
+    persona       #  prefer, emotion
+    planning     ##  todo, checklist
+    repo         ##  stash, update
+    runtime      ##  env, goal
+    security     ##  admin, login
+    training      #  evaluation_history_status
+    updates       #  mcp, selfmod
+    web           #  weather, web_fetch
+
+code · sonder:latest · manual · ctx #/#.#k
+❯

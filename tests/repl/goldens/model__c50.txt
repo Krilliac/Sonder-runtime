@@ -1,0 +1,23 @@
+/model
+model  sonder:latest · tier code (active)
+tiers
+  code           sonder:latest  (active)
+  fast           sonder:latest
+  general        sonder:latest
+  unavailable
+    cloud-code, cloud-general
+      hosted/cloud tiers are disabled. Set
+      SONDER_ALLOW_CLOUD=1 to opt in; prompts
+      sent to cloud tiers leave this machine.
+    reasoning
+      no model set · SONDER_REASONING
+    vision
+      no model set · SONDER_VISION
+installed (ollama)
+  nomic-embed-text:latest  0.3 GB
+  qwen2.5:0.5b             0.4 GB
+  sonder:latest            0.8 GB
+/model <tier> · /model <name>
+
+code · sonder:latest · manual · ctx 0/8.2k
+❯

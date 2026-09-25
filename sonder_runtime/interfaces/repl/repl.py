@@ -14,7 +14,6 @@ import hashlib
 import inspect
 import os
 import re
-import shutil
 import signal
 import sys
 import threading
@@ -29,8 +28,6 @@ from sonder_runtime.platform import paths as server_paths
 import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
 from sonder_runtime.adapters.observability.repl_formatting import (
     elapsed_label as _elapsed_label,
-    response_footer as _response_footer,
-    response_status_label as _response_status_label,
 )
 from sonder_runtime.adapters.observability.response_formatting import (
     _strip_activity_block as _strip_activity,
@@ -58,6 +55,8 @@ from sonder_runtime.adapters.repl_services import (
     code_improve, consult as consult_flow, tier_router,
 )
 from sonder_runtime.interfaces.repl import command_router
+from sonder_runtime.interfaces.repl import style as S
+from sonder_runtime.application.ports import repl_notices
 from sonder_runtime.adapters.command_catalog import command_catalog
 from sonder_runtime.adapters.security.permission_policy import permission_policy
 from sonder_runtime.adapters.repl_services import project_scaffold
@@ -121,17 +120,25 @@ class _JsonLinesWriter:
             self._emit(line.rstrip("\r"))
         return len(text)
 
-    def _emit(self, text):
+    def _emit(self, text, event="output"):
         self._seq += 1
         payload = {
             "schema": self.schema,
             "seq": self._seq,
-            "event": "output",
+            "event": event,
             "text": str(text),
         }
         self._stream.write(json.dumps(
             payload, ensure_ascii=False, separators=(",", ":"),
         ) + "\n")
+
+    def emit_event(self, event, text):
+        """Emit ``text`` line by line under a named event (``error``)."""
+        if self._buffer:
+            self._emit(self._buffer.rstrip("\r"))
+            self._buffer = ""
+        for line in str(text or "").split("\n"):
+            self._emit(line.rstrip("\r"), event=event)
 
     def flush(self):
         self._stream.flush()
@@ -150,10 +157,12 @@ def run_jsonl(stream=None):
     mode does not add retries, persist prompts, or reinterpret commands; it is
     only a deterministic presentation adapter around the existing loop.
     """
+    _reconfigure_streams()
     writer = _JsonLinesWriter(stream or sys.stdout)
-    ansi_was_enabled = _Ansi.enabled
+    previous_caps = S._CACHED
     legacy_ndjson = os.environ.pop("SONDER_REPL_NDJSON", None)
-    _Ansi.enabled = False
+    # Machine output is never styled: no colour, no motion, plain words.
+    S.set_caps(S.Caps(color="none", glyphs="unicode", plain=False))
     try:
         with redirect_stdout(writer):
             main(machine_output=True)
@@ -161,7 +170,7 @@ def run_jsonl(stream=None):
         if legacy_ndjson is not None:
             os.environ["SONDER_REPL_NDJSON"] = legacy_ndjson
         writer.close()
-        _Ansi.enabled = ansi_was_enabled
+        S._CACHED = previous_caps
 
 
 class _LegacyRuntimeProxy:
@@ -238,66 +247,91 @@ _HISTORY_SECRET_ASSIGNMENT = re.compile(
 )
 
 
-_COLOUR_ENABLED = bool(
-    getattr(sys.stdout, "isatty", lambda: False)()
-) and not os.environ.get("NO_COLOR")
-_TRUECOLOR = _COLOUR_ENABLED and os.environ.get("COLORTERM", "").lower() in {
-    "truecolor", "24bit",
+# --- terminal chrome ------------------------------------------------------
+#
+# Every colour, glyph and width decision comes from ``style`` (spec 2.1-2.10):
+# capabilities are detected once at REPL start (``_init_terminal``) and the
+# helpers below only translate the REPL's call sites into style roles.  With
+# colour ``none`` nothing here emits an ESC byte; with ASCII glyphs the chrome
+# is pure ASCII.
+
+_ROLE_ALIASES = {
+    "teal": "accent", "cyan": "info", "green": "success", "amber": "warning",
+    "red": "danger", "violet": "warning", "text2": "muted", "bold": "strong",
 }
 
 
-def _fg(rgb, cell):
-    """A foreground escape: the 24-bit token, or its nearest 256-colour cell.
+def _paint(text, *roles):
+    """Paint ``text`` with style roles (``accent``, ``muted``, ...)."""
+    return S.s(text, *(_ROLE_ALIASES.get(r, r) for r in roles if r))
 
-    The design tokens are the 24-bit values; a terminal that only advertises
-    ANSI colours must never receive them, so the fallback cell is chosen by
-    hand to keep the same hierarchy (accent, identity, four tones, greys).
+
+def _cols():
+    """The terminal's real width (floor 20, no cap)."""
+    return S.cols()
+
+
+def _reconfigure_streams():
+    """Never let an unencodable character end the session (P0-1).
+
+    A console on a legacy code page (cp1252, ascii) cannot encode ``·`` or a
+    model's emoji; ``errors="replace"`` prints ``?`` instead of raising
+    ``UnicodeEncodeError`` out of ``print``.  Streams without ``reconfigure``
+    (test doubles, the JSONL writer) are left alone.
     """
-    if _TRUECOLOR:
-        return "\x1b[38;2;%d;%d;%dm" % tuple(rgb)
-    return "\x1b[38;5;%dm" % int(cell)
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(errors="replace")
+            except (ValueError, OSError, TypeError):
+                pass
 
 
-class _Ansi:
-    """Small dependency-free palette; automatically disappears when piped.
+def _init_terminal():
+    """Detect terminal capabilities once for this REPL session.
 
-    One accent (Sonder's signal teal) carries the prompt, the answer label and
-    the header mark; a cool blue names identity (model, persona) and the
-    ``manual`` mode; green, amber, red and violet are the four semantic tones
-    (ok/plan, warn/acceptEdits, error/danger, auto); ``text2`` and ``muted``
-    are the two greys the chrome is drawn in. Truecolor is opt-in from the
-    terminal's ``COLORTERM`` declaration; the 256-colour fallback keeps the
-    same hierarchy.
+    On Windows the composer's ``enable_vt`` probe switches the console into
+    VT mode; if that fails, colour is off, links are off and glyphs are
+    ASCII, instead of ``←[38;5;..m`` litter on a legacy conhost.
+    """
+    _reconfigure_streams()
+    vt_enable = getattr(slash_menu, "enable_vt", None) if slash_menu is not None else None
+    try:
+        return S.caps(env=os.environ, stream=sys.stdout, platform=os.name,
+                      vt_enable=vt_enable if callable(vt_enable) else None,
+                      refresh=True)
+    except Exception:
+        return S.set_caps(S.Caps())
+
+
+class _NdjsonCommandWriter(_JsonLinesWriter):
+    """``SONDER_REPL_NDJSON=1`` on a pipe: every stdout line is JSON.
+
+    Turn results keep their ``sonder.repl-turn.v1`` line, written raw; every
+    other line (command output, notices) becomes a ``sonder.repl-output.v1``
+    ``output`` event, so a consumer never meets a line it cannot parse.
     """
 
-    enabled = _COLOUR_ENABLED
-    truecolor = _TRUECOLOR
-    reset = "\x1b[0m"
-    bold = "\x1b[1m"
-    teal = _fg((99, 214, 200), 80)
-    cyan = _fg((127, 184, 240), 111)
-    green = _fg((121, 211, 148), 114)
-    amber = _fg((240, 195, 106), 221)
-    red = _fg((242, 123, 123), 210)
-    violet = _fg((216, 156, 246), 183)
-    text2 = _fg((165, 178, 189), 249)
-    muted = _fg((111, 126, 138), 243)
-    # The composer keeps its own quiet surface: a darker panel that separates
-    # what is being typed from the transcript above it.
-    composer_surface = (
-        "\x1b[48;2;15;23;30m\x1b[38;2;231;237;242m"
-        if truecolor
-        else "\x1b[48;5;234m\x1b[38;5;255m"
-    )
+    def _emit(self, text, event="output"):
+        self._seq += 1
+        payload = {"schema": self.schema, "seq": self._seq, "event": event,
+                   "text": str(text)}
+        self._stream.write(json.dumps(
+            payload, ensure_ascii=True, separators=(",", ":"),
+        ) + "\n")
+
+    def raw_line(self, line):
+        if self._buffer:
+            self._emit(self._buffer.rstrip("\r"))
+            self._buffer = ""
+        self._stream.write(str(line).rstrip("\n") + "\n")
+        self._stream.flush()
 
 
-def _paint(text, *styles):
-    if not _Ansi.enabled:
-        return str(text)
-    return "".join(styles) + str(text) + _Ansi.reset
-
-
-def _read_input(prompt, *, history=None, composer=False, argument_completer=None):
+def _read_input(prompt, *, history=None, composer=False, argument_completer=None,
+                refresh_frame=None):
     """Prompt for a line, optionally in the raw terminal composer frame."""
     if slash_menu is not None:
         try:
@@ -305,18 +339,173 @@ def _read_input(prompt, *, history=None, composer=False, argument_completer=None
                 # Keep ordinary input() as the universal fallback.  The
                 # framed composer is raw-terminal presentation only, never a
                 # second input protocol or a source of changed prompt text.
+                extra = {}
+                if composer and refresh_frame is not None:
+                    # Shift+Tab goes through the same audited tool /mode
+                    # uses, then the frame redraws with the new mode.
+                    extra = {"mode_cycle": _cycle_mode, "refresh_frame": refresh_frame}
                 return slash_menu.read_line(
                     "" if composer else prompt,
                     history=history, frame=prompt if composer else "",
-                    frame_style=_Ansi.composer_surface if composer and _Ansi.enabled else "",
+                    frame_style="",
                     argument_completer=argument_completer,
                     fallback_prompt=prompt,
+                    **extra,
                 )
         except (EOFError, KeyboardInterrupt):
             raise
         except Exception:
             pass  # a menu problem must never cost the user their prompt
     return input(prompt)
+
+
+def _cycle_mode():
+    """Shift+Tab: advance the mode through the ``permission_mode`` tool.
+
+    Same authority and the same audit record as typing ``/mode <next>``: a
+    person at the console pressed the key.
+    """
+    order = ("plan", "manual", "acceptEdits", "auto")
+    snapshot = _permission_mode_snapshot() or {}
+    current = str(snapshot.get("mode") or "manual")
+    wanted = order[(order.index(current) + 1) % len(order)] if current in order else "manual"
+    return _mode_command(wanted)
+
+
+# --- POSIX line editing (P0-5) --------------------------------------------
+#
+# Without readline, cooked-mode input() hands arrow keys and Shift+Tab to the
+# REPL as ``^[[A`` / ``^[[Z`` bytes, which then went to the model as a turn.
+# readline gives history, editing and Tab completion; the stripping in
+# ``_normalize_input_line`` is the backstop for everything readline is not.
+
+_READLINE = None
+
+
+def _readline_completer(text, state):
+    try:
+        import readline
+        line = readline.get_line_buffer()
+    except Exception:
+        line = text
+    if not line.startswith("/") or " " in line.strip():
+        return None
+    try:
+        matches = [c.name for c in command_catalog.complete(line.strip(), limit=40)]
+    except Exception:
+        matches = []
+    matches = [m for m in matches if m.startswith(line.strip())]
+    return matches[state] if state < len(matches) else None
+
+
+def _setup_readline(history):
+    """Install readline on a POSIX terminal; returns the module or None."""
+    global _READLINE
+    if os.name == "nt" or _composer_available():
+        return None
+    if not (_console_has_operator() and _stdout_is_interactive()):
+        return None
+    try:
+        import readline
+    except Exception:
+        return None
+    try:
+        readline.set_completer(_readline_completer)
+        readline.set_completer_delims(" \t\n")
+        if "libedit" in str(getattr(readline, "__doc__", "") or ""):
+            readline.parse_and_bind("bind ^I rl_complete")
+        else:
+            readline.parse_and_bind("tab: complete")
+            # A terminal that must not receive escapes (NO_COLOR, TERM=dumb)
+            # gets none from readline either: no meta-mode or paste toggles.
+            # Plain mode also skips the paste toggle, whose trailing bare
+            # carriage return would redraw the line (P1-11).
+            caps = S.caps()
+            if caps.color == "none" or caps.plain:
+                readline.parse_and_bind("set enable-meta-key off")
+                readline.parse_and_bind("set enable-bracketed-paste off")
+            else:
+                readline.parse_and_bind("set enable-bracketed-paste on")
+        readline.clear_history()
+        for entry in history or ():
+            if "\n" not in entry:
+                readline.add_history(entry)
+    except Exception:
+        return None
+    _READLINE = readline
+    return readline
+
+
+def _readline_forget_last():
+    """Drop the line readline just recorded (an approval answer, a login)."""
+    if _READLINE is None:
+        return
+    try:
+        length = _READLINE.get_current_history_length()
+        if length:
+            _READLINE.remove_history_item(length - 1)
+    except Exception:
+        pass
+
+
+def _readline_prompt(text):
+    """Mark escapes as zero-width so readline measures the prompt right."""
+    if _READLINE is None or "\x1b" not in text:
+        return text
+    return re.sub(r"(\x1b\[[0-9;]*m)", "\x01\\1\x02", text)
+
+
+# --- persisted history (P2-5) ---------------------------------------------
+
+_HISTORY_FILE_NAME = "repl_history"
+
+
+def _history_path():
+    try:
+        return os.path.join(str(server_paths.default_home()), _HISTORY_FILE_NAME)
+    except Exception:
+        return ""
+
+
+def _load_history(path=None):
+    """Lines from the persisted history, oldest first, capped at the limit."""
+    path = path if path is not None else _history_path()
+    if not path:
+        return []
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as handle:
+            lines = [line.rstrip("\n") for line in handle]
+    except OSError:
+        return []
+    return [line for line in lines if _history_safe(line)][-REPL_HISTORY_LIMIT:]
+
+
+def _save_history(entries, path=None):
+    """Write history 0600, newest ``REPL_HISTORY_LIMIT`` single-line entries."""
+    path = path if path is not None else _history_path()
+    if not path:
+        return False
+    keep = [e for e in entries if _history_safe(e) and "\n" not in e][-REPL_HISTORY_LIMIT:]
+    try:
+        flags = (os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                 | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(path, flags, 0o600)
+        try:
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+            os.write(fd, "".join(e + "\n" for e in keep).encode("utf-8", "replace"))
+        finally:
+            os.close(fd)
+    except OSError:
+        return False
+    return True
+
+
+# ``_confirm`` pushes a slash command typed as an approval answer here, so
+# the main loop's history (and readline's) can recall it with Up.
+_HISTORY_SINK = None
 
 
 def _clear_terminal_scrollback(stream=None):
@@ -402,6 +591,78 @@ def _stdout_is_interactive():
         return False
 
 
+class _Approval(str):
+    """An approval question: the full text as a string, plus its layout.
+
+    It is a ``str`` so everything that already treats the question as text
+    (tests, logs) keeps working; ``_confirm`` reads the extra attributes to
+    draw the spec 2.8 prompt and to require ``yes`` for ``[danger]``.
+    """
+
+    def __new__(cls, command, risk, summary, reason):
+        word = command_catalog.risk_word(risk) if hasattr(command_catalog, "risk_word") else ""
+        text = "approve %s %s\n%s\n%s" % (command, word, summary, reason)
+        value = super().__new__(cls, text)
+        value.command = command
+        value.risk = risk
+        value.word = word
+        value.summary = summary
+        value.reason = reason
+        value.danger = risk == "dangerous"
+        return value
+
+    def lines(self, width):
+        c = S.caps()
+        role = "danger" if self.danger else "warning"
+        head = "%s approve  %s" % (S.g("ask", c), S.safe_text(self.command))
+        word = self.word
+        room = width - 1 - S.cell_width(word) - 1
+        if S.cell_width(head) > room:
+            head = S.truncate(head, max(8, room), c)
+        pad = " " * max(1, width - 1 - S.cell_width(head) - S.cell_width(word))
+        out = [S.s(head, "strong", c=c) + pad + S.s(word, role, c=c) if word
+               else S.s(head, "strong", c=c)]
+        for text in (self.summary, self.reason):
+            if text:
+                out.extend(S.wrap(S.safe_text(text), width - 1, indent="  ",
+                                  hanging="  "))
+        return out
+
+    def prompt(self):
+        return "  type 'yes' to run: " if self.danger else "  run it? [y/N] "
+
+
+def _flush_typeahead():
+    """Discard keys typed before the question was shown (P0-4).
+
+    A line typed ahead while a turn ran (``/env``, a stray ``y``) must never
+    be read as the answer to a prompt it was not written for.
+    """
+    stream = getattr(sys, "stdin", None)
+    try:
+        if stream is None or not stream.isatty():
+            return
+    except Exception:
+        return
+    if os.name == "nt":
+        try:
+            import msvcrt
+            while msvcrt.kbhit():
+                msvcrt.getwch()
+        except Exception:
+            pass
+        return
+    try:
+        import termios
+        termios.tcflush(stream.fileno(), termios.TCIFLUSH)
+    except Exception:
+        pass
+
+
+# The approval answer that was a slash command, for the skip notice.
+_DIVERTED_ANSWER = ""
+
+
 def _confirm(question):
     """Ask a y/N question, defaulting to no. Anything but an explicit yes is no.
 
@@ -416,14 +677,59 @@ def _confirm(question):
     ``_gate_tools`` -- so this is the safety net rather than the seam: a
     function whose whole job is asking a person has no business reading a
     line nobody typed.
+
+    Pending input is flushed first, so type-ahead never answers.  ``y``,
+    ``yes``, ``n``, ``no`` and an empty line are answers; anything else asks
+    again, and three invalid answers are a no.  An answer that starts with
+    ``/`` is a no: that command was not run, and it is pushed to history so
+    Up recalls it.  A ``[danger]`` question needs the whole word ``yes``.
     """
+    global _DIVERTED_ANSWER
+    _DIVERTED_ANSWER = ""
     if not _console_has_operator():
         return False
+    danger = bool(getattr(question, "danger", False))
+    if isinstance(question, _Approval):
+        for line in question.lines(_cols()):
+            print(line)
+        prompt = question.prompt()
+    else:
+        prompt = "%s [y/N] " % question
+    _flush_typeahead()
+    for _attempt in range(3):
+        try:
+            answer = input(_readline_prompt(prompt))
+        except (EOFError, OSError, KeyboardInterrupt):
+            return False
+        _readline_forget_last()
+        value = str(answer or "").strip()
+        lowered = value.lower()
+        if value.startswith("/"):
+            _DIVERTED_ANSWER = value
+            if _HISTORY_SINK is not None:
+                try:
+                    _HISTORY_SINK(value)
+                except Exception:
+                    pass
+            return False
+        if lowered in ("", "n", "no"):
+            return False
+        if lowered == "yes" or (lowered == "y" and not danger):
+            return True
+        if danger and lowered == "y":
+            prompt = "  type the whole word 'yes' to run: "
+        else:
+            prompt = "  please answer y or n [y/N] "
+    return False
+
+
+def _risk_summary(label):
+    """The catalog's one-line summary for a command, or ""."""
     try:
-        answer = input("%s [y/N] " % question)
-    except (EOFError, OSError, KeyboardInterrupt):
-        return False
-    return str(answer or "").strip().lower() in ("y", "yes")
+        command = command_catalog.by_name(label.split(None, 1)[0])
+    except Exception:
+        command = None
+    return str(getattr(command, "summary", "") or "")
 
 
 # Most-to-least severe, so a command that fronts several tools is described by
@@ -444,7 +750,7 @@ def _severity(risk):
     return _RISK_RANK.get(risk, -1)
 
 
-def _gate_tools(tools, label):
+def _gate_tools(tools, label, command_line=None):
     """Strictest decision across ``tools``; returns ``(may_run, refusal_text)``.
 
     The console is the one surface that *can* have a human attached, so ``ask``
@@ -495,7 +801,10 @@ def _gate_tools(tools, label):
             worst = decision
     if worst is None:
         return True, ""
-    if _confirm("run %s? %s." % (label, worst.reason)):
+    question = _Approval(
+        str(command_line or label), worst.risk, _risk_summary(label), worst.reason,
+    )
+    if _confirm(question):
         return True, ""
     return False, "skipped %s" % label
 
@@ -630,7 +939,7 @@ def _named_command_gate(cmd, argument=""):
     # read from being prompted for -- or, piped, refused for -- a write it
     # cannot perform.
     tools = command_catalog.narrow_branch_tools(cmd, argument, tools)
-    return _gate_tools(tools, cmd)
+    return _gate_tools(tools, cmd, ("%s %s" % (cmd, argument or "")).strip())
 
 
 def _mode_command(argument):
@@ -700,8 +1009,11 @@ def _run_catalogued(line, cmd):
                 )
             except Exception as exc:
                 return "%s failed: %s" % (cmd, exc)
-    return "unknown command %s\n\n%s" % (
-        cmd, command_catalog.format_matches(cmd),
+    # One line, suggestion first (spec P2-1), fitted to the terminal.
+    # On a terminal the notice prefix ("? unknown  ") costs three more cells.
+    return command_catalog.unknown_command(
+        cmd, width=_cols() - (3 if _stdout_is_interactive() else 0),
+        sep=" %s " % S.g("sep"), ellipsis=S.g("ellipsis"),
     )
 
 
@@ -748,15 +1060,24 @@ def _format_route_explanation(report):
     return "\n".join(lines)
 
 
+# CSI (``ESC [ ... final``), SS3 (``ESC O x``), and a bare ESC + one char.
+# Cooked-mode input() without readline hands arrow keys (``^[[A``),
+# Shift+Tab (``^[[Z``) and bracketed-paste markers (``^[[200~``) to the REPL
+# as text; before this they became a 60-90 s model turn (P0-5).
+_INPUT_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1bO.|\x9b[0-?]*[ -/]*[@-~]|\x1b.?")
+
+
 def _normalize_input_line(line):
-    """Strip console framing, including a BOM from piped PowerShell input."""
+    """Strip console framing: a BOM from piped PowerShell, and key escapes."""
     value = str(line or "")
     # Windows PowerShell 5.1 may send a UTF-8 BOM that Python's console codec
     # exposes either correctly as U+FEFF or as the three Latin-1 code points.
-    for prefix in ("\ufeff", "\xef\xbb\xbf", "\xff\xfe", "\xfe\xff"):
+    for prefix in ("﻿", "\xef\xbb\xbf", "\xff\xfe", "\xfe\xff"):
         if value.startswith(prefix):
             value = value[len(prefix):]
             break
+    if "\x1b" in value or "\x9b" in value:
+        value = _INPUT_ESCAPE.sub("", value)
     return value.strip()
 
 
@@ -775,91 +1096,81 @@ def _history_safe(line):
     )
 
 
-def _rule(char="─", width=56):
-    return _paint(char * width, _Ansi.muted)
-
-
 def _result_tag(ok):
-    return _paint("PASS" if ok else "FAIL", _Ansi.green if ok else _Ansi.red, _Ansi.bold)
-
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m|\x1b\]8;;[^\x1b]*(?:\x1b\\|\x07)")
+    return _paint("PASS" if ok else "FAIL", "success" if ok else "danger", "strong")
 
 
-def _terminal_link(url, label=None):
-    """Return an OSC 8 link for an interactive terminal, or plain text.
+def _emit(text):
+    """Print command output with untrusted text made inert (P0-2).
 
-    Windows Terminal recognizes OSC 8 as a real clickable link, so the REPL's
-    loopback endpoint can open the local live-log dashboard directly.  The
-    escape sequence is omitted when colour is disabled: copied/piped output
-    must remain the literal URL and layout width must stay stable.
+    Output from tools, files, the model and errors can carry ESC, OSC 52,
+    BEL or bidi overrides; ``safe_text`` shows them as visible escapes, on a
+    terminal and on a pipe alike.  On a terminal, refusals, ``ERROR:`` text
+    and unknown commands go through the one notice component.
     """
-    target = str(url or "")
-    text = str(label if label is not None else target)
-    if not _Ansi.enabled or not target.startswith(("http://", "https://")):
-        return text
-    return "\x1b]8;;%s\x1b\\%s\x1b]8;;\x1b\\" % (target, text)
+    value = S.safe_text("" if text is None else text)
+    if _stdout_is_interactive():
+        rendered = _as_notice(value)
+        if rendered is not None:
+            print(rendered)
+            return
+    print(value)
 
 
-def _visible_len(text):
-    """Printed width, ignoring colour escapes.
-
-    Padding a boxed line by len() counts the escape bytes, so the right edge
-    frays the moment any field inside is coloured -- and it shows only in a
-    real terminal, never in piped output.
-    """
-    return len(_ANSI_RE.sub("", str(text)))
+_NOTICE_PREFIXES = (
+    ("refused ", "refused"), ("refused:", "refused"), ("ERROR:", "error"),
+    ("ERROR ", "error"), ("unknown command ", "unknown"),
+)
 
 
-def _box_chars():
-    """Box glyphs, degrading to ASCII rather than raising.
+_REFUSAL_WORDS = re.compile(
+    r"outside (?:the )?allowed roots|outside sonder's file roots|outside the selected"
+    r" workspace|\brefused\b|\bnot allowed\b|\bdenied\b|HOST POLICY",
+    re.IGNORECASE,
+)
+# Paths under a system credential store never get a "how to get in" hint
+# (spec 2.7): the refusal is the answer.
+_CREDENTIAL_PATHS = re.compile(
+    r"/etc/(?:shadow|gshadow|sudoers|master\.passwd)|~?/\.ssh\b|/\.gnupg\b|"
+    r"/\.aws/credentials|/\.netrc\b|\\config\\sam\b",
+    re.IGNORECASE,
+)
 
-    A Windows console on a legacy code page cannot encode U+256D, and an
-    unhandled UnicodeEncodeError here would take the whole REPL launch down
-    with it. A decorative header must never be able to do that.
-    """
-    glyphs = {"tl": "╭", "tr": "╮", "bl": "╰", "br": "╯",
-              "h": "─", "v": "│", "dot": "◈", "prompt": "❯",
-              "tool": "▸", "refused": "⊘", "approved": "✓", "alert": "!"}
-    encoding = getattr(sys.stdout, "encoding", None) or "ascii"
-    try:
-        "".join(glyphs.values()).encode(encoding)
-    except (UnicodeEncodeError, LookupError, TypeError):
-        return {"tl": "+", "tr": "+", "bl": "+", "br": "+",
-                "h": "-", "v": "|", "dot": "*", "prompt": ">",
-                "tool": ">", "refused": "x", "approved": "*", "alert": "!"}
-    return glyphs
+# The slash line being dispatched, so a refusal or error names what was typed.
+_CURRENT_LINE = [""]
 
 
-def _terminal_columns(default=100):
-    """The width the header packs to: the terminal's, held between 60 and 120."""
-    try:
-        columns = int(shutil.get_terminal_size((default, 24)).columns)
-    except (ValueError, OSError):
-        columns = default
-    return max(60, min(120, columns))
-
-
-def _header_lines(segments, width=None):
-    """Pack ``(text, styles)`` segments into lines no wider than ``width``.
-
-    Segments are joined by three spaces and never split: one that does not
-    fit starts the next line. Width is measured with ``_visible_len`` so a
-    coloured value packs exactly like a plain one -- the boxed header this
-    replaced frayed at its right edge whenever padding counted escape bytes.
-    """
-    columns = int(width) if width else _terminal_columns()
-    lines, current, used = [], [], 0
-    for text, styles in segments:
-        painted = _paint(text, *styles) if styles else str(text)
-        length = _visible_len(painted)
-        if current and used + 3 + length > columns:
-            lines.append("   ".join(current))
-            current, used = [], 0
-        current.append(painted)
-        used = length if used == 0 else used + 3 + length
-    if current:
-        lines.append("   ".join(current))
-    return lines
+def _as_notice(value, title=None):
+    """A notice for a refusal/error/unknown line, or None for ordinary output."""
+    text = str(value or "")
+    for prefix, kind in _NOTICE_PREFIXES:
+        if not text.startswith(prefix):
+            continue
+        first, _, rest = text.partition("\n")
+        if kind == "unknown":
+            return S.notice(kind, first[len("unknown "):], rest.strip() or None,
+                            width=_cols())
+        body = first[len(prefix):].strip()
+        head = title if title is not None else _CURRENT_LINE[0]
+        if not head:
+            # "refused /cmd: reason" -> title "/cmd", detail "reason".
+            name, sep, reason = body.partition(": ")
+            head, body = (name, reason) if sep and name.startswith("/") else (body, "")
+        elif kind == "refused":
+            _name, sep, reason = body.partition(": ")
+            body = reason if sep and _name.startswith("/") else body
+        if kind == "error" and _REFUSAL_WORDS.search(first):
+            kind = "refused"
+        hint = _error_hint(text) or None
+        # "path is outside allowed roots. Set X or ..." -> detail + hint.
+        sentence, dot, advice = body.partition(". ")
+        if dot and advice and kind == "refused":
+            body, hint = sentence, hint or advice.rstrip(".")
+        if _CREDENTIAL_PATHS.search("%s %s" % (head, text)):
+            hint = None
+        detail = "\n".join(part for part in (body, rest.strip()) if part) or None
+        return S.notice(kind, head, detail, hint=hint, width=_cols())
+    return None
 
 
 def _installed_models():
@@ -1015,154 +1326,76 @@ def _permission_mode_snapshot():
     ).snapshot()
 
 
-def _permission_mode_colour(snapshot):
-    mode = PermissionModeFacade().snapshot(snapshot)
-    if mode is None:
-        return _Ansi.muted
-    return {
-        "plan": _Ansi.green,
-        "manual": _Ansi.cyan,
-        "acceptEdits": _Ansi.amber,
-        "auto": _Ansi.violet,
-    }.get(str(mode.get("mode") or ""), _Ansi.muted)
+def _mode_fields(snapshot):
+    """``(mode, elevated, reason, blurb)`` from a permission snapshot."""
+    view = PermissionModeFacade()
+    state = view.snapshot(snapshot)
+    if state is None:
+        return "unknown", False, "", ""
+    return (
+        str(state.get("mode") or "unknown"),
+        view.elevated(state),
+        view.elevation_reason(state),
+        str(state.get("blurb") or "").strip(),
+    )
 
 
-def _startup_banner(strict, persona, project, tier=None):
-    """The header shown on launch.
+def _endpoint():
+    """``(url, live)`` for the local listener, loopback for wildcard binds."""
+    try:
+        host, port = listener_probe.DEFAULT_HOST, listener_probe.DEFAULT_PORT
+        live = bool(listener_probe.port_open(host, port))
+        # 0.0.0.0/:: are bind addresses, not browser destinations.
+        display_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+        return "http://%s:%s" % (display_host, port), live
+    except Exception:
+        return os.environ.get("SONDER_API", "http://127.0.0.1:11435"), False
 
-    Every value is read from the runtime rather than written here: the model
-    comes from the live tier table and the endpoint from the listener, so the
-    banner cannot claim a setup the process is not actually in. Each lookup is
-    guarded, because a cosmetic header must never be the reason a REPL fails
-    to start.
+
+def _mode_cycle_key():
+    """True only when a Shift+Tab handler is really installed (P1-6)."""
+    return bool(getattr(slash_menu, "supports_mode_cycle", False)) and _composer_available()
+
+
+def _banner_state(strict, persona, project, tier=None, *, session_id="",
+                  model_override=None, notices=None):
+    """Everything the banner and ``/about`` show, read live from the runtime.
+
+    Every lookup is guarded: a cosmetic header must never be the reason a
+    REPL fails to start.  Startup never waits on a remote Git server; the
+    cached ref is enough and ``/updatecheck`` is the explicit refresh.
     """
     tier = tier or "code"
     try:
-        model = ModelSelectionFacade.resolved_model(server.TIERS, tier)
+        model = ModelSelectionFacade.resolved_model(server.TIERS, tier, model_override)
     except Exception:
         model = "unknown"
+    endpoint, live = _endpoint()
     try:
-        host, port = listener_probe.DEFAULT_HOST, listener_probe.DEFAULT_PORT
-        live = listener_probe.port_open(host, port)
-        # 0.0.0.0/:: are bind addresses, not browser destinations.  The
-        # dashboard remains loopback-only in this presentation, matching the
-        # readiness probe and avoiding a dead OSC-8 link on wildcard binds.
-        display_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
-        endpoint = "http://%s:%s" % (display_host, port)
-    except Exception:
-        endpoint, live = os.environ.get("SONDER_API", "http://127.0.0.1:11435"), False
-
-    source = {}
-    try:
-        # Startup must never wait on a remote Git server.  The cached
-        # origin/main ref still shows the installed/newest known revisions;
-        # `/updatecheck` is the explicit network refresh command.
         source = server.runtime_source_update_status_data(refresh=False)
-        revision = "%s @ %s" % (
-            str(source.get("installed_commit") or "unknown")[:12],
-            source.get("installed_commit_time") or "unknown time",
-        )
-        newest = "%s @ %s" % (
-            str(source.get("newest_commit") or "unknown")[:12],
-            source.get("newest_commit_time") or "unknown time",
-        )
-        newest_label = (
-            "newest source" if source.get("remote_ref_refreshed")
-            else "newest known source"
-        )
-        update = "%s (behind %s)" % (
-            source.get("state") or "unknown", source.get("behind", "?"),
-        )
-        running_commit = str(source.get("running_commit") or "").strip()
-        running = running_commit[:12] if running_commit else "unavailable"
-        if source.get("restart_required"):
-            update += "; restart required"
-    except Exception as exc:
-        revision = newest = "unavailable (%s)" % type(exc).__name__
-        newest_label = "newest source"
-        running = "unavailable"
-        update = "check unavailable"
-
-    permission = _permission_mode_snapshot()
-    box = _box_chars()
-
-    def field(label, value, *styles):
-        """``label value``: the label always muted, the value as styled."""
-        return ("%s %s" % (_paint(label, _Ansi.muted), _paint(value, *styles)), ())
-
-    # Two-line header: identity on the first, hint on the second, then a
-    # hairline rule.  Provenance (installed/running/newest source, update)
-    # packs onto a third line so /updatecheck still has something to echo.
-    identity = [
-        ("%s %s" % (_paint(box["dot"], _Ansi.teal, _Ansi.bold),
-                    _paint("sonder", _Ansi.teal, _Ansi.bold)), ()),
-        field("persona", str(persona), _Ansi.cyan) if persona else None,
-        ("%s %s" % (
-            _paint(model, _Ansi.cyan),
-            _paint("· %s" % tier, _Ansi.muted),
-        ), ()),
-    ]
-    identity = [s for s in identity if s is not None]
-    endpoint_text = (_terminal_link(endpoint) if live
-                     else "%s %s" % (_terminal_link(endpoint),
-                                     _paint("(not listening)", _Ansi.amber)))
-    identity.append(field("endpoint", endpoint_text,
-                          *(_Ansi.green if live else _Ansi.muted,)))
-    identity.append(field("project", str(project or "(none)")))
-    if permission is not None:
-        mode_view = PermissionModeFacade()
-        identity.append(field("mode", mode_view.label(permission),
-                              _permission_mode_colour(permission)))
-    notes = []
-    if permission is not None:
-        mode_view = PermissionModeFacade()
-        blurb = str(permission.get("blurb") or "").strip()
-        if blurb:
-            notes.append(_paint("  %s: %s" % (mode_view.label(permission), blurb),
-                                _Ansi.muted))
-        if mode_view.elevated(permission):
-            reason = mode_view.elevation_reason(permission)
-            if reason:
-                notes.append(_paint("  elevation: %s" % reason, _Ansi.red))
-    if strict:
-        notes.append(_paint("  strict: on · pinned to the sonder alias", _Ansi.amber))
-    provenance = [
-        field("installed source", revision),
-        field("running source", running, *((_Ansi.amber,) if source.get("restart_required") else ())),
-        field(newest_label, newest),
-        field("update", "%s · /updatecheck | /update" % update, _Ansi.amber),
-    ]
-    width = _terminal_columns()
-    # Interactive composer already carries live model/lanes/ctx in its frame
-    # (see docs/assets/repl/terminal-repl.png). Keep launch chrome short so the
-    # banner does not compete with that frame; full provenance stays on /status
-    # and /updatecheck.
-    if _composer_available():
-        lines = _header_lines(identity, width) + notes
-        if source.get("restart_required") or str(source.get("state") or "") not in (
-            "", "current", "unknown",
-        ):
-            lines.extend(_header_lines([
-                field("update", "%s · /updatecheck | /update" % update, _Ansi.amber),
-            ], width))
-        sep = _paint(" · ", _Ansi.muted)
-        hint = sep.join([
-            _paint("/help for commands", _Ansi.muted),
-            _paint("just start typing", _Ansi.muted),
-            _paint("Shift+Tab cycles the mode", _Ansi.muted),
-        ])
-        return "%s\n  %s\n" % ("\n".join(lines), hint)
-    lines = _header_lines(identity, width) + notes + _header_lines(provenance, width)
-    sep = _paint(" · ", _Ansi.muted)
-    hint = sep.join([
-        _paint("/help for commands", _Ansi.muted),
-        _paint("just start typing", _Ansi.muted),
-        _paint("Shift+Tab cycles the mode", _Ansi.muted),
-    ])
-    return "%s\n  %s\n%s\n" % (
-        "\n".join(lines), hint, _rule(box["h"], min(width, 72)),
+        source = source if isinstance(source, dict) else {}
+    except Exception:
+        source = {}
+    mode, elevated, reason, blurb = _mode_fields(_permission_mode_snapshot())
+    if notices is None:
+        try:
+            notices = repl_notices.pending_repl_notices()
+        except Exception:
+            notices = 0
+    return S.BannerState.from_source(
+        source, persona=str(persona or ""), model=str(model or "unknown"),
+        tier=tier, mode=mode, endpoint=endpoint, live=live,
+        mode_cycle_key=_mode_cycle_key(), notices=int(notices or 0),
+        elevated=elevated, elevated_reason=reason, strict=bool(strict),
+        project=str(project or ""), session_id=str(session_id or ""),
+        mode_blurb=blurb,
     )
 
+
+def _startup_banner(strict, persona, project, tier=None, **kwargs):
+    """The one startup banner (spec 2.5), the same design on every platform."""
+    width = kwargs.pop("width", None) or _cols()
+    return S.banner(_banner_state(strict, persona, project, tier, **kwargs), width)
 
 
 def _composer_available():
@@ -1175,52 +1408,18 @@ def _composer_available():
         return False
 
 
-def _status_line(title):
-    """The composer title as a muted line above a plain prompt.
-
-    Inner spans keep their own colour (the mode is painted); the muted tone
-    resumes after each of them instead of falling back to the default.
-    """
-    text = str(title or "")
-    if not _Ansi.enabled or not text:
-        return text
-    return _Ansi.muted + text.replace(_Ansi.reset, _Ansi.reset + _Ansi.muted) + _Ansi.reset
-
-
 def _prompt_glyph():
-    """The gutter glyph a plain ``input()`` prompt is reduced to."""
-    return _paint(_box_chars()["prompt"], _Ansi.teal, _Ansi.bold) + " "
-
-
-def _execution_prompt(status=None):
-    """Prompt suffix refreshed once per user turn, with no polling thread."""
-    facade = ExecutionStatusFacade(
-        lambda: server.execution_status_data(),
-    )
-    value = facade.snapshot(status)
-    colour = _Ansi.amber
-    if value is not None:
-        try:
-            colour = _Ansi.green if any(
-                int(value.get(key) or 0) for key in
-                ("running_lanes", "running_agents", "queued_agents")
-            ) else _Ansi.muted
-        except (TypeError, ValueError, OverflowError):
-            pass
-    return _paint(facade.prompt_text(status), colour)
+    """The gutter glyph the plain prompt is reduced to."""
+    return _paint(S.g("prompt"), "accent", "strong") + " "
 
 
 def _compact_count(value):
-    """Render a non-negative count without making the composer noisy."""
+    """Render a non-negative count without making the status line noisy."""
     try:
         value = max(0, int(value or 0))
     except (TypeError, ValueError, OverflowError):
         return "?"
-    if value >= 1_000_000:
-        return "%.1fm" % (value / 1_000_000.0)
-    if value >= 1_000:
-        return "%.1fk" % (value / 1_000.0)
-    return str(value)
+    return S.compact_count(value)
 
 
 def _composer_context(session_id, project):
@@ -1258,95 +1457,86 @@ def _latest_repl_turn_metrics(session_id="", *, surfaces=("terminal/mcp",)):
     return _turn_metrics(response)
 
 
-def _composer_title(tier=None, status=None, *, context=None, last_turn=None,
-                    width=None, model_override=None, permission=None):
-    """Live model, runtime, context and last-turn status for the composer."""
-    # Resolve the live execution state once. A title that is subsequently
-    # compacted must keep this lanes/agents snapshot rather than falling back
-    # to compact-mode zero values.
-    status_facade = ExecutionStatusFacade(
-        lambda: server.execution_status_data(),
-    )
-    status = status_facade.snapshot(status)
+def _status_state(tier=None, *, context=None, model_override=None,
+                  permission=None, status=None, project="default"):
+    """The persistent session state for the status line (spec 2.4).
+
+    Per-turn metrics are deliberately absent: the answer footer is the only
+    place they appear (P1-2).
+    """
     resolved_tier = str(tier or "code")
     try:
-        model = ModelSelectionFacade.resolved_model(
-            server.TIERS, resolved_tier, model_override,
-        )
+        model = ModelSelectionFacade.resolved_model(server.TIERS, resolved_tier, model_override)
     except Exception:
         model = "unknown"
-    # This is intentionally the live table rather than a cached launch value:
-    # /model changes should be visible before the very next submitted turn.
-    compact = width is not None and int(width) <= 88
-    if compact:
-        # The wide composer delegates to _execution_prompt(), which refreshes
-        # a missing status snapshot and explicitly renders an unavailable
-        # lookup as unknown.  Do the same here: treating ``None`` as an empty
-        # mapping made narrow terminals claim L0/A0 when the status service
-        # was unavailable -- an especially misleading place to hide a live
-        # fanout or failed status read.
-        lanes, agents = status_facade.counts(status)
-        parts = ["S %s" % resolved_tier]
-        if permission is not None:
-            mode_view = PermissionModeFacade()
-            parts.append("M:%s" % mode_view.short_label(permission))
-            if mode_view.elevated(permission):
-                parts.append("E!")
-        parts.append("L%s A%s" % (lanes, agents))
-    else:
-        parts = ["Sonder %s (%s)  %s" % (
-            resolved_tier, model, _execution_prompt(status),
-        )]
-        if permission is not None:
-            mode_view = PermissionModeFacade()
-            mode_text = "mode %s" % mode_view.label(permission)
-            if mode_view.elevated(permission):
-                reason = mode_view.elevation_reason(permission)
-                mode_text += "  ELEVATED%s" % (
-                    " (%s)" % reason if reason else "",
-                )
-            parts.append(_paint(mode_text, _permission_mode_colour(permission)))
-    if isinstance(context, dict):
-        parts.append(("C%s/%s L%s" if compact else "ctx~%s/%s (%s left)") % (
-            _compact_count(context.get("used")),
-            _compact_count(context.get("limit")),
-            _compact_count(context.get("left")),
-        ))
-    if isinstance(last_turn, dict):
-        parts.append(("T%s/%s" if compact else "tok %s/%s") % (
-            _compact_count(last_turn.get("tokens_in")),
-            _compact_count(last_turn.get("tokens_out")),
-        ))
-        elapsed = max(0, int(last_turn.get("elapsed_ms") or 0))
-        if elapsed:
-            parts.append(_elapsed_label(elapsed))
-        calls = int(last_turn.get("model_calls") or 0)
-        tools = int(last_turn.get("tool_calls") or 0)
-        if calls or tools:
-            parts.append(("M%s T%s" if compact else "calls %sM/%sT") % (
-                _compact_count(calls), _compact_count(tools),
-            ))
-    title = (" | " if compact else "  ·  ").join(parts)
-    # A wide terminal can still have a long active model tag plus a complete
-    # metrics suffix.  The frame truncates titles rather than wrapping them,
-    # which previously left an unhelpful clipped tail such as ``ca-``.  Switch
-    # to the compact vocabulary whenever the actual composed title will not
-    # fit, not merely below one fixed terminal-width threshold.
-    if not compact and width is not None:
-        try:
-            title_budget = max(0, int(width) - 4)
-        except (TypeError, ValueError, OverflowError):
-            title_budget = 0
-        if title_budget and _visible_len(title) > title_budget:
-            return _composer_title(
-                tier, status, context=context, last_turn=last_turn,
-                width=88, model_override=model_override, permission=permission,
-            )
-    return title
+    mode, elevated, reason, _blurb = _mode_fields(permission)
+    lanes, agents = ExecutionStatusFacade(
+        lambda: server.execution_status_data(),
+    ).counts(status)
+    context = context if isinstance(context, dict) else {}
+    return S.StatusState(
+        mode=mode, tier=resolved_tier, model=str(model or ""),
+        ctx_used=context.get("used"), ctx_limit=context.get("limit"),
+        agents=agents if isinstance(agents, int) else 0,
+        lanes=lanes if isinstance(lanes, int) else 0,
+        project=str(project or "default"), elevated=elevated,
+        elevated_reason=reason,
+    )
+
+
+def _status_text(tier=None, *, width=None, **kwargs):
+    """One status line, one vocabulary at every width (P1-1)."""
+    return S.status_line(_status_state(tier, **kwargs), width or _cols())
+
+
+def _status_long(state, width):
+    """``/status``: every status field, labelled, plus the pool in words."""
+    rows = [
+        ("mode", state.mode + (" ELEVATED" if state.elevated else "")
+         + (" (%s)" % state.elevated_reason if state.elevated_reason else "")),
+        ("tier", state.tier), ("model", state.model or "unknown"),
+        ("context", ("%s of %s tokens" % (_compact_count(state.ctx_used),
+                                            _compact_count(state.ctx_limit)))
+         if state.ctx_limit else "unknown"),
+        ("agents", "%d running, %d lanes" % (state.agents, state.lanes)),
+        ("project", state.project),
+    ]
+    endpoint, live = _endpoint()
+    rows.append(("endpoint", "%s %s" % (endpoint, "listening" if live else "not listening")))
+    rows.append(("pool", _pool_words()))
+    label_w = max(len(r[0]) for r in rows)
+    out = []
+    for label, value in rows:
+        prefix = "  %s  " % label.ljust(label_w)
+        lines = S.wrap(S.safe_text(value), width - 1, indent=prefix,
+                       hanging=" " * len(prefix))
+        lines[0] = "  " + _paint(label.ljust(label_w), "muted") + lines[0][2 + label_w:]
+        out.extend(lines)
+    out.extend(_paint(line, "muted") for line in S.wrap(
+        "/status pool for worker detail %s /about for provenance" % S.g("sep"),
+        width - 1, indent="  ", hanging="  "))
+    return "\n".join(out)
+
+
+def _pool_words():
+    """The inference pool in plain words: ``Ollama: 1 worker, idle``."""
+    try:
+        summary = server.OLLAMA_POOL.summary()
+        workers = int(summary.get("worker_count") or 0)
+        eligible = int(summary.get("eligible_worker_count") or 0)
+        queue = summary.get("queue") or {}
+        waiting = int(queue.get("waiting") or 0)
+    except Exception:
+        return "unknown (the pool did not answer)"
+    words = "%d worker%s" % (workers, "" if workers == 1 else "s")
+    if eligible != workers:
+        words += " (%d ready)" % eligible
+    state = "idle" if waiting == 0 else "%d waiting" % waiting
+    return "Ollama: %s, %s" % (words, state)
 
 
 def _composer_frame_width():
-    """Use the raw composer's current width for a compact title when needed."""
+    """Use the raw composer's current width for the frame title when drawn."""
     if slash_menu is None:
         return None
     try:
@@ -1381,6 +1571,9 @@ def _watch_activity(poll_seconds=1.0):
 HELP = """commands (slash forms are optional -- plain language works too, e.g.
 "show me your stats", "which model should handle X", "read file foo.py"):
   /help              show this help
+  /about             show source provenance, endpoint, session and mode details
+  /status [pool]     show mode, model, context, endpoint; pool shows worker detail
+  /logs [n]          show the last n records of this session's REPL log
   /trace [on|off]    toggle trace mode (bare = on); shows retrieval + prompt
   /strict [on|off]   toggle strict mode (bare = on); pins to the sonder alias
   /persona [name]    show/set active persona (coder/explainer/reviewer/teacher)
@@ -1602,54 +1795,97 @@ def _completion_timing(started_at):
 
 
 class _WorkingIndicator:
-    """A terminal-only animated acknowledgement for a synchronous REPL turn."""
+    """The live line for one synchronous turn (spec 2.6, P1-3).
 
-    def __init__(self, label, stream=None):
+    One row, refreshed at 1 Hz: phase, elapsed time, model, tokens so far and
+    the cancel hint, read from the activity tracker's live span.  After 20 s
+    with no new activity it adds the slow-model hint.  With motion off
+    (``SONDER_PLAIN``, ``TERM=dumb``, ``NO_COLOR``) nothing is redrawn: it
+    prints ``working...`` once and a ``working (30s)`` line every 15 s, so
+    the output holds no carriage returns and no escapes.
+    """
+
+    INTERVAL = 1.0
+    SLOW_AFTER = 20.0
+    PLAIN_EVERY = 15.0
+
+    def __init__(self, label="Sonder", stream=None, *, model="", clock=None):
         self.label = str(label or "Sonder")
         self.stream = stream or sys.stdout
+        self.model = str(model or "")
+        self._clock = clock or time.monotonic
+        self.started = self._clock()
         self._stop = threading.Event()
         self._thread = owned_runtime_thread(target=self._run, daemon=True)
+        self._drawn = False
+        self._progress_key = None
+        self._progress_at = self.started
 
     def start(self):
         self._thread.start()
         return self
 
-    def _render(self, tick):
-        dots = "." * (1 + tick % 3)
-        base = "%s %s is working%s" % (_box_chars()["dot"], self.label, dots)
-        if not _Ansi.enabled:
-            return base
-        # A single cyan highlight crosses the label from left to right.  The
-        # text itself stays stable, so it reads as activity rather than a
-        # progress or completion claim.
-        index = tick % max(1, len(base))
-        return (
-            _Ansi.muted + base[:index] + _Ansi.cyan + _Ansi.bold
-            + base[index:index + 1] + _Ansi.muted + base[index + 1:]
-            + _Ansi.reset
-        )
+    def _span(self):
+        """The newest active response span, or None."""
+        try:
+            active = activity_tracker.snapshot().get("active") or []
+        except Exception:
+            return None
+        return active[-1] if active else None
+
+    def state(self, now=None):
+        now = self._clock() if now is None else now
+        span = self._span() or {}
+        events = span.get("events") or []
+        calls = int(span.get("model_calls") or 0)
+        tokens = int(span.get("tokens_in") or 0)
+        last = events[-1] if events else {}
+        kind = str(last.get("kind") or "")
+        if kind in ("tool_call", "tool_result"):
+            phase = str(last.get("tool") or last.get("name") or "tool")
+        elif calls or kind == "model_call":
+            phase = "model call %d" % (calls + 1)
+        else:
+            phase = "routing"
+        key = (len(events), calls, tokens)
+        if key != self._progress_key:
+            self._progress_key, self._progress_at = key, now
+        slow = now - self._progress_at >= self.SLOW_AFTER
+        return S.LiveState(phase=phase, elapsed_s=max(0.0, now - self.started),
+                           model=self.model, tokens_in=tokens or None, slow=slow)
+
+    def _render(self, now=None):
+        return S.live_line(self.state(now), _cols())
+
+    def _write(self, text):
+        try:
+            self.stream.write(text)
+            self.stream.flush()
+        except Exception:
+            self._stop.set()
 
     def _run(self):
-        tick = 0
+        c = S.caps()
+        if not c.motion:
+            self._write(("working..." if c.plain else self._render()) + "\n")
+            next_line = self.started + self.PLAIN_EVERY
+            while not self._stop.wait(0.25):
+                if self._clock() >= next_line:
+                    self._write(self._render() + "\n")
+                    next_line += self.PLAIN_EVERY
+            return
         while not self._stop.is_set():
-            try:
-                self.stream.write("\r" + self._render(tick))
-                self.stream.flush()
-            except Exception:
-                return
-            tick += 1
-            self._stop.wait(0.14)
+            self._write("\r\x1b[2K" + self._render())
+            self._drawn = True
+            self._stop.wait(self.INTERVAL)
 
     def stop(self):
         self._stop.set()
         if self._thread.is_alive():
-            self._thread.join(0.5)
-        try:
-            width = max(20, shutil.get_terminal_size((80, 24)).columns - 1)
-            self.stream.write("\r" + (" " * width) + "\r")
-            self.stream.flush()
-        except Exception:
-            pass
+            self._thread.join(1.5)
+        if self._drawn:
+            self._write("\r\x1b[2K")
+            self._drawn = False
 
 
 _TODO_USAGE = (
@@ -1859,15 +2095,15 @@ def _interruptible_turn():
                 )
 
 
-def _begin_chat_turn(label="Sonder"):
-    """Acknowledge an interactive submission before synchronous work begins."""
+# The model the next turn will use, set by the loop before each turn.
+_TURN_MODEL = [""]
+
+
+def _begin_chat_turn(label="Sonder", *, model=None):
+    """Start the live line for an interactive turn (TTY only; P1-3)."""
     if not (_console_has_operator() and _stdout_is_interactive()):
         return None
-    if not _Ansi.enabled:
-        box = _box_chars()
-        print(_paint("%s %s is working..." % (box["dot"], label), _Ansi.muted))
-        return None
-    return _WorkingIndicator(label).start()
+    return _WorkingIndicator(label, model=_TURN_MODEL[0] if model is None else model).start()
 
 
 def _parse_activity_events(text):
@@ -1943,48 +2179,31 @@ def _parse_activity_events(text):
     return clean, timed_events, stats
 
 
-def _render_tool_rows(events, box, width):
-    """Print codex-style tool call rows with status glyphs and timing."""
+def _tool_row_lines(events, width):
+    """Tool rows (spec 2.6), aligned with ``style.table``; always shown.
+
+    ``▸ ✓ ok       Read File src/a.py   12ms`` -- the status glyph always
+    carries its word, and a failed or refused call is never hidden, even
+    when the whole turn errored (P1-4).
+    """
     if not events:
-        return
+        return []
+    rows = []
     for ev in events:
         ok = ev.get("ok", True)
-        glyph = box["tool"] if ok else box["refused"]
-        tone = _Ansi.green if ok else _Ansi.red
-        title = ev.get("title") or "tool"
+        glyph, word, role = ("ok", "ok", "success") if ok else ("fail", "failed", "danger")
+        status = _paint("%s %s" % (S.g(glyph), word), role)
+        title = S.safe_text(" ".join(str(ev.get("title") or "tool").split()))
         elapsed = ev.get("elapsed_ms")
-        timing = " %s" % _elapsed_label(elapsed) if elapsed else ""
-        status = _paint(glyph, tone)
-        label = _paint(title, _Ansi.text2)
-        time_str = _paint(timing, _Ansi.muted) if timing else ""
-        print("  %s %s%s" % (status, label, time_str))
+        timing = _paint(S.duration_label(elapsed), "muted") if elapsed else ""
+        rows.append((_paint(S.g("tool"), "muted"), status, title, timing))
+    return S.table(rows, [(1, 1, "<"), (8, 9, "<"), (8, None, "<"), (0, 8, ">")],
+                   width, indent="  ")
 
 
-def _render_turn_stats(stats, box):
-    """Print a compact stats summary line under tool rows."""
-    if not stats:
-        return
-    parts = []
-    mc = stats.get("model_calls", 0)
-    tc = stats.get("tool_calls", 0)
-    tin = stats.get("tokens_in", 0)
-    tout = stats.get("tokens_out", 0)
-    fc = stats.get("file_creates", 0)
-    fe = stats.get("file_edits", 0)
-    fd = stats.get("file_deletes", 0)
-    if tc:
-        parts.append("%d tool call%s" % (tc, "" if tc == 1 else "s"))
-    if mc:
-        parts.append("%d model call%s" % (mc, "" if mc == 1 else "s"))
-    if tin or tout:
-        parts.append("%s/%s tokens" % (
-            _compact_number(tin), _compact_number(tout),
-        ))
-    files_total = fc + fe + fd
-    if files_total:
-        parts.append("%d file%s changed" % (files_total, "" if files_total == 1 else "s"))
-    if parts:
-        print(_paint("  %s %s" % (box["h"], " · ".join(parts)), _Ansi.muted))
+def _render_tool_rows(events, width=None):
+    for line in _tool_row_lines(events, width or _cols()):
+        print(line)
 
 
 def _compact_number(n):
@@ -1996,64 +2215,94 @@ def _compact_number(n):
     return "%dk" % (n // 1000)
 
 
+# How many answers have offered the long "rate: /pass /fail" footer.
+_RATE_OFFERS = [0]
+
+
+def _print_body(text, width):
+    """Answer body: sanitized; prose soft-wrapped on a terminal only."""
+    clean = S.safe_text(text)
+    for line in S.wrap(clean, width - 1):
+        print(line)
+
+
 def _print_chat_result(text, started_at, *, offer_feedback=False,
                        label="Sonder", error=False, indicator=None,
-                       interaction_id=None):
-    """Present one completed turn with lightweight terminal chrome.
+                       interaction_id=None, metrics=None):
+    """Present one completed turn.
 
-    The result itself is printed verbatim: the bars are separate lines, never
-    a width cap, pager, or content transform.  Piped/scripted uses retain the
-    historical plain output so shells and callers do not receive decoration.
-    SONDER_REPL_NDJSON=1 lets a piped caller opt into one structured JSON
-    line per turn instead of scraping that plain text; interactive terminals
-    keep their chrome regardless, and the flagless default never changes.
+    Piped/scripted use keeps the historical plain output (answer, then a
+    ``[timing]`` line) so shells and callers do not receive decoration; the
+    answer is sanitized either way (P0-2).  SONDER_REPL_NDJSON=1 lets a
+    piped caller opt into one structured JSON line per turn instead.  On a
+    terminal: turn header, tool rows (always, including on error), the body,
+    and one muted footer that is the only place the turn's metrics and its
+    single clock appear (P1-2).
     """
     if indicator is not None:
         indicator.stop()
     answer = str(text or "")
-    timing = _completion_timing(started_at)
+    elapsed_ms = max(0, int((time.monotonic() - float(started_at)) * 1000))
     if not (_console_has_operator() and _stdout_is_interactive()):
-        if _machine_output.enabled(os.environ):
-            elapsed_ms = max(
-                0, int((time.monotonic() - float(started_at)) * 1000),
-            )
-            print(_machine_output.ndjson_line(_machine_output.turn_payload(
-                answer, elapsed_ms=elapsed_ms, error=error,
+        if _machine_output.enabled(os.environ) or hasattr(sys.stdout, "raw_line"):
+            line = _machine_output.ndjson_line(_machine_output.turn_payload(
+                _strip_activity(answer), elapsed_ms=elapsed_ms, error=error,
                 interaction_id=interaction_id,
                 feedback_offered=offer_feedback, label=label,
                 hint=_error_hint(answer) if error else "",
-            )))
+            ))
+            raw = getattr(sys.stdout, "raw_line", None)
+            if callable(raw):
+                raw(line)
+            else:
+                print(line)
             return
-        print(answer)
-        print(_paint("[%s]" % timing, _Ansi.muted))
+        emit_event = getattr(sys.stdout, "emit_event", None)
+        if error and callable(emit_event):
+            # ``repl --json``: a turn that failed is an ``error`` event.
+            emit_event("error", S.safe_text(_strip_activity(answer)))
+            return
+        print(S.safe_text(answer))
+        print(_paint("[%s]" % _completion_timing(started_at), "muted"))
         if offer_feedback:
             print("(/pass or /fail to teach Sonder Runtime)")
         return
 
-    box = _box_chars()
+    width = _cols()
     clean_answer, events, stats = _parse_activity_events(answer)
     clean_answer = _strip_activity(clean_answer)
-
-    title = "%s %s " % (
-        box["dot"], _response_status_label(label, error=error),
-    )
-    tone = _Ansi.red if error else _Ansi.teal
-    width = _terminal_columns()
-    rule_len = max(4, width - _visible_len(title))
-    print(_paint(title, tone, _Ansi.bold) + _paint(box["h"] * rule_len, _Ansi.muted))
-
-    if events and not error:
-        _render_tool_rows(events, box, width)
-        _render_turn_stats(stats, box)
+    print(S.turn_header("error" if error else "answer", width))
+    rows = _tool_row_lines(events, width)
+    for line in rows:
+        print(line)
+    if rows:
         print()
-
-    print(clean_answer)
-    footer = _response_footer(box, timing, offer_feedback=offer_feedback)
-    print(_paint(footer, _Ansi.muted))
-    if error:
-        hint = _error_hint(answer)
-        if hint:
-            print(_paint("  hint: %s" % hint, _Ansi.muted))
+    _print_body(clean_answer, width)
+    metrics = metrics if isinstance(metrics, dict) else {}
+    server_ms = int(metrics.get("elapsed_ms") or 0)
+    rate = ""
+    if offer_feedback:
+        _RATE_OFFERS[0] += 1
+        rate = "full" if _RATE_OFFERS[0] <= 3 else "short"
+    hint = " ".join(S.safe_text(_error_hint(answer) or "").split()) if error else ""
+    state = S.FooterState(
+        elapsed_ms=server_ms or elapsed_ms, ok=not error,
+        model_calls=metrics.get("model_calls") or stats.get("model_calls"),
+        tokens_in=metrics.get("tokens_in", stats.get("tokens_in")),
+        tokens_out=metrics.get("tokens_out", stats.get("tokens_out")),
+        tool_calls=metrics.get("tool_calls") or stats.get("tool_calls"),
+        hint=hint, rate=rate,
+    )
+    line = S.footer(state, width)
+    if hint and ("hint: " + hint) not in S.strip_ansi(line):
+        # A hint too long for the footer row gets its own wrapped lines
+        # rather than being cut off mid-sentence.
+        state.hint = ""
+        print(S.footer(state, width))
+        for text in S.wrap("hint: " + hint, width - 1, indent="  ", hanging="    "):
+            print(_paint(text, "muted"))
+        return
+    print(line)
 
 
 def _format_fanout_summaries(payload):
@@ -2113,7 +2362,7 @@ def _approve_lane_command(arguments):
     if not _console_has_operator():
         return False, "interactive approval unavailable; use an operator console or an exact one-shot approval"
     detail = terminal_text(json.dumps(arguments, ensure_ascii=False, indent=2),
-                           width=shutil.get_terminal_size((80, 24)).columns, limit=20000)
+                           width=_cols(), limit=20000)
     if _confirm("run this lane action?\n" + detail + "\n" + terminal_text(decision.reason)):
         return True, ""
     return False, "operator declined"
@@ -2255,7 +2504,7 @@ def _start_tool_inventory_warmup():
 def _lanes_command(arg):
     from sonder_runtime.interfaces.repl.facades.agent_lanes import LaneConsoleFacade
     return LaneConsoleFacade(lambda: server._application(), _approve_lane_command).run(
-        arg, width=shutil.get_terminal_size((80, 24)).columns,
+        arg, width=_cols(),
     )
 
 
@@ -2287,7 +2536,7 @@ def _print_lessons():
         print("(no lessons yet)")
         return
     for lesson in lessons:
-        print("- %s" % lesson["text"])
+        _emit("- %s" % lesson["text"])
 
 
 def _on_off(arg, current):
@@ -2333,7 +2582,7 @@ def _run_train(n):
     passed = 0
     lessons = 0
     for t in tasks:
-        print("  %s %s" % (_paint("PRACTICE", _Ansi.teal, _Ansi.bold), t["name"]))
+        print("  %s %s" % (_paint("PRACTICE", "teal", "bold"), t["name"]))
         # Practice runs are single-turn and must not pollute the user's chat thread.
         resp = server.sonder(t["prompt"], session="none")
         iid = server.parse_interaction_id(resp)
@@ -2347,10 +2596,10 @@ def _run_train(n):
             msg = server.record_outcome(iid, signal)
             if "Distilled lesson" in msg:
                 lessons += 1
-            print("    %s  %s" % (_result_tag(ok), msg))
+            print("    %s  %s" % (_result_tag(ok), S.safe_text(msg)))
         else:
             print("    %s  (no interaction id)" % _result_tag(ok))
-    print(_paint("practice complete", _Ansi.cyan, _Ansi.bold) +
+    print(_paint("practice complete", "cyan", "bold") +
           "  %d tasks · %d passed · %d failed · %d new lessons" % (
         len(tasks), passed, len(tasks) - passed, lessons))
 
@@ -2361,7 +2610,7 @@ def _print_sessions():
         sessions = memory_store.list_sessions(conn, 20)
     finally:
         conn.close()
-    print(_format_sessions(sessions))
+    _emit(_format_sessions(sessions))
 
 
 def _print_facts(project):
@@ -2374,7 +2623,7 @@ def _print_facts(project):
         print("(no facts for project '%s')" % project)
         return
     for f in facts:
-        print("  - %s  %s" % (f["id"], f["text"]))
+        _emit("  - %s  %s" % (f["id"], f["text"]))
 
 
 def _recovery_command(session_id, project, argument):
@@ -2472,6 +2721,220 @@ def _run_session_work(session_id, *, host_project, **arguments):
     return server._run_managed_repl_work(session_id, memory_database=memory_database, **arguments)
 
 
+def _model_listing(tier, active_model, tiers, installed, width):
+    """``/model`` with no argument (spec 3, /model mockup).
+
+    The active tier is marked ``(active)`` in the accent colour, withheld
+    tiers share one footnote per reason instead of repeating it per row, and
+    installed models sit in two columns when the terminal is wide enough.
+    """
+    sep = " %s " % S.g("sep")
+    current = str(active_model or server.TIERS.get(tier) or "?")
+    active = _paint("(active)", "accent")
+    lines = ["%s  %s%stier %s %s" % (
+        _paint("model", "muted"), _paint(S.safe_text(current), "info", "strong"),
+        sep, S.safe_text(tier), active)]
+    lines.append(_paint("tiers", "muted"))
+    for name in sorted(tiers):
+        row = "  %-14s %s" % (S.safe_text(name), S.safe_text(tiers[name]))
+        lines.append(row + ("  " + active if name == tier and not active_model else ""))
+    # A withheld tier is named rather than silently omitted: the user
+    # configured it, and "where did cloud-code go" is a worse answer than
+    # one line saying what would turn it back on.
+    reasons = {}
+    for name in sorted(set(server.TIERS).difference(tiers)):
+        reason = _unselectable_tier_reason(name) or "unavailable"
+        reasons.setdefault(reason, []).append(name)
+    configured = {str(name).casefold() for name in server.TIERS}
+    for name, env_name in OPTIONAL_LOCAL_TIERS:
+        if name not in configured:
+            reasons.setdefault("no model set %s %s" % (S.g("sep"), env_name), []).append(name)
+    if reasons:
+        lines.append(_paint("  unavailable", "muted"))
+        name_w = max(len(", ".join(v)) for v in reasons.values())
+        side_by_side = 4 + name_w + 2 <= (width - 1) // 2
+        for reason, names in reasons.items():
+            reason = S.safe_text(" ".join(reason.split()))
+            if side_by_side:
+                head = "    %-*s  " % (name_w, ", ".join(names))
+                wrapped = S.wrap(reason, width - 1, indent=head, hanging=" " * len(head))
+            else:
+                wrapped = S.wrap(", ".join(names), width - 1, indent="    ",
+                                 hanging="    ")
+                wrapped += S.wrap(reason, width - 1, indent="      ", hanging="      ")
+            lines.extend(_paint(line, "muted") for line in wrapped)
+    if installed is None:
+        lines.append(_paint("installed models: (ollama did not answer)", "warning"))
+    elif not installed:
+        lines.append(_paint("installed models (ollama): (none installed)", "warning"))
+    else:
+        lines.append(_paint("installed (ollama)", "muted"))
+        cells = []
+        for name, size in installed:
+            mark = "  " + active if name == current and active_model else ""
+            cells.append((S.safe_text(name), S.safe_text(size), mark))
+        name_w = max(S.cell_width(c[0]) for c in cells)
+        size_w = max(S.cell_width(c[1]) for c in cells)
+        rendered = ["%s  %s%s" % (c[0].ljust(name_w), c[1].rjust(size_w), c[2]) for c in cells]
+        col_w = max(S.cell_width(r) for r in rendered)
+        columns = 2 if 2 + col_w * 2 + 4 <= width - 1 else 1
+        rows = (len(rendered) + columns - 1) // columns
+        for r in range(rows):
+            parts = [rendered[r + k * rows] for k in range(columns) if r + k * rows < len(rendered)]
+            line = "  " + "    ".join(
+                p + " " * (col_w - S.cell_width(p)) if k < len(parts) - 1 else p
+                for k, p in enumerate(parts))
+            lines.append(S.truncate(line.rstrip(), width - 1))
+    lines.append(_paint("/model <tier>%s/model <name>" % sep, "muted"))
+    return lines
+
+
+def _help_screen(width, mode="manual"):
+    """Compact ``/help`` (spec 2.9): legend first, core commands, groups.
+
+    Fits 80x24 without scrolling; the catalog supplies rows and the layout
+    is fitted here with the session's glyphs.
+    """
+    text = command_catalog.format_help(
+        width=width, mode=mode, sep=" %s " % S.g("sep"), ellipsis=S.g("ellipsis"),
+    )
+    lines = text.split("\n")
+    if not lines:
+        return text
+    out = [_paint(lines[0], "accent", "strong")]
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped.startswith("in ") or stripped.startswith("[") and "] " in stripped:
+            out.append(_paint(line, "muted"))
+        elif line.startswith("  groups"):
+            out.append(_paint(line, "muted"))
+        else:
+            out.append(re.sub(r"(\[(?:asks|writes|runs|danger)\])$",
+                              lambda m: _paint(m.group(1), "danger" if m.group(1) == "[danger]"
+                                               else "warning"), line))
+    return "\n".join(out)
+
+
+_HELP_STATUS = (
+    ("tier", "the model tier turns go to (/model <tier>)"),
+    ("model", "the model that tier is bound to right now"),
+    ("mode", "how much runs without asking: plan, manual, acceptEdits, auto"
+             " (/mode); ELEVATED means an override is active"),
+    ("ctx", "context used / the model's window, in tokens (/context)"),
+    ("agents", "agents or lanes running now; shown only when non-zero (/agents)"),
+    ("proj", "the active project, when it is not 'default' (/project)"),
+)
+
+
+def _help_status_text(width):
+    lines = [_paint("the status line above the prompt", "accent", "strong"),
+             _paint("  code %s sonder:latest %s manual %s ctx 64/8.2k" % (
+                 (S.g("sep"),) * 3), "muted")]
+    for name, text in _HELP_STATUS:
+        prefix = "  %-7s " % name
+        lines.extend(S.wrap(text, width - 1, indent=prefix, hanging=" " * len(prefix)))
+    lines.append(_paint("  fields leave from the right on narrow terminals; the mode"
+                        " never does. per-turn numbers are in each answer's footer.",
+                        "muted"))
+    return "\n".join(lines)
+
+
+_LOGS_DEFAULT = 20
+_LOGS_MAX = 500
+
+
+def _logs_command(arg):
+    """``/logs [n]``: the last n records of SONDER_HOME/logs/repl.log.
+
+    Read-only.  Each record is re-sanitized: the file stores C1 and bidi
+    characters raw, and a log line must not be able to drive the terminal.
+    """
+    text = str(arg or "").strip()
+    if text and (not text.isdigit() or not 1 <= int(text) <= _LOGS_MAX):
+        return "usage: /logs [n]  (n is 1..%d, default %d)" % (_LOGS_MAX, _LOGS_DEFAULT)
+    count = int(text) if text else _LOGS_DEFAULT
+    try:
+        path = repl_notices.repl_log_path()
+    except Exception:
+        path = None
+    if not path:
+        return "logs are not being saved to a file in this session"
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - 256 * 1024))
+            data = handle.read().decode("utf-8", "replace")
+    except OSError as exc:
+        return "cannot read the log %s: %s" % (path, exc.strerror or type(exc).__name__)
+    rows = [line for line in data.splitlines() if line.strip()][-count:]
+    if not rows:
+        return "no log records yet (%s)" % path
+    out = []
+    for raw in rows:
+        try:
+            record = json.loads(raw)
+        except ValueError:
+            out.append(S.safe_text(raw))
+            continue
+        stamp = str(record.get("timestamp") or "")[11:19]
+        out.append(S.safe_text("%s %-7s %s: %s" % (
+            stamp, record.get("severity") or record.get("level") or "",
+            record.get("component") or record.get("logger") or "",
+            " ".join(str(record.get("message") or "").split()),
+        )))
+    out.append(_paint("  %s" % S.safe_text(path), "muted"))
+    return "\n".join(out)
+
+
+def _drain_notices():
+    """Show queued log records between turns (spec 2.11).
+
+    Never called while the live line is drawn.  ERROR records get a full
+    notice each; everything else is one muted ``! N notices · /logs`` line.
+    """
+    try:
+        notices = repl_notices.drain_repl_notices()
+        dropped = repl_notices.last_drain_dropped()
+    except Exception:
+        return
+    if not notices and not dropped:
+        return
+    width = _cols()
+    quiet = 0
+    for item in notices:
+        if getattr(item, "is_error", False):
+            print(S.notice("error", item.message, detail=item.component or None,
+                           hint="/logs shows the full record", width=width))
+        else:
+            quiet += 1
+    quiet += int(dropped or 0)
+    if quiet:
+        print("  " + _paint(S.g("warn"), "warning", "strong") + " " + _paint(
+            "%d notice%s%s/logs" % (quiet, "" if quiet == 1 else "s", " %s " % S.g("sep")),
+            "muted"))
+
+
+def _refusal_notice(line, refusal):
+    """Render a gate refusal/skip as a notice; plain text off a terminal."""
+    text = str(refusal or "")
+    if not _stdout_is_interactive():
+        return S.safe_text(text)
+    command = " ".join(str(line or "").split())
+    if text.startswith("skipped "):
+        diverted = _DIVERTED_ANSWER
+        detail = None
+        if diverted:
+            detail = "your %s was not run; press %s to recall it" % (
+                diverted, S.g("up"))
+        return S.notice("skipped", command, detail, width=_cols())
+    if text.startswith("refused "):
+        _cmd, _sep, reason = text[len("refused "):].partition(": ")
+        return S.notice("refused", command, reason or None,
+                        hint=_error_hint(text) or None, width=_cols())
+    return S.safe_text(text)
+
+
 def _with_conversation_lifetime(function):
     from functools import wraps
 
@@ -2509,10 +2972,33 @@ def main(*, machine_output=False):
     # from TIERS: live config reload intentionally rebuilds that process-wide
     # mapping, but it must not silently undo this REPL session's choice.
     active_model = None
-    # Keep raw-palette recall local to this REPL process. Prompts can include
-    # private repository context, so terminal convenience must not create a
-    # durable prompt log.
-    input_history = []
+    # Up-arrow recall.  An attended terminal session persists it to
+    # SONDER_HOME/repl_history (0600, newest 200 lines; P2-5) -- the same
+    # home already holds the conversation turns themselves.  Credential lines
+    # never enter it (``_history_safe``), piped scripts never write it, and
+    # SONDER_REPL_HISTORY=0 keeps it process-local.
+    persist_history = (
+        not machine_output and _console_has_operator() and _stdout_is_interactive()
+        and str(os.environ.get("SONDER_REPL_HISTORY", "1")).strip() != "0"
+    )
+    input_history = _load_history() if persist_history else []
+
+    def remember(line):
+        if not _history_safe(line) or (input_history and input_history[-1] == line):
+            return
+        input_history.append(line)
+        if len(input_history) > REPL_HISTORY_LIMIT:
+            del input_history[:-REPL_HISTORY_LIMIT]
+        if _READLINE is not None and "\n" not in line:
+            try:
+                _READLINE.add_history(line)
+            except Exception:
+                pass
+        if persist_history:
+            _save_history(input_history)
+
+    global _HISTORY_SINK
+    _HISTORY_SINK = remember
     # The most recent plain-language turn, kept so a bare /why can answer
     # "why did (or didn't) that route" about the thing just typed. Session
     # state only; never persisted.
@@ -2598,7 +3084,7 @@ def main(*, machine_output=False):
             return
         path, error = _workspace_path(text)
         if error:
-            print(error + "\nuse /workspace-create <path> to create a new guarded directory")
+            _emit(error + "\nuse /workspace-create <path> to create a new guarded directory")
             return
         server._clear_managed_repl_conversation()
         workspace_root = path
@@ -2612,12 +3098,12 @@ def main(*, machine_output=False):
             print("usage: /workspace-create <path>")
             return
         output = server.directory_create(path=path, parents=True)
-        print(output)
+        _emit(output)
         if _is_repl_error(output):
             return
         path, error = _workspace_path(path)
         if error:
-            print(error)
+            _emit(error)
             return
         server._clear_managed_repl_conversation()
         workspace_root = path
@@ -2655,8 +3141,9 @@ def main(*, machine_output=False):
         except Exception:
             ignored_cue = ""
         if ignored_cue:
-            print(_paint("(note: %s)" % ignored_cue, _Ansi.muted))
+            print(_paint("(note: %s)" % ignored_cue, "muted"))
         started_at = time.monotonic()
+        _TURN_MODEL[0] = current_model()
         indicator = _begin_chat_turn("Sonder work")
         try:
             out = _run_session_work(session_id, host_project=project,
@@ -2671,16 +3158,25 @@ def main(*, machine_output=False):
         last_response = out
         last_run_source = _answer_only(out)
         last_turn_metrics = _latest_repl_turn_metrics(surfaces=("agent",))
-        _print_chat_result(out, started_at, label="Sonder work", indicator=indicator)
+        _print_chat_result(out, started_at, label="Sonder work", indicator=indicator,
+                           metrics=last_turn_metrics)
+
+    def current_model():
+        try:
+            return ModelSelectionFacade.resolved_model(
+                server.TIERS, active_tier or "code", active_model,
+            )
+        except Exception:
+            return ""
 
     def workspace_file_command(raw_path, call):
         """Run one /read /write /append /edit /mkdir /delete in the workspace."""
         path, error = _workspace_scoped_path(workspace_root, raw_path)
         if error:
-            print(error)
+            _emit(error)
             return
         with _workspace_file_scope(workspace_root):
-            print(call(path))
+            _emit(call(path))
 
     def announce_interrupted_turn():
         nonlocal last_iid, last_response, last_run_source, last_turn_metrics
@@ -2692,11 +3188,15 @@ def main(*, machine_output=False):
         last_run_source = None
         last_turn_metrics = None
         print()
-        print(_paint(
-            "interrupted: turn cancelled. Press Ctrl-C again at the prompt"
-            " (or Ctrl-D, or /exit) to quit.",
-            _Ansi.muted,
-        ))
+        if _stdout_is_interactive():
+            print(S.notice("skipped", "turn cancelled",
+                           hint="Ctrl-C again at the prompt, Ctrl-D or /exit quits",
+                           width=_cols()))
+        else:
+            print(
+                "interrupted: turn cancelled. Press Ctrl-C again at the prompt"
+                " (or Ctrl-D, or /exit) to quit."
+            )
 
     def apply_trace(val):
         nonlocal trace
@@ -2740,33 +3240,8 @@ def main(*, machine_output=False):
         model_argument_completer.refresh(installed)
 
         if not arg:
-            current = str(active_model or server.TIERS.get(tier) or "?")
-            print("active tier: %s  ->  %s" % (
-                _paint(tier, _Ansi.cyan), _paint(current, _Ansi.cyan, _Ansi.bold)))
-            print()
-            print(_paint("tiers", _Ansi.muted))
-            for name in sorted(tiers):
-                mark = "*" if name == tier else " "
-                print("  %s %-14s %s" % (mark, name, tiers[name]))
-            # A withheld tier is named rather than silently omitted: the user
-            # configured it, and "where did cloud-code go" is a worse answer
-            # than one line saying what would turn it back on.
-            for name in sorted(set(server.TIERS).difference(tiers)):
-                print(_paint("  - %-14s %s" % (
-                    name, _unselectable_tier_reason(name) or "unavailable",
-                ), _Ansi.muted))
-            print()
-            if installed is None:
-                print(_paint("installed models: (ollama did not answer)", _Ansi.amber))
-            elif installed:
-                print(_paint("installed models (ollama)", _Ansi.muted))
-                for name, size in installed:
-                    mark = "*" if name == current else " "
-                    print("  %s %-40s %s" % (mark, name, size))
-            else:
-                print(_paint("installed models (ollama): (none installed)", _Ansi.amber))
-            print()
-            print(_paint("usage: /model <model-name>  |  /model <tier>", _Ansi.muted))
+            for line in _model_listing(tier, active_model, tiers, installed, _cols()):
+                print(line)
             return
 
         tier_names = {str(name).casefold(): name for name in tiers}
@@ -2788,7 +3263,7 @@ def main(*, machine_output=False):
         withheld_reason = _unselectable_tier_reason(withheld)
         if withheld_reason:
             print(_paint("cannot select tier %r: %s" % (
-                withheld, withheld_reason), _Ansi.red))
+                withheld, withheld_reason), "red"))
             return
 
         # An optional local tier with no model bound is absent from the tier
@@ -2799,14 +3274,14 @@ def main(*, machine_output=False):
             print(_paint(
                 "tier %r has no model configured; set %s to an installed"
                 " model and restart Sonder to enable it" % (arg.casefold(), unbound),
-                _Ansi.red,
+                "red",
             ))
             return
 
         if installed is None:
             print(_paint(
                 "cannot verify installed models because Ollama did not answer; model selection was not changed",
-                _Ansi.red,
+                "red",
             ))
             return
 
@@ -2830,7 +3305,7 @@ def main(*, machine_output=False):
                 if base and base in name.casefold()
                 and not _model_selection_ineligibility(name)
             ]
-            print(_paint("no installed model named %r" % arg, _Ansi.red))
+            print(_paint("no installed model named %r" % arg, "red"))
             if near:
                 print("did you mean: %s" % ", ".join(near[:5]))
             else:
@@ -2844,7 +3319,7 @@ def main(*, machine_output=False):
                     "model %r cannot serve chat (%s)" % (
                         selected_model, ineligible,
                     ),
-                    _Ansi.red,
+                    "red",
                 ))
                 print("choose a chat-capable model shown by /model")
                 return
@@ -2856,7 +3331,7 @@ def main(*, machine_output=False):
         # an avoidable next-turn pin refusal.
         active_model = selected_model or arg
         print("%s session model -> %s" % (
-            tier, _paint(active_model, _Ansi.cyan, _Ansi.bold)))
+            tier, _paint(active_model, "cyan", "bold")))
 
     def do_run(timeout=grounding.DEFAULT_TIMEOUT):
         block = grounding.extract_runnable_code_block(last_run_source or last_response)
@@ -2868,7 +3343,7 @@ def main(*, machine_output=False):
             language=block["language"],
             timeout=timeout,
         )
-        print(code_runner.format_result(result))
+        _emit(code_runner.format_result(result))
         if result.get("ok"):
             print("[ran OK]")
         elif result.get("returncode") is None and result.get("error", "").startswith("timed out"):
@@ -2886,7 +3361,7 @@ def main(*, machine_output=False):
             language=block["language"],
             timeout=timeout,
         )
-        print(code_runner.format_window_result(result))
+        _emit(code_runner.format_window_result(result))
         print("[launched]" if result.get("ok") else "[launch failed]")
 
     def do_runproject(timeout=grounding.MAX_TIMEOUT):
@@ -2895,7 +3370,7 @@ def main(*, machine_output=False):
             print("(no file/path fenced project blocks in the last response)")
             return
         result = code_runner.run_project({"files": files}, timeout=timeout)
-        print(code_runner.format_project_result(result))
+        _emit(code_runner.format_project_result(result))
         print("[ran OK]" if result.get("ok") else "[project failed]")
 
     def do_dump(label="repl"):
@@ -2950,10 +3425,10 @@ def main(*, machine_output=False):
             tiers = [active_tier] + tiers
         result = consult_flow.consult(question, tiers)
         for answer in result["answers"]:
-            print("\n=== %s ===\n%s" % (answer["tier"], answer["text"]))
+            _emit("\n=== %s ===\n%s" % (answer["tier"], answer["text"]))
         verdict = consult_flow.verdict_line(result)
-        colour = _Ansi.green if result["agree"] is True else _Ansi.amber
-        print("\n" + _paint(verdict, colour, _Ansi.bold))
+        colour = "green" if result["agree"] is True else "amber"
+        print("\n" + _paint(verdict, colour, "bold"))
 
     def do_route(question):
         question = (question or "").strip()
@@ -2966,9 +3441,9 @@ def main(*, machine_output=False):
         # which answers only "hosted/cloud tiers are disabled".
         decision = tier_router.route(
             question, available_tiers=set(_selectable_tiers()))
-        print("kind:   %s" % _paint(decision["kind"], _Ansi.cyan))
-        print("tier:   %s" % _paint(decision["tier"], _Ansi.cyan, _Ansi.bold))
-        print("reason: %s" % _paint(decision["reason"], _Ansi.muted))
+        print("kind:   %s" % _paint(decision["kind"], "cyan"))
+        print("tier:   %s" % _paint(decision["tier"], "cyan", "bold"))
+        print("reason: %s" % _paint(decision["reason"], "muted"))
 
     def do_refactor(arg):
         parts = (arg or "").split(None, 2)
@@ -2981,25 +3456,25 @@ def main(*, machine_output=False):
             src = server.file_ops.read_file(fpath)
             src = src.get("text", "") if isinstance(src, dict) else str(src)
         except Exception as exc:
-            print("could not read %s: %s" % (fpath, exc))
+            _emit("could not read %s: %s" % (fpath, exc))
             return
         chosen = active_tier or tier_router.route(
             objective or "improve %s" % fname,
             available_tiers=set(_selectable_tiers()))["tier"]
-        print(_paint("asking %s to improve %s ..." % (chosen, fname), _Ansi.muted))
+        print(_paint("asking %s to improve %s ..." % (chosen, fname), "muted"))
         res = code_improve.improve_function(
             src, fname,
             lambda p, t: server.ensemble_answer(p, tiers=t, mode="code"),
             tier=chosen, objective=objective)
         if not res["ok"]:
-            print(_paint("no change: %s" % res["reason"], _Ansi.amber))
+            print(_paint("no change: %s" % res["reason"], "amber"))
             return
-        print(res["diff"] or "(no diff)")
-        if _confirm(_paint("apply this change?", _Ansi.amber)):
+        _emit(res["diff"] or "(no diff)")
+        if _confirm(_paint("apply this change?", "amber")):
             server.file_ops.write_file(fpath, res["edited"], mode="overwrite")
-            print(_paint("applied to %s" % fpath, _Ansi.green))
+            print(_paint("applied to %s" % fpath, "green"))
         else:
-            print(_paint("discarded", _Ansi.muted))
+            print(_paint("discarded", "muted"))
 
     def do_replay(raw):
         """Re-render a stored thread read-only; never switches the session.
@@ -3031,14 +3506,42 @@ def main(*, machine_output=False):
             turns = memory_store.session_turns(conn, replay_session)
         finally:
             conn.close()
-        print(_format_session_replay(
+        _emit(_format_session_replay(
             turns, session_id=replay_session, limit=count,
         ))
 
     if not machine_output:
-        print(_startup_banner(strict, persona, project, active_tier))
+        _init_terminal()
+        banner = _startup_banner(strict, persona, project, active_tier)
         if _stdout_is_interactive():
+            if banner:
+                print(banner)
+            # The banner already counted the startup notices ("! N startup
+            # notices · /logs"); they are in the log, not repeated here.
+            try:
+                repl_notices.drain_repl_notices()
+            except Exception:
+                pass
             _start_tool_inventory_warmup()
+        elif banner:
+            # Off a terminal the banner never mixes into stdout (P0-3): one
+            # identity line on stderr, and stdout stays script output only.
+            try:
+                print(str(banner).split("\n", 1)[0], file=sys.stderr)
+            except (OSError, ValueError):
+                pass
+        _setup_readline(input_history)
+
+    # ``SONDER_REPL_NDJSON=1`` on a pipe: every stdout line is JSON, not only
+    # the turn lines, so command output cannot break a line-oriented parser.
+    ndjson_writer = None
+    if (not machine_output and _machine_output.enabled(os.environ)
+            and not _stdout_is_interactive()):
+        ndjson_writer = _NdjsonCommandWriter(sys.stdout)
+        previous_stdout, sys.stdout = sys.stdout, ndjson_writer
+
+    last_status = None
+    last_interrupt = [0.0]
 
     while True:
         # ``/workspace`` may select/create a directory in response to a prior
@@ -3054,31 +3557,58 @@ def main(*, machine_output=False):
             except KeyboardInterrupt:
                 announce_interrupted_turn()
             continue
+        attended = (not machine_output and _stdout_is_interactive()
+                    and _console_has_operator())
         try:
-            prompt = "" if machine_output else _composer_title(
-                active_tier,
-                context=_composer_context(session_id, project),
-                last_turn=last_turn_metrics,
-                width=_composer_frame_width(),
-                model_override=active_model,
-                permission=_permission_mode_snapshot(),
-            )
-            if prompt and _stdout_is_interactive() and not _composer_available():
-                # No raw composer to frame the title (Linux, macOS, a dumb
-                # TERM): the status goes on its own muted line and the prompt
-                # is the gutter glyph, so what is typed lines up with the
-                # transcript.
-                print(_status_line(prompt))
-                prompt = _prompt_glyph()
+            prompt = ""
+            if attended:
+                _drain_notices()
+                status_kwargs = dict(
+                    context=_composer_context(session_id, project),
+                    model_override=active_model,
+                    permission=_permission_mode_snapshot(),
+                    project=project,
+                )
+                if _composer_available():
+                    # The raw composer draws the status line as its frame.
+                    prompt = _status_text(active_tier, width=_composer_frame_width(),
+                                          **status_kwargs)
+                else:
+                    status = _status_text(active_tier, **status_kwargs)
+                    # Plain mode prints the status line only when it changes.
+                    if not S.caps().plain or status != last_status:
+                        print()
+                        print(status)
+                    last_status = status
+                    prompt = _readline_prompt(_prompt_glyph())
             line = _read_input(
                 prompt,
                 history=input_history,
-                composer=not machine_output,
+                composer=attended,
                 argument_completer=model_argument_completer,
+                refresh_frame=(lambda: _status_text(
+                    active_tier, width=_composer_frame_width(),
+                    context=_composer_context(session_id, project),
+                    model_override=active_model,
+                    permission=_permission_mode_snapshot(), project=project,
+                )) if attended else None,
             )
-        except (EOFError, KeyboardInterrupt):
-            print()
+        except EOFError:
+            if not machine_output:
+                print()
             break
+        except KeyboardInterrupt:
+            # Ctrl-C at the idle prompt: the first press clears the line, a
+            # second one within 2 s quits (P2-4).  Ctrl-D quits at once.
+            now = time.monotonic()
+            if not attended or now - last_interrupt[0] <= 2.0:
+                if not machine_output:
+                    print()
+                break
+            last_interrupt[0] = now
+            print()
+            print(_paint("(Ctrl-C again or /exit to quit)", "muted"))
+            continue
 
         # PowerShell 5.1 may prefix the first piped UTF-8 line with a BOM. Treat
         # it as transport framing so slash commands remain commands.
@@ -3090,12 +3620,9 @@ def main(*, machine_output=False):
                 if pending_workspace_work and not line.startswith("/"):
                     workspace_reply = _workspace_reply_command(line)
                     if workspace_reply:
-                        print(_paint("(interpreted as: %s)" % workspace_reply, _Ansi.muted))
+                        print(_paint("(interpreted as: %s)" % workspace_reply, "muted"))
                         line = workspace_reply
-                if _history_safe(line) and (not input_history or input_history[-1] != line):
-                    input_history.append(line)
-                    if len(input_history) > REPL_HISTORY_LIMIT:
-                        del input_history[:-REPL_HISTORY_LIMIT]
+                remember(line)
                 _maybe_live_reload()
 
                 # Natural-language command resolution: "show me your stats" -> /stats,
@@ -3108,10 +3635,12 @@ def main(*, machine_output=False):
                     last_natural_turn = line
                     resolved = command_router.resolve(line)
                     if resolved:
-                        print(_paint("(interpreted as: %s)" % resolved, _Ansi.muted))
+                        print(_paint("(interpreted as: %s)" % S.safe_text(resolved), "muted"))
                         line = resolved
 
+                _CURRENT_LINE[0] = ""
                 if _looks_like_slash_command(line):
+                    _CURRENT_LINE[0] = " ".join(line.split())
                     parts = line.split(None, 1)
                     cmd = parts[0].lower()
                     arg = parts[1] if len(parts) > 1 else ""
@@ -3127,39 +3656,67 @@ def main(*, machine_output=False):
                     if usage:
                         print(usage)
                         continue
-                    may_run, refusal = _named_command_gate(cmd, arg)
+                    # Rating commands record an outcome for the answer just
+                    # shown; the plain-language form ("that worked") already
+                    # does so ungated.  With nothing to rate there is nothing
+                    # to approve, so say so before any prompt (P1-9).
+                    rating = _rating_precheck(cmd, last_iid)
+                    if rating == "nothing":
+                        print("(nothing to rate yet)")
+                        continue
+                    may_run, refusal = (
+                        (True, "") if rating == "rate" else _named_command_gate(cmd, arg)
+                    )
                     if not may_run:
-                        box = _box_chars()
-                        if _stdout_is_interactive() and refusal.startswith("refused "):
-                            print("%s %s" % (
-                                _paint(box["refused"], _Ansi.red, _Ansi.bold),
-                                _paint(refusal, _Ansi.red),
-                            ))
-                            hint = _error_hint(refusal)
-                            if hint:
-                                print(_paint("  %s" % hint, _Ansi.muted))
-                        else:
-                            print(refusal)
+                        print(_refusal_notice(line, refusal))
                         continue
 
                     if cmd == "/":
                         # A bare slash is the "what can I type" gesture.
-                        print(command_catalog.format_matches(""))
+                        _emit(command_catalog.format_matches(""))
                     elif cmd == "/help":
-                        print(command_catalog.help_text(arg.strip()) + _help_policy_note(arg))
+                        topic = arg.strip()
+                        if not topic and not machine_output and _stdout_is_interactive():
+                            mode = _mode_fields(_permission_mode_snapshot())[0]
+                            print(_help_screen(_cols(), mode if mode != "unknown" else "manual"))
+                        elif topic.lower() == "status":
+                            print(_help_status_text(_cols()))
+                        elif topic.lower() == "all":
+                            _emit(command_catalog.help_text(""))
+                        else:
+                            _emit(command_catalog.help_text(topic) + _help_policy_note(arg))
+                    elif cmd == "/about":
+                        state = _banner_state(
+                            strict, persona, project, active_tier,
+                            session_id=session_id, model_override=active_model,
+                        )
+                        print("\n".join(S.about_lines(state, _cols())))
+                    elif cmd == "/logs":
+                        _emit(_logs_command(arg))
+                    elif cmd == "/status":
+                        if arg.strip().lower() == "pool":
+                            _emit(server.status())
+                        elif arg.strip():
+                            print("usage: /status [pool]")
+                        else:
+                            print(_status_long(_status_state(
+                                active_tier, context=_composer_context(session_id, project),
+                                model_override=active_model,
+                                permission=_permission_mode_snapshot(), project=project,
+                            ), _cols()))
                     elif cmd == "/why":
                         # A diagnostic read over the resolver's own trace: which stage
                         # claimed (or refused) a plain-language turn, and on what
                         # evidence. Never dispatches anything.
                         target = arg.strip() or last_natural_turn
                         if not target:
-                            print(
+                            _emit(
                                 "usage: /why [text]  explain how a plain-language turn"
                                 " routes; the bare form uses your previous non-slash"
                                 " turn"
                             )
                         else:
-                            print(_format_route_explanation(
+                            _emit(_format_route_explanation(
                                 command_router.explain(target)
                             ))
                     elif cmd == "/version":
@@ -3171,11 +3728,11 @@ def main(*, machine_output=False):
 
                         stamped = build_identity.stamped_build_info()
                         if stamped is not None:
-                            print("sonder %s (commit %s, stamped release)" % (
+                            _emit("sonder %s (commit %s, stamped release)" % (
                                 stamped.version, stamped.commit_sha[:12],
                             ))
                         else:
-                            print("sonder %s (source checkout)"
+                            _emit("sonder %s (source checkout)"
                                   % build_identity.VERSION)
                     elif cmd == "/clear":
                         _clear_terminal_scrollback()
@@ -3188,7 +3745,7 @@ def main(*, machine_output=False):
                     elif cmd == "/model":
                         do_model(arg)
                     elif cmd == "/cloud":
-                        print(server.cloud_opt_in(arg.strip() or "status"))
+                        _emit(server.cloud_opt_in(arg.strip() or "status"))
                     elif cmd == "/consult":
                         do_consult(arg)
                     elif cmd == "/route":
@@ -3196,23 +3753,23 @@ def main(*, machine_output=False):
                     elif cmd == "/refactor":
                         do_refactor(arg)
                     elif cmd in ("/env", "/environment"):
-                        print(server.environment_status(
+                        _emit(server.environment_status(
                             refresh=(arg or "").strip().lower() == "refresh"))
                     elif cmd in ("/toolstatus", "/toolversion"):
                         name = (arg or "").strip()
                         if not name:
-                            print("usage: /toolstatus <discovered-tool-name>  (try /env first)")
+                            _emit("usage: /toolstatus <discovered-tool-name>  (try /env first)")
                         else:
-                            print(server.toolchain_status(name=name))
+                            _emit(server.toolchain_status(name=name))
                     elif cmd == "/scaffold":
                         parts = arg.split()
                         if len(parts) < 2:
-                            print("usage: /scaffold <kind> <name> [root]   kinds: %s"
+                            _emit("usage: /scaffold <kind> <name> [root]   kinds: %s"
                                   % ", ".join(project_scaffold.kinds()))
                         else:
                             kind, name = parts[0], parts[1]
                             root = parts[2] if len(parts) > 2 else name
-                            print(server.scaffold_project(
+                            _emit(server.scaffold_project(
                                 kind=kind, name=name, root=root, apply=True))
                     elif cmd == "/workspace":
                         do_workspace_select(arg)
@@ -3223,138 +3780,138 @@ def main(*, machine_output=False):
                         if a in ("on", "off"):
                             location_consent = a == "on"
                         elif a:
-                            print("usage: /location [on|off]")
+                            _emit("usage: /location [on|off]")
                             continue
                         effective = (
                             server._env_location_consent()
                             if location_consent is None else location_consent
                         )
-                        print("approximate IP location: %s%s" % (
+                        _emit("approximate IP location: %s%s" % (
                             "on" if effective else "off",
                             " (env default)" if location_consent is None else "",
                         ))
                     elif cmd == "/stats":
-                        print(server.sonder_stats())
+                        _emit(server.sonder_stats())
                     elif cmd == "/context":
-                        print(server.context_health(session=session_id, project=project))
+                        _emit(server.context_health(session=session_id, project=project))
                     elif cmd in ("/contextsize", "/ctxsize"):
                         if arg.strip():
-                            print(server.set_context_size(arg.strip()))
+                            _emit(server.set_context_size(arg.strip()))
                         else:
-                            print(server.context_policy_status())
+                            _emit(server.context_policy_status())
                     elif cmd in ("/compact", "/compaction"):
-                        print(server.context_compaction_plan(session=session_id, project=project))
+                        _emit(server.context_compaction_plan(session=session_id, project=project))
                     elif cmd in ("/commands", "/cmds"):
-                        print(server.command_registry_list(arg.strip()))
+                        _emit(server.command_registry_list(arg.strip()))
                     elif cmd == "/dump":
                         do_dump(arg.strip() or "repl")
                     elif cmd in ("/permissions", "/perms"):
-                        print(server.permission_policy(arg.strip()))
+                        _emit(server.permission_policy(arg.strip()))
                     elif cmd == "/mode":
-                        print(_mode_command(arg.strip()))
+                        _emit(_mode_command(arg.strip()))
                     elif cmd in ("/todo", "/task", "/tasks"):
                         text = arg.strip()
                         if not text or text.lower() in ("list", "ls"):
-                            print(server.task_list(project=project))
+                            _emit(server.task_list(project=project))
                         else:
                             action, _, rest = text.partition(" ")
                             action = action.lower()
                             if action in ("add", "create", "new"):
-                                print(server.task_create(title=rest.strip(), project=project))
+                                _emit(server.task_create(title=rest.strip(), project=project))
                             elif action in ("done", "complete", "finish"):
                                 if rest.strip():
-                                    print(server.task_update(task_id=rest.strip(), status="done"))
+                                    _emit(server.task_update(task_id=rest.strip(), status="done"))
                                 else:
-                                    print("usage: /todo done <task-id>")
+                                    _emit("usage: /todo done <task-id>")
                             elif action in ("start", "doing"):
                                 if rest.strip():
-                                    print(server.task_update(task_id=rest.strip(), status="in_progress"))
+                                    _emit(server.task_update(task_id=rest.strip(), status="in_progress"))
                                 else:
-                                    print("usage: /todo start <task-id>")
+                                    _emit("usage: /todo start <task-id>")
                             elif action in ("block", "blocked"):
                                 if rest.strip():
-                                    print(server.task_update(task_id=rest.strip(), status="blocked"))
+                                    _emit(server.task_update(task_id=rest.strip(), status="blocked"))
                                 else:
-                                    print("usage: /todo block <task-id>")
+                                    _emit("usage: /todo block <task-id>")
                             elif action in ("show", "view"):
                                 if rest.strip():
-                                    print(server.task_show(rest.strip()))
+                                    _emit(server.task_show(rest.strip()))
                                 else:
-                                    print("usage: /todo show <task-id>")
+                                    _emit("usage: /todo show <task-id>")
                             elif action == "plan":
                                 # "/todo plan Build auth | design schema | add API"
                                 parts = [p.strip() for p in rest.split("|")]
                                 parts = [p for p in parts if p]
                                 if len(parts) < 2:
-                                    print("usage: /todo plan <title> | <step> | <step> ...")
+                                    _emit("usage: /todo plan <title> | <step> | <step> ...")
                                 else:
-                                    print(server.task_plan(
+                                    _emit(server.task_plan(
                                         title=parts[0],
                                         steps=json.dumps(parts[1:]),
                                         project=project,
                                         owner="sonder",
                                     ))
                             elif action in ("progress", "status"):
-                                print(server.task_progress(project=project))
+                                _emit(server.task_progress(project=project))
                             elif action in ("delete", "rm", "remove"):
                                 if rest.strip():
-                                    print(server.task_delete(task_id=rest.strip()))
+                                    _emit(server.task_delete(task_id=rest.strip()))
                                 else:
-                                    print("usage: /todo delete <task-id>")
+                                    _emit("usage: /todo delete <task-id>")
                             elif action in ("depend", "dep", "blockedby"):
                                 # "/todo depend <task-id> <depends-on-id>"
                                 dep_parts = rest.split()
                                 if len(dep_parts) == 2:
-                                    print(server.task_depend(
+                                    _emit(server.task_depend(
                                         task_id=dep_parts[0], depends_on=dep_parts[1],
                                     ))
                                 else:
-                                    print("usage: /todo depend <task-id> <depends-on-id>")
+                                    _emit("usage: /todo depend <task-id> <depends-on-id>")
                             else:
-                                print(_TODO_USAGE)
+                                _emit(_TODO_USAGE)
                     elif cmd == "/quality":
-                        print(server.memory_quality_report())
+                        _emit(server.memory_quality_report())
                     elif cmd == "/qualityfix":
-                        print(server.memory_quality_repair(apply=(arg.strip().lower() == "apply")))
+                        _emit(server.memory_quality_repair(apply=(arg.strip().lower() == "apply")))
                     elif cmd in ("/privacy", "/privacyreview", "/privacyfix", "/embeddings", "/embedfix"):
-                        print(server.control_command(line, session=session_id, project=project))
+                        _emit(server.control_command(line, session=session_id, project=project))
                     elif cmd in ("/emotion", "/emotions", "/vectors", "/mood"):
-                        print(server.emotion_command(arg))
+                        _emit(server.emotion_command(arg))
                     elif cmd in ("/prefer", "/preference", "/preferences"):
-                        print(server.preference_command(arg))
+                        _emit(server.preference_command(arg))
                     elif cmd in ("/improve", "/improvements"):
-                        print(server.system_improvement_report(session=session_id, project=project))
+                        _emit(server.system_improvement_report(session=session_id, project=project))
                     elif cmd == "/artifact-mobility":
-                        print(_artifact_mobility_command(arg))
+                        _emit(_artifact_mobility_command(arg))
                     elif cmd == "/lanes":
-                        print(_lanes_command(arg))
+                        _emit(_lanes_command(arg))
                     elif cmd == "/recover":
-                        print(_recovery_command(session_id, workspace_root, arg))
+                        _emit(_recovery_command(session_id, workspace_root, arg))
                     elif cmd == "/recovery":
-                        print(_recovery_posture_command())
+                        _emit(_recovery_posture_command())
                     elif cmd in ("/agents", "/masterstatus"):
-                        print(server.master_status())
+                        _emit(server.master_status())
                     elif cmd == "/fanouts":
-                        print(_fanout_recent_command(arg))
+                        _emit(_fanout_recent_command(arg))
                     elif cmd in ("/capacity", "/agentcapacity"):
-                        print(server.control_command(line, session=session_id, project=project))
+                        _emit(server.control_command(line, session=session_id, project=project))
                     elif cmd in ("/agentcancel", "/cancelagents"):
-                        print(server.control_command(line, session=session_id, project=project))
+                        _emit(server.control_command(line, session=session_id, project=project))
                     elif cmd in ("/agentretry", "/retryagent"):
-                        print(server.control_command(line, session=session_id, project=project))
+                        _emit(server.control_command(line, session=session_id, project=project))
                     elif cmd == "/tools":
-                        print(_tools_command(arg))
+                        _emit(_tools_command(arg))
                     elif cmd == "/test":
                         _test_command(arg, workspace_root)
                     elif cmd == "/digest":
-                        print(_digest_command(arg, workspace_root))
+                        _emit(_digest_command(arg, workspace_root))
                     elif cmd == "/activity":
                         if arg.strip().lower() in ("watch", "tail"):
                             _watch_activity()
                         else:
-                            print(server.activity_status())
+                            _emit(server.activity_status())
                     elif cmd in ("/autopilot", "/auto", "/mission"):
-                        print(server.control_command(
+                        _emit(server.control_command(
                             line, session=session_id, project=project,
                             autopilot_request_owner=_repl_autopilot_owner(cmd, arg),
                         ))
@@ -3380,17 +3937,17 @@ def main(*, machine_output=False):
                         # With a piped stdin the gate refused rather than asked,
                         # nobody said yes, and this is False -- which is the whole
                         # point.
-                        print(server.control_command(
+                        _emit(server.control_command(
                             line, session=session_id, project=project,
                             operator_approved=_console_has_operator(),
                         ))
                     elif cmd in ("/weather", "/forecast"):
-                        print(server.control_command(
+                        _emit(server.control_command(
                             line, session=session_id, project=project,
                         ))
                     elif cmd in ("/work", "/agent"):
                         if not arg.strip():
-                            print("usage: /work <task>")
+                            _emit("usage: /work <task>")
                         else:
                             out = _run_session_work(session_id, host_project=project,
                                 prompt=arg.strip(), tier=active_model or active_tier or "auto",
@@ -3400,7 +3957,7 @@ def main(*, machine_output=False):
                             last_run_source = _answer_only(out)
                             last_iid = None
                             last_turn_metrics = _latest_repl_turn_metrics(surfaces=("agent",))
-                            print(out)
+                            _emit(out)
                     elif cmd in (
                         "/report", "/endreport", "/checklist", "/plan",
                         "/inventory", "/workspace",
@@ -3410,39 +3967,39 @@ def main(*, machine_output=False):
                         "/runprogram", "/runscript",
                         "/artifactcheck", "/verifyartifact", "/groundartifact",
                     ):
-                        print(server.control_command(
+                        _emit(server.control_command(
                             line, session=session_id, project=project,
                         ))
                     elif cmd in ("/asset", "/assets", "/assetgen", "/artifact"):
                         parts = arg.strip().split(None, 1)
                         if len(parts) != 2:
-                            print("usage: /asset <name> <free-form brief>")
+                            _emit("usage: /asset <name> <free-form brief>")
                         else:
-                            print(server.artifact_generate(name=parts[0], brief=parts[1]))
+                            _emit(server.artifact_generate(name=parts[0], brief=parts[1]))
                     elif cmd in ("/forge", "/gamesuite"):
-                        print(server.game_reference_suite(name=arg.strip() or "sonder-reference"))
+                        _emit(server.game_reference_suite(name=arg.strip() or "sonder-reference"))
                     elif cmd in ("/game", "/gamegen"):
                         parts = arg.strip().split(None, 2)
                         if len(parts) != 3 or "|" not in parts[2]:
-                            print("usage: /game <language> <2d|2.5d|3d> <name> | <concept>")
+                            _emit("usage: /game <language> <2d|2.5d|3d> <name> | <concept>")
                         else:
                             name, _, concept = parts[2].partition("|")
-                            print(server.game_generate_and_test(
+                            _emit(server.game_generate_and_test(
                                 name=name.strip(), concept=concept.strip(),
                                 language=parts[0], dimension=parts[1],
                             ))
                     elif cmd in ("/gamefleet", "/gamecampaign"):
                         campaign_args = server._parse_game_campaign_command(arg)
                         if campaign_args is None:
-                            print("usage: /gamefleet <name> | <concept> [| language | dimension]")
+                            _emit("usage: /gamefleet <name> | <concept> [| language | dimension]")
                         else:
-                            print(server.game_generation_campaign(**campaign_args))
+                            _emit(server.game_generation_campaign(**campaign_args))
                     elif cmd == "/register":
                         parts = arg.split(None, 1)
                         if len(parts) != 2:
-                            print("usage: /register <username> <password>")
+                            _emit("usage: /register <username> <password>")
                         else:
-                            print(server.admin_register(parts[0], parts[1]))
+                            _emit(server.admin_register(parts[0], parts[1]))
                     elif cmd == "/login":
                         parts = arg.split(None, 1)
                         if not parts:
@@ -3455,7 +4012,7 @@ def main(*, machine_output=False):
                         elif len(parts) == 2:
                             username, password = parts
                         else:
-                            print("usage: /login [<username> <password>]")
+                            _emit("usage: /login [<username> <password>]")
                             continue
                         out = server.admin_login(username, password)
                         # Keep the bearer token for this session; never print it
@@ -3464,24 +4021,24 @@ def main(*, machine_output=False):
                         token, display = split_login_output(out)
                         if token:
                             CURRENT_TOKEN = token
-                        print(display)
+                        _emit(display)
                     elif cmd == "/whoami":
-                        print(server.admin_whoami(CURRENT_TOKEN))
+                        _emit(server.admin_whoami(CURRENT_TOKEN))
                     elif cmd == "/admin":
-                        print(server.admin_status(CURRENT_TOKEN))
+                        _emit(server.admin_status(CURRENT_TOKEN))
                     elif cmd == "/accounts":
-                        print(server.admin_accounts(CURRENT_TOKEN))
+                        _emit(server.admin_accounts(CURRENT_TOKEN))
                     elif cmd == "/setaccount":
                         parts = arg.split()
                         if not parts:
-                            print("usage: /setaccount <username> role=developer tier=pro dev_flags=x banned=false")
+                            _emit("usage: /setaccount <username> role=developer tier=pro dev_flags=x banned=false")
                         else:
                             kv = {}
                             for item in parts[1:]:
                                 if "=" in item:
                                     k, v = item.split("=", 1)
                                     kv[k] = v
-                            print(server.admin_set_account(
+                            _emit(server.admin_set_account(
                                 token=CURRENT_TOKEN,
                                 username=parts[0],
                                 role=kv.get("role", ""),
@@ -3490,27 +4047,27 @@ def main(*, machine_output=False):
                                 banned=kv.get("banned", ""),
                             ))
                     elif cmd in ("/debug", "/inspect"):
-                        print(server.debug_inspect(CURRENT_TOKEN))
+                        _emit(server.debug_inspect(CURRENT_TOKEN))
                     elif cmd in ("/cot", "/chainofthought", "/thoughts"):
-                        print(server.admin_private_chain_of_thought(CURRENT_TOKEN))
+                        _emit(server.admin_private_chain_of_thought(CURRENT_TOKEN))
                     elif cmd == "/filepolicy":
-                        print(server.file_policy(token=CURRENT_TOKEN))
+                        _emit(server.file_policy(token=CURRENT_TOKEN))
                     elif cmd in ("/files", "/find"):
                         # A selected workspace scopes the search root too.
                         root, error = _workspace_scoped_path(
                             workspace_root, workspace_root and ".",
                         )
                         if error:
-                            print(error)
+                            _emit(error)
                         else:
                             with _workspace_file_scope(workspace_root):
-                                print(server.file_find(
+                                _emit(server.file_find(
                                     query=arg.strip() or "*", root=root,
                                     token=CURRENT_TOKEN,
                                 ))
                     elif cmd == "/read":
                         if not arg.strip():
-                            print("usage: /read <path>")
+                            _emit("usage: /read <path>")
                         else:
                             workspace_file_command(
                                 arg.strip(),
@@ -3519,7 +4076,7 @@ def main(*, machine_output=False):
                     elif cmd in ("/write", "/append"):
                         parts = arg.split(None, 1)
                         if len(parts) != 2:
-                            print("usage: %s <path> <text>" % cmd)
+                            _emit("usage: %s <path> <text>" % cmd)
                         else:
                             workspace_file_command(parts[0], lambda path: server.file_write(
                                 path=path,
@@ -3530,7 +4087,7 @@ def main(*, machine_output=False):
                     elif cmd == "/edit":
                         pieces = arg.split("|", 2)
                         if len(pieces) != 3 or not pieces[0].strip():
-                            print("usage: /edit <path>|<old>|<new>")
+                            _emit("usage: /edit <path>|<old>|<new>")
                         else:
                             workspace_file_command(pieces[0].strip(), lambda path: server.file_edit(
                                 path=path,
@@ -3540,7 +4097,7 @@ def main(*, machine_output=False):
                             ))
                     elif cmd == "/mkdir":
                         if not arg.strip():
-                            print("usage: /mkdir <path>")
+                            _emit("usage: /mkdir <path>")
                         else:
                             workspace_file_command(
                                 arg.strip(),
@@ -3548,7 +4105,7 @@ def main(*, machine_output=False):
                             )
                     elif cmd == "/delete":
                         if not arg.strip():
-                            print("usage: /delete <path>")
+                            _emit("usage: /delete <path>")
                         else:
                             workspace_file_command(
                                 arg.strip(),
@@ -3577,15 +4134,15 @@ def main(*, machine_output=False):
                             ):
                                 mode = requested_mode
                                 task = parts[1] if len(parts) > 1 else ""
-                        print(server.master_orchestrate(task=task, mode=mode))
+                        _emit(server.master_orchestrate(task=task, mode=mode))
                     elif cmd == "/lessons":
                         _print_lessons()
                     elif cmd in ("/pass", "/good"):
                         if last_iid:
-                            print(server.record_outcome(last_iid, "tests_passed"))
+                            _emit(server.record_outcome(last_iid, "tests_passed"))
                             last_iid = None
                         else:
-                            print("(nothing to record yet)")
+                            _emit("(nothing to record yet)")
                     elif cmd in ("/accept", "/accepted", "/used", "/copied", "/edited"):
                         if last_iid:
                             signal = {
@@ -3595,16 +4152,16 @@ def main(*, machine_output=False):
                                 "/copied": "copied",
                                 "/edited": "edited",
                             }[cmd]
-                            print(server.record_outcome(last_iid, signal))
+                            _emit(server.record_outcome(last_iid, signal))
                             last_iid = None
                         else:
-                            print("(nothing to record yet)")
+                            _emit("(nothing to record yet)")
                     elif cmd in ("/fail", "/bad"):
                         if last_iid:
-                            print(server.record_outcome(last_iid, "failed"))
+                            _emit(server.record_outcome(last_iid, "failed"))
                             last_iid = None
                         else:
-                            print("(nothing to record yet)")
+                            _emit("(nothing to record yet)")
                     elif cmd == "/run":
                         timeout = _parse_run_timeout(arg)
                         if timeout is not None:
@@ -3628,7 +4185,7 @@ def main(*, machine_output=False):
                         last_response = None
                         last_run_source = None
                         last_turn_metrics = None
-                        print("started a new thread (%s)" % session_id)
+                        _emit("started a new thread (%s)" % session_id)
                     elif cmd == "/sessions":
                         _print_sessions()
                     elif cmd == "/replay":
@@ -3636,7 +4193,7 @@ def main(*, machine_output=False):
                     elif cmd == "/resume":
                         target = (arg or "").strip()
                         if not target:
-                            print("usage: /resume <session-id|title-prefix>")
+                            _emit("usage: /resume <session-id|title-prefix>")
                         else:
                             conn = server._open_db()
                             try:
@@ -3654,36 +4211,36 @@ def main(*, machine_output=False):
                                 # makes the composer attribute another conversation's
                                 # token/call/timing data to the newly selected thread.
                                 last_turn_metrics = None
-                                print("resumed thread %s" % session_id)
+                                _emit("resumed thread %s" % session_id)
                             else:
-                                print("no session matching '%s'" % target)
+                                _emit("no session matching '%s'" % target)
                     elif cmd == "/project":
                         a = (arg or "").strip()
                         if not a:
-                            print("project: %s" % project)
+                            _emit("project: %s" % project)
                         else:
                             project = a
-                            print("project: %s" % project)
+                            _emit("project: %s" % project)
                     elif cmd == "/fact":
                         a = (arg or "").strip()
                         if not a:
-                            print("usage: /fact <text> | /fact forget <id> confirm")
+                            _emit("usage: /fact <text> | /fact forget <id> confirm")
                         elif a.lower() == "forget" or a.lower().startswith("forget "):
                             bits = a.split()
                             if len(bits) != 3 or bits[2].lower() != "confirm":
-                                print("usage: /fact forget <id> confirm")
+                                _emit("usage: /fact forget <id> confirm")
                             else:
-                                print(server.sonder_forget_fact(
+                                _emit(server.sonder_forget_fact(
                                     bits[1], project=project, confirm=bits[1],
                                 ))
                         else:
-                            print(server.sonder_remember_fact(a, project=project))
+                            _emit(server.sonder_remember_fact(a, project=project))
                     elif cmd == "/facts":
                         _print_facts(project)
                     elif cmd in ("/exit", "/quit", "/q"):
                         break
                     else:
-                        print(_run_catalogued(line, cmd))
+                        _emit(_run_catalogued(line, cmd))
                     continue
 
                 # Passive learning: if the previous turn is still pending an outcome,
@@ -3752,7 +4309,7 @@ def main(*, machine_output=False):
                             print("workspace: %s" % workspace_root)
                             task = remainder or line
                             if remainder:
-                                print(_paint("(using folder from your message; working on: %s)" % remainder, _Ansi.muted))
+                                print(_paint("(using folder from your message; working on: %s)" % remainder, "muted"))
                             run_workspace_work(task)
                             continue
                         pending_workspace_work = line
@@ -3772,6 +4329,7 @@ def main(*, machine_output=False):
                     continue
 
                 started_at = time.monotonic()
+                _TURN_MODEL[0] = current_model()
                 indicator = _begin_chat_turn()
                 try:
                     out = server.sonder(line, trace=trace, strict=strict, persona=persona,
@@ -3784,8 +4342,10 @@ def main(*, machine_output=False):
                     raise
                 last_turn_metrics = _latest_repl_turn_metrics(session_id)
                 if _is_repl_error(out):
-                    _print_chat_result(out, started_at, label="Sonder error", error=True,
-                                       indicator=indicator)
+                    # One label; the error header and footer say it failed
+                    # (P1-4: never "Sonder error · error").
+                    _print_chat_result(out, started_at, label="Sonder", error=True,
+                                       indicator=indicator, metrics=last_turn_metrics)
                     continue
 
                 last_iid = server.parse_interaction_id(out)
@@ -3793,13 +4353,36 @@ def main(*, machine_output=False):
                 last_run_source = _answer_only(out)
                 cleaned = _strip_footer(out)
                 _print_chat_result(cleaned, started_at, offer_feedback=bool(last_iid),
-                                   indicator=indicator, interaction_id=last_iid)
+                                   indicator=indicator, interaction_id=last_iid,
+                                   metrics=last_turn_metrics)
         except KeyboardInterrupt:
             # Ctrl-C during a turn cancels that turn (its cancellation
             # scope was cancelled by the signal handler) and returns to
             # the prompt. A Ctrl-C at the idle prompt still exits.
             announce_interrupted_turn()
             continue
+
+    if ndjson_writer is not None:
+        ndjson_writer.close()
+        sys.stdout = previous_stdout
+
+
+_RATING_COMMANDS = frozenset((
+    "/pass", "/good", "/fail", "/bad", "/accept", "/accepted", "/used",
+    "/copied", "/edited",
+))
+
+
+def _rating_precheck(cmd, last_iid):
+    """``"nothing"``/``"rate"`` for a rating command, ``""`` for any other.
+
+    Rating records an outcome for the answer just shown, the same thing the
+    ungated plain-language form ("that worked") records; with no answer to
+    rate there is nothing to approve either (P1-9).
+    """
+    if cmd not in _RATING_COMMANDS:
+        return ""
+    return "rate" if last_iid else "nothing"
 
 
 if __name__ == "__main__":

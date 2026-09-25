@@ -111,7 +111,7 @@ def test_interactive_error_panel_adds_a_hint_for_known_failures(
         monkeypatch, capsys):
     monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: True)
     monkeypatch.setattr(sonder_repl, "_stdout_is_interactive", lambda: True)
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    monkeypatch.setattr(sonder_repl.S, "_CACHED", sonder_repl.S.Caps())
 
     sonder_repl._print_chat_result(
         "ERROR contacting local Ollama at 127.0.0.1:11434 after 1 attempt(s): boom",
@@ -127,7 +127,7 @@ def test_interactive_error_panel_stays_hint_free_for_unknown_failures(
         monkeypatch, capsys):
     monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: True)
     monkeypatch.setattr(sonder_repl, "_stdout_is_interactive", lambda: True)
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    monkeypatch.setattr(sonder_repl.S, "_CACHED", sonder_repl.S.Caps())
 
     sonder_repl._print_chat_result("ERROR: novel", 0.0, error=True)
 
@@ -140,7 +140,7 @@ def test_piped_error_output_never_carries_a_hint(monkeypatch, capsys):
         sonder_repl, "_completion_timing",
         lambda _started: "Sonder completed in 1.00s",
     )
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    monkeypatch.setattr(sonder_repl.S, "_CACHED", sonder_repl.S.Caps())
     monkeypatch.delenv("SONDER_REPL_NDJSON", raising=False)
 
     sonder_repl._print_chat_result(

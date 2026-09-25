@@ -1,0 +1,5 @@
+◈ sonder · sonder:latest · manual · not listening
+  /help commands · /mode to switch
+
+code · sonder:latest · manual · ctx 0/8.2k
+❯

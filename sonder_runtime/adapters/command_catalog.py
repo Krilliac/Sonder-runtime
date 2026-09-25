@@ -33,6 +33,7 @@ import importlib
 import os
 import re
 import shlex
+import unicodedata
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence
 
@@ -159,7 +160,14 @@ CATEGORIES = {
     "data": "Inspect, query, and convert structured data",
     "creative": "Artifacts, assets, images, and games",
     "web": "Search, fetch, weather, and location",
-    "system": "Host, hardware, runtime policy, and diagnostics",
+    # ``system`` used to hold 66 commands, which made ``/help system`` a wall
+    # and the group name say nothing.  The four groups below replace it; the
+    # older placement tables still write ``system`` and ``_split_system``
+    # refines that into one of these at catalog build time.
+    "diagnostics": "Health checks, activity, logs, and turn inspection",
+    "runtime": "Models, modes, hardware, host tools, and runtime policy",
+    "updates": "Source updates, self-modification, and live reload",
+    "admin": "Debug and administrator inspection",
     "persona": "Tone, emotion vectors, and preferences",
     "security": "Permissions, risk inspection, and accounts",
     "training": "Curriculum, evaluation, and weight training",
@@ -1236,6 +1244,43 @@ def _help_summaries() -> dict:
     return out
 
 
+# Refinement of the legacy ``system`` placement into the four groups above.
+# Checked in order; the first keyword contained in the command stem (or the
+# tool it fronts) wins, and anything unmatched is a diagnostic read.
+_SYSTEM_SPLIT = (
+    ("diagnostics", (
+        "activity", "calibration", "diagnostic", "dump", "log_inspect",
+        "policy_explain", "reasoning", "report", "turn_inspect", "why",
+        "commands", "improve", "capability_manifest", "local_service_probe",
+        "artifact-mobility",
+    )),
+    ("updates", (
+        "update", "stash", "selfmod", "self_heal", "live_reload", "mcp",
+        "fetch_artifact", "verify_artifact",
+    )),
+    ("admin", (
+        "cot", "debug", "access_request", "authoritative", "admin",
+        "process_list",
+    )),
+    ("runtime", (
+        "runtime", "cloud", "mode", "strict", "trace", "fanout", "status",
+        "hardware", "npu", "unload", "compiler_cache", "location", "env",
+        "tool", "lane", "recovery", "goal", "ensemble", "vision", "image",
+    )),
+)
+
+
+def _split_system(category: str, name: str, tool: str = "") -> str:
+    """Place a command the older tables put in ``system`` into its group."""
+    if category != "system":
+        return category
+    stems = [str(name or "").lstrip("/").lower(), str(tool or "").lower()]
+    for group, keywords in _SYSTEM_SPLIT:
+        if any(word in stem for stem in stems if stem for word in keywords):
+            return group
+    return "diagnostics"
+
+
 def _category_for(name: str) -> str:
     if name in _CATEGORY_BY_TOOL:
         return _CATEGORY_BY_TOOL[name]
@@ -1472,6 +1517,7 @@ def catalog() -> tuple[CatalogCommand, ...]:
             category = _LEGACY_CATEGORY.get(raw, raw)
         if category not in CATEGORIES:
             category = _category_for(tool or stem)
+        category = _split_system(category, canonical, tool)
         schema_params = _params_from_schema(getattr(row, "parameters", {})) if row else ()
         if not schema_params:
             schema_params = _native_params(canonical)
@@ -1505,7 +1551,7 @@ def catalog() -> tuple[CatalogCommand, ...]:
             name=slash,
             aliases=(),
             tool=row.name,
-            category=_category_for(row.name),
+            category=_split_system(_category_for(row.name), slash, row.name),
             risk=_risk_for(row.name, server),
             summary=_summarize(row.description),
             params=_params_from_schema(row.parameters),
@@ -1746,18 +1792,46 @@ _RISK_MARK = {
 }
 
 
+# Risk as words (spec 2.3/2.9).  The one-character marks above collided with
+# the prompt ``>`` and with other surfaces, and a screen reader read them as
+# punctuation.  ``safe`` stays blank for the same reason it does above.
+RISK_WORD = {
+    "safe": "", "ask": "[asks]", "mutation": "[writes]",
+    "execution": "[runs]", "dangerous": "[danger]",
+}
+RISK_LEGEND = (
+    ("[asks]", "asks first"), ("[writes]", "changes files"),
+    ("[runs]", "runs a program"), ("[danger]", "destructive"),
+)
+
+
+def risk_word(risk: str) -> str:
+    """The bracketed word for a risk class; unknown classes read as danger.
+
+    An unrecognised class is unclassified, and rendering it blank would make
+    it look like a safe read -- the failure ``_RISK_MARK`` documents.
+    """
+    if not risk:
+        return ""
+    return RISK_WORD.get(str(risk), "[danger]")
+
+
 def _line(command: Command, width: int) -> str:
-    return "  %s %-*s  %s" % (
-        _RISK_MARK.get(command.risk, " "), width, command.name,
-        command.summary or "(no description)",
-    )
+    word = risk_word(command.risk)
+    return ("  %-*s  %s%s" % (
+        width, command.name, command.summary or "(no description)",
+        ("  " + word) if word else "",
+    )).rstrip()
 
 
 def help_overview() -> str:
+    """The full, plain overview (``/help all``, HTTP and app surfaces)."""
     grouped = categories()
     total = sum(len(v) for v in grouped.values())
+    legend = "   ".join("%s %s" % pair for pair in RISK_LEGEND)
     lines = [
         "sonder commands  (%d across %d categories)" % (total, len(grouped)),
+        "  legend: %s" % legend,
         "",
         "  /help <category>   list that category      /help <command>  full usage",
         "  /<text>            match commands as you type",
@@ -1773,9 +1847,201 @@ def help_overview() -> str:
         lines += ["", "most used"]
         pwidth = max(len(c.name) for c in popular)
         lines += [_line(c, pwidth) for c in popular]
-    lines += ["", "  legend: ? asks first   * changes files   "
-                  "> runs a program   ! destructive"]
     return "\n".join(lines)
+
+
+# The eight commands the compact ``/help`` leads with (spec 2.9).  Usage and
+# summary are curated for a first screen; the risk word is read from the
+# catalog for the command's *bare* form, so a command whose bare form only
+# reads (``/todo`` lists) is not marked for what its sub-commands can do.
+_CORE_HELP = (
+    ("/model [tier|name]", "switch model or tier", "/model"),
+    # /mode is the gate's own control and never prompts (GATE_EXEMPT_TOOLS).
+    ("/mode <name>", "plan, manual, acceptEdits or auto", ""),
+    ("/read <path>", "show a file", "/read"),
+    ("/run", "run the last answer's code block", "/run"),
+    ("/todo", "list tasks (add/done change them)", "/todo"),
+    ("/status", "session, model, endpoint, context", "/status"),
+    ("/pass  /fail", "rate the last answer (teaches Sonder)", ""),
+    ("/exit", "quit (or Ctrl-D)", ""),
+)
+
+
+def _bare_risk(name: str) -> str:
+    """Risk of a command's bare form, or "" when it fronts no graded tool."""
+    if not name:
+        return ""
+    command = by_name(name)
+    if command is None:
+        return ""
+    try:
+        tools = console_tools().get(command.name, ())
+        tools = narrow_branch_tools(command.name, "", tools) if tools else ()
+    except Exception:
+        tools = ()
+    if not tools:
+        return command.risk if command.risk != "safe" else ""
+    graded = [by_name("/" + tool) for tool in tools]
+    risks = [c.risk for c in graded if c is not None] or [command.risk]
+    return max(risks, key=lambda r: _RISK_SEVERITY.get(r, 4))
+
+
+def _group_examples(commands, limit: int = 2) -> str:
+    popular = {name: index for index, name in enumerate(POPULAR)}
+    ranked = sorted(
+        commands,
+        key=lambda c: (popular.get(c.name, len(POPULAR)), 0 if c.native else 1,
+                       len(c.name), c.name),
+    )
+    return ", ".join(c.name.lstrip("/") for c in ranked[:limit])
+
+
+def help_rows(mode: str = "manual") -> dict:
+    """Structured data for the compact ``/help`` (spec 2.9).
+
+    ``{"title", "legend", "core", "groups", "footer"}`` where ``core`` rows
+    are ``(usage, summary, risk_word)`` and ``groups`` rows are
+    ``(name, count, examples)``.  Layout belongs to the caller: the REPL
+    styles and fits these to the terminal (``format_help`` is the plain
+    renderer).  Raises ``CatalogUnavailable`` like the other readers.
+    """
+    grouped = categories()
+    total = sum(len(v) for v in grouped.values())
+    core = []
+    for usage, summary, name in _CORE_HELP:
+        core.append((usage, summary, risk_word(_bare_risk(name)) if name else ""))
+    groups = [
+        (key, len(grouped[key]), _group_examples(grouped[key]))
+        for key in sorted(grouped)
+    ]
+    return {
+        "title": ("sonder commands", "%d in %d groups" % (total, len(grouped))),
+        "legend": ("in %s:" % (mode or "manual"),) + tuple(
+            "%s %s" % pair for pair in RISK_LEGEND),
+        "core": tuple(core),
+        "groups": tuple(groups),
+        "footer": ("/help <group>", "/help all", "/help status"),
+    }
+
+
+def _cells(text: str) -> int:
+    return sum(
+        0 if unicodedata.combining(ch) else
+        2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        for ch in str(text)
+    )
+
+
+def _fit(text: str, width: int, ellipsis: str = "...") -> str:
+    text = str(text)
+    if _cells(text) <= width:
+        return text
+    room = max(0, width - _cells(ellipsis))
+    out, used = [], 0
+    for ch in text:
+        if used + _cells(ch) > room:
+            break
+        out.append(ch)
+        used += _cells(ch)
+    return "".join(out) + ellipsis[:max(0, width - used)]
+
+
+def _wrap_items(items, width: int, sep: str, indent: str = "  ") -> list:
+    """Join ``items`` with ``sep``, breaking only between items."""
+    lines, current = [], indent
+    for item in items:
+        piece = item if current == indent else sep + item
+        if current != indent and _cells(current + piece) > width:
+            lines.append(current.rstrip())
+            current = indent + item
+        else:
+            current += piece
+    lines.append(current.rstrip())
+    return [_fit(line, width) for line in lines]
+
+
+def format_help(width: int = 80, mode: str = "manual", sep: str = " · ",
+                ellipsis: str = "…") -> str:
+    """Plain rendering of :func:`help_rows` that fits ``width - 1`` columns.
+
+    Groups sit in three columns from 80 columns, two from 60, else one.
+    Summaries are cut with ``ellipsis``.  At 80x24 the whole screen fits.
+    """
+    try:
+        data = help_rows(mode)
+    except CatalogUnavailable as exc:
+        return _UNAVAILABLE_TEXT % exc
+    limit = max(20, int(width)) - 1
+    lines = [_fit(sep.join(data["title"]), limit, ellipsis)]
+    lines += _wrap_items(
+        [data["legend"][0] + " " + data["legend"][1]] + list(data["legend"][2:]),
+        limit, sep,
+    )
+    usage_w = max(len(row[0]) for row in data["core"])
+    for usage, summary, word in data["core"]:
+        tail = ("  " + word) if word else ""
+        room = limit - 4 - usage_w - 2 - len(tail)
+        if room < 8:
+            lines.append(_fit("    %s%s" % (usage, tail), limit, ellipsis))
+            continue
+        lines.append(("    %-*s  %s%s" % (
+            usage_w, usage, _fit(summary, room, ellipsis), tail)).rstrip())
+    lines.append(_fit("  groups" + sep + sep.join(data["footer"]), limit, ellipsis))
+    key_w = max(len(row[0]) for row in data["groups"])
+    # Three columns from 80 up keep the whole screen inside 24 rows with the
+    # typed line, the status line and the prompt; examples show where they
+    # have room to say something.
+    columns = 3 if limit >= 79 else (2 if limit >= 59 else 1)
+    col_w = (limit - 4 - 2 * (columns - 1)) // columns
+    cells = []
+    for key, count, examples in data["groups"]:
+        head = "%-*s %3d  " % (key_w, key, count)
+        room = col_w - len(head)
+        shown = _fit(examples, room, ellipsis) if room >= 10 else ""
+        cells.append((head + shown).rstrip())
+    col_w = min(col_w, max(_cells(cell) for cell in cells) + 2)
+    rows = (len(cells) + columns - 1) // columns
+    for r in range(rows):
+        parts = [cells[r + k * rows] for k in range(columns) if r + k * rows < len(cells)]
+        line = "    " + "  ".join(
+            part.ljust(col_w) if k < len(parts) - 1 else part
+            for k, part in enumerate(parts))
+        lines.append(_fit(line.rstrip(), limit, ellipsis))
+    return "\n".join(lines)
+
+
+def unknown_command(cmd: str, width: int = 80, sep: str = " · ",
+                    ellipsis: str = "…") -> str:
+    """One line for a submitted miss (spec P2-1), suggestion first.
+
+    ``unknown command /hlep · did you mean /help? · /help lists all``.  A
+    typo gets the near-miss guesses; a real prefix gets up to five matches.
+    Suggestions leave from the right until the line fits ``width - 1``.
+    """
+    name = str(cmd or "").strip()
+    head = "unknown command %s" % name
+    tail = "/help lists all"
+    try:
+        guesses = near_misses(name, limit=5)
+        if guesses:
+            items = [g if g.startswith("/") else "%s (group)" % g for g in guesses]
+            label, closing = "did you mean ", "?"
+        else:
+            items = [c.name for c in complete(name, limit=5)] if name.strip("/") else []
+            label, closing = "matches: ", ""
+    except CatalogUnavailable:
+        items, label, closing = [], "", ""
+    limit = max(20, int(width)) - 1
+    # The suggestion outlives the "/help lists all" tail: it is the one
+    # thing on the line that saves a second attempt.
+    for with_tail in (True, False):
+        for count in range(len(items), 0, -1):
+            parts = [head, label + ", ".join(items[:count]) + closing]
+            line = sep.join(parts + ([tail] if with_tail else []))
+            if _cells(line) <= limit:
+                return line
+    line = sep.join([head, tail])
+    return line if _cells(line) <= limit else _fit(line, limit, ellipsis)
 
 
 def help_category(name: str) -> str:

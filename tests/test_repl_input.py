@@ -164,43 +164,83 @@ def test_refactor_apply_prompt_never_reads_piped_stdin(monkeypatch):
     assert writes == []
 
 
+def _caps(monkeypatch, **fields):
+    """Pin the style capabilities for one test (restored afterwards)."""
+    value = sonder_repl.S.Caps(**fields)
+    monkeypatch.setattr(sonder_repl.S, "_CACHED", value)
+    return value
+
+
 def test_interactive_chat_result_uses_chrome_without_changing_full_answer(monkeypatch, capsys):
+    # Spec 2.6 changed this output: turn header, body, one muted footer that
+    # is the only place the elapsed time appears ("done 1.0s").
     monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: True)
     monkeypatch.setattr(sonder_repl, "_stdout_is_interactive", lambda: True)
-    monkeypatch.setattr(sonder_repl, "_completion_timing", lambda _started: "Sonder completed in 1.00s")
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    monkeypatch.setattr(sonder_repl.time, "monotonic", lambda: 1.0)
+    _caps(monkeypatch, color="none", glyphs="unicode")
 
     answer = "first very long line\nsecond line"
     sonder_repl._print_chat_result(answer, 0.0, offer_feedback=True)
 
     text = capsys.readouterr().out
     assert answer in text
-    assert "Sonder completed in 1.00s" in text
-    assert "/pass or /fail" in text
-    assert any(glyph in text for glyph in ("◈", "*"))
+    assert "done 1.0s" in text
+    assert "rate: /pass /fail" in text
+    assert "◈ answer" in text
+    assert "completed in" not in text
 
 
 def test_interactive_error_result_uses_error_tone(monkeypatch, capsys):
     monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: True)
     monkeypatch.setattr(sonder_repl, "_stdout_is_interactive", lambda: True)
-    monkeypatch.setattr(sonder_repl, "_completion_timing", lambda _started: "Sonder completed in 1.00s")
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", True)
+    _caps(monkeypatch, color="16", glyphs="unicode")
 
     sonder_repl._print_chat_result("ERROR: refused", 0.0, error=True)
 
     text = capsys.readouterr().out
-    assert sonder_repl._Ansi.red in text
+    assert "\x1b[31" in text  # the danger role
     assert "ERROR: refused" in text
+    assert "failed after" in text
+    # One label, never "Sonder error · error" (P1-4).
+    assert "error · error" not in sonder_repl.S.strip_ansi(text)
+
+
+def test_interactive_error_result_keeps_its_tool_rows(monkeypatch, capsys):
+    monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: True)
+    monkeypatch.setattr(sonder_repl, "_stdout_is_interactive", lambda: True)
+    _caps(monkeypatch, color="none", glyphs="ascii")
+    answer = (
+        "ERROR: the tool failed\n=== ACTIVITY (observable work) ===\n"
+        "• Read File src/a.py\n× Run Shell rm\n=== END ACTIVITY ==="
+    )
+
+    sonder_repl._print_chat_result(answer, 0.0, error=True)
+
+    text = capsys.readouterr().out
+    assert "+ ok" in text and "Read File src/a.py" in text
+    assert "x failed" in text and "Run Shell rm" in text
 
 
 def test_piped_chat_result_stays_plain_for_scripts(monkeypatch, capsys):
     monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: False)
     monkeypatch.setattr(sonder_repl, "_completion_timing", lambda _started: "Sonder completed in 1.00s")
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    _caps(monkeypatch, color="none")
 
     sonder_repl._print_chat_result("exact output", 0.0)
 
     assert capsys.readouterr().out == "exact output\n[Sonder completed in 1.00s]\n"
+
+
+def test_piped_chat_result_is_sanitized_but_otherwise_unchanged(monkeypatch, capsys):
+    monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: False)
+    monkeypatch.setattr(sonder_repl, "_completion_timing", lambda _started: "Sonder completed in 1.00s")
+    _caps(monkeypatch, color="none")
+
+    sonder_repl._print_chat_result("a\x1b]52;c;eA==\x07b‮c", 0.0)
+
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "\x07" not in out and "‮" not in out
+    assert out.startswith("a\\x1b]52;c;eA==\\x07b\\u202ec\n")
 
 
 def test_redirected_stdout_stays_plain_even_when_stdin_is_interactive(monkeypatch, capsys):
@@ -213,39 +253,68 @@ def test_redirected_stdout_stays_plain_even_when_stdin_is_interactive(monkeypatc
     assert capsys.readouterr().out == "exact output\n[Sonder completed in 1.00s]\n"
 
 
-def test_interactive_turn_acknowledges_work_without_claiming_progress(monkeypatch, capsys):
+def test_interactive_turn_acknowledges_work_without_claiming_progress(monkeypatch):
     monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: True)
     monkeypatch.setattr(sonder_repl, "_stdout_is_interactive", lambda: True)
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    _caps(monkeypatch, color="none", plain=True)
+    stream = io.StringIO()
+    indicator = sonder_repl._WorkingIndicator("Sonder work", stream).start()
+    deadline = sonder_repl.time.monotonic() + 5
+    while "working" not in stream.getvalue() and sonder_repl.time.monotonic() < deadline:
+        sonder_repl.time.sleep(0.02)
+    indicator.stop()
 
-    sonder_repl._begin_chat_turn("Sonder work")
-
-    text = capsys.readouterr().out
-    assert "Sonder work is working" in text
+    text = stream.getvalue()
+    assert text == "working...\n"
     assert "%" not in text and "complete" not in text
 
 
 def test_piped_turn_acknowledgement_stays_silent(monkeypatch, capsys):
     monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: False)
 
-    sonder_repl._begin_chat_turn()
-
+    assert sonder_repl._begin_chat_turn() is None
     assert capsys.readouterr().out == ""
 
 
-def test_working_indicator_uses_a_moving_highlight_and_animated_ellipsis(monkeypatch):
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", True)
-    indicator = sonder_repl._WorkingIndicator("Sonder")
+def test_live_line_shows_phase_elapsed_model_and_cancel_hint(monkeypatch):
+    _caps(monkeypatch, color="none", glyphs="unicode", motion=False)
+    monkeypatch.setattr(sonder_repl, "_cols", lambda: 100)
+    now = [100.0]
+    indicator = sonder_repl._WorkingIndicator(
+        "Sonder", io.StringIO(), model="sonder:latest", clock=lambda: now[0],
+    )
+    monkeypatch.setattr(indicator, "_span", lambda: None)
 
-    first = indicator._render(0)
-    later = indicator._render(2)
+    now[0] = 103.0
+    line = indicator._render()
+    assert line == "◈ working · routing · 3s · sonder:latest · Ctrl-C cancels"
 
-    plain_first = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", first)
-    plain_later = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", later)
-    assert "Sonder is working." in plain_first
-    assert "Sonder is working..." in plain_later
-    assert sonder_repl._Ansi.cyan in first
-    assert first != later
+    monkeypatch.setattr(indicator, "_span", lambda: {
+        "events": [{"kind": "model_call"}], "model_calls": 1, "tokens_in": 2600,
+    })
+    now[0] = 145.0
+    line = indicator._render()
+    assert "model call 2" in line and "45s" in line and "2.6k tok in" in line
+    assert "slow local model?" not in line
+
+    now[0] = 170.0  # 25 s without progress
+    assert "slow local model? /model fast" in indicator._render()
+
+
+def test_live_line_redraw_erases_the_row_and_stop_clears_it(monkeypatch):
+    _caps(monkeypatch, color="16", glyphs="unicode", motion=True)
+    stream = io.StringIO()
+    indicator = sonder_repl._WorkingIndicator("Sonder", stream, model="m")
+    monkeypatch.setattr(indicator, "_span", lambda: None)
+    indicator.start()
+    deadline = sonder_repl.time.monotonic() + 5
+    while "working" not in stream.getvalue() and sonder_repl.time.monotonic() < deadline:
+        sonder_repl.time.sleep(0.02)
+    indicator.stop()
+
+    text = stream.getvalue()
+    assert text.startswith("\r\x1b[2K")
+    assert text.endswith("\r\x1b[2K")
 
 
 def test_chat_result_stops_a_live_working_indicator(monkeypatch, capsys):
@@ -387,82 +456,102 @@ def test_help_exposes_runtime_policy_and_live_mcp_convergence():
 
 
 def _strip(text):
-    return sonder_repl._ANSI_RE.sub("", text)
+    return sonder_repl.S.strip_ansi(text)
 
 
-def test_header_lines_pack_coloured_segments_like_plain_ones(monkeypatch):
-    """The header packs segments to the terminal width by their printed
-    width, so a coloured value must pack exactly like a plain one -- padding
-    that counts escape bytes only shows in a real terminal, never in piped
-    test output."""
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", True)
-    plain = [("model sonder:latest", ()), ("endpoint http://127.0.0.1:11435", ()),
-             ("directory ~/src", ()), ("persona coder", ())]
-    coloured = [(text, (sonder_repl._Ansi.cyan,)) for text, _ in plain]
-    plain_lines = sonder_repl._header_lines(plain, width=60)
-    coloured_lines = sonder_repl._header_lines(coloured, width=60)
-    assert [_strip(line) for line in coloured_lines] == plain_lines
-    assert len(plain_lines) == 2, plain_lines
-    assert all(len(line) <= 60 for line in plain_lines)
-    assert plain_lines[0] == "model sonder:latest   endpoint http://127.0.0.1:11435"
-
-
-def test_header_never_splits_a_segment_that_is_wider_than_the_line():
-    lines = sonder_repl._header_lines([("a" * 70, ()), ("b", ())], width=60)
-    assert lines == ["a" * 70, "b"]
-
-
-def test_header_falls_back_to_ascii_when_the_console_cannot_encode_it(monkeypatch):
+def test_banner_falls_back_to_ascii_when_the_console_cannot_encode_it(monkeypatch):
     """A legacy Windows code page cannot encode U+25C8 or U+276F. A decorative
     header must not be able to take the REPL launch down with a
-    UnicodeEncodeError."""
+    UnicodeEncodeError (P0-1)."""
     class _Cp437:
         encoding = "cp437"
 
-    monkeypatch.setattr(sonder_repl.sys, "stdout", _Cp437())
-    glyphs = sonder_repl._box_chars()
-    assert glyphs["tl"] == "+" and glyphs["h"] == "-" and glyphs["prompt"] == ">"
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+        def isatty(self):
+            return True
+
+    caps = sonder_repl.S.caps(env={"TERM": "xterm"}, stream=_Cp437(), platform="posix")
+    assert caps.glyphs == "ascii"
+    monkeypatch.setattr(sonder_repl.S, "_CACHED", caps)
     monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "x"}, raising=False)
     text = sonder_repl._startup_banner(None, "coder", "default")
-    text.encode("cp437")  # must not raise
-    assert "* sonder" in text
+    _strip(text).encode("ascii")  # must not raise
+    assert "# sonder" in _strip(text)
+    assert _strip(sonder_repl._prompt_glyph()) == "> "
 
 
-def test_status_line_keeps_the_muted_tone_after_a_coloured_span(monkeypatch):
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", True)
-    title = "Sonder code  ·  %s  ·  ctx~12k/32k" % sonder_repl._paint(
-        "mode manual", sonder_repl._Ansi.cyan,
-    )
-    line = sonder_repl._status_line(title)
-    assert line.startswith(sonder_repl._Ansi.muted)
-    assert line.endswith(sonder_repl._Ansi.reset)
-    # After the mode's own reset the muted tone is re-applied, so the context
-    # figures that follow it are not printed in the terminal's default colour.
-    assert sonder_repl._Ansi.reset + sonder_repl._Ansi.muted + "  ·  ctx" in line
-    assert _strip(line) == _strip(title)
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
-    assert sonder_repl._status_line("plain") == "plain"
+def test_status_line_is_one_vocabulary_at_every_width(monkeypatch):
+    # Spec 2.4 replaced the two composer vocabularies (P1-1).
+    _caps(monkeypatch, color="none", glyphs="unicode")
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "sonder:latest"}, raising=False)
+    permission = {"mode": "manual"}
+    status = {"known": True, "running_lanes": 0, "running_agents": 0}
+    context = {"used": 64, "limit": 8192, "left": 8128}
+
+    wide = sonder_repl._status_text("code", width=110, context=context,
+                                    permission=permission, status=status)
+    narrow = sonder_repl._status_text("code", width=60, context=context,
+                                      permission=permission, status=status)
+
+    assert wide == "code · sonder:latest · manual · ctx 64/8.2k"
+    assert narrow == wide
+    for text in (wide, narrow):
+        assert not re.search(r"(^| )[A-Z]\d", text), "a bare single-letter field"
 
 
 def test_plain_prompt_is_the_gutter_glyph(monkeypatch):
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
-    assert sonder_repl._prompt_glyph() in ("❯ ", "> ")
+    _caps(monkeypatch, color="none", glyphs="unicode")
+    assert sonder_repl._prompt_glyph() == "❯ "
+    _caps(monkeypatch, color="none", glyphs="ascii")
+    assert sonder_repl._prompt_glyph() == "> "
 
 
 def test_startup_banner_reads_the_live_runtime_not_a_literal(monkeypatch):
     """The banner must not be able to claim a setup the process is not in."""
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    _caps(monkeypatch, color="none", glyphs="unicode")
     monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "some-model:13b"},
                         raising=False)
     text = sonder_repl._startup_banner(None, "coder", "duetos")
     assert "some-model:13b" in text
-    assert "coder" in text and "duetos" in text
+    assert "coder" in text
     assert "/help" in text
+    # The project moved to /about with the rest of the provenance (spec 2.5).
+    state = sonder_repl._banner_state(None, "coder", "duetos")
+    assert any("duetos" in line for line in sonder_repl.S.about_lines(state, 80))
+
+
+def test_startup_banner_is_one_design_on_every_platform(monkeypatch):
+    _caps(monkeypatch, color="none", glyphs="unicode")
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "m"}, raising=False)
+    for available in (True, False):
+        monkeypatch.setattr(sonder_repl, "_composer_available", lambda a=available: a)
+        text = sonder_repl._startup_banner(None, "coder", "default")
+        lines = text.splitlines()
+        assert lines[0].startswith("◈ sonder · coder · m (code) · ")
+        assert lines[1].strip().startswith("/help commands")
+        assert "installed source" not in text and "─" not in text
+
+
+def test_shift_tab_hint_only_when_the_key_works(monkeypatch):
+    _caps(monkeypatch, color="none", glyphs="unicode")
+
+    class _Menu:
+        supports_mode_cycle = True
+
+        @staticmethod
+        def available():
+            return True
+
+    monkeypatch.setattr(sonder_repl, "slash_menu", _Menu)
+    assert "Shift+Tab mode" in sonder_repl._startup_banner(None, "coder", "default")
+    _Menu.supports_mode_cycle = False
+    text = sonder_repl._startup_banner(None, "coder", "default")
+    assert "Shift+Tab" not in text and "/mode to switch" in text
+    monkeypatch.setattr(sonder_repl, "slash_menu", None)
+    assert "Shift+Tab" not in sonder_repl._startup_banner(None, "coder", "default")
 
 
 def test_startup_banner_surfaces_permission_mode_and_elevation(monkeypatch):
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    _caps(monkeypatch, color="none", glyphs="unicode")
     monkeypatch.setattr(sonder_repl.server, "permission_mode_data", lambda: {
         "mode": "acceptEdits",
         "label": "Accept edits",
@@ -473,12 +562,12 @@ def test_startup_banner_surfaces_permission_mode_and_elevation(monkeypatch):
 
     text = sonder_repl._startup_banner(None, "coder", "default")
 
-    assert "mode" in text and "Accept edits" in text
-    assert "elevation" in text and "operator override" in text
+    assert "acceptEdits" in text
+    assert "ELEVATED" in text and "operator override" in text
 
 
 def test_startup_banner_omits_unknown_permission_state(monkeypatch):
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    _caps(monkeypatch, color="none", glyphs="unicode")
     monkeypatch.setattr(
         sonder_repl.server, "permission_mode_data",
         lambda: (_ for _ in ()).throw(RuntimeError("not available")),
@@ -486,68 +575,66 @@ def test_startup_banner_omits_unknown_permission_state(monkeypatch):
 
     text = sonder_repl._startup_banner(None, "coder", "default")
 
-    assert "\n  mode:" not in text
-    assert "\n  elevation:" not in text
+    assert "ELEVATED" not in text
+    assert " unknown " in text or "unknown ·" in text
 
 
 def test_terminal_endpoint_link_is_clickable_without_affecting_layout(monkeypatch):
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", True)
+    _caps(monkeypatch, color="16", glyphs="unicode", links=True)
+    monkeypatch.setattr(listener_probe, "port_open", lambda *_args: True)
 
-    link = sonder_repl._terminal_link("http://127.0.0.1:11435")
+    text = sonder_repl._startup_banner(None, "coder", "default", width=120)
 
-    assert link.startswith("\x1b]8;;http://127.0.0.1:11435\x1b\\")
-    assert link.endswith("\x1b]8;;\x1b\\")
-    assert sonder_repl._visible_len(link) == len("http://127.0.0.1:11435")
+    assert "\x1b]8;;http://127.0.0.1:" in text
+    assert _strip(text).splitlines()[0].endswith("http://127.0.0.1:%s" % listener_probe.DEFAULT_PORT)
 
 
-def test_terminal_endpoint_link_stays_plain_when_ansi_is_disabled(monkeypatch):
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+def test_terminal_endpoint_link_stays_plain_when_colour_is_off(monkeypatch):
+    _caps(monkeypatch, color="none", glyphs="unicode", links=False)
+    monkeypatch.setattr(listener_probe, "port_open", lambda *_args: True)
 
-    assert sonder_repl._terminal_link("http://127.0.0.1:11435") == "http://127.0.0.1:11435"
+    assert "\x1b" not in sonder_repl._startup_banner(None, "coder", "default")
 
 
 def test_startup_banner_normalizes_wildcard_bind_for_dashboard_link(monkeypatch):
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    _caps(monkeypatch, color="none", glyphs="unicode")
     monkeypatch.setattr(listener_probe, "DEFAULT_HOST", "0.0.0.0")
     monkeypatch.setattr(listener_probe, "DEFAULT_PORT", 11435)
     monkeypatch.setattr(listener_probe, "port_open", lambda *_args: True)
 
-    banner = sonder_repl._startup_banner(None, "coder", "default")
+    banner = sonder_repl._startup_banner(None, "coder", "default", width=120)
 
     assert "http://127.0.0.1:11435" in banner
     assert "http://0.0.0.0:11435" not in banner
 
 
-def test_execution_prompt_shows_live_lanes_running_and_queued_agents(monkeypatch):
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
-    text = sonder_repl._execution_prompt({
-        "known": True,
-        "running_lanes": 2,
-        "running_agents": 3,
-        "queued_agents": 4,
-    })
-    assert text == "[lanes 2 | agents 3+4q]"
-
-
-def test_execution_prompt_reports_unknown_instead_of_zero(monkeypatch):
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
-    assert sonder_repl._execution_prompt({"known": False}) == "[lanes ? | agents ?]"
-
-
-def test_composer_title_uses_live_tier_and_execution_status(monkeypatch):
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+def test_status_line_shows_live_agents_and_lanes_only_when_running(monkeypatch):
+    _caps(monkeypatch, color="none", glyphs="unicode")
     monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "coder:14b"}, raising=False)
 
-    title = sonder_repl._composer_title("code", {
-        "known": True, "running_lanes": 1, "running_agents": 0,
-        "queued_agents": 0,
+    busy = sonder_repl._status_text("code", width=100, permission={"mode": "manual"}, status={
+        "known": True, "running_lanes": 2, "running_agents": 3, "queued_agents": 4,
+    })
+    idle = sonder_repl._status_text("code", width=100, permission={"mode": "manual"}, status={
+        "known": True, "running_lanes": 0, "running_agents": 0,
     })
 
-    assert title == "Sonder code (coder:14b)  [lanes 1 | agents 0]"
+    assert "3 agents" in busy and "2 lanes" in busy
+    assert "agent" not in idle and "lane" not in idle
 
 
-def test_composer_title_surfaces_permission_mode_and_elevation(monkeypatch):
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+def test_status_line_uses_live_tier_and_model(monkeypatch):
+    _caps(monkeypatch, color="none", glyphs="unicode")
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "coder:14b"}, raising=False)
+
+    title = sonder_repl._status_text("code", width=100, permission={"mode": "plan"},
+                                     status={"known": True})
+
+    assert title == "code · coder:14b · plan"
+
+
+def test_status_line_surfaces_permission_mode_and_elevation(monkeypatch):
+    _caps(monkeypatch, color="none", glyphs="unicode")
     permission = {
         "mode": "auto",
         "label": "Auto",
@@ -556,110 +643,74 @@ def test_composer_title_surfaces_permission_mode_and_elevation(monkeypatch):
     }
     status = {"known": True, "running_lanes": 0, "running_agents": 0}
 
-    wide = sonder_repl._composer_title("code", status, permission=permission)
-    compact = sonder_repl._composer_title("code", status, width=80,
-                                           permission=permission)
+    wide = sonder_repl._status_text("code", width=120, status=status, permission=permission)
+    narrow = sonder_repl._status_text("code", width=30, status=status, permission=permission)
 
-    assert "mode Auto  ELEVATED (operator override)" in wide
-    assert "M:auto" in compact and "E!" in compact
-
-
-def test_composer_title_compact_permission_mode_is_visible_after_pin(monkeypatch):
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
-    status = {"known": True, "running_lanes": 0, "running_agents": 0}
-    permission = {"mode": "acceptEdits", "label": "Accept edits"}
-
-    title = sonder_repl._composer_title("code", status, width=80,
-                                        permission=permission)
-
-    assert "M:edits" in title
+    assert "auto ELEVATED (operator override)" in wide
+    # The mode word is never dropped.
+    assert "auto" in narrow
 
 
-def test_composer_title_shows_approximate_context_and_last_turn_metrics(monkeypatch):
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+def test_status_line_carries_context_but_never_per_turn_metrics(monkeypatch):
+    # P1-2: the footer is the only place per-turn metrics appear.
+    _caps(monkeypatch, color="none", glyphs="unicode")
     monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "coder:14b"}, raising=False)
 
-    title = sonder_repl._composer_title(
-        "code", {"known": True, "running_lanes": 0, "running_agents": 0,
-                 "queued_agents": 0},
+    title = sonder_repl._status_text(
+        "code", width=80, status={"known": True}, permission={"mode": "manual"},
         context={"used": 1_250, "limit": 8_192, "left": 6_942},
-        last_turn={"tokens_in": 1_024, "tokens_out": 250, "elapsed_ms": 1_500,
-                   "model_calls": 1, "tool_calls": 2},
     )
 
-    assert "ctx~1.2k/8.2k (6.9k left)" in title
-    assert "tok 1.0k/250" in title
-    assert "1.50s" in title and "calls 1M/2T" in title
+    assert "ctx 1.2k/8.2k" in title
+    assert "tok" not in title and "calls" not in title
 
 
-def test_composer_title_keeps_all_stats_inside_a_standard_80_column_frame(monkeypatch):
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
-    title = sonder_repl._composer_title(
-        "code", {"known": True, "running_lanes": 0, "running_agents": 0,
-                 "queued_agents": 0}, width=80,
-        context={"used": 1_250, "limit": 8_192, "left": 6_942},
-        last_turn={"tokens_in": 1_024, "tokens_out": 250, "elapsed_ms": 1_500,
-                   "model_calls": 1, "tool_calls": 2},
-    )
-
-    assert len(title) <= 76
-    assert "C1.2k/8.2k L6.9k" in title and "T1.0k/250" in title
-    assert "1.50s" in title and "M1 T2" in title
-
-
-def test_composer_title_compacts_when_full_status_exceeds_a_wide_frame(monkeypatch):
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"}, raising=False)
-
-    title = sonder_repl._composer_title(
-        "code", {"known": True, "running_lanes": 0, "running_agents": 0,
-                 "queued_agents": 0}, width=120,
-        context={"used": 1_250, "limit": 8_192, "left": 6_942},
-        last_turn={"tokens_in": 3_252, "tokens_out": 29, "elapsed_ms": 17_366,
-                   "model_calls": 1, "tool_calls": 0},
-    )
-
-    assert len(title) <= 116
-    assert "C1.2k/8.2k L6.9k" in title
-    assert "T3.3k/29" in title
-    assert "calls" not in title
-
-
-def test_composer_title_compaction_keeps_live_status_snapshot(monkeypatch):
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+def test_status_line_fits_every_width(monkeypatch):
+    _caps(monkeypatch, color="16", glyphs="unicode")
     monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "x" * 120}, raising=False)
-    monkeypatch.setattr(
-        sonder_repl.server, "execution_status_data",
-        lambda: {"known": True, "running_lanes": 2, "running_agents": 3, "queued_agents": 0},
-    )
-
-    title = sonder_repl._composer_title("code", width=120)
-
-    assert "L2 A3" in title
-
-
-def test_composer_title_uses_visible_width_not_ansi_bytes(monkeypatch):
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", True)
-    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "x" * 79}, raising=False)
-    status = {"known": True, "running_lanes": 0, "running_agents": 0, "queued_agents": 0}
-    full = sonder_repl._composer_title("code", status, width=None)
-
-    title = sonder_repl._composer_title("code", status, width=120)
-
-    assert "Sonder code" in sonder_repl._ANSI_RE.sub("", title)
+    for width in (20, 30, 40, 50, 60, 80, 120):
+        title = sonder_repl._status_text(
+            "code", width=width, permission={"mode": "manual"},
+            status={"known": True, "running_lanes": 2, "running_agents": 3},
+            context={"used": 1, "limit": 8192},
+        )
+        assert sonder_repl.S.cell_width(title) <= width - 1, (width, title)
 
 
-def test_compact_composer_reports_unknown_execution_status_without_fake_idle(monkeypatch):
-    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+def test_status_line_never_invents_idle_when_status_is_unknown(monkeypatch):
+    _caps(monkeypatch, color="none", glyphs="unicode")
     monkeypatch.setattr(
         sonder_repl.server, "execution_status_data",
         lambda: {"known": False, "error": "status unavailable"},
     )
 
-    title = sonder_repl._composer_title("code", width=80)
+    title = sonder_repl._status_text("code", width=80, permission={"mode": "manual"})
 
-    assert "L? A?" in title
-    assert "L0 A0" not in title
+    assert "0 agents" not in title and "0 lanes" not in title
+
+
+def test_status_long_form_names_every_field_and_the_pool_in_words(monkeypatch):
+    _caps(monkeypatch, color="none", glyphs="unicode")
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "coder:14b"}, raising=False)
+    monkeypatch.setattr(listener_probe, "port_open", lambda *_args: False)
+
+    class _Pool:
+        @staticmethod
+        def summary():
+            return {"worker_count": 1, "eligible_worker_count": 1,
+                    "queue": {"waiting": 0, "limit": 8}}
+
+    monkeypatch.setattr(sonder_repl.server, "OLLAMA_POOL", _Pool, raising=False)
+    state = sonder_repl._status_state("code", permission={"mode": "manual"},
+                                      status={"known": True}, project="default")
+
+    text = sonder_repl._status_long(state, 80)
+
+    for label in ("mode", "tier", "model", "context", "agents", "project",
+                  "endpoint", "pool"):
+        assert "  %s" % label in text
+    assert "Ollama: 1 worker, idle" in text
+    assert "/status pool" in text
 
 
 def test_composer_context_and_last_turn_degrade_without_a_fake_value(monkeypatch):
@@ -788,25 +839,28 @@ def test_model_tag_selection_pins_the_next_chat_without_leaving_code_route(monke
     assert seen[0]["model_override"] == "gemma3:12b"
 
 
-def test_resume_clears_previous_sessions_composer_turn_metrics(monkeypatch):
-    """The next composer belongs to the resumed session, not its predecessor."""
+def test_status_line_never_carries_turn_metrics_before_or_after_resume(monkeypatch, capsys):
+    """Spec P1-1/P1-2 replaced the composer's last-turn fields: the status line
+    holds persistent state only, so no session's metrics can leak into it."""
     lines = iter(("hello", "/resume other-session", "/exit"))
-    titles = []
 
     class _Connection:
         def close(self):
             pass
 
-    def _read(title, **_kwargs):
-        titles.append(title)
-        return next(lines)
-
-    monkeypatch.setattr(sonder_repl, "_read_input", _read)
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_a, **_k: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_init_terminal", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_setup_readline", lambda _history: None)
+    monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: True)
+    monkeypatch.setattr(sonder_repl, "_stdout_is_interactive", lambda: True)
+    monkeypatch.setattr(sonder_repl, "_load_history", lambda *_a: [])
+    monkeypatch.setattr(sonder_repl, "_save_history", lambda *_a: True)
+    monkeypatch.setattr(sonder_repl, "_start_tool_inventory_warmup", lambda: None)
+    monkeypatch.setattr(sonder_repl.S, "_CACHED", sonder_repl.S.Caps(glyphs="unicode"))
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(sonder_repl, "_composer_context", lambda *_args: None)
-    monkeypatch.setattr(sonder_repl, "_composer_frame_width", lambda: 160)
     monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args: None)
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
@@ -820,8 +874,11 @@ def test_resume_clears_previous_sessions_composer_turn_metrics(monkeypatch):
 
     sonder_repl.main()
 
-    assert "tok 123/45" in titles[1]
-    assert "tok 123/45" not in titles[2]
+    out = capsys.readouterr().out
+    status_lines = [line for line in out.splitlines() if " · " in line and "ctx" not in line]
+    assert len(status_lines) >= 3
+    assert "resumed thread other-session" in out
+    assert "123" not in out and "tok" not in out
 
 
 def test_model_selection_refuses_unverified_tag_when_catalog_is_unavailable(monkeypatch, capsys):

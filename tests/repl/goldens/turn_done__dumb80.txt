@@ -1,0 +1,10 @@
+hold on, what is RAII?
+working...
+# answer ----------------------------------------------------------------------
+RAII stands for Resource Acquisition Is Initialization, a C++ technique where a
+resource is acquired in a constructor and released in the destructor, so
+cleanup happens automatically when the object leaves scope.
+  done <t> | 2 model calls | 5.2k->86 tok | rate: /pass /fail
+
+code | sonder:latest | manual | ctx 59/8.2k
+>

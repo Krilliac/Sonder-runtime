@@ -120,4 +120,33 @@ terminal. On a terminal, WARNING and above are also queued and shown between
 turns as one short notice; piped and `--json` runs print only ERROR records
 to stderr, as text. `SONDER_REPL_LOG_STDERR=1` restores the old behaviour:
 JSON on stderr at `SONDER_REPL_LOG_LEVEL` (default `WARNING`). `serve` and
-`mcp` logging is unchanged.
+`mcp` logging is unchanged. `/logs [n]` shows the last `n` records (default
+20), with control characters escaped.
+
+## REPL terminal behaviour
+
+- **Terminal detection:** colour, glyphs and motion are decided once at start
+  (`sonder_runtime/interfaces/repl/style.py`). `NO_COLOR` removes colour,
+  `TERM=dumb` or `SONDER_PLAIN=1` also switch to ASCII glyphs and no
+  redrawing, and `SONDER_GLYPHS` / `SONDER_THEME` override the guesses.
+- **Piped output:** when stdout is not a terminal there is no prompt and no
+  status line, and the banner goes to stderr as one line. With
+  `SONDER_REPL_NDJSON=1`, every stdout line is JSON. Model answers, file
+  contents and errors are shown with control characters escaped, on a
+  terminal and on a pipe alike.
+- **Approval prompts:** keys typed before the prompt appears are discarded.
+  The prompt accepts `y`, `yes`, `n`, `no` or Enter (no). A `[danger]`
+  command needs the whole word `yes`. A slash command typed as the answer
+  counts as no, and it is saved to history so Up recalls it.
+- **Line editing:** on Linux and macOS terminals, readline provides history,
+  editing and Tab completion. Leftover arrow-key escape sequences are
+  removed before a line is used.
+- **History:** a terminal session saves its history to
+  `SONDER_HOME/repl_history` (`0600`, newest 200 lines, credential lines
+  excluded). `SONDER_REPL_HISTORY=0` keeps history in memory only.
+- **Commands:** `/about` shows the source revisions, endpoint, session and
+  mode. `/status` shows the full status line plus the Ollama pool in plain
+  words, and `/status pool` shows the pool detail. `/help status` explains
+  each status-line field.
+- **Ctrl-C:** at the prompt, the first press clears the line and a second
+  press within 2 s quits. During a turn, Ctrl-C cancels only that turn.
