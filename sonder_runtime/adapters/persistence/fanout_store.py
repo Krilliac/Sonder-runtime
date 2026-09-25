@@ -69,7 +69,11 @@ _LAST_PRUNE_TS: dict[str, float] = {}
 
 # Intentionally conservative: the database is a receipt, not a secret store.
 _BEARER = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]{8,}")
-_URI_CREDENTIAL = re.compile(r"(?i)([a-z][a-z0-9+.-]*://)[^\s/@:]+(?::[^\s/@]+)?@")
+# ``(?<![a-z])`` only skips start positions that cannot be the leftmost match:
+# if a scheme matched starting after a letter, it would also match starting at
+# that letter. Without it every position of a long letter run rescanned the
+# rest of the run -- quadratic, ~90 s for one 100k-character model answer.
+_URI_CREDENTIAL = re.compile(r"(?i)(?<![a-z])([a-z][a-z0-9+.-]*://)[^\s/@:]+(?::[^\s/@]+)?@")
 _SENSITIVE_NAME = r"(?:api[_-]?key|access[_-]?key|authorization|token|secret|password|[a-z][a-z0-9_-]{0,40}_(?:token|secret|password))"
 _ASSIGNMENT = re.compile(r"(?i)\b(" + _SENSITIVE_NAME + r")\s*[:=]\s*([^\s,;]{4,})")
 _SENSITIVE_ASSIGNMENT = re.compile(r"(?i)\b(" + _SENSITIVE_NAME + r")\s*[:=]\s*([^\s,;]{4,})")

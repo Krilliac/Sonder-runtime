@@ -44,6 +44,24 @@ def test_receipt_lifecycle_is_wal_foreign_key_and_explicitly_bounded(isolated):
         active.close()
 
 
+def test_uri_credential_redaction_is_linear_and_still_redacts_embedded_schemes():
+    # Every start position the scheme may begin at is still honoured,
+    # including a scheme glued to a preceding digit or letter run.
+    for raw, expected in (
+        ("see https://user:pw@host/x", "see https://<redacted>@host/x"),
+        ("1http://user:pw@host", "1http://<redacted>@host"),
+        ("xhttp://user@host", "xhttp://<redacted>@host"),
+        ("a.b+c-d://u:p@h", "a.b+c-d://<redacted>@h"),
+        ("no credential http://host/x", "no credential http://host/x"),
+    ):
+        assert store._safe_text(raw, 10_000) == expected
+    # A long letter run once took ~90 s here (quadratic rescanning); it is
+    # now milliseconds. The bound is two orders of magnitude of headroom.
+    started = time.monotonic()
+    assert store._safe_text("x" * 200_000, 300_000) == "x" * 200_000
+    assert time.monotonic() - started < 5
+
+
 def test_sealed_execution_prompt_is_not_exposed_by_receipt_readers():
     run = store.create_run("private prompt", ["local"], execution_prompt_ciphertext="ciphertext")
 
