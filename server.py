@@ -4468,11 +4468,13 @@ def _apply_code_gate(reply, interaction_id=None, regenerate=None):
 
 
 _existing_mcp = globals().get("_PERSISTENT_MCP")
-if isinstance(_existing_mcp, reloadable_mcp.ReloadableMCPServer):
+if reloadable_mcp.is_reloadable_server(_existing_mcp):
     mcp = _existing_mcp
     mcp.begin_module_refresh()
 else:
-    mcp = reloadable_mcp.ReloadableMCPServer("sonder-runtime")
+    # Lazy: the MCP SDK is imported (and the registry built) on first use, so
+    # importing this module for the REPL, HTTP API or CLI does not pay for it.
+    mcp = reloadable_mcp.LazyReloadableMCPServer("sonder-runtime")
 _PERSISTENT_MCP = mcp
 
 
