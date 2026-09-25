@@ -145,3 +145,35 @@ def test_server_side_history_falls_back_to_legacy_turns(monkeypatch, tmp_path):
         {"role": "user", "content": "legacy question"},
         {"role": "assistant", "content": "legacy answer"},
     ]
+
+
+def test_over_bound_durable_session_falls_back_visibly(monkeypatch, tmp_path, caplog):
+    """A durable chain longer than the replay bound cannot supply history.
+
+    The verified replay refuses (409) once a session outgrows its event bound.
+    History then comes from the legacy table, and the loss of the durable
+    transcript is logged rather than silently producing an empty context.
+    """
+    import logging
+
+    from sonder_runtime.adapters.persistence.session_repository import SQLiteSessionRepository
+    from sonder_runtime.application.session.http_facade import HttpSessionFacade
+
+    repository = SQLiteSessionRepository(tmp_path / "long.db")
+    for index in range(6):
+        repository.append("demo", "user.message", {"content": "turn %d" % index})
+        repository.append("demo", "model.response", {"content": "resp %d" % index})
+    monkeypatch.setattr(sonder_serve, "_SESSION_FACADE",
+                        HttpSessionFacade(repository, max_replay_events=10))
+    _legacy_turns(monkeypatch, [
+        {"id": "1", "task": "legacy question", "response": "legacy answer"},
+    ])
+
+    with caplog.at_level(logging.WARNING, logger=sonder_serve._serve_logger.name):
+        history = sonder_serve._server_side_history("demo")
+
+    assert history == [
+        {"role": "user", "content": "legacy question"},
+        {"role": "assistant", "content": "legacy answer"},
+    ]
+    assert "durable session history unavailable: replay status=409" in caplog.text

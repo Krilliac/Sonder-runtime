@@ -2190,6 +2190,13 @@ def _durable_session_history(storage_session, limit):
         _serve_logger.warning("durable session history unavailable", exc_info=True)
         return []
     if getattr(result, "status_code", None) != 200:
+        # A chain that fails verification, or one longer than the replay
+        # bound, cannot supply history.  Make that loss of context visible
+        # instead of silently answering the turn without prior messages.
+        _serve_logger.warning(
+            "durable session history unavailable: replay status=%s",
+            getattr(result, "status_code", None),
+        )
         return []
     messages = []
     for item in (result.body or {}).get("transcript") or ():
