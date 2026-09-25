@@ -93,3 +93,24 @@ def test_catalogued_control_commands_are_forwarded(monkeypatch, capsys, line):
     assert [prompt for prompt, _ in seen] == [line]
     assert seen[0][1]["project"] == server.DEFAULT_PROJECT
     assert "handled %s" % line in out
+
+
+def test_an_unknown_persona_is_refused_and_the_current_one_kept(monkeypatch, capsys):
+    """``personas.get`` silently falls back to the default for an unknown
+    name, so ``/persona bogus`` used to report ``persona: bogus`` while every
+    later turn actually ran as ``coder``."""
+    _drive(monkeypatch, ("/persona teacher", "/persona Bogus", "/persona"))
+
+    out = capsys.readouterr().out.splitlines()
+    assert "persona: teacher" in out
+    assert not any(line.strip() == "persona: bogus" for line in out)
+    assert any("unknown persona 'Bogus'" in line for line in out)
+    assert out[-1].startswith("persona: teacher (available: ")
+
+
+def test_persona_names_are_case_insensitive(monkeypatch, capsys):
+    _drive(monkeypatch, ("/persona  REVIEWER ", "/persona"))
+
+    out = capsys.readouterr().out.splitlines()
+    assert "persona: reviewer" in out
+    assert out[-1].startswith("persona: reviewer (available: ")

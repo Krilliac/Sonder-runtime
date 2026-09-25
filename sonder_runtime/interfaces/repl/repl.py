@@ -2259,7 +2259,15 @@ def main(*, machine_output=False):
         if not arg:
             print("persona: %s (available: %s)" % (persona, ", ".join(personas.names())))
             return
-        persona = arg.lower()
+        wanted = arg.lower()
+        available = personas.names()
+        if wanted not in available:
+            # ``personas.get`` falls back to the default for an unknown name,
+            # so accepting it here would report a persona no turn will use.
+            print("unknown persona %r; still %s (available: %s)" % (
+                arg, persona, ", ".join(available)))
+            return
+        persona = wanted
         print("persona: %s" % persona)
 
     def do_model(arg):

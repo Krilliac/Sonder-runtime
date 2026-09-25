@@ -48,3 +48,30 @@ def test_classification_distinguishes_auth_and_model_fallthrough():
     assert _MODULE.classify(401, "") == "auth_failure"
     assert _MODULE.classify(200, '{"choices":[{"message":{"content":"model calls: 1"}}]}') == "model_fallthrough"
     assert _MODULE.classify(200, '{"choices":[{"message":{"content":"ok"}}]}') == "handled"
+
+
+def _reply(text):
+    import json
+    return json.dumps({"choices": [{"message": {"content": text}}]})
+
+
+def test_handler_failures_are_the_dispatcher_error_forms():
+    for text in (
+        "file_read failed: OSError: disk gone",
+        "/file_read failed: boom",
+        "loop is catalogued but not callable here.",
+        "report\nTraceback (most recent call last):\n  File \"x\", line 1",
+    ):
+        assert _MODULE.classify(200, _reply(text)) == "handler_failure", text
+
+
+def test_a_report_that_merely_mentions_failure_words_is_handled():
+    """``/system_profile_text`` prints standing instructions that say "when
+    /run reports ... a traceback"; the word in prose is not a failed handler."""
+    text = (
+        "profile: /home/user/Sonder-runtime/system_profile.md\n"
+        "- When `/run` reports a timeout, missing output, or a traceback, "
+        "diagnose that\n"
+        "- a build that failed: fix it before claiming done\n"
+    )
+    assert _MODULE.classify(200, _reply(text)) == "handled"

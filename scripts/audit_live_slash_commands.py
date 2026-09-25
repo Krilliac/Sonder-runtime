@@ -223,6 +223,15 @@ def _content(body: str) -> str:
     return body
 
 
+# The catalogued dispatcher's own error replies: ``<tool> failed: ...`` and
+# ``<tool> is catalogued but not callable here.``  Matched only at the start of
+# the reply, because a report may legitimately quote those words in prose
+# (``/system_profile_text`` says "when /run reports ... a traceback").
+_HANDLER_FAILURE = re.compile(
+    r"/?[\w.-]+ (?:failed: |is catalogued but not callable)", re.IGNORECASE,
+)
+
+
 def classify(status: int, body: str) -> str:
     if status == 401:
         return "auth_failure"
@@ -240,7 +249,7 @@ def classify(status: int, body: str) -> str:
         match = re.search(r"model calls:\s*(\d+)", lowered)
         if match and int(match.group(1)) > 0:
             return "model_fallthrough"
-    if any(token in lowered for token in ("failed:", "not callable", "traceback")):
+    if _HANDLER_FAILURE.match(text) or "traceback (most recent call last)" in lowered:
         return "handler_failure"
     if (lowered.startswith("refused ") or lowered.startswith("permission denied")
             or "permission gate refused" in lowered
