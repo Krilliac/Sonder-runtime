@@ -34,6 +34,10 @@ String appControlError(Object error) {
     'APP_CONTROL_ROUTE_NOT_FOUND' ||
     'APP_CONTROL_UNAVAILABLE' =>
       'Server conversations is unavailable on this server. Check its configuration or refresh later.',
+    // The server could not prepare or attach recovery for interrupted app
+    // work (HTTP 503). Nothing was resumed or closed (plan P1-11).
+    'APP_RECOVERY_UNAVAILABLE' =>
+      'Recovery is unavailable on this server right now. Nothing was resumed or closed; the interrupted work stays on the PC. Refresh later, or resume or close it from the console.',
     'INVALID_LABEL' =>
       'Use at most 256 UTF-8 bytes without control characters.',
     'PASSWORD_REQUIRED' => 'Enter your account password.',

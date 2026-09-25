@@ -26,6 +26,13 @@ class SearchAgents extends FakeAgents {
       });
 }
 
+class EmptyAgents extends FakeAgents {
+  @override
+  Future<AgentLanePage> agentLanes(
+          {int cursor = 0, String? parentSessionId}) async =>
+      AgentLanePage.fromJson({'lanes': const [], 'has_more': false});
+}
+
 class FailingReads extends FakeAgents {
   Object? failure = SonderException('Authentication failed', httpStatus: 401);
   int attempts = 0;
@@ -464,7 +471,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Agent conversation shortcuts'), findsOneWidget);
     expect(find.text('Alt+↑ / Alt+↓'), findsOneWidget);
-    expect(find.textContaining('A request is sent only after the server confirms'),
+    expect(
+        find.textContaining('A request is sent only after the server confirms'),
         findsOneWidget);
     await tester.tap(find.text('Close'));
     await tester.pumpAndSettle();
@@ -496,7 +504,8 @@ void main() {
     tester.view.resetDevicePixelRatio();
   });
 
-  testWidgets('run header shows public execution identity and resource boundary',
+  testWidgets(
+      'run header shows public execution identity and resource boundary',
       (tester) async {
     final api = MetadataAgents();
     WorkspaceDestination? destination;
@@ -504,7 +513,8 @@ void main() {
     tester.view.devicePixelRatio = 1;
     await tester.pumpWidget(MaterialApp(
         theme: SonderTheme.dark,
-        home: AgentScreen(api: api, onNavigate: (value) => destination = value)));
+        home:
+            AgentScreen(api: api, onNavigate: (value) => destination = value)));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Parser agent'));
     await tester.pumpAndSettle();
@@ -519,6 +529,74 @@ void main() {
     await tester.tap(find.text('Open Runtime'));
     await tester.pumpAndSettle();
     expect(destination, WorkspaceDestination.runtime);
+    await tester.pumpWidget(const SizedBox());
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+
+  testWidgets('empty agents: guidance at the top, Go to Chat, one search',
+      (tester) async {
+    WorkspaceDestination? destination;
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    await tester.pumpWidget(MaterialApp(
+        theme: SonderTheme.dark,
+        home: AgentScreen(
+            api: EmptyAgents(), onNavigate: (value) => destination = value)));
+    await tester.pumpAndSettle();
+    expect(find.text('Agents start from Chat with /delegate'), findsOneWidget);
+    expect(find.text('Select an agent conversation'), findsNothing);
+    expect(find.byKey(const Key('agent-search')), findsNothing);
+    expect(find.byTooltip('Find conversation (Ctrl+Shift+F)'), findsNothing);
+    final top = tester
+        .getTopLeft(find.text('Agents start from Chat with /delegate'))
+        .dy;
+    expect(top, lessThan(200));
+    await tester.tap(find.text('Go to Chat'));
+    await tester.pumpAndSettle();
+    expect(destination, WorkspaceDestination.chat);
+    await tester.pumpWidget(const SizedBox());
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+
+  testWidgets('wide layouts keep a single search control', (tester) async {
+    await open(tester, FakeAgents());
+    expect(find.byKey(const Key('agent-search')), findsOneWidget);
+    expect(find.byTooltip('Find conversation (Ctrl+Shift+F)'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+
+  testWidgets('Agents meets tap-target and label guidelines on a phone',
+      (tester) async {
+    final handle = tester.ensureSemantics();
+    await open(tester, FakeAgents(), size: const Size(390, 844));
+    await expectLater(tester, meetsGuideline(androidTapTargetGuideline));
+    await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
+    handle.dispose();
+    await tester.pumpWidget(const SizedBox());
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+
+  testWidgets('phone agents fit at text scale 1.0, 1.5 and 2.0',
+      (tester) async {
+    for (final scale in [1.0, 1.5, 2.0]) {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      for (final api in [FakeAgents(), EmptyAgents()]) {
+        await tester.pumpWidget(MediaQuery(
+            data: MediaQueryData(
+                size: const Size(390, 844),
+                textScaler: TextScaler.linear(scale)),
+            child: MaterialApp(
+                theme: SonderTheme.dark, home: AgentScreen(api: api))));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull, reason: 'scale $scale');
+      }
+    }
     await tester.pumpWidget(const SizedBox());
     tester.view.resetPhysicalSize();
     tester.view.resetDevicePixelRatio();

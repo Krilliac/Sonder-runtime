@@ -42,6 +42,27 @@ Future<void> pumpRuntime(
   await tester.pumpAndSettle();
 }
 
+/// Lets real I/O (LocalManager.inspect, MockClient) finish between frames.
+Future<void> settleLive(WidgetTester tester) async {
+  for (var i = 0; i < 40; i++) {
+    await tester
+        .runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+    await tester.pump(const Duration(milliseconds: 50));
+    if (i > 4 && find.byType(LinearProgressIndicator).evaluate().isEmpty) {
+      break;
+    }
+  }
+  await pumpFrames(tester);
+}
+
+/// The live screen polls every 2 s, so it never "settles"; pump a few
+/// frames instead (enough for dialogs and ensureVisible animations).
+Future<void> pumpFrames(WidgetTester tester) async {
+  for (var i = 0; i < 6; i++) {
+    await tester.pump(const Duration(milliseconds: 100));
+  }
+}
+
 void main() {
   group('status vocabulary mirrors style.py', () {
     test('glyphs and words', () {
@@ -375,6 +396,86 @@ void main() {
       ]);
     });
 
+    test('parses jobs, fanout and compute pages', () async {
+      await http.runWithClient(() async {
+        const source = HttpRuntimeDataSource(baseUrl: 'http://pc.test');
+        final jobs = await source.jobs();
+        expect(jobs.single.kind, 'index');
+        expect(jobs.single.status, 'running');
+        final fanout = await source.fanoutRuns();
+        expect(fanout.single.answered, 2);
+        expect(fanout.single.running, 1);
+        final nodes = await source.computeNodes();
+        expect(nodes.single.local, isTrue);
+        expect(nodes.single.health, 'healthy');
+        expect(nodes.single.stale, isFalse);
+      },
+          () => MockClient((request) async {
+                switch (request.url.path) {
+                  case '/v1/jobs':
+                    expect(request.url.queryParameters['limit'], '20');
+                    return http.Response(
+                        jsonEncode({
+                          'object': 'list',
+                          'data': [
+                            {
+                              'job_id': 'job-1',
+                              'kind': 'index',
+                              'status': 'RUNNING',
+                              'updated_at': '2026-09-25T12:00:00Z',
+                            }
+                          ]
+                        }),
+                        200);
+                  case '/v1/fanout':
+                    return http.Response(
+                        jsonEncode({
+                          'runs': [
+                            {
+                              'run_id': 'fan-1',
+                              'status': 'running',
+                              'models_selected': 3,
+                              'models_answered': 2,
+                              'models_running': 1,
+                              'updated_ts': 1790000000,
+                            }
+                          ]
+                        }),
+                        200);
+                  default:
+                    return http.Response(
+                        jsonEncode({
+                          'object': 'compute_inventory_page',
+                          'nodes': [
+                            {
+                              'node_id': 'pc-a',
+                              'local': true,
+                              'stale': false,
+                              'health': 'healthy',
+                              'active_jobs': 0,
+                            }
+                          ]
+                        }),
+                        200);
+                }
+              }));
+    });
+
+    test('transport failures and unreadable bodies are SonderExceptions',
+        () async {
+      await http.runWithClient(() async {
+        const source = HttpRuntimeDataSource(baseUrl: 'http://pc.test');
+        await expectLater(source.workRuns(), throwsA(isA<SonderException>()));
+      }, () => MockClient((_) async => http.Response('not json', 200)));
+      await http.runWithClient(() async {
+        const source = HttpRuntimeDataSource(baseUrl: 'http://pc.test');
+        await expectLater(
+            source.fanoutRuns(),
+            throwsA(isA<SonderException>().having(
+                (e) => e.message, 'message', contains('cannot reach'))));
+      }, () => MockClient((_) async => throw Exception('refused')));
+    });
+
     test('errors carry status and code', () async {
       await http.runWithClient(() async {
         const source = HttpRuntimeDataSource(baseUrl: 'http://pc.test');
@@ -396,5 +497,146 @@ void main() {
     expect(workRunDetail(run, runtimeNow), '4m of 30m budget');
     expect(workRunStatus(const WorkRun(id: 'x', status: 'budget_exceeded')),
         RuntimeStatus.fail);
+  });
+
+  testWidgets('live refresh reads status, updates, extensions and extras',
+      (tester) async {
+    final paths = <String>[];
+    final client = MockClient((request) async {
+      paths.add(request.url.path);
+      switch (request.url.path) {
+        case '/v1/sonder/status':
+          return http.Response(
+              jsonEncode({
+                'status': 'ready',
+                'models': [
+                  {'id': 'sonder:latest', 'owned_by': 'local'}
+                ],
+                'selfmod': {
+                  'enabled': true,
+                  'mode': 'propose',
+                  'active': 0,
+                  'deployed': 2,
+                  'rollback_points': 1,
+                  'runs': const [],
+                },
+              }),
+              200);
+        case '/v1/admin/updates/status':
+          return http.Response(
+              jsonEncode({
+                'running_version': '0.9.0',
+                'running_commit': '55a8f684fede0000',
+                'platform': 'linux',
+                'architecture': 'x86_64',
+                'plans': [
+                  {
+                    'update_id': 'u1',
+                    'status': 'verified',
+                    'channel': 'stable',
+                    'target_version': '0.9.1',
+                    'created_at_utc': '2026-09-25T12:00:00Z',
+                  }
+                ],
+              }),
+              200);
+        case '/v1/extensions':
+          return http.Response(
+              jsonEncode({
+                'persistence': 'durable',
+                'records': [
+                  {
+                    'extension_id': 'ext.demo',
+                    'scope': 'user',
+                    'version': '1.0.0',
+                    'enabled': true,
+                    'health_state': 'healthy',
+                  }
+                ],
+              }),
+              200);
+        case '/v1/work-runs':
+          return http.Response(
+              jsonEncode({
+                'runs': [
+                  {
+                    'id': 'wr-${'2' * 32}',
+                    'status': 'failed',
+                    'created_at': 1000,
+                    'updated_at': 1100,
+                  }
+                ]
+              }),
+              200);
+        case '/v1/approvals':
+          return http.Response(
+              jsonEncode({
+                'pending': const [],
+                'approvals': [
+                  {'call_id': 'c1', 'tool': 'write_file', 'nonce': 'n1'}
+                ],
+              }),
+              200);
+      }
+      return http.Response('{}', 404);
+    });
+    await http.runWithClient(() async {
+      tester.view.physicalSize = const Size(1280, 1000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await tester.pumpWidget(MaterialApp(
+        theme: SonderTheme.light,
+        home: RuntimeScreen(
+            settings: Settings(serverUrl: 'http://127.0.0.1:11435')),
+      ));
+      await settleLive(tester);
+      expect(
+          paths,
+          containsAll(<String>[
+            '/v1/sonder/status',
+            '/v1/admin/updates/status',
+            '/v1/extensions',
+            '/v1/work-runs',
+            '/v1/approvals',
+          ]));
+      expect(find.text('Work runs (1)'), findsOneWidget);
+      expect(find.textContaining('none waiting · 1 open'), findsOneWidget);
+      await tester.scrollUntilVisible(find.text('Updates & extensions'), 400,
+          scrollable: find.byType(Scrollable).first);
+      await pumpFrames(tester);
+      expect(find.textContaining('0.9.0'), findsWidgets);
+      await tester.scrollUntilVisible(find.textContaining('ext.demo'), 300,
+          scrollable: find.byType(Scrollable).first);
+      // Collapse and reopen a group through its header.
+      await tester.ensureVisible(find.text('Updates & extensions'));
+      await pumpFrames(tester);
+      await tester.tap(find.text('Updates & extensions'));
+      await pumpFrames(tester);
+      expect(find.textContaining('ext.demo'), findsNothing);
+      // The rail jumps to (and opens) a section.
+      await tester.tap(find.text('Updates').first);
+      await pumpFrames(tester);
+      expect(find.textContaining('ext.demo'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    }, () => client);
+  });
+
+  testWidgets('an HTTP error is shown as the server row, not as offline',
+      (tester) async {
+    final client = MockClient((request) async =>
+        http.Response('{"error":{"message":"denied"}}', 401));
+    await http.runWithClient(() async {
+      await tester.pumpWidget(MaterialApp(
+        home: RuntimeScreen(
+            settings: Settings(serverUrl: 'http://127.0.0.1:11435')),
+      ));
+      await settleLive(tester);
+      expect(find.textContaining("Can't reach"), findsNothing);
+      expect(find.textContaining('Unauthorized'), findsWidgets);
+      await tester.pumpWidget(const SizedBox());
+    }, () => client);
   });
 }

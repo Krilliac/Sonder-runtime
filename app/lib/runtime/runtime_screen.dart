@@ -104,6 +104,18 @@ class _RuntimeScreenState extends State<RuntimeScreen>
   /// True after a refresh or poll could not reach the server. The last
   /// loaded values stay on screen, dimmed and labelled "as of".
   bool _offline = false;
+
+  /// The server answered, but not with status (401, 403, 421, 5xx…).
+  String? _serverError;
+
+  /// True for transport failures, false when the server answered an HTTP
+  /// error: "can't reach" and "refused" are different remedies.
+  static bool _unreachable(Object error) {
+    if (error is! SonderException) return true;
+    if (error.httpStatus != null) return false;
+    return !RegExp(r'HTTP \d{3}|Unauthorized').hasMatch(error.message);
+  }
+
   DateTime? _lastInfoAt;
   String? _notice;
   List<WorkRun>? _workRuns;
@@ -416,10 +428,10 @@ class _RuntimeScreenState extends State<RuntimeScreen>
       var reached = true;
       try {
         info = await _api.systemInfo();
-      } catch (_) {
+      } catch (error) {
         // The explicit Refresh path reports connection errors. Background
         // polls preserve the last useful snapshot, dimmed as "as of".
-        reached = false;
+        reached = !_unreachable(error);
       }
       if (mounted && _appActive) {
         setState(() {
@@ -467,10 +479,12 @@ class _RuntimeScreenState extends State<RuntimeScreen>
           _resumeLauncherOperation(activeOperation);
         }
       }
+      var unreachable = false;
       try {
         info = await _api.systemInfo();
       } on SonderException catch (e) {
         serverError = e.message;
+        unreachable = _unreachable(e);
       }
       UpdateStatus? updateStatus;
       try {
@@ -492,7 +506,8 @@ class _RuntimeScreenState extends State<RuntimeScreen>
           _info = info;
           _lastInfoAt = DateTime.now();
         }
-        _offline = info == null;
+        _offline = unreachable;
+        _serverError = info == null && !unreachable ? serverError : null;
         if (updateStatus != null) _updateStatus = updateStatus;
         if (extensionRegistry != null) _extensionRegistry = extensionRegistry;
         _localInfo = localInfo;
@@ -923,6 +938,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
                       serverUrl: widget.settings.serverUrl,
                       info: info,
                       offline: _offline,
+                      serverError: _serverError,
                       loading: _loading,
                       workRuns: _workRuns,
                       workRunsError: _workRunsError,

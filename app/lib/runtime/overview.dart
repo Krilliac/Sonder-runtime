@@ -116,6 +116,7 @@ List<OverviewRow> overviewRows({
   required String serverUrl,
   required SystemInfo? info,
   required bool offline,
+  String? serverError,
   bool loading = false,
   List<WorkRun>? workRuns,
   Object? workRunsError,
@@ -133,6 +134,9 @@ List<OverviewRow> overviewRows({
         status: RuntimeStatus.fail,
         label: 'Server',
         value: "Can't reach $host"));
+  } else if (info == null && serverError != null && serverError.isNotEmpty) {
+    rows.add(OverviewRow(
+        status: RuntimeStatus.fail, label: 'Server', value: serverError));
   } else if (info == null) {
     rows.add(OverviewRow(
         status: RuntimeStatus.unknown,

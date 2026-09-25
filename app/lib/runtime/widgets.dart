@@ -112,14 +112,29 @@ class _StatusRow extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
-          SizedBox(
-            width: 120,
-            child: Text(label, style: Theme.of(context).textTheme.labelLarge),
-          ),
-          const SizedBox(width: 12),
+          // Phones stack the label over the value (plan §2.4) instead of
+          // squeezing the value into a narrow column.
           Expanded(
-            child: SelectableText(value,
-                style: tokens.mono(12, color: muted ? tokens.text2 : null)),
+            child: LayoutBuilder(builder: (context, constraints) {
+              final labelText =
+                  Text(label, style: Theme.of(context).textTheme.labelLarge);
+              final valueText = SelectableText(value,
+                  style: tokens.mono(12, color: muted ? tokens.text2 : null));
+              if (constraints.maxWidth < 360) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [labelText, const SizedBox(height: 2), valueText],
+                );
+              }
+              return Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SizedBox(width: 120, child: labelText),
+                  const SizedBox(width: 12),
+                  Expanded(child: valueText),
+                ],
+              );
+            }),
           ),
           if (onCopy != null)
             IconButton(
