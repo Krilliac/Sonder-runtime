@@ -19,12 +19,19 @@ void main() {
     );
     final light = ColorScheme.fromSeed(seedColor: Colors.teal);
 
-    // Green is the read-only plan mode's alone; auto never borrows it, and
-    // each theme draws the same meaning in its own contrast-safe value.
-    expect(permissionModeColor(dark, 'plan'), SonderTokens.dark.ok);
-    expect(permissionModeColor(light, 'plan'), SonderTokens.light.ok);
-    expect(permissionModeColor(dark, 'auto'), isNot(SonderTokens.dark.ok));
-    expect(permissionModeColor(dark, 'auto'), SonderTokens.dark.auto);
+    // Mode tones follow the REPL's mode_roles: plan muted, manual text,
+    // acceptEdits warn, auto warn (and strong). None borrows the ok green,
+    // and each theme draws the same meaning in its own contrast-safe value.
+    expect(permissionModeColor(dark, 'plan'), SonderTokens.dark.muted);
+    expect(permissionModeColor(light, 'plan'), SonderTokens.light.muted);
+    expect(permissionModeColor(dark, 'manual'), SonderTokens.dark.text);
+    expect(permissionModeColor(dark, 'acceptEdits'), SonderTokens.dark.warn);
+    expect(permissionModeColor(dark, 'auto'), SonderTokens.dark.warn);
+    expect(permissionModeIsStrong('auto'), isTrue);
+    expect(permissionModeIsStrong('acceptEdits'), isFalse);
+    for (final mode in ['plan', 'manual', 'acceptEdits', 'auto']) {
+      expect(permissionModeColor(dark, mode), isNot(SonderTokens.dark.ok));
+    }
     expect(permissionModeColor(light, 'future-mode'), light.outline);
     expect(permissionModeIcon('manual'), Icons.pan_tool_outlined);
     expect(permissionModeIcon('future-mode'), Icons.help_outline);

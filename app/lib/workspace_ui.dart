@@ -3,6 +3,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'api.dart';
 import 'theme.dart';
+import 'ui/status_vocab.dart';
+import 'ui/strings.dart';
+
+export 'ui/status_vocab.dart' show StatusKind;
 
 enum WorkspaceDestination {
   chat('Chat', Icons.chat_bubble_outline),
@@ -66,45 +70,171 @@ class WorkspaceNavigation extends StatelessWidget {
       ]);
 }
 
+/// The legacy three-tone notice API. Kept so existing call sites compile;
+/// new code passes a [StatusKind] as `kind:` instead. Mapping: info → note,
+/// success → ok, warning → warn.
 enum NoticeTone { info, success, warning }
 
-/// Persistent, accessible feedback shared by connection and conversation UIs.
+/// Persistent, accessible feedback: the app's port of the REPL notice
+/// (style.py `notice`).
+///
+/// ```
+/// ⊘ refused  /write notes.txt
+///            File changes need a person to confirm, and manual mode asks first.
+///            hint: approve this call once, or change the mode
+///            [Approve this call once]  [Change mode…]
+/// ```
+///
+/// The glyph and the kind word always precede the title, in the kind's
+/// colour (warn uses `tokens.warn`, ok `tokens.ok`, error and refused
+/// `tokens.danger`), so colour never carries the meaning alone. Screen
+/// readers hear "refused: /write notes.txt. …": the semantics label starts
+/// with the word. The notice is a live region.
 class WorkspaceNotice extends StatelessWidget {
-  final String message;
+  /// The headline. [message] is the legacy name for the same text.
+  final String title;
+
+  /// Optional body under the title.
+  final String? detail;
+
+  /// Optional next step, drawn muted as `hint: …`.
+  final String? hint;
+
+  /// A synonym for the kind's word from the same row of the vocabulary
+  /// ("done", "needs you", "off"); defaults to [StatusKind.word].
+  final String? word;
+
+  /// Legacy: the tone used when no `kind:` is given.
   final NoticeTone tone;
+
+  /// Legacy single action, drawn under the text.
   final Widget? action;
-  const WorkspaceNotice(
-      {super.key,
-      required this.message,
-      this.tone = NoticeTone.info,
-      this.action});
+
+  /// Buttons under the text, in reading order; the first is the primary.
+  final List<Widget> actions;
+
+  final StatusKind? _kind;
+
+  const WorkspaceNotice({
+    super.key,
+    String? title,
+    String? message,
+    StatusKind? kind,
+    this.tone = NoticeTone.info,
+    this.detail,
+    this.hint,
+    this.word,
+    this.action,
+    this.actions = const <Widget>[],
+  })  : assert(title != null || message != null,
+            'WorkspaceNotice needs a title (or the legacy message)'),
+        title = title ?? message ?? '',
+        _kind = kind;
+
+  /// The legacy name for [title].
+  String get message => title;
+
+  /// The notice kind: the explicit `kind:`, else the legacy [tone] mapped.
+  StatusKind get kind =>
+      _kind ??
+      switch (tone) {
+        NoticeTone.info => StatusKind.note,
+        NoticeTone.success => StatusKind.ok,
+        NoticeTone.warning => StatusKind.warn,
+      };
+
+  /// The word shown and announced before the title.
+  String get kindWord => word ?? kind.word;
+
+  /// What a screen reader hears for the text part of the notice.
+  String get semanticsLabel {
+    final buffer = StringBuffer('$kindWord: $title');
+    final detail = this.detail;
+    final hint = this.hint;
+    if (detail != null && detail.isNotEmpty) buffer.write('. $detail');
+    if (hint != null && hint.isNotEmpty) {
+      buffer.write('. ${SonderStrings.hintLabel} $hint');
+    }
+    return buffer.toString();
+  }
+
   @override
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
-    final color = tone == NoticeTone.warning ? tokens.danger : tokens.accent;
+    final textTheme = Theme.of(context).textTheme;
+    final kind = this.kind;
+    final detail = this.detail;
+    final hint = this.hint;
+    final body = textTheme.bodyMedium?.copyWith(color: tokens.text);
+    final buttons = [if (action != null) action!, ...actions];
     return Semantics(
+        container: true,
         liveRegion: true,
         child: Container(
-          padding: const EdgeInsets.all(12),
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
           decoration: BoxDecoration(
               color: tokens.panel,
               border: Border.all(color: tokens.hairline),
               borderRadius: BorderRadius.circular(SonderRadius.row)),
-          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Icon(
-                switch (tone) {
-                  NoticeTone.warning => Icons.error_outline,
-                  NoticeTone.success => Icons.check_circle_outline,
-                  _ => Icons.info_outline
-                },
-                size: 18,
-                color: color),
-            const SizedBox(width: 10),
-            Expanded(
-                child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [Text(message), if (action != null) action!])),
-          ]),
+          child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Semantics(
+                  label: semanticsLabel,
+                  excludeSemantics: true,
+                  child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
+                      children: [
+                        // Titles start in one column for the common words,
+                        // like the REPL's column 11, so a run of notices
+                        // reads as a list.
+                        ConstrainedBox(
+                          constraints: const BoxConstraints(minWidth: 84),
+                          child: Text('${kind.glyph} $kindWord',
+                              style: tokens.mono(13,
+                                  color: kind.color(tokens),
+                                  height: 22,
+                                  weight: kind.role == StatusRole.danger
+                                      ? FontWeight.w600
+                                      : FontWeight.w500)),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                            child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                              Text(title, style: body),
+                              if (detail != null && detail.isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 2),
+                                  child: Text(detail,
+                                      style: textTheme.bodyMedium
+                                          ?.copyWith(color: tokens.text2)),
+                                ),
+                              if (hint != null && hint.isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 2),
+                                  child: Text(
+                                      '${SonderStrings.hintLabel} $hint',
+                                      style: textTheme.bodySmall
+                                          ?.copyWith(color: tokens.muted)),
+                                ),
+                            ])),
+                      ]),
+                ),
+                if (buttons.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: buttons),
+                  ),
+              ]),
         ));
   }
 }
@@ -167,10 +297,22 @@ class RequestFailure {
 const conversationWidth = 760.0;
 
 /// One Markdown owner for chat answers, agent messages and returned reports.
+///
+/// Code blocks (P2-8): fenced code is drawn on the panel with a transparent
+/// text background, so long blocks read as one surface instead of a stripe
+/// per line, and scroll horizontally instead of wrapping. Only inline code
+/// keeps the raised background. With [fullWidthCode] the blocks take the
+/// full available (reading) width; it needs a bounded width, so it is
+/// opt-in for callers that lay the content out inside one.
 class ConversationContent extends StatelessWidget {
   final String content;
   final Color? color;
-  const ConversationContent({super.key, required this.content, this.color});
+  final bool fullWidthCode;
+  const ConversationContent(
+      {super.key,
+      required this.content,
+      this.color,
+      this.fullWidthCode = false});
   @override
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
@@ -178,10 +320,15 @@ class ConversationContent extends StatelessWidget {
         .textTheme
         .bodyMedium
         ?.copyWith(color: color ?? tokens.text);
+    final blockCode = tokens.mono(13, color: tokens.text);
     return MarkdownBody(
         data: content,
         selectable: true,
         softLineBreak: true,
+        fitContent: !fullWidthCode,
+        // Used only for fenced/indented blocks: a plain span with no
+        // background, so the block has no per-line stripes.
+        syntaxHighlighter: _PlainCodeHighlighter(blockCode),
         styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
           p: body,
           strong: body?.copyWith(fontWeight: FontWeight.w600),
@@ -189,9 +336,10 @@ class ConversationContent extends StatelessWidget {
           h2: Theme.of(context).textTheme.titleMedium,
           h3: Theme.of(context).textTheme.titleSmall,
           a: body?.copyWith(
-              color: tokens.accent,
+              color: tokens.accentText,
               decoration: TextDecoration.underline,
-              decorationColor: tokens.accent.withValues(alpha: 0.5)),
+              decorationColor: tokens.accentText.withValues(alpha: 0.5)),
+          // Inline code only; blocks use [_PlainCodeHighlighter].
           code: tokens
               .mono(13, color: tokens.text)
               .copyWith(backgroundColor: tokens.raised),
@@ -210,4 +358,13 @@ class ConversationContent extends StatelessWidget {
           listIndent: 22,
         ));
   }
+}
+
+/// Formats a code block as one plain mono span with no background.
+class _PlainCodeHighlighter extends SyntaxHighlighter {
+  final TextStyle style;
+  _PlainCodeHighlighter(this.style);
+
+  @override
+  TextSpan format(String source) => TextSpan(style: style, text: source);
 }

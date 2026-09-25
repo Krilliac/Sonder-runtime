@@ -6,7 +6,6 @@
 .pub-cache/
 .pub/
 build/
-pubspec.lock
 .metadata
 assets/local-system.zip
 

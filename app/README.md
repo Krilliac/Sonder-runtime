@@ -207,6 +207,46 @@ uses the authenticated launcher already running on the configured computer.
    This contacts `ipwho.is`; VPN or ISP routing can report the wrong city.
 5. Start chatting.
 
+### Connecting a phone to the PC
+
+The server answers only requests whose `Host` header names it. By default
+that is `localhost`, a loopback IP such as `127.0.0.1`, and (when the server
+listens on a LAN address) any IP literal, each with the server's own port.
+Any other name is refused with **HTTP 421 `HOST_NOT_ALLOWED`**, which the app
+shows as *"The server at mypc.local refused this address"*. This guards the
+server against DNS-rebinding pages in a browser; it is not a login check.
+
+Pick one of these, in order of simplicity:
+
+- **Use the PC's IP.** In Settings enter the address by number, for example
+  `https://192.168.1.20:11435` behind your TLS proxy, not `mypc` or
+  `mypc.local`. (Release Android builds refuse all plain `http://` traffic;
+  see *Build it yourself* for the development-only cleartext override.)
+- **USB or the Android emulator: `adb reverse`.** Run
+  `adb reverse tcp:11435 tcp:11435` on the PC, then use
+  `http://127.0.0.1:11435` in a development build (cleartext override on).
+  The emulator's `10.0.2.2` alias reaches a loopback-bound server under a
+  name it does not accept, so it is refused; `adb reverse` avoids it and
+  keeps the server on loopback.
+- **Allow the name on the PC.** Add each name the phone uses to
+  `[server].allowed_hosts` in the server config, or set
+  `SONDER_ALLOWED_HOSTS=mypc.local,mypc.tail1234.ts.net` (comma-separated,
+  at most 64 entries). An entry without a port accepts any port, which a
+  port-changing forward needs; `name:port` accepts only that port. Restart
+  the server afterwards.
+- **Tailscale Serve, Caddy or a Cloudflare tunnel.** These proxies pass the
+  phone's original `Host` (for example `mypc.tail1234.ts.net`) through to the
+  server, so that name must be in `allowed_hosts` as above. They also
+  terminate TLS, which account sign-in needs (next point). To keep sign-in
+  rate limits per device behind a proxy, set `tls_terminated_by_proxy` and
+  `trusted_proxy_cidrs`; see the
+  [server-private installer](../docs/runbooks/install-server-private.md).
+
+Account passwords and sessions need **HTTPS**; plain HTTP is accepted only
+for the numeric loopback addresses `127.0.0.1` and `::1` (which is what
+`adb reverse` gives a development build). The name `localhost` does not
+count as loopback for sign-in.
+
 ## Build it yourself
 
 From the repository root on Windows, the repo-local builder keeps Flutter under `.tooling/flutter`, so
@@ -240,7 +280,8 @@ with `-EngineBundle` to avoid assembling it on every app build. The build keeps
 the Flutter/Android `local-system.zip` code-only and attaches the large sealed
 engine only to the desktop sibling folder, avoiding a duplicate embedded copy.
 
-The repo commits only `lib/`, `pubspec.yaml` and `test/`. Generate the native
+The repo commits only `lib/`, `test/`, `pubspec.yaml`, the resolved
+`pubspec.lock` and the pinned `.flutter-version`. Generate the native
 project scaffolding locally with `flutter create`, then build:
 
 ```bash
@@ -264,7 +305,9 @@ same development-only choice as `-AllowAndroidCleartextForDevelopment`; do not
 use either override for distributed APKs or when sending bearer credentials.
 
 Requires the [Flutter SDK](https://docs.flutter.dev/get-started/install)
-(stable channel). Android builds also need a JDK (17) and the Android SDK;
+at the stable version pinned in `app/.flutter-version` (CI installs exactly
+that version and runs `flutter pub get --enforce-lockfile`, so a dependency
+change must update `pubspec.lock` in the same commit). Android builds also need a JDK (17) and the Android SDK;
 Linux desktop needs `libgtk-3-dev` and friends (see the workflow for the exact
 package list).
 
