@@ -1,0 +1,240 @@
+reading file "ht.gz" - please wait, this might take some time...
+Debuggee command was: ./leak
+finished reading file, now analyzing data:
+
+MOST CALLS TO ALLOCATION FUNCTIONS
+2000 calls to allocation functions with 0B peak consumption from
+std::__new_allocator<>::allocate(unsigned long, void const*)
+  at /usr/include/c++/13/bits/new_allocator.h:151
+  in /work/spark/build/leak
+std::allocator_traits<>::allocate(std::allocator<>&, unsigned long)
+  at /usr/include/c++/13/bits/alloc_traits.h:482
+std::_Vector_base<>::_M_allocate(unsigned long)
+  at /usr/include/c++/13/bits/stl_vector.h:381
+std::_Vector_base<>::_M_create_storage(unsigned long)
+  at /usr/include/c++/13/bits/stl_vector.h:398
+std::_Vector_base<>::_Vector_base(unsigned long, std::allocator<> const&)
+  at /usr/include/c++/13/bits/stl_vector.h:335
+std::vector<>::vector(unsigned long, std::allocator<> const&)
+  at /usr/include/c++/13/bits/stl_vector.h:557
+churn()
+  at /work/spark/src/leak.cpp:11
+2000 calls with 0B peak consumption from:
+    main
+      at /work/spark/src/leak.cpp:20
+      in /work/spark/build/leak
+
+10 calls to allocation functions with 40.96K peak consumption from
+leak_buffer(unsigned long)
+  at /work/spark/src/leak.cpp:7
+  in /work/spark/build/leak
+10 calls with 40.96K peak consumption from:
+    main
+      at /work/spark/src/leak.cpp:19
+      in /work/spark/build/leak
+
+1 calls to allocation functions with 73.73K peak consumption from
+0x7f0000cb738e
+  in /lib/x86_64-linux-gnu/libstdc++.so.6
+1 calls with 73.73K peak consumption from:
+    call_init
+      at ./elf/dl-init.c:74
+      in /lib64/ld-linux-x86-64.so.2
+    _dl_init::call_init
+      at ./elf/dl-init.c:120
+      in /lib64/ld-linux-x86-64.so.2
+    _dl_init
+      at ./elf/./elf/dl-init.c:121
+    _dl_start_user
+      in /lib64/ld-linux-x86-64.so.2
+
+1 calls to allocation functions with 4.10K peak consumption from
+__GI__IO_file_doallocate
+  at ./libio/filedoalloc.c:101
+  in /lib/x86_64-linux-gnu/libc.so.6
+1 calls with 4.10K peak consumption from:
+    __GI__IO_doallocbuf
+      at ./libio/genops.c:347
+      in /lib/x86_64-linux-gnu/libc.so.6
+    _IO_new_file_overflow
+      at ./libio/fileops.c:745
+      in /lib/x86_64-linux-gnu/libc.so.6
+    _IO_new_file_xsputn::_IO_new_file_xsputn
+      at ./libio/fileops.c:1244
+      in /lib/x86_64-linux-gnu/libc.so.6
+    _IO_new_file_xsputn
+      at ./libio/./libio/fileops.c:1197
+    __printf_buffer_to_file_done::__printf_buffer_flush_to_file
+      at ./stdio-common/printf_buffer_to_file.c:59
+      in /lib/x86_64-linux-gnu/libc.so.6
+    __printf_buffer_to_file_done
+      at ./stdio-common/./stdio-common/printf_buffer_to_file.c:120
+    __vfprintf_internal
+      at ./stdio-common/vfprintf-internal.c:1560
+      in /lib/x86_64-linux-gnu/libc.so.6
+    ___printf_chk
+      at ./debug/printf_chk.c:33
+      in /lib/x86_64-linux-gnu/libc.so.6
+    main::printf
+      at /usr/include/x86_64-linux-gnu/bits/stdio2.h:86
+      in /work/spark/build/leak
+    main
+      at /work/spark/src/leak.cpp:21
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/x86_64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/x86_64-linux-gnu/libc.so.6
+    _start
+      in /work/spark/build/leak
+
+
+PEAK MEMORY CONSUMERS
+73.73K peak memory consumed over 1 calls from
+0x7f0000cb738e
+  in /lib/x86_64-linux-gnu/libstdc++.so.6
+73.73K consumed over 1 calls from:
+    call_init
+      at ./elf/dl-init.c:74
+      in /lib64/ld-linux-x86-64.so.2
+    _dl_init::call_init
+      at ./elf/dl-init.c:120
+      in /lib64/ld-linux-x86-64.so.2
+    _dl_init
+      at ./elf/./elf/dl-init.c:121
+    _dl_start_user
+      in /lib64/ld-linux-x86-64.so.2
+
+40.96K peak memory consumed over 10 calls from
+leak_buffer(unsigned long)
+  at /work/spark/src/leak.cpp:7
+  in /work/spark/build/leak
+40.96K consumed over 10 calls from:
+    main
+      at /work/spark/src/leak.cpp:19
+      in /work/spark/build/leak
+
+4.10K peak memory consumed over 1 calls from
+__GI__IO_file_doallocate
+  at ./libio/filedoalloc.c:101
+  in /lib/x86_64-linux-gnu/libc.so.6
+4.10K consumed over 1 calls from:
+    __GI__IO_doallocbuf
+      at ./libio/genops.c:347
+      in /lib/x86_64-linux-gnu/libc.so.6
+    _IO_new_file_overflow
+      at ./libio/fileops.c:745
+      in /lib/x86_64-linux-gnu/libc.so.6
+    _IO_new_file_xsputn::_IO_new_file_xsputn
+      at ./libio/fileops.c:1244
+      in /lib/x86_64-linux-gnu/libc.so.6
+    _IO_new_file_xsputn
+      at ./libio/./libio/fileops.c:1197
+    __printf_buffer_to_file_done::__printf_buffer_flush_to_file
+      at ./stdio-common/printf_buffer_to_file.c:59
+      in /lib/x86_64-linux-gnu/libc.so.6
+    __printf_buffer_to_file_done
+      at ./stdio-common/./stdio-common/printf_buffer_to_file.c:120
+    __vfprintf_internal
+      at ./stdio-common/vfprintf-internal.c:1560
+      in /lib/x86_64-linux-gnu/libc.so.6
+    ___printf_chk
+      at ./debug/printf_chk.c:33
+      in /lib/x86_64-linux-gnu/libc.so.6
+    main::printf
+      at /usr/include/x86_64-linux-gnu/bits/stdio2.h:86
+      in /work/spark/build/leak
+    main
+      at /work/spark/src/leak.cpp:21
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/x86_64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/x86_64-linux-gnu/libc.so.6
+    _start
+      in /work/spark/build/leak
+
+
+MEMORY LEAKS
+40.96K leaked over 10 calls from
+leak_buffer(unsigned long)
+  at /work/spark/src/leak.cpp:7
+  in /work/spark/build/leak
+40.96K leaked over 10 calls from:
+    main
+      at /work/spark/src/leak.cpp:19
+      in /work/spark/build/leak
+
+4.10K leaked over 1 calls from
+__GI__IO_file_doallocate
+  at ./libio/filedoalloc.c:101
+  in /lib/x86_64-linux-gnu/libc.so.6
+4.10K leaked over 1 calls from:
+    __GI__IO_doallocbuf
+      at ./libio/genops.c:347
+      in /lib/x86_64-linux-gnu/libc.so.6
+    _IO_new_file_overflow
+      at ./libio/fileops.c:745
+      in /lib/x86_64-linux-gnu/libc.so.6
+    _IO_new_file_xsputn::_IO_new_file_xsputn
+      at ./libio/fileops.c:1244
+      in /lib/x86_64-linux-gnu/libc.so.6
+    _IO_new_file_xsputn
+      at ./libio/./libio/fileops.c:1197
+    __printf_buffer_to_file_done::__printf_buffer_flush_to_file
+      at ./stdio-common/printf_buffer_to_file.c:59
+      in /lib/x86_64-linux-gnu/libc.so.6
+    __printf_buffer_to_file_done
+      at ./stdio-common/./stdio-common/printf_buffer_to_file.c:120
+    __vfprintf_internal
+      at ./stdio-common/vfprintf-internal.c:1560
+      in /lib/x86_64-linux-gnu/libc.so.6
+    ___printf_chk
+      at ./debug/printf_chk.c:33
+      in /lib/x86_64-linux-gnu/libc.so.6
+    main::printf
+      at /usr/include/x86_64-linux-gnu/bits/stdio2.h:86
+      in /work/spark/build/leak
+    main
+      at /work/spark/src/leak.cpp:21
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/x86_64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/x86_64-linux-gnu/libc.so.6
+    _start
+      in /work/spark/build/leak
+
+
+MOST TEMPORARY ALLOCATIONS
+2000 temporary allocations of 2000 allocations in total (100.00%) from
+std::__new_allocator<>::allocate(unsigned long, void const*)
+  at /usr/include/c++/13/bits/new_allocator.h:151
+  in /work/spark/build/leak
+std::allocator_traits<>::allocate(std::allocator<>&, unsigned long)
+  at /usr/include/c++/13/bits/alloc_traits.h:482
+std::_Vector_base<>::_M_allocate(unsigned long)
+  at /usr/include/c++/13/bits/stl_vector.h:381
+std::_Vector_base<>::_M_create_storage(unsigned long)
+  at /usr/include/c++/13/bits/stl_vector.h:398
+std::_Vector_base<>::_Vector_base(unsigned long, std::allocator<> const&)
+  at /usr/include/c++/13/bits/stl_vector.h:335
+std::vector<>::vector(unsigned long, std::allocator<> const&)
+  at /usr/include/c++/13/bits/stl_vector.h:557
+churn()
+  at /work/spark/src/leak.cpp:11
+2000 temporary allocations of 2000 allocations in total (100.00%) from:
+    main
+      at /work/spark/src/leak.cpp:20
+      in /work/spark/build/leak
+
+
+total runtime: 0.09s.
+calls to allocation functions: 2012 (22863/s)
+temporary memory allocations: 2000 (22727/s)
+peak heap memory consumption: 118.78K
+peak RSS (including heaptrack overhead): 4.85M
+total memory leaked: 45.06K

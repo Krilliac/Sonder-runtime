@@ -828,7 +828,7 @@
       ]
     },
     {
-      "file_count": 242,
+      "file_count": 253,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1002,6 +1002,17 @@
         "sonder_runtime/domain/ollama_policy.py",
         "sonder_runtime/domain/operational_capabilities.py",
         "sonder_runtime/domain/permission_context.py",
+        "sonder_runtime/domain/profiling/__init__.py",
+        "sonder_runtime/domain/profiling/callgrind.py",
+        "sonder_runtime/domain/profiling/chrome_trace.py",
+        "sonder_runtime/domain/profiling/folded.py",
+        "sonder_runtime/domain/profiling/frames.py",
+        "sonder_runtime/domain/profiling/heaptrack_text.py",
+        "sonder_runtime/domain/profiling/model.py",
+        "sonder_runtime/domain/profiling/perf_text.py",
+        "sonder_runtime/domain/profiling/render.py",
+        "sonder_runtime/domain/profiling/tabular_csv.py",
+        "sonder_runtime/domain/profiling/tracy_csv.py",
         "sonder_runtime/domain/project_scope_keys.py",
         "sonder_runtime/domain/promotion/__init__.py",
         "sonder_runtime/domain/promotion/measured.py",

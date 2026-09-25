@@ -1,0 +1,5 @@
+"Line #","Process","Stack","Module","Function","Count","Weight (in view) (ms)","% Weight"
+"1","spark.exe [1234]","spark.exe!main/spark.exe!Game::Tick/spark.exe!Physics::Integrate","spark.exe","Physics::Integrate","5,120","5,120.00","61.20"
+"2","spark.exe [1234]","spark.exe!main/spark.exe!Game::Tick/spark.exe!Render::Submit","spark.exe","Render::Submit","2,048","2,048.00","24.48"
+"3","spark.exe [1234]","spark.exe!main/d3d12.dll!D3D12CreateDevice","d3d12.dll","D3D12CreateDevice","700","700.00","8.37"
+"4","spark.exe [1234]","ntdll.dll!RtlUserThreadStart/ntdll.dll!NtWaitForSingleObject","ntdll.dll","NtWaitForSingleObject","498","498.00","5.95"
