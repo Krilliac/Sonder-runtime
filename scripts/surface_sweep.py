@@ -608,7 +608,7 @@ class Sweep:
                 result = asyncio.run(server.mcp.call_tool(command.tool, dict(args)))
                 content = getattr(result, "content", None) or []
                 text = "\n".join(getattr(block, "text", "") for block in content)
-                return text, bool(getattr(result, "isError", False))
+                return text, bool(getattr(result, "is_error", getattr(result, "isError", False)))
 
             self._run("mcp", command.name, "%s %s" % (command.tool, json.dumps(args, sort_keys=True)), call)
 
