@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 306,
+      "file_count": 307,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -117,6 +117,7 @@
         "sonder_runtime/adapters/execution/runtime_payload.py",
         "sonder_runtime/adapters/execution/runtime_profile.py",
         "sonder_runtime/adapters/execution/sandbox.py",
+        "sonder_runtime/adapters/execution/subagent_dispatch_verifier.py",
         "sonder_runtime/adapters/execution/worlds.py",
         "sonder_runtime/adapters/execution_tools.py",
         "sonder_runtime/adapters/execution_tools/__init__.py",

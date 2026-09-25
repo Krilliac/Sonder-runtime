@@ -5,8 +5,8 @@ effect, after an effect but before its receipt, and after the receipt but
 before the checkpoint, using the live worker port and the persisted store.
 
 Each case runs the real worker adapter (``SubprocessJobProvider``,
-``ComputeJobWorker`` submit and cancel, ``LocalSubagentProvider``, and
-``GuardedLegacySelfmodService`` deploy) in a child interpreter against a
+``ComputeJobWorker`` submit and cancel, ``LocalSubagentProvider`` dispatch,
+and ``GuardedLegacySelfmodService`` deploy) in a child interpreter against a
 file-backed ``SQLiteEffectJournal`` and terminates that interpreter with
 ``os._exit`` at one cut point.  No ``except``/``finally`` handler runs, so the
 parent observes exactly what a killed worker leaves on disk.  The external
@@ -22,15 +22,15 @@ import os
 import sqlite3
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 CRASH_EXIT = 86
 FAMILIES = (
-    "process-start", "compute-submit", "compute-cancel", "subagent-run",
+    "process-start", "compute-submit", "compute-cancel", "subagent-dispatch",
     "selfmod-deploy",
 )
 CUTS = (
@@ -45,7 +45,7 @@ IDENTITY = {
     "process-start": ("runtime:process-jobs", "process:crash-node", "process-jobs"),
     "compute-submit": ("runtime:compute-jobs", "compute:crash-node", "compute-jobs"),
     "compute-cancel": ("runtime:compute-jobs", "compute:crash-node", "compute-jobs"),
-    "subagent-run": ("subagent:crash-child", "subagent:crash-node", "local-subagents"),
+    "subagent-dispatch": ("subagent:crash-child", "subagent:crash-node", "local-subagents"),
     "selfmod-deploy": ("selfmod:selfmod-test-1", "selfmod:crash-node", "selfmod-mutation"),
 }
 
@@ -88,7 +88,10 @@ def _build(
         from sonder_runtime.adapters.execution.process_jobs import SubprocessJobProvider
         from sonder_runtime.application.jobs.durable_registry import DurableJobRegistry
         from tests.test_job004_process_provider import (
-            _Cleanup, _MemoryLimiter, _Process, _request,
+            _Cleanup,
+            _MemoryLimiter,
+            _Process,
+            _request,
         )
 
         def launcher(*_args, **_kwargs):
@@ -139,14 +142,19 @@ def _build(
 
         return journal, prepare, cancel
 
-    if family == "subagent-run":
+    if family == "subagent-dispatch":
+        from sonder_runtime.adapters.execution.subagent_dispatch_verifier import (
+            DurableSubagentDispatchVerifier,
+        )
         from sonder_runtime.adapters.persistence.durable_continuation import (
             SQLiteDurableContinuationRepository,
         )
         from sonder_runtime.adapters.subagents import LocalSubagentProvider
         from sonder_runtime.application.context import local_owner_context
         from sonder_runtime.application.ports.subagents import (
-            SubagentBudget, SubagentRequest,
+            SubagentBudget,
+            SubagentRequest,
+            SubagentStatus,
         )
         from sonder_runtime.application.subagents.durable_continuation import (
             DurableContinuationService,
@@ -158,16 +166,27 @@ def _build(
             composed.recover_before_restart()
             return composed
 
+        class AdmissionEffectRepository(SQLiteDurableContinuationRepository):
+            """The dispatch effect is the admitting ``running`` transition."""
+
+            def update(self, child_id, *, status, **kwargs):
+                if status is SubagentStatus.RUNNING:
+                    effect()
+                return super().update(child_id, status=status, **kwargs)
+
         def runner(_state, _save, _control):
-            effect()
             return "child result"
 
         # A fresh continuation store per epoch: only the effect journal may
-        # stop a post-restart duplicate, not continuation bookkeeping.
-        service = DurableContinuationService(
-            SQLiteDurableContinuationRepository(root / f"children-{epoch}.db")
+        # stop a post-restart duplicate, not continuation bookkeeping.  The
+        # verifier reads that same fresh store, so it cannot prove the
+        # epoch-1 admission either.
+        children = AdmissionEffectRepository(root / f"children-{epoch}.db")
+        service = DurableContinuationService(children)
+        provider = LocalSubagentProvider(
+            service, runner, effect_binding_factory=factory,
+            dispatch_verifier=DurableSubagentDispatchVerifier(lambda: children),
         )
-        provider = LocalSubagentProvider(service, runner, effect_binding_factory=factory)
         provider.register_root(
             "root-1", SubagentBudget(max_steps=8, max_output_tokens=100, max_wall_seconds=30),
         )
@@ -270,19 +289,20 @@ def test_hard_crash_never_duplicates_or_falsely_completes(family, cut, tmp_path)
         SQLiteEffectJournal,
     )
     from sonder_runtime.application.execution.effect_journal import (
-        EffectJournalError, EffectOutcome, EffectState,
+        EffectJournalError,
+        EffectOutcome,
+        EffectState,
     )
     from sonder_runtime.application.execution.worker_bindings import (
         AuthenticatedWorkerBinding,
     )
-    from sonder_runtime.application.ports.subagents import SubagentStatus
 
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(REPO), env.get("PYTHONPATH"))))
     env["SONDER_STATE_HOME"] = str(tmp_path / "state")
     completed = subprocess.run(
         [sys.executable, str(Path(__file__).resolve()), family, cut, str(tmp_path)],
-        cwd=REPO, env=env, capture_output=True, text=True, timeout=120,
+        cwd=REPO, env=env, capture_output=True, text=True, timeout=120, check=False,
     )
     # A child that finished normally or failed elsewhere never reached the cut.
     assert completed.returncode == CRASH_EXIT, (completed.returncode, completed.stderr[-4000:])
@@ -352,15 +372,12 @@ def test_hard_crash_never_duplicates_or_falsely_completes(family, cut, tmp_path)
         outcome = operate()
     except Exception as exc:  # noqa: BLE001 - classified below
         refusal = exc
-    if family == "subagent-run":
-        # The child runs on a worker thread; the refusal surfaces as a
-        # failed child rather than an exception from spawn().
-        assert refusal is None and outcome is not None
-        assert outcome.status is not SubagentStatus.SUCCEEDED
-    else:
-        # The refusal must come from the effect journal (restart fence or
-        # duplicate-intent refusal), not from an unrelated fixture error.
-        assert isinstance(refusal, EffectJournalError), repr(refusal)
+    # The refusal must come from the effect journal (restart fence,
+    # duplicate-intent refusal, or an unprovable settled dispatch), not from
+    # an unrelated fixture error.  Subagent dispatch is journaled in the
+    # spawning thread, so its refusal also surfaces from spawn() itself.
+    assert outcome is None
+    assert isinstance(refusal, EffectJournalError), repr(refusal)
     assert retried == []
     assert _effect_count(tmp_path) == expected_effects
     final = journal.get(intent_id)
@@ -375,10 +392,12 @@ def test_post_invoke_publication_failure_is_uncertain_not_reattachable(tmp_path)
         SQLiteEffectJournal,
     )
     from sonder_runtime.application.execution.effect_journal import (
-        EffectJournalError, EffectState,
+        EffectJournalError,
+        EffectState,
     )
     from sonder_runtime.application.execution.worker_bindings import (
-        AuthenticatedWorkerBinding, journaled_effect,
+        AuthenticatedWorkerBinding,
+        journaled_effect,
     )
 
     journal = SQLiteEffectJournal(tmp_path / "effects.db")
@@ -403,7 +422,8 @@ def test_success_predicate_failure_after_effect_is_uncertain(tmp_path):
     )
     from sonder_runtime.application.execution.effect_journal import EffectState
     from sonder_runtime.application.execution.worker_bindings import (
-        AuthenticatedWorkerBinding, journaled_effect,
+        AuthenticatedWorkerBinding,
+        journaled_effect,
     )
 
     journal = SQLiteEffectJournal(tmp_path / "effects.db")

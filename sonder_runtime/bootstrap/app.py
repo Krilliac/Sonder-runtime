@@ -472,6 +472,9 @@ def build_application(
                 DurableComputeSubmitVerifier,
                 DurableLocalProcessStartVerifier,
             )
+            from ..adapters.execution.subagent_dispatch_verifier import (
+                DurableSubagentDispatchVerifier,
+            )
             from ..adapters.persistence.sqlite.effect_journal import SQLiteEffectJournal
             from ..platform.paths import state_path
 
@@ -480,6 +483,9 @@ def build_application(
                 reconciliation_verifiers={
                     "process-start": DurableLocalProcessStartVerifier(get_job_registry),
                     "compute-submit": DurableComputeSubmitVerifier(get_job_registry),
+                    "subagent-dispatch": DurableSubagentDispatchVerifier(
+                        get_continuation_repository
+                    ),
                 },
             )
         return worker_effect_journal
@@ -502,6 +508,12 @@ def build_application(
         )
         binding.recover_before_restart()
         return binding
+
+    def get_continuation_repository():
+        """Lazy durable child store read by the subagent-dispatch verifier."""
+        if continuation_repository is None:
+            get_delegation_service()
+        return continuation_repository
 
     def _compose_selfmod_binding(run_id: str):
         binding = worker_binding(
@@ -990,6 +1002,9 @@ def build_application(
                 from ..adapters.conversational_subagents import (
                     conversational_runner_factory,
                 )
+                from ..adapters.execution.subagent_dispatch_verifier import (
+                    DurableSubagentDispatchVerifier,
+                )
                 subagent_provider = LocalSubagentProvider(
                     continuation_service,
                     runner_factory=conversational_runner_factory(
@@ -999,6 +1014,9 @@ def build_application(
                         lambda request, _context: _compose_subagent_binding(
                             request.child_id or request.parent_id
                         )
+                    ),
+                    dispatch_verifier=DurableSubagentDispatchVerifier(
+                        lambda: continuation_repository
                     ),
                 )
                 from ..application.ports.subagents import SubagentBudget

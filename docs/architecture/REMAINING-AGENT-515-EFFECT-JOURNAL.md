@@ -101,7 +101,8 @@ mutation remains exactly once in the fixture.
 worker family through its real adapter: `SubprocessJobProvider.start`
 (`process-start`), `ComputeJobWorker.submit` (`compute-submit`),
 `ComputeJobWorker.cancel` (`compute-cancel`), `LocalSubagentProvider.spawn`
-(`subagent-run`), and `GuardedLegacySelfmodService.deploy`
+(`subagent-dispatch`, originally `subagent-run`; see the dispatch section
+below), and `GuardedLegacySelfmodService.deploy`
 (`selfmod-deploy`). Each case runs in a child interpreter against a
 file-backed `SQLiteEffectJournal` and is killed with `os._exit` at one cut, so
 no `except` or `finally` handler runs. The external effect appends to a marker
@@ -119,9 +120,11 @@ status is asserted first; a case whose crash hook did not fire fails.
 For every family and cut, a restarted worker at a newer epoch retries the same
 operation. The effect journal refuses it: the restart fence for unresolved
 cuts, or intent-identity conflict or duplicate-intent refusal for the
-committed cut. The marker count does not change. For `subagent-run`, the
-refusal surfaces as a non-succeeded child, because the child runs on a worker
-thread. That gives 25 hard-crash cases (5 families x 5 cuts).
+committed cut. The marker count does not change. For `subagent-dispatch` the
+marker is the admitting `running` transition in the child store; the refusal
+now surfaces from `spawn()` itself, because dispatch is journaled in the
+spawning thread (the former `subagent-run` family surfaced it as a
+non-succeeded child). That gives 25 hard-crash cases (5 families x 5 cuts).
 
 A mutation check confirmed that the harness is not vacuous. Temporarily
 committing the receipt before the checkpoint insert made all five
@@ -304,8 +307,10 @@ Remaining limits:
   `cancellation_requested` receipt whose cleanup was pending. This was
   confirmed by a direct run. Retrying cancellation needs a per-attempt identity
   or a query-based reconciliation strategy.
-- Compute, subagent, and self-mod operation families still have no provider
+- Compute-cancel and self-mod operation families still have no provider
   verifier, so their fences can be cleared only by future trusted composition.
+  Compute-submit and subagent-dispatch verifiers are described below; they
+  prove launch or admission only, never workload or runner success.
 - A full hosted regression and deployment receipt are still required before
   LOOP-008 can be promoted to `verified`.
 
@@ -343,27 +348,74 @@ matrix.
 
 ### Concrete child-checkpoint blocker and next implementation
 
-`LocalSubagentProvider` currently wraps the entire runner in one
-`subagent-run:{child_id}` effect. That first intent stays unresolved while the
-runner saves child checkpoints and completes inner tool effects in the same
-run. Consequently, even a journal containing a completed inner mutation has a
-settled high-water of zero until the outer runner returns. Copying zero into a
-child checkpoint would not establish a resumable effect prefix.
+*Superseded by the bounded dispatch effect below:* `LocalSubagentProvider`
+originally wrapped the entire runner in one `subagent-run:{child_id}` effect.
+That first intent stayed unresolved while the runner saved child checkpoints
+and completed inner tool effects in the same run, so even a journal containing
+a completed inner mutation had a settled high-water of zero until the outer
+runner returned.
 
-`test_child_effect_checkpoint_crash.py` reproduces this with two persisted
-databases and a real interpreter exit after one fsynced mutation and a child
-checkpoint. The inner effect has a completed receipt, the outer intent has none,
-and reopening both stores refuses duplicate work. This qualifies the existing
-fence, not checkpoint-based continuation.
+#### Bounded `subagent-dispatch` effect (item 1 below)
+
+`LocalSubagentProvider` now journals one `subagent-dispatch:{child_id}` effect
+around admission only (`DurableContinuationService.spawn`), in the spawning
+thread, with reconciliation strategy `query`. The binding factory runs before
+the intent, so a fenced run is refused before any admission. The runner thread
+is gated: it waits (bounded by 30 s and the operation deadline) until the
+dispatch receipt and checkpoint commit, and fails closed if the receipt is not
+published. It then runs under the same binding, so inner effects are journaled
+in the same run above the settled dispatch.
+
+The receipt proves exact durable admission, not runner completion. The
+provider and the new host verifier
+(`adapters/execution/subagent_dispatch_verifier.py`) derive it from the child
+store only. They recompute a canonical request digest from the persisted request
+(child, parent, prompt, budget, metadata, resume and idempotency keys). They
+require an exact child, parent, idempotency key, and digest match. They take the
+admitted revision from the retained receipt of the first applied `running`
+update in the store's mutation log. The receipt key is
+`subagent-dispatch:{child_id}:{admitted_revision}`. The outcome digest binds
+those fields, and the live and reconciled values are identical. The child
+store schema is unchanged. A missing row, a digest, parent, or idempotency
+mismatch, a wrong run, scope, or strategy, and a legacy or unstarted row
+without a retained admission record all produce no proof. Terminal status text
+alone is not used. A synchronous admission refusal with no durable admission
+is recorded as a `failed` dispatch, not a fence. Reuse of a settled dispatch
+returns the existing child only while the child store still proves that
+admission, and it cannot start a runner. Production composition registers the
+verifier in `get_worker_effect_journal` through a lazy continuation-repository
+getter, and passes the same kind of verifier to the provider.
+
+Evidence (focused, not a requirement verification):
+`tests/test_subagent_dispatch_effect.py` covers the dispatch being completed
+before the runner's first inner effect and a settled high-water of 2 while the
+child is running. It also covers registry-reserved delegation, reuse, refusal,
+and verifier no-proof cases. A real `os._exit` after admission but before the
+receipt leaves an intent. A second spawn is refused. A verifier bound to a
+store without the row gives no proof. The exact row reconciles it, and the
+settled dispatch still starts no runner. `test_child_effect_checkpoint_crash.py`
+was rewritten deliberately to these semantics. After a real crash mid-run,
+the dispatch and inner receipts are `completed` and the settled high-water is
+2. Restart still requires owner cleanup (`ContinuationCleanupRequired`), a
+restarted provider cannot launch a second runner, and the inner write is
+refused rather than re-invoked. `tests/test_worker_effect_crash_injection.py`
+now runs the `subagent-dispatch` family through all five cuts.
+`tests/test_515_bounded_subagent_dispatch_effect_bootstrap.py` checks the
+composition wiring.
+
+The settled prefix now exists, but nothing consumes it yet. The remaining
+items below are unchanged, and restart of a child whose runner crashed after
+dispatch remains non-resuming.
 
 The child checkpoint CAS in `application/subagents/durable_continuation.py`
 stores no journal provenance. Existing restart paths correctly require owner
 cleanup and fence the unresolved outer effect. They prevent duplicate execution
 but cannot continue from the saved child state. The next implementation needs:
 
-1. A bounded dispatch effect whose receipt proves exact durable child admission,
-   with an identity and request digest, rather than completion of the entire
-   runner. Crashes across dispatch must still refuse an unproven second start.
+1. Implemented as described above: a bounded dispatch effect whose receipt
+   proves exact durable child admission, with an identity and request digest,
+   rather than completion of the entire runner. Crashes across dispatch still
+   refuse an unproven second start.
 2. Host-stamped checkpoint provenance binding child sequence/state digest,
    journal identity, run, worker, owner epoch, and settled position to the child
    CAS. SQLite child storage, PostgreSQL snapshots, and the continuation codec
