@@ -184,19 +184,19 @@ def tighten_existing_stores(home: str | os.PathLike[str]) -> int:
         _SWEPT_HOMES.add(directory)
     changed = 0
     try:
-        entries = list(os.scandir(directory))
+        names = os.listdir(directory)
     except OSError:
         return 0
-    for entry in entries:
-        name = entry.name.lower()
-        if not name.endswith(_STORE_SUFFIXES):
+    for name in names:
+        if not name.lower().endswith(_STORE_SUFFIXES):
             continue
+        path = os.path.join(directory, name)
         try:
-            if not entry.is_file(follow_symlinks=False):
+            if not stat.S_ISREG(os.lstat(path).st_mode):
                 continue
         except OSError:
             continue
-        if restrict_to_owner(entry.path):
+        if restrict_to_owner(path):
             changed += 1
     return changed
 

@@ -203,14 +203,14 @@ def test_web_fetch_requires_context_cloud_consent(executor):
     ToolCall("web_search", {"query": "sonder runtime"}),
 ])
 def test_network_tool_refusal_is_a_tool_result_not_a_fault(executor, monkeypatch, call):
-    # With consent given but SONDER_WEB_TOOLS off, the adapters raise
-    # RuntimeError; native MCP answered that with -32603 "internal MCP
-    # handler error" instead of the refusal.
+    # With consent given but SONDER_WEB_TOOLS off, the adapters raise the typed
+    # WebToolsDisabled refusal (a RuntimeError); native MCP answered that with
+    # -32603 "internal MCP handler error" instead of the refusal.
     monkeypatch.setenv("SONDER_WEB_TOOLS", "0")
     context = local_owner_context(correlation_id="req_web", cloud_allowed=True)
     result = executor.execute(call, context)
     assert result.ok is False
-    assert result.error_code == "RuntimeError"
+    assert result.error_code == "WebToolsDisabled"
     assert "disabled by SONDER_WEB_TOOLS" in result.output
 
 

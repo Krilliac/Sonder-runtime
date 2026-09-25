@@ -66,9 +66,14 @@ def _isolate_emotion_vectors_state(_isolate_runtime_home):
     """
     from sonder_runtime.platform import paths
 
+    # Resolve once, before the test runs: platform-simulation tests patch
+    # ``os.name``/path flavours, and re-resolving the home under those patches
+    # at teardown tried to build a WindowsPath on POSIX.
+    live_copy = paths.default_home() / "emotion_vectors.json"
+
     def remove():
         try:
-            (paths.default_home() / "emotion_vectors.json").unlink()
+            live_copy.unlink()
         except (FileNotFoundError, OSError):
             pass
 

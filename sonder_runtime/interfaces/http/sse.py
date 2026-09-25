@@ -28,7 +28,11 @@ class SSEKeepAlive:
     through ``lock`` so frames never interleave.
     """
 
-    def __init__(self, write: Callable[[bytes], None], interval_seconds: float):
+    def __init__(self, write: Callable[[bytes], None], interval_seconds: float,
+                 *, thread_factory: Callable[..., object]):
+        # ``thread_factory`` is the runtime's owned-thread constructor, injected
+        # by the serving entry point (interfaces may not import the platform).
+        self._thread_factory = thread_factory
         if interval_seconds <= 0:
             raise ValueError("keep-alive interval must be positive")
         self._write = write
@@ -50,7 +54,7 @@ class SSEKeepAlive:
                     return
 
     def start(self) -> "SSEKeepAlive":
-        self._thread = threading.Thread(
+        self._thread = self._thread_factory(
             target=self._run, name="sonder-sse-keepalive", daemon=True,
         )
         self._thread.start()

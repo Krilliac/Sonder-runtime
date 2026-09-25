@@ -8,6 +8,7 @@ import time
 
 import sonder_runtime.interfaces.http.serve as ts
 from sonder_runtime.interfaces.http.sse import SSEKeepAlive
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 
 
 @contextmanager
@@ -119,7 +120,7 @@ def test_keepalive_detects_a_departed_client():
             raise BrokenPipeError()
         frames.append(frame)
 
-    keepalive = SSEKeepAlive(write, 0.05).start()
+    keepalive = SSEKeepAlive(write, 0.05, thread_factory=owned_runtime_thread).start()
     time.sleep(0.4)
     assert keepalive.stop() is False
     assert frames == [b": keep-alive\n\n"]

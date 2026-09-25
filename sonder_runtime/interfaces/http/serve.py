@@ -3306,6 +3306,7 @@ _WORK_RUNNER = WorkRunner(
     max_running=_env_int("SONDER_HTTP_WORK_MAX_RUNNING", 2),
     stop_reason=_work_run_stop_reason,
     lifetime=_work_run_lifetime,
+    thread_factory=owned_runtime_thread,
 )
 
 
@@ -7378,7 +7379,9 @@ class Handler(BaseHTTPRequestHandler):
             if callable(flush):
                 flush()
 
-        keepalive = SSEKeepAlive(write, STREAM_HEARTBEAT_SECONDS)
+        keepalive = SSEKeepAlive(
+            write, STREAM_HEARTBEAT_SECONDS, thread_factory=owned_runtime_thread,
+        )
         self._early_stream = keepalive
         self.close_connection = True
         try:

@@ -91,7 +91,8 @@ class WorkRunner:
                  budget_seconds=DEFAULT_BUDGET_SECONDS,
                  max_running=DEFAULT_MAX_RUNNING, clock=time.monotonic,
                  stop_reason: Callable[[], str] | None = None,
-                 lifetime: Callable[[], object] | None = None):
+                 lifetime: Callable[[], object] | None = None,
+                 thread_factory: Callable[..., object]):
         # ``store``: start/finish/get/recent/request_cancel/cancel_requested/
         # reconcile.  ``effects``: Fence, held(fence), reason_lost(fence).
         # ``stop_reason()``: a process-wide reason every run must stop
@@ -102,6 +103,9 @@ class WorkRunner:
         self._effects = effects
         self._stop_reason = stop_reason
         self._lifetime = lifetime
+        # The runtime's owned-thread constructor, injected by the serving entry
+        # point: interfaces may not import the platform layer directly.
+        self._thread_factory = thread_factory
         self.configure(wait_seconds=wait_seconds, budget_seconds=budget_seconds,
                        max_running=max_running)
         self._clock = clock
@@ -211,7 +215,7 @@ class WorkRunner:
 
         target = thread_wrapper(body) if thread_wrapper is not None else body
         context = contextvars.copy_context()
-        worker = threading.Thread(
+        worker = self._thread_factory(
             target=context.run, args=(target,), name="sonder-http-work-" + run_id[-8:],
             daemon=True,
         )

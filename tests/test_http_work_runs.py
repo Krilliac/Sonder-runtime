@@ -12,6 +12,7 @@ from sonder_runtime.adapters.persistence import http_work_runs, session_reposito
 from sonder_runtime.adapters.web import lifecycle as sonder_lifecycle
 from sonder_runtime.bootstrap import app as bootstrap_app
 from sonder_runtime.interfaces.http import serve, work_runs
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 
 
 LOCAL = {"mode": "local-open", "authorized": True}
@@ -29,7 +30,7 @@ def work_env(monkeypatch, tmp_path):
         lambda: SimpleNamespace(session_repository=lambda: repository),
     )
     sonder_lifecycle.reset_for_tests()
-    runner = work_runs.WorkRunner(store=http_work_runs, effects=effect_fence, wait_seconds=1, budget_seconds=60, max_running=1)
+    runner = work_runs.WorkRunner(store=http_work_runs, effects=effect_fence, wait_seconds=1, budget_seconds=60, max_running=1, thread_factory=owned_runtime_thread)
     monkeypatch.setattr(serve, "_WORK_RUNNER", runner)
     yield runner
     sonder_lifecycle.reset_for_tests()
@@ -107,7 +108,7 @@ def test_cancel_stops_effects_and_is_recorded(work_env, monkeypatch):
 
 def test_wall_budget_expiry_fences_effects(work_env, monkeypatch):
     now = [1000.0]
-    runner = work_runs.WorkRunner(store=http_work_runs, effects=effect_fence, wait_seconds=1, budget_seconds=60, max_running=1,
+    runner = work_runs.WorkRunner(store=http_work_runs, effects=effect_fence, wait_seconds=1, budget_seconds=60, max_running=1, thread_factory=owned_runtime_thread,
                                   clock=lambda: now[0])
     monkeypatch.setattr(serve, "_WORK_RUNNER", runner)
     observed = {}
@@ -187,6 +188,7 @@ def test_drain_fences_a_detached_run_and_counts_it_as_in_flight(work_env, monkey
         store=http_work_runs, effects=effect_fence, wait_seconds=1, budget_seconds=60,
         max_running=1, stop_reason=serve._work_run_stop_reason,
         lifetime=serve._work_run_lifetime,
+        thread_factory=owned_runtime_thread,
     )
     monkeypatch.setattr(serve, "_WORK_RUNNER", runner)
     started, drained, observed = threading.Event(), threading.Event(), {}
