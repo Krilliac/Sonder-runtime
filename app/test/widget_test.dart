@@ -418,8 +418,8 @@ void main() {
     final list = find
         .descendant(
           of: find.byType(SystemScreen),
-          matching: find.byWidgetPredicate((w) =>
-              w is Scrollable && w.axisDirection == AxisDirection.down),
+          matching: find.byWidgetPredicate(
+              (w) => w is Scrollable && w.axisDirection == AxisDirection.down),
         )
         .last;
     await tester.scrollUntilVisible(

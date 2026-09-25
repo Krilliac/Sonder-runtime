@@ -60,7 +60,11 @@ class ChatStatusStrip extends StatelessWidget {
       valueListenable: info,
       builder: (context, value, _) {
         final state = statusStateFor(
-            info: value, mode: mode, model: model, tier: tier, project: project);
+            info: value,
+            mode: mode,
+            model: model,
+            tier: tier,
+            project: project);
         final base = tokens.mono(11, color: tokens.muted);
         return Container(
           key: const Key('chat-status-strip'),
@@ -75,7 +79,8 @@ class ChatStatusStrip extends StatelessWidget {
             top: false,
             child: LayoutBuilder(builder: (context, constraints) {
               final cell = monoCellWidth(context, base);
-              final cols = cell <= 0 ? 80 : (constraints.maxWidth / cell).floor();
+              final cols =
+                  cell <= 0 ? 80 : (constraints.maxWidth / cell).floor();
               final fields = statusLineFields(state, cols);
               final line = joinStatusFields(fields);
               return Semantics(
@@ -121,7 +126,8 @@ class ChatStatusStrip extends StatelessWidget {
         return switch (f.text) {
           'plan' => base.copyWith(color: tokens.muted),
           'acceptEdits' => base.copyWith(color: tokens.warn),
-          'auto' => base.copyWith(color: tokens.warn, fontWeight: FontWeight.w700),
+          'auto' =>
+            base.copyWith(color: tokens.warn, fontWeight: FontWeight.w700),
           _ => base.copyWith(color: tokens.text, fontWeight: FontWeight.w500),
         };
       case StatusFieldKind.elevated:

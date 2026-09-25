@@ -20,11 +20,14 @@ class ChatMarkdown extends StatelessWidget {
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
     final theme = Theme.of(context);
-    final body = theme.textTheme.bodyMedium?.copyWith(color: color ?? tokens.text);
+    final body =
+        theme.textTheme.bodyMedium?.copyWith(color: color ?? tokens.text);
     return MarkdownBody(
       data: content,
       selectable: true,
       softLineBreak: true,
+      // Code blocks span the reading width instead of hugging their text.
+      fitContent: false,
       syntaxHighlighter: _PlainCode(tokens.mono(13, color: tokens.text)),
       styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(
         p: body,
@@ -45,8 +48,8 @@ class ChatMarkdown extends StatelessWidget {
             borderRadius: BorderRadius.circular(SonderRadius.row),
             border: Border.all(color: tokens.hairline)),
         blockquoteDecoration: BoxDecoration(
-            border:
-                Border(left: BorderSide(color: tokens.hairlineStrong, width: 2))),
+            border: Border(
+                left: BorderSide(color: tokens.hairlineStrong, width: 2))),
         blockquotePadding: const EdgeInsets.fromLTRB(14, 2, 0, 2),
         horizontalRuleDecoration: BoxDecoration(
             border: Border(top: BorderSide(color: tokens.hairline))),

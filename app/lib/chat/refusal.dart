@@ -15,7 +15,8 @@ class RefusalNotice extends StatefulWidget {
   final RefusalInfo refusal;
 
   /// Sends the approval. Null hides the approve action.
-  final Future<ApprovalOutcome> Function(String callId, Duration ttl)? onApprove;
+  final Future<ApprovalOutcome> Function(String callId, Duration ttl)?
+      onApprove;
 
   /// Opens the mode picker.
   final VoidCallback? onChangeMode;
@@ -134,8 +135,7 @@ class _RefusalNoticeState extends State<RefusalNotice> {
               key: const Key('approval-copy'),
               icon: const Icon(Icons.copy_all_outlined, size: 16),
               label: const Text('Copy'),
-              onPressed: () =>
-                  Clipboard.setData(ClipboardData(text: command)),
+              onPressed: () => Clipboard.setData(ClipboardData(text: command)),
             ),
           ],
         );

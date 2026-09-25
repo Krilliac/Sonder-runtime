@@ -61,7 +61,8 @@ void main() {
     await unmountChat(tester);
   });
 
-  testWidgets('polls with backoff, then the answer replaces the card and is '
+  testWidgets(
+      'polls with backoff, then the answer replaces the card and is '
       'stored', (tester) async {
     final backend = FakeChatBackend();
     await pumpChat(tester, backend);
@@ -82,7 +83,8 @@ void main() {
 
     expect(find.byKey(const Key('work-run-card')), findsNothing);
     expect(find.text('The PSO cache now warms at load.'), findsOneWidget);
-    expect(await storedChatText(), contains('The PSO cache now warms at load.'));
+    expect(
+        await storedChatText(), contains('The PSO cache now warms at load.'));
     expect(await storedChatText(), isNot(contains('GET /v1/work-runs')));
     await unmountChat(tester);
   });
@@ -107,7 +109,8 @@ void main() {
     expect(find.text('Stopping…'), findsOneWidget);
 
     // A second tap cannot send another cancel.
-    await tester.tap(find.byKey(const Key('work-run-stop')), warnIfMissed: false);
+    await tester.tap(find.byKey(const Key('work-run-stop')),
+        warnIfMissed: false);
     await tester.pumpAndSettle();
     expect(backend.workRunCancels, [_runId]);
 
@@ -115,7 +118,8 @@ void main() {
     await tester.pump(const Duration(seconds: 3));
     await tester.pump();
     expect(find.byKey(const Key('work-run-card')), findsNothing);
-    expect(find.textContaining('was stopped', findRichText: true), findsWidgets);
+    expect(
+        find.textContaining('was stopped', findRichText: true), findsWidgets);
     await unmountChat(tester);
   });
 
@@ -133,6 +137,43 @@ void main() {
         find.textContaining('Work runs need a developer or admin account',
             findRichText: true),
         findsOneWidget);
+    await unmountChat(tester);
+  });
+
+  testWidgets('429 WORK_CAPACITY_EXHAUSTED lists running runs with Stop',
+      (tester) async {
+    final backend = FakeChatBackend()
+      ..runningWork = [const WorkRunInfo(id: _runId, status: 'running')];
+    await pumpChat(tester, backend);
+    await tester.enterText(find.byType(TextField), 'one more job');
+    await tester.testTextInput.receiveAction(TextInputAction.send);
+    await tester.pump();
+    backend.lastTurn.fail(SonderException(
+      'routed work capacity is busy (2 routed work run(s) are already running); '
+      'retry later, or cancel a run with POST /v1/work-runs/<id>/cancel',
+      httpStatus: 429,
+      code: 'WORK_CAPACITY_EXHAUSTED',
+      retryable: true,
+    ));
+    await tester.pump();
+    await tester.pump();
+    expect(find.textContaining('Every work slot on the PC is busy',
+        findRichText: true), findsOneWidget);
+    expect(find.textContaining('POST /v1/work-runs', findRichText: true),
+        findsNothing);
+
+    await tester.tap(find.byKey(const Key('error-running-work')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('running-work')), findsOneWidget);
+    expect(find.textContaining('wr-7c1e…'), findsOneWidget);
+    await tester.tap(find.text('Stop…'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Stop run'));
+    await tester.pumpAndSettle();
+    expect(backend.workRunCancels, [_runId]);
+    expect(find.text('Stopping…'), findsOneWidget);
+    await tester.tap(find.text('Close'));
+    await tester.pumpAndSettle();
     await unmountChat(tester);
   });
 

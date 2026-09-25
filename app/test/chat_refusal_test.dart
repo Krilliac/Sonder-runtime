@@ -60,9 +60,12 @@ void main() {
     });
 
     test('answers that merely mention refusal stay answers', () {
-      expect(classifyReply(_assistant('The server refused my request because…')),
+      expect(
+          classifyReply(_assistant('The server refused my request because…')),
           ReplyKind.answer);
-      expect(classifyReply(const ChatMessage(role: Role.user, content: 'refused x: y')),
+      expect(
+          classifyReply(
+              const ChatMessage(role: Role.user, content: 'refused x: y')),
           ReplyKind.answer);
     });
   });
@@ -107,7 +110,8 @@ void main() {
 
     expect(backend.approvals, [('3f9a12c0', const Duration(minutes: 15))]);
     expect(find.byKey(const Key('approval-approved')), findsOneWidget);
-    expect(find.textContaining('nonce n_c41a', findRichText: true), findsOneWidget);
+    expect(find.textContaining('nonce n_c41a', findRichText: true),
+        findsOneWidget);
     // The action is spent: no second approval from the same notice.
     expect(find.byKey(const Key('refusal-approve')), findsNothing);
     await unmountChat(tester);
@@ -136,11 +140,13 @@ void main() {
     await tester.tap(find.byKey(const Key('approval-confirm')));
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('Approve from the console: /approve 3f9a12c0',
-        findRichText: true), findsOneWidget);
+    expect(
+        find.textContaining('Approve from the console: /approve 3f9a12c0',
+            findRichText: true),
+        findsOneWidget);
     String? copied;
-    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        SystemChannels.platform, (call) async {
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, (call) async {
       if (call.method == 'Clipboard.setData') {
         copied = (call.arguments as Map)['text'] as String?;
       }
@@ -169,15 +175,16 @@ void main() {
   });
 
   group('SonderApiChatBackend.approveCall', () {
-    Future<ApprovalOutcome> approveWith(http.Response Function() reply,
-        List<http.Request> seen) {
+    Future<ApprovalOutcome> approveWith(
+        http.Response Function() reply, List<http.Request> seen) {
       final client = MockClient((request) async {
         seen.add(request);
         return reply();
       });
       return http.runWithClient(
-        () => SonderApiChatBackend(baseUrl: 'http://127.0.0.1:11435', apiKey: 'k')
-            .approveCall('3f9a12c0', ttl: const Duration(minutes: 5)),
+        () =>
+            SonderApiChatBackend(baseUrl: 'http://127.0.0.1:11435', apiKey: 'k')
+                .approveCall('3f9a12c0', ttl: const Duration(minutes: 5)),
         () => client,
       );
     }

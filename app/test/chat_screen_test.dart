@@ -33,7 +33,9 @@ void main() {
       await tester.pump(const Duration(milliseconds: 100));
 
       expect(find.textContaining('Connected'), findsNothing);
-      expect(find.textContaining("Can't reach 127.0.0.1:11435", findRichText: true),
+      expect(
+          find.textContaining("Can't reach 127.0.0.1:11435",
+              findRichText: true),
           findsOneWidget);
       expect(find.byKey(const Key('connection-retry')), findsOneWidget);
       expect(find.byKey(const Key('connection-settings')), findsOneWidget);
@@ -51,7 +53,8 @@ void main() {
         ..statusError = SonderException('Server returned HTTP 421.');
       await pumpChat(tester, backend, size: const Size(390, 844));
       await tester.pump(const Duration(milliseconds: 100));
-      expect(find.textContaining('! refused', findRichText: true), findsOneWidget);
+      expect(
+          find.textContaining('! refused', findRichText: true), findsOneWidget);
       expect(
           find.textContaining('mypc.local:11435 refused this address',
               findRichText: true),
@@ -74,7 +77,8 @@ void main() {
     });
   });
 
-  testWidgets('offline with a conversation: pinned notice, disabled chip '
+  testWidgets(
+      'offline with a conversation: pinned notice, disabled chip '
       '(P2-13)', (tester) async {
     final backend = FakeChatBackend()
       ..mode = permissionModeFor('manual')
@@ -91,7 +95,8 @@ void main() {
     await tester.pump();
     expect(find.byKey(const Key('offline-notice')), findsOneWidget);
     expect(find.byKey(const Key('permission-mode-chip')), findsNothing);
-    expect(find.byKey(const Key('permission-mode-chip-offline')), findsOneWidget);
+    expect(
+        find.byKey(const Key('permission-mode-chip-offline')), findsOneWidget);
     await unmountChat(tester);
   });
 
@@ -118,8 +123,10 @@ void main() {
     expect(find.textContaining('slow local model', findRichText: true),
         findsNothing);
     await tester.pump(const Duration(seconds: 9));
-    expect(find.textContaining('slow local model? try the fast route',
-        findRichText: true), findsOneWidget);
+    expect(
+        find.textContaining('slow local model? try the fast route',
+            findRichText: true),
+        findsOneWidget);
 
     await tester.tap(find.byKey(const Key('live-stop')));
     await tester.pump();
@@ -154,7 +161,8 @@ void main() {
     );
     await tester.pump();
     await tester.pump();
-    expect(find.text('done 61.2s · 2 model calls · 2.6k→143 tok'), findsOneWidget);
+    expect(
+        find.text('done 61.2s · 2 model calls · 2.6k→143 tok'), findsOneWidget);
     expect(find.text('useful'), findsOneWidget);
     // The tier from the receipt reaches the status line.
     expect(_statusLine(tester), startsWith('code · sonder'));
@@ -175,7 +183,8 @@ void main() {
       },
     );
     addTearDown(() => tester.binding.defaultBinaryMessenger
-        .setMockDecodedMessageHandler<Object?>(SystemChannels.accessibility, null));
+        .setMockDecodedMessageHandler<Object?>(
+            SystemChannels.accessibility, null));
 
     final backend = FakeChatBackend();
     await pumpChat(tester, backend);
@@ -191,7 +200,8 @@ void main() {
     final notice = find.byKey(const Key('error-notice'));
     expect(notice, findsOneWidget);
     expect(find.descendant(of: notice, matching: find.byType(MarkdownBody)),
-        findsNothing, reason: 'error URLs are not auto-linked');
+        findsNothing,
+        reason: 'error URLs are not auto-linked');
     expect(find.text('useful'), findsNothing);
     expect(find.textContaining('failed after'), findsOneWidget);
 
@@ -221,17 +231,20 @@ void main() {
 
     await pumpChat(tester, backend, size: const Size(1440, 900));
     await tester.pump(const Duration(milliseconds: 100));
-    expect(_statusLine(tester), 'sonder · acceptEdits · ctx 2.1k/8.2k · 2 agents');
+    expect(
+        _statusLine(tester), 'sonder · acceptEdits · ctx 2.1k/8.2k · 2 agents');
     await unmountChat(tester);
   });
 
-  testWidgets('500 messages: polls rebuild no turns, parses are cached, the '
+  testWidgets(
+      '500 messages: polls rebuild no turns, parses are cached, the '
       'reader is not yanked to the end (P2-17)', (tester) async {
     final messages = <Map<String, Object>>[
       for (var i = 0; i < 500; i++)
         ChatMessage(
           role: i.isEven ? Role.user : Role.assistant,
-          content: i.isEven ? 'question $i' : 'answer $i with some **bold** text',
+          content:
+              i.isEven ? 'question $i' : 'answer $i with some **bold** text',
         ).toJson(),
     ];
     final thread = {
@@ -261,8 +274,7 @@ void main() {
     final scrollable = find.byKey(const Key('chat-transcript'));
     await tester.drag(scrollable, const Offset(0, 3000));
     await tester.pump();
-    final position =
-        tester.widget<ListView>(scrollable).controller!.position;
+    final position = tester.widget<ListView>(scrollable).controller!.position;
     final before = position.pixels;
     await _send(tester, 'another');
     // Sending always goes to the end.

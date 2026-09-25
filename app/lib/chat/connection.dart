@@ -3,7 +3,14 @@ import '../api.dart';
 /// One reachability state shared by the rail dot, the empty state and the
 /// offline notice, so they can never disagree (P0-3). Colour never carries
 /// it alone: every state has a word.
-enum ConnState { connecting, connected, refused, unauthorized, serverError, unreachable }
+enum ConnState {
+  connecting,
+  connected,
+  refused,
+  unauthorized,
+  serverError,
+  unreachable
+}
 
 class ConnectionStatus {
   final ConnState state;
@@ -98,8 +105,7 @@ class ConnectionStatus {
         ConnState.refused =>
           "Use the PC's IP address, or add this host to allowed_hosts "
               '(SONDER_ALLOWED_HOSTS) on the PC.',
-        ConnState.unauthorized =>
-          'Check the API key or account in Settings.',
+        ConnState.unauthorized => 'Check the API key or account in Settings.',
         ConnState.serverError => 'Retry, or open Runtime to see what failed.',
         ConnState.unreachable =>
           'Check that the server is running and the address in Settings.',

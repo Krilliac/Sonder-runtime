@@ -235,8 +235,7 @@ class SonderApiChatBackend implements ChatBackend {
   Future<CommandCatalog> fetchCommands() => _api().fetchCommands();
 
   @override
-  Future<PermissionMode?> fetchPermissionMode() =>
-      _api().fetchPermissionMode();
+  Future<PermissionMode?> fetchPermissionMode() => _api().fetchPermissionMode();
 
   @override
   Future<PermissionMode> setPermissionMode(String mode) async {
@@ -249,7 +248,9 @@ class SonderApiChatBackend implements ChatBackend {
 
   Map<String, String> _headers() {
     final h = <String, String>{'Content-Type': 'application/json'};
-    if (apiKey.trim().isNotEmpty) h['Authorization'] = 'Bearer ${apiKey.trim()}';
+    if (apiKey.trim().isNotEmpty) {
+      h['Authorization'] = 'Bearer ${apiKey.trim()}';
+    }
     if (accountSession?.matches(baseUrl) == true) {
       h['X-Sonder-Account-Token'] = accountSession!.token;
     }
@@ -305,7 +306,8 @@ class SonderApiChatBackend implements ChatBackend {
           httpStatus: 403, code: 'FORBIDDEN');
     }
     if (resp.statusCode != 200) {
-      throw _httpError(resp, 'Work run request failed (HTTP ${resp.statusCode}).');
+      throw _httpError(
+          resp, 'Work run request failed (HTTP ${resp.statusCode}).');
     }
     final decoded = jsonDecode(utf8.decode(resp.bodyBytes));
     if (decoded is! Map<String, dynamic>) {
@@ -346,8 +348,7 @@ class SonderApiChatBackend implements ChatBackend {
       {Duration ttl = const Duration(minutes: 15)}) async {
     final http.Response resp;
     try {
-      resp = await _send(
-          'POST', '/v1/approvals/${Uri.encodeComponent(callId)}',
+      resp = await _send('POST', '/v1/approvals/${Uri.encodeComponent(callId)}',
           body: {'ttl_seconds': ttl.inSeconds});
     } on SonderException catch (e) {
       return ApprovalOutcome(ApprovalStatus.failed, message: e.message);

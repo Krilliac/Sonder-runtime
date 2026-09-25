@@ -191,8 +191,7 @@ String joinStatusFields(List<StatusField> fields) {
   final buffer = StringBuffer();
   for (var i = 0; i < fields.length; i++) {
     if (i > 0) {
-      buffer.write(
-          fields[i].kind == StatusFieldKind.elevated ? ' ' : _sep());
+      buffer.write(fields[i].kind == StatusFieldKind.elevated ? ' ' : _sep());
     }
     buffer.write(fields[i].text);
   }
@@ -306,7 +305,8 @@ String liveLine(LiveState st, int width) {
   final phase = _clean(st.phase).isEmpty ? 'working' : _clean(st.phase);
   final when = elapsedLabel(st.elapsedSeconds);
   final model = _clean(st.model);
-  final tok = (st.tokensIn ?? 0) > 0 ? '${compactCount(st.tokensIn!)} tok in' : '';
+  final tok =
+      (st.tokensIn ?? 0) > 0 ? '${compactCount(st.tokensIn!)} tok in' : '';
   final slow = st.slow ? _clean(st.slowHint) : '';
   final candidates = <List<String>>[
     [head, phase, when, model, tok, slow],

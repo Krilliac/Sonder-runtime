@@ -78,8 +78,8 @@ RefusalInfo? refusalOf(ChatMessage message) {
   final tail = _modeTail.firstMatch(firstLine);
   if (tail != null) {
     mode = tail.group(1) ?? '';
-    body = firstLine.substring(0, tail.start) +
-        body.substring(firstLine.length);
+    body =
+        firstLine.substring(0, tail.start) + body.substring(firstLine.length);
   }
   return RefusalInfo(
     subject: head?.group(1) ?? '',

@@ -145,11 +145,14 @@ class FakeChatBackend implements ChatBackend {
   Future<WorkRunInfo> cancelWorkRun(String id) async {
     workRunCancels.add(id);
     return (cancelWorkRunResult ??
-        (i) => WorkRunInfo(id: i, status: 'running', cancelRequested: true))(id);
+        (i) =>
+            WorkRunInfo(id: i, status: 'running', cancelRequested: true))(id);
   }
 
+  List<WorkRunInfo> runningWork = const [];
+
   @override
-  Future<List<WorkRunInfo>> listWorkRuns() async => const [];
+  Future<List<WorkRunInfo>> listWorkRuns() async => runningWork;
 
   @override
   Future<ApprovalOutcome> approveCall(String callId,
@@ -197,6 +200,7 @@ Future<Settings> pumpChat(
   tester.view.devicePixelRatio = 1.0;
   final settings = await Settings.load();
   await tester.pumpWidget(MaterialApp(
+    debugShowCheckedModeBanner: false,
     theme: SonderTheme.light,
     darkTheme: SonderTheme.dark,
     themeMode: themeMode,
@@ -221,10 +225,7 @@ Future<void> unmountChat(dynamic tester) async {
 /// Everything the chat store holds, as one string, for leak checks.
 Future<String> storedChatText() async {
   final prefs = await SharedPreferences.getInstance();
-  return prefs
-      .getKeys()
-      .map((k) => '$k=${prefs.get(k)}')
-      .join('\n');
+  return prefs.getKeys().map((k) => '$k=${prefs.get(k)}').join('\n');
 }
 
 /// Load the bundled IBM Plex faces and Material Icons so text measures and

@@ -49,8 +49,10 @@ class WorkRunCard extends StatefulWidget {
 }
 
 class _WorkRunCardState extends State<WorkRunCard> {
-  final DateTime _mountedAt = DateTime.now();
   WorkRunInfo? _info;
+
+  /// Seconds on screen, for runs whose start the server has not told us yet.
+  int _ticks = 0;
   String _error = '';
   bool _forbidden = false;
   bool _stopping = false;
@@ -65,7 +67,7 @@ class _WorkRunCardState extends State<WorkRunCard> {
     super.initState();
     _schedule();
     _tick = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() {});
+      if (mounted) setState(() => _ticks++);
     });
   }
 
@@ -171,14 +173,16 @@ class _WorkRunCardState extends State<WorkRunCard> {
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
     final info = _info;
-    final started = info?.createdAt ?? _mountedAt;
-    final elapsed = DateTime.now().difference(started).inSeconds;
+    final created = info?.createdAt;
+    final elapsed =
+        created == null ? _ticks : DateTime.now().difference(created).inSeconds;
     final budget = widget.run.budgetSeconds ??
         (info?.deadlineAt != null && info?.createdAt != null
             ? info!.deadlineAt!.difference(info.createdAt!).inSeconds
             : null);
-    final budgetText =
-        budget == null ? '' : ' of ${elapsedLabel(budget).replaceAll(' 00s', '')} budget';
+    final budgetText = budget == null
+        ? ''
+        : ' of ${elapsedLabel(budget).replaceAll(' 00s', '')} budget';
     final title = 'work run ${widget.run.shortId} · '
         '${elapsedLabel(elapsed)}$budgetText';
     if (_forbidden) {
@@ -215,6 +219,124 @@ class _WorkRunCardState extends State<WorkRunCard> {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// The running work runs, each with Stop (after a confirm), for a 429
+/// WORK_CAPACITY_EXHAUSTED.
+Future<void> showRunningWork(
+  BuildContext context, {
+  required Future<List<WorkRunInfo>> Function() list,
+  required Future<WorkRunInfo> Function(String id) cancel,
+}) =>
+    showDialog<void>(
+      context: context,
+      builder: (_) => _RunningWorkDialog(list: list, cancel: cancel),
+    );
+
+class _RunningWorkDialog extends StatefulWidget {
+  final Future<List<WorkRunInfo>> Function() list;
+  final Future<WorkRunInfo> Function(String id) cancel;
+  const _RunningWorkDialog({required this.list, required this.cancel});
+
+  @override
+  State<_RunningWorkDialog> createState() => _RunningWorkDialogState();
+}
+
+class _RunningWorkDialogState extends State<_RunningWorkDialog> {
+  List<WorkRunInfo>? _runs;
+  String _error = '';
+  final Set<String> _stopping = <String>{};
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final runs = await widget.list();
+      if (!mounted) return;
+      setState(() => _runs = runs.where((r) => r.isRunning).toList());
+    } on SonderException catch (e) {
+      if (mounted) setState(() => _error = e.message);
+    } catch (_) {
+      if (mounted) setState(() => _error = 'Could not list work runs.');
+    }
+  }
+
+  Future<void> _stop(WorkRunInfo run) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Stop this work run?'),
+        content: Text('Work run ${WorkRunRef(run.id).shortId} stops making '
+            'changes at its next step.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Keep running')),
+          FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Stop run')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    setState(() => _stopping.add(run.id));
+    try {
+      await widget.cancel(run.id);
+    } on SonderException catch (e) {
+      if (mounted) setState(() => _error = e.message);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = SonderTokens.of(context);
+    final runs = _runs;
+    return AlertDialog(
+      key: const Key('running-work'),
+      title: const Text('Running work'),
+      content: SizedBox(
+        width: 420,
+        child: runs == null && _error.isEmpty
+            ? const LinearProgressIndicator()
+            : Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (_error.isNotEmpty)
+                    ChatNotice(kind: ChatStatusKind.warn, title: _error),
+                  if (runs != null && runs.isEmpty)
+                    const ChatNotice(
+                        kind: ChatStatusKind.note, title: 'No work runs'),
+                  for (final run in runs ?? const <WorkRunInfo>[])
+                    Row(children: [
+                      Expanded(
+                        child: Text(
+                          '◈ working  ${WorkRunRef(run.id).shortId}',
+                          style: tokens.mono(12, color: tokens.text),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: _stopping.contains(run.id)
+                            ? null
+                            : () => _stop(run),
+                        child: Text(
+                            _stopping.contains(run.id) ? 'Stopping…' : 'Stop…'),
+                      ),
+                    ]),
+                ],
+              ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Close')),
+      ],
     );
   }
 }

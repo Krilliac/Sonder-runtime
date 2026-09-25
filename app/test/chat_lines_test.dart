@@ -50,7 +50,11 @@ void main() {
     expect(at50, contains('…'));
     expect(statusLine(elevated, 30), 'code · manual ELEVATED');
     const plain = StatusState(
-        mode: 'manual', tier: 'code', model: 'sonder:latest', ctxUsed: 64, ctxLimit: 8192);
+        mode: 'manual',
+        tier: 'code',
+        model: 'sonder:latest',
+        ctxUsed: 64,
+        ctxLimit: 8192);
     expect(statusLine(plain, 30), 'code · manual · ctx 64/8.2k');
 
     // Values generated with style.status_line.
@@ -97,16 +101,25 @@ void main() {
   // app's rating controls are buttons).
   test('footerLine matches style.footer', () {
     expect(
-      footerLine(const FooterState(
-          elapsedMs: 75700, modelCalls: 2, tokensIn: 2600, tokensOut: 43, rate: 'full'), width: 80),
+      footerLine(
+          const FooterState(
+              elapsedMs: 75700,
+              modelCalls: 2,
+              tokensIn: 2600,
+              tokensOut: 43,
+              rate: 'full'),
+          width: 80),
       'done 75.7s · 2 model calls · 2.6k→43 tok · rate: /pass /fail',
     );
     expect(
-      footerLine(const FooterState(elapsedMs: 231, ok: false, hint: 'start ollama'),
+      footerLine(
+          const FooterState(elapsedMs: 231, ok: false, hint: 'start ollama'),
           width: 80),
       'failed after 231ms · hint: start ollama',
     );
-    expect(footerLine(const FooterState(elapsedMs: 1200, rate: 'short'), width: 80),
+    expect(
+        footerLine(const FooterState(elapsedMs: 1200, rate: 'short'),
+            width: 80),
         'done 1.2s · /pass /fail');
     // Generated with style.footer(rate='').
     expect(
@@ -126,7 +139,8 @@ void main() {
       'done 61.2s · 2 model calls',
     );
     expect(
-      footerLine(const FooterState(elapsedMs: 12000, ok: false, hint: 'start ollama')),
+      footerLine(
+          const FooterState(elapsedMs: 12000, ok: false, hint: 'start ollama')),
       'failed after 12.0s · hint: start ollama',
     );
   });
@@ -134,7 +148,10 @@ void main() {
   // style.live_line, minus "Ctrl-C cancels" (Stop is a button in the app).
   test('liveLine drops model, tokens, then the slow hint', () {
     expect(
-      liveLine(const LiveState(phase: 'routing', elapsedSeconds: 12, model: 'sonder:latest'), 80),
+      liveLine(
+          const LiveState(
+              phase: 'routing', elapsedSeconds: 12, model: 'sonder:latest'),
+          80),
       '◈ working · routing · 12s · sonder:latest',
     );
     const slow = LiveState(
@@ -143,10 +160,12 @@ void main() {
         model: 'sonder:latest',
         tokensIn: 2600,
         slow: true);
-    expect(liveLine(slow, 200),
+    expect(
+        liveLine(slow, 200),
         '◈ working · model call 1/2 · 42s · sonder:latest · 2.6k tok in · '
         'slow local model? try the fast route');
-    expect(liveLine(slow, 90),
+    expect(
+        liveLine(slow, 90),
         '◈ working · model call 1/2 · 42s · 2.6k tok in · slow local model? '
         'try the fast route');
     expect(liveLine(slow, 80),

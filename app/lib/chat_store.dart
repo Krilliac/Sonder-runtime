@@ -187,7 +187,8 @@ class ChatStore {
   }
 
   static Future<void> save(List<ChatThread> threads) async {
-    final kept = ([...threads]..sort((a, b) => b.updatedAt.compareTo(a.updatedAt)))
+    final kept = ([...threads]
+          ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt)))
         .take(maxThreads)
         .toList();
     final keepNames = <String>{};

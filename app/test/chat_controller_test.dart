@@ -9,7 +9,8 @@ import 'package:sonder_runtime/models.dart';
 
 import 'chat_fakes.dart';
 
-Future<ChatController> _start(WidgetTester tester, FakeChatBackend backend) async {
+Future<ChatController> _start(
+    WidgetTester tester, FakeChatBackend backend) async {
   SharedPreferences.setMockInitialValues(<String, Object>{});
   ChatStore.backend = PrefsChatStoreBackend();
   ChatStore.resetCache();
@@ -96,7 +97,8 @@ void main() {
     expect(c.connection.value.state, ConnState.refused);
     expect(c.connection.value.sentence, contains('refused this address'));
 
-    backend.statusError = SonderException('Cannot reach server: SocketException');
+    backend.statusError =
+        SonderException('Cannot reach server: SocketException');
     await c.pollStatus();
     expect(c.connection.value.state, ConnState.unreachable);
     expect(c.connection.value.isOffline, isTrue);
@@ -199,7 +201,8 @@ void main() {
     c.dispose();
   });
 
-  testWidgets('a 403 on the mode route makes the chip read-only until the '
+  testWidgets(
+      'a 403 on the mode route makes the chip read-only until the '
       'account changes', (tester) async {
     final backend = FakeChatBackend()
       ..mode = permissionModeFor('manual')
@@ -217,8 +220,10 @@ void main() {
     await c.requestModeChange('manual', confirm: (_, __) async => true);
     expect(backend.modePosts, ['plan']);
 
-    c.updateBackend(FakeChatBackend(serverUrl: 'http://other:11435')
-      ..mode = permissionModeFor('manual'), identityChanged: true);
+    c.updateBackend(
+        FakeChatBackend(serverUrl: 'http://other:11435')
+          ..mode = permissionModeFor('manual'),
+        identityChanged: true);
     expect(c.modeReadOnly, isFalse);
     c.dispose();
   });

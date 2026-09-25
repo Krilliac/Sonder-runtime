@@ -38,13 +38,15 @@ void main() {
     expect(loaded.last.messages.single.content, 'one');
   });
 
-  test('a corrupt thread is set aside, never overwritten, and costs only itself',
+  test(
+      'a corrupt thread is set aside, never overwritten, and costs only itself',
       () async {
     await ChatStore.save([
       _thread('chat-a', [_user('keep me')], minute: 1),
       _thread('chat-b', [_user('fine')], minute: 2),
     ]);
-    await ChatStore.backend.write('thread-chat-a.json', '{"id": "chat-a", "mess');
+    await ChatStore.backend
+        .write('thread-chat-a.json', '{"id": "chat-a", "mess');
     // An older .corrupt copy must survive too.
     await ChatStore.backend.write('thread-chat-a.json.corrupt', 'older backup');
 
@@ -130,12 +132,15 @@ void main() {
     expect(await ChatStore.loadSessions(), {'chat-a': 2});
   });
 
-  test('directory backend: one file per thread, corrupt file renamed', () async {
+  test('directory backend: one file per thread, corrupt file renamed',
+      () async {
     final dir = await Directory.systemTemp.createTemp('sonder_chat_store');
     addTearDown(() => dir.delete(recursive: true));
     ChatStore.backend = DirectoryChatStoreBackend(dir);
     ChatStore.resetCache();
-    await ChatStore.save([_thread('chat-f', [_user('file')])]);
+    await ChatStore.save([
+      _thread('chat-f', [_user('file')])
+    ]);
     final file = File('${dir.path}/chats/thread-chat-f.json');
     expect(file.existsSync(), isTrue);
     file.writeAsStringSync('{oops');

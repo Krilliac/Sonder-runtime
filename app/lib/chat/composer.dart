@@ -41,7 +41,10 @@ const _modeCommands = {'/mode', '/permission_mode'};
 String? canonicalMode(String typed) => switch (typed.toLowerCase()) {
       'plan' => 'plan',
       'manual' || 'default' => 'manual',
-      'acceptedits' || 'accept-edits' || 'accept_edits' || 'edits' =>
+      'acceptedits' ||
+      'accept-edits' ||
+      'accept_edits' ||
+      'edits' =>
         'acceptEdits',
       'auto' => 'auto',
       _ => null,
@@ -57,7 +60,8 @@ ComposerIntercept? classifyIntercept(String text) {
   if (_accountCommands.contains(command)) {
     final user = args.isEmpty ? '' : args.first;
     return AccountIntercept(command,
-        username: RegExp(r'^[A-Za-z0-9_.@-]{1,64}$').hasMatch(user) ? user : '');
+        username:
+            RegExp(r'^[A-Za-z0-9_.@-]{1,64}$').hasMatch(user) ? user : '');
   }
   if (_modeCommands.contains(command)) {
     return ModeIntercept(args.isEmpty ? null : canonicalMode(args.first));
@@ -172,52 +176,62 @@ class ChatComposer extends StatelessWidget {
                       ),
                       Padding(
                         padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
-                        child: Row(
-                          children: [
-                            if (modeChip != null) ...[
-                              Flexible(child: modeChip!),
-                              const SizedBox(width: 6),
-                            ],
-                            _CommandsButton(
-                                onTap: onOpenCommands, desktop: desktop),
-                            Expanded(
-                              child: desktop
-                                  ? Padding(
-                                      padding: const EdgeInsets.only(
-                                          left: 8, right: 10),
-                                      child: Text(
-                                        'Enter send · Shift Enter newline',
-                                        textAlign: TextAlign.right,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: tokens.mono(11,
-                                            color: tokens.muted),
-                                      ),
-                                    )
-                                  : const SizedBox.shrink(),
-                            ),
-                            SizedBox(
-                              width: 48,
-                              height: 48,
-                              child: Center(
-                                child: SizedBox(
-                                  width: 36,
-                                  height: 36,
-                                  child: FloatingActionButton.small(
-                                    key: const Key('composer-send'),
-                                    heroTag: null,
-                                    onPressed: sending ? onCancel : onSend,
-                                    tooltip: sending ? 'Stop' : 'Send',
-                                    child: sending
-                                        ? const Icon(Icons.stop, size: 18)
-                                        : const Icon(Icons.arrow_upward,
-                                            size: 18),
+                        child: LayoutBuilder(builder: (context, row) {
+                          // The chip may take what the "/" and Send targets
+                          // leave, and truncates its label past that.
+                          final chipMax = (row.maxWidth - 48 - 48 - 12)
+                              .clamp(48.0, double.infinity);
+                          return Row(
+                            children: [
+                              if (modeChip != null) ...[
+                                ConstrainedBox(
+                                  constraints:
+                                      BoxConstraints(maxWidth: chipMax),
+                                  child: modeChip!,
+                                ),
+                                const SizedBox(width: 6),
+                              ],
+                              _CommandsButton(
+                                  onTap: onOpenCommands, desktop: desktop),
+                              Expanded(
+                                child: desktop
+                                    ? Padding(
+                                        padding: const EdgeInsets.only(
+                                            left: 8, right: 10),
+                                        child: Text(
+                                          'Enter send · Shift Enter newline',
+                                          textAlign: TextAlign.right,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: tokens.mono(11,
+                                              color: tokens.muted),
+                                        ),
+                                      )
+                                    : const SizedBox.shrink(),
+                              ),
+                              SizedBox(
+                                width: 48,
+                                height: 48,
+                                child: Center(
+                                  child: SizedBox(
+                                    width: 36,
+                                    height: 36,
+                                    child: FloatingActionButton.small(
+                                      key: const Key('composer-send'),
+                                      heroTag: null,
+                                      onPressed: sending ? onCancel : onSend,
+                                      tooltip: sending ? 'Stop' : 'Send',
+                                      child: sending
+                                          ? const Icon(Icons.stop, size: 18)
+                                          : const Icon(Icons.arrow_upward,
+                                              size: 18),
+                                    ),
                                   ),
                                 ),
                               ),
-                            ),
-                          ],
-                        ),
+                            ],
+                          );
+                        }),
                       ),
                     ],
                   ),
@@ -390,7 +404,8 @@ class CommandRow extends StatelessWidget {
                       command.displayName,
                       style: TextStyle(
                         fontFamily: SonderTheme.mono,
-                        fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                        fontWeight:
+                            selected ? FontWeight.w700 : FontWeight.w500,
                         color: cs.primary,
                       ),
                       overflow: TextOverflow.ellipsis,
@@ -419,7 +434,8 @@ class CommandRow extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       if (usage != command.displayName)
-                        Text(usage, style: meta, overflow: TextOverflow.ellipsis),
+                        Text(usage,
+                            style: meta, overflow: TextOverflow.ellipsis),
                       if (aliases.isNotEmpty)
                         Text('aliases: $aliases',
                             style: meta, overflow: TextOverflow.ellipsis),

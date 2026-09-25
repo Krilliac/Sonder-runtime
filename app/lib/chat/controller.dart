@@ -20,7 +20,8 @@ class ChatEntry {
   final bool retryable;
   final int? elapsedMs;
 
-  const ChatEntry(this.id, this.message, {this.retryable = false, this.elapsedMs});
+  const ChatEntry(this.id, this.message,
+      {this.retryable = false, this.elapsedMs});
 
   ChatEntry withMessage(ChatMessage next, {bool? retryable, int? elapsedMs}) =>
       ChatEntry(id, next,
@@ -58,6 +59,22 @@ class LiveTurn {
       );
 }
 
+const workCapacityCode = 'WORK_CAPACITY_EXHAUSTED';
+
+/// The words for a 429 WORK_CAPACITY_EXHAUSTED, instead of the server's
+/// route instructions.
+const workCapacityText =
+    'Every work slot on the PC is busy. Stop a running work run, or retry '
+    'in a moment.';
+
+bool isWorkCapacityError(SonderException e) =>
+    e.code == workCapacityCode ||
+    e.message.contains('routed work capacity is busy');
+
+/// True for a stored error message produced from a capacity refusal.
+bool isWorkCapacityMessage(ChatMessage m) =>
+    m.error && m.diagnostic.contains(workCapacityCode);
+
 /// Outcome of a mode change request, for the shell to report.
 enum ModeChangeOutcome { changed, declined, readOnly, failed, unchanged }
 
@@ -77,7 +94,8 @@ class ChatController extends ChangeNotifier {
   ChatController(ChatBackend backend, {required String model})
       : _backend = backend,
         _model = model,
-        connection = ValueNotifier(ConnectionStatus.connecting(backend.serverUrl));
+        connection =
+            ValueNotifier(ConnectionStatus.connecting(backend.serverUrl));
 
   ChatBackend get backend => _backend;
 
@@ -371,7 +389,10 @@ class ChatController extends ChangeNotifier {
       // What the server holds is now unknown: drop the chip, re-read.
       _mode = null;
       unawaited(refreshPermissionMode());
-      return (ModeChangeOutcome.failed, 'Could not change mode: ${err.message}');
+      return (
+        ModeChangeOutcome.failed,
+        'Could not change mode: ${err.message}'
+      );
     } catch (e) {
       _mode = null;
       unawaited(refreshPermissionMode());
@@ -414,12 +435,21 @@ class ChatController extends ChangeNotifier {
     _entries
       ..clear()
       ..addAll(messages.map((m) => ChatEntry(_nextId++, m)));
+    // The status line's tier is the last reply's route.
+    for (final m in messages.reversed) {
+      final tier = m.responseMetadata?.tier ?? '';
+      if (tier.isNotEmpty) {
+        lastTier = tier;
+        break;
+      }
+    }
   }
 
   String titleFor(List<ChatMessage> messages) {
     final userMessages = messages.where((m) => m.role == Role.user);
     if (userMessages.isEmpty) return currentThread.title;
-    final text = userMessages.first.content.replaceAll(RegExp(r'\s+'), ' ').trim();
+    final text =
+        userMessages.first.content.replaceAll(RegExp(r'\s+'), ' ').trim();
     if (text.isEmpty) return 'New chat';
     if (text.length <= 42) return text;
     return '${text.substring(0, 42)}...';
@@ -477,8 +507,8 @@ class ChatController extends ChangeNotifier {
     if (thread.id == _currentThreadId) return;
     _currentThreadId = thread.id;
     _project = thread.project;
-    final latest = _threads.firstWhere((t) => t.id == thread.id,
-        orElse: () => thread);
+    final latest =
+        _threads.firstWhere((t) => t.id == thread.id, orElse: () => thread);
     _setEntries(latest.messages);
     if (sending && _turnThreadId == thread.id) _restorePendingRow();
     _notify();
@@ -489,8 +519,7 @@ class ChatController extends ChangeNotifier {
     final remaining = _threads.where((t) => t.id != thread.id).toList();
     final next =
         remaining.isEmpty ? [ChatThread.fresh(project: _project)] : remaining;
-    final current =
-        thread.id == _currentThreadId ? next.first : currentThread;
+    final current = thread.id == _currentThreadId ? next.first : currentThread;
     _threads = next;
     _currentThreadId = current.id;
     _project = current.project;
@@ -657,8 +686,8 @@ class ChatController extends ChangeNotifier {
 
   void _updatePending(String partial) {
     if (_turnThreadId != _currentThreadId) return;
-    _replace(_pendingId,
-        (e) => e.withMessage(e.message.copyWith(content: partial)));
+    _replace(
+        _pendingId, (e) => e.withMessage(e.message.copyWith(content: partial)));
     _notify();
   }
 
@@ -712,7 +741,9 @@ class ChatController extends ChangeNotifier {
 
   void _finishOk(ChatTurn turn, ChatReply reply) {
     final elapsed = _liveElapsedMs();
-    if (reply.metadata?.tier.isNotEmpty == true) lastTier = reply.metadata!.tier;
+    if (reply.metadata?.tier.isNotEmpty == true) {
+      lastTier = reply.metadata!.tier;
+    }
     final message = ChatMessage(
       role: Role.assistant,
       content: reply.text.isEmpty ? '(empty response)' : reply.text,
@@ -730,7 +761,19 @@ class ChatController extends ChangeNotifier {
     final elapsed = _liveElapsedMs();
     ChatMessage message;
     var retryable = false;
-    if (e is SonderException) {
+    if (e is SonderException && isWorkCapacityError(e)) {
+      message = ChatMessage(
+        role: Role.assistant,
+        content: workCapacityText,
+        error: true,
+        diagnostic: [
+          if (e.diagnosticText.isNotEmpty) e.diagnosticText,
+          if (!e.diagnosticText.contains(workCapacityCode))
+            'code: $workCapacityCode',
+        ].join('\n'),
+      );
+      retryable = true;
+    } else if (e is SonderException) {
       final diagnostics = <String>[
         if (e.diagnosticText.isNotEmpty) e.diagnosticText,
         if (verboseErrors && e.cause != null) 'cause: ${e.cause}',

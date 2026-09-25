@@ -15,7 +15,8 @@ void main() {
       expect(i, isA<AccountIntercept>());
       expect((i as AccountIntercept).username, 'bob');
       expect(classifyIntercept('/register'), isA<AccountIntercept>());
-      expect(classifyIntercept('/ADMIN_LOGIN root pw'), isA<AccountIntercept>());
+      expect(
+          classifyIntercept('/ADMIN_LOGIN root pw'), isA<AccountIntercept>());
     });
 
     test('mode commands go to the chip flow', () {
@@ -25,8 +26,8 @@ void main() {
               .target,
           'acceptEdits');
       expect((classifyIntercept('/mode') as ModeIntercept).target, isNull);
-      expect(
-          (classifyIntercept('/permissions plan') as ModeIntercept).target, 'plan');
+      expect((classifyIntercept('/permissions plan') as ModeIntercept).target,
+          'plan');
       expect(classifyIntercept('/elevate'), isA<ModeIntercept>());
     });
 
@@ -82,7 +83,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byKey(const Key('raise-mode-sheet')), findsOneWidget);
-    expect(find.textContaining('manual → auto', findRichText: true), findsOneWidget);
+    expect(find.textContaining('manual → auto', findRichText: true),
+        findsOneWidget);
     expect(find.text('Switch to auto'), findsOneWidget);
     await tester.tap(find.byKey(const Key('raise-mode-cancel')));
     await tester.pumpAndSettle();
@@ -105,7 +107,8 @@ void main() {
 
     // manual -> acceptEdits is a raise.
     expect(find.byKey(const Key('raise-mode-sheet')), findsOneWidget);
-    expect(find.textContaining('manual → acceptEdits', findRichText: true), findsOneWidget);
+    expect(find.textContaining('manual → acceptEdits', findRichText: true),
+        findsOneWidget);
     await tester.tap(find.byKey(const Key('raise-mode-cancel')));
     await tester.pumpAndSettle();
     expect(backend.modePosts, isEmpty);
@@ -148,10 +151,11 @@ void main() {
     await tester.tap(find.byKey(const Key('permission-mode-option-plan')));
     await tester.pumpAndSettle();
 
-    expect(find.text('Only an administrator can change the mode'),
-        findsOneWidget);
+    expect(
+        find.text('Only an administrator can change the mode'), findsOneWidget);
     expect(find.textContaining('{'), findsNothing);
-    final chip = tester.widget<InkWell>(find.byKey(const Key('permission-mode-chip')));
+    final chip =
+        tester.widget<InkWell>(find.byKey(const Key('permission-mode-chip')));
     expect(chip.onTap, isNull);
     expect(find.byTooltip('Only an administrator can change the mode'),
         findsOneWidget);

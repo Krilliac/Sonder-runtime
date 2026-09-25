@@ -23,7 +23,8 @@ class SonderMark extends StatelessWidget {
         color: tokens.accentDim,
         borderRadius: BorderRadius.circular(size * 0.28),
       ),
-      child: Icon(Icons.hexagon_outlined, size: size * 0.6, color: tokens.accent),
+      child:
+          Icon(Icons.hexagon_outlined, size: size * 0.6, color: tokens.accent),
     );
   }
 }
@@ -61,7 +62,8 @@ class ConnectionRow extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(c.glyph,
-                      style: tokens.mono(11, color: tone, weight: FontWeight.w600)),
+                      style: tokens.mono(11,
+                          color: tone, weight: FontWeight.w600)),
                   const SizedBox(width: 6),
                   Flexible(
                     child: Text(c.host,
@@ -114,7 +116,8 @@ class ChatDrawer extends StatelessWidget {
     final text = Theme.of(context).textTheme;
     final projects = threads.map((t) => t.project).toSet().toList()..sort();
     return Drawer(
-      shape: embedded ? Border(right: BorderSide(color: tokens.hairline)) : null,
+      shape:
+          embedded ? Border(right: BorderSide(color: tokens.hairline)) : null,
       child: SafeArea(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -176,8 +179,8 @@ class ChatDrawer extends StatelessWidget {
                           style: text.bodySmall?.copyWith(color: tokens.muted)),
                     )
                   : ListView.builder(
-                      padding:
-                          const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 4),
                       itemCount: threads.length,
                       itemBuilder: (_, index) {
                         final thread = threads[index];
@@ -186,8 +189,9 @@ class ChatDrawer extends StatelessWidget {
                           thread: thread,
                           selected: thread.id == currentThreadId,
                           onTap: () => onSelect(thread),
-                          onDelete:
-                              threads.length <= 1 ? null : () => onDelete(thread),
+                          onDelete: threads.length <= 1
+                              ? null
+                              : () => onDelete(thread),
                         );
                       },
                     ),
@@ -212,8 +216,8 @@ class ChatDrawer extends StatelessWidget {
                   children: [
                     for (final project in projects.take(4))
                       Padding(
-                        padding:
-                            const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 5),
                         child: Row(
                           children: [
                             Container(

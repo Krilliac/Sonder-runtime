@@ -155,7 +155,8 @@ class OfflineNotice extends StatelessWidget {
         : ChatStatusKind.warn;
     return ChatNotice(
       kind: kind,
-      word: status.word,
+      // The REPL's words: "✗ error  Can't reach mypc", "! refused  …".
+      word: status.state == ConnState.unreachable ? 'error' : status.word,
       liveRegion: true,
       title: status.sentence,
       detail: status.remedy,

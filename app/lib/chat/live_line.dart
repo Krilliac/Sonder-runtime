@@ -88,16 +88,17 @@ class LiveLineView extends StatelessWidget {
     if (rest.startsWith(head)) {
       spans.add(TextSpan(
           text: head,
-          style: style.copyWith(color: tokens.accent, fontWeight: FontWeight.w600)));
+          style: style.copyWith(
+              color: tokens.accent, fontWeight: FontWeight.w600)));
       rest = rest.substring(head.length);
     }
     final i = slowHint.isEmpty ? -1 : rest.indexOf(slowHint);
     if (i >= 0) {
       spans.add(TextSpan(text: rest.substring(0, i), style: style));
-      spans.add(TextSpan(
-          text: slowHint, style: style.copyWith(color: tokens.warn)));
-      spans.add(TextSpan(
-          text: rest.substring(i + slowHint.length), style: style));
+      spans.add(
+          TextSpan(text: slowHint, style: style.copyWith(color: tokens.warn)));
+      spans.add(
+          TextSpan(text: rest.substring(i + slowHint.length), style: style));
     } else {
       spans.add(TextSpan(text: rest, style: style));
     }

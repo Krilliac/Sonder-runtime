@@ -61,7 +61,8 @@ class ChatNotice extends StatelessWidget {
     final text = Theme.of(context).textTheme;
     final tone = kind.color(tokens);
     final label = word ?? kind.word;
-    final strong = kind == ChatStatusKind.refused || kind == ChatStatusKind.fail;
+    final strong =
+        kind == ChatStatusKind.refused || kind == ChatStatusKind.fail;
     return Semantics(
       container: true,
       liveRegion: liveRegion,
@@ -82,8 +83,7 @@ class ChatNotice extends StatelessWidget {
                       weight: strong ? FontWeight.w600 : FontWeight.w500),
                 ),
                 if (title.isNotEmpty)
-                  Text(title,
-                      style: tokens.mono(12, color: tokens.text)),
+                  Text(title, style: tokens.mono(12, color: tokens.text)),
               ],
             ),
           ),

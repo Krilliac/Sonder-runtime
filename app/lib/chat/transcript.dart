@@ -40,9 +40,11 @@ class TranscriptActions {
   final ValueChanged<String> onFeedback;
   final ValueChanged<int> onRetry;
   final VoidCallback onChangeMode;
-  final Future<ApprovalOutcome> Function(String callId, Duration ttl)? onApprove;
+  final Future<ApprovalOutcome> Function(String callId, Duration ttl)?
+      onApprove;
   final Future<WorkRunInfo> Function(String id) fetchWorkRun;
   final Future<WorkRunInfo> Function(String id) cancelWorkRun;
+  final Future<List<WorkRunInfo>> Function() listWorkRuns;
   final void Function(int entryId, WorkRunInfo run) onWorkRunResolved;
 
   const TranscriptActions({
@@ -53,6 +55,7 @@ class TranscriptActions {
     required this.onApprove,
     required this.fetchWorkRun,
     required this.cancelWorkRun,
+    required this.listWorkRuns,
     required this.onWorkRunResolved,
   });
 }
@@ -172,8 +175,7 @@ class ParsedAnswer {
     );
   }
 
-  static (List<ToolCallRow>, Map<String, int>) _parseActivityBlock(
-      String raw) {
+  static (List<ToolCallRow>, Map<String, int>) _parseActivityBlock(String raw) {
     if (raw.isEmpty) return (const [], const {});
     final actions = <ToolCallRow>[];
     final timed = <ToolCallRow>[];
@@ -195,9 +197,11 @@ class ParsedAnswer {
       } else if (t.startsWith('files:')) {
         final parts = t.split(RegExp(r'\s+'));
         if (parts.length >= 4) {
-          stats['file_creates'] = int.tryParse(parts[1].replaceAll('+', '')) ?? 0;
+          stats['file_creates'] =
+              int.tryParse(parts[1].replaceAll('+', '')) ?? 0;
           stats['file_edits'] = int.tryParse(parts[2].replaceAll('~', '')) ?? 0;
-          stats['file_deletes'] = int.tryParse(parts[3].replaceAll('-', '')) ?? 0;
+          stats['file_deletes'] =
+              int.tryParse(parts[3].replaceAll('-', '')) ?? 0;
         }
       } else if (t.startsWith('• ') || t.startsWith('× ')) {
         actions.add(ToolCallRow(t.substring(2).trim(), ok: t.startsWith('•')));
@@ -242,8 +246,7 @@ String? footerFor(ChatEntry entry, ParsedAnswer? parsed) {
     return footerLine(FooterState(elapsedMs: elapsed, ok: false));
   }
   if (elapsed == null && m == null && stats.isEmpty) return null;
-  int? pick(int? a, String key) =>
-      (a != null && a > 0) ? a : (stats[key] ?? a);
+  int? pick(int? a, String key) => (a != null && a > 0) ? a : (stats[key] ?? a);
   return footerLine(FooterState(
     elapsedMs: elapsed ?? 0,
     modelCalls: pick(m?.modelCalls, 'model_calls'),
@@ -273,8 +276,7 @@ class TranscriptTurn extends StatelessWidget {
     final tokens = SonderTokens.of(context);
     final message = entry.message;
     final isUser = message.role == Role.user;
-    final parsed =
-        isUser || message.pending ? null : ParsedAnswer.of(message);
+    final parsed = isUser || message.pending ? null : ParsedAnswer.of(message);
     final kind = parsed?.kind ?? ReplyKind.answer;
     final glyph = isUser
         ? '❯'
@@ -283,9 +285,10 @@ class TranscriptTurn extends StatelessWidget {
             ReplyKind.refused => '⊘',
             _ => '◈',
           };
-    final glyphColor = !isUser && (kind == ReplyKind.error || kind == ReplyKind.refused)
-        ? tokens.danger
-        : tokens.accent;
+    final glyphColor =
+        !isUser && (kind == ReplyKind.error || kind == ReplyKind.refused)
+            ? tokens.danger
+            : tokens.accent;
     final speaker = isUser ? 'You' : 'Sonder Runtime';
 
     Widget content;
@@ -297,7 +300,8 @@ class TranscriptTurn extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           if (message.content.isNotEmpty) ...[
-            ChatMarkdown(key: const Key('streaming-text'), content: message.content),
+            ChatMarkdown(
+                key: const Key('streaming-text'), content: message.content),
             const SizedBox(height: 10),
           ],
           LiveLineView(live: live, onStop: actions.onStop),
@@ -362,6 +366,16 @@ class TranscriptTurn extends StatelessWidget {
           title: title,
           detail: detail,
           actions: [
+            if (isWorkCapacityMessage(message))
+              FilledButton.tonal(
+                key: const Key('error-running-work'),
+                onPressed: () => showRunningWork(
+                  context,
+                  list: actions.listWorkRuns,
+                  cancel: actions.cancelWorkRun,
+                ),
+                child: const Text('Show running work'),
+              ),
             if (entry.retryable)
               OutlinedButton(
                 key: const Key('error-retry'),

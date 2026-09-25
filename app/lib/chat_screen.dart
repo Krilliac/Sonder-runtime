@@ -197,10 +197,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         matches = catalog.popularCommands;
         grouped = true;
       } else {
-        matches = catalog.commands.where((c) => c.matchesPrefix(query)).toList();
+        matches =
+            catalog.commands.where((c) => c.matchesPrefix(query)).toList();
         if (matches.isEmpty) {
           final needle = query.substring(1);
-          matches = catalog.commands.where((c) => c.matchesLoose(needle)).toList();
+          matches =
+              catalog.commands.where((c) => c.matchesLoose(needle)).toList();
         }
       }
     }
@@ -239,8 +241,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (_paletteMatches.isEmpty && key == LogicalKeyboardKey.enter) {
       if (HardwareKeyboard.instance.isShiftPressed) {
         final value = _input.value;
-        final start =
-            value.selection.start < 0 ? value.text.length : value.selection.start;
+        final start = value.selection.start < 0
+            ? value.text.length
+            : value.selection.start;
         final end = value.selection.end < 0 ? start : value.selection.end;
         _input.value = value.copyWith(
           text: value.text.replaceRange(start, end, '\n'),
@@ -531,6 +534,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         onApprove: (callId, ttl) => _chat.backend.approveCall(callId, ttl: ttl),
         fetchWorkRun: (id) => _chat.backend.getWorkRun(id),
         cancelWorkRun: (id) => _chat.backend.cancelWorkRun(id),
+        listWorkRuns: () => _chat.backend.listWorkRuns(),
         onWorkRunResolved: (entryId, run) =>
             unawaited(_chat.resolveWorkRun(entryId, run)),
       );
@@ -560,8 +564,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Widget _buildScreen(BuildContext context) {
-    final currentTitle =
-        _chat.loadingThreads ? 'Loading chats...' : _chat.currentThread.displayTitle;
+    final currentTitle = _chat.loadingThreads
+        ? 'Loading chats...'
+        : _chat.currentThread.displayTitle;
     final entries = _chat.entries;
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -616,7 +621,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 unawaited(_openSettings());
                 return null;
               }),
-              _OpenRuntimeIntent: CallbackAction<_OpenRuntimeIntent>(onInvoke: (_) {
+              _OpenRuntimeIntent:
+                  CallbackAction<_OpenRuntimeIntent>(onInvoke: (_) {
                 unawaited(_openRuntime());
                 return null;
               }),
@@ -642,7 +648,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       icon: const Icon(Icons.link_outlined),
                       onPressed: _openAppControl),
                   ConstrainedBox(
-                      constraints: BoxConstraints(maxWidth: compact ? 100 : 260),
+                      constraints:
+                          BoxConstraints(maxWidth: compact ? 100 : 260),
                       child: _ModelPill(
                         label: _modelLabel(_chat.model),
                         models: _chat.models,
@@ -666,10 +673,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         }
                       },
                       itemBuilder: (_) => const [
-                        PopupMenuItem(value: 'commands', child: Text('Commands')),
+                        PopupMenuItem(
+                            value: 'commands', child: Text('Commands')),
                         PopupMenuItem(value: 'new', child: Text('New chat')),
                         PopupMenuItem(value: 'runtime', child: Text('Runtime')),
-                        PopupMenuItem(value: 'settings', child: Text('Settings')),
+                        PopupMenuItem(
+                            value: 'settings', child: Text('Settings')),
                       ],
                     ),
                   if (!desktop && !compact) ...[
@@ -725,8 +734,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                             builder: (context, c, _) => !c.isOffline
                                 ? const SizedBox.shrink()
                                 : Padding(
-                                    padding:
-                                        const EdgeInsets.fromLTRB(16, 10, 16, 0),
+                                    padding: const EdgeInsets.fromLTRB(
+                                        16, 10, 16, 0),
                                     child: Center(
                                       child: ConstrainedBox(
                                         constraints: const BoxConstraints(
@@ -734,8 +743,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                         child: OfflineNotice(
                                           key: const Key('offline-notice'),
                                           status: c,
-                                          onRetry: () =>
-                                              unawaited(_chat.retryConnection()),
+                                          onRetry: () => unawaited(
+                                              _chat.retryConnection()),
                                           onSettings: () =>
                                               unawaited(_openSettings()),
                                         ),
