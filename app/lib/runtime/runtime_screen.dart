@@ -150,6 +150,11 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     if (oldWidget.dataSource != widget.dataSource ||
         oldWidget.settings != widget.settings) {
       _data = _dataSourceFor(widget);
+      _workRuns = null;
+      _workRunsError = null;
+      _approvals = null;
+      _approvalsError = null;
+      unawaited(_loadExtras());
     }
   }
 
@@ -933,10 +938,6 @@ class _RuntimeScreenState extends State<RuntimeScreen>
                   ),
                 ],
               ),
-              if (_notice != null) ...[
-                const SizedBox(height: 12),
-                WorkspaceNotice(message: _notice!),
-              ],
               if (_loading || _working) ...[
                 const SizedBox(height: 16),
                 const LinearProgressIndicator(),
@@ -1385,16 +1386,19 @@ class _RuntimeScreenState extends State<RuntimeScreen>
                               : widget.settings.effectiveLauncherUrl,
                           ok: widget.settings.usesHostLauncher &&
                               _launcherInfo != null,
+                          off: !widget.settings.hasHostLauncher,
                         ),
                         _StatusRow(
                           label: 'Launcher',
                           value: _launcherInfo?.launcher ?? 'Not reachable',
                           ok: _launcherInfo?.ok ?? false,
+                          off: !widget.settings.hasHostLauncher,
                         ),
                         _StatusRow(
                           label: 'Main server',
                           value: launcherServerText,
                           ok: _launcherInfo?.serverState == 'healthy',
+                          off: !widget.settings.hasHostLauncher,
                         ),
                         if (_launcherOperation != null)
                           _StatusRow(
@@ -1681,6 +1685,12 @@ class _RuntimeScreenState extends State<RuntimeScreen>
                     ),
                   ),
                   const SizedBox(height: 12),
+                  if (_notice != null) ...[
+                    WorkspaceNotice(
+                        key: const Key('runtime-info-notice'),
+                        message: _notice!),
+                    const SizedBox(height: 12),
+                  ],
                   _Section(
                     title: 'Command',
                     child: Row(

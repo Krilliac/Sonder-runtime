@@ -40,6 +40,7 @@ class _DeploymentPanel extends StatelessWidget {
           label: 'Members',
           value: info.membersLabel,
           ok: info.configuredMembers.isNotEmpty,
+          off: true,
         ),
         if (info.localNode.isNotEmpty)
           _StatusRow(label: 'Local node', value: info.localNode, ok: true),
@@ -73,6 +74,7 @@ class _DeploymentPanel extends StatelessWidget {
             value: info.recoveryPosture!.summary,
             ok: info.recoveryPosture!.automaticTakeoverAvailable &&
                 info.recoveryPosture!.automaticFailbackAvailable,
+            off: true,
           ),
         _StatusRow(
           label: 'State replication',

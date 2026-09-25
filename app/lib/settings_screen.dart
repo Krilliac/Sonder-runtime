@@ -1,10 +1,234 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'account_session.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 
 import 'api.dart';
+import 'local_manager.dart';
+import 'runtime/status_word.dart';
 import 'settings.dart';
 import 'theme.dart';
 import 'workspace_ui.dart';
+
+/// What "Test connection" found, as one status word plus one-line remedy
+/// (plan P1-3, P0-2).
+enum ServerReachability {
+  reachable('reachable', RuntimeStatus.ok),
+  refused('refused (421)', RuntimeStatus.refused),
+  needsHttps('needs HTTPS for sign-in', RuntimeStatus.warn),
+  unauthorized('needs a key', RuntimeStatus.warn),
+  rateLimited('wait', RuntimeStatus.warn),
+  unreachable('unreachable', RuntimeStatus.fail),
+  failed('error', RuntimeStatus.fail);
+
+  final String word;
+  final RuntimeStatus status;
+  const ServerReachability(this.word, this.status);
+}
+
+class ConnectionDiagnosis {
+  final ServerReachability state;
+  final String title;
+  final String detail;
+
+  /// The PC-side setting that fixes a 421, e.g. `SONDER_ALLOWED_HOSTS=mypc`.
+  final String? serverSetting;
+
+  /// Android emulator hint for `10.0.2.2`.
+  final String? adbHint;
+
+  const ConnectionDiagnosis(this.state, this.title,
+      {this.detail = '', this.serverSetting, this.adbHint});
+
+  bool get ok => state == ServerReachability.reachable;
+}
+
+bool _isLoopback(String host) =>
+    host == 'localhost' ||
+    host == '::1' ||
+    RegExp(r'^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$').hasMatch(host);
+
+int? _statusOf(Object error) {
+  if (error is SonderException) {
+    if (error.httpStatus != null) return error.httpStatus;
+    // Older transport builds only put the status in the message.
+    final match = RegExp(r'HTTP (\d{3})').firstMatch(error.message);
+    if (match != null) return int.parse(match.group(1)!);
+  }
+  return null;
+}
+
+/// A successful probe of [serverUrl].
+ConnectionDiagnosis diagnoseReachable(String serverUrl, {int modelCount = 0}) {
+  final uri = Uri.tryParse(serverUrl.trim());
+  final host = uri?.host ?? '';
+  final models = modelCount == 1 ? '1 model' : '$modelCount models';
+  if (uri != null && uri.scheme == 'http' && !_isLoopback(host)) {
+    return ConnectionDiagnosis(
+      ServerReachability.needsHttps,
+      'Reachable at $host ($models), but sign-in needs HTTPS off this device.',
+      detail: 'The API key works over this address. For accounts, serve the '
+          'PC over HTTPS (Tailscale Serve or a TLS proxy that keeps the Host '
+          'header).',
+    );
+  }
+  return ConnectionDiagnosis(
+      ServerReachability.reachable, 'Connected to $host. $models available.');
+}
+
+/// A failed probe or sign-in, turned into what the person can do next.
+ConnectionDiagnosis diagnoseConnectionError(Object error, String serverUrl) {
+  final uri = Uri.tryParse(serverUrl.trim());
+  final host = uri?.host.isNotEmpty == true ? uri!.host : serverUrl.trim();
+  final port = uri?.hasPort == true ? uri!.port : 11435;
+  final status = _statusOf(error);
+  final code = error is SonderException ? error.code : '';
+  if (status == 421 || code == 'HOST_NOT_ALLOWED') {
+    final emulator = host == '10.0.2.2';
+    return ConnectionDiagnosis(
+      ServerReachability.refused,
+      'Refused: the server at $host refused this address.',
+      detail: "Connect with the PC's IP (or 127.0.0.1 with adb reverse), or "
+          'add $host to [server].allowed_hosts / SONDER_ALLOWED_HOSTS on the '
+          'PC and restart Sonder.',
+      serverSetting: 'SONDER_ALLOWED_HOSTS=$host',
+      adbHint: emulator
+          ? 'Android emulator: run adb reverse tcp:$port tcp:$port, then use '
+              'http://127.0.0.1:$port.'
+          : null,
+    );
+  }
+  if (status == 401 || status == 403) {
+    return ConnectionDiagnosis(
+      ServerReachability.unauthorized,
+      'Reached $host, but it needs a valid API key or account.',
+      detail: 'Paste the deployment API key from the PC, or sign in below.',
+    );
+  }
+  if (status == 429) {
+    final wait = error is SonderException ? error.retryAfterSeconds : null;
+    return ConnectionDiagnosis(
+      ServerReachability.rateLimited,
+      wait == null
+          ? 'Too many failed sign-ins from this network. Try again shortly.'
+          : 'Too many failed sign-ins from this network. Try again in $wait s.',
+    );
+  }
+  if (status != null) {
+    return ConnectionDiagnosis(
+        ServerReachability.failed, 'The server at $host answered HTTP $status.',
+        detail: error is SonderException ? error.message : '');
+  }
+  if (error is ArgumentError) {
+    return const ConnectionDiagnosis(
+      ServerReachability.needsHttps,
+      'Sign-in needs HTTPS off this device.',
+      detail: 'Use an https:// server URL for accounts, or keep using the '
+          'API key over the LAN.',
+    );
+  }
+  return ConnectionDiagnosis(
+    ServerReachability.unreachable,
+    "Can't reach $host.",
+    detail: 'Check that Sonder is running on the PC, that both devices are on '
+        'the same network or tailnet, and that the port ($port) is right.',
+  );
+}
+
+/// The first admin needs the bootstrap secret the server printed.
+class BootstrapSecretRequired implements Exception {
+  final String message;
+  const BootstrapSecretRequired(this.message);
+  @override
+  String toString() => message;
+}
+
+/// Network actions Settings performs. Tests substitute a fake.
+///
+/// Lane A owns `lib/api/account.dart`; until it lands, [register] posts
+/// directly so it can send `X-Sonder-Bootstrap-Secret` and accept 201.
+class SettingsConnection {
+  const SettingsConnection();
+
+  Future<List<String>> testServer(
+          String serverUrl, String apiKey, AccountSession? account) =>
+      SonderApi(baseUrl: serverUrl, apiKey: apiKey, accountSession: account)
+          .listModels();
+
+  Future<String> login(
+          String serverUrl, String apiKey, String username, String password) =>
+      SonderApi(baseUrl: serverUrl, apiKey: apiKey).login(username, password);
+
+  Future<void> logout(String apiKey, AccountSession account) => SonderApi(
+          baseUrl: account.origin, apiKey: apiKey, accountSession: account)
+      .logout();
+
+  /// Returns "Account <u> created (role <r>)." on 200 or 201.
+  Future<String> register(
+    String serverUrl,
+    String apiKey,
+    String username,
+    String password, {
+    String? bootstrapSecret,
+  }) async {
+    final origin = serverOrigin(serverUrl);
+    final headers = <String, String>{'Content-Type': 'application/json'};
+    if (apiKey.trim().isNotEmpty) {
+      headers['Authorization'] = 'Bearer ${apiKey.trim()}';
+    }
+    final secret = bootstrapSecret?.trim() ?? '';
+    if (secret.isNotEmpty) headers['X-Sonder-Bootstrap-Secret'] = secret;
+    final client = http.Client();
+    late http.Response response;
+    try {
+      final request =
+          http.Request('POST', Uri.parse('$origin/v1/sonder/register'))
+            ..followRedirects = false
+            ..headers.addAll(headers)
+            ..body = jsonEncode({'username': username, 'password': password});
+      response = await http.Response.fromStream(
+          await client.send(request).timeout(const Duration(seconds: 20)));
+    } catch (error) {
+      throw SonderException('Account request could not be completed.',
+          cause: error);
+    } finally {
+      client.close();
+    }
+    Map<String, dynamic> body = const {};
+    try {
+      final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+      if (decoded is Map<String, dynamic>) body = decoded;
+    } catch (_) {}
+    final error = body['error'];
+    final message =
+        (body['message'] ?? (error is Map ? error['message'] : error) ?? '')
+            .toString()
+            .trim();
+    if ((response.statusCode == 200 || response.statusCode == 201) &&
+        body['ok'] == true) {
+      final account = body['account'];
+      final name = account is Map ? account['username']?.toString() : null;
+      final role = account is Map ? account['role']?.toString() : null;
+      if (name != null && name.isNotEmpty) {
+        return role == null || role.isEmpty
+            ? 'Account $name created.'
+            : 'Account $name created (role $role).';
+      }
+      return message.isEmpty ? 'Account $username created.' : message;
+    }
+    if (response.statusCode == 403 && message.contains('bootstrap')) {
+      throw BootstrapSecretRequired(message);
+    }
+    throw SonderException(
+      message.isEmpty ? 'Account request failed.' : message,
+      httpStatus: response.statusCode,
+      code: error is Map ? (error['code']?.toString() ?? '') : '',
+    );
+  }
+}
 
 /// Connection settings: server URL, API key, theme, plus a "Test connection"
 /// button that hits /v1/models so the user gets immediate feedback.
@@ -12,12 +236,14 @@ class SettingsScreen extends StatefulWidget {
   final Settings settings;
   final ValueChanged<Settings> onChanged;
   final ValueChanged<WorkspaceDestination>? onNavigate;
+  final SettingsConnection connection;
 
   const SettingsScreen({
     super.key,
     required this.settings,
     required this.onChanged,
     this.onNavigate,
+    this.connection = const SettingsConnection(),
   });
 
   @override
@@ -33,6 +259,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late final TextEditingController _password;
   late final TextEditingController _launcherUrl;
   late final TextEditingController _launcherToken;
+
+  /// First-admin bootstrap secret: memory only, never in [Settings], cleared
+  /// after each use and when this screen goes away (plan P0-9).
+  final TextEditingController _bootstrapSecret = TextEditingController();
+  bool _needsBootstrap = false;
   late String _themeMode;
   late bool _allowHosted;
   late bool _keepServerRunning;
@@ -40,8 +271,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   AccountSession? _account;
   bool _obscureKey = true;
   bool _obscureLauncherToken = true;
+  bool _obscureBootstrap = true;
   String? _status;
   bool _statusOk = false;
+  ConnectionDiagnosis? _connection;
+  String? _keyringWarning;
   bool _testing = false;
   bool _dirty = false;
   late final List<TextEditingController> _trackedControllers;
@@ -90,6 +324,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _password.dispose();
     _launcherUrl.dispose();
     _launcherToken.dispose();
+    _bootstrapSecret.clear();
+    _bootstrapSecret.dispose();
     super.dispose();
   }
 
@@ -122,13 +358,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return discard == true;
   }
 
+  void _forgetBootstrapSecret() {
+    _bootstrapSecret.clear();
+    _needsBootstrap = false;
+  }
+
   Future<void> _leaveSettings() async {
     if (!await _confirmDiscard() || !mounted) return;
+    _forgetBootstrapSecret();
     Navigator.of(context).pop();
   }
 
   Future<void> _navigate(WorkspaceDestination destination) async {
     if (!await _confirmDiscard() || !mounted) return;
+    _forgetBootstrapSecret();
     widget.onNavigate?.call(destination);
   }
 
@@ -158,32 +401,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
             : _model.text.trim(),
       );
 
+  /// A phone still pointing at its own loopback has not been connected yet.
+  bool get _firstRun {
+    final host = Uri.tryParse(_server.text.trim())?.host ?? '';
+    return !LocalManager.canRunLocalTools &&
+        (host.isEmpty || _isLoopback(host));
+  }
+
   Future<void> _test() async {
     setState(() {
       _testing = true;
       _status = null;
+      _connection = null;
     });
-    final api = SonderApi(
-      baseUrl: _server.text,
-      apiKey: _key.text,
-      accountSession: _account?.matches(_server.text) == true ? _account : null,
-    );
     try {
-      final models = await api.listModels();
+      final models = await widget.connection.testServer(
+        _server.text,
+        _key.text,
+        _account?.matches(_server.text) == true ? _account : null,
+      );
       if (!mounted) return;
-      setState(() {
-        _statusOk = true;
-        _status = 'Connected. Models: ${models.join(", ")}';
-      });
-    } on SonderException catch (e) {
+      setState(() => _connection =
+          diagnoseReachable(_server.text, modelCount: models.length));
+    } catch (error) {
       if (!mounted) return;
-      setState(() {
-        _statusOk = false;
-        _status = e.message;
-      });
+      setState(
+          () => _connection = diagnoseConnectionError(error, _server.text));
     } finally {
       if (mounted) setState(() => _testing = false);
     }
+  }
+
+  Future<void> _copyServerSetting(String setting) async {
+    await Clipboard.setData(ClipboardData(text: setting));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Copied $setting')),
+    );
   }
 
   Future<void> _testLauncher() async {
@@ -276,11 +530,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _status = null;
     });
     try {
-      await SonderApi(
-              baseUrl: account.origin,
-              apiKey: _key.text,
-              accountSession: account)
-          .logout();
+      await widget.connection.logout(_key.text, account);
       await Settings.clearAccountSession();
       if (!mounted) return;
       _account = null;
@@ -315,18 +565,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _testing = true;
       _status = null;
     });
-    final api = SonderApi(baseUrl: _server.text, apiKey: _key.text);
     try {
       final loginOrigin = serverOrigin(_server.text);
       if (register) {
-        final msg = await api.register(_username.text, _password.text);
+        final secret = _needsBootstrap ? _bootstrapSecret.text : null;
+        String msg;
+        try {
+          msg = await widget.connection.register(
+            _server.text,
+            _key.text,
+            _username.text,
+            _password.text,
+            bootstrapSecret: secret,
+          );
+        } finally {
+          // Used once, whatever the outcome.
+          if (secret != null) _bootstrapSecret.clear();
+        }
         if (!mounted) return;
         setState(() {
+          _needsBootstrap = false;
           _statusOk = true;
           _status = msg;
         });
       } else {
-        final token = await api.login(_username.text, _password.text);
+        final token = await widget.connection
+            .login(_server.text, _key.text, _username.text, _password.text);
         if (!mounted) return;
         setState(() {
           _account = AccountSession(token: token, origin: loginOrigin);
@@ -335,11 +599,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _status = 'Logged in. Save settings to store the token securely.';
         });
       }
+    } on BootstrapSecretRequired {
+      if (!mounted) return;
+      setState(() {
+        _needsBootstrap = true;
+        _statusOk = false;
+        _status = 'The first administrator account needs the bootstrap '
+            'secret that Sonder printed on the PC. Enter it below and '
+            'register again. It is used once and never saved.';
+      });
     } on SonderException catch (e) {
+      if (!mounted) return;
+      final diagnosis = diagnoseConnectionError(e, _server.text);
+      setState(() {
+        _statusOk = false;
+        if (diagnosis.state == ServerReachability.refused ||
+            diagnosis.state == ServerReachability.rateLimited) {
+          _connection = diagnosis;
+          _status = diagnosis.title;
+        } else {
+          _status = e.message;
+        }
+      });
+    } on ArgumentError {
       if (!mounted) return;
       setState(() {
         _statusOk = false;
-        _status = e.message;
+        _status = 'Sign-in needs an https:// server URL off this device.';
       });
     } catch (_) {
       if (!mounted) return;
@@ -371,6 +657,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
     // A blank field explicitly replaces a credential that was present when
     // this screen opened. Do not leave an old keychain value usable.
+    SettingsSaveResult result;
     try {
       if (widget.settings.apiKey.trim().isNotEmpty && s.apiKey.trim().isEmpty) {
         await Settings.clearApiKey();
@@ -379,40 +666,178 @@ class _SettingsScreenState extends State<SettingsScreen> {
           s.launcherToken.trim().isEmpty) {
         await Settings.clearLauncherToken();
       }
-      await s.save();
+      result = await s.save();
     } catch (_) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Settings were not saved because secure credential storage failed.',
-          ),
-        ),
-      );
+      setState(() => _keyringWarning =
+          'System keyring unavailable: a removed key could not be deleted, '
+              'so nothing was saved. Try again once the keyring works.');
       return;
     }
     if (!mounted) return;
     widget.onChanged(s);
-    setState(() => _dirty = false);
+    setState(() {
+      _dirty = false;
+      _keyringWarning = result.warning;
+    });
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Settings saved')),
+      SnackBar(
+          content: Text(result.warning == null
+              ? 'Settings saved'
+              : 'Settings saved; keys kept in memory only')),
+    );
+  }
+
+  InputDecoration _field(String label,
+          {String? hint, String? helper, IconData? icon, Widget? suffix}) =>
+      InputDecoration(
+        labelText: label,
+        hintText: hint,
+        helperText: helper,
+        helperMaxLines: 3,
+        prefixIcon: icon == null ? null : Icon(icon),
+        suffixIcon: suffix,
+        border: const OutlineInputBorder(),
+      );
+
+  Widget _eye(
+          {required bool obscured,
+          required String what,
+          required VoidCallback onPressed}) =>
+      IconButton(
+        tooltip: obscured ? 'Show $what' : 'Hide $what',
+        icon: Icon(obscured ? Icons.visibility : Icons.visibility_off),
+        onPressed: onPressed,
+      );
+
+  Widget _connectCard(BuildContext context) {
+    final tokens = SonderTokens.of(context);
+    final diagnosis = _connection;
+    final refused = diagnosis?.state == ServerReachability.refused;
+    final title = _firstRun || refused ? 'Connect to your PC' : 'Server';
+    return Container(
+      key: const Key('settings-connect-card'),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+      decoration: BoxDecoration(
+        color: tokens.panel,
+        borderRadius: BorderRadius.circular(SonderRadius.row),
+        border: Border.all(color: tokens.hairline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(title, style: Theme.of(context).textTheme.titleSmall),
+          if (_firstRun) ...[
+            const SizedBox(height: 6),
+            Text(
+              "Use the PC's IP address on your network or tailnet, for "
+              'example http://192.168.1.20:11435.',
+              style: Theme.of(context)
+                  .textTheme
+                  .bodySmall
+                  ?.copyWith(color: tokens.text2),
+            ),
+          ],
+          const SizedBox(height: 12),
+          TextField(
+            controller: _server,
+            keyboardType: TextInputType.url,
+            autocorrect: false,
+            decoration: _field(
+              'Server URL',
+              hint: 'http://192.168.1.20:11435',
+              helper: 'HTTP works for the API key on your LAN; sign-in needs '
+                  'HTTPS off this device.',
+              icon: Icons.dns_outlined,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 12,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              FilledButton.tonalIcon(
+                key: const Key('settings-test-connection'),
+                onPressed: _testing ? null : _test,
+                icon: _testing
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.wifi_tethering),
+                label: Text(_testing ? 'Testing…' : 'Test connection'),
+              ),
+              if (diagnosis != null)
+                RuntimeStatusWord(diagnosis.state.status,
+                    word: diagnosis.state.word, width: 200),
+            ],
+          ),
+          if (diagnosis != null) ...[
+            const SizedBox(height: 10),
+            WorkspaceNotice(
+              key: const Key('settings-connection-notice'),
+              message: [
+                diagnosis.title,
+                if (diagnosis.detail.isNotEmpty) diagnosis.detail,
+                if (diagnosis.adbHint != null) diagnosis.adbHint!,
+              ].join('\n'),
+              tone: diagnosis.ok ? NoticeTone.success : NoticeTone.warning,
+              action: diagnosis.serverSetting == null
+                  ? null
+                  : Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Wrap(
+                        spacing: 8,
+                        runSpacing: 4,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          SelectableText(diagnosis.serverSetting!,
+                              style: tokens.mono(12)),
+                          TextButton.icon(
+                            onPressed: () =>
+                                _copyServerSetting(diagnosis.serverSetting!),
+                            icon: const Icon(Icons.copy, size: 16),
+                            label: const Text('Copy server setting'),
+                          ),
+                        ],
+                      ),
+                    ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    final tokens = SonderTokens.of(context);
+    final signedIn = _account?.matches(_server.text) == true;
     return Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: false,
-        leading: IconButton(
-          tooltip: 'Back to chat',
-          onPressed: _leaveSettings,
-          icon: const Icon(Icons.arrow_back),
+        // One return control (plan P2-11), at the leading edge so its
+        // tooltip never collides with the window's own Close tooltip.
+        leadingWidth: 104,
+        leading: Padding(
+          padding: const EdgeInsets.only(left: 8),
+          child: Tooltip(
+            message: 'Back to chat',
+            child: TextButton.icon(
+              onPressed: _leaveSettings,
+              icon: const Icon(Icons.arrow_back, size: 20),
+              label: const Text('Chat'),
+            ),
+          ),
         ),
         title: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text('Settings'),
+            const Flexible(
+              child: Text('Settings', overflow: TextOverflow.ellipsis),
+            ),
             if (_dirty) ...[
               const SizedBox(width: 8),
               Semantics(
@@ -428,291 +853,305 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
         actions: [
           if (widget.onNavigate != null)
-            WorkspaceMenu(current: WorkspaceDestination.settings, onSelected: _navigate),
-          Tooltip(
-            message: 'Return to main chat',
-            child: TextButton.icon(
-                onPressed: _leaveSettings,
-              icon: const Icon(Icons.chat_bubble_outline, size: 18),
-              label: const Text('Chat'),
-            ),
-          ),
+            WorkspaceMenu(
+                current: WorkspaceDestination.settings, onSelected: _navigate),
         ],
       ),
       body: Column(
         children: [
           Expanded(
             child: ListView(
-              padding: const EdgeInsets.all(20),
+              padding: const EdgeInsets.symmetric(vertical: 20),
               children: [
-          const _GroupLabel('Connection'),
-          const SizedBox(height: 4),
-          TextField(
-            controller: _server,
-            keyboardType: TextInputType.url,
-            autocorrect: false,
-            decoration: const InputDecoration(
-              labelText: 'Server URL',
-              hintText: 'https://your-host.example',
-              helperText:
-                  'HTTPS is required off-device; HTTP is for loopback development only',
-              prefixIcon: Icon(Icons.dns_outlined),
-              border: OutlineInputBorder(),
-            ),
-          ),
-          const SizedBox(height: 16),
-          TextField(
-            controller: _key,
-            obscureText: _obscureKey,
-            autocorrect: false,
-            enableSuggestions: false,
-            decoration: InputDecoration(
-              labelText: 'API key (optional)',
-              helperText: 'Leave blank if the server has auth disabled',
-              prefixIcon: const Icon(Icons.key_outlined),
-              suffixIcon: IconButton(
-                icon:
-                    Icon(_obscureKey ? Icons.visibility : Icons.visibility_off),
-                onPressed: () => setState(() => _obscureKey = !_obscureKey),
-              ),
-              border: const OutlineInputBorder(),
-            ),
-          ),
-          const SizedBox(height: 16),
-          TextField(
-            controller: _launcherUrl,
-            keyboardType: TextInputType.url,
-            autocorrect: false,
-            decoration: const InputDecoration(
-              labelText: 'Host launcher URL (optional)',
-              hintText: 'https://your-host:11436',
-              helperText:
-                  'Explicit HTTPS control endpoint for remote/mobile Start, Stop, and Restart. Never derived from the server URL.',
-              prefixIcon: Icon(Icons.power_settings_new_outlined),
-              border: OutlineInputBorder(),
-            ),
-          ),
-          const SizedBox(height: 16),
-          TextField(
-            controller: _launcherToken,
-            obscureText: _obscureLauncherToken,
-            autocorrect: false,
-            enableSuggestions: false,
-            decoration: InputDecoration(
-              labelText: 'Host launcher token',
-              helperText:
-                  'Separate from the main API key; required for LAN startup control.',
-              prefixIcon: const Icon(Icons.vpn_key_outlined),
-              suffixIcon: IconButton(
-                icon: Icon(_obscureLauncherToken
-                    ? Icons.visibility
-                    : Icons.visibility_off),
-                onPressed: () => setState(
-                  () => _obscureLauncherToken = !_obscureLauncherToken,
-                ),
-              ),
-              border: const OutlineInputBorder(),
-            ),
-          ),
-          const SizedBox(height: 16),
-          TextField(
-            controller: _model,
-            autocorrect: false,
-            decoration: const InputDecoration(
-              labelText: 'Default model or route',
-              hintText: 'sonder, code, fast...',
-              helperText:
-                  'Used for new conversations.',
-              prefixIcon: Icon(Icons.memory_outlined),
-              border: OutlineInputBorder(),
-            ),
-          ),
-          const SizedBox(height: 16),
-          TextField(
-            controller: _contextSize,
-            autocorrect: false,
-            decoration: const InputDecoration(
-              labelText: 'Context size',
-              hintText: '8192, 32k, 256k, 1m',
-              helperText:
-                  'Requested conversation capacity; server limits still apply.',
-              prefixIcon: Icon(Icons.view_week_outlined),
-              border: OutlineInputBorder(),
-            ),
-          ),
-          const _GroupLabel('Privacy & autonomy'),
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('Allow hosted/cloud tiers'),
-            subtitle: const Text(
-              'Opt-in only. Prompts sent to cloud tiers leave this machine.',
-            ),
-            value: _allowHosted,
-            onChanged: (v) => _changeBool((value) => _allowHosted = value, v),
-          ),
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('Keep local server running after app closes'),
-            subtitle: const Text(
-              'Use this for headless/background mode. Turn it off if the app '
-              'should stop its local server on exit.',
-            ),
-            value: _keepServerRunning,
-            onChanged: (v) =>
-                _changeBool((value) => _keepServerRunning = value, v),
-          ),
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            secondary: const Icon(Icons.location_searching_outlined),
-            title: const Text('Allow approximate IP location'),
-            subtitle: const Text(
-              'Off by default. For weather or nearby requests, the app asks '
-              'ipwho.is for an approximate city/region. Raw IP is never sent '
-              'to Sonder Runtime, displayed, or retained.',
-            ),
-            value: _allowApproximateLocation,
-            onChanged: (v) => _changeBool(
-              (value) => _allowApproximateLocation = value,
-              v,
-            ),
-          ),
-          const _GroupLabel('Account'),
-          const SizedBox(height: 4),
-          TextField(
-            controller: _username,
-            autocorrect: false,
-            decoration: const InputDecoration(
-              labelText: 'Username',
-              prefixIcon: Icon(Icons.person_outline),
-              border: OutlineInputBorder(),
-            ),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _password,
-            obscureText: true,
-            autocorrect: false,
-            enableSuggestions: false,
-            decoration: const InputDecoration(
-              labelText: 'Password',
-              helperText: 'At least 8 characters. First account becomes admin.',
-              prefixIcon: Icon(Icons.lock_outline),
-              border: OutlineInputBorder(),
-            ),
-          ),
-          const SizedBox(height: 12),
-          Text(_account == null
-              ? 'No account session. Login preserves your deployment API key.'
-              : 'Signed-in server: ${_account!.origin}'),
-          const SizedBox(height: 6),
-          Text(
-            'Sign out revokes this session on the server. Forget local session '
-            'removes it from this device only; it does not revoke it on the server.',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              FilledButton.tonalIcon(
-                onPressed: _testing ? null : _register,
-                icon: const Icon(Icons.person_add_alt),
-                label: const Text('Register'),
-              ),
-              FilledButton.icon(
-                onPressed: _testing ? null : _login,
-                icon: const Icon(Icons.login),
-                label: const Text('Login'),
-              ),
-              OutlinedButton.icon(
-                onPressed: _testing || _account?.matches(_server.text) != true
-                    ? null : _signOut,
-                icon: const Icon(Icons.logout),
-                label: const Text('Sign out'),
-              ),
-              OutlinedButton.icon(
-                onPressed: _testing ? null : _forgetApiSession,
-                icon: const Icon(Icons.logout),
-                label: const Text('Forget local session'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              FilledButton.tonalIcon(
-                onPressed: _testing ? null : _test,
-                icon: _testing
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.wifi_tethering),
-                label: Text(_testing ? 'Testing…' : 'Test main server'),
-              ),
-              OutlinedButton.icon(
-                onPressed: _testing ? null : _testLauncher,
-                icon: const Icon(Icons.power_settings_new_outlined),
-                label: const Text('Test host control'),
-              ),
-            ],
-          ),
-          if (_status != null) ...[
-            const SizedBox(height: 12),
-            WorkspaceNotice(message: _status!, tone: _statusOk ? NoticeTone.success : NoticeTone.warning),
-          ],
-          const _GroupLabel('Appearance'),
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    'Theme',
-                    style: Theme.of(context).textTheme.bodyMedium,
+                _Readable(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const _GroupLabel('Connection', first: true),
+                      _connectCard(context),
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: _key,
+                        obscureText: _obscureKey,
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        decoration: _field(
+                          'API key (optional)',
+                          helper: Settings.memoryOnlyCredentials
+                              ? 'Kept in memory only in the browser.'
+                              : 'Leave blank if the server has auth disabled',
+                          icon: Icons.key_outlined,
+                          suffix: _eye(
+                            obscured: _obscureKey,
+                            what: 'API key',
+                            onPressed: () =>
+                                setState(() => _obscureKey = !_obscureKey),
+                          ),
+                        ),
+                      ),
+                      if (_keyringWarning != null) ...[
+                        const SizedBox(height: 10),
+                        WorkspaceNotice(
+                          key: const Key('settings-keyring-warning'),
+                          message: _keyringWarning!,
+                          tone: NoticeTone.warning,
+                        ),
+                      ],
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: _launcherUrl,
+                        keyboardType: TextInputType.url,
+                        autocorrect: false,
+                        decoration: _field(
+                          'Host launcher URL (optional)',
+                          hint: 'https://your-host:11436',
+                          helper:
+                              'Explicit HTTPS control endpoint for remote/mobile Start, Stop, and Restart. Never derived from the server URL.',
+                          icon: Icons.power_settings_new_outlined,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: _launcherToken,
+                        obscureText: _obscureLauncherToken,
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        decoration: _field(
+                          'Host launcher token',
+                          helper:
+                              'Separate from the main API key; required for LAN startup control.',
+                          icon: Icons.vpn_key_outlined,
+                          suffix: _eye(
+                            obscured: _obscureLauncherToken,
+                            what: 'launcher token',
+                            onPressed: () => setState(() =>
+                                _obscureLauncherToken = !_obscureLauncherToken),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: OutlinedButton.icon(
+                          onPressed: _testing ? null : _testLauncher,
+                          icon: const Icon(Icons.power_settings_new_outlined),
+                          label: const Text('Test host control'),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: _model,
+                        autocorrect: false,
+                        decoration: _field(
+                          'Default model or route',
+                          hint: 'sonder, code, fast...',
+                          helper: 'Used for new conversations.',
+                          icon: Icons.memory_outlined,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: _contextSize,
+                        autocorrect: false,
+                        decoration: _field(
+                          'Context size',
+                          hint: '8192, 32k, 256k, 1m',
+                          helper:
+                              'Requested conversation capacity; server limits still apply.',
+                          icon: Icons.view_week_outlined,
+                        ),
+                      ),
+                      const _GroupLabel('Privacy & autonomy'),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Allow hosted/cloud tiers'),
+                        subtitle: const Text(
+                          'Opt-in only. Prompts sent to cloud tiers leave this machine.',
+                        ),
+                        value: _allowHosted,
+                        onChanged: (v) =>
+                            _changeBool((value) => _allowHosted = value, v),
+                      ),
+                      // Only a build that runs its own local server can keep
+                      // it running; phones and the web never start one.
+                      if (LocalManager.canRunLocalTools)
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text(
+                              'Keep local server running after app closes'),
+                          subtitle: const Text(
+                            'Use this for headless/background mode. Turn it off if the app '
+                            'should stop its local server on exit.',
+                          ),
+                          value: _keepServerRunning,
+                          onChanged: (v) => _changeBool(
+                              (value) => _keepServerRunning = value, v),
+                        ),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Allow approximate IP location'),
+                        subtitle: const Text(
+                          'Off by default. For weather or nearby requests, the app asks '
+                          'ipwho.is for an approximate city/region. Raw IP is never sent '
+                          'to Sonder Runtime, displayed, or retained.',
+                        ),
+                        value: _allowApproximateLocation,
+                        onChanged: (v) => _changeBool(
+                          (value) => _allowApproximateLocation = value,
+                          v,
+                        ),
+                      ),
+                      const _GroupLabel('Account'),
+                      TextField(
+                        controller: _username,
+                        autocorrect: false,
+                        decoration:
+                            _field('Username', icon: Icons.person_outline),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _password,
+                        obscureText: true,
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        decoration: _field(
+                          'Password',
+                          helper:
+                              'At least 8 characters. First account becomes admin.',
+                          icon: Icons.lock_outline,
+                        ),
+                      ),
+                      if (_needsBootstrap) ...[
+                        const SizedBox(height: 12),
+                        TextField(
+                          key: const Key('settings-bootstrap-secret'),
+                          controller: _bootstrapSecret,
+                          obscureText: _obscureBootstrap,
+                          autocorrect: false,
+                          enableSuggestions: false,
+                          decoration: _field(
+                            'Bootstrap secret',
+                            helper: 'Printed by Sonder on the PC for the first '
+                                'admin. Used once, never saved.',
+                            icon: Icons.admin_panel_settings_outlined,
+                            suffix: _eye(
+                              obscured: _obscureBootstrap,
+                              what: 'bootstrap secret',
+                              onPressed: () => setState(
+                                  () => _obscureBootstrap = !_obscureBootstrap),
+                            ),
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 12),
+                      Text(_account == null
+                          ? 'No account session. Login preserves your deployment API key.'
+                          : 'Signed-in server: ${_account!.origin}'),
+                      const SizedBox(height: 6),
+                      Text(
+                        'Sign out revokes this session on the server. Forget local session '
+                        'removes it from this device only; it does not revoke it on the server.',
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.copyWith(color: tokens.text2),
+                      ),
+                      const SizedBox(height: 12),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          FilledButton.icon(
+                            onPressed: _testing ? null : _login,
+                            icon: const Icon(Icons.login),
+                            label: const Text('Login'),
+                          ),
+                          // Registering is for a first account or an admin;
+                          // it is hidden while a session is active.
+                          if (_account == null)
+                            OutlinedButton.icon(
+                              onPressed: _testing ? null : _register,
+                              icon: const Icon(Icons.person_add_alt),
+                              label: const Text('Register'),
+                            ),
+                          OutlinedButton.icon(
+                            onPressed: _testing || !signedIn ? null : _signOut,
+                            icon: const Icon(Icons.logout),
+                            label: const Text('Sign out'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: _testing || _account == null
+                                ? null
+                                : _forgetApiSession,
+                            icon: const Icon(Icons.phonelink_erase_outlined),
+                            label: const Text('Forget local session'),
+                          ),
+                        ],
+                      ),
+                      if (_status != null) ...[
+                        const SizedBox(height: 12),
+                        WorkspaceNotice(
+                            message: _status!,
+                            tone: _statusOk
+                                ? NoticeTone.success
+                                : NoticeTone.warning),
+                      ],
+                      const _GroupLabel('Appearance'),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        child: Wrap(
+                          alignment: WrapAlignment.spaceBetween,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          spacing: 12,
+                          runSpacing: 8,
+                          children: [
+                            Text(
+                              'Theme',
+                              style: Theme.of(context).textTheme.bodyMedium,
+                            ),
+                            SegmentedButton<String>(
+                              key: const Key('settings-theme-mode'),
+                              showSelectedIcon: false,
+                              style: SegmentedButton.styleFrom(
+                                textStyle: Theme.of(context)
+                                    .textTheme
+                                    .labelLarge
+                                    ?.copyWith(fontFamily: SonderTheme.sans),
+                              ),
+                              segments: const [
+                                ButtonSegment(
+                                    value: 'light', label: Text('Light')),
+                                ButtonSegment(
+                                    value: 'dark', label: Text('Dark')),
+                                ButtonSegment(
+                                    value: 'system', label: Text('Auto')),
+                              ],
+                              selected: {_themeMode},
+                              onSelectionChanged: (selection) => setState(() {
+                                _themeMode = selection.first;
+                                _dirty = true;
+                              }),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                SegmentedButton<String>(
-                  key: const Key('settings-theme-mode'),
-                  showSelectedIcon: false,
-                  style: SegmentedButton.styleFrom(
-                    visualDensity: VisualDensity.compact,
-                    textStyle: SonderTokens.of(context).mono(12),
-                  ),
-                  segments: const [
-                    ButtonSegment(value: 'light', label: Text('Light')),
-                    ButtonSegment(value: 'dark', label: Text('Dark')),
-                    ButtonSegment(value: 'system', label: Text('System')),
-                  ],
-                  selected: {_themeMode},
-                  onSelectionChanged: (selection) => setState(() {
-                    _themeMode = selection.first;
-                    _dirty = true;
-                  }),
-                ),
-              ],
-            ),
-          ),
               ],
             ),
           ),
           SafeArea(
             minimum: const EdgeInsets.fromLTRB(20, 8, 20, 12),
-            child: Center(
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 720),
-                child: SizedBox(
-                  width: double.infinity,
-                  child: FilledButton.icon(
-                    key: const Key('settings-save'),
-                    onPressed: _dirty ? _save : null,
-                    icon: const Icon(Icons.save_outlined),
-                    label: const Text('Save'),
-                  ),
+            child: _Readable(
+              padding: EdgeInsets.zero,
+              child: SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  key: const Key('settings-save'),
+                  onPressed: _dirty ? _save : null,
+                  icon: const Icon(Icons.save_outlined),
+                  label: const Text('Save'),
                 ),
               ),
             ),
@@ -723,18 +1162,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 }
 
+/// The settings column and the Save bar share one reading width.
+class _Readable extends StatelessWidget {
+  final Widget child;
+  final EdgeInsets padding;
+  const _Readable(
+      {required this.child,
+      this.padding = const EdgeInsets.symmetric(horizontal: 20)});
+
+  @override
+  Widget build(BuildContext context) => Center(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: 720 + padding.horizontal),
+          child: Padding(padding: padding, child: child),
+        ),
+      );
+}
 
 /// A group's name as an eyebrow over a hairline: the settings read as one
 /// column with quiet section breaks, not a stack of cards.
 class _GroupLabel extends StatelessWidget {
   final String text;
-  const _GroupLabel(this.text);
+  final bool first;
+  const _GroupLabel(this.text, {this.first = false});
 
   @override
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
     return Padding(
-      padding: const EdgeInsets.only(top: 28, bottom: 8),
+      padding: EdgeInsets.only(top: first ? 4 : 28, bottom: 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
