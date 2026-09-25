@@ -140,7 +140,13 @@ _KEY_SHAPE_RE = re.compile(
     r"(?:AKIA|ASIA|AIDA|AROA|AIPA|ANPA|ANVA|ASCA)[A-Z0-9]{16})\b"
 )
 _JWT_RE = re.compile(r"\bey[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\b")
-_URI_CREDENTIAL_RE = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/@\s:]+:[^/@\s]+@")
+# Anchored at the start of the whole scheme-character run (not ``\b``): a word
+# boundary also admits starts after every ``-``/``.`` inside a run, which made
+# long runs like ``a-a-a-...`` quadratic. Leading non-letters stay in group 1,
+# so the substituted text is unchanged.
+_URI_CREDENTIAL_RE = re.compile(
+    r"(?i)(?<![a-z0-9+.-])([0-9+.-]*[a-z][a-z0-9+.-]*://)[^/@\s:]+:[^/@\s]+@"
+)
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 

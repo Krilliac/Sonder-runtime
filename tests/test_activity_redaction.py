@@ -405,3 +405,25 @@ def test_feed_reports_ring_drops_and_sequence_window(monkeypatch):
     assert feed["sequence_gap"] == feed["dropped_events"]
     assert feed["oldest_seq"] > 1
     assert feed["truncated"] is True
+
+
+def test_uri_credentials_are_redacted_after_mixed_scheme_prefixes():
+    from sonder_runtime.adapters.observability import activity_tracker as at
+    for text in (
+        "clone https://user:pw@example.com/repo",
+        "1-http://user:pw@example.com",
+        "see git+ssh://user:pw@host/x",
+    ):
+        out = at._redact_text(text)
+        assert "user:pw@" not in out, out
+        assert "<redacted>@" in out, out
+
+
+def test_uri_credential_redaction_is_linear_on_long_scheme_runs():
+    import time
+    from sonder_runtime.adapters.observability import activity_tracker as at
+    for run in ("a-" * 20000, "a1" * 20000, "a." * 20000):
+        started = time.perf_counter()
+        at._redact_text(run)
+        # Quadratic scanning took seconds here; a linear scan takes milliseconds.
+        assert time.perf_counter() - started < 1.0
