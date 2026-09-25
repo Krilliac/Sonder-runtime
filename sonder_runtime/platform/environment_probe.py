@@ -24,6 +24,34 @@ _SPECIALIST_TOOLS = (
     "sccache", "clcache", "doxygen", "xperf", "wpaexporter", "nssm",
 )
 _cache = None
+_CAPABILITY_SUMMARY_MAX_CHARS = 480
+
+# Optional provider of a compact, path-free capability line (installed by
+# bootstrap from the host tool inventory).  Platform may import only
+# platform, so the inventory is reached through this injected callable.
+_capability_summary_provider = None
+
+
+def set_capability_summary_provider(provider):
+    """Install (or clear with None) the capability summary provider."""
+    global _capability_summary_provider
+    if provider is not None and not callable(provider):
+        raise TypeError("capability summary provider must be callable")
+    _capability_summary_provider = provider
+
+
+def _capability_summary():
+    provider = _capability_summary_provider
+    if provider is None:
+        return ""
+    try:
+        summary = provider()
+    except Exception:
+        return ""
+    if not isinstance(summary, str):
+        return ""
+    summary = " ".join(summary.split())
+    return summary[:_CAPABILITY_SUMMARY_MAX_CHARS]
 
 
 def _which_map(names):
@@ -74,7 +102,7 @@ def agent_brief(refresh=False):
     """Return the compact, single-line environment summary for agents."""
     env = probe(refresh)
     tools = sorted(env["toolchains"])
-    return (
+    brief = (
         "environment: %s %s (%s) | preferred shell: %s | shells: %s | "
         "tools: %s | python %s | %d cpus"
         % (
@@ -85,6 +113,10 @@ def agent_brief(refresh=False):
             env["python_version"], env["cpu_count"],
         )
     )
+    summary = _capability_summary()
+    if summary:
+        brief += " | capabilities: " + summary
+    return brief
 
 
 def format_profile(refresh=False):
@@ -117,4 +149,4 @@ def format_profile(refresh=False):
     return "\n".join(lines)
 
 
-__all__ = ["agent_brief", "format_profile", "probe"]
+__all__ = ["agent_brief", "format_profile", "probe", "set_capability_summary_provider"]

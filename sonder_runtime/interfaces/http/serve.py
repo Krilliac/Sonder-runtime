@@ -4164,6 +4164,16 @@ class ServeHTTPServer(ThreadingHTTPServer):
     request_queue_size = 128
 
 
+# Inventory routes never read an unexpected body; a request carrying one is
+# answered and its connection closed instead of draining untrusted bytes.
+_BODY_GUARDED_INVENTORY_ROUTES = (
+    "/v1/compute/nodes",
+    "/v1/compute/nodes/refresh",
+    "/v1/tools/inventory",
+    "/v1/tools/inventory/refresh",
+)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "sonder-serve/1.0"
     # socketserver reads this in setup() and calls connection.settimeout(); a
@@ -4189,7 +4199,7 @@ class Handler(BaseHTTPRequestHandler):
         if (getattr(self, "_artifact_transfer_request", False)
                 or getattr(self, "_memory_replication_request", False)
                 or getattr(self, "_app_control_request", False)
-                or _request_route(getattr(self, "path", "")) in ("/v1/compute/nodes", "/v1/compute/nodes/refresh")):
+                or _request_route(getattr(self, "path", "")) in _BODY_GUARDED_INVENTORY_ROUTES):
             return
         if not self.close_connection:
             return
@@ -4547,7 +4557,7 @@ class Handler(BaseHTTPRequestHandler):
         pending = self._unread_request_body_bytes()
         if (getattr(self, "_artifact_transfer_request", False)
                 or getattr(self, "_app_control_request", False)
-                or _request_route(getattr(self, "path", "")) in ("/v1/compute/nodes", "/v1/compute/nodes/refresh")) and pending != 0:
+                or _request_route(getattr(self, "path", "")) in _BODY_GUARDED_INVENTORY_ROUTES) and pending != 0:
             return True
         if pending == 0:
             self._request_body_consumed = True
@@ -4943,6 +4953,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/v1/compute/nodes":
             self._with_compute_inventory_admission(self._handle_compute_inventory_read)
+            return
+        if path == "/v1/tools/inventory":
+            self._with_tool_inventory_admission(self._handle_tool_inventory_read)
             return
         if path == "/v1/compute/snapshot":
             context = self._request_auth_context()
@@ -5942,6 +5955,84 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json_payload(body, status=status, headers={"Cache-Control": "no-store"})
         return True
 
+    def _with_tool_inventory_admission(self, handler):
+        from sonder_runtime.interfaces.http.facades.host_tools import tool_inventory_request_slot
+        with tool_inventory_request_slot() as admitted:
+            if not admitted:
+                self._send_json_payload({"error": {"code": "TOOL_INVENTORY_BUSY"}}, status=429)
+                return
+            handler()
+
+    @staticmethod
+    def _tool_inventory_service_factory():
+        from sonder_runtime.bootstrap.app import default_app
+
+        def factory():
+            services = getattr(default_app(), "developer_tools", None)
+            return getattr(services, "inventory", None) if services is not None else None
+
+        return factory
+
+    def _handle_tool_inventory_read(self):
+        """Admin-only redacted host tool inventory (``GET /v1/tools/inventory``)."""
+        context = self._request_auth_context()
+        if not context["authorized"]:
+            self._send_auth_error()
+            return
+        if not _admin_authorized(context):
+            self._send_json_payload({"error": {"code": "FORBIDDEN"}}, status=403)
+            return
+        try:
+            self._validate_request_framing()
+            if self._unread_request_body_bytes() != 0:
+                raise ValueError("tool inventory reads do not accept a body")
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query,
+                keep_blank_values=True, max_num_fields=2)
+            from sonder_runtime.interfaces.http.facades.host_tools import dispatch_tool_inventory
+            status, body = dispatch_tool_inventory(self._tool_inventory_service_factory(), query)
+        except (ValueError, HTTPRequestError):
+            status, body = 400, {"error": {"code": "INVALID_TOOL_INVENTORY_QUERY"}}
+        except Exception:
+            status, body = 503, {"error": {"code": "TOOL_INVENTORY_UNAVAILABLE"}}
+        self._send_json_payload(body, status=status, headers={"Cache-Control": "no-store"})
+
+    def _handle_tool_inventory_refresh(self):
+        if _request_route(self.path) != "/v1/tools/inventory/refresh":
+            return False
+        self._with_tool_inventory_admission(self._handle_admitted_tool_inventory_refresh)
+        return True
+
+    def _handle_admitted_tool_inventory_refresh(self):
+        """Admin-only forced rediscovery (``POST /v1/tools/inventory/refresh``)."""
+        if self._reject_disallowed_origin():
+            return
+        if self._auth_rate_limited():
+            return
+        context = self._request_auth_context()
+        if not context["authorized"]:
+            self._send_auth_error()
+            return
+        if not _admin_authorized(context):
+            self._send_json_payload({"error": {"code": "FORBIDDEN"}}, status=403)
+            return
+        try:
+            if "?" in self.path:
+                raise ValueError("refresh accepts a JSON body only")
+            payload = self._read_json(max_bytes=1024)
+            from sonder_runtime.interfaces.http.facades.host_tools import (
+                dispatch_tool_inventory_refresh,
+            )
+            status, body = dispatch_tool_inventory_refresh(
+                self._tool_inventory_service_factory(), payload,
+            )
+        except HTTPRequestError as error:
+            status, body = error.status, {"error": {"code": "INVALID_TOOL_INVENTORY_QUERY"}}
+        except (ValueError, TypeError):
+            status, body = 400, {"error": {"code": "INVALID_TOOL_INVENTORY_QUERY"}}
+        except Exception:
+            status, body = 503, {"error": {"code": "TOOL_INVENTORY_UNAVAILABLE"}}
+        self._send_json_payload(body, status=status, headers={"Cache-Control": "no-store"})
+
     def _handle_account_logout(self):
         """Revoke an explicitly supplied login; never infer a target account.
 
@@ -6016,6 +6107,8 @@ class Handler(BaseHTTPRequestHandler):
         if handle_artifact_transfer(self, "POST", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
             return
         if self._handle_compute_inventory_refresh():
+            return
+        if self._handle_tool_inventory_refresh():
             return
         is_chat_completion = _request_route(self.path) == "/v1/chat/completions"
         _serve_logger.debug(f"do_POST: path={_request_route(self.path)!r}, peer={self._peer()!r}, is_chat_completion={is_chat_completion}")

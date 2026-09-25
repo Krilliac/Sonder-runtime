@@ -15,6 +15,8 @@ production lifecycle and admission layer (`sonder_lifecycle.py`).
 | `POST /v1/chat/completions` | key | OpenAI-compatible chat. |
 | `GET /v1/models` | key | Route IDs plus exact chat-capable catalog models. |
 | `POST /v1/admin/drain` | admin | Begin graceful drain (idempotent). |
+| `GET /v1/tools/inventory` | admin | Redacted host developer-tool inventory; optional `category` and `name` filters. See [Host tool inventory](../host-tool-inventory.md). |
+| `POST /v1/tools/inventory/refresh` | admin | Force host tool rediscovery (`{}` or `{"full": true}`); returns the same view. |
 | `GET /v1/admin/updates/status` | admin | Durable update state (System page). |
 | `POST /v1/memory/replication/batches` | fixed configured peer only | Disabled unless the typed fact-only receiver is enabled; accepts one bounded authenticated replication batch and returns its durable receipt. It is not an operator send, takeover, or failback endpoint. |
 | `GET /v1/sonder/status` | admin/owner | Rich host-wide runtime/stats snapshot, including the configured deployment profile and honest capability availability. Ordinary hosted accounts receive only their account and the model catalog. |

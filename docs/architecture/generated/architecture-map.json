@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 310,
+      "file_count": 319,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -145,6 +145,15 @@
         "sonder_runtime/adapters/goal_formatting.py",
         "sonder_runtime/adapters/host_terminal_projection.py",
         "sonder_runtime/adapters/host_terminal_result.py",
+        "sonder_runtime/adapters/host_tools/__init__.py",
+        "sonder_runtime/adapters/host_tools/bounded_process.py",
+        "sonder_runtime/adapters/host_tools/darwin.py",
+        "sonder_runtime/adapters/host_tools/discovery.py",
+        "sonder_runtime/adapters/host_tools/guards.py",
+        "sonder_runtime/adapters/host_tools/linux.py",
+        "sonder_runtime/adapters/host_tools/probes.py",
+        "sonder_runtime/adapters/host_tools/snapshot_store.py",
+        "sonder_runtime/adapters/host_tools/windows.py",
         "sonder_runtime/adapters/inference/__init__.py",
         "sonder_runtime/adapters/inference/external_membership.py",
         "sonder_runtime/adapters/inference/injected.py",
@@ -359,7 +368,7 @@
       ]
     },
     {
-      "file_count": 349,
+      "file_count": 352,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -461,6 +470,8 @@
         "sonder_runtime/application/extensions/quarantine.py",
         "sonder_runtime/application/extensions/registry.py",
         "sonder_runtime/application/foreground_turns.py",
+        "sonder_runtime/application/host_tools/__init__.py",
+        "sonder_runtime/application/host_tools/service.py",
         "sonder_runtime/application/inference_membership/__init__.py",
         "sonder_runtime/application/inference_membership/controller.py",
         "sonder_runtime/application/inspection/__init__.py",
@@ -544,6 +555,7 @@
         "sonder_runtime/application/ports/extensions.py",
         "sonder_runtime/application/ports/filesystem.py",
         "sonder_runtime/application/ports/host_final.py",
+        "sonder_runtime/application/ports/host_tools.py",
         "sonder_runtime/application/ports/host_turn_links.py",
         "sonder_runtime/application/ports/inference_membership.py",
         "sonder_runtime/application/ports/jobs.py",
@@ -714,7 +726,7 @@
       ]
     },
     {
-      "file_count": 57,
+      "file_count": 58,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -744,6 +756,7 @@
         "sonder_runtime/bootstrap/doctor_checks.py",
         "sonder_runtime/bootstrap/doctor_formatting.py",
         "sonder_runtime/bootstrap/evaluation.py",
+        "sonder_runtime/bootstrap/host_tools.py",
         "sonder_runtime/bootstrap/lane_tests.py",
         "sonder_runtime/bootstrap/legacy_interfaces.py",
         "sonder_runtime/bootstrap/legacy_mcp.py",
@@ -777,7 +790,7 @@
       ]
     },
     {
-      "file_count": 193,
+      "file_count": 196,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -869,6 +882,9 @@
         "sonder_runtime/domain/fanout_worker_identity.py",
         "sonder_runtime/domain/fleet_pressure.py",
         "sonder_runtime/domain/health_formatting.py",
+        "sonder_runtime/domain/host_tools/__init__.py",
+        "sonder_runtime/domain/host_tools/model.py",
+        "sonder_runtime/domain/host_tools/registry.py",
         "sonder_runtime/domain/identifier_resolution.py",
         "sonder_runtime/domain/improvement_report_formatting.py",
         "sonder_runtime/domain/inference_membership.py",
@@ -976,7 +992,7 @@
       ]
     },
     {
-      "file_count": 51,
+      "file_count": 52,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -1004,6 +1020,7 @@
         "sonder_runtime/interfaces/http/facades/control_plane.py",
         "sonder_runtime/interfaces/http/facades/extensions.py",
         "sonder_runtime/interfaces/http/facades/health_status.py",
+        "sonder_runtime/interfaces/http/facades/host_tools.py",
         "sonder_runtime/interfaces/http/facades/model_request.py",
         "sonder_runtime/interfaces/http/facades/observability.py",
         "sonder_runtime/interfaces/http/facades/session.py",

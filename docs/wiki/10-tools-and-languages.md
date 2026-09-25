@@ -108,6 +108,39 @@ snippets, so a command such as `cargo --version` must not be passed to it.
 `toolchain_status` is local-only and returns a bounded, redacted result. It is
 not a general shell or command-execution feature.
 
+## Host tool inventory
+
+The host tool inventory is a categorized, cached registry of the developer tools
+installed on this host. It covers 14 categories: compilers, build systems, test
+runners, linters/formatters, debuggers/profilers, package managers, runtimes,
+containers/VMs, version control, database clients, media and document tools,
+cloud CLIs, editors/IDEs, and shells.
+
+It searches beyond `PATH`:
+
+- on Windows: vswhere, the Windows SDK, App Paths, `py -0p`, scoop, Chocolatey
+  and winget
+- on macOS: Homebrew, the Xcode command line tools, and app bundles
+- on Linux: common install prefixes
+
+Each tool's version comes from the fixed probe listed in the registry, or from
+installer metadata. The snapshot is kept for 24 hours.
+
+Once a snapshot exists, agents receive a one-line, path-free capability summary
+in their environment brief. Administrators can read the inventory with
+`GET /v1/tools/inventory` and force a rediscovery with
+`POST /v1/tools/inventory/refresh`.
+
+Discovery never executes:
+
+- GUI launchers
+- tools whose version query goes to the network
+- project-local binaries
+- Store aliases
+
+See [Host tool inventory](../host-tool-inventory.md) for the sources, bounds,
+redaction rules and limitations.
+
 ## Structured data — `data_inspect`
 
 Read-only, never-executing structured preview of a data file inside
