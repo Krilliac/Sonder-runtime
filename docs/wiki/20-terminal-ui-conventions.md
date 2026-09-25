@@ -96,6 +96,20 @@ versioned and additive-only. Interactive terminals ignore the flag.
 - Raw composer history (Up/Down, Ctrl+R) is process-local and never
   persisted; credential-bearing lines are excluded (`_history_safe()`).
 
+## Workspace scope for file commands
+
+- With a `/workspace` selected, `/files`, `/read`, `/write`, `/append`,
+  `/edit`, `/mkdir`, and `/delete` resolve relative paths against that
+  directory instead of the process cwd, and refuse any path whose
+  canonical form (symlinks followed) leaves it. The file layer also caps
+  its roots at the workspace for the command
+  (`file_ops.managed_root_scope`), so a path swapped for a link between
+  the two checks still cannot escape.
+- Selecting a workspace never grants file authority. A workspace outside
+  Sonder's file roots (`SONDER_FILE_ROOTS` or the roots file) is refused
+  for file commands with a message naming both. `/workspace clear`
+  returns the commands to the default roots.
+
 ## Interrupting a turn
 
 - Ctrl-C while a turn runs cancels that turn and returns to the prompt;

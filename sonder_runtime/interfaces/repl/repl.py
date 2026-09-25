@@ -22,6 +22,7 @@ from contextlib import contextmanager, redirect_stdout
 
 from sonder_runtime.domain.common.errors import DependencyUnavailable
 from sonder_runtime.application import foreground_turns
+from sonder_runtime.adapters.filesystem import file_ops
 import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
 from sonder_runtime.adapters.observability.repl_formatting import (
     elapsed_label as _elapsed_label,
@@ -1302,7 +1303,9 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /route <request>   suggest the tier best suited to a request, and why
   /refactor <file> <fn> [goal]  propose a guarded improvement to one function
   /scaffold <kind> <name> [root]  write a full project skeleton (cpp-msvc, csharp, rust, ...)
-  /workspace [path]  show/set the directory used for guarded project work
+  /workspace [path]  show/set the directory used for guarded project work;
+                     /files /read /write /append /edit /mkdir /delete then
+                     resolve relative paths inside it and refuse escapes
   /workspace-create <path>  create a guarded directory, select it, and resume queued work
   /env [refresh]     show the host OS, shells, and installed toolchains
   /toolstatus <name> run the fixed local version probe for a discovered tool
@@ -1557,6 +1560,65 @@ class _WorkingIndicator:
             self.stream.flush()
         except Exception:
             pass
+
+
+def _workspace_scoped_path(workspace, raw):
+    """Resolve a file-command path against the selected ``/workspace``.
+
+    Returns ``(path, error)``.  With no workspace selected the argument is
+    returned unchanged and the default file roots apply.  With one selected, a
+    relative path is joined to the workspace, and any path whose canonical
+    form (symlinks followed) leaves the workspace is refused.  The returned
+    path is the lexical join, not the canonical one, so the file layer still
+    sees -- and refuses -- a symlinked spelling of a mutation target.
+
+    Selecting a workspace never widens file authority: a workspace outside
+    Sonder's configured file roots is refused here rather than granted.
+    """
+    text = str(raw or "").strip()
+    if not workspace or not text:
+        return text, ""
+    base = os.path.realpath(workspace)
+    if not file_ops.inside_allowed_roots(base):
+        return "", (
+            "refused: the selected workspace %s is outside Sonder's file roots,"
+            " so file commands cannot use it; add it to SONDER_FILE_ROOTS or"
+            " %s, or /workspace clear to use the default roots"
+            % (base, file_ops.roots_file_path())
+        )
+    candidate = os.path.expanduser(text)
+    if not os.path.isabs(candidate):
+        candidate = os.path.join(base, candidate)
+    resolved = os.path.realpath(candidate)
+    try:
+        inside = os.path.commonpath([
+            os.path.normcase(resolved), os.path.normcase(base),
+        ]) == os.path.normcase(base)
+    except ValueError:
+        inside = False
+    if not inside:
+        return "", (
+            "refused: %s is outside the selected workspace %s; use a path"
+            " inside it, or /workspace clear to use the default file roots"
+            % (text, base)
+        )
+    return candidate, ""
+
+
+@contextmanager
+def _workspace_file_scope(workspace):
+    """Cap file-layer authority at the selected workspace for one command.
+
+    Defence in depth for ``_workspace_scoped_path``: the file layer re-checks
+    containment against the workspace at resolution time, so a path that is
+    swapped for a link between the two checks still cannot escape.
+    """
+    if not workspace:
+        yield
+        return
+    root = os.path.realpath(workspace)
+    with file_ops.managed_root_scope(lambda: (root,)):
+        yield
 
 
 @contextmanager
@@ -2291,6 +2353,15 @@ def main(*, machine_output=False):
         last_turn_metrics = _latest_repl_turn_metrics(surfaces=("agent",))
         _print_chat_result(out, started_at, label="Sonder work", indicator=indicator)
 
+    def workspace_file_command(raw_path, call):
+        """Run one /read /write /append /edit /mkdir /delete in the workspace."""
+        path, error = _workspace_scoped_path(workspace_root, raw_path)
+        if error:
+            print(error)
+            return
+        with _workspace_file_scope(workspace_root):
+            print(call(path))
+
     def announce_interrupted_turn():
         nonlocal last_iid, last_response, last_run_source, last_turn_metrics
         # Nothing from the cancelled turn may be rated, re-run, or reported as
@@ -2984,7 +3055,7 @@ def main(*, machine_output=False):
                         "/tree", "/folders", "/search", "/grep",
                         "/programs", "/programfind", "/scripts", "/scriptfind",
                         "/image", "/inspectimage", "/vision", "/analyzeimage",
-                        "/mkdir", "/runprogram", "/runscript",
+                        "/runprogram", "/runscript",
                         "/artifactcheck", "/verifyartifact", "/groundartifact",
                     ):
                         print(server.control_command(
@@ -3073,33 +3144,66 @@ def main(*, machine_output=False):
                     elif cmd == "/filepolicy":
                         print(server.file_policy(token=CURRENT_TOKEN))
                     elif cmd in ("/files", "/find"):
-                        print(server.file_find(query=arg.strip() or "*", token=CURRENT_TOKEN))
+                        # A selected workspace scopes the search root too.
+                        root, error = _workspace_scoped_path(
+                            workspace_root, workspace_root and ".",
+                        )
+                        if error:
+                            print(error)
+                        else:
+                            with _workspace_file_scope(workspace_root):
+                                print(server.file_find(
+                                    query=arg.strip() or "*", root=root,
+                                    token=CURRENT_TOKEN,
+                                ))
                     elif cmd == "/read":
-                        print(server.file_read(path=arg.strip(), token=CURRENT_TOKEN))
+                        if not arg.strip():
+                            print("usage: /read <path>")
+                        else:
+                            workspace_file_command(
+                                arg.strip(),
+                                lambda path: server.file_read(path=path, token=CURRENT_TOKEN),
+                            )
                     elif cmd in ("/write", "/append"):
                         parts = arg.split(None, 1)
                         if len(parts) != 2:
                             print("usage: %s <path> <text>" % cmd)
                         else:
-                            print(server.file_write(
-                                path=parts[0],
+                            workspace_file_command(parts[0], lambda path: server.file_write(
+                                path=path,
                                 content=parts[1],
                                 mode="append" if cmd == "/append" else "create",
                                 token=CURRENT_TOKEN,
                             ))
                     elif cmd == "/edit":
                         pieces = arg.split("|", 2)
-                        if len(pieces) != 3:
+                        if len(pieces) != 3 or not pieces[0].strip():
                             print("usage: /edit <path>|<old>|<new>")
                         else:
-                            print(server.file_edit(
-                                path=pieces[0].strip(),
+                            workspace_file_command(pieces[0].strip(), lambda path: server.file_edit(
+                                path=path,
                                 old=pieces[1],
                                 new=pieces[2],
                                 token=CURRENT_TOKEN,
                             ))
+                    elif cmd == "/mkdir":
+                        if not arg.strip():
+                            print("usage: /mkdir <path>")
+                        else:
+                            workspace_file_command(
+                                arg.strip(),
+                                lambda path: server.directory_create(path=path),
+                            )
                     elif cmd == "/delete":
-                        print(server.file_delete(path=arg.strip(), dry_run=True, token=CURRENT_TOKEN))
+                        if not arg.strip():
+                            print("usage: /delete <path>")
+                        else:
+                            workspace_file_command(
+                                arg.strip(),
+                                lambda path: server.file_delete(
+                                    path=path, dry_run=True, token=CURRENT_TOKEN,
+                                ),
+                            )
                     elif cmd == "/master":
                         text = arg.strip()
                         mode = "ask"
