@@ -1,0 +1,11 @@
+OS|Windows NT|10.0.19045
+CPU|amd64|family 6 model 158 stepping 10|8
+GPU|||
+Crash|EXCEPTION_ACCESS_VIOLATION_READ|0x8|0
+Module|spark_game.exe|1.2.3.4|spark_game.pdb|1B4E28BA2FA111D2883FB9A761BDE3FB3|0x7ff610000000|0x7ff61001ffff|1
+Module|ntdll.dll|10.0.19041.1|ntdll.pdb|ABCDEF0123456789ABCDEF01234567891|0x7ffb30000000|0x7ffb301effff|0
+
+0|0|spark_game.exe|Renderer::Submit(int)|C:\agent\_work\3\s\Engine\Render\render.cpp|42|0x14
+0|1|spark_game.exe|Game::RunFrame()|C:\agent\_work\3\s\Engine\Game\game.cpp|118|0x40
+0|2|ntdll.dll||||0x500
+1|0|ntdll.dll|NtWaitForSingleObject|||0x14

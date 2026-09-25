@@ -1,0 +1,27 @@
+Loading Dump File [C:\run\in\spark_game_cppthrow.dmp]
+(3c00.3c04): C++ EH exception - code e06d7363 (first/second chance not available)
+0:000> .echo SONDER_0123456789abcdef_BEGIN;q
+SONDER_0123456789abcdef_BEGIN
+SONDER_0123456789abcdef_STACK
+ # Child-SP          RetAddr               Call Site
+00 00000041`5c6ff3e0 00007ffb`2e8b5b19     KERNELBASE!RaiseException+0x69
+01 00000041`5c6ff4c0 00007ff6`10005010     VCRUNTIME140!_CxxThrowException+0x97 [d:\a01\_work\43\s\src\vctools\crt\vcruntime\src\eh\throw.cpp @ 82]
+02 00000041`5c6ff520 00007ff6`10003000     spark_game!Assets::Load+0x7c [C:\agent\_work\3\s\Engine\Assets\assets.cpp @ 204]
+03 00000041`5c6ff580 00007ff6`10003100     spark_game!main+0x44 [C:\agent\_work\3\s\Game\main.cpp @ 20]
+SONDER_0123456789abcdef_ANALYZE
+ExceptionAddress: 00007ffb2e8b4fd9 (KERNELBASE!RaiseException+0x0000000000000069)
+   ExceptionCode: e06d7363 (C++ EH exception)
+  ExceptionFlags: 00000081
+NumberParameters: 4
+   Parameter[0]: 0000000019930520
+   Parameter[1]: 00000041`5c6ff5f0
+SONDER_0123456789abcdef_THREADS
+.  0  Id: 3c00.3c04 Suspend: 0 Teb: 00000041`5c4f0000 Unfrozen "MainThread"
+ # Child-SP          RetAddr               Call Site
+00 00000041`5c6ff3e0 00007ffb`2e8b5b19     KERNELBASE!RaiseException+0x69
+SONDER_0123456789abcdef_MODULES
+start             end                 module name
+00007ff6`10000000 00007ff6`10020000   spark_game spark_game.exe Tue Mar  5 09:58:00 2024 (65E6ED38)
+00007ffb`2e880000 00007ffb`2ebd0000   KERNELBASE KERNELBASE.dll Mon Jan  1 00:00:00 2024 (65920080)
+*** ERROR: Module load completed but symbols could not be loaded for render.dll
+SONDER_0123456789abcdef_END
