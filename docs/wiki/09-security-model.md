@@ -79,6 +79,11 @@ of the model — an uncensored or "abliterated" model changes what it will
   failures emit `AUTH_FAILED` audit events and a bounded metric.
 - Privileged routes (drain, update control) require an **admin**
   authorization result, not merely a valid chat key.
+- **Console logins never print the session token.** `/login` in the REPL (and
+  in `repl --json`) and in the served console keeps the bearer token for that
+  session and shows `token: [hidden] ...` in its place. The `admin_login` MCP
+  tool and `POST /v1/sonder/login` still return the token, because returning
+  it is their contract with a programmatic client.
 
 ## Workspace & tool containment
 

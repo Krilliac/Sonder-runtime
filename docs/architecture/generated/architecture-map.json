@@ -775,7 +775,7 @@
       ]
     },
     {
-      "file_count": 192,
+      "file_count": 193,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -874,6 +874,7 @@
         "sonder_runtime/domain/interaction_footer.py",
         "sonder_runtime/domain/launcher_health.py",
         "sonder_runtime/domain/learning_tier.py",
+        "sonder_runtime/domain/login_output.py",
         "sonder_runtime/domain/loop_actions.py",
         "sonder_runtime/domain/loop_result_formatting.py",
         "sonder_runtime/domain/loop_retry_policy.py",

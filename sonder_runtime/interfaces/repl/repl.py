@@ -2970,11 +2970,13 @@ def main(*, machine_output=False):
                     print("usage: /login [<username> <password>]")
                     continue
                 out = server.admin_login(username, password)
-                marker = "token: "
-                from ...domain.cloud_access import has_legacy_error_prefix
-                if marker in out and not has_legacy_error_prefix(out):
-                    CURRENT_TOKEN = out.split(marker, 1)[1].strip().splitlines()[0]
-                print(out)
+                # Keep the bearer token for this session; never print it
+                # (scrollback and `repl --json` stdout outlive the session).
+                from ...domain.login_output import split_login_output
+                token, display = split_login_output(out)
+                if token:
+                    CURRENT_TOKEN = token
+                print(display)
             elif cmd == "/whoami":
                 print(server.admin_whoami(CURRENT_TOKEN))
             elif cmd == "/admin":

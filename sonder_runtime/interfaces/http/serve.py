@@ -2819,12 +2819,13 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         if len(parts2) != 2:
             return "usage: /login <username> <password>"
         out = server.admin_login(parts2[0], parts2[1])
-        marker = "token: "
-        from ...domain.cloud_access import has_legacy_error_prefix
-        if marker in out and not has_legacy_error_prefix(out):
-            state.token = out.split(marker, 1)[1].strip().splitlines()[0]
+        # The token stays in the console session; the reply never shows it.
+        from ...domain.login_output import split_login_output
+        token, display = split_login_output(out)
+        if token:
+            state.token = token
             state.account = server._admin_account_from_token(state.token)
-        return out
+        return display
     if cmd == "/whoami":
         return server.admin_whoami(state.token)
     if cmd == "/admin":
