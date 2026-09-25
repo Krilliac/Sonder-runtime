@@ -84,6 +84,13 @@ def test_explanatory_conversational_and_content_prompts_stay_in_chat(prompt):
     # The content-form exemption never hides real workspace work.
     ("Write a poem to docs/poem.md", "workbench"),
     ("Write a poem about the database and then fix the parser module", "workbench"),
+    # A creative noun that modifies software, or text saved into the
+    # workspace, is still workspace work.
+    ("Write a story generator module for the repo", "workbench"),
+    ("Create a rap battle feature in the web app", "workbench"),
+    ("Write a joke api endpoint in the server", "workbench"),
+    ("Write a poem about the api and save it in the repo", "workbench"),
+    ("Write a poem, run the tests", "workbench"),
     ("Implement the login endpoint end-to-end without asking me", "autopilot"),
     ("Run a fleet of agents to audit the repository", "fleet"),
 ])

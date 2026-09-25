@@ -122,10 +122,21 @@ _CONTENT_ONLY_RE = re.compile(
     r"(?:(?:a|an|another|some|one|two|three|few|short|long|funny|little|quick|"
     r"brief|silly)\s+)*"
     r"(?:poem|poems|haiku|haikus|limerick|limericks|sonnet|sonnets|song|songs|"
-    r"lyrics|story|stories|joke|jokes|riddle|riddles|rap|verse|verses|ode)\b"
+    r"lyrics|story|stories|joke|jokes|riddle|riddles|rap|verse|verses|ode)"
+    # The form must head the object: "a story generator module" or "a joke
+    # api endpoint" is software, not a creative text request.
+    r"(?:\s+(?:about|on|regarding|concerning|of|for|that|which|where|with|to)\b"
+    r"|\s*[.!?,;:]|\s*$)"
 )
 _CONTENT_ONLY_FOLLOWUP_RE = re.compile(
-    r"(?:\b(?:and|then|also)\b|[;:])\s+(?:then\s+|also\s+)?" + _WORK_ACTION_RE.pattern
+    r"(?:\b(?:and|then|also)\b|[,;:])\s+(?:then\s+|also\s+)?" + _WORK_ACTION_RE.pattern
+)
+# Persisting the text into the workspace is workspace work even for a poem.
+_CONTENT_ONLY_PERSIST_RE = re.compile(
+    r"\b(?:save|saves|saving|saved|commit|commits|push|store|put|append|insert|"
+    r"place)\b|\b(?:in|into|to|under|inside)\s+(?:the\s+|our\s+|my\s+|this\s+|a\s+)?"
+    r"(?:new\s+)?(?:repo|repository|project|workspace|codebase|folder|directory|"
+    r"file|docs|readme)\b"
 )
 _PATH_LIKE_RE = re.compile(
     r"(?:[a-zA-Z]:[\\/]|[./~][\\/]|[\\/][\w.-]+|\.[a-zA-Z0-9]{1,8}\b)"
@@ -327,6 +338,7 @@ def classify_work(text):
         return True
     if (_CONTENT_ONLY_RE.match(candidate)
             and not _CONTENT_ONLY_FOLLOWUP_RE.search(candidate)
+            and not _CONTENT_ONLY_PERSIST_RE.search(candidate)
             and not _FILE_LIKE_RE.search(value)):
         return False
     action = _WORK_ACTION_RE.search(candidate)
