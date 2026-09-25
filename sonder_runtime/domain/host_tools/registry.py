@@ -55,6 +55,8 @@ HOST_TOOL_SPECS: tuple[ToolSpec, ...] = (
     _spec("clang", C.COMPILER),
     _spec("clang++", C.COMPILER),
     _spec("cl", C.COMPILER, None, platforms=WIN),
+    # clang-cl ships versioned only on Debian/Ubuntu (clang-cl-18).
+    _spec("clang-cl", C.COMPILER, executables=("clang-cl", "clang-cl-18")),
     _spec("rustc", C.COMPILER),
     _spec("javac", C.COMPILER, ("-version",), pattern=r"javac (\d+(?:\.\d+){0,3})"),
     _spec("kotlinc", C.COMPILER, ("-version",), pattern=r"kotlinc-jvm (\d+(?:\.\d+){1,3})"),
@@ -72,6 +74,10 @@ HOST_TOOL_SPECS: tuple[ToolSpec, ...] = (
     _spec("mingw32-make", C.BUILD_SYSTEM, platforms=WIN),
     _spec("nmake", C.BUILD_SYSTEM, None, platforms=WIN),
     _spec("link", C.BUILD_SYSTEM, None, platforms=WIN),
+    _spec("lld-link", C.BUILD_SYSTEM),
+    _spec("ld.lld", C.BUILD_SYSTEM),
+    # FASTBuild (operator build profiles); -version prints and exits.
+    _spec("fbuild", C.BUILD_SYSTEM, ("-version",), pattern=r"FASTBuild v(\d+(?:\.\d+){0,3})"),
     _spec("msbuild", C.BUILD_SYSTEM, ("-version", "-nologo")),
     _spec("meson", C.BUILD_SYSTEM),
     _spec("bazel", C.BUILD_SYSTEM),
@@ -117,6 +123,7 @@ HOST_TOOL_SPECS: tuple[ToolSpec, ...] = (
     _spec("biome", C.LINTER_FORMATTER),
     _spec("clang-format", C.LINTER_FORMATTER),
     _spec("clang-tidy", C.LINTER_FORMATTER),
+    _spec("clangd", C.LINTER_FORMATTER, executables=("clangd", "clangd-18", "clangd-17")),
     _spec("cppcheck", C.LINTER_FORMATTER),
     _spec("rustfmt", C.LINTER_FORMATTER),
     # gofmt has no version switch.

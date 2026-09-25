@@ -1,0 +1,23 @@
+[1/11] Building CXX object CMakeFiles/crash_test.dir/tests/crash_test.cpp.o
+[2/11] Linking CXX executable crash_test
+[3/11] Building CXX object CMakeFiles/shadergen.dir/tools/shadergen.cpp.o
+[4/11] Linking CXX executable shadergen
+[5/11] Generating shaders.h
+[6/11] Building CXX object CMakeFiles/game.dir/src/game/main.cpp.o
+FAILED: CMakeFiles/game.dir/src/game/main.cpp.o 
+/usr/bin/c++  -I/work/sparklite/build/ninja-debug/generated -I/work/sparklite/src/core -g -std=gnu++17 -MD -MT CMakeFiles/game.dir/src/game/main.cpp.o -MF CMakeFiles/game.dir/src/game/main.cpp.o.d -o CMakeFiles/game.dir/src/game/main.cpp.o -c /work/sparklite/src/game/main.cpp
+/work/sparklite/src/game/main.cpp: In function 'int main()':
+/work/sparklite/src/game/main.cpp:10:60: error: 'class Entity' has no member named 'pos'
+   10 |     std::printf("%s %f\n", kBasicShaderName, length(player.pos));
+      |                                                            ^~~
+[7/11] Building CXX object CMakeFiles/core.dir/cmake_pch.hxx.gch
+[8/11] Building CXX object CMakeFiles/core.dir/src/core/entity.cpp.o
+[9/11] Building CXX object CMakeFiles/core.dir/src/core/math.cpp.o
+FAILED: CMakeFiles/core.dir/src/core/math.cpp.o 
+/usr/bin/c++  -I/work/sparklite/src/core -g -std=gnu++17 -Winvalid-pch -include /work/sparklite/build/ninja-debug/CMakeFiles/core.dir/cmake_pch.hxx -MD -MT CMakeFiles/core.dir/src/core/math.cpp.o -MF CMakeFiles/core.dir/src/core/math.cpp.o.d -o CMakeFiles/core.dir/src/core/math.cpp.o -c /work/sparklite/src/core/math.cpp
+/work/sparklite/src/core/math.cpp: In function 'float normalized_length(const Vec3&)':
+/work/sparklite/src/core/math.cpp:19:15: error: 'lenght' was not declared in this scope; did you mean 'length'?
+   19 |     float l = lenght(v);
+      |               ^~~~~~
+      |               length
+ninja: build stopped: cannot make progress due to previous errors.

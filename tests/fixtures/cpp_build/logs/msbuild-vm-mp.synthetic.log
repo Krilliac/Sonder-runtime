@@ -1,0 +1,12 @@
+MSBuild version 17.9.8+b34f75857 for .NET Framework
+  Building SparkLite.sln with /MP and -m:4 (synthetic fixture; replace with a captured log)
+  math.cpp
+  entity.cpp
+  util.cpp
+  main.cpp
+C:\src\SparkLite\src\core\entity.cpp(7,5): error C2065: 'positon': undeclared identifier [C:\src\SparkLite\src\core\core.vcxproj]
+C:\src\SparkLite\src\game\main.cpp(10,60): error C2039: 'pos': is not a member of 'Entity' [C:\src\SparkLite\src\game\game.vcxproj]
+C:\src\SparkLite\src\core\math.cpp(19,15): error C2065: 'lenght': undeclared identifier [C:\src\SparkLite\src\core\core.vcxproj]
+C:\src\SparkLite\src\core\math.h(12,1): warning C4244: 'return': conversion from 'double' to 'float', possible loss of data [C:\src\SparkLite\src\core\core.vcxproj]
+main.obj : error LNK2019: unresolved external symbol "public: void __cdecl Entity::tick(float)" (?tick@Entity@@QEAAXM@Z) referenced in function main [C:\src\SparkLite\src\game\game.vcxproj]
+C:\src\SparkLite\x64\Debug\game.exe : fatal error LNK1120: 1 unresolved externals [C:\src\SparkLite\src\game\game.vcxproj]

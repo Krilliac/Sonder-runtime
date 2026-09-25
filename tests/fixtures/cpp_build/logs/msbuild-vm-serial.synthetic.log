@@ -1,0 +1,14 @@
+MSBuild version 17.9.8+b34f75857 for .NET Framework
+  Building SparkLite.sln (synthetic fixture; replace with a captured log)
+  pch.cpp
+  math.cpp
+C:\src\SparkLite\src\core\math.cpp(19,15): error C2065: 'lenght': undeclared identifier [C:\src\SparkLite\src\core\core.vcxproj]
+C:\src\SparkLite\src\core\math.cpp(1,1): fatal error C1853: 'x64\Debug\core.pch' precompiled header file is from a different version of the compiler, or the precompiled header is C++ and you are using it from C (or vice versa) [C:\src\SparkLite\src\core\core.vcxproj]
+Done compiling core.
+  main.cpp
+C:\src\SparkLite\src\game\main.cpp(10,60): error C2039: 'pos': is not a member of 'Entity' [C:\src\SparkLite\src\game\game.vcxproj]
+C:\src\SparkLite\src\game\main.cpp(3,10): fatal error C1083: Cannot open include file: 'shaders.h': No such file or directory [C:\src\SparkLite\src\game\game.vcxproj]
+main.obj : error LNK2019: unresolved external symbol "public: void __cdecl Entity::tick(float)" (?tick@Entity@@QEAAXM@Z) referenced in function main [C:\src\SparkLite\src\game\game.vcxproj]
+C:\src\SparkLite\x64\Debug\game.exe : fatal error LNK1120: 1 unresolved externals [C:\src\SparkLite\src\game\game.vcxproj]
+C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.CppBuild.targets(456,5): error MSB8020: The build tools for v141 (Platform Toolset = 'v141') cannot be found. [C:\src\SparkLite\tools\tools.vcxproj]
+C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.MakeFile.Targets(44,5): error MSB3073: The command "fbuild.exe -config ..\fbuild.bff deploy" exited with code 1. [C:\src\SparkLite\tools\tools.vcxproj]
