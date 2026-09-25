@@ -28,6 +28,11 @@ different strong credential for each service:
 Both must contain at least 24 characters for a remote endpoint. Distributed
 mobile apps require HTTPS for both services.
 
+A launcher bound to loopback without `SONDER_LAUNCHER_TOKEN` is still allowed
+for single-user desktops, but it prints a `WARNING: ... WITHOUT
+authentication` line on stderr at startup: any local process or user can then
+start, stop, and restart Sonder through it. Set a token on shared machines.
+
 ## Windows host setup
 
 Run these commands in a terminal opened in the repository. Generate and store

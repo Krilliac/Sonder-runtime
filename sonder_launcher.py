@@ -2304,6 +2304,24 @@ def validate_configuration(
         )
 
 
+def unauthenticated_loopback_warning(host, token):
+    """Return the startup warning for a token-less loopback launcher, or ``""``.
+
+    A loopback launcher without a token stays allowed (the operator decision
+    for single-user desktops), but every local process and user on the machine
+    can then start, stop and restart Sonder through it. That must be visible
+    at startup, not only in the docs.
+    """
+    if token or not _loopback(host):
+        return ""
+    return (
+        "WARNING: the Sonder launcher is running WITHOUT authentication "
+        "(no SONDER_LAUNCHER_TOKEN). Any local process or user on this machine "
+        "can control Sonder through %s. Set SONDER_LAUNCHER_TOKEN (see "
+        "--generate-token) unless this is a single-user machine." % host
+    )
+
+
 def serve(
     host,
     port,
@@ -2326,6 +2344,9 @@ def serve(
     )
     if context is not None:
         server.socket = context.wrap_socket(server.socket, server_side=True)
+    warning = unauthenticated_loopback_warning(host, token)
+    if warning:
+        print(warning, file=sys.stderr, flush=True)
     print("Sonder launcher listening on %s://%s:%s" % ("https" if cert else "http", host, port))
     server.serve_forever()
 
