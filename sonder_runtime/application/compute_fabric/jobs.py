@@ -20,6 +20,7 @@ from threading import RLock
 from typing import Any, Callable, Mapping
 
 from ..execution.process_jobs import ProcessJobProvider, ProcessJobRequest
+from ..execution.effect_journal import EffectJournalError, EffectState
 from ..execution.worker_bindings import AuthenticatedWorkerBinding, journaled_effect, _digest as _effect_request_digest
 from ..ports.jobs import JobIdentity
 from ...domain.common.errors import CapacityExceeded, Conflict, DependencyUnavailable, InvalidInput, NotFound
@@ -44,6 +45,10 @@ _REMOTE_JOB_STATES = frozenset({
 MAX_COMPUTE_ARTIFACT_BYTES = 64 * 1024 * 1024
 MAX_COMPUTE_ARTIFACTS = 256
 _ARTIFACT_LOCK_STRIPES = 64
+# Upper bound on journaled cancellation attempts for one compute job.  Each
+# retry needs every earlier attempt settled, so this also bounds the keyed
+# journal lookups a cancel performs to derive its attempt identity.
+MAX_COMPUTE_CANCEL_ATTEMPTS = 32
 
 
 def _identity(value: str, label: str) -> str:
@@ -1398,16 +1403,83 @@ class ComputeJobWorker:
 
     def cancel(self, remote_job_id: str, reason: str = "cancelled") -> RemoteJobReceipt:
         if self._effect_binding is not None:
+            _identity(remote_job_id, "remote_job_id")
+            # Journal refusals come first: they describe durable state that a
+            # restarted worker without in-memory job knowledge must honour.
+            attempt = self._next_cancel_attempt(remote_job_id)
+            if not isinstance(reason, str) or not reason.strip() or len(reason) > 512:
+                raise InvalidInput("cancellation reason must be non-empty and bounded")
+            with self._lock:
+                known = remote_job_id in self._by_job
+            if not known:
+                # Nothing can be cancelled, so no effect intent is admitted.
+                raise NotFound("compute job was not found")
+            operation_id, idempotency_key = self._cancel_attempt_identity(
+                remote_job_id, attempt,
+            )
             return journaled_effect(
                 self._effect_binding,
-                operation_id=f"compute-cancel:{self.worker_id}:{remote_job_id}",
-                idempotency_key=f"cancel:{remote_job_id}",
+                operation_id=operation_id,
+                idempotency_key=idempotency_key,
                 request={"remote_job_id": remote_job_id, "reason": reason},
                 invoke=lambda: self._cancel_unjournaled(remote_job_id, reason),
                 receipt_key=lambda result: f"{result.remote_job_id}:{result.state}",
                 reconciliation="idempotent",
             )
         return self._cancel_unjournaled(remote_job_id, reason)
+
+    def _cancel_attempt_identity(self, remote_job_id: str, attempt: int) -> tuple[str, str]:
+        """Return ``(operation_id, idempotency_key)`` for one cancel attempt.
+
+        Attempt 1 keeps the historical identity byte-for-byte, so journals
+        written before per-attempt identities count as the first attempt.  The
+        remote job id is always the final ``:``-segment of the operation id;
+        identities cannot contain ``:``, so the forms cannot collide.
+        """
+        if attempt == 1:
+            return (
+                f"compute-cancel:{self.worker_id}:{remote_job_id}",
+                f"cancel:{remote_job_id}",
+            )
+        return (
+            f"compute-cancel:{self.worker_id}:attempt-{attempt}:{remote_job_id}",
+            f"cancel:{remote_job_id}:attempt-{attempt}",
+        )
+
+    def _next_cancel_attempt(self, remote_job_id: str) -> int:
+        """Derive the next cancel attempt for a job from durable journal state.
+
+        A retry is admitted only when every earlier attempt is settled and
+        none of them already reported a completed cancellation.  An ``intent``
+        or ``uncertain`` attempt may still be acting on the provider, so it
+        refuses until trusted reconciliation settles it.  Concurrent callers
+        that derive the same attempt collide on its journal identity, and the
+        journal admits at most one of them.
+        """
+        binding = self._effect_binding
+        if binding is None:
+            raise EffectJournalError("cancel attempt identity requires an effect binding")
+        lookup = getattr(binding.journal, "get", None)
+        if not callable(lookup):
+            raise EffectJournalError(
+                "compute cancel attempt identity requires a keyed effect journal"
+            )
+        cancelled_receipt = f"{remote_job_id}:cancelled"
+        for attempt in range(1, MAX_COMPUTE_CANCEL_ATTEMPTS + 1):
+            operation_id, _ = self._cancel_attempt_identity(remote_job_id, attempt)
+            prior = lookup(f"{binding.run_id}:{operation_id}")
+            if prior is None:
+                return attempt
+            if prior.run_id != binding.run_id or prior.operation_id != operation_id:
+                raise EffectJournalError("compute cancel attempt identity conflicts with the journal")
+            if prior.state in {EffectState.INTENT, EffectState.UNCERTAIN}:
+                raise EffectJournalError(
+                    "a prior cancellation attempt for this compute job is unresolved; "
+                    "it requires reconciliation before a retry"
+                )
+            if prior.state is EffectState.COMPLETED and prior.receipt_key == cancelled_receipt:
+                raise EffectJournalError("compute job cancellation already completed")
+        raise EffectJournalError("compute job cancellation attempts are exhausted")
 
     def _cancel_unjournaled(self, remote_job_id: str, reason: str = "cancelled") -> RemoteJobReceipt:
         logger.debug(f"ComputeJobWorker.cancel: remote_job_id={remote_job_id!r}, reason={reason!r}")
@@ -1456,6 +1528,7 @@ __all__ = [
     "JobCatalogEntry",
     "MAX_COMPUTE_ARTIFACTS",
     "MAX_COMPUTE_ARTIFACT_BYTES",
+    "MAX_COMPUTE_CANCEL_ATTEMPTS",
     "RemoteArtifactReceipt",
     "RemoteArtifactPayload",
     "RemoteJobEnvelope",

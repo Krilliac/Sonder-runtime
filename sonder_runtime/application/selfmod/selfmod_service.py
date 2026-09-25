@@ -54,6 +54,7 @@ from .verification_lifecycle import (
     VerificationLifecycleRecord,
     VerificationRecord,
 )
+from ..execution.effect_journal import EffectJournalError, EffectState
 from ..execution.worker_bindings import AuthenticatedWorkerBinding, journaled_effect
 
 
@@ -177,6 +178,82 @@ class LegacySelfmodPort(Protocol):
     def rollback(self, run_id: str, reason: str = "user requested rollback") -> Mapping[str, object]: ...
 
 
+def _result_phase(result: Mapping[str, object]) -> str:
+    if not isinstance(result, Mapping):
+        # A malformed legacy receipt is ambiguous; raising here makes the
+        # journal record the effect as uncertain instead of settled.
+        raise TypeError("legacy selfmod stage returned a non-mapping receipt")
+    return str(result.get("phase", ""))
+
+
+def _result_passed(result: Mapping[str, object]) -> bool:
+    if not isinstance(result, Mapping):
+        raise TypeError("legacy selfmod stage returned a non-mapping receipt")
+    return result.get("passed") is True
+
+
+@dataclass(frozen=True, slots=True)
+class _StageEffect:
+    """Journal identity and success predicate for one legacy mutating stage.
+
+    ``operation`` prefixes the journal operation id and ``receipt`` names the
+    stage in its receipt/idempotency key.  A ``repeatable`` stage is one the
+    legacy port legitimately allows to run again for the same run; each call
+    gets a per-attempt identity derived from the durable journal.
+    """
+
+    operation: str
+    receipt: str
+    repeatable: bool
+    success: Callable[[Mapping[str, object]], bool]
+
+
+# Predicates mirror the legacy run-dict contract in ``selfmod.py``: each stage
+# reports the phase it moved the run into, and command stages report
+# ``passed``.  Deploy and rollback keep their original identity and semantics.
+_STAGE_EFFECTS: Mapping[str, _StageEffect] = {
+    "create_backup": _StageEffect(
+        "selfmod-backup", "backup", False,
+        lambda result: _result_phase(result) == "backed_up",
+    ),
+    "prepare_workspace": _StageEffect(
+        "selfmod-prepare-workspace", "prepare-workspace", False,
+        lambda result: _result_phase(result) == "editing",
+    ),
+    # Allowed repeatedly in the editing/testing phases.
+    "record_reproducer_before": _StageEffect(
+        "selfmod-reproducer-before", "reproducer-before", True, _result_passed,
+    ),
+    # Re-entered from ``interrupted`` after an interruption.
+    "begin_testing": _StageEffect(
+        "selfmod-begin-testing", "begin-testing", True,
+        lambda result: _result_phase(result) == "testing",
+    ),
+    # One call per verification kind, and retried checks.
+    "record_test": _StageEffect(
+        "selfmod-record-test", "record-test", True, _result_passed,
+    ),
+    # A review can auto-approve an eligible run in the same legacy call.
+    "review": _StageEffect(
+        "selfmod-review", "review", False,
+        lambda result: _result_phase(result) in {"reviewing", "approved"},
+    ),
+    "approve": _StageEffect(
+        "selfmod-approve", "approve", False,
+        lambda result: _result_phase(result) == "approved",
+    ),
+    "deploy": _StageEffect(
+        "selfmod-deploy", "deploy", False,
+        lambda result: str(result.get("phase", "")) == "deployed",
+    ),
+    "rollback": _StageEffect("selfmod-rollback", "rollback", False, lambda _result: True),
+}
+# Bound on journaled attempts of one repeatable stage per run.  Every retry
+# requires all earlier attempts settled, so this also bounds the keyed journal
+# lookups used to derive the next attempt.
+MAX_SELFMOD_STAGE_ATTEMPTS = 256
+
+
 @dataclass(frozen=True)
 class SelfmodIntegrationState:
     """A read-only view joining the durable legacy run to typed evidence."""
@@ -243,10 +320,18 @@ class GuardedLegacySelfmodService:
         run = self._legacy.get_run(run_id)
         phase = str(run.get("phase", ""))
         if phase == "proposed":
-            self._legacy.create_backup(run_id)
-            run = self._legacy.prepare_workspace(run_id)
+            self._mutating_call(
+                run_id, "create_backup", {}, lambda: self._legacy.create_backup(run_id),
+            )
+            run = self._mutating_call(
+                run_id, "prepare_workspace", {},
+                lambda: self._legacy.prepare_workspace(run_id),
+            )
         elif phase == "backed_up":
-            run = self._legacy.prepare_workspace(run_id)
+            run = self._mutating_call(
+                run_id, "prepare_workspace", {},
+                lambda: self._legacy.prepare_workspace(run_id),
+            )
         elif phase != "editing":
             raise InvalidInput(f"selfmod run {run_id!r} is not ready for preparation")
         if self._governance.get(run_id).phase.value == "proposed":
@@ -271,7 +356,11 @@ class GuardedLegacySelfmodService:
     def record_reproducer(self, run_id: str, evidence: ReproducerEvidence) -> SelfmodIntegrationState:
         if not isinstance(evidence, FailureEvidence):
             raise InvalidInput("guarded legacy execution accepts FailureEvidence reproducers only")
-        result = self._legacy.record_reproducer_before(run_id, evidence.command_argv)
+        command = tuple(evidence.command_argv)
+        result = self._mutating_call(
+            run_id, "record_reproducer_before", {"command": list(command)},
+            lambda: self._legacy.record_reproducer_before(run_id, command),
+        )
         if not bool(result.get("passed")):
             raise Forbidden("baseline reproducer did not demonstrate the declared failure")
         governance = self._governance.record_reproducer(run_id, evidence)
@@ -284,8 +373,15 @@ class GuardedLegacySelfmodService:
             raise InvalidInput("verification kind must be a VerificationKind")
         lifecycle = self._lifecycle.get(run_id)
         if not self._unrestricted and lifecycle.phase is LifecyclePhase.PROPOSED:
-            self._legacy.begin_testing(run_id)
-        result = self._legacy.record_test(run_id, self._ROOT_KINDS[kind], command, timeout=timeout)
+            self._mutating_call(
+                run_id, "begin_testing", {}, lambda: self._legacy.begin_testing(run_id),
+            )
+        root_kind = self._ROOT_KINDS[kind]
+        result = self._mutating_call(
+            run_id, "record_test",
+            {"kind": root_kind, "command": list(command), "timeout": timeout},
+            lambda: self._legacy.record_test(run_id, root_kind, command, timeout=timeout),
+        )
         evidence_id = f"{run_id}:{kind.value}"
         digest = _receipt_digest(result)
         passed = bool(result.get("passed"))
@@ -311,7 +407,10 @@ class GuardedLegacySelfmodService:
 
     def review(self, run_id: str, *, reviewer: str = "independent-selfmod-review") -> SelfmodIntegrationState:
         if self._unrestricted:
-            run = self._legacy.review(run_id)
+            run = self._mutating_call(
+                run_id, "review", {"require_kinds": None},
+                lambda: self._legacy.review(run_id),
+            )
             governance = self._governance.get(run_id)
             if not governance.verifications:
                 governance = self._governance.mark_unrestricted_bypass(run_id, "verification")
@@ -323,9 +422,10 @@ class GuardedLegacySelfmodService:
         lifecycle = self._lifecycle.get(run_id)
         if lifecycle.phase is not LifecyclePhase.VERIFIED or governance.phase.value != "verified":
             raise Forbidden("typed verification evidence is incomplete")
-        result = self._legacy.review(
-            run_id,
-            require_kinds={"reproducer_before", "targeted", "architecture", "regression", "smoke"},
+        require_kinds = {"reproducer_before", "targeted", "architecture", "regression", "smoke"}
+        result = self._mutating_call(
+            run_id, "review", {"require_kinds": sorted(require_kinds)},
+            lambda: self._legacy.review(run_id, require_kinds=require_kinds),
         )
         approved = str(result.get("phase")) == "reviewing"
         evidence_ids = tuple(item.evidence_id for item in governance.verifications)
@@ -343,13 +443,19 @@ class GuardedLegacySelfmodService:
 
     def approve(self, run_id: str, *, approver: str = "user") -> SelfmodIntegrationState:
         if self._unrestricted:
-            run = self._legacy.approve(run_id, approver=approver)
+            run = self._mutating_call(
+                run_id, "approve", {"approver": approver},
+                lambda: self._legacy.approve(run_id, approver=approver),
+            )
             return self._state(run_id, legacy_run=run)
         governance = self._governance.get(run_id)
         lifecycle = self._lifecycle.get(run_id)
         if governance.phase.value != "reviewed" or lifecycle.phase is not LifecyclePhase.REVIEWED:
             raise Forbidden("independent review is required before approval")
-        run = self._legacy.approve(run_id, approver=approver)
+        run = self._mutating_call(
+            run_id, "approve", {"approver": approver},
+            lambda: self._legacy.approve(run_id, approver=approver),
+        )
         governance = self._governance.approve(run_id)
         backup_digest = _receipt_digest({"manifest": run.get("backup_manifest"), "run_id": run_id})
         lifecycle = self._lifecycle.record_backup(
@@ -370,9 +476,8 @@ class GuardedLegacySelfmodService:
             raise Forbidden("automatic remote push is forbidden; deployment is local only")
         if self._unrestricted:
             run = self._mutating_call(
-                run_id, "selfmod-deploy", {"health_command": health_command, "commit": commit},
+                run_id, "deploy", {"health_command": health_command, "commit": commit},
                 lambda: self._legacy.deploy(run_id, health_command=health_command, commit=commit),
-                receipt_key=f"selfmod:{run_id}:deploy",
             )
             return self._state(run_id, legacy_run=run)
         if health_command is None:
@@ -384,9 +489,8 @@ class GuardedLegacySelfmodService:
         governance = self._governance.deployment_intent(run_id)
         try:
             run = self._mutating_call(
-                run_id, "selfmod-deploy", {"health_command": health_command, "commit": commit},
+                run_id, "deploy", {"health_command": health_command, "commit": commit},
                 lambda: self._legacy.deploy(run_id, health_command=health_command, commit=commit),
-                receipt_key=f"selfmod:{run_id}:deploy",
             )
         except Exception:
             run = self._legacy.get_run(run_id)
@@ -413,11 +517,10 @@ class GuardedLegacySelfmodService:
             # producing its malformed receipt.
             try:
                 rollback_run = self._mutating_call(
-                    run_id, "selfmod-rollback", {"reason": "ambiguous deployment receipt"},
+                    run_id, "rollback", {"reason": "ambiguous deployment receipt"},
                     lambda: self._legacy.rollback(
                         run_id, reason="ambiguous deployment receipt; fail-closed rollback"
                     ),
-                    receipt_key=f"selfmod:{run_id}:rollback",
                 )
             except Exception as exc:
                 raise Forbidden("ambiguous deployment receipt and rollback failed") from exc
@@ -437,30 +540,71 @@ class GuardedLegacySelfmodService:
     def _mutating_call(
         self,
         run_id: str,
-        operation: str,
+        stage: str,
         request: object,
         invoke: Callable[[], Mapping[str, object]],
-        *,
-        receipt_key: str,
     ) -> Mapping[str, object]:
+        """Run one legacy mutating stage under the worker effect journal.
+
+        Without a composed binding factory the legacy call runs directly, as
+        before.  Otherwise the stage's own success predicate classifies the
+        receipt: a receipt that misses it is a settled ``failed`` outcome, and
+        an exception (or unpublishable receipt) leaves the intent uncertain.
+        """
+        effect = _STAGE_EFFECTS[stage]
         if self._effect_binding_factory is None:
             return invoke()
         binding = self._effect_binding_factory(run_id)
         if not isinstance(binding, AuthenticatedWorkerBinding):
             raise TypeError("effect_binding_factory returned an invalid binding")
+        if effect.repeatable:
+            attempt = self._next_stage_attempt(binding, run_id, effect)
+            operation_id = f"{effect.operation}:{run_id}:attempt-{attempt}"
+            receipt_key = f"selfmod:{run_id}:{effect.receipt}:attempt-{attempt}"
+        else:
+            # One-shot stages keep one identity per run; a second call is a
+            # duplicate intent and refuses.  Deploy/rollback ids are unchanged.
+            operation_id = f"{effect.operation}:{run_id}"
+            receipt_key = f"selfmod:{run_id}:{effect.receipt}"
         return journaled_effect(
             binding,
-            operation_id=f"{operation}:{run_id}",
+            operation_id=operation_id,
             idempotency_key=receipt_key,
             request=request,
             invoke=invoke,
             receipt_key=receipt_key,
             reconciliation="manual",
-            success=lambda result: (
-                operation.endswith("rollback")
-                or str(result.get("phase", "")) == "deployed"
-            ),
+            success=effect.success,
         )
+
+    @staticmethod
+    def _next_stage_attempt(
+        binding: AuthenticatedWorkerBinding, run_id: str, effect: _StageEffect,
+    ) -> int:
+        """Derive a repeatable stage's next attempt from durable journal state.
+
+        Attempts are admitted contiguously, so the first missing attempt is
+        the next one.  Every earlier attempt must be settled: an ``intent`` or
+        ``uncertain`` attempt may have mutated the run without a receipt, so a
+        retry refuses until trusted reconciliation settles it.  Two callers
+        that derive the same attempt collide on its journal identity.
+        """
+        lookup = getattr(binding.journal, "get", None)
+        if not callable(lookup):
+            raise EffectJournalError("selfmod stage attempts require a keyed effect journal")
+        for attempt in range(1, MAX_SELFMOD_STAGE_ATTEMPTS + 1):
+            operation_id = f"{effect.operation}:{run_id}:attempt-{attempt}"
+            prior = lookup(f"{binding.run_id}:{operation_id}")
+            if prior is None:
+                return attempt
+            if prior.run_id != binding.run_id or prior.operation_id != operation_id:
+                raise EffectJournalError("selfmod stage attempt identity conflicts with the journal")
+            if prior.state in {EffectState.INTENT, EffectState.UNCERTAIN}:
+                raise EffectJournalError(
+                    f"a prior {effect.receipt} attempt is unresolved; "
+                    "it requires reconciliation before a retry"
+                )
+        raise EffectJournalError(f"selfmod {effect.receipt} attempts are exhausted")
 
     def get(self, run_id: str) -> SelfmodIntegrationState:
         return self._state(run_id)
