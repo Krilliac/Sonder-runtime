@@ -6,7 +6,7 @@ server-side setting Sonder cannot query, and metadata cannot see what else is
 using the GPU.  This tracker closes the loop with the one authoritative
 signal Ollama exposes, ``/api/ps`` ``size`` versus ``size_vram``:
 
-1. The host records every automatically selected window per model.
+1. The host records the actual window dispatched in each local model request.
 2. At most once per ``check_interval`` per model, and only when the host asks
    for a window again, the tracker reads ``/api/ps``.  It never adds a probe to
    a first request and never probes a model that is not loaded.
@@ -117,7 +117,7 @@ class ResidencyFeedback:
             return state.ceiling
 
     def note_selection(self, model: str, context: int) -> None:
-        """Record the window the host just chose automatically."""
+        """Record a dispatched window; planning-only calls must not use this."""
         key = self._key(model)
         if not key:
             return
@@ -128,6 +128,11 @@ class ResidencyFeedback:
         with self._lock:
             state = self._states.get(self._key(model))
             return state.verdict if state else None
+
+    def forget_selection(self, model: str) -> None:
+        """Discard attribution and stale measurements for an unknown-window load."""
+        with self._lock:
+            self._states.pop(self._key(model), None)
 
     def refresh(
         self,
@@ -153,17 +158,30 @@ class ResidencyFeedback:
                 return None
             if state.last_checked is not None and now - state.last_checked < self._interval:
                 return None
-            state.last_checked = now
             selected = state.last_selected
         if not self._probe_lock.acquire(blocking=False):
             return None
         try:
+            # Do not consume the throttle window until this caller owns the
+            # probe slot.  A concurrent model that loses the non-blocking
+            # acquisition must remain immediately eligible for a later probe.
+            # Recheck under the state lock because another caller may have
+            # completed a probe while this caller waited for the slot.
+            with self._lock:
+                state = self._states.get(key)
+                now = self._clock()
+                if state is None or state.last_selected is None:
+                    return None
+                if state.last_checked is not None and now - state.last_checked < self._interval:
+                    return None
+                state.last_checked = now
+                selected = state.last_selected
             reading = self._read(key)
         finally:
             self._probe_lock.release()
         if reading is None:
             return None
-        return self._apply(key, reading, selected, geometry, kv_type, now)
+        return self._apply(key, reading, selected, geometry, kv_type, now, state)
 
     def _read(self, key: str) -> ResidencyReading | None:
         try:
@@ -189,7 +207,8 @@ class ResidencyFeedback:
         geometry: ModelGeometry | None,
         kv_type: str,
         now: float,
-    ) -> ResidencyVerdict:
+        expected_state: _ModelState,
+    ) -> ResidencyVerdict | None:
         if reading.context_length is not None:
             observed, attributed_by = reading.context_length, "server-reported"
         else:
@@ -216,7 +235,9 @@ class ResidencyFeedback:
             measured_at=now,
         )
         with self._lock:
-            state = self._states.setdefault(key, _ModelState())
+            state = self._states.get(key)
+            if state is not expected_state or state.last_selected != selected:
+                return None
             state.verdict = verdict
             if ceiling is not None:
                 previous = state.ceiling if now < state.ceiling_expires else None
@@ -238,4 +259,31 @@ class ResidencyFeedback:
         return verdict
 
 
-__all__ = ["ResidencyFeedback", "ResidencyVerdict"]
+def record_dispatched_context(path, payload, feedback_provider, is_cloud_model):
+    """Attribute only an actual model request's serialized context window.
+
+    The transport invokes this after opening the response, inside provider
+    admission. Discovery, prewarm, invalid windows and cloud requests do not
+    supply a local context observation. Advisory bookkeeping cannot fail a call.
+    """
+    if path not in {"/api/chat", "/api/generate"} or not isinstance(payload, Mapping):
+        return
+    model = payload.get("model")
+    options = payload.get("options")
+    context = options.get("num_ctx") if isinstance(options, Mapping) else None
+    if not isinstance(model, str) or not model.strip():
+        return
+    try:
+        if is_cloud_model(model):
+            return
+        feedback = feedback_provider()
+        if feedback is not None:
+            if type(context) is int and context > 0:
+                feedback.note_selection(model, context)
+            else:
+                feedback.forget_selection(model)
+    except Exception:
+        logger.debug("residency dispatch attribution failed", exc_info=True)
+
+
+__all__ = ["ResidencyFeedback", "ResidencyVerdict", "record_dispatched_context"]

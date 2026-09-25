@@ -56,6 +56,9 @@ CPU_ONLY = "cpu"
 # and rounds down to a whole 1024-token page.
 _SPILL_MARGIN = 1.10
 _WINDOW_PAGE = 1024
+# Bound metadata-driven expansion and arithmetic before trusting remote counts.
+_MAX_MODEL_BLOCKS = 4096
+_MAX_METADATA_INTEGER = (1 << 63) - 1
 
 
 def normalize_kv_type(value: object) -> str | None:
@@ -89,8 +92,8 @@ def _positive_int(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
-        return value if value > 0 else None
-    if isinstance(value, float) and value.is_integer() and value > 0:
+        return value if 0 < value <= _MAX_METADATA_INTEGER else None
+    if isinstance(value, float) and value.is_integer() and 0 < value <= _MAX_METADATA_INTEGER:
         return int(value)
     return None
 
@@ -103,7 +106,7 @@ def _per_layer_heads(value: Any, block_count: int) -> tuple[int, ...] | None:
     if isinstance(value, (list, tuple)) and len(value) == block_count:
         heads = []
         for item in value:
-            if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+            if isinstance(item, bool) or not isinstance(item, int) or not 0 <= item <= _MAX_METADATA_INTEGER:
                 return None
             heads.append(item)
         return tuple(heads) if any(heads) else None
@@ -130,7 +133,7 @@ def geometry_from_model_info(info: Mapping[str, Any] | None) -> ModelGeometry | 
     if key("attention.kv_lora_rank") is not None:
         return None
     block_count = _positive_int(key("block_count"))
-    if block_count is None:
+    if block_count is None or block_count > _MAX_MODEL_BLOCKS:
         return None
     head_count_raw = key("attention.head_count")
     head_count = _positive_int(head_count_raw)
@@ -200,7 +203,7 @@ def reading_from_ps_row(row: Mapping[str, Any] | None) -> ResidencyReading | Non
     name = str(row.get("name") or row.get("model") or "").strip()
     total = _positive_int(row.get("size"))
     vram = row.get("size_vram")
-    if not name or total is None or isinstance(vram, bool) or not isinstance(vram, int) or vram < 0:
+    if not name or total is None or isinstance(vram, bool) or not isinstance(vram, int) or not 0 <= vram <= _MAX_METADATA_INTEGER:
         return None
     return ResidencyReading(
         model=name,
@@ -237,7 +240,7 @@ def window_after_spill(
         if per_token <= 0:
             return None
         drop = int(math.ceil(spilled_bytes * _SPILL_MARGIN / per_token))
-        if drop >= context - minimum:
+        if drop > context - minimum:
             return None
         target = context - drop
     target = (target // _WINDOW_PAGE) * _WINDOW_PAGE if target >= _WINDOW_PAGE else target

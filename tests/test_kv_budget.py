@@ -27,6 +27,27 @@ def test_geometry_derives_head_dim_from_embedding_when_key_length_absent():
     assert geometry.context_length == 32768
 
 
+def test_oversized_block_count_is_rejected_before_expanding_heads(monkeypatch):
+    def expansion_must_not_run(*_args):
+        pytest.fail("untrusted block count reached tuple expansion")
+
+    monkeypatch.setattr(kb, "_per_layer_heads", expansion_must_not_run)
+    assert kb.geometry_from_model_info(qwen_like(**{"qwen2.block_count": 10**12})) is None
+
+
+def test_supported_block_count_boundary_remains_bounded():
+    geometry = kb.geometry_from_model_info(qwen_like(**{"qwen2.block_count": 4096}))
+    assert len(geometry.kv_heads_per_layer) == 4096
+    assert kb.geometry_from_model_info(qwen_like(**{"qwen2.block_count": 4097})) is None
+
+
+@pytest.mark.parametrize("field", ["size", "size_vram"])
+def test_oversized_residency_numbers_are_unproven(field):
+    row = {"name": "m:7b", "size": 10_000_000_000, "size_vram": 5_000_000_000}
+    row[field] = 1 << 100
+    assert kb.reading_from_ps_row(row) is None
+
+
 def test_per_token_cost_matches_hand_computation():
     geometry = kb.geometry_from_model_info(qwen_like())
     # 28 layers * 4 kv heads * (128 K + 128 V) * 2 bytes.
@@ -93,6 +114,23 @@ def test_spill_larger_than_the_cache_is_unfixable():
     geometry = kb.geometry_from_model_info(qwen_like())
     spilled = kb.kv_bytes(geometry, 8192, "f16") * 2
     assert kb.window_after_spill(8192, spilled, geometry=geometry, kv_type="f16", minimum=512) is None
+
+
+def test_spill_reaching_minimum_window_is_still_fixable():
+    geometry = kb.ModelGeometry("test", 1, (1,), 1, 1)
+    # 4 bytes/token; ceil(11_169 * 1.10 / 4) == 3_072 == 4_096 - 1_024.
+    assert kb.window_after_spill(
+        4096, 11169, geometry=geometry, kv_type="f16", minimum=1024,
+    ) == 1024
+
+
+def test_spill_one_unit_beyond_minimum_window_is_unfixable():
+    geometry = kb.ModelGeometry("test", 1, (1,), 1, 1)
+    # ceil(11_173 * 1.10 / 4) == 3_073, one token of reduction beyond
+    # the available 3_072-token reduction.
+    assert kb.window_after_spill(
+        4096, 11173, geometry=geometry, kv_type="f16", minimum=1024,
+    ) is None
 
 
 def test_spill_without_geometry_halves_and_respects_minimum():

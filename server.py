@@ -1148,7 +1148,7 @@ from sonder_runtime.adapters.runtime_readiness_formatting import (
     format_model_readiness as _runtime_model_readiness_lines,
 )
 from sonder_runtime.adapters.goal_formatting import format_goal as _format_goal
-from sonder_runtime.adapters.inference.residency_feedback import ResidencyFeedback as _ResidencyFeedback
+from sonder_runtime.adapters.inference.residency_feedback import ResidencyFeedback as _ResidencyFeedback, record_dispatched_context as _record_residency_dispatch
 from sonder_runtime.domain import kv_budget as _kv_budget
 from sonder_runtime.application.goals import (
     GoalCommandFailed as _GoalCommandFailed,
@@ -1716,6 +1716,7 @@ def _residency_feedback():
     try:
         primary = ollama_policy.normalize(BASE).rstrip("/")
         if tuple(OLLAMA_POOL.configured_origins) != (primary,):
+            _RESIDENCY_FEEDBACK = None
             return None
     except Exception:
         return None
@@ -1741,11 +1742,9 @@ def _auto_model_context(model):
     with _MODEL_CONTEXT_CACHE_LOCK:
         geometry = _MODEL_GEOMETRY_CACHE.get(str(model or "").strip().casefold())
     feedback.refresh(model, geometry=geometry, kv_type=context_policy.kv_cache_type()[0])
-    chosen = context_policy.auto_context(
+    return context_policy.auto_context(
         context_length, parameter_size, feedback.ceiling(model),
     )
-    feedback.note_selection(model, chosen)
-    return chosen
 
 
 def _make_generate(
@@ -5158,6 +5157,7 @@ def _post(
         )
         def transport():
             with OLLAMA_POOL.open_url(req, timeout=remaining) as resp:
+                _record_residency_dispatch(path, json.loads(data), _residency_feedback, _is_cloud_model_name)
                 raw = _read_ollama_response_bytes(resp)
                 return json.loads(raw.decode("utf-8"))
 

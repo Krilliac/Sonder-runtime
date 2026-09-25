@@ -97,6 +97,29 @@ def test_transport_failure_is_swallowed():
     assert feedback.ceiling("qwen:27b") is None
 
 
+def test_probe_lock_skip_does_not_consume_other_model_throttle():
+    calls = []
+    clock = Clock()
+    feedback = tracker(
+        [spill_row(), {"name": "llama:7b", "size": 10, "size_vram": 10}],
+        clock, calls, check_interval=60,
+    )
+    feedback.note_selection("qwen:27b", 16384)
+    feedback.note_selection("llama:7b", 16384)
+    feedback._probe_lock.acquire()
+    try:
+        assert feedback.refresh("qwen:27b", geometry=None, kv_type="f16") is None
+        assert feedback.refresh("llama:7b", geometry=None, kv_type="f16") is None
+        assert calls == []
+    finally:
+        feedback._probe_lock.release()
+
+    # Neither skipped model was stamped as checked; the next owner can probe.
+    assert feedback.refresh("qwen:27b", geometry=None, kv_type="f16") is not None
+    assert feedback.refresh("llama:7b", geometry=None, kv_type="f16") is not None
+    assert len(calls) == 2
+
+
 def test_unloaded_model_produces_no_verdict():
     feedback = tracker([{"name": "other:7b", "size": 10, "size_vram": 5}], Clock())
     feedback.note_selection("qwen:27b", 16384)
@@ -116,6 +139,7 @@ def test_server_auto_context_applies_measured_ceiling(monkeypatch):
     monkeypatch.setattr(server, "_is_cloud_model_name", lambda model: False)
 
     assert server._auto_model_context("qwen:27b") == 32768
+    feedback.note_selection("qwen:27b", 32768)  # The selected request was dispatched.
     assert server._auto_model_context("qwen:27b") == 16384
 
 
