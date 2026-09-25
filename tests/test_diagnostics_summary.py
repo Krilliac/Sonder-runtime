@@ -127,3 +127,21 @@ def test_scan_goes_back_through_unrelated_trailing_lines():
 def test_no_summary_is_none():
     assert find_summary(["hello", "world"]) is None
     assert find_summary([]) is None
+
+
+def test_absurd_duration_is_dropped_so_the_wire_stays_strict_json():
+    import json
+
+    line = "= 1 passed in %ss =" % ("9" * 400)
+    summary = find_summary([line])
+    assert summary is not None and summary.passed == 1
+    assert summary.duration_seconds is None
+    json.dumps(summary.to_wire(), allow_nan=False)
+
+
+@pytest.mark.parametrize("duration", ["1.2.3", ".", "..", "4."])
+def test_malformed_dotnet_duration_never_raises(duration):
+    line = "Passed!  - Failed: 0, Passed: 4, Skipped: 0, Total: 4, Duration: %s s" % duration
+    summary = find_summary([line])
+    assert summary is not None and summary.tool == "dotnet" and summary.passed == 4
+    assert summary.duration_seconds is None

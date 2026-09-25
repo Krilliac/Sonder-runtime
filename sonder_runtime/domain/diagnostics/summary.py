@@ -17,6 +17,7 @@ from .model import clean_text
 
 MAX_SUMMARY_LINE_CHARS = 400
 HARD_MAX_TAIL = 2_000
+_MAX_DURATION_SECONDS = 10_000_000.0
 
 STATUS_PASSED = "passed"
 STATUS_FAILED = "failed"
@@ -59,10 +60,14 @@ def _summary(tool: str, line: str, **counts) -> RunSummary:
     errors = counts.get("errors")
     total = counts.get("total")
     status = counts.get("status") or _status(failed, errors, passed)
+    duration = counts.get("duration")
+    if duration is not None and not (0.0 <= duration <= _MAX_DURATION_SECONDS):
+        # A 400-digit "duration" parses to inf, which JSON cannot carry.
+        duration = None
     return RunSummary(
         tool=tool, line=clean_text(line, MAX_SUMMARY_LINE_CHARS),
         passed=passed, failed=failed, skipped=skipped, errors=errors, total=total,
-        duration_seconds=counts.get("duration"), status=status,
+        duration_seconds=duration, status=status,
     )
 
 
@@ -225,7 +230,7 @@ _VITEST_PART_RE = re.compile(r"^(?P<n>\d+) (?P<word>failed|passed|skipped|todo)$
 _DOTNET_RE = re.compile(
     r"^(?P<word>Failed|Passed)!\s+-\s+Failed:\s+(?P<failed>\d+),\s+Passed:\s+(?P<passed>\d+),"
     r"\s+Skipped:\s+(?P<skipped>\d+),\s+Total:\s+(?P<total>\d+)"
-    r"(?:,\s+Duration:\s+(?P<dur>[\d.]+)\s*(?P<unit>ms|s|m))?"
+    r"(?:,\s+Duration:\s+(?P<dur>\d+(?:\.\d+)?)\s*(?P<unit>ms|s|m))?"
 )
 _MAVEN_RE = re.compile(
     r"^(?:\[(?:INFO|ERROR|WARNING)\]\s+)?Tests run: (?P<run>\d+), Failures: (?P<failures>\d+), "

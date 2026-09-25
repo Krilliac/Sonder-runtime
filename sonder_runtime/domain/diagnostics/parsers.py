@@ -69,7 +69,9 @@ _GNU_RE = re.compile(
 )
 _GNU_FLAG_SUFFIX_RE = re.compile(r"^-W[\w=+-]+$")
 _LD_REFERENCE_RE = re.compile(
-    r"^(?P<file>[^:\n]+):\(\.\w+[^)]*\): (?P<msg>undefined reference to .*)$"
+    # ``\.\w[^)]*`` is the linear spelling of ``\.\w+[^)]*`` (the two
+    # quantifiers overlapped and backtracked quadratically on long lines).
+    r"^(?P<file>[^:\n]+):\(\.\w[^)]*\): (?P<msg>undefined reference to .*)$"
 )
 _LD_PREFIX_RE = re.compile(
     r"^(?:\S*/)?(?:ld|collect2)(?:\.\w+)?: (?:error: )?(?P<msg>.*)$"
@@ -78,14 +80,18 @@ _MSVC_CL_RE = re.compile(
     r"^(?P<file>(?:[A-Za-z]:)?[^(\n]+)\((?P<line>\d+)(?:,(?P<col>\d+))?\)\s*:\s*"
     + _SEV + r"\s+(?P<code>[A-Z]{1,6}\d{4})\s*:\s*(?P<msg>.*)$"
 )
-_MSVC_LINK_RE = re.compile(
-    r"^(?P<file>[^\n]*?)\s*:\s*(?P<sev>fatal error|error|warning)\s+"
-    r"(?P<code>LNK\d{4})\s*:\s*(?P<msg>.*)$"
+# ``<file> : <sev> <CODE>: <msg>`` shapes are found with an unanchored search
+# for the ``: <sev> <CODE>:`` marker, which starts only at a colon, instead of
+# a lazy ``^(?P<file>.*?)\s*:`` prefix whose overlap with ``\s*`` backtracked
+# quadratically on whitespace-heavy lines. The file is the text before the
+# first marker and the message the text after it -- the same split the
+# anchored lazy form produced.
+_MSVC_LINK_MARK_RE = re.compile(
+    r":\s*(?P<sev>fatal error|error|warning)\s+(?P<code>LNK\d{4})\s*:\s*"
 )
 # A project-level msbuild/dotnet diagnostic has no (line,col) group.
-_MSBUILD_RE = re.compile(
-    r"^(?P<file>[^\n]*?)\s*:\s*(?P<sev>error|warning)\s+"
-    r"(?P<code>(?:MSB|NETSDK|CS|NU)\d{4})\s*:\s*(?P<msg>.*)$"
+_MSBUILD_MARK_RE = re.compile(
+    r":\s*(?P<sev>error|warning)\s+(?P<code>(?:MSB|NETSDK|CS|NU)\d{4})\s*:\s*"
 )
 _MSBUILD_PROJECT_SUFFIX_RE = re.compile(r"\s+\[[^\]\n]{1,1024}\.(?:vcx|cs|fs|vb)proj\]$")
 _DOTNET_CODE_RE = re.compile(r"^(?:CS|MSB|NETSDK|NU)\d{4}$")
@@ -107,10 +113,14 @@ _TSC_PRETTY_RE = re.compile(
 _ESLINT_ROW_RE = re.compile(
     r"^\s+(?P<line>\d+):(?P<col>\d+)\s+(?P<sev>error|warning)\s+(?P<rest>\S.*)$"
 )
-_ESLINT_UNIX_RE = re.compile(
-    r"^(?P<file>[^\n]+?):(?P<line>\d+):(?P<col>\d+): (?P<msg>.*) "
-    r"\[(?P<sev>Error|Warning)/(?P<code>[@\w/-]+)\]$"
+# The ``[Error/rule]`` suffix is split off at the last `` [`` (a rule name
+# holds no space or bracket, so no other split can match) and the prefix is
+# matched on its own; a single regex with ``(?P<msg>.*) \[`` backtracked once
+# per ``file:line:col:`` candidate.
+_ESLINT_UNIX_PREFIX_RE = re.compile(
+    r"^(?P<file>[^\n]+?):(?P<line>\d+):(?P<col>\d+): (?P<msg>.*)$"
 )
+_ESLINT_UNIX_SUFFIX_RE = re.compile(r"^\[(?P<sev>Error|Warning)/(?P<code>[@\w/-]+)\]$")
 _ESLINT_RULE_RE = re.compile(r"^[@\w/-]+$")
 _ESLINT_HEADER_RE = re.compile(
     r"^(?:[A-Za-z]:[\\/]|/|\.{1,2}[\\/])?[^\s:*?\"<>|][^:*?\"<>|\n]*"
@@ -236,19 +246,19 @@ def _parse_msvc(line: str, line_no: int) -> Diagnostic | None:
             raw_line_no=line_no,
         )
     if "LNK" in stripped:
-        match = _MSVC_LINK_RE.match(stripped)
+        match = _MSVC_LINK_MARK_RE.search(stripped)
         if match:
             return make_diagnostic(
                 tool=DiagnosticTool.MSVC_LINK.value, severity=_severity(match.group("sev")),
-                file=match.group("file").strip(), code=match.group("code"),
-                message=match.group("msg"), raw_line_no=line_no,
+                file=stripped[: match.start()].strip(), code=match.group("code"),
+                message=stripped[match.end():], raw_line_no=line_no,
             )
-    match = _MSBUILD_RE.match(stripped)
+    match = _MSBUILD_MARK_RE.search(stripped)
     if match:
         return make_diagnostic(
             tool=DiagnosticTool.DOTNET.value, severity=_severity(match.group("sev")),
-            file=match.group("file").strip(), code=match.group("code"),
-            message=match.group("msg"), raw_line_no=line_no,
+            file=stripped[: match.start()].strip(), code=match.group("code"),
+            message=stripped[match.end():], raw_line_no=line_no,
         )
     return None
 
@@ -269,13 +279,19 @@ def _parse_tsc(line: str, line_no: int) -> Diagnostic | None:
 def _parse_eslint_unix(line: str, line_no: int) -> Diagnostic | None:
     if not line.endswith("]") or "/" not in line:
         return None
-    match = _ESLINT_UNIX_RE.match(line)
+    split = line.rfind(" [")
+    if split < 0:
+        return None
+    suffix = _ESLINT_UNIX_SUFFIX_RE.match(line[split + 1:])
+    if not suffix:
+        return None
+    match = _ESLINT_UNIX_PREFIX_RE.match(line[:split])
     if not match:
         return None
     return make_diagnostic(
-        tool=DiagnosticTool.ESLINT.value, severity=_severity(match.group("sev")),
+        tool=DiagnosticTool.ESLINT.value, severity=_severity(suffix.group("sev")),
         file=match.group("file"), line=match.group("line"), col=match.group("col"),
-        code=match.group("code"), message=match.group("msg"), raw_line_no=line_no,
+        code=suffix.group("code"), message=match.group("msg"), raw_line_no=line_no,
     )
 
 

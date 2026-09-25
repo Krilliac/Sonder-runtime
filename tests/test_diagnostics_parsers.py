@@ -1,6 +1,7 @@
 """Golden fixtures for the one diagnostics parser (domain, pure)."""
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -281,6 +282,96 @@ def test_pathological_lines_finish_quickly(line):
     started = time.monotonic()
     parse_diagnostics(text)
     assert time.monotonic() - started < 1.0
+
+
+
+# Lines that made a lazy ``^(?P<file>.*?)\s*:`` prefix, overlapping
+# ``\w+[^)]*`` quantifiers, or a ``(?P<msg>.*) \[`` tail backtrack
+# quadratically: each cost 15-60 ms per 4 KB line, so a 50,000-line window
+# took tens of minutes. Two hundred copies must now finish well inside a
+# second each way the scan reaches them.
+@pytest.mark.parametrize("line", [
+    " " * 4000 + "1:1  error  x",
+    "Tests:" + " " * 4000 + "x, 1 total",
+    "LNK a:" + " " * 4000 + "x",
+    ":" + " " * 4000 + "x(",
+    " " * 4000 + ":",
+    " " * 2000 + "(" + " " * 2000 + ":",
+    "a:(." + "w" * 4090,
+    ("a:1:1: " * 580)[:4000] + "/]",
+], ids=[
+    "ws-eslint-row", "ws-jest", "ws-lnk", "colon-ws", "ws-colon",
+    "ws-paren-colon", "ld-word-run", "eslint-unix-candidates",
+])
+def test_quadratic_backtracking_shapes_stay_linear(line):
+    text = "\n".join([line] * 200)
+    started = time.monotonic()
+    parse_diagnostics(text)
+    for _ in range(20):
+        parse_line(line)
+    assert time.monotonic() - started < 2.0
+
+
+def test_fuzzed_output_never_raises_and_stays_bounded():
+    import random
+
+    from sonder_runtime.domain.diagnostics.digest import digest_text, render_digest
+    from sonder_runtime.domain.diagnostics.summary import find_summary
+
+    seeds = [
+        "src/a.c:12:5: error: 'x' undeclared [-Wunused-variable]",
+        "C:\\p\\a.cpp(10,3): error C2065: 'x': undeclared [C:\\p\\a.vcxproj]",
+        "main.obj : error LNK2019: unresolved external symbol foo",
+        "Build.csproj : error NETSDK1045: bad sdk",
+        "error[E0308]: mismatched types", "  --> src/main.rs:3:5",
+        "a.ts(1,2): error TS2304: Cannot find name 'x'.",
+        "src/a.ts:1:2 - error TS2304: x", "/p/a.js",
+        "  1:10  error  'x' is defined but never used  no-unused-vars",
+        "a.js:1:2: bad thing [Error/no-undef]",
+        "./a.go:3:2: undefined: x", "# pkg",
+        "Traceback (most recent call last):", '  File "a.py", line 3, in <module>',
+        "ValueError: bad", "    ^", "SyntaxError: invalid syntax",
+        "FAILED tests/test_a.py::test_x - assert 1 == 2", "ERROR tests/b.py",
+        "= 3 failed, 10 passed in 4.21s =", "Ran 3 tests in 0.1s", "FAILED (failures=1)",
+        "test result: FAILED. 1 passed; 1 failed; 0 ignored", "make: *** [all] Error 2",
+        "Tests:  1 failed, 4 passed, 5 total", " Tests  1 failed | 4 passed (5)",
+        "Failed!  - Failed: 1, Passed: 4, Skipped: 0, Total: 5, Duration: 3 ms",
+        "Passed!  - Failed: 0, Passed: 4, Skipped: 0, Total: 4, Duration: 1.5 s",
+        "Tests run: 5, Failures: 1, Errors: 0, Skipped: 0", "5 tests completed, 1 failed",
+        "/usr/bin/ld: a.o:(.text+0x1): undefined reference to `f'",
+        "collect2: error: ld returned 1 exit status", "\x1b[31merror\x1b[0m: x",
+        "ok  \tpkg\t0.01s", "FAIL\tpkg", "100% tests passed, 0 tests failed out of 3",
+    ]
+    alphabet = (":()[]/\\\"'`-=, .0123456789aEeWrLNKTSxX\t\x1b\r\x00"
+                "\u2018\u2019->#%|!\u00e9\U0001f600")
+    rng = random.Random(20260925)
+
+    def mutate(text):
+        chars = list(text)
+        for _ in range(rng.randint(0, 6)):
+            op = rng.randint(0, 3)
+            if op == 0 and chars:
+                del chars[rng.randrange(len(chars))]
+            elif op == 1:
+                chars.insert(rng.randint(0, len(chars)), rng.choice(alphabet))
+            elif op == 2 and chars:
+                chars = chars[: rng.randint(0, len(chars))]
+            else:
+                chars.extend(rng.choice(seeds))
+        return "".join(chars)
+
+    for _ in range(1500):
+        lines = [mutate(rng.choice(seeds)) for _ in range(rng.randint(1, 30))]
+        text = "\n".join(lines)
+        for line in lines:
+            parse_line(line)
+        result = parse_diagnostics(text)
+        assert len(result.diagnostics) <= 200 and len(result.groups) <= 50
+        find_summary(lines)
+        digest = digest_text(text)
+        assert len(render_digest(digest)) <= 4000
+        wire = digest.to_wire()
+        assert len(json.dumps(wire, ensure_ascii=False).encode("utf-8")) <= 48_000
 
 
 NEGATIVE_CORPUS = """\
