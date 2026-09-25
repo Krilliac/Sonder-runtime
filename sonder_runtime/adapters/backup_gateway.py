@@ -110,9 +110,12 @@ class LegacyBackupGateway:
             expected = _operator_fault(exc)
             if expected:
                 # A refused restore (missing/unverifiable backup, occupied
-                # destination) wrote nothing; it is not a data-loss event.
+                # destination) wrote nothing.  An I/O fault while staging is a
+                # failure, not a refusal, but the staging directory is
+                # discarded and the backup is untouched: neither is data loss.
+                outcome = "failed" if isinstance(exc, OSError) else "refused"
                 logger.error(
-                    f"backup full restore refused for dir={backup_dir!r} "
+                    f"backup full restore {outcome} for dir={backup_dir!r} "
                     f"destination={destination!r}: {exc}"
                 )
             else:

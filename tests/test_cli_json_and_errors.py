@@ -128,6 +128,29 @@ def test_expected_backup_faults_are_logged_without_a_traceback(
     assert "restore refused" in records[1].getMessage()
 
 
+def test_restore_io_failure_is_not_logged_as_a_refusal(
+    home, tmp_path, monkeypatch, caplog
+):
+    # A mid-restore I/O fault (disk full while staging) is not a refusal of
+    # the operator's request; the log must not claim nothing was attempted.
+    import errno
+
+    import sonder_runtime.adapters.backup as backup_impl
+
+    def disk_full(_backup_dir, _destination):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(backup_impl, "restore_to_empty", disk_full)
+    caplog.set_level("ERROR")
+    assert main(["restore", "apply", str(tmp_path / "b"),
+                 str(tmp_path / "dest"), "--confirm", "restore"]) == 1
+    records = _gateway_records(caplog)
+    assert len(records) == 1 and not records[0].exc_info
+    message = records[0].getMessage()
+    assert "restore failed" in message and "refused" not in message
+    assert "No space left" in message
+
+
 def test_unexpected_backup_faults_keep_their_traceback(
     home, tmp_path, monkeypatch, caplog
 ):
