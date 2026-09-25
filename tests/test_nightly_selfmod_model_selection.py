@@ -1,6 +1,7 @@
 """Focused contract tests for the bounded selfmod worker's model pin."""
 
 import json
+import os
 import sys
 import subprocess
 import hashlib
@@ -746,8 +747,15 @@ def test_held_out_snapshot_rejects_candidate_mutation(tmp_path, monkeypatch):
             prepared["command"], cwd=candidate, text=True,
             capture_output=True, timeout=60,
         )
-        assert result.returncode == 0, result.stdout + result.stderr
-        assert Path(snapshot_test).read_text(encoding="utf-8").startswith("from reflection")
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            # A superuser bypasses the snapshot's 0o444 mode, so the write
+            # lands; the evaluator's digest re-check must then fail closed
+            # instead of reporting the tampered suite as a pass.
+            assert result.returncode == 2, result.stdout + result.stderr
+            assert "SELFMOD HELD-OUT CANARY FAILED: after changed" in result.stdout
+        else:
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert Path(snapshot_test).read_text(encoding="utf-8").startswith("from reflection")
     finally:
         if prepared["cleanup"] is not None:
             prepared["cleanup"].cleanup()
