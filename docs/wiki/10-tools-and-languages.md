@@ -30,7 +30,7 @@ Both MCP surfaces (`python -m sonder_runtime mcp`, the default, and
 - **`initialize`** reports the server's own capabilities (a client that sends
   `capabilities: {}` still sees `tools`) and the runtime build version as
   `serverInfo.version`. MCP Tasks on the native surface still require the
-  client to advertise `tasks`.
+  client to advertise `tasks`; until it does, `tasks` is not advertised back.
 - The native tool list is generated in
   [`runtime-reference.md`](../architecture/generated/runtime-reference.md#native-mcp-tools).
 

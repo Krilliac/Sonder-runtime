@@ -18,6 +18,11 @@ from ...application.tools.generated_catalogs import GeneratedCatalogs
 from ...application.ports.tool_registry import ToolDescriptor
 
 
+# Capabilities this transport serves only when the client advertised them too:
+# the Tasks methods below are gated on the negotiated overlap.
+_CLIENT_OPT_IN_CAPABILITIES = frozenset({"tasks"})
+
+
 @dataclass(frozen=True)
 class McpTransportLimits:
     max_frame_bytes: int = 256_000
@@ -330,11 +335,17 @@ class StdioMcpTransport:
             # Advertise what this server supports, not the intersection with
             # the client's own capability keys: MCP capabilities are declared
             # per side, and a client that sent ``{}`` would otherwise be told
-            # this server has no tools.
+            # this server has no tools. A capability this session serves only
+            # on the client's opt-in (MCP Tasks) is advertised only once
+            # negotiated, so the result never promises a method that the
+            # session would then refuse.
+            negotiated = set(self._negotiation.capabilities)
+            advertised = [
+                name for name in self._negotiation.server_capabilities
+                if name not in _CLIENT_OPT_IN_CAPABILITIES or name in negotiated
+            ]
             return {"protocolVersion": self._negotiation.agreed_version,
-                    "capabilities": {
-                        name: {} for name in self._negotiation.server_capabilities
-                    },
+                    "capabilities": {name: {} for name in advertised},
                     "serverInfo": {
                         "name": "sonder-runtime",
                         "version": self._server_info_version

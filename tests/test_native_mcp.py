@@ -610,10 +610,11 @@ def test_native_initialize_advertises_server_capabilities_and_build_version():
     )
     rows = [json.loads(line) for line in output.getvalue().splitlines()]
     result = rows[0]["result"]
-    assert "tools" in result["capabilities"]
-    assert "tasks" in result["capabilities"]
+    assert result["capabilities"] == {"tools": {}, "notifications": {}}
     assert result["serverInfo"] == {"name": "sonder-runtime", "version": runtime_version()}
-    # Advertising is not enabling: Tasks still need the client's opt-in.
+    # Tasks need the client's opt-in, so they are neither advertised nor
+    # served to a client that did not advertise ``tasks``: initialize never
+    # promises a method the session then refuses.
     assert rows[1]["error"]["code"] == -32602
     assert "not negotiated" in rows[1]["error"]["message"]
 

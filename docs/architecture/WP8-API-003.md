@@ -15,7 +15,9 @@ the server supports, and it is what the `initialize` result advertises: MCP has
 each side declare its own capabilities, so a client that sends
 `capabilities: {}` still learns that `tools` is served. `capabilities` is the
 intersection with the client's advertised keys, and features that need the
-client's opt-in (MCP Tasks) stay gated on it. The native transport reports the
+client's opt-in (MCP Tasks) stay gated on it; the native transport advertises
+such a capability only when it was negotiated, so `initialize` never promises
+a method the session would refuse. The native transport reports the
 runtime build version (`sonder_runtime.platform.version.runtime_version()`) as
 `serverInfo.version`.
 
