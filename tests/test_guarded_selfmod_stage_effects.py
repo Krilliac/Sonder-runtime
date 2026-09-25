@@ -41,6 +41,7 @@ from sonder_runtime.application.selfmod.selfmod_service import (
 from sonder_runtime.application.selfmod.verification_lifecycle import (
     VerificationKind,
 )
+from sonder_runtime.domain.common.errors import InvalidInput
 from tests.test_selfmod_legacy_integration import (
     LegacyDouble,
     failure_evidence,
@@ -242,6 +243,7 @@ def test_record_test_retries_get_distinct_journal_derived_attempts(tmp_path):
     # A new process: fresh journal handle, fresh service, newer owner epoch.
     reopened = SQLiteEffectJournal(db)
     restarted = _service(legacy, reopened, epoch=2, unrestricted=True)
+    legacy.phase = "testing"  # create_plan in the helper resets the double
     restarted.record_verification(RUN, VerificationKind.TARGETED, ("pytest", "-q"))
 
     attempts = [
@@ -285,6 +287,7 @@ def test_uncertain_record_test_refuses_the_next_attempt(tmp_path):
     legacy = ExplodingLegacy()
     service = _service(legacy, journal, unrestricted=True, recover=False)
     service.prepare(RUN)
+    legacy.phase = "testing"  # unrestricted mode does not call begin_testing
     with pytest.raises(RuntimeError, match="lost the test receipt"):
         service.record_verification(RUN, VerificationKind.TARGETED, ("pytest",))
     attempt = journal.get(f"{JOURNAL_RUN}:selfmod-record-test:{RUN}:attempt-1")
@@ -310,6 +313,7 @@ def test_in_flight_record_test_refuses_a_concurrent_attempt(tmp_path):
     legacy = SlowLegacy()
     service = _service(legacy, journal, unrestricted=True, recover=False)
     service.prepare(RUN)
+    legacy.phase = "testing"  # unrestricted mode does not call begin_testing
     worker = threading.Thread(target=lambda: service.record_verification(
         RUN, VerificationKind.TARGETED, ("pytest",),
     ))
@@ -383,15 +387,43 @@ def test_crash_between_invoke_and_receipt_leaves_uncertain_record_test(tmp_path)
     ).state is EffectState.COMPLETED
 
     legacy = LegacyDouble()
-    legacy.phase = "testing"
     for epoch in (2, 3):
         service = _service(legacy, SQLiteEffectJournal(db), epoch=epoch, unrestricted=True)
+        legacy.phase = "testing"  # create_plan in the helper resets the double
         with pytest.raises(EffectJournalError, match="reconciliation"):
             service.record_verification(RUN, VerificationKind.ARCHITECTURE, ("python", "-c", "pass"))
         assert journal.get(crashed_id).state is EffectState.UNCERTAIN
     assert legacy.calls == []
     assert journal.get(f"{JOURNAL_RUN}:selfmod-record-test:{RUN}:attempt-3") is None
     assert _marker(tmp_path).read_text(encoding="utf-8") == "x"
+
+
+def test_phase_refusal_admits_no_intent_and_does_not_fence_the_run(tmp_path):
+    """A stage called from the wrong legacy phase is refused before admission.
+
+    The legacy precondition would refuse without mutating anything; journaling
+    that refusal as an uncertain effect would fence the run behind manual
+    reconciliation that no verifier can provide.
+    """
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    legacy = LegacyDouble()
+    service = _service(legacy, journal, unrestricted=True)
+    service.prepare(RUN)
+    assert legacy.phase == "editing"
+    with pytest.raises(InvalidInput, match="cannot record-test from phase 'editing'"):
+        service.record_verification(RUN, VerificationKind.TARGETED, ("pytest",))
+    with pytest.raises(InvalidInput, match="cannot approve from phase 'editing'"):
+        service.approve(RUN, approver="operator")
+    assert journal.get(f"{JOURNAL_RUN}:selfmod-record-test:{RUN}:attempt-1") is None
+    assert journal.get(f"{JOURNAL_RUN}:selfmod-approve:{RUN}") is None
+    assert not journal.effects_since(JOURNAL_RUN, 0, limit=1000).unresolved
+    assert [name for name, _ in legacy.calls].count("targeted") == 0
+    # The run is not fenced: once the legacy run is in testing, the stage runs.
+    legacy.phase = "testing"
+    service.record_verification(RUN, VerificationKind.TARGETED, ("pytest",))
+    assert journal.get(
+        f"{JOURNAL_RUN}:selfmod-record-test:{RUN}:attempt-1"
+    ).state is EffectState.COMPLETED
 
 
 if __name__ == "__main__":

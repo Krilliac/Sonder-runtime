@@ -206,6 +206,12 @@ class _StageEffect:
     receipt: str
     repeatable: bool
     success: Callable[[Mapping[str, object]], bool]
+    # Legacy phases the stage accepts.  A call from any other phase is refused
+    # before an intent is admitted: the legacy precondition would refuse it
+    # without mutating anything, and journaling that refusal as an uncertain
+    # effect would fence the whole run behind manual reconciliation.  ``None``
+    # (deploy/rollback) keeps the historical journal-first semantics.
+    phases: frozenset[str] | None = None
 
 
 # Predicates mirror the legacy run-dict contract in ``selfmod.py``: each stage
@@ -215,32 +221,39 @@ _STAGE_EFFECTS: Mapping[str, _StageEffect] = {
     "create_backup": _StageEffect(
         "selfmod-backup", "backup", False,
         lambda result: _result_phase(result) == "backed_up",
+        frozenset({"proposed"}),
     ),
     "prepare_workspace": _StageEffect(
         "selfmod-prepare-workspace", "prepare-workspace", False,
         lambda result: _result_phase(result) == "editing",
+        frozenset({"backed_up"}),
     ),
     # Allowed repeatedly in the editing/testing phases.
     "record_reproducer_before": _StageEffect(
         "selfmod-reproducer-before", "reproducer-before", True, _result_passed,
+        frozenset({"editing", "testing"}),
     ),
     # Re-entered from ``interrupted`` after an interruption.
     "begin_testing": _StageEffect(
         "selfmod-begin-testing", "begin-testing", True,
         lambda result: _result_phase(result) == "testing",
+        frozenset({"editing", "interrupted"}),
     ),
     # One call per verification kind, and retried checks.
     "record_test": _StageEffect(
         "selfmod-record-test", "record-test", True, _result_passed,
+        frozenset({"testing"}),
     ),
     # A review can auto-approve an eligible run in the same legacy call.
     "review": _StageEffect(
         "selfmod-review", "review", False,
         lambda result: _result_phase(result) in {"reviewing", "approved"},
+        frozenset({"testing"}),
     ),
     "approve": _StageEffect(
         "selfmod-approve", "approve", False,
         lambda result: _result_phase(result) == "approved",
+        frozenset({"reviewing"}),
     ),
     "deploy": _StageEffect(
         "selfmod-deploy", "deploy", False,
@@ -554,6 +567,12 @@ class GuardedLegacySelfmodService:
         effect = _STAGE_EFFECTS[stage]
         if self._effect_binding_factory is None:
             return invoke()
+        if effect.phases is not None:
+            phase = str(self._legacy.get_run(run_id).get("phase", ""))
+            if phase not in effect.phases:
+                raise InvalidInput(
+                    f"selfmod run {run_id!r} cannot {effect.receipt} from phase {phase!r}"
+                )
         binding = self._effect_binding_factory(run_id)
         if not isinstance(binding, AuthenticatedWorkerBinding):
             raise TypeError("effect_binding_factory returned an invalid binding")
