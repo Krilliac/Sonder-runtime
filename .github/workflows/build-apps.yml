@@ -55,6 +55,8 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
       - run: flutter create --org $APP_ORG --project-name sonder_runtime --platforms=android .
+      - name: Install Sonder app branding
+        run: python ../scripts/install_app_branding.py . --platforms android
       - name: Configure production networking
         run: python ../scripts/configure_flutter_networking.py .
       - name: Bundle local system
@@ -93,6 +95,8 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
       - run: flutter create --org $APP_ORG --project-name sonder_runtime --platforms=android .
+      - name: Install Sonder app branding
+        run: python ../scripts/install_app_branding.py . --platforms android
       - name: Configure production networking
         run: python ../scripts/configure_flutter_networking.py .
       - name: Bundle local system
@@ -157,6 +161,8 @@ jobs:
           cache: true
       - run: flutter config --enable-linux-desktop
       - run: flutter create --org $APP_ORG --project-name sonder_runtime --platforms=linux .
+      - name: Install Sonder app branding
+        run: python ../scripts/install_app_branding.py . --platforms linux
       - name: Configure Sonder Runtime identity
         run: python ../scripts/configure_flutter_networking.py .
       - name: Bundle local system
@@ -199,6 +205,8 @@ jobs:
           cache: true
       - run: flutter config --enable-windows-desktop
       - run: flutter create --org $env:APP_ORG --project-name sonder_runtime --platforms=windows .
+      - name: Install Sonder app branding
+        run: python ../scripts/install_app_branding.py . --platforms windows
       - name: Configure Sonder Runtime identity
         run: python ../scripts/configure_flutter_networking.py .
       - name: Bundle local system
@@ -241,6 +249,8 @@ jobs:
           cache: true
       - run: flutter config --enable-macos-desktop
       - run: flutter create --org $APP_ORG --project-name sonder_runtime --platforms=macos .
+      - name: Install Sonder app branding
+        run: python ../scripts/install_app_branding.py . --platforms macos
       - name: Configure local-network privacy description
         run: python ../scripts/configure_flutter_networking.py .
       - name: Bundle local system
@@ -249,11 +259,11 @@ jobs:
       - run: flutter test --exclude-tags golden
       - run: flutter build macos --release
       - name: Add local system to macOS app
-        run: cp -a build/local-system "build/macos/Build/Products/Release/Sonder Runtime.app/Contents/Resources/local-system"
+        run: cp -a build/local-system "build/macos/Build/Products/Release/Sonder.app/Contents/Resources/local-system"
       - name: Package macOS app
         run: |
           cd build/macos/Build/Products/Release
-          zip -r -y "$GITHUB_WORKSPACE/app/sonder-runtime-macos.zip" "Sonder Runtime.app"
+          zip -r -y "$GITHUB_WORKSPACE/app/sonder-runtime-macos.zip" "Sonder.app"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         id: upload-artifact
         with:
@@ -271,6 +281,9 @@ jobs:
         working-directory: app
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
       - name: Read pinned Flutter version
         shell: bash
         run: echo "FLUTTER_VERSION=$(tr -d '[:space:]' < .flutter-version)" >> "$GITHUB_ENV"
@@ -280,6 +293,8 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
       - run: flutter create --org $APP_ORG --project-name sonder_runtime --platforms=web .
+      - name: Install Sonder app branding
+        run: python ../scripts/install_app_branding.py . --platforms web
       - run: flutter pub get --enforce-lockfile
       - run: flutter build web --release
 

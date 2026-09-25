@@ -5,29 +5,9 @@ import 'package:flutter/material.dart';
 
 import '../models.dart';
 import '../theme.dart';
+import '../ui/sonder_mark.dart';
 import '../workspace_ui.dart';
 import 'connection.dart';
-
-/// The product mark: the signal tile with a stroked hexagon, sized by role.
-class SonderMark extends StatelessWidget {
-  final double size;
-  const SonderMark({super.key, this.size = 22});
-
-  @override
-  Widget build(BuildContext context) {
-    final tokens = SonderTokens.of(context);
-    return Container(
-      width: size,
-      height: size,
-      decoration: BoxDecoration(
-        color: tokens.accentDim,
-        borderRadius: BorderRadius.circular(size * 0.28),
-      ),
-      child:
-          Icon(Icons.hexagon_outlined, size: size * 0.6, color: tokens.accent),
-    );
-  }
-}
 
 /// Colour for a connection state; always paired with its word.
 Color connectionColor(SonderTokens tokens, ConnState state) => switch (state) {

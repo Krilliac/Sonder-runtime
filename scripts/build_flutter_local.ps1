@@ -93,6 +93,9 @@ try {
                         --project-name sonder_runtime `
                         --platforms $PlatformList .
                 }
+                Invoke-NativeStep "Install Sonder app branding" {
+                    & $Python "$RepoRoot\scripts\install_app_branding.py" . --platforms $PlatformList
+                }
                 Invoke-NativeStep "Configure Sonder Runtime identity and networking" {
                     $NetworkArgs = @(
                         "$RepoRoot\scripts\configure_flutter_networking.py",

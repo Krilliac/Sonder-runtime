@@ -4,7 +4,8 @@ import 'package:flutter/material.dart';
 import '../theme.dart';
 import '../workspace_ui.dart' show StatusKind, WorkspaceNotice;
 import 'connection.dart';
-import 'drawer.dart' show SonderMark, connectionColor;
+import '../ui/sonder_mark.dart';
+import 'drawer.dart' show connectionColor;
 
 /// The empty conversation. Its connection line is driven by the same state
 /// as the rail (P0-3): `Connecting…` (muted), `Connected to X` (ok), or the

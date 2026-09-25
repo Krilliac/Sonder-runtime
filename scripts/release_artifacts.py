@@ -26,6 +26,9 @@ EXPECTED_ARTIFACTS = (
     "sonder-runtime-windows-x64.zip",
     "sonder-runtime-macos.zip",
 )
+# macOS names the bundle after PRODUCT_NAME (scripts/install_app_branding.py
+# DISPLAY_NAME); build-apps.yml zips exactly this directory.
+MACOS_APP_BUNDLE = "Sonder.app"
 OUTPUTS = (
     "sonder-runtime-sbom.cdx.json",
     "sonder-runtime-provenance.intoto.json",
@@ -70,7 +73,7 @@ def _validate_symlink(name: str, target: str) -> str:
     destination = posixpath.normpath(posixpath.join(posixpath.dirname(name), target))
     # macOS's Flutter frameworks have legitimate relative symlinks; they must
     # still resolve lexically inside their application bundle.
-    if not destination.startswith("Sonder Runtime.app/") or "\0" in target:
+    if not destination.startswith(MACOS_APP_BUNDLE + "/") or "\0" in target:
         raise ValueError(f"release archive symlink escapes application: {name}")
     return destination
 
@@ -108,7 +111,7 @@ def _zip_entries(archive: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
                 break
             suffix = destination[len(redirect):].lstrip("/")
             destination = posixpath.normpath(posixpath.join(links[redirect], suffix))
-            if not destination.startswith("Sonder Runtime.app/"):
+            if not destination.startswith(MACOS_APP_BUNDLE + "/"):
                 raise ValueError(f"release archive symlink escapes application: {name}")
         else:
             raise ValueError(f"release archive symlink cycle: {name}")
@@ -302,7 +305,7 @@ def _verify_zip(path: Path, *, version: str | None, revision: str | None) -> Non
             _verify_nested(archive, entries, "data/flutter_assets/assets/local-system.zip",
                            version=version, revision=revision)
         else:
-            prefix = "Sonder Runtime.app/Contents/"
+            prefix = MACOS_APP_BUNDLE + "/Contents/"
             for name in ("Info.plist", "MacOS/sonder", "Frameworks/App.framework/Versions/A/App"):
                 _require_file(entries, prefix + name)
             _verify_manifest(entries, lambda key, stream=False: archive.open(entries[key]) if stream else archive.read(key),

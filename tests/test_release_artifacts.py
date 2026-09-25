@@ -64,7 +64,7 @@ def _zip(path: Path, *, license_file: bool = True, app_file: bool = True,
             for name, data in files.items():
                 archive.writestr("local-system/" + name, data)
         else:
-            prefix = "Sonder Runtime.app/Contents/"
+            prefix = release.MACOS_APP_BUNDLE + "/Contents/"
             if app_file:
                 archive.writestr(prefix + "MacOS/sonder", b"app")
             archive.writestr(prefix + "Info.plist", b"plist")
@@ -191,7 +191,7 @@ def test_rejects_mac_framework_symlink_escape(tmp_path):
     _artifacts(tmp_path)
     path = tmp_path / "macos" / "sonder-runtime-macos.zip"
     with zipfile.ZipFile(path, "a") as archive:
-        link = zipfile.ZipInfo("Sonder Runtime.app/Contents/Frameworks/escape")
+        link = zipfile.ZipInfo(release.MACOS_APP_BUNDLE + "/Contents/Frameworks/escape")
         link.create_system = 3
         link.external_attr = (stat.S_IFLNK | 0o777) << 16
         archive.writestr(link, "../../../../outside")

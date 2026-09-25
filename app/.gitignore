@@ -11,13 +11,14 @@ assets/local-system.zip
 
 # Native project scaffolding — generated on demand by `flutter create`
 # (see app/README.md and .github/workflows/build-apps.yml). Not committed
-# so there is no generated native code to maintain in git.
-android/
-ios/
-linux/
-macos/
-windows/
-web/
+# so there is no generated native code to maintain in git. Anchored to the
+# app root: the committed icon renders live in assets/brand/<platform>/.
+/android/
+/ios/
+/linux/
+/macos/
+/windows/
+/web/
 
 # IDE / OS
 .idea/

@@ -190,7 +190,7 @@ uses the authenticated launcher already running on the configured computer.
   a Play Store upload).
 - **Linux** — `tar xzf sonder-runtime-linux-x64.tar.gz && ./sonder`
 - **Windows** — unzip and run `sonder.exe`.
-- **macOS** — unzip and open `Sonder Runtime.app` (right-click → Open the first time,
+- **macOS** — unzip and open `Sonder.app` (right-click → Open the first time,
   since the build is unsigned).
 
 ## First run
@@ -281,12 +281,15 @@ the Flutter/Android `local-system.zip` code-only and attaches the large sealed
 engine only to the desktop sibling folder, avoiding a duplicate embedded copy.
 
 The repo commits only `lib/`, `test/`, `pubspec.yaml`, the resolved
-`pubspec.lock` and the pinned `.flutter-version`. Generate the native
-project scaffolding locally with `flutter create`, then build:
+`pubspec.lock`, the pinned `.flutter-version` and the rendered app icons in
+`assets/brand/` (regenerate them with `scripts/generate_app_icons.py` only
+when the S mark changes). Generate the native project scaffolding locally with
+`flutter create`, brand it, then build:
 
 ```bash
 cd app
 flutter create --org com.sonder.runtime --project-name sonder_runtime .
+python ../scripts/install_app_branding.py .     # Sonder icons + display name
 python ../scripts/configure_flutter_networking.py .
 python ../scripts/package_local_system.py --out app/build/local-system --zip app/assets/local-system.zip
 flutter pub get
