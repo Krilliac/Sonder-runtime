@@ -169,6 +169,30 @@ def test_the_worker_installs_the_fence_around_its_task(monkeypatch, autopilot_db
     assert effect_fence.current() is None
 
 
+def test_the_worker_stops_its_agent_loop_when_the_run_is_cancelled(monkeypatch, autopilot_db):
+    # Live repro (2026-09-25): `/autopilot cancel` during an inspect task took
+    # ~5 minutes to reach `cancelled` on a CPU host because the task's agent
+    # loop kept spending model steps; only effects were fenced. Fleet workers
+    # already hand the agent a cancel_check that stops before the next model
+    # or tool action; the autopilot worker handed it none.
+    run = _claimed()
+    seen = {}
+
+    def fake_agent(prompt, **kwargs):
+        check = kwargs.get("cancel_check")
+        seen["before"] = bool(check and check())
+        autopilot_store.request_cancel(run["id"])
+        seen["after"] = bool(check and check())
+        return "stopped"
+
+    monkeypatch.setattr(server, "_agent_impl", fake_agent)
+    monkeypatch.setattr(server, "_autopilot_allowed_tools", lambda _run: frozenset({"file_read"}))
+    monkeypatch.setattr(server, "_autopilot_tool_policy", lambda _run: None)
+    task = {"id": "t1", "kind": "inspect", "title": "look", "instruction": "look"}
+    assert server._autopilot_work_model(run, task, "") == "stopped"
+    assert seen == {"before": False, "after": True}
+
+
 # --- the fleet and selfmod fences ---------------------------------------------------
 
 

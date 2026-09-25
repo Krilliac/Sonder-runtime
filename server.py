@@ -22053,6 +22053,10 @@ def _autopilot_work_model(
             tool_allowlist=allowed,
             tool_policy=_autopilot_tool_policy(run),
             return_host_receipt=True,
+            # The fence refuses effects once the run is cancelled or its lease
+            # is lost; the same check also stops the loop before its next model
+            # or tool action, so a cancel does not wait out the task's steps.
+            cancel_check=lambda: bool(effect_fence.reason_lost(fence)),
             **({"pre_model_context": pre_model_context}
                if strategy_memory is not None else {}),
         )
