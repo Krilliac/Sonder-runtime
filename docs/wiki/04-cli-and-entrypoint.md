@@ -16,7 +16,7 @@ compatibility surfaces and delegate here.
 | `status` | Local build / config / schema status. |
 | `diagnostics` | Redacted diagnostic bundle (config, schemas, preflight). |
 | `config` | Print the effective, redacted configuration. |
-| `migrate` | Apply pending schema migrations (all stores or `--store`). |
+| `migrate` | Apply pending schema migrations (all stores or `--store`). `--adopt-epoch2` runs the crash-safe SPEC-5 epoch-2 adoption that `serve` requires; it backs the databases up to `backups/pre-epoch2-*` first, is a verified no-op (no new copy) when the home is already adopted, and rejects `--store` (exit 2) because adoption always covers every domain database. |
 | `backup` | `create` / `verify` / `list` / `prune`. |
 | `restore` | `verify` / `smoke` / `apply` a backup. |
 | `smoke` | Minimal end-to-end check (config, migrate, ops roundtrip). |

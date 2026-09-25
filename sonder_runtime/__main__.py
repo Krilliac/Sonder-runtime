@@ -508,9 +508,29 @@ def cmd_config(args) -> int:
     return 0
 
 
+def _read_epoch2_receipt(home) -> dict:
+    """Return the adoption receipt's fields, or ``{}`` when unreadable."""
+    try:
+        data = json.loads(
+            (home / "epoch2_adoption_receipt.json").read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def cmd_migrate(args) -> int:
     import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 
+    if getattr(args, "adopt_epoch2", False) and args.store:
+        # --store used to be accepted and silently ignored here, so an
+        # operator scoping the command to one store still adopted every one.
+        print(
+            "--store cannot be combined with --adopt-epoch2: epoch adoption "
+            "always covers every domain database",
+            file=sys.stderr,
+        )
+        return 2
     try:
         config = _load_config(args)
         _configure_typed_home(config)
@@ -528,6 +548,34 @@ def cmd_migrate(args) -> int:
             )
 
             home = runtime_paths.default_home()
+            # Re-running an already verified adoption used to take another
+            # full pre-epoch2 copy every time. A home that already passes the
+            # read-only adoption check is a verified no-op: nothing is copied
+            # or rewritten. Partial/unverified state still re-runs the
+            # crash-safe bridge, which backs up first.
+            import sqlite3
+
+            try:
+                existing = (
+                    check_epoch2_cleanup(home) if home.is_dir() else None
+                )
+            except (OSError, sqlite3.Error):
+                existing = None  # not provably adopted: take the safe path
+            if existing is not None and existing.allowed:
+                prior = _read_epoch2_receipt(home)
+                _emit(
+                    {
+                        "adopted": True,
+                        "already_adopted": True,
+                        "epoch": 2,
+                        "source_version": prior.get("source_version"),
+                        "backup_path": prior.get("backup_path"),
+                        "tasks_migrated": 0,
+                        "verified": True,
+                    },
+                    as_json=args.json,
+                )
+                return 0
             receipt = run_bridge_migration(home, version="spec5-bridge-cli")
             cleanup = check_epoch2_cleanup(home)
             if not cleanup.allowed:
@@ -540,6 +588,7 @@ def cmd_migrate(args) -> int:
             _emit(
                 {
                     "adopted": True,
+                    "already_adopted": False,
                     "epoch": receipt.epoch,
                     "source_version": receipt.source_version,
                     "backup_path": receipt.backup_path,

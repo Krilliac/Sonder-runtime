@@ -25,6 +25,7 @@ from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sq
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import time
@@ -494,6 +495,64 @@ def verify_backup(backup_dir: str | os.PathLike) -> list[str]:
     return _verify_directory(Path(backup_dir).expanduser())
 
 
+PRE_EPOCH2_PREFIX = "pre-epoch2-"
+_PRE_EPOCH2_NAME = re.compile(
+    r"^pre-epoch2-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})(\.\d{1,6})?"
+)
+
+
+def _pre_epoch2_entry(child: Path) -> dict | None:
+    """Describe a raw ``migrate --adopt-epoch2`` safety copy, if ``child`` is one.
+
+    The epoch-2 bridge copies the pre-adoption databases into
+    ``<home>/backups/pre-epoch2-<UTC ISO time>`` before touching them. Those
+    directories carry no manifest, so they never verify as restorable standard
+    backups, but they live in the default backup target and must participate
+    in retention instead of accumulating forever. A directory whose name does
+    not carry a parseable timestamp is ignored (never listed, never pruned).
+    """
+    match = _PRE_EPOCH2_NAME.match(child.name)
+    if match is None:
+        return None
+    day, hour, minute, second, fraction = match.groups()
+    micros = (fraction or ".0")[1:].ljust(6, "0")
+    try:
+        files = sum(
+            1 for member in child.iterdir()
+            if member.suffix == ".db" and member.is_file()
+            and not _is_link_or_junction(member)
+        )
+    except OSError:
+        return None
+    return {
+        "path": str(child),
+        "backup_id": child.name,
+        "created_at_utc": f"{day}T{hour}:{minute}:{second}.{micros}Z",
+        "application_version": "unknown",
+        "files": files,
+        "kind": "pre-epoch2",
+    }
+
+
+def _protected_pre_epoch2(backups: list[dict], newest_verified: str | None) -> set[str]:
+    """Pre-epoch2 copies that retention must keep.
+
+    A raw pre-epoch2 copy is the only recovery point for the state that existed
+    before adoption until a verified standard backup supersedes it. Every such
+    copy at least as new as the newest verified standard backup (or all of
+    them, when no standard backup verifies) is therefore protected.
+    """
+    cutoff = next(
+        (e["created_at_utc"] for e in backups if e["path"] == newest_verified),
+        None,
+    )
+    return {
+        e["path"] for e in backups
+        if e.get("kind") == "pre-epoch2"
+        and (cutoff is None or e["created_at_utc"] >= cutoff)
+    }
+
+
 def list_backups(target: str | os.PathLike) -> list[dict]:
     target_dir = Path(target).expanduser()
     if not target_dir.is_dir():
@@ -505,6 +564,11 @@ def list_backups(target: str | os.PathLike) -> list[dict]:
             or _is_link_or_junction(child)
             or not child.is_dir()
         ):
+            continue
+        if child.name.startswith(PRE_EPOCH2_PREFIX):
+            legacy = _pre_epoch2_entry(child)
+            if legacy is not None:
+                entries.append(legacy)
             continue
         manifest_path = child / "manifest.json"
         if (
@@ -555,9 +619,10 @@ def prune_backups(target: str | os.PathLike, *, keep: int) -> list[str]:
         if not verify_backup(entry["path"]):
             verified_newest = entry["path"]
             break
+    protected = _protected_pre_epoch2(backups, verified_newest)
     removed = []
     for entry in backups[keep:]:
-        if entry["path"] == verified_newest:
+        if entry["path"] == verified_newest or entry["path"] in protected:
             continue
         candidate = Path(entry["path"])
         if _is_link_or_junction(candidate) or not candidate.is_dir():
@@ -600,6 +665,7 @@ def prune_backups_tiered(
             break
     if newest_verified:
         keep.add(newest_verified)
+    keep.update(_protected_pre_epoch2(backups, newest_verified))
 
     day_buckets: dict[str, str] = {}
     week_buckets: dict[str, str] = {}
