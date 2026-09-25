@@ -1355,8 +1355,9 @@ class BuildFixService:
             if state.current.get(rel) == original:
                 continue
             try:
-                receipt = self._editor.replace(rel, original, expected_sha256=state.current_sha[rel],
-                                               ctx=self._cleanup_edit_ctx(run))
+                receipt = self._edit(run.job_id, "revert-%d" % run.attempt, rel, original,
+                                     state.current_sha[rel], sha256_text(original),
+                                     self._cleanup_edit_ctx(run))
             except (EditConflict, EditRefused) as exc:
                 raise _Stop(FixStopReason.UNCERTAIN_SIDE_EFFECT,
                             "restoring %s failed: %s" % (rel, _clip(exc, 120))) from None

@@ -186,7 +186,11 @@ write (`restore-<id>`).
   recorded as `uncertain`, and the fix stops with `UNCERTAIN_SIDE_EFFECT`.
 - **Refusals.** The journal refuses an edit whose key it already holds. It
   also refuses any edit while the run has an unresolved one. A resumed or
-  restarted fix therefore never applies the same edit twice.
+  restarted fix therefore never applies the same edit twice. When an edit
+  raised inside the gateway (a cancellation or an expired budget) and left
+  its intent uncertain, the next edit of the same fix first offers that
+  intent to the verifier once; only when it is proven is the new edit
+  admitted, so a `revert_after` still restores the originals.
 - **Gateway receipts.** The fix no longer binds the gateway's ambient
   journal, so each write has one journal intent. Gateway receipts and audit
   are unchanged.

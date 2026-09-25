@@ -785,7 +785,13 @@ What is wired now (caller -> callee):
     exception, or a receipt that does not match the journaled digests)
     marks the intent `uncertain`.
   - A journal refusal before the edit becomes `EditConflict(uncertain=False)`,
-    and the editor is not called.
+    and the editor is not called. Before refusing, `BuildFixEffects.replace`
+    runs the run's reconciliation (`recover_before_restart`) once and retries
+    only when every unresolved edit was proven. This covers an earlier edit
+    of the same fix that raised inside the gateway (a cancellation or an
+    expired budget), so the unjudged revert and `revert_after` are not fenced
+    by an edit the file proves never happened. A duplicate key is refused
+    again on the retry.
   - A journal failure after the edit becomes `EditConflict(uncertain=True)`.
     In both cases the fix stops with `UNCERTAIN_SIDE_EFFECT`.
   - An unchanged text (equal digests) is not an effect and is not journaled.
@@ -850,6 +856,13 @@ verifier registered, only the journal fence stops that restore
 (`RESTORE_CONFLICT`, editor never called). With the verifier, the same
 restore proves the edit not applied and writes the original.
 Another host's fix run is reported under `foreign_runs` and not claimed.
+A fifth cut, a `revert_after` restore of the original after the write and
+before the receipt, is proven `completed` at startup, and the restarted
+restore finds the file already original without a write. An edit that raises
+`Cancelled` or `DeadlineExceeded` inside the editor is journaled `uncertain`;
+with the verifier the fix proves it `failed` in-run and `revert_after`
+restores the originals, and without one every later edit of the run is
+refused (`revert_after failed`, the file keeps the best candidate).
 `test_build_application_proves_a_crashed_fix_edit_at_startup` crashes a fix
 into the production journal file under the node's `build-fix:<node>`
 identity, and `build_application` proves the edit at startup. It also checks

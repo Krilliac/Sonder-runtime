@@ -57,7 +57,11 @@ from sonder_runtime.application.execution.worker_bindings import (  # noqa: E402
     effect_request_digest,
 )
 from sonder_runtime.domain.build.repair import FixStopReason  # noqa: E402
-from sonder_runtime.domain.common.errors import SonderError  # noqa: E402
+from sonder_runtime.domain.common.errors import (  # noqa: E402
+    Cancelled,
+    DeadlineExceeded,
+    SonderError,
+)
 from tests.test_build_fix_service import (  # noqa: E402
     BASE_FILES,
     FakeEditor,
@@ -90,7 +94,9 @@ CUTS = {
 }
 # Only for the fence test: attempt 2's write, cut before it reaches the file.
 FENCE_CUT = {"second_write_after_intent": (2, "before_write")}
-ALL_CUTS = {**CUTS, **FENCE_CUT}
+# A fix with ``revert_after``: its 4th edit restores the original, cut after it.
+REVERT_AFTER_CUT = {"revert_after_after_edit": (4, "after_write")}
+ALL_CUTS = {**CUTS, **FENCE_CUT, **REVERT_AFTER_CUT}
 
 
 def sha(text: str) -> str:
@@ -214,7 +220,7 @@ def _child(case: str, root: Path, composed: bool) -> None:
     else:
         worker, journal = WORKER, journal_at(root)
     h = fix_service(root, journal, 1, cut=ALL_CUTS[case], worker=worker)
-    job, _report = h.run(attempts=2)
+    job, _report = h.run(attempts=2, revert_after=case in REVERT_AFTER_CUT)
     (root / "job.txt").write_text(job, encoding="utf-8")
     os._exit(0)  # the cut never fired: the parent fails the case
 
@@ -373,6 +379,64 @@ def test_a_foreign_hosts_fix_edit_is_left_alone(tmp_path):
     report = reconcile_unresolved_effects(journal, owner_epoch=2,
                                           owns_worker={"build-fix:other-node"}.__contains__)
     assert report.resolved == () and len(report.foreign_runs) == 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="real POSIX process crash cut")
+def test_a_crashed_revert_after_edit_is_journaled_and_proven(tmp_path):
+    """``revert_after`` restores the originals through the journal too."""
+    job = crash("revert_after_after_edit", tmp_path)
+    target = tmp_path / "proj" / REL
+    assert target.read_text() == ORIGINAL and len(writes(tmp_path)) == 4
+    raw = journal_at(tmp_path)
+    unresolved = raw.effects_since(run_id_for(job), 0, limit=50).unresolved
+    assert len(unresolved) == 1
+    edit = edit_from_intent(unresolved[0])
+    assert (edit.candidate, edit.before_sha256, edit.after_sha256) == (
+        "revert-2", sha(IMPROVED), sha(ORIGINAL))
+    journal = journal_at(tmp_path, verifier=True)
+    report = reconcile_unresolved_effects(journal, owner_epoch=2,
+                                          owns_worker={WORKER}.__contains__)
+    assert [item.intent_id for item in report.resolved] == [unresolved[0].intent_id]
+    assert journal.get(unresolved[0].intent_id).state is EffectState.COMPLETED
+    restarted = fix_service(tmp_path, journal, 3)
+    assert restarted.service.restore(job, ctx())["already_original"] == [REL]
+    assert restarted.editor.calls == 0 and len(writes(tmp_path)) == 4
+
+
+@pytest.mark.parametrize("stop", [Cancelled, DeadlineExceeded])
+@pytest.mark.parametrize("verifier", [True, False])
+def test_an_edit_interrupted_in_the_gateway_fences_the_run_until_proven(tmp_path, stop, verifier):
+    """A cancellation raised by the editor leaves its edit uncertain. With the
+    verifier the fix proves it from the file and ``revert_after`` still
+    restores the originals; without one every later edit is refused."""
+    seed(tmp_path)
+    journal = journal_at(tmp_path, verifier=verifier)
+    h = fix_service(tmp_path, journal, 1)
+    real = h.editor.replace
+    calls = []
+
+    def replace(rel, text, *, expected_sha256, ctx):
+        calls.append(rel)
+        if len(calls) == 2:  # attempt 2's write, before it reaches the file
+            raise stop("stopped inside the gateway")
+        return real(rel, text, expected_sha256=expected_sha256, ctx=ctx)
+
+    h.editor.replace = replace
+    job, report = h.run(attempts=4, revert_after=True)
+    records = journal.effects_since(run_id_for(job), 0, limit=50).records
+    states = [(record.state, edit_from_intent(record).candidate) for record in records]
+    target = tmp_path / "proj" / REL
+    if verifier:
+        assert states == [(EffectState.COMPLETED, "attempt-1"), (EffectState.FAILED, "attempt-2"),
+                          (EffectState.COMPLETED, "revert-2")]
+        assert target.read_text() == ORIGINAL and len(writes(tmp_path)) == 2
+        assert any("originals were restored" in note for note in report.notes)
+    else:
+        assert states == [(EffectState.COMPLETED, "attempt-1"),
+                          (EffectState.UNCERTAIN, "attempt-2")]
+        assert target.read_text() == IMPROVED and len(writes(tmp_path)) == 1
+        assert any("revert_after failed" in note for note in report.notes)
+    assert len(calls) == len(writes(tmp_path)) + 1
 
 
 def _edit_ctx(root: Path, job: str):

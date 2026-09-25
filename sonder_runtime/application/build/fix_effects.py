@@ -196,25 +196,35 @@ class BuildFixEffects:
                                    uncertain=True, rel=rel)
             return _EditOutcome(receipt, None)
 
-        try:
-            binding = self.binding(job_id, ctx.project_root)
-            outcome = journaled_effect(
-                binding, operation_id=edit.operation_id,
-                idempotency_key=edit.idempotency_key, request=edit.request(), invoke=invoke,
-                receipt_key=lambda result: _receipt_key(edit, result),
-                reconciliation="query",
-                success=lambda result: result.receipt is not None,
-                checkpoint_state=lambda result: {
-                    "family": FAMILY, "operation_id": edit.operation_id,
-                    "applied": result.receipt is not None,
-                },
-            )
-        except EffectJournalError as exc:
-            if invoked:
-                raise EditConflict("the edit of %s ran but its journal receipt failed (%s)"
-                                   % (rel, type(exc).__name__), uncertain=True, rel=rel) from None
-            raise EditConflict("the effect journal refused the edit of %s: %s"
-                               % (rel, str(exc)[:160]), uncertain=False, rel=rel) from None
+        for reconciled in (False, True):
+            try:
+                binding = self.binding(job_id, ctx.project_root)
+                outcome = journaled_effect(
+                    binding, operation_id=edit.operation_id,
+                    idempotency_key=edit.idempotency_key, request=edit.request(), invoke=invoke,
+                    receipt_key=lambda result: _receipt_key(edit, result),
+                    reconciliation="query",
+                    success=lambda result: result.receipt is not None,
+                    checkpoint_state=lambda result: {
+                        "family": FAMILY, "operation_id": edit.operation_id,
+                        "applied": result.receipt is not None,
+                    },
+                )
+            except EffectJournalError as exc:
+                if invoked:
+                    raise EditConflict("the edit of %s ran but its journal receipt failed (%s)"
+                                       % (rel, type(exc).__name__), uncertain=True,
+                                       rel=rel) from None
+                if not reconciled and self._reconciled(job_id, ctx.project_root):
+                    # An earlier edit of this run raised (for example a
+                    # cancellation inside the gateway) and left its intent
+                    # uncertain, which fences the run. The trusted verifier
+                    # proved it from the file, so admit this edit once more.
+                    # A duplicate key is refused again: nothing runs twice.
+                    continue
+                raise EditConflict("the effect journal refused the edit of %s: %s"
+                                   % (rel, str(exc)[:160]), uncertain=False, rel=rel) from None
+            break
         if outcome.error is not None:
             raise outcome.error
         intent_id = "%s:%s" % (edit.run_id, edit.operation_id)
@@ -222,6 +232,14 @@ class BuildFixEffects:
         return EditReceipt(rel=receipt.rel, before=receipt.before, after=receipt.after,
                            receipt_id=receipt.receipt_id, effect_intent_id=intent_id,
                            tool=receipt.tool)
+
+    def _reconciled(self, job_id: str, project_root: str) -> bool:
+        """True when every unresolved edit of the run is now proven."""
+        try:
+            self.recover(job_id, project_root)
+        except EffectJournalError:
+            return False
+        return True
 
     def recover(self, job_id: str, project_root: str) -> None:
         """Offer this fix's unresolved edits to the verifiers before new edits.
