@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "8d6d692ec68ca2232dfb2b6b32b5eac85c92e2041efcea10cc6279bf304d5ab3",
+    "catalog_digest": "5d60b6d42b769ac3dca2584ec38d1f63dc209eb5799d2b9f5e60631c87791b49",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "8d6d692ec68ca2232dfb2b6b32b5eac85c92e2041efcea10cc6279bf304d5ab3",
+      "catalog_digest": "5d60b6d42b769ac3dca2584ec38d1f63dc209eb5799d2b9f5e60631c87791b49",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -9263,6 +9263,16 @@
     },
     {
       "aliases": [],
+      "category": "dev",
+      "name": "/crash",
+      "native": true,
+      "params": [],
+      "risk": "safe",
+      "summary": "digest a crash (minidump, core, sanitizer/valgrind log)",
+      "tool": ""
+    },
+    {
+      "aliases": [],
       "category": "data",
       "name": "/data_convert",
       "native": false,
@@ -13473,6 +13483,16 @@
       "risk": "safe",
       "summary": "Inspect one PID for fixed memory-risk indicators without returning content.",
       "tool": "process_memory_risk_inspect"
+    },
+    {
+      "aliases": [],
+      "category": "dev",
+      "name": "/profile",
+      "native": true,
+      "params": [],
+      "risk": "safe",
+      "summary": "hot paths, frame spikes, allocations",
+      "tool": ""
     },
     {
       "aliases": [],
@@ -18032,14 +18052,14 @@
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
     "capabilities": 216,
-    "commands": 327,
+    "commands": 329,
     "configuration": 220,
     "events": 43,
     "native_tools": 66,
     "schemas": 4,
     "tools": 216
   },
-  "digest": "47193049f81d532f153d55a73f4b44f97dfbf5125e2ac8176e8b16b2d8917245",
+  "digest": "c2d9e729d127e79cc9b383145ba9fa9c3f98ffa3643942d3045bb85033e87392",
   "events": [
     {
       "name": "session.started",
@@ -20650,9 +20670,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "8d6d692ec68ca2232dfb2b6b32b5eac85c92e2041efcea10cc6279bf304d5ab3",
+    "catalog_digest": "5d60b6d42b769ac3dca2584ec38d1f63dc209eb5799d2b9f5e60631c87791b49",
     "client": {
-      "digest": "8d6d692ec68ca2232dfb2b6b32b5eac85c92e2041efcea10cc6279bf304d5ab3",
+      "digest": "5d60b6d42b769ac3dca2584ec38d1f63dc209eb5799d2b9f5e60631c87791b49",
       "events": [
         {
           "name": "approval.denied",

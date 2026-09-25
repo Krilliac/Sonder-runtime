@@ -353,6 +353,36 @@ The REPL facade provides `/build`, `/fix-build` and `/fix-build-restore`. See
 [C++ build model, build jobs and the build-fix loop](../architecture/CPP-BUILD-FIX.md)
 and [Build tools security](../security/BUILD-TOOLS.md).
 
+## Crash and profile digests — `/crash` / `/profile`
+
+Crash captures and profiler output from native builds become two small typed
+results, a crash report and a profile digest. Raw debugger output and capture
+bytes never reach the model; strings copied from a capture are labelled
+untrusted.
+
+- Pure readers (no process launched): Windows/Breakpad/Crashpad minidumps,
+  ELF cores, sanitizer logs, valgrind XML, macOS `.ips`; callgrind, Chrome
+  trace JSON, Tracy/WPA/PIX/Superluminal CSV, `heaptrack_print` and
+  `perf report` text.
+- Host engines, as permission-gated jobs from host-owned argv templates: cdb,
+  gdb, lldb, eu-stack, rust `minidump-stackwalk`, `llvm-symbolizer`, `perf`,
+  `heaptrack_print`, `tracy-csvexport`, xperf.
+- Symbol-server downloads happen only from the attended console after
+  consent and a y/N on the exact command; model, MCP and HTTP requests for
+  them are refused.
+
+In the REPL:
+- `/crash <dump|core|log>` digests a crash; `/crash triage <dir>` buckets a
+  folder of dumps by signature.
+- `/crash fix last` prints fatal diagnostics in compiler form, a local source
+  excerpt and a repro test.
+- `/profile <capture>` summarizes hot paths and frame spikes.
+
+Admin HTTP routes live under `/v1/tools/crash-*`, `/v1/tools/profile-*` and
+`/v1/tools/debug-runs/<id>`.
+
+The details are in [Crash and profile digests](../crash-profile-digest.md).
+
 ## Other tool families
 
 - **Local service probe:** `local_service_probe` performs bounded,

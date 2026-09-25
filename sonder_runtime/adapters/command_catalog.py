@@ -233,6 +233,11 @@ _CATEGORY_BY_TOOL = {
     "toolchain_status": "system",
     "tool_inventory": "system",
     "output_digest": "dev",
+    "crash_triage": "dev",
+    "crash_digest": "dev",
+    "profile_digest": "dev",
+    "profile_capture_digest": "dev",
+    "debug_run_result": "dev",
     "npu_status": "system",
     "cloud_opt_in": "security",
     "system_profile_text": "persona",
@@ -323,6 +328,7 @@ _CATEGORY_BY_SLASH = {
     "/todo": "planning", "/plan": "planning",
     "/cot": "system", "/debug": "system", "/env": "system", "/toolstatus": "system",
     "/tools": "system", "/test": "dev", "/digest": "dev",
+    "/crash": "dev", "/profile": "dev",
     "/trace": "system", "/strict": "system", "/dump": "system",
     "/whoami": "security", "/admin": "security", "/accounts": "security",
     "/login": "security", "/register": "security", "/setaccount": "security",
@@ -518,6 +524,14 @@ _UNREGISTERED_BRANCH_WORK = {
     "/test": "test_run",
     "/tools": "toolchain_status",
     "/digest": "log_inspect",
+    # ``/crash`` and ``/profile`` front the composed debug digest service. Both
+    # can launch a host debugger or profiler (a durable ProcessJob), so each
+    # is graded by the execution-class typed tool doing the same work:
+    # ``crash_digest`` / ``profile_capture_digest`` (permission_modes
+    # EXECUTION_TOOLS). Their pure forms (triage, text formats) are reads, but
+    # the branch is graded by the strictest member it can reach.
+    "/crash": "crash_digest",
+    "/profile": "profile_capture_digest",
 }
 
 

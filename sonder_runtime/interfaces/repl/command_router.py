@@ -343,6 +343,17 @@ _RULES = [
           _test_runner_action),
     _rule(r"^summari[sz]e\s+(?:the\s+)?(?:output|log)\s+(?:of|for|from)\s+"
           r"(?:job\s+)?(?P<arg>\S+)\s*$", _with_arg("/digest")),
+    # Crash and profile digests: whole-turn forms naming a capture file only.
+    # "profile startup" or "why is this slow" is work for the agent, not a
+    # digest, so the profile rule needs analyze/summarize + a capture noun +
+    # a path with a capture extension.
+    _rule(r"^(?:why did (?:it|this|the game) crash|analy[sz]e (?:the |this )?crash(?: dump)?)"
+          r"\s+(?P<arg>\S+\.(?:dmp|mdmp|core|ips|log|txt|xml)|core(?:\.\d+)?)\s*[?!.]*$",
+          _with_arg("/crash")),
+    _rule(r"^(?:analy[sz]e|summari[sz]e) (?:the |this )?(?:profile|capture|trace)\s+"
+          r"(?P<arg>\S+\.(?:json|csv|etl|tracy|zst|gz|out|data|txt)|callgrind\.out\.\d+|perf\.data)"
+          r"\s*[?!.]*$", _with_arg("/profile")),
+    _rule(r"^fix (?:the|that) crash\s*[?!.]*$", _fixed("/crash fix last")),
 
     # --- environment ---
     _rule(r"^(?:show\s+(?:the\s+)?|what\s+)?(?:host\s+)?environment\b(?:\s+are\s+you\s+(?:on|in))?\s*\??$",

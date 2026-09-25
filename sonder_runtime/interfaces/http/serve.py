@@ -5248,6 +5248,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/v1/tools/inventory":
             self._with_tool_inventory_admission(self._handle_tool_inventory_read)
             return
+        if self._handle_debug_tools_request("GET", path):
+            return
         if path == "/v1/compute/snapshot":
             context = self._request_auth_context()
             if not context["authorized"]:
@@ -6445,6 +6447,88 @@ class Handler(BaseHTTPRequestHandler):
             status, body = 503, {"error": {"code": "TOOL_INVENTORY_UNAVAILABLE"}}
         self._send_json_payload(body, status=status, headers={"Cache-Control": "no-store"})
 
+    # --- crash / profile digests (admin-only; lane D routes) -------------------
+
+    def _debug_tools_context(self, auth):
+        """Typed HTTP context: source=http, principal from the account."""
+        context = sonder_lifecycle.get().operation_context(self._correlation(), auth)
+        account = auth.get("account")
+        if account is not None:
+            identity = _account_identity(account)
+            if not identity:
+                raise PermissionError("authenticated account identity is unavailable")
+            principal = "account:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        else:
+            principal = "owner"
+        from sonder_runtime.bootstrap.app import default_app
+
+        state = getattr(getattr(default_app(), "config", None), "state", None)
+        roots = tuple(Path(root).resolve() for root in getattr(state, "workspace_roots", ()))
+        return replace(context, principal_id=principal, source="http", workspace_roots=roots)
+
+    def _handle_debug_tools_request(self, method, route):
+        """``/v1/tools/crash-*``, ``profile-*`` and ``debug-runs/<id>`` (admin)."""
+        from sonder_runtime.interfaces.http.facades.debug_tools import (
+            DebugToolsHttpFacade, route_kind,
+        )
+
+        if route_kind(method, route) is None:
+            return False
+        # do_GET has already applied the origin and auth rate-limit checks by
+        # the time it reaches this route; do_POST dispatches here first.
+        if method == "POST" and (self._reject_disallowed_origin() or self._auth_rate_limited()):
+            return True
+        auth = self._request_auth_context()
+        if not auth["authorized"]:
+            self._send_auth_error()
+            return True
+        admin = _admin_authorized(auth)
+        if not admin:
+            self._send_json_payload({"ok": False, "error_code": "FORBIDDEN",
+                                     "error": {"code": "FORBIDDEN"}}, status=403)
+            return True
+        try:
+            wait_seconds = 0
+            payload = None
+            if method == "POST" and not route.endswith("/cancel"):
+                if "?" in self.path:
+                    raise ValueError("debug tool requests take a JSON body only")
+                payload = self._read_json(max_bytes=16 * 1024)
+            else:
+                self._validate_request_framing()
+                if self._unread_request_body_bytes() != 0:
+                    raise ValueError("this debug route does not accept a body")
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query,
+                    keep_blank_values=True, max_num_fields=1)
+                if set(query) - {"wait_seconds"} or any(len(v) != 1 for v in query.values()):
+                    raise ValueError("unknown debug run query parameter")
+                if "wait_seconds" in query:
+                    raw = query["wait_seconds"][0]
+                    if not raw.isdigit() or len(raw) > 2:
+                        raise ValueError("wait_seconds must be 0..60")
+                    wait_seconds = int(raw)
+            from sonder_runtime.bootstrap.app import default_app
+
+            facade = DebugToolsHttpFacade(lambda: getattr(default_app(), "debug_tools", None))
+            status, body = facade.dispatch(
+                method, route, payload, self._debug_tools_context(auth),
+                admin=admin, wait_seconds=wait_seconds,
+            )
+        except HTTPRequestError as error:
+            status, body = error.status, {"ok": False, "error_code": "INVALID_DEBUG_REQUEST",
+                                          "error": {"code": "INVALID_DEBUG_REQUEST"}}
+        except PermissionError:
+            status, body = 403, {"ok": False, "error_code": "FORBIDDEN",
+                                 "error": {"code": "FORBIDDEN"}}
+        except (ValueError, TypeError):
+            status, body = 400, {"ok": False, "error_code": "INVALID_DEBUG_REQUEST",
+                                 "error": {"code": "INVALID_DEBUG_REQUEST"}}
+        except Exception:
+            status, body = 503, {"ok": False, "error_code": "DEBUG_TOOLS_UNAVAILABLE",
+                                 "error": {"code": "DEBUG_TOOLS_UNAVAILABLE"}}
+        self._send_json_payload(body, status=status, headers={"Cache-Control": "no-store"})
+        return True
+
     def _handle_account_logout(self):
         """Revoke an explicitly supplied login; never infer a target account.
 
@@ -6521,6 +6605,8 @@ class Handler(BaseHTTPRequestHandler):
         if self._handle_compute_inventory_refresh():
             return
         if self._handle_tool_inventory_refresh():
+            return
+        if self._handle_debug_tools_request("POST", _request_route(self.path)):
             return
         is_chat_completion = _request_route(self.path) == "/v1/chat/completions"
         _serve_logger.debug(f"do_POST: path={_request_route(self.path)!r}, peer={self._peer()!r}, is_chat_completion={is_chat_completion}")

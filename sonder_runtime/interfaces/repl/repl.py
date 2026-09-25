@@ -79,6 +79,10 @@ from sonder_runtime.interfaces.repl.facades.developer_tools import (
     start_test_command as _start_test_command,
 )
 from sonder_runtime.application.context import local_owner_context as _local_owner_context
+from sonder_runtime.interfaces.repl.facades.debug_tools import (
+    crash_command as _render_crash_command,
+    profile_command as _render_profile_command,
+)
 
 # Optional: the live filtering "/" menu. Absent or unusable (piped stdin,
 # non-Windows, dumb terminal) the REPL falls back to plain input().
@@ -1608,6 +1612,13 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /tools [refresh|category|name]  categorized host tool inventory with versions
   /test [runner] [selector]  run the project's tests; /test status|result|cancel <job>
   /digest <job|path> summarize job output or a log: final line, failures, errors
+  /crash <dump|core|log> [--exe P] [--sym DIR] [--engine E] [--repro NAME]  digest a crash (minidump, core, sanitizer/valgrind log)
+  /crash triage <path|dir>  pure read, no debugger; a folder is bucketed by signature
+  /crash symbols on|off  allow symbol-server downloads for this console session
+  /crash fix <run_id|last>  fatal diagnostics, local source excerpt and a repro test
+  /crash status|result|cancel <run_id>  follow a debugger run
+  /profile <capture> [--budget MS] [--top N]  hot paths, frame spikes, allocations
+  /profile status|result|cancel <run_id>  follow a profiler run
   /location [on|off] allow approximate IP location for "my area" weather answers
   /stats             show Sonder Runtime's learning stats
   /context           show context, session, and memory health meters
@@ -2459,6 +2470,8 @@ def _test_command(
     out(text)
     if job_id is None:
         return
+    _RECENT_TEST_JOBS.insert(0, job_id)
+    del _RECENT_TEST_JOBS[8:]
     started = clock()
     last_progress = started
     try:
@@ -2481,6 +2494,89 @@ def _test_command(
                 time.sleep(min(0.25, poll_seconds))
     except KeyboardInterrupt:
         out(_render_test_followup(services, "cancel", job_id, context))
+
+
+def _debug_services():
+    """The composed crash/profile digest service (``Application.debug_tools``) or None."""
+    try:
+        return getattr(server._application(), "debug_tools", None)
+    except Exception:
+        return None
+
+
+# Newest-first ids of the ``/test`` runs this console started; ``/crash fix``
+# looks for a crashed test among their reports (it never runs one itself).
+_RECENT_TEST_JOBS = []
+
+
+def _recent_test_reports(context):
+    services = _developer_services()
+    runs = getattr(services, "test_runs", None) if services is not None else None
+    if runs is None:
+        return ()
+    reports = []
+    for job_id in list(_RECENT_TEST_JOBS)[:8]:
+        try:
+            value = runs.result(job_id, context, wait_seconds=0)
+        except Exception:
+            continue
+        if hasattr(value, "failures") and hasattr(value, "runner"):
+            reports.append(value)
+    return tuple(reports)
+
+
+def _crash_source_lookup(workspace=""):
+    """Map debug-info paths into this checkout; read excerpts through file_ops."""
+    from pathlib import Path
+
+    try:
+        from sonder_runtime.adapters.debugging.source_map import ProjectSourceMap
+        from sonder_runtime.application.debugging.crash_fix import project_source_lookup
+    except ImportError:
+        return None
+    root = Path(workspace) if workspace else file_ops.workspace_root()
+    try:
+        source_map = ProjectSourceMap((root,))
+    except Exception:
+        return None
+
+    def resolve(path):
+        try:
+            return source_map.resolve(path)
+        except Exception:
+            return None
+
+    def read_lines(local):
+        try:
+            text = file_ops.read_file(str(root / local), max_bytes=1_000_000)["text"]
+        except Exception:
+            return None
+        return text.splitlines()
+
+    return project_source_lookup(resolve, read_lines)
+
+
+def _crash_command(arg, workspace=""):
+    """``/crash``: digest, triage, symbols consent, fix brief, run follow-ups."""
+    context = _developer_context(workspace)
+    words = str(arg or "").split()
+    fix = bool(words) and words[0].lower() == "fix"
+    _render_crash_command(
+        _debug_services(), arg, context, confirm=_confirm_answer,
+        source_lookup=_crash_source_lookup(workspace) if fix else None,
+        test_reports=(lambda: _recent_test_reports(context)) if fix else None,
+    )
+
+
+def _confirm_answer(prompt):
+    """The operator's typed answer; piped or unattended input never says yes."""
+    if not _console_has_operator():
+        return ""
+    return input(prompt)
+
+
+def _profile_command(arg, workspace=""):
+    _render_profile_command(_debug_services(), arg, _developer_context(workspace))
 
 
 def _inventory_stale(snapshot):
@@ -3937,6 +4033,10 @@ def main(*, machine_output=False):
                         _test_command(arg, workspace_root)
                     elif cmd == "/digest":
                         _emit(_digest_command(arg, workspace_root))
+                    elif cmd == "/crash":
+                        _crash_command(arg, workspace_root)
+                    elif cmd == "/profile":
+                        _profile_command(arg, workspace_root)
                     elif cmd == "/activity":
                         if arg.strip().lower() in ("watch", "tail"):
                             _watch_activity()
