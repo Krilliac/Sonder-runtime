@@ -69,11 +69,19 @@ _LAST_PRUNE_TS: dict[str, float] = {}
 
 # Intentionally conservative: the database is a receipt, not a secret store.
 _BEARER = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]{8,}")
-# ``(?<![a-z])`` only skips start positions that cannot be the leftmost match:
-# if a scheme matched starting after a letter, it would also match starting at
-# that letter. Without it every position of a long letter run rescanned the
-# rest of the run -- quadratic, ~90 s for one 100k-character model answer.
-_URI_CREDENTIAL = re.compile(r"(?i)(?<![a-z])([a-z][a-z0-9+.-]*://)[^\s/@:]+(?::[^\s/@]+)?@")
+# Linear on long scheme-character runs. A scheme's ``[a-z0-9+.-]*`` always
+# extends to the end of its run, so whether ``://`` (and the credential tail)
+# follows does not depend on where in the run the scheme starts: either every
+# letter of the run starts a match, or none does. The pattern therefore tries
+# each run once, from its start (the lookbehind), and carries any leading
+# ``[0-9+.-]`` characters inside group 1 so the leftmost letter still begins
+# the scheme and the output is unchanged. The unanchored form rescanned the
+# rest of the run from every letter -- quadratic, ~90 s for one 100k-character
+# model answer; a lookbehind on letters alone still left digit/dot/dash-mixed
+# runs (hex digests, dotted identifiers) quadratic.
+_URI_CREDENTIAL = re.compile(
+    r"(?i)(?<![a-z0-9+.-])([0-9+.-]*[a-z][a-z0-9+.-]*://)[^\s/@:]+(?::[^\s/@]+)?@"
+)
 _SENSITIVE_NAME = r"(?:api[_-]?key|access[_-]?key|authorization|token|secret|password|[a-z][a-z0-9_-]{0,40}_(?:token|secret|password))"
 _ASSIGNMENT = re.compile(r"(?i)\b(" + _SENSITIVE_NAME + r")\s*[:=]\s*([^\s,;]{4,})")
 _SENSITIVE_ASSIGNMENT = re.compile(r"(?i)\b(" + _SENSITIVE_NAME + r")\s*[:=]\s*([^\s,;]{4,})")

@@ -103,7 +103,12 @@ def test_lazy_registry_matches_eager_registry_exactly():
         "import server\n"
         "rows = sorted((t.name, t.description, json.dumps(t.parameters, sort_keys=True))\n"
         "              for t in server.mcp._tool_manager.list_tools())\n"
-        "print('RESULT=' + json.dumps(rows))\n"
+        "resources = sorted((str(r.uri), r.name, r.description or '')\n"
+        "                   for r in server.mcp._resource_manager.list_resources())\n"
+        "templates = sorted(t.uri_template for t in server.mcp._resource_manager.list_templates())\n"
+        "prompts = sorted((p.name, p.description or '')\n"
+        "                 for p in server.mcp._prompt_manager.list_prompts())\n"
+        "print('RESULT=' + json.dumps([rows, resources, templates, prompts]))\n"
     )
     assert _run(code, "lazy") == _run(code, "eager")
 

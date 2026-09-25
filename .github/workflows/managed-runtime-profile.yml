@@ -34,10 +34,11 @@ jobs:
             requirements-runtime.txt
       # uv installs the same requirement file into setup-python's interpreter
       # (--system), where the pip install used to land, several times faster.
+      # uv itself is pinned like the actions above; bump it deliberately.
       - name: Install focused test dependencies
         # pwsh does not stop on a failing native command; check each one.
         run: |
-          python -m pip install uv
+          python -m pip install uv==0.12.19
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           uv pip install -r requirements-dev.txt --system
       - name: Provision dedicated managed runtime through canonical installer

@@ -125,8 +125,10 @@ is unavailable the selector's own default base is used.
 
 A full `-n 3` capture ranked with `slow_tests.py` found two avoidable costs:
 
-- `fanout_store`'s URI-credential redaction was quadratic on long letter
-  runs; one 100k-character answer took ~90 s. `test_fanout_store.py` and
+- `fanout_store`'s URI-credential redaction was quadratic on long runs of
+  scheme characters; one 100k-character answer took ~90 s. The pattern now
+  tries each run once, from its start, with unchanged output (letter runs
+  and mixed runs such as hex digests alike). `test_fanout_store.py` and
   `test_model_fanout.py` (~449 s of recorded time) now run in ~22 s wall.
 - `test_app_recovery_http.py` polled with a fixed 10 s sleep; it now backs
   off from 0.5 s to the same cap (96 s -> 62 s back to back).

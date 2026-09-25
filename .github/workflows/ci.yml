@@ -41,9 +41,10 @@ jobs:
             requirements-runtime.txt
       # uv installs the same requirement file into setup-python's interpreter
       # (--system), where the pip install used to land, several times faster.
+      # uv itself is pinned like the actions above; bump it deliberately.
       - name: Install deps (stdlib core + mcp for server import)
         run: |
-          python -m pip install uv
+          python -m pip install uv==0.12.19
           uv pip install -r requirements-dev.txt --system
       # The release workflow calls this same job at the tag's exact SHA. A
       # broken runtime smoke or mismatched version triad must block publication.
@@ -141,7 +142,7 @@ jobs:
         run: |
           python -m venv "$env:RUNNER_TEMP\sonder-ci-venv"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pip install uv
+          python -m pip install uv==0.12.19
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           uv pip install -r requirements-dev.txt --python "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe"
       - name: Exercise managed owner, artifact verifier, and lifecycle regressions
