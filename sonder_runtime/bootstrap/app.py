@@ -253,7 +253,8 @@ def _compose_developer_tools(config, runtime_redactor, get_job_registry, get_pro
 
 
 def _compose_build_tools(config, runtime_redactor, developer_tools, get_job_registry,
-                         get_process_job_provider, grants, *, tools_getter, model_gateway_getter):
+                         get_process_job_provider, grants, *, tools_getter, model_gateway_getter,
+                         effect_binding_factory=None):
     """Compose the C++ build tools, or None when this build lacks them.
 
     They sit on the developer tools' inventory and digest; without those, or
@@ -275,6 +276,7 @@ def _compose_build_tools(config, runtime_redactor, developer_tools, get_job_regi
             process_job_provider=get_process_job_provider, job_registry=get_job_registry,
             redactor=runtime_redactor, grants=grants, tools_getter=tools_getter,
             model_gateway_getter=model_gateway_getter,
+            effect_binding_factory=effect_binding_factory,
         )
         if services is not None:
             install_build_brief(services, developer_tools.inventory)
@@ -595,26 +597,35 @@ def build_application(
 
             from ..adapters.persistence.worker_effect_hosts import host_lease
 
+            verifiers = {
+                "process-start": DurableLocalProcessStartVerifier(get_job_registry),
+                "compute-submit": DurableComputeSubmitVerifier(get_job_registry),
+                "subagent-dispatch": DurableSubagentDispatchVerifier(
+                    get_continuation_repository
+                ),
+            }
+            try:
+                from ..adapters.build.fix_effect_verifier import BuildFixEditVerifier
+            except ImportError:
+                # Without the build package no fix can journal an edit.
+                pass
+            else:
+                # A build-fix edit is proven from the edited file's current
+                # SHA-256 against the journaled before/after digests.
+                verifiers["build-fix"] = BuildFixEditVerifier()
             journal_path = state_path("worker-effects.db", "SONDER_WORKER_EFFECTS_DB")
             # Register this process as a live journal host before any intent
             # can be admitted, so a peer's startup reconciliation never claims
             # this process's in-flight effects.  Failure refuses the journal.
             host_lease(journal_path)
             worker_effect_journal = SQLiteEffectJournal(
-                journal_path,
-                reconciliation_verifiers={
-                    "process-start": DurableLocalProcessStartVerifier(get_job_registry),
-                    "compute-submit": DurableComputeSubmitVerifier(get_job_registry),
-                    "subagent-dispatch": DurableSubagentDispatchVerifier(
-                        get_continuation_repository
-                    ),
-                },
+                journal_path, reconciliation_verifiers=verifiers,
             )
         return worker_effect_journal
 
     # Worker families this composition owns.  Startup reconciliation only
     # claims unresolved intents admitted by one of these identities.
-    worker_families = ("process", "compute", "subagent", "selfmod")
+    worker_families = ("process", "compute", "subagent", "selfmod", "build-fix")
 
     def worker_id_for(family: str) -> str:
         return f"{family}:{effective_config.compute.node_id}"
@@ -1723,6 +1734,11 @@ def build_application(
         config, runtime_redactor, developer_tools, get_job_registry, get_process_job_provider,
         build_grants, tools_getter=lambda: typed_tools_ref.get("tools"),
         model_gateway_getter=lambda: gateway,
+        # Every fix edit is a ``build-fix`` effect in the worker effect
+        # journal, under this host's worker identity and owner epoch.
+        effect_binding_factory=lambda run_id, scope: worker_binding(
+            family="build-fix", scope=scope, run_id=run_id,
+        ),
     )
 
     tools = ToolApplicationFacade.compose(

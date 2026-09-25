@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 346,
+      "file_count": 347,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -78,6 +78,7 @@
         "sonder_runtime/adapters/build/collector.py",
         "sonder_runtime/adapters/build/environment.py",
         "sonder_runtime/adapters/build/executor.py",
+        "sonder_runtime/adapters/build/fix_effect_verifier.py",
         "sonder_runtime/adapters/build/launcher.py",
         "sonder_runtime/adapters/build/network.py",
         "sonder_runtime/adapters/build/planner.py",
@@ -395,7 +396,7 @@
       ]
     },
     {
-      "file_count": 373,
+      "file_count": 374,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -425,6 +426,7 @@
         "sonder_runtime/application/backup/__init__.py",
         "sonder_runtime/application/backup/use_cases.py",
         "sonder_runtime/application/build/__init__.py",
+        "sonder_runtime/application/build/fix_effects.py",
         "sonder_runtime/application/build/fix_ports.py",
         "sonder_runtime/application/build/fix_service.py",
         "sonder_runtime/application/build/grants.py",

@@ -17,8 +17,11 @@ running on a host-injected worker. The loop:
    with RESIDENCY_REFUSED before any model call). A malformed or refused
    candidate is HYPOTHESIS_REJECTED and nothing is written;
 5. saves each file's pre-image before its first write, then writes through
-   the gateway carrying the grant token, so the gateway's typed writes create
-   the effect-journal intents;
+   the gateway carrying the grant token. When composition supplies the
+   worker effect journal, every edit (write, revert, restore) is a
+   ``build-fix`` effect (``fix_effects``): its intent is committed before
+   the edit and its receipt after, so startup reconciliation can prove or
+   fence an edit a crash interrupted;
 6. verifies with ``compile_one`` of the focus and then the target build; a
    PCH or forced-include focus, or a unity file without a blob, goes
    straight to the target build;
@@ -76,9 +79,11 @@ from ...domain.common.errors import (
     SonderError,
 )
 from ..context import OperationContext
-from ..execution import effect_journal
+from ..execution.effect_journal import EffectJournalError
+from ..execution.worker_bindings import AuthenticatedWorkerBinding
 from ..ports import runtime_threads
 from ..ports.jobs import JobIdentity, JobStatus
+from .fix_effects import BindingFactory, BuildFixEffects
 from .fix_ports import (
     BUILD_FIX_ID_RE,
     FIX_SCOPE_REJECTED,
@@ -312,6 +317,7 @@ class BuildFixService:
                  thread_factory: Callable[..., Any] | None = None,
                  propose_only_ok: bool = False, operator_max_timeout: int = 3600,
                  effect_journal_store: Any = None,
+                 effect_binding_factory: BindingFactory | None = None,
                  monotonic: Callable[[], float] = time.monotonic,
                  utility_allow: frozenset[str] = frozenset()) -> None:
         if isinstance(max_model_calls, bool) or not 1 <= int(max_model_calls) <= 64:
@@ -333,7 +339,16 @@ class BuildFixService:
         self._thread_factory = thread_factory or runtime_threads.Thread
         self._propose_only_ok = bool(propose_only_ok)
         self._operator_max_timeout = int(operator_max_timeout)
-        self._journal = effect_journal_store
+        if effect_binding_factory is None and effect_journal_store is not None:
+            # A bare journal (tests, embedders): one worker identity and one
+            # owner epoch for this service instance, as composition would give.
+            epoch = time.time_ns()
+
+            def effect_binding_factory(run_id: str, scope: str) -> AuthenticatedWorkerBinding:
+                return AuthenticatedWorkerBinding(effect_journal_store, run_id, "build-fix:local",
+                                                  epoch, scope, auto_reconcile=True)
+        self._effects = BuildFixEffects(effect_binding_factory) \
+            if effect_binding_factory is not None else None
         self._utility_allow = frozenset(utility_allow)
         self._runs: dict[str, _Run] = {}
         self._lock = threading.Lock()
@@ -662,6 +677,19 @@ class BuildFixService:
         edit_ctx = EditContext(operation=context, project_root=project_root, job_id=job_id,
                                grant_token=grant.token if grant else "")
         try:
+            fenced = False
+            applied: Mapping[str, frozenset[str]] = {}
+            if self._effects is not None:
+                # Offer an edit a crash left unresolved to the verifier first.
+                # The restore never writes over an edit whose outcome is
+                # unknown; a proven edit counts as written by the fix even
+                # when the crash came before its pre-image record.
+                try:
+                    self._effects.recover(job_id, project_root)
+                except EffectJournalError:
+                    fenced = True
+                else:
+                    applied = self._effects.applied(job_id, project_root)
             plan: list[tuple[str, str, str]] = []
             conflicts: list[str] = []
             already: list[str] = []
@@ -670,19 +698,25 @@ class BuildFixService:
                 _, current = self._editor.read(rel, edit_ctx)
                 if current == entry.original_sha256:
                     already.append(rel)
-                elif entry.last_written_sha256 and current == entry.last_written_sha256:
+                elif (entry.last_written_sha256 and current == entry.last_written_sha256) \
+                        or current in applied.get(rel, ()):
                     plan.append((rel, current, entry.original_sha256))
                 else:
                     conflicts.append(rel)
             if conflicts:
                 raise fix_error(RESTORE_CONFLICT, "changed since the fix wrote them: %s"
                                 % ", ".join(conflicts[:6]))
+            if plan and fenced:
+                raise fix_error(RESTORE_CONFLICT,
+                                "an interrupted edit of this fix could not be proven from the "
+                                "files; compare them with the pre-images")
             restored = []
+            candidate = "restore-" + uuid.uuid4().hex[:16]
             for rel, current, original_sha in plan:
                 text, sha = self._preimages.load(job_id, rel)
                 if sha != original_sha:
                     raise fix_error(RESTORE_CONFLICT, "pre-image of %s does not match its record" % rel)
-                self._editor.replace(rel, text, expected_sha256=current, ctx=edit_ctx)
+                self._edit(job_id, candidate, rel, text, current, original_sha, edit_ctx)
                 self._preimages.record_write(job_id, rel, original_sha)
                 restored.append(rel)
         finally:
@@ -702,15 +736,7 @@ class BuildFixService:
         terminal = JobStatus.FAILED
         try:
             self._set_registry(run.job_id, JobStatus.RUNNING)
-            binding = None
-            if self._journal is not None:
-                binding = effect_journal.JournalBinding(self._journal, run.job_id, "build-fix", 1,
-                                                        run.plan.project_root)
-            if binding is not None:
-                with effect_journal.bound(binding):
-                    report = self._loop(run)
-            else:
-                report = self._loop(run)
+            report = self._loop(run)
             if report.stop_reason is FixStopReason.CANCELLED:
                 terminal = JobStatus.CANCELLED
             elif report.status in ("fixed", "improved", "unchanged"):
@@ -1053,8 +1079,8 @@ class BuildFixService:
                 self._preimages.save(run.job_id, rel, original, original_sha)
                 state.preimaged.add(rel)
             try:
-                receipt = self._editor.replace(rel, new_texts[rel], expected_sha256=before_sha,
-                                               ctx=run.edit_ctx)
+                receipt = self._edit(run.job_id, "attempt-%d" % run.attempt, rel, new_texts[rel],
+                                     before_sha, sha256_text(new_texts[rel]), run.edit_ctx)
             except EditConflict as exc:
                 state.uncertain = exc.uncertain or bool(written)
                 if exc.uncertain:
@@ -1074,14 +1100,24 @@ class BuildFixService:
             state.effect_intents.append(receipt.effect_intent_id)
         return intents
 
+    def _edit(self, job_id: str, candidate: str, rel: str, text: str, before_sha: str,
+              after_sha: str, ctx: EditContext) -> Any:
+        """One source edit: journaled as a ``build-fix`` effect when a journal is composed."""
+        if self._effects is None:
+            return self._editor.replace(rel, text, expected_sha256=before_sha, ctx=ctx)
+        return self._effects.replace(self._editor, job_id=job_id, candidate=candidate, rel=rel,
+                                     text=text, before_sha256=before_sha, after_sha256=after_sha,
+                                     ctx=ctx)
+
     def _revert_files(self, run: _Run, state: "_LoopState", rels: list[str] | tuple[str, ...]) -> None:
         for rel in rels:
             target = state.best_texts.get(rel, state.originals[rel][0])
             if state.current.get(rel) == target:
                 continue
             try:
-                receipt = self._editor.replace(rel, target, expected_sha256=state.current_sha[rel],
-                                               ctx=self._cleanup_edit_ctx(run))
+                receipt = self._edit(run.job_id, "revert-%d" % run.attempt, rel, target,
+                                     state.current_sha[rel], sha256_text(target),
+                                     self._cleanup_edit_ctx(run))
             except EditConflict as exc:
                 raise _Stop(FixStopReason.UNCERTAIN_SIDE_EFFECT,
                             "reverting %s failed (%s); nothing further was reverted"
@@ -1301,7 +1337,7 @@ class BuildFixService:
             except _Stop as exc:
                 notes.append("revert_after failed: %s" % (exc.note or exc.reason.value))
         if state.effect_intents and not any(state.effect_intents):
-            notes.append("no effect journal was bound; writes carry gateway receipts only")
+            notes.append("no effect journal is composed; edits carry gateway receipts only")
         return make_fix_report(
             status=status, stop_reason=stop, job_id=run.job_id, target=plan.request.target,
             config=plan.grant_spec.config, verification_scope=verification,

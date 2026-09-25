@@ -569,7 +569,8 @@ def compose_build_tools(*, config, inventory, digest, process_job_provider: Call
                         tools_getter: Callable[[], Any] | None = None,
                         model_gateway_getter: Callable[[], Any] | None = None,
                         cancellation_tree: Any = None,
-                        candidate_generator: Any = None) -> Any:
+                        candidate_generator: Any = None,
+                        effect_binding_factory: Callable[[str, str], Any] | None = None) -> Any:
     """Wire the build model, build jobs and (when present) the fix loop.
 
     Nothing here probes, reads a project or launches: the planner resolves
@@ -579,6 +580,11 @@ def compose_build_tools(*, config, inventory, digest, process_job_provider: Call
     ``candidate_generator`` replaces the model-backed candidate generator
     (tests and evaluations script the fix loop with it); the runtime leaves
     it unset.
+
+    ``effect_binding_factory`` maps ``(run_id, project_root)`` to the host's
+    authenticated ``build-fix`` worker binding over the worker effect
+    journal; with it every fix edit is journaled and startup reconciliation
+    can prove or fence an interrupted one. The runtime always supplies it.
     """
     from ..platform.config import BuildToolsConfig
 
@@ -638,14 +644,15 @@ def compose_build_tools(*, config, inventory, digest, process_job_provider: Call
                        grants=grants, tools_getter=tools_getter,
                        model_gateway_getter=model_gateway_getter, job_registry=job_registry,
                        cancellation_tree=cancellation_tree, redact=redact_display,
-                       candidate_generator=candidate_generator)
+                       candidate_generator=candidate_generator,
+                       effect_binding_factory=effect_binding_factory)
     logger.info("build tools composed (fix loop %s)", "on" if fix is not None else "off")
     return BuildToolServices(model=models, jobs=jobs, fix=fix)
 
 
 def _compose_fix(*, settings, jobs, models, state_dir, grants, tools_getter, inventory,
                  model_gateway_getter, job_registry, cancellation_tree, redact,
-                 candidate_generator=None):
+                 candidate_generator=None, effect_binding_factory=None):
     """The build-fix loop (lane B2), or None when its packages are absent."""
     if tools_getter is None:
         return None
@@ -686,6 +693,9 @@ def _compose_fix(*, settings, jobs, models, state_dir, grants, tools_getter, inv
             grants=grants,
             propose_only_ok=settings.fix_propose_only_ok,
             operator_max_timeout=settings.max_timeout_seconds,
+            # Each edit is a journaled ``build-fix`` effect in the worker
+            # effect journal (resolved lazily on the first edit).
+            effect_binding_factory=effect_binding_factory,
         )
     except Exception:
         logger.error("build_fix could not be composed; it will report unavailable", exc_info=True)

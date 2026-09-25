@@ -4,8 +4,8 @@
 
 * ``SourceEditor``: reads and writes project sources only through the typed
   tool gateway, carrying the fix's grant token (``EditContext``). It never
-  opens a file for writing itself; typed writes record the effect-journal
-  intents.
+  opens a file for writing itself. The service journals each edit as a
+  ``build-fix`` effect around the editor call (``fix_effects``).
 * ``CandidateGenerator``: turns ``RepairEvidence`` into a ``CandidatePatch``;
   it checks residency before anything leaves the machine.
 * ``FixStrategyPort``: maps each attempt to the strategy controller.

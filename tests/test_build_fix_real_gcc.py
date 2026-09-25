@@ -257,15 +257,18 @@ def test_the_fix_loop_repairs_the_seeded_error_end_to_end(tmp_path, monkeypatch,
     assert entry.last_written_sha256 == sha(fixed)
     assert report.preimage_label.endswith(job) and str(root) not in report.preimage_label
 
-    # The real typed gateway recorded an effect-journal intent for every write.
+    # Every edit is a journaled ``build-fix`` effect: intent before, receipt after.
     intents = [intent for item in report.attempts for intent in item.effect_intent_ids]
     assert len(intents) == 2  # the regression's write and the fix's write
     for intent in intents:
         assert stack.journal.get(intent).state is EffectState.COMPLETED
-    # The revert of the regression went through the gateway too: three writes in all.
-    page = stack.journal.effects_since(job, 0, limit=50)
+    # The revert of the regression was journaled too: three edits in all.
+    page = stack.journal.effects_since("build-fix:" + job, 0, limit=50)
     assert len(page.records) == 3 and not page.unresolved
     assert all(record.state is EffectState.COMPLETED for record in page.records)
+    assert all(record.operation_id.startswith("build-fix:") for record in page.records)
+    # The gateway itself journals nothing for the fix (no unprovable twin intents).
+    assert not stack.journal.effects_since(job, 0, limit=50).records
     written = [receipt for receipt in stack.tools.receipts if receipt.tool_name == "text_patch"]
     assert written and all(receipt.success for receipt in written)
     source = "build_fix_grant:" + plan.plan_digest
@@ -290,6 +293,10 @@ def test_the_fix_loop_repairs_the_seeded_error_end_to_end(tmp_path, monkeypatch,
     restored = service.restore(job, context)
     assert restored["restored"] == [MATH] and (root / MATH).read_text() == original
     assert stack.book.live() == 0
+    # The refused restore is a failed (not applied) effect; the approved one completed.
+    page = stack.journal.effects_since("build-fix:" + job, 0, limit=50)
+    assert [record.state for record in page.records[3:]] == [EffectState.FAILED,
+                                                             EffectState.COMPLETED]
 
 
 @pytest.mark.skipif(not HAVE_TOOLS, reason="cmake and ninja are required")

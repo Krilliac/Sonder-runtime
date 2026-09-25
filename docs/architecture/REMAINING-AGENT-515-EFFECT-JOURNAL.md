@@ -743,3 +743,129 @@ What remains:
   filesystem.
 - No master-spec checkbox changes. LOOP-008, AGENT-006 and SESSION-007 stay
   unverified.
+
+## The `build-fix` effect family (2026-09-25)
+
+*Supersedes, for build fixes only,* the statement above that the typed
+gateway journals each fix write. Before this slice, `_compose_fix` in
+`sonder_runtime/bootstrap/build_tools.py` passed no journal to
+`BuildFixService`. Production fix edits were therefore not in the worker
+effect journal, and neither startup reconciliation nor a pre-resume path
+could see an interrupted edit. Tests that passed a journal got one gateway
+intent per write, keyed by a fresh request id, under a fixed worker
+(`build-fix`) and epoch (`1`). No verifier could prove that intent, so after a
+crash it would have stayed fenced forever.
+
+What is wired now (caller -> callee):
+
+- `build_application` passes `_compose_build_tools(...,
+  effect_binding_factory=...)` down through `compose_build_tools` and
+  `_compose_fix` into `BuildFixService(effect_binding_factory=...)`. The
+  factory is `worker_binding(family="build-fix", scope=<project root>,
+  run_id=<run>)`. That binding is authenticated, uses `auto_reconcile=True`,
+  runs as worker `build-fix:<node>` under the host epoch, and uses the shared
+  `worker-effects.db`. The binding is resolved lazily, on the first edit.
+- `BuildFixService._edit` routes every source edit through
+  `application/build/fix_effects.BuildFixEffects.replace`, which wraps the
+  editor call in `journaled_effect`. The edits covered are the attempt's
+  candidate write (`attempt-<n>`), the revert to best, the unjudged revert
+  and the `revert_after` revert (`revert-<n>`), and `build_fix_restore`
+  (`restore-<random>`).
+  - Run: `build-fix:<job_id>`. Scope: the project root.
+  - Idempotency key: the JSON tuple `["build-fix", job, candidate, rel,
+    before_sha256, after_sha256]`. Operation id: `build-fix:` plus the first
+    40 hex characters of the key's SHA-256. Request digest: the canonical
+    digest of the same fields (`worker_bindings.effect_request_digest`).
+  - The intent commits before the editor runs. After the editor returns, the
+    receipt and a content-free checkpoint commit in one transaction.
+  - A refused write (`EditRefused`) or one the editor proves did not happen
+    (`EditConflict(uncertain=False)`) is a `failed` outcome with receipt
+    `<op>:not-applied:<type>`.
+  - An unprovable write (`EditConflict(uncertain=True)`, an invoker
+    exception, or a receipt that does not match the journaled digests)
+    marks the intent `uncertain`.
+  - A journal refusal before the edit becomes `EditConflict(uncertain=False)`,
+    and the editor is not called.
+  - A journal failure after the edit becomes `EditConflict(uncertain=True)`.
+    In both cases the fix stops with `UNCERTAIN_SIDE_EFFECT`.
+  - An unchanged text (equal digests) is not an effect and is not journaled.
+- With a binding in place, the fix no longer binds the ambient gateway
+  journal. Each write therefore has exactly one intent, and that intent can be
+  proven. Gateway receipts and audit are unchanged. `effect_journal_store=`
+  (a bare journal, used by tests and embedders) still works: the service
+  derives a binding from it, as worker `build-fix:local`, with one epoch per
+  service instance.
+- `get_worker_effect_journal` registers
+  `adapters/build/fix_effect_verifier.BuildFixEditVerifier` for the
+  `build-fix` family, and `worker_families` now includes `build-fix`. The
+  startup pass therefore claims and reconciles this host's fix runs. The
+  verifier authenticates the intent (`edit_from_intent`): the key, run,
+  operation id, scope, worker prefix and request digest must all round-trip.
+  It then hashes the file as it is now:
+  - current digest equals the after-digest: `completed`, with receipt
+    `<op>:applied:sha256:<digest>`;
+  - current digest equals the before-digest: `failed` (not applied);
+  - anything else: no proof. The intent stays `uncertain` and the run stays
+    fenced. This covers another digest and a file that is missing, larger
+    than 2 MiB, a final symlink, or under a parent that resolves outside the
+    root.
+
+  The verifier only reads, at most 2 MiB, under the journal's 2 s verifier
+  timeout.
+- Pre-resume path: `build_fix_restore` first calls
+  `recover_before_restart` on the fix's run. That call reconciles
+  automatically, so a crash-interrupted edit is proven there too. An
+  unproven edit refuses the restore with `RESTORE_CONFLICT` whenever the
+  restore would write. A completed edit counts as written by the fix
+  (`BuildFixEffects.applied`, bounded to 8 pages of 100 records). A restore
+  after a crash between the write and the pre-image record therefore
+  succeeds; before this slice it answered `RESTORE_CONFLICT`.
+
+Crash evidence: `tests/test_build_fix_effect_journal.py` runs the real
+`BuildFixService` loop in a child interpreter. The loop uses the fakes of
+`test_build_fix_service` with an editor over real files, and every real
+write is counted in a log. The child is killed with `os._exit` at one of
+three cuts:
+
+| Cut | File after the crash | Startup reconciliation |
+|---|---|---|
+| attempt 1: after the intent, before the write | original; 0 writes | `failed` (`not-applied`), resolved |
+| attempt 1: after the write, before the receipt | candidate; 1 write | `completed` (`applied`), resolved |
+| attempt 2's revert: after the write, before the receipt | best; 3 writes | `completed`, resolved |
+
+For every cut:
+
+- a second pass is a no-op;
+- the same edit re-requested by a restarted fix at a newer epoch is refused
+  by the journal before the editor runs (the key is already admitted), and
+  the write count and the file are unchanged;
+- `build_fix_restore` from the restarted runtime returns the original.
+
+A file edited by hand after the crash (neither digest) stays `uncertain`. In
+that case a successor binding refuses to restart, the restore refuses (the
+file matches no record), and a later pass proves the edit once the file
+carries the after-digest again. A fourth cut (attempt 2's write, before the
+file write) leaves the file at the pre-image record's digest. With no
+verifier registered, only the journal fence stops that restore
+(`RESTORE_CONFLICT`, editor never called). With the verifier, the same
+restore proves the edit not applied and writes the original.
+Another host's fix run is reported under `foreign_runs` and not claimed.
+`test_build_application_proves_a_crashed_fix_edit_at_startup` crashes a fix
+into the production journal file under the node's `build-fix:<node>`
+identity, and `build_application` proves the edit at startup. It also checks
+that the composed fix service journals through that same binding. Removing
+`build-fix` from `worker_families` makes that test fail (the run becomes
+foreign). `tests/test_build_fix_real_gcc.py` asserts the three `build-fix`
+effects of a real g++/clang++ fix and the absence of gateway twins.
+
+Limits:
+
+- The proof is about the file's current state. An edit that ran and was
+  then undone by hand to the exact before-digest is recorded as not
+  applied. That is the state that a resumed fix and `build_fix_restore` act
+  on.
+- A fix job is still never retried (`max_attempts=1`), and
+  `BuildFixService.recover()` (which marks unfinished fixes interrupted) is
+  not called by production composition. The journal proof and the restore
+  path do not depend on it.
+- No master-spec checkbox changes. LOOP-008 stays unverified.

@@ -40,6 +40,14 @@ def _digest(value: Any) -> str:
     ).hexdigest()
 
 
+def effect_request_digest(value: Any) -> str:
+    """The canonical request digest ``journaled_effect`` records for ``value``.
+
+    Verifiers recompute it to bind a parsed intent to the admitted request.
+    """
+    return _digest(value)
+
+
 def _json_safe(value: Any) -> Any:
     """Convert a bounded worker receipt/state into deterministic JSON data."""
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -376,5 +384,6 @@ def _publish_outcome(
 
 __all__ = [
     "AuthenticatedWorkerBinding", "EffectReconciliationReport",
-    "EffectRecoveryRequired", "ReconciledEffect", "journaled_effect",
+    "EffectRecoveryRequired", "ReconciledEffect", "effect_request_digest",
+    "journaled_effect",
 ]

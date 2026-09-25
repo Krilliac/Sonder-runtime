@@ -167,6 +167,52 @@ it, every write the fix makes is refused unattended under `manual`.
    id and the requested file list, and the restore's own writes are covered by
    a grant scoped to exactly the job's pre-imaged files.
 
+## Edit journal and crash recovery
+
+Every source edit a fix makes is a `build-fix` effect in the worker effect
+journal (`worker-effects.db`), recorded by
+`application/build/fix_effects.py`. This covers the candidate write
+(`attempt-<n>`), the reverts (`revert-<n>`) and each `build_fix_restore`
+write (`restore-<id>`).
+
+- **Recording.** The intent is committed before the editor call. Its key is
+  (job, candidate, file, before SHA-256, after SHA-256). The receipt is
+  committed after the call returns. The run is `build-fix:<job_id>` and the
+  worker is `build-fix:<node>` under the host's owner epoch.
+  `bootstrap/app.py` supplies the binding through
+  `compose_build_tools(effect_binding_factory=...)`.
+- **Outcomes.** A write that was refused, or that the editor proves did not
+  happen, is recorded as `failed`. A write whose result cannot be proven is
+  recorded as `uncertain`, and the fix stops with `UNCERTAIN_SIDE_EFFECT`.
+- **Refusals.** The journal refuses an edit whose key it already holds. It
+  also refuses any edit while the run has an unresolved one. A resumed or
+  restarted fix therefore never applies the same edit twice.
+- **Gateway receipts.** The fix no longer binds the gateway's ambient
+  journal, so each write has one journal intent. Gateway receipts and audit
+  are unchanged.
+
+After a crash, startup reconciliation offers each unresolved edit to
+`adapters/build/fix_effect_verifier.BuildFixEditVerifier`. The verifier
+hashes the file as it is now (read-only, at most 2 MiB, no links, parents
+inside the project root):
+
+| File's current SHA-256 | Result |
+| --- | --- |
+| the after-digest | `completed`: the edit happened |
+| the before-digest | `failed`: the edit did not happen |
+| anything else, or unreadable | no proof: the edit stays `uncertain` and the run stays fenced |
+
+`build_fix_restore` runs the same reconciliation first. It refuses with
+`RESTORE_CONFLICT` to write over an edit that is still unproven. It accepts
+a file whose digest is the after-digest of a completed edit of the job. That
+is the case when a crash came after the write but before the pre-image
+record.
+
+The proof describes the file's current state only. An edit undone by hand
+back to the exact before-digest reads as not applied. The details are in
+[Issue 515](REMAINING-AGENT-515-EFFECT-JOURNAL.md), in the section on the
+`build-fix` effect family.
+
 ## Surfaces
 
 - Typed tools: native MCP and every typed-gateway caller
@@ -234,7 +280,7 @@ configuration error. It never widens anything.
 | TOOL-004 approval bound to the resolved command | `build_permission_resolvers` (`resolved_command`, `build:plan-refused`) |
 | TOOL-007 receipts | the gateway receipts and the durable audit, with grant writes named by `policy_match` |
 | JOB-001..005 | the build and fix jobs (lanes B1/B2) and cancellation through the result tools |
-| LOOP-006/007/008 | the fix loop (lane B2); grant writes go through the typed writes and their effect-journal intents |
+| LOOP-006/007/008 | the fix loop (lane B2); grant writes go through the typed writes; every edit is a journaled `build-fix` effect with a provider verifier (see Edit journal and crash recovery) |
 | EXEC-001/002/006 | host world per run, the IsolationTruth labels on reports, and build-time tool sources excluded from edits |
 | REPO-004/007 | clangd `BuildNavigator` and `ClangdSymbolTransport` (lane D) |
 
@@ -273,6 +319,20 @@ clangd`):
 
   The grant suite drives real `text_patch` and `write_file` writes through the
   typed gateway under `manual` mode, as an unattended worker.
+- `tests/test_build_fix_effect_journal.py` kills the fix loop with
+  `os._exit`:
+  - after an edit's intent and before the write;
+  - after the write and before the receipt, for a candidate write and for a
+    revert.
+
+  Startup reconciliation, both `reconcile_unresolved_effects` and
+  `build_application` over the production journal file, proves each case
+  from the file digest. Other cases stay fenced: a file changed by hand, and
+  a journal without the verifier. A restarted fix that asks for the same
+  edit is refused before the editor runs.
+- `tests/test_build_fix_real_gcc.py` asserts the three journaled `build-fix`
+  effects of a real g++/clang++ fix, plus the failed and completed effects
+  of its refused and approved restores.
 - `tests/test_build_clangd_transport.py` runs against the real clangd:
   - definition and hover;
   - diagnostics that match g++;
