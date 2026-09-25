@@ -115,6 +115,13 @@ _PROBE = textwrap.dedent(r'''
 
     fn = getattr(server.runtime_policy_status, "fn", server.runtime_policy_status)
     results = [run("cold", fn)]
+    # Import seeded the policy file; a read must not recreate it (nor its
+    # lock) when it is gone -- live reload included.
+    policy_file = server.runtime_policy.policy_path()
+    policy_file.unlink()
+    results.append(run("missing_policy", fn))
+    results[-1]["policy_recreated"] = policy_file.exists()
+    server._refresh_runtime_policy(create=True)
     # Seed the cache as a real refresh would, without the socket, then read it.
     server._remember_runtime_readiness({
         **server._RUNTIME_POLICY,
@@ -175,11 +182,15 @@ def test_the_harness_catches_a_socket_and_a_write(trap_results):
     assert any(kind == "sql" for kind, _ in trap_results["sql_canary"]["events"])
 
 
-@pytest.mark.parametrize("label", ["cold", "cached", "slash"])
+@pytest.mark.parametrize("label", ["cold", "missing_policy", "cached", "slash"])
 def test_runtime_policy_status_fires_no_trap(trap_results, label):
     row = trap_results[label]
     assert row["events"] == [], row
     assert "runtime policy" in row["output"].lower() or "local" in row["output"].lower()
+
+
+def test_status_does_not_recreate_a_missing_policy_file(trap_results):
+    assert trap_results["missing_policy"]["policy_recreated"] is False
 
 
 def test_cold_status_says_readiness_was_never_checked(trap_results):

@@ -1301,7 +1301,12 @@ def _prime_live_reload_modules():
 _prime_live_reload_modules()
 
 
-def _maybe_live_reload():
+def _maybe_live_reload(*, create_policy=True):
+    """Reload changed watched modules, then re-apply the shared runtime policy.
+
+    ``create_policy=False`` is for read-only surfaces (``runtime_policy_status``):
+    a missing policy file then renders defaults instead of being written.
+    """
     modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
     for name, module in modules.items():
         if name == "sonder_runtime.adapters.recall":
@@ -1372,7 +1377,7 @@ def _maybe_live_reload():
             continue
         if name in globals():
             globals()[name] = module
-    _refresh_runtime_policy(create=True)
+    _refresh_runtime_policy(create=create_policy)
 
 
 def _open_db():
@@ -23110,7 +23115,9 @@ def runtime_policy_status() -> str:
     Read-only: renders the last model-inventory result with its age and never
     contacts the model endpoint. ``/runtime status refresh`` re-checks it.
     """
-    _maybe_live_reload()
+    # Not the default ``create_policy=True``: that would write a missing
+    # policy file (and its lock) from a read graded ``safe``.
+    _maybe_live_reload(create_policy=False)
     return _format_runtime_policy_status(_runtime_policy_cached_data())
 
 
