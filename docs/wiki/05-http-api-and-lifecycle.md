@@ -24,6 +24,25 @@ production lifecycle and admission layer (`sonder_lifecycle.py`).
 everything else requires the bearer key unless the peer is loopback (the
 reverse proxy restricts those paths to loopback upstream).
 
+**Host allowlist (DNS-rebinding defence).** Before any routing, every request
+whose `Host` header does not name this listener is refused with
+`421 HOST_NOT_ALLOWED` and the connection is closed. Accepted names are
+`localhost` and loopback IP literals (a port, when present, must be the bound
+port), any IP literal when the listener itself binds a non-loopback address,
+and the operator's `[server].allowed_hosts` / `SONDER_ALLOWED_HOSTS` entries
+(`name` accepts any port, `name:port` only that port). A request with no
+`Host` header (HTTP/1.0 tooling; browsers always send one) is accepted. A
+reverse proxy that forwards the public name in `Host` (`proxy_set_header Host
+$host`) must list that name in `allowed_hosts`; the reference nginx
+configuration forwards the upstream address and needs nothing.
+
+**Client address.** `X-Forwarded-For` is consulted only when
+`tls_terminated_by_proxy = true` *and* the socket peer is inside
+`trusted_proxy_cidrs`; it is then read right to left and the first hop outside
+those networks is the client. Otherwise the socket peer is the client, so a
+local process cannot rotate the header to escape the authentication-failure
+limiter or spend another address's budget.
+
 `GET /v1/models` always includes the `sonder` runtime route and configured
 tier IDs. It also includes exact installed/discovered models that declare a
 chat capability; embedding- or vision-only entries are omitted. Cloud models

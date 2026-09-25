@@ -35,6 +35,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from sonder_runtime.interfaces.http.artifact_transfer import handle_artifact_transfer, is_artifact_route
+from sonder_runtime.interfaces.http.host_policy import (
+    forwarded_client_ip, host_allowed, normalize_allowed_host,
+)
 from sonder_runtime.interfaces.http.memory_replication import (
     handle_memory_replication,
     is_memory_replication_route,
@@ -678,6 +681,24 @@ HOST = os.environ.get("SONDER_HOST", "127.0.0.1")
 REQUIRE_ACCOUNT = _env_flag("SONDER_REQUIRE_ACCOUNT")
 AUTH_MODE = _resolve_auth_mode(API_KEY, REQUIRE_ACCOUNT)
 CORS_ORIGINS = _parse_cors_origins(os.environ.get("SONDER_CORS_ORIGINS", ""))
+
+
+def _parse_allowed_hosts(values):
+    """Validated public Host names; malformed entries are dropped, not widened."""
+    parsed = []
+    for value in values:
+        try:
+            parsed.append(normalize_allowed_host(value))
+        except ValueError:
+            _serve_logger.warning("ignoring malformed allowed host entry")
+    return tuple(dict.fromkeys(parsed))
+
+
+# Public names a proxy or remote client may put in ``Host`` besides loopback
+# names (DNS-rebinding defence; see host_policy.host_allowed).
+ALLOWED_HOSTS = _parse_allowed_hosts(
+    part for part in os.environ.get("SONDER_ALLOWED_HOSTS", "").split(",") if part.strip()
+)
 # The validated serve entry point sets this whenever a TLS-terminating proxy
 # fronts the otherwise-loopback runtime. Peer-address checks alone cannot tell
 # that proxy apart from a direct local browser.
@@ -957,6 +978,8 @@ def configure_typed_config(config) -> None:
         _serve_logger.warning("api-key auth mode downgraded to local-open: no API key configured on loopback bind")
         AUTH_MODE = "local-open"
     CORS_ORIGINS = frozenset(server_config.cors_origins)
+    global ALLOWED_HOSTS
+    ALLOWED_HOSTS = _parse_allowed_hosts(server_config.allowed_hosts)
     TLS_TERMINATED_BY_PROXY = server_config.tls_terminated_by_proxy
     ALLOW_REGISTRATION = server_config.allow_registration
     MAX_REQUEST_BYTES = max(1, min(16 * 1024 * 1024, server_config.max_request_bytes))
@@ -4107,6 +4130,8 @@ class Handler(BaseHTTPRequestHandler):
         self._app_control_request = False
         self._memory_replication_request = False
         self._spanda_headers = None
+        if self._reject_disallowed_host():
+            return
         if handle_memory_replication(
                 self, "OPTIONS", _MEMORY_REPLICATION_RECEIVER):
             return
@@ -4125,6 +4150,42 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
         self.send_header("X-Sonder-Elapsed-Ms", "0")
         self.end_headers()
+
+    def _listener_port(self):
+        server_address = getattr(getattr(self, "server", None), "server_address", None)
+        if isinstance(server_address, tuple) and len(server_address) >= 2:
+            port = server_address[1]
+            if type(port) is int and port > 0:
+                return port
+        return BOUND_PORT or CONFIGURED_PORT
+
+    def _reject_disallowed_host(self):
+        """Refuse a request whose Host does not name this listener (421).
+
+        Runs before any routing, including the private transfer and
+        replication surfaces, so a DNS-rebinding page can reach nothing.
+        """
+        headers = getattr(self, "headers", None)
+        if headers is None:
+            return False
+        values = headers.get_all("Host") if hasattr(headers, "get_all") else None
+        if values is not None and len(values) > 1:
+            allowed = False
+        else:
+            allowed = host_allowed(
+                headers.get("Host"), bind_host=HOST,
+                bound_port=self._listener_port(), allowed_hosts=ALLOWED_HOSTS,
+            )
+        if allowed:
+            return False
+        _serve_logger.warning("request refused: Host header does not name this listener")
+        self.close_connection = True
+        self._send_json_payload(
+            {"error": {"message": "host is not allowed for this listener",
+                       "type": "invalid_request", "code": "HOST_NOT_ALLOWED"}},
+            status=421, headers={"Connection": "close", "Cache-Control": "no-store"},
+        )
+        return True
 
     def _reject_disallowed_origin(self):
         origin = self.headers.get("Origin")
@@ -4155,23 +4216,18 @@ class Handler(BaseHTTPRequestHandler):
         return self.client_address[0] if self.client_address else ""
 
     def _client_ip(self):
-        """Resolve client IP through X-Forwarded-For when peer is a trusted proxy."""
-        peer = self._peer()
-        if not peer:
-            return peer
-        try:
-            peer_addr = ipaddress.ip_address(peer)
-        except ValueError:
-            return peer
-        if not any(peer_addr in net for net in _TRUSTED_PROXY_NETWORKS):
-            return peer
-        xff = self.headers.get("X-Forwarded-For", "")
-        if not xff:
-            return peer
-        parts = [p.strip() for p in xff.split(",") if p.strip()]
-        if not parts:
-            return peer
-        return parts[0]
+        """Resolve the client IP; X-Forwarded-For only via a declared proxy.
+
+        A loopback peer is not by itself a proxy: without the operator's
+        ``tls_terminated_by_proxy`` declaration any local process could rotate
+        the header to dodge the authentication-failure limiter, or to spend
+        another address's budget.
+        """
+        return forwarded_client_ip(
+            self._peer(), self.headers.get("X-Forwarded-For", ""),
+            proxy_declared=TLS_TERMINATED_BY_PROXY,
+            trusted_networks=_TRUSTED_PROXY_NETWORKS,
+        )
 
     def _correlation(self):
         if not getattr(self, "_correlation_id", ""):
@@ -4655,6 +4711,8 @@ class Handler(BaseHTTPRequestHandler):
         self._app_control_request = False
         self._memory_replication_request = False
         self._spanda_headers = None
+        if self._reject_disallowed_host():
+            return
         if handle_memory_replication(
                 self, "PUT", _MEMORY_REPLICATION_RECEIVER):
             return
@@ -4696,6 +4754,8 @@ class Handler(BaseHTTPRequestHandler):
         self._app_control_request = False
         self._memory_replication_request = False
         self._spanda_headers = None
+        if self._reject_disallowed_host():
+            return
         if handle_memory_replication(
                 self, "GET", _MEMORY_REPLICATION_RECEIVER):
             return
@@ -5749,6 +5809,9 @@ class Handler(BaseHTTPRequestHandler):
         self._app_control_request = False
         self._memory_replication_request = False
         self._spanda_headers = None
+        self._early_stream = None
+        if self._reject_disallowed_host():
+            return
         if handle_memory_replication(
                 self, "POST", _MEMORY_REPLICATION_RECEIVER):
             return

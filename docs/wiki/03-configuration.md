@@ -44,7 +44,12 @@ max_request_bytes = 1048576
 max_concurrent_requests = 4
 request_timeout_seconds = 300
 tls_terminated_by_proxy = true      # reference TLS-proxy deployment; also hides the local log dashboard
-trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
+trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]  # X-Forwarded-For is read only with tls_terminated_by_proxy = true
+allowed_hosts = []                  # extra Host names ("name" or "name:port"); others get 421
+work_wait_seconds = 240             # routed chat work: wait before answering with a work-run id
+work_budget_seconds = 1800          # routed chat work: wall-clock budget, then effects are refused
+work_max_running = 2                # concurrent routed work runs
+stream_heartbeat_seconds = 15       # SSE keep-alive interval while a streamed turn generates
 
 [state]
 home = "/var/lib/sonder"
@@ -189,7 +194,10 @@ Lean reports the pinned version.
 
 Serving/auth: `SONDER_API_KEY`, `SONDER_HOST`, `SONDER_PORT`,
 `SONDER_AUTH_MODE`, `SONDER_AUTH_SECRET`, `SONDER_MAX_REQUEST_BYTES`,
-`SONDER_MAX_CONCURRENT_REQUESTS`, `SONDER_QUEUE_DEPTH`, `SONDER_CORS_ORIGINS`.
+`SONDER_MAX_CONCURRENT_REQUESTS`, `SONDER_QUEUE_DEPTH`, `SONDER_CORS_ORIGINS`,
+`SONDER_ALLOWED_HOSTS` (comma-separated `[server].allowed_hosts`),
+`SONDER_HTTP_WORK_WAIT_SECONDS`, `SONDER_HTTP_WORK_BUDGET_SECONDS`,
+`SONDER_HTTP_WORK_MAX_RUNNING`, `SONDER_STREAM_HEARTBEAT_SECONDS`.
 
 Orchestration: `SONDER_MAX_WORKER_CAP` lowers the absolute ceiling for explicit
 per-run `worker_cap` requests. It accepts a positive decimal integer only and

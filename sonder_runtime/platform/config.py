@@ -145,6 +145,19 @@ class ServerConfig:
     # non-loopback exposure.  Loopback binding never needs it; non-loopback
     # binding is rejected without it.
     tls_terminated_by_proxy: bool = False
+    # Public names (``host`` or ``host:port``) clients or a proxy may put in
+    # the Host header besides loopback names.  Everything else is refused
+    # with 421 before routing (DNS-rebinding defence).
+    allowed_hosts: tuple[str, ...] = ()
+    # Routed HTTP work (workbench/fleet/autopilot chat turns): how long the
+    # request waits before answering with a work-run id, the wall-clock budget
+    # after which the run may no longer change anything, and how many such
+    # runs may execute at once.
+    work_wait_seconds: int = 240
+    work_budget_seconds: int = 1800
+    work_max_running: int = 2
+    # SSE keep-alive comment interval while a streamed chat turn generates.
+    stream_heartbeat_seconds: int = 15
 
 
 @dataclass(frozen=True)
@@ -611,6 +624,41 @@ def _is_exact_string(value: object) -> bool:
 
 def _has_minimum_api_key(value: object) -> bool:
     return _is_exact_string(value) and len(value) >= MIN_API_KEY_LENGTH
+
+
+_ALLOWED_HOST_NAME = re.compile(
+    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*"
+)
+
+
+def _valid_allowed_host(entry: object) -> bool:
+    """``name``, ``name:port``, ``ip:port`` or ``[v6]:port`` (case-insensitive)."""
+    if not _is_exact_string(entry) or not 1 <= len(entry) <= 260:
+        return False
+    entry = entry.lower()
+    port = ""
+    if entry.startswith("["):
+        name, sep, rest = entry[1:].partition("]")
+        if not sep or (rest and not rest.startswith(":")):
+            return False
+        port = rest[1:] if rest else ""
+        try:
+            if ipaddress.ip_address(name).version != 6:
+                return False
+        except ValueError:
+            return False
+    else:
+        name, sep, port = entry.partition(":")
+        if sep and not port:
+            return False
+        try:
+            ipaddress.ip_address(name)
+        except ValueError:
+            if len(name) > 253 or not _ALLOWED_HOST_NAME.fullmatch(name):
+                return False
+    if port and not (port.isdigit() and len(port) <= 5 and 1 <= int(port) <= 65535):
+        return False
+    return True
 
 
 def _is_loopback_host(host: object) -> bool:
@@ -1112,12 +1160,32 @@ def _apply_environment(
             server.session_state_owner_limit, errors,
         ),
         train_max_n=_env_int("SONDER_TRAIN_MAX_N", env, server.train_max_n, errors),
+        work_wait_seconds=_env_int(
+            "SONDER_HTTP_WORK_WAIT_SECONDS", env, server.work_wait_seconds, errors,
+        ),
+        work_budget_seconds=_env_int(
+            "SONDER_HTTP_WORK_BUDGET_SECONDS", env, server.work_budget_seconds, errors,
+        ),
+        work_max_running=_env_int(
+            "SONDER_HTTP_WORK_MAX_RUNNING", env, server.work_max_running, errors,
+        ),
+        stream_heartbeat_seconds=_env_int(
+            "SONDER_STREAM_HEARTBEAT_SECONDS", env, server.stream_heartbeat_seconds, errors,
+        ),
     )
     if "SONDER_CORS_ORIGINS" in env:
         server = replace(
             server,
             cors_origins=tuple(
                 part.strip() for part in env["SONDER_CORS_ORIGINS"].split(",")
+                if part.strip()
+            ),
+        )
+    if "SONDER_ALLOWED_HOSTS" in env:
+        server = replace(
+            server,
+            allowed_hosts=tuple(
+                part.strip() for part in env["SONDER_ALLOWED_HOSTS"].split(",")
                 if part.strip()
             ),
         )
@@ -1459,6 +1527,19 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             ipaddress.ip_network(cidr)
         except ValueError:
             errors.append(f"[server].trusted_proxy_cidrs entry invalid: {cidr!r}")
+    if not 30 <= server.work_budget_seconds <= 86_400:
+        errors.append("[server].work_budget_seconds must be within 30..86400")
+    if not 1 <= server.work_wait_seconds <= server.work_budget_seconds:
+        errors.append("[server].work_wait_seconds must be within 1..work_budget_seconds")
+    if not 1 <= server.work_max_running <= 64:
+        errors.append("[server].work_max_running must be within 1..64")
+    if not 1 <= server.stream_heartbeat_seconds <= 300:
+        errors.append("[server].stream_heartbeat_seconds must be within 1..300")
+    if len(server.allowed_hosts) > 64:
+        errors.append("[server].allowed_hosts accepts at most 64 entries")
+    for entry in server.allowed_hosts:
+        if not _valid_allowed_host(entry):
+            errors.append(f"[server].allowed_hosts entry invalid: {entry!r}")
 
     api_key = getattr(config.secrets, "api_key", None)
     loopback = _is_loopback_host(server_host) if host_is_exact_string else False

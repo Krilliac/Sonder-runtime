@@ -1,0 +1,197 @@
+"""Request-origin policy for the HTTP listener: Host allowlist and client IP.
+
+Two decisions live here because both are about *which peer and which name*
+a request really came through, and both must be made before routing:
+
+* ``host_allowed`` defeats DNS rebinding.  A loopback-bound, local-open
+  listener needs no credentials, and a same-origin browser ``GET`` sends no
+  ``Origin`` header, so the origin check alone cannot tell a rebinding page
+  (``http://rebind.attacker.example:11435``) from the operator's own tools.
+  The ``Host`` header can: a browser always sends the name it resolved, and a
+  rebinding attack only works through a hostname the attacker controls.
+* ``forwarded_client_ip`` decides whether ``X-Forwarded-For`` may name the
+  client.  It may only when the operator declared a TLS-terminating proxy
+  *and* the raw socket peer lies inside the trusted proxy CIDRs; otherwise
+  any local process could rotate the header to dodge the authentication
+  failure limiter or to lock out someone else's address.
+
+Both functions are pure so the policy can be tested without a socket.
+"""
+from __future__ import annotations
+
+import ipaddress
+import re
+from typing import Iterable
+
+__all__ = [
+    "forwarded_client_ip",
+    "host_allowed",
+    "normalize_allowed_host",
+    "parse_host_header",
+]
+
+_HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+_MAX_HOST_HEADER = 1024
+
+
+def _normalize_name(name: str) -> str:
+    name = name.strip().lower()
+    if name.endswith(".") and not name.endswith(".."):
+        name = name[:-1]
+    return name
+
+
+def _valid_dns_name(name: str) -> bool:
+    if not name or len(name) > 253:
+        return False
+    return all(_HOST_LABEL.match(label) for label in name.split("."))
+
+
+def parse_host_header(value) -> tuple[str, int | None] | None:
+    """Split a ``Host`` value into ``(name, port)``; ``None`` when malformed.
+
+    IPv6 literals keep no brackets in the returned name.  A name that is not a
+    syntactically valid DNS name or IP literal is malformed: anything a
+    browser could send for a rebinding page is a DNS name, so rejecting junk
+    here never costs a legitimate client.
+    """
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or len(value) > _MAX_HOST_HEADER:
+        return None
+    port_text = ""
+    if value.startswith("["):
+        end = value.find("]")
+        if end < 0:
+            return None
+        name = value[1:end]
+        rest = value[end + 1:]
+        if rest:
+            if not rest.startswith(":"):
+                return None
+            port_text = rest[1:]
+        try:
+            if ipaddress.ip_address(name).version != 6:
+                return None
+        except ValueError:
+            return None
+        name = name.lower()
+    else:
+        if value.count(":") > 1:
+            # An unbracketed IPv6 literal is not a valid Host (RFC 9110 7.2).
+            return None
+        name, sep, port_text = value.partition(":")
+        if sep and not port_text:
+            return None
+        name = _normalize_name(name)
+        try:
+            ipaddress.ip_address(name)
+        except ValueError:
+            if not _valid_dns_name(name):
+                return None
+    port = None
+    if port_text:
+        if not port_text.isdigit() or len(port_text) > 5:
+            return None
+        port = int(port_text)
+        if not 1 <= port <= 65535:
+            return None
+    return name, port
+
+
+def normalize_allowed_host(entry) -> tuple[str, int | None]:
+    """Validate one configured public host (``name`` or ``name:port``)."""
+    parsed = parse_host_header(entry if isinstance(entry, str) else None)
+    if parsed is None:
+        raise ValueError("allowed host entry must be a DNS name or IP literal with an optional port")
+    return parsed
+
+
+def _ip(name: str):
+    try:
+        return ipaddress.ip_address(name)
+    except ValueError:
+        return None
+
+
+def _is_loopback_name(name: str) -> bool:
+    if name == "localhost":
+        return True
+    address = _ip(name)
+    return bool(address is not None and address.is_loopback)
+
+
+def host_allowed(value, *, bind_host: str, bound_port: int | None,
+                 allowed_hosts: Iterable = ()) -> bool:
+    """Whether a request's ``Host`` header names this listener.
+
+    A missing header is accepted: HTTP/1.0 tooling may omit it and no browser
+    can, so it cannot carry a rebinding attack.  Otherwise the name must be
+
+    * a configured public host (``[server].allowed_hosts``); an entry without
+      a port accepts any port, an entry with a port only that port;
+    * ``localhost`` or a loopback IP literal; or
+    * any IP literal when the listener itself is bound to a non-loopback
+      address (remote clients reach it by address; DNS rebinding needs a name).
+
+    For the last two a port, when present, must be the bound port.
+    """
+    if value is None:
+        return True
+    parsed = parse_host_header(value)
+    if parsed is None:
+        return False
+    name, port = parsed
+    for entry in allowed_hosts or ():
+        try:
+            allowed_name, allowed_port = (
+                entry if isinstance(entry, tuple) else normalize_allowed_host(entry)
+            )
+        except ValueError:
+            continue
+        if name == allowed_name and (allowed_port is None or allowed_port == port):
+            return True
+    port_ok = port is None or bound_port is None or port == bound_port
+    if not port_ok:
+        return False
+    if _is_loopback_name(name):
+        return True
+    bind_loopback = _is_loopback_name(_normalize_name(str(bind_host or "").strip("[]")))
+    if not bind_loopback and _ip(name) is not None:
+        # The unspecified address is never a name a client should use for
+        # this listener; browsers historically routed 0.0.0.0 to localhost.
+        return not _ip(name).is_unspecified
+    return False
+
+
+def forwarded_client_ip(peer: str, forwarded_for: str, *, proxy_declared: bool,
+                        trusted_networks: Iterable) -> str:
+    """Resolve the client address, trusting ``X-Forwarded-For`` only via a proxy.
+
+    The header is consulted only when ``proxy_declared`` (the operator set
+    ``tls_terminated_by_proxy``) and the raw peer is inside a trusted proxy
+    network.  It is then read right to left, skipping trusted proxy hops, so a
+    client-supplied prefix cannot choose the address; the first entry that is
+    not a trusted proxy is the client.  Malformed entries fail back to the
+    peer rather than inventing an address.
+    """
+    peer = str(peer or "")
+    if not peer or not proxy_declared:
+        return peer
+    networks = tuple(trusted_networks or ())
+    try:
+        peer_address = ipaddress.ip_address(peer)
+    except ValueError:
+        return peer
+    if not any(peer_address in net for net in networks):
+        return peer
+    hops = [part.strip() for part in str(forwarded_for or "").split(",") if part.strip()]
+    for hop in reversed(hops):
+        try:
+            address = ipaddress.ip_address(hop)
+        except ValueError:
+            return peer
+        if not any(address in net for net in networks):
+            return str(address)
+    return peer
