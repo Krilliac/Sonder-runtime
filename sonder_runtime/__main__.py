@@ -1149,9 +1149,13 @@ def cmd_mcp(args) -> int:
             return 1
         application = build_application(config=config)
         try:
+            # run_native_mcp returns the number of frames served, not a
+            # status: a session that reached EOF cleanly exits 0.
             if getattr(args, "progressive_tools", False):
-                return run_native_mcp(application, close_compute_on_exit=False, progressive_tools=True)
-            return run_native_mcp(application, close_compute_on_exit=False)
+                run_native_mcp(application, close_compute_on_exit=False, progressive_tools=True)
+            else:
+                run_native_mcp(application, close_compute_on_exit=False)
+            return 0
         finally:
             application.close_providers(timeout=5)
     from sonder_runtime.bootstrap.app import close_default_runtime_resources

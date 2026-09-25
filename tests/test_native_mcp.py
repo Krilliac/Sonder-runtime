@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+
+import pytest
 from types import SimpleNamespace
 
 from sonder_runtime.platform.config import SonderConfig
@@ -50,6 +52,21 @@ def _app():
         "tool_executor": _Executor(),
         "close_providers": lambda self, *, timeout: None,
     })()
+
+
+@pytest.fixture
+def allow_native_tools(monkeypatch):
+    """Answer the runtime permission gate with allow for routing tests.
+
+    Every native call is gated; these tests prove routing, not policy, so
+    they grant the call the way an operator allow rule would.
+    """
+    from sonder_runtime.adapters.security.permission_policy import permission_policy
+
+    monkeypatch.setattr(
+        permission_policy, "decide_for_caller",
+        lambda *_args, **_kwargs: SimpleNamespace(action="allow"),
+    )
 
 
 class _Inspections:
@@ -324,7 +341,7 @@ def test_native_file_edit_schema_is_bounded_and_omits_legacy_bypass_fields():
     assert "approval" not in schema["properties"]
 
 
-def test_native_file_edit_routes_to_canonical_typed_executor():
+def test_native_file_edit_routes_to_canonical_typed_executor(allow_native_tools):
     request = {
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": {"protocolVersion": "2.0", "capabilities": {"tools": {}}},
@@ -360,7 +377,7 @@ def test_native_archive_extract_schema_declares_safe_bounds():
     assert schema["properties"]["max_seconds"]["maximum"] == 60.0
 
 
-def test_native_archive_extract_routes_to_typed_executor():
+def test_native_archive_extract_routes_to_typed_executor(allow_native_tools):
     request = {
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": {"protocolVersion": "2.0", "capabilities": {"tools": {}}},
@@ -395,7 +412,7 @@ def test_native_archive_create_schema_is_bounded_and_omits_legacy_bypass_fields(
     assert "approval" not in schema["properties"]
 
 
-def test_native_archive_create_routes_to_typed_executor():
+def test_native_archive_create_routes_to_typed_executor(allow_native_tools):
     request = {
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": {"protocolVersion": "2.0", "capabilities": {"tools": {}}},
@@ -686,3 +703,86 @@ def test_native_entrypoint_reports_safety_refusal_without_traceback(monkeypatch,
 
     assert entrypoint.cmd_mcp(SimpleNamespace(native=True)) == 2
     assert capsys.readouterr().err == "native MCP startup refused: elevated host\n"
+
+
+_UNGATED_BEFORE = {
+    # native name -> (arguments, the name the permission catalog grades)
+    "run_program": ({"program": "id"}, "workspace_run"),
+    "workspace_run": ({"program": "id"}, "workspace_run"),
+    "run_script": ({"path": "tool.py"}, "run_script"),
+    "archive_create": ({"root": "p", "inputs_json": "[]", "destination": "a.zip"}, "archive_create"),
+    "archive_extract": ({"source": "a.zip", "destination": "out"}, "archive_extract"),
+    "fetch_artifact": ({"url": "https://example.test/a.bin", "dest": "a.bin"}, "fetch_artifact"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_UNGATED_BEFORE))
+def test_native_host_program_and_write_tools_obey_runtime_permission_policy(monkeypatch, name):
+    """Every native tool answers to the runtime permission modes.
+
+    The typed file family and compute already did; host programs, archive
+    writes, and artifact downloads reached the packaged executor with no gate,
+    so `plan` or `manual` did not stop a native client running `id`.
+    """
+    from sonder_runtime.adapters.security.permission_policy import permission_policy
+
+    arguments, graded = _UNGATED_BEFORE[name]
+    decided = []
+
+    def deny(tool, **kwargs):
+        decided.append((tool, kwargs))
+        return SimpleNamespace(action="deny", reason="refused for test", call_id="c1")
+
+    monkeypatch.setattr(permission_policy, "decide_for_caller", deny)
+
+    class _Refuse:
+        def execute(self, call, context):
+            raise AssertionError("a denied native tool must not execute")
+
+    app = _app()
+    app.tool_executor = _Refuse()
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2.0", "capabilities": {"tools": {}},
+        }},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": name, "arguments": arguments,
+        }},
+    ]
+    output = io.StringIO()
+    run_native_mcp(
+        app,
+        input_stream=io.StringIO("\n".join(json.dumps(item) for item in requests) + "\n"),
+        output_stream=output,
+    )
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert rows[1]["result"]["isError"] is True
+    assert rows[1]["result"]["error"] == "permission_denied"
+    assert rows[1]["result"]["evidence"]["call_id"] == "c1"
+    assert decided[0][0] == graded
+    assert decided[0][1]["interactive"] is False
+    assert decided[0][1]["surface"] == "native-mcp"
+    assert decided[0][1]["arguments"] == arguments
+
+
+def test_native_entrypoint_exit_status_is_not_the_frame_count(monkeypatch):
+    """`run_native_mcp` returns frames handled; the process must exit 0.
+
+    Returning it from `cmd_mcp` made a clean session exit with status N mod
+    256 (a 41-frame session exited 41), which supervisors read as a crash.
+    """
+    import sonder_runtime.__main__ as entrypoint
+    import sonder_runtime.adapters.security.unsafe_lab as unsafe_lab
+    import sonder_runtime.bootstrap.app as bootstrap_app
+    import sonder_runtime.bootstrap.native_mcp as native_mcp
+    from sonder_runtime.adapters.persistence import migrations
+
+    monkeypatch.setattr(unsafe_lab, "require_startup", lambda: None)
+    monkeypatch.setattr(entrypoint, "_load_config", lambda _args: SonderConfig())
+    monkeypatch.setattr(entrypoint, "_configure_typed_home", lambda _config: None)
+    monkeypatch.setattr(entrypoint, "_export_runtime_environment", lambda *_a, **_k: None)
+    monkeypatch.setattr(migrations, "migrate_all", lambda **_kwargs: None)
+    monkeypatch.setattr(bootstrap_app, "build_application", lambda **_kwargs: _app())
+    monkeypatch.setattr(native_mcp, "run_native_mcp", lambda _app, **_kwargs: 41)
+
+    assert entrypoint.cmd_mcp(SimpleNamespace(native=True)) == 0

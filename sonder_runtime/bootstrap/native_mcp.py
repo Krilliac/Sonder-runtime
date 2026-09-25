@@ -954,7 +954,36 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                         "evidence": {"tool": canonical_name},
                     }
             return compute_result(canonical_name, canonical_arguments)
-        cloud_consent = bool(canonical_arguments.pop("consent", False)) if canonical_name in {"web_fetch", "web_search", "weather_lookup", "approximate_location_lookup"} else False
+        typed_tools = getattr(application, "tools", None)
+        typed_route = canonical_name in _TYPED_TOOL_NAMES and typed_tools is not None
+        if not typed_route:
+            # The typed gateway applies the runtime permission modes itself;
+            # every other native tool is gated here, as the legacy MCP surface
+            # gates each call, so `plan`/`manual` hold for host programs,
+            # archive writes, and downloads too. Graded under the name the
+            # permission catalog knows; the call's own arguments let a
+            # one-shot console approval of exactly this call answer it.
+            from ..adapters.security.permission_policy import permission_policy
+
+            graded = _GRADED_NAMES.get(canonical_name, canonical_name)
+            try:
+                decision = permission_policy.decide_for_caller(
+                    graded, interactive=False, gate_control_exempt=False,
+                    surface="native-mcp", arguments=dict(arguments),
+                )
+            finally:
+                permission_policy.forget_spent_approval()
+            if decision is not None and decision.action != permission_policy.allow_action():
+                logger.warning(f"native tool {canonical_name!r} denied by runtime permission policy")
+                return {
+                    "output": "permission gate refused %s: %s" % (
+                        canonical_name, getattr(decision, "reason", "") or "denied"),
+                    "isError": True,
+                    "error": "permission_denied",
+                    "evidence": {"tool": canonical_name,
+                                 "call_id": getattr(decision, "call_id", "")},
+                }
+        cloud_consent =bool(canonical_arguments.pop("consent", False)) if canonical_name in {"web_fetch", "web_search", "weather_lookup", "approximate_location_lookup"} else False
         if cloud_consent:
             context = local_owner_context(
                 correlation_id=context.correlation_id,
@@ -990,8 +1019,7 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                 "error": None,
                 "evidence": {"model": vision.model, "tier": vision.tier},
             }
-        typed_tools = getattr(application, "tools", None)
-        if canonical_name in _TYPED_TOOL_NAMES and typed_tools is not None:
+        if typed_route:
             logger.debug(f"routing to typed tool gateway: {canonical_name!r}")
             return typed_result(typed_tools, canonical_name, canonical_arguments, context, selected)
         if canonical_name in _INSPECTION_NAMES:
