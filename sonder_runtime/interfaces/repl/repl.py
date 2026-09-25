@@ -14,12 +14,14 @@ import inspect
 import os
 import re
 import shutil
+import signal
 import sys
 import threading
 import time
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 
 from sonder_runtime.domain.common.errors import DependencyUnavailable
+from sonder_runtime.application import foreground_turns
 import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
 from sonder_runtime.adapters.observability.repl_formatting import (
     elapsed_label as _elapsed_label,
@@ -1557,6 +1559,47 @@ class _WorkingIndicator:
             pass
 
 
+@contextmanager
+def _interruptible_turn():
+    """Run one REPL turn in its own cancellable foreground scope.
+
+    While the turn runs, SIGINT first cancels the turn's scope in the shared
+    cancellation tree -- so every cooperative checkpoint below it (model
+    requests, agent steps) refuses further work -- and then raises
+    ``KeyboardInterrupt`` to unwind the blocking call.  The caller turns that
+    into "turn cancelled, back to the prompt"; only an interrupt at the idle
+    prompt ends the session.  The previous SIGINT disposition is restored when
+    the turn ends.
+    """
+    with foreground_turns.foreground_turn("repl-turn") as node:
+        installed = False
+        previous = None
+
+        def on_interrupt(signum, frame):
+            foreground_turns.cancel(node)
+            raise KeyboardInterrupt
+
+        if threading.current_thread() is threading.main_thread():
+            try:
+                previous = signal.signal(signal.SIGINT, on_interrupt)
+                installed = True
+            except (ValueError, OSError):
+                installed = False
+        try:
+            yield node
+        except KeyboardInterrupt:
+            # Also cancel when the interrupt did not come through the handler
+            # (a test double, or a platform that raises it directly).
+            foreground_turns.cancel(node)
+            raise
+        finally:
+            if installed:
+                signal.signal(
+                    signal.SIGINT,
+                    previous if previous is not None else signal.default_int_handler,
+                )
+
+
 def _begin_chat_turn(label="Sonder"):
     """Acknowledge an interactive submission before synchronous work begins."""
     if not (_console_has_operator() and _stdout_is_interactive()):
@@ -2248,6 +2291,22 @@ def main(*, machine_output=False):
         last_turn_metrics = _latest_repl_turn_metrics(surfaces=("agent",))
         _print_chat_result(out, started_at, label="Sonder work", indicator=indicator)
 
+    def announce_interrupted_turn():
+        nonlocal last_iid, last_response, last_run_source, last_turn_metrics
+        # Nothing from the cancelled turn may be rated, re-run, or reported as
+        # the latest answer; clear the per-turn handles instead of leaving the
+        # previous turn's attached to what the operator abandoned.
+        last_iid = None
+        last_response = None
+        last_run_source = None
+        last_turn_metrics = None
+        print()
+        print(_paint(
+            "interrupted: turn cancelled. Press Ctrl-C again at the prompt"
+            " (or Ctrl-D, or /exit) to quit.",
+            _Ansi.muted,
+        ))
+
     def apply_trace(val):
         nonlocal trace
         trace = val
@@ -2575,7 +2634,11 @@ def main(*, machine_output=False):
         if queued_workspace_work:
             task = queued_workspace_work
             queued_workspace_work = ""
-            run_workspace_work(task)
+            try:
+                with _interruptible_turn():
+                    run_workspace_work(task)
+            except KeyboardInterrupt:
+                announce_interrupted_turn()
             continue
         try:
             prompt = "" if machine_output else _composer_title(
@@ -2605,674 +2668,682 @@ def main(*, machine_output=False):
 
         # PowerShell 5.1 may prefix the first piped UTF-8 line with a BOM. Treat
         # it as transport framing so slash commands remain commands.
-        line = _normalize_input_line(line)
-        if not line:
-            continue
-        if pending_workspace_work and not line.startswith("/"):
-            workspace_reply = _workspace_reply_command(line)
-            if workspace_reply:
-                print(_paint("(interpreted as: %s)" % workspace_reply, _Ansi.muted))
-                line = workspace_reply
-        if _history_safe(line) and (not input_history or input_history[-1] != line):
-            input_history.append(line)
-            if len(input_history) > REPL_HISTORY_LIMIT:
-                del input_history[:-REPL_HISTORY_LIMIT]
-        _maybe_live_reload()
-
-        # Natural-language command resolution: "show me your stats" -> /stats,
-        # "which model should handle X" -> /route X, "read file foo.py" ->
-        # /read foo.py. The resolved slash line flows into the ordinary
-        # dispatch below, so every command has exactly one implementation and
-        # the slash form stays the precise way to invoke it. Unmatched turns
-        # fall through untouched to feedback/intent/work/chat handling.
-        if not line.startswith("/"):
-            last_natural_turn = line
-            resolved = command_router.resolve(line)
-            if resolved:
-                print(_paint("(interpreted as: %s)" % resolved, _Ansi.muted))
-                line = resolved
-
-        if _looks_like_slash_command(line):
-            parts = line.split(None, 1)
-            cmd = parts[0].lower()
-            arg = parts[1] if len(parts) > 1 else ""
-
-            # One choke point for every hand-written branch below, including
-            # the ones forwarded to server.control_command. Commands handled by
-            # _run_catalogued (the `else`) are gated there instead.
-            may_run, refusal = _named_command_gate(cmd, arg)
-            if not may_run:
-                box = _box_chars()
-                if _stdout_is_interactive() and refusal.startswith("refused "):
-                    print("%s %s" % (
-                        _paint(box["refused"], _Ansi.red, _Ansi.bold),
-                        _paint(refusal, _Ansi.red),
-                    ))
-                    hint = _error_hint(refusal)
-                    if hint:
-                        print(_paint("  %s" % hint, _Ansi.muted))
-                else:
-                    print(refusal)
-                continue
-
-            if cmd == "/":
-                # A bare slash is the "what can I type" gesture.
-                print(command_catalog.format_matches(""))
-            elif cmd == "/help":
-                print(command_catalog.help_text(arg.strip()))
-            elif cmd == "/why":
-                # A diagnostic read over the resolver's own trace: which stage
-                # claimed (or refused) a plain-language turn, and on what
-                # evidence. Never dispatches anything.
-                target = arg.strip() or last_natural_turn
-                if not target:
-                    print(
-                        "usage: /why [text]  explain how a plain-language turn"
-                        " routes; the bare form uses your previous non-slash"
-                        " turn"
-                    )
-                else:
-                    print(_format_route_explanation(
-                        command_router.explain(target)
-                    ))
-            elif cmd == "/version":
-                # Display only: the version literal plus the release stamp
-                # when the install has one. Deliberately no git probe here --
-                # starting a process would break the display-only claim the
-                # permission-gate coverage floor checks this branch against.
-                from sonder_runtime.platform import version as build_identity
-
-                stamped = build_identity.stamped_build_info()
-                if stamped is not None:
-                    print("sonder %s (commit %s, stamped release)" % (
-                        stamped.version, stamped.commit_sha[:12],
-                    ))
-                else:
-                    print("sonder %s (source checkout)"
-                          % build_identity.VERSION)
-            elif cmd == "/clear":
-                _clear_terminal_scrollback()
-            elif cmd == "/trace":
-                apply_trace(_on_off(arg, trace))
-            elif cmd == "/strict":
-                apply_strict(_on_off(arg, strict))
-            elif cmd == "/persona":
-                do_persona(arg)
-            elif cmd == "/model":
-                do_model(arg)
-            elif cmd == "/cloud":
-                print(server.cloud_opt_in(arg.strip() or "status"))
-            elif cmd == "/consult":
-                do_consult(arg)
-            elif cmd == "/route":
-                do_route(arg)
-            elif cmd == "/refactor":
-                do_refactor(arg)
-            elif cmd in ("/env", "/environment"):
-                print(server.environment_status(
-                    refresh=(arg or "").strip().lower() == "refresh"))
-            elif cmd in ("/toolstatus", "/toolversion"):
-                name = (arg or "").strip()
-                if not name:
-                    print("usage: /toolstatus <discovered-tool-name>  (try /env first)")
-                else:
-                    print(server.toolchain_status(name=name))
-            elif cmd == "/scaffold":
-                parts = arg.split()
-                if len(parts) < 2:
-                    print("usage: /scaffold <kind> <name> [root]   kinds: %s"
-                          % ", ".join(project_scaffold.kinds()))
-                else:
-                    kind, name = parts[0], parts[1]
-                    root = parts[2] if len(parts) > 2 else name
-                    print(server.scaffold_project(
-                        kind=kind, name=name, root=root, apply=True))
-            elif cmd == "/workspace":
-                do_workspace_select(arg)
-            elif cmd in ("/workspace-create", "/workspacecreate"):
-                do_workspace_create(arg)
-            elif cmd == "/location":
-                a = (arg or "").strip().lower()
-                if a in ("on", "off"):
-                    location_consent = a == "on"
-                elif a:
-                    print("usage: /location [on|off]")
+        try:
+            with _interruptible_turn():
+                line = _normalize_input_line(line)
+                if not line:
                     continue
-                effective = (
-                    server._env_location_consent()
-                    if location_consent is None else location_consent
-                )
-                print("approximate IP location: %s%s" % (
-                    "on" if effective else "off",
-                    " (env default)" if location_consent is None else "",
-                ))
-            elif cmd == "/stats":
-                print(server.sonder_stats())
-            elif cmd == "/context":
-                print(server.context_health(session=session_id, project=project))
-            elif cmd in ("/contextsize", "/ctxsize"):
-                if arg.strip():
-                    print(server.set_context_size(arg.strip()))
-                else:
-                    print(server.context_policy_status())
-            elif cmd in ("/compact", "/compaction"):
-                print(server.context_compaction_plan(session=session_id, project=project))
-            elif cmd in ("/commands", "/cmds"):
-                print(server.command_registry_list(arg.strip()))
-            elif cmd == "/dump":
-                do_dump(arg.strip() or "repl")
-            elif cmd in ("/permissions", "/perms"):
-                print(server.permission_policy(arg.strip()))
-            elif cmd == "/mode":
-                print(_mode_command(arg.strip()))
-            elif cmd in ("/todo", "/task", "/tasks"):
-                text = arg.strip()
-                if not text or text.lower() in ("list", "ls"):
-                    print(server.task_list(project=project))
-                else:
-                    action, _, rest = text.partition(" ")
-                    action = action.lower()
-                    if action in ("add", "create", "new"):
-                        print(server.task_create(title=rest.strip(), project=project))
-                    elif action in ("done", "complete", "finish"):
-                        if rest.strip():
-                            print(server.task_update(task_id=rest.strip(), status="done"))
+                if pending_workspace_work and not line.startswith("/"):
+                    workspace_reply = _workspace_reply_command(line)
+                    if workspace_reply:
+                        print(_paint("(interpreted as: %s)" % workspace_reply, _Ansi.muted))
+                        line = workspace_reply
+                if _history_safe(line) and (not input_history or input_history[-1] != line):
+                    input_history.append(line)
+                    if len(input_history) > REPL_HISTORY_LIMIT:
+                        del input_history[:-REPL_HISTORY_LIMIT]
+                _maybe_live_reload()
+
+                # Natural-language command resolution: "show me your stats" -> /stats,
+                # "which model should handle X" -> /route X, "read file foo.py" ->
+                # /read foo.py. The resolved slash line flows into the ordinary
+                # dispatch below, so every command has exactly one implementation and
+                # the slash form stays the precise way to invoke it. Unmatched turns
+                # fall through untouched to feedback/intent/work/chat handling.
+                if not line.startswith("/"):
+                    last_natural_turn = line
+                    resolved = command_router.resolve(line)
+                    if resolved:
+                        print(_paint("(interpreted as: %s)" % resolved, _Ansi.muted))
+                        line = resolved
+
+                if _looks_like_slash_command(line):
+                    parts = line.split(None, 1)
+                    cmd = parts[0].lower()
+                    arg = parts[1] if len(parts) > 1 else ""
+
+                    # One choke point for every hand-written branch below, including
+                    # the ones forwarded to server.control_command. Commands handled by
+                    # _run_catalogued (the `else`) are gated there instead.
+                    may_run, refusal = _named_command_gate(cmd, arg)
+                    if not may_run:
+                        box = _box_chars()
+                        if _stdout_is_interactive() and refusal.startswith("refused "):
+                            print("%s %s" % (
+                                _paint(box["refused"], _Ansi.red, _Ansi.bold),
+                                _paint(refusal, _Ansi.red),
+                            ))
+                            hint = _error_hint(refusal)
+                            if hint:
+                                print(_paint("  %s" % hint, _Ansi.muted))
                         else:
-                            print("usage: /todo done <task-id>")
-                    elif action in ("start", "doing"):
-                        if rest.strip():
-                            print(server.task_update(task_id=rest.strip(), status="in_progress"))
+                            print(refusal)
+                        continue
+
+                    if cmd == "/":
+                        # A bare slash is the "what can I type" gesture.
+                        print(command_catalog.format_matches(""))
+                    elif cmd == "/help":
+                        print(command_catalog.help_text(arg.strip()))
+                    elif cmd == "/why":
+                        # A diagnostic read over the resolver's own trace: which stage
+                        # claimed (or refused) a plain-language turn, and on what
+                        # evidence. Never dispatches anything.
+                        target = arg.strip() or last_natural_turn
+                        if not target:
+                            print(
+                                "usage: /why [text]  explain how a plain-language turn"
+                                " routes; the bare form uses your previous non-slash"
+                                " turn"
+                            )
                         else:
-                            print("usage: /todo start <task-id>")
-                    elif action in ("block", "blocked"):
-                        if rest.strip():
-                            print(server.task_update(task_id=rest.strip(), status="blocked"))
+                            print(_format_route_explanation(
+                                command_router.explain(target)
+                            ))
+                    elif cmd == "/version":
+                        # Display only: the version literal plus the release stamp
+                        # when the install has one. Deliberately no git probe here --
+                        # starting a process would break the display-only claim the
+                        # permission-gate coverage floor checks this branch against.
+                        from sonder_runtime.platform import version as build_identity
+
+                        stamped = build_identity.stamped_build_info()
+                        if stamped is not None:
+                            print("sonder %s (commit %s, stamped release)" % (
+                                stamped.version, stamped.commit_sha[:12],
+                            ))
                         else:
-                            print("usage: /todo block <task-id>")
-                    elif action in ("show", "view"):
-                        if rest.strip():
-                            print(server.task_show(rest.strip()))
+                            print("sonder %s (source checkout)"
+                                  % build_identity.VERSION)
+                    elif cmd == "/clear":
+                        _clear_terminal_scrollback()
+                    elif cmd == "/trace":
+                        apply_trace(_on_off(arg, trace))
+                    elif cmd == "/strict":
+                        apply_strict(_on_off(arg, strict))
+                    elif cmd == "/persona":
+                        do_persona(arg)
+                    elif cmd == "/model":
+                        do_model(arg)
+                    elif cmd == "/cloud":
+                        print(server.cloud_opt_in(arg.strip() or "status"))
+                    elif cmd == "/consult":
+                        do_consult(arg)
+                    elif cmd == "/route":
+                        do_route(arg)
+                    elif cmd == "/refactor":
+                        do_refactor(arg)
+                    elif cmd in ("/env", "/environment"):
+                        print(server.environment_status(
+                            refresh=(arg or "").strip().lower() == "refresh"))
+                    elif cmd in ("/toolstatus", "/toolversion"):
+                        name = (arg or "").strip()
+                        if not name:
+                            print("usage: /toolstatus <discovered-tool-name>  (try /env first)")
                         else:
-                            print("usage: /todo show <task-id>")
-                    elif action == "plan":
-                        # "/todo plan Build auth | design schema | add API"
-                        parts = [p.strip() for p in rest.split("|")]
-                        parts = [p for p in parts if p]
+                            print(server.toolchain_status(name=name))
+                    elif cmd == "/scaffold":
+                        parts = arg.split()
                         if len(parts) < 2:
-                            print("usage: /todo plan <title> | <step> | <step> ...")
+                            print("usage: /scaffold <kind> <name> [root]   kinds: %s"
+                                  % ", ".join(project_scaffold.kinds()))
                         else:
-                            print(server.task_plan(
-                                title=parts[0],
-                                steps=json.dumps(parts[1:]),
-                                project=project,
-                                owner="sonder",
-                            ))
-                    elif action in ("progress", "status"):
-                        print(server.task_progress(project=project))
-                    elif action in ("delete", "rm", "remove"):
-                        if rest.strip():
-                            print(server.task_delete(task_id=rest.strip()))
-                        else:
-                            print("usage: /todo delete <task-id>")
-                    elif action in ("depend", "dep", "blockedby"):
-                        # "/todo depend <task-id> <depends-on-id>"
-                        dep_parts = rest.split()
-                        if len(dep_parts) == 2:
-                            print(server.task_depend(
-                                task_id=dep_parts[0], depends_on=dep_parts[1],
-                            ))
-                        else:
-                            print("usage: /todo depend <task-id> <depends-on-id>")
-                    else:
-                        print(
-                            "usage: /todo [list] | /todo add <title> | /todo start <id> | "
-                            "/todo done <id> | /todo block <id> | /todo show <id>\n"
-                            "       /todo plan <title> | <step> | <step> ...\n"
-                            "       /todo progress | /todo delete <id> | "
-                            "/todo depend <id> <depends-on-id>"
+                            kind, name = parts[0], parts[1]
+                            root = parts[2] if len(parts) > 2 else name
+                            print(server.scaffold_project(
+                                kind=kind, name=name, root=root, apply=True))
+                    elif cmd == "/workspace":
+                        do_workspace_select(arg)
+                    elif cmd in ("/workspace-create", "/workspacecreate"):
+                        do_workspace_create(arg)
+                    elif cmd == "/location":
+                        a = (arg or "").strip().lower()
+                        if a in ("on", "off"):
+                            location_consent = a == "on"
+                        elif a:
+                            print("usage: /location [on|off]")
+                            continue
+                        effective = (
+                            server._env_location_consent()
+                            if location_consent is None else location_consent
                         )
-            elif cmd == "/quality":
-                print(server.memory_quality_report())
-            elif cmd == "/qualityfix":
-                print(server.memory_quality_repair(apply=(arg.strip().lower() == "apply")))
-            elif cmd in ("/privacy", "/privacyreview", "/privacyfix", "/embeddings", "/embedfix"):
-                print(server.control_command(line, session=session_id, project=project))
-            elif cmd in ("/emotion", "/emotions", "/vectors", "/mood"):
-                print(server.emotion_command(arg))
-            elif cmd in ("/prefer", "/preference", "/preferences"):
-                print(server.preference_command(arg))
-            elif cmd in ("/improve", "/improvements"):
-                print(server.system_improvement_report(session=session_id, project=project))
-            elif cmd == "/artifact-mobility":
-                print(_artifact_mobility_command(arg))
-            elif cmd == "/lanes":
-                print(_lanes_command(arg))
-            elif cmd == "/recover":
-                print(_recovery_command(session_id, workspace_root, arg))
-            elif cmd == "/recovery":
-                print(_recovery_posture_command())
-            elif cmd in ("/agents", "/masterstatus"):
-                print(server.master_status())
-            elif cmd == "/fanouts":
-                print(_fanout_recent_command(arg))
-            elif cmd in ("/capacity", "/agentcapacity"):
-                print(server.control_command(line, session=session_id, project=project))
-            elif cmd in ("/agentcancel", "/cancelagents"):
-                print(server.control_command(line, session=session_id, project=project))
-            elif cmd in ("/agentretry", "/retryagent"):
-                print(server.control_command(line, session=session_id, project=project))
-            elif cmd in ("/activity", "/tools"):
-                if arg.strip().lower() in ("watch", "tail"):
-                    _watch_activity()
-                else:
-                    print(server.activity_status())
-            elif cmd in ("/autopilot", "/auto", "/mission"):
-                print(server.control_command(
-                    line, session=session_id, project=project,
-                ))
-            elif cmd in (
-                "/runtime", "/models", "/mcp", "/convergence",
-                "/update", "/updatecheck", "/updatesource",
-                "/stash", "/runtime-stash",
-                "/hardware", "/training", "/weighttraining",
-                "/selfmod", "/selfmodify",
-                "/learning", "/learnhealth", "/metrics",
-                "/goal", "/goals", "/ensemble",
-                "/approve", "/approvals",
-            ):
-                # ``/selfmod deploy`` will not accept "nobody to ask" as a yes,
-                # so this branch reports whether anybody was in fact asked.
-                # Reaching here means ``_named_command_gate`` passed; combined
-                # with an operator actually being attached, that is a person
-                # having answered its prompt, because the source-writing forms
-                # of ``/selfmod`` keep its ``dangerous`` grade and so always
-                # prompt outside ``plan`` (the read forms are narrowed to the
-                # read they are and never prompt, and ``_selfmod_command``
-                # consults this flag only for ``deploy`` and ``rollback``).
-                # With a piped stdin the gate refused rather than asked,
-                # nobody said yes, and this is False -- which is the whole
-                # point.
-                print(server.control_command(
-                    line, session=session_id, project=project,
-                    operator_approved=_console_has_operator(),
-                ))
-            elif cmd in ("/weather", "/forecast"):
-                print(server.control_command(
-                    line, session=session_id, project=project,
-                ))
-            elif cmd in ("/work", "/agent"):
-                if not arg.strip():
-                    print("usage: /work <task>")
-                else:
-                    out = _run_session_work(session_id, host_project=project,
-                        prompt=arg.strip(), tier=active_model or active_tier or "auto",
-                        project=workspace_root or project, max_steps=12,
-                    )
-                    last_response = out
-                    last_run_source = _answer_only(out)
-                    last_iid = None
-                    last_turn_metrics = _latest_repl_turn_metrics(surfaces=("agent",))
-                    print(out)
-            elif cmd in (
-                "/report", "/endreport", "/checklist", "/plan",
-                "/inventory", "/workspace",
-                "/tree", "/folders", "/search", "/grep",
-                "/programs", "/programfind", "/scripts", "/scriptfind",
-                "/image", "/inspectimage", "/vision", "/analyzeimage",
-                "/mkdir", "/runprogram", "/runscript",
-                "/artifactcheck", "/verifyartifact", "/groundartifact",
-            ):
-                print(server.control_command(
-                    line, session=session_id, project=project,
-                ))
-            elif cmd in ("/asset", "/assets", "/assetgen", "/artifact"):
-                parts = arg.strip().split(None, 1)
-                if len(parts) != 2:
-                    print("usage: /asset <name> <free-form brief>")
-                else:
-                    print(server.artifact_generate(name=parts[0], brief=parts[1]))
-            elif cmd in ("/forge", "/gamesuite"):
-                print(server.game_reference_suite(name=arg.strip() or "sonder-reference"))
-            elif cmd in ("/game", "/gamegen"):
-                parts = arg.strip().split(None, 2)
-                if len(parts) != 3 or "|" not in parts[2]:
-                    print("usage: /game <language> <2d|2.5d|3d> <name> | <concept>")
-                else:
-                    name, _, concept = parts[2].partition("|")
-                    print(server.game_generate_and_test(
-                        name=name.strip(), concept=concept.strip(),
-                        language=parts[0], dimension=parts[1],
-                    ))
-            elif cmd in ("/gamefleet", "/gamecampaign"):
-                campaign_args = server._parse_game_campaign_command(arg)
-                if campaign_args is None:
-                    print("usage: /gamefleet <name> | <concept> [| language | dimension]")
-                else:
-                    print(server.game_generation_campaign(**campaign_args))
-            elif cmd == "/register":
-                parts = arg.split(None, 1)
-                if len(parts) != 2:
-                    print("usage: /register <username> <password>")
-                else:
-                    print(server.admin_register(parts[0], parts[1]))
-            elif cmd == "/login":
-                parts = arg.split(None, 1)
-                if not parts:
-                    # Do not put a password in the line editor's process-local
-                    # history. The explicit-argument form remains available
-                    # for scripts and backwards compatibility, but an
-                    # interactive login is masked by default.
-                    username = _read_input("username: ").strip()
-                    password = getpass.getpass("password: ")
-                elif len(parts) == 2:
-                    username, password = parts
-                else:
-                    print("usage: /login [<username> <password>]")
-                    continue
-                out = server.admin_login(username, password)
-                # Keep the bearer token for this session; never print it
-                # (scrollback and `repl --json` stdout outlive the session).
-                from ...domain.login_output import split_login_output
-                token, display = split_login_output(out)
-                if token:
-                    CURRENT_TOKEN = token
-                print(display)
-            elif cmd == "/whoami":
-                print(server.admin_whoami(CURRENT_TOKEN))
-            elif cmd == "/admin":
-                print(server.admin_status(CURRENT_TOKEN))
-            elif cmd == "/accounts":
-                print(server.admin_accounts(CURRENT_TOKEN))
-            elif cmd == "/setaccount":
-                parts = arg.split()
-                if not parts:
-                    print("usage: /setaccount <username> role=developer tier=pro dev_flags=x banned=false")
-                else:
-                    kv = {}
-                    for item in parts[1:]:
-                        if "=" in item:
-                            k, v = item.split("=", 1)
-                            kv[k] = v
-                    print(server.admin_set_account(
-                        token=CURRENT_TOKEN,
-                        username=parts[0],
-                        role=kv.get("role", ""),
-                        tier=kv.get("tier", ""),
-                        dev_flags=kv.get("dev_flags", ""),
-                        banned=kv.get("banned", ""),
-                    ))
-            elif cmd in ("/debug", "/inspect"):
-                print(server.debug_inspect(CURRENT_TOKEN))
-            elif cmd in ("/cot", "/chainofthought", "/thoughts"):
-                print(server.admin_private_chain_of_thought(CURRENT_TOKEN))
-            elif cmd == "/filepolicy":
-                print(server.file_policy(token=CURRENT_TOKEN))
-            elif cmd in ("/files", "/find"):
-                print(server.file_find(query=arg.strip() or "*", token=CURRENT_TOKEN))
-            elif cmd == "/read":
-                print(server.file_read(path=arg.strip(), token=CURRENT_TOKEN))
-            elif cmd in ("/write", "/append"):
-                parts = arg.split(None, 1)
-                if len(parts) != 2:
-                    print("usage: %s <path> <text>" % cmd)
-                else:
-                    print(server.file_write(
-                        path=parts[0],
-                        content=parts[1],
-                        mode="append" if cmd == "/append" else "create",
-                        token=CURRENT_TOKEN,
-                    ))
-            elif cmd == "/edit":
-                pieces = arg.split("|", 2)
-                if len(pieces) != 3:
-                    print("usage: /edit <path>|<old>|<new>")
-                else:
-                    print(server.file_edit(
-                        path=pieces[0].strip(),
-                        old=pieces[1],
-                        new=pieces[2],
-                        token=CURRENT_TOKEN,
-                    ))
-            elif cmd == "/delete":
-                print(server.file_delete(path=arg.strip(), dry_run=True, token=CURRENT_TOKEN))
-            elif cmd == "/master":
-                text = arg.strip()
-                mode = "ask"
-                task = text
-                if text:
-                    parts = text.split(None, 1)
-                    mode_alias = {
-                        "delagte": "delegate",
-                        "delegte": "delegate",
-                        "paralell": "parallel",
-                        "inlne": "inline",
-                        "workflow": "fleet",
-                    }
-                    requested_mode = mode_alias.get(parts[0].lower(), parts[0].lower())
-                    if requested_mode in (
-                        "ask", "inline", "master", "delegate",
-                        "delegated", "agents", "parallel", "fleet", "swarm",
-                        "fanout",
+                        print("approximate IP location: %s%s" % (
+                            "on" if effective else "off",
+                            " (env default)" if location_consent is None else "",
+                        ))
+                    elif cmd == "/stats":
+                        print(server.sonder_stats())
+                    elif cmd == "/context":
+                        print(server.context_health(session=session_id, project=project))
+                    elif cmd in ("/contextsize", "/ctxsize"):
+                        if arg.strip():
+                            print(server.set_context_size(arg.strip()))
+                        else:
+                            print(server.context_policy_status())
+                    elif cmd in ("/compact", "/compaction"):
+                        print(server.context_compaction_plan(session=session_id, project=project))
+                    elif cmd in ("/commands", "/cmds"):
+                        print(server.command_registry_list(arg.strip()))
+                    elif cmd == "/dump":
+                        do_dump(arg.strip() or "repl")
+                    elif cmd in ("/permissions", "/perms"):
+                        print(server.permission_policy(arg.strip()))
+                    elif cmd == "/mode":
+                        print(_mode_command(arg.strip()))
+                    elif cmd in ("/todo", "/task", "/tasks"):
+                        text = arg.strip()
+                        if not text or text.lower() in ("list", "ls"):
+                            print(server.task_list(project=project))
+                        else:
+                            action, _, rest = text.partition(" ")
+                            action = action.lower()
+                            if action in ("add", "create", "new"):
+                                print(server.task_create(title=rest.strip(), project=project))
+                            elif action in ("done", "complete", "finish"):
+                                if rest.strip():
+                                    print(server.task_update(task_id=rest.strip(), status="done"))
+                                else:
+                                    print("usage: /todo done <task-id>")
+                            elif action in ("start", "doing"):
+                                if rest.strip():
+                                    print(server.task_update(task_id=rest.strip(), status="in_progress"))
+                                else:
+                                    print("usage: /todo start <task-id>")
+                            elif action in ("block", "blocked"):
+                                if rest.strip():
+                                    print(server.task_update(task_id=rest.strip(), status="blocked"))
+                                else:
+                                    print("usage: /todo block <task-id>")
+                            elif action in ("show", "view"):
+                                if rest.strip():
+                                    print(server.task_show(rest.strip()))
+                                else:
+                                    print("usage: /todo show <task-id>")
+                            elif action == "plan":
+                                # "/todo plan Build auth | design schema | add API"
+                                parts = [p.strip() for p in rest.split("|")]
+                                parts = [p for p in parts if p]
+                                if len(parts) < 2:
+                                    print("usage: /todo plan <title> | <step> | <step> ...")
+                                else:
+                                    print(server.task_plan(
+                                        title=parts[0],
+                                        steps=json.dumps(parts[1:]),
+                                        project=project,
+                                        owner="sonder",
+                                    ))
+                            elif action in ("progress", "status"):
+                                print(server.task_progress(project=project))
+                            elif action in ("delete", "rm", "remove"):
+                                if rest.strip():
+                                    print(server.task_delete(task_id=rest.strip()))
+                                else:
+                                    print("usage: /todo delete <task-id>")
+                            elif action in ("depend", "dep", "blockedby"):
+                                # "/todo depend <task-id> <depends-on-id>"
+                                dep_parts = rest.split()
+                                if len(dep_parts) == 2:
+                                    print(server.task_depend(
+                                        task_id=dep_parts[0], depends_on=dep_parts[1],
+                                    ))
+                                else:
+                                    print("usage: /todo depend <task-id> <depends-on-id>")
+                            else:
+                                print(
+                                    "usage: /todo [list] | /todo add <title> | /todo start <id> | "
+                                    "/todo done <id> | /todo block <id> | /todo show <id>\n"
+                                    "       /todo plan <title> | <step> | <step> ...\n"
+                                    "       /todo progress | /todo delete <id> | "
+                                    "/todo depend <id> <depends-on-id>"
+                                )
+                    elif cmd == "/quality":
+                        print(server.memory_quality_report())
+                    elif cmd == "/qualityfix":
+                        print(server.memory_quality_repair(apply=(arg.strip().lower() == "apply")))
+                    elif cmd in ("/privacy", "/privacyreview", "/privacyfix", "/embeddings", "/embedfix"):
+                        print(server.control_command(line, session=session_id, project=project))
+                    elif cmd in ("/emotion", "/emotions", "/vectors", "/mood"):
+                        print(server.emotion_command(arg))
+                    elif cmd in ("/prefer", "/preference", "/preferences"):
+                        print(server.preference_command(arg))
+                    elif cmd in ("/improve", "/improvements"):
+                        print(server.system_improvement_report(session=session_id, project=project))
+                    elif cmd == "/artifact-mobility":
+                        print(_artifact_mobility_command(arg))
+                    elif cmd == "/lanes":
+                        print(_lanes_command(arg))
+                    elif cmd == "/recover":
+                        print(_recovery_command(session_id, workspace_root, arg))
+                    elif cmd == "/recovery":
+                        print(_recovery_posture_command())
+                    elif cmd in ("/agents", "/masterstatus"):
+                        print(server.master_status())
+                    elif cmd == "/fanouts":
+                        print(_fanout_recent_command(arg))
+                    elif cmd in ("/capacity", "/agentcapacity"):
+                        print(server.control_command(line, session=session_id, project=project))
+                    elif cmd in ("/agentcancel", "/cancelagents"):
+                        print(server.control_command(line, session=session_id, project=project))
+                    elif cmd in ("/agentretry", "/retryagent"):
+                        print(server.control_command(line, session=session_id, project=project))
+                    elif cmd in ("/activity", "/tools"):
+                        if arg.strip().lower() in ("watch", "tail"):
+                            _watch_activity()
+                        else:
+                            print(server.activity_status())
+                    elif cmd in ("/autopilot", "/auto", "/mission"):
+                        print(server.control_command(
+                            line, session=session_id, project=project,
+                        ))
+                    elif cmd in (
+                        "/runtime", "/models", "/mcp", "/convergence",
+                        "/update", "/updatecheck", "/updatesource",
+                        "/stash", "/runtime-stash",
+                        "/hardware", "/training", "/weighttraining",
+                        "/selfmod", "/selfmodify",
+                        "/learning", "/learnhealth", "/metrics",
+                        "/goal", "/goals", "/ensemble",
+                        "/approve", "/approvals",
                     ):
-                        mode = requested_mode
-                        task = parts[1] if len(parts) > 1 else ""
-                print(server.master_orchestrate(task=task, mode=mode))
-            elif cmd == "/lessons":
-                _print_lessons()
-            elif cmd in ("/pass", "/good"):
-                if last_iid:
-                    print(server.record_outcome(last_iid, "tests_passed"))
-                    last_iid = None
-                else:
-                    print("(nothing to record yet)")
-            elif cmd in ("/accept", "/accepted", "/used", "/copied", "/edited"):
-                if last_iid:
-                    signal = {
-                        "/accept": "accepted",
-                        "/accepted": "accepted",
-                        "/used": "used",
-                        "/copied": "copied",
-                        "/edited": "edited",
-                    }[cmd]
-                    print(server.record_outcome(last_iid, signal))
-                    last_iid = None
-                else:
-                    print("(nothing to record yet)")
-            elif cmd in ("/fail", "/bad"):
-                if last_iid:
-                    print(server.record_outcome(last_iid, "failed"))
-                    last_iid = None
-                else:
-                    print("(nothing to record yet)")
-            elif cmd == "/run":
-                timeout = _parse_run_timeout(arg)
-                if timeout is not None:
-                    do_run(timeout)
-            elif cmd in ("/runwindow", "/runnew", "/runconsole"):
-                timeout = _parse_run_timeout(arg)
-                if timeout is not None:
-                    do_run_window(timeout)
-            elif cmd == "/runproject":
-                timeout = _parse_run_timeout(arg)
-                if timeout is not None:
-                    do_runproject(timeout)
-            elif cmd in ("/train", "/learn"):
-                n = _parse_train_n(arg)
-                if n is not None:
-                    _run_train(n)
-            elif cmd == "/new":
-                server._clear_managed_repl_conversation()
-                session_id = memory_store.new_id()
-                last_iid = None
-                last_response = None
-                last_run_source = None
-                last_turn_metrics = None
-                print("started a new thread (%s)" % session_id)
-            elif cmd == "/sessions":
-                _print_sessions()
-            elif cmd == "/replay":
-                do_replay(arg)
-            elif cmd == "/resume":
-                target = (arg or "").strip()
-                if not target:
-                    print("usage: /resume <session-id|title-prefix>")
-                else:
-                    conn = server._open_db()
-                    try:
-                        found = memory_store.find_session(conn, target)
-                    finally:
-                        conn.close()
-                    if found:
+                        # ``/selfmod deploy`` will not accept "nobody to ask" as a yes,
+                        # so this branch reports whether anybody was in fact asked.
+                        # Reaching here means ``_named_command_gate`` passed; combined
+                        # with an operator actually being attached, that is a person
+                        # having answered its prompt, because the source-writing forms
+                        # of ``/selfmod`` keep its ``dangerous`` grade and so always
+                        # prompt outside ``plan`` (the read forms are narrowed to the
+                        # read they are and never prompt, and ``_selfmod_command``
+                        # consults this flag only for ``deploy`` and ``rollback``).
+                        # With a piped stdin the gate refused rather than asked,
+                        # nobody said yes, and this is False -- which is the whole
+                        # point.
+                        print(server.control_command(
+                            line, session=session_id, project=project,
+                            operator_approved=_console_has_operator(),
+                        ))
+                    elif cmd in ("/weather", "/forecast"):
+                        print(server.control_command(
+                            line, session=session_id, project=project,
+                        ))
+                    elif cmd in ("/work", "/agent"):
+                        if not arg.strip():
+                            print("usage: /work <task>")
+                        else:
+                            out = _run_session_work(session_id, host_project=project,
+                                prompt=arg.strip(), tier=active_model or active_tier or "auto",
+                                project=workspace_root or project, max_steps=12,
+                            )
+                            last_response = out
+                            last_run_source = _answer_only(out)
+                            last_iid = None
+                            last_turn_metrics = _latest_repl_turn_metrics(surfaces=("agent",))
+                            print(out)
+                    elif cmd in (
+                        "/report", "/endreport", "/checklist", "/plan",
+                        "/inventory", "/workspace",
+                        "/tree", "/folders", "/search", "/grep",
+                        "/programs", "/programfind", "/scripts", "/scriptfind",
+                        "/image", "/inspectimage", "/vision", "/analyzeimage",
+                        "/mkdir", "/runprogram", "/runscript",
+                        "/artifactcheck", "/verifyartifact", "/groundartifact",
+                    ):
+                        print(server.control_command(
+                            line, session=session_id, project=project,
+                        ))
+                    elif cmd in ("/asset", "/assets", "/assetgen", "/artifact"):
+                        parts = arg.strip().split(None, 1)
+                        if len(parts) != 2:
+                            print("usage: /asset <name> <free-form brief>")
+                        else:
+                            print(server.artifact_generate(name=parts[0], brief=parts[1]))
+                    elif cmd in ("/forge", "/gamesuite"):
+                        print(server.game_reference_suite(name=arg.strip() or "sonder-reference"))
+                    elif cmd in ("/game", "/gamegen"):
+                        parts = arg.strip().split(None, 2)
+                        if len(parts) != 3 or "|" not in parts[2]:
+                            print("usage: /game <language> <2d|2.5d|3d> <name> | <concept>")
+                        else:
+                            name, _, concept = parts[2].partition("|")
+                            print(server.game_generate_and_test(
+                                name=name.strip(), concept=concept.strip(),
+                                language=parts[0], dimension=parts[1],
+                            ))
+                    elif cmd in ("/gamefleet", "/gamecampaign"):
+                        campaign_args = server._parse_game_campaign_command(arg)
+                        if campaign_args is None:
+                            print("usage: /gamefleet <name> | <concept> [| language | dimension]")
+                        else:
+                            print(server.game_generation_campaign(**campaign_args))
+                    elif cmd == "/register":
+                        parts = arg.split(None, 1)
+                        if len(parts) != 2:
+                            print("usage: /register <username> <password>")
+                        else:
+                            print(server.admin_register(parts[0], parts[1]))
+                    elif cmd == "/login":
+                        parts = arg.split(None, 1)
+                        if not parts:
+                            # Do not put a password in the line editor's process-local
+                            # history. The explicit-argument form remains available
+                            # for scripts and backwards compatibility, but an
+                            # interactive login is masked by default.
+                            username = _read_input("username: ").strip()
+                            password = getpass.getpass("password: ")
+                        elif len(parts) == 2:
+                            username, password = parts
+                        else:
+                            print("usage: /login [<username> <password>]")
+                            continue
+                        out = server.admin_login(username, password)
+                        # Keep the bearer token for this session; never print it
+                        # (scrollback and `repl --json` stdout outlive the session).
+                        from ...domain.login_output import split_login_output
+                        token, display = split_login_output(out)
+                        if token:
+                            CURRENT_TOKEN = token
+                        print(display)
+                    elif cmd == "/whoami":
+                        print(server.admin_whoami(CURRENT_TOKEN))
+                    elif cmd == "/admin":
+                        print(server.admin_status(CURRENT_TOKEN))
+                    elif cmd == "/accounts":
+                        print(server.admin_accounts(CURRENT_TOKEN))
+                    elif cmd == "/setaccount":
+                        parts = arg.split()
+                        if not parts:
+                            print("usage: /setaccount <username> role=developer tier=pro dev_flags=x banned=false")
+                        else:
+                            kv = {}
+                            for item in parts[1:]:
+                                if "=" in item:
+                                    k, v = item.split("=", 1)
+                                    kv[k] = v
+                            print(server.admin_set_account(
+                                token=CURRENT_TOKEN,
+                                username=parts[0],
+                                role=kv.get("role", ""),
+                                tier=kv.get("tier", ""),
+                                dev_flags=kv.get("dev_flags", ""),
+                                banned=kv.get("banned", ""),
+                            ))
+                    elif cmd in ("/debug", "/inspect"):
+                        print(server.debug_inspect(CURRENT_TOKEN))
+                    elif cmd in ("/cot", "/chainofthought", "/thoughts"):
+                        print(server.admin_private_chain_of_thought(CURRENT_TOKEN))
+                    elif cmd == "/filepolicy":
+                        print(server.file_policy(token=CURRENT_TOKEN))
+                    elif cmd in ("/files", "/find"):
+                        print(server.file_find(query=arg.strip() or "*", token=CURRENT_TOKEN))
+                    elif cmd == "/read":
+                        print(server.file_read(path=arg.strip(), token=CURRENT_TOKEN))
+                    elif cmd in ("/write", "/append"):
+                        parts = arg.split(None, 1)
+                        if len(parts) != 2:
+                            print("usage: %s <path> <text>" % cmd)
+                        else:
+                            print(server.file_write(
+                                path=parts[0],
+                                content=parts[1],
+                                mode="append" if cmd == "/append" else "create",
+                                token=CURRENT_TOKEN,
+                            ))
+                    elif cmd == "/edit":
+                        pieces = arg.split("|", 2)
+                        if len(pieces) != 3:
+                            print("usage: /edit <path>|<old>|<new>")
+                        else:
+                            print(server.file_edit(
+                                path=pieces[0].strip(),
+                                old=pieces[1],
+                                new=pieces[2],
+                                token=CURRENT_TOKEN,
+                            ))
+                    elif cmd == "/delete":
+                        print(server.file_delete(path=arg.strip(), dry_run=True, token=CURRENT_TOKEN))
+                    elif cmd == "/master":
+                        text = arg.strip()
+                        mode = "ask"
+                        task = text
+                        if text:
+                            parts = text.split(None, 1)
+                            mode_alias = {
+                                "delagte": "delegate",
+                                "delegte": "delegate",
+                                "paralell": "parallel",
+                                "inlne": "inline",
+                                "workflow": "fleet",
+                            }
+                            requested_mode = mode_alias.get(parts[0].lower(), parts[0].lower())
+                            if requested_mode in (
+                                "ask", "inline", "master", "delegate",
+                                "delegated", "agents", "parallel", "fleet", "swarm",
+                                "fanout",
+                            ):
+                                mode = requested_mode
+                                task = parts[1] if len(parts) > 1 else ""
+                        print(server.master_orchestrate(task=task, mode=mode))
+                    elif cmd == "/lessons":
+                        _print_lessons()
+                    elif cmd in ("/pass", "/good"):
+                        if last_iid:
+                            print(server.record_outcome(last_iid, "tests_passed"))
+                            last_iid = None
+                        else:
+                            print("(nothing to record yet)")
+                    elif cmd in ("/accept", "/accepted", "/used", "/copied", "/edited"):
+                        if last_iid:
+                            signal = {
+                                "/accept": "accepted",
+                                "/accepted": "accepted",
+                                "/used": "used",
+                                "/copied": "copied",
+                                "/edited": "edited",
+                            }[cmd]
+                            print(server.record_outcome(last_iid, signal))
+                            last_iid = None
+                        else:
+                            print("(nothing to record yet)")
+                    elif cmd in ("/fail", "/bad"):
+                        if last_iid:
+                            print(server.record_outcome(last_iid, "failed"))
+                            last_iid = None
+                        else:
+                            print("(nothing to record yet)")
+                    elif cmd == "/run":
+                        timeout = _parse_run_timeout(arg)
+                        if timeout is not None:
+                            do_run(timeout)
+                    elif cmd in ("/runwindow", "/runnew", "/runconsole"):
+                        timeout = _parse_run_timeout(arg)
+                        if timeout is not None:
+                            do_run_window(timeout)
+                    elif cmd == "/runproject":
+                        timeout = _parse_run_timeout(arg)
+                        if timeout is not None:
+                            do_runproject(timeout)
+                    elif cmd in ("/train", "/learn"):
+                        n = _parse_train_n(arg)
+                        if n is not None:
+                            _run_train(n)
+                    elif cmd == "/new":
                         server._clear_managed_repl_conversation()
-                        session_id = found
+                        session_id = memory_store.new_id()
                         last_iid = None
                         last_response = None
                         last_run_source = None
-                        # Per-turn metrics are tied to the previous session's
-                        # activity span.  Leaving them visible after a resume
-                        # makes the composer attribute another conversation's
-                        # token/call/timing data to the newly selected thread.
                         last_turn_metrics = None
-                        print("resumed thread %s" % session_id)
+                        print("started a new thread (%s)" % session_id)
+                    elif cmd == "/sessions":
+                        _print_sessions()
+                    elif cmd == "/replay":
+                        do_replay(arg)
+                    elif cmd == "/resume":
+                        target = (arg or "").strip()
+                        if not target:
+                            print("usage: /resume <session-id|title-prefix>")
+                        else:
+                            conn = server._open_db()
+                            try:
+                                found = memory_store.find_session(conn, target)
+                            finally:
+                                conn.close()
+                            if found:
+                                server._clear_managed_repl_conversation()
+                                session_id = found
+                                last_iid = None
+                                last_response = None
+                                last_run_source = None
+                                # Per-turn metrics are tied to the previous session's
+                                # activity span.  Leaving them visible after a resume
+                                # makes the composer attribute another conversation's
+                                # token/call/timing data to the newly selected thread.
+                                last_turn_metrics = None
+                                print("resumed thread %s" % session_id)
+                            else:
+                                print("no session matching '%s'" % target)
+                    elif cmd == "/project":
+                        a = (arg or "").strip()
+                        if not a:
+                            print("project: %s" % project)
+                        else:
+                            project = a
+                            print("project: %s" % project)
+                    elif cmd == "/fact":
+                        a = (arg or "").strip()
+                        if not a:
+                            print("usage: /fact <text> | /fact forget <id> confirm")
+                        elif a.lower().startswith("forget "):
+                            bits = a.split()
+                            if len(bits) != 3 or bits[2].lower() != "confirm":
+                                print("usage: /fact forget <id> confirm")
+                            else:
+                                print(server.sonder_forget_fact(
+                                    bits[1], project=project, confirm=bits[1],
+                                ))
+                        else:
+                            print(server.sonder_remember_fact(a, project=project))
+                    elif cmd == "/facts":
+                        _print_facts(project)
+                    elif cmd in ("/exit", "/quit", "/q"):
+                        break
                     else:
-                        print("no session matching '%s'" % target)
-            elif cmd == "/project":
-                a = (arg or "").strip()
-                if not a:
-                    print("project: %s" % project)
-                else:
-                    project = a
-                    print("project: %s" % project)
-            elif cmd == "/fact":
-                a = (arg or "").strip()
-                if not a:
-                    print("usage: /fact <text> | /fact forget <id> confirm")
-                elif a.lower().startswith("forget "):
-                    bits = a.split()
-                    if len(bits) != 3 or bits[2].lower() != "confirm":
-                        print("usage: /fact forget <id> confirm")
-                    else:
-                        print(server.sonder_forget_fact(
-                            bits[1], project=project, confirm=bits[1],
-                        ))
-                else:
-                    print(server.sonder_remember_fact(a, project=project))
-            elif cmd == "/facts":
-                _print_facts(project)
-            elif cmd in ("/exit", "/quit", "/q"):
-                break
-            else:
-                print(_run_catalogued(line, cmd))
-            continue
-
-        # Passive learning: if the previous turn is still pending an outcome,
-        # check whether this line is plain feedback on it ("thanks, that
-        # worked" / "no that's wrong") rather than a new task. Conservative
-        # classifier — only fires on short, non-question/imperative turns.
-        if last_iid:
-            signal = feedback.classify_signal(line)
-            if signal:
-                server.record_outcome(last_iid, signal)
-                last_iid = None
-                print("(learned: %s recorded)" % signal)
-                continue
-            fb = feedback.classify_feedback(line)
-            if fb == "positive":
-                server.record_outcome(last_iid, "accepted")
-                last_iid = None
-                print("(learned: \U0001F44D recorded)")
-                continue
-            if fb == "negative":
-                server.record_outcome(last_iid, "rejected")
-                last_iid = None
-                print("(learned: \U0001F44E recorded)")
-                continue
-
-        # Natural-language control intents ("strict on, show your reasoning",
-        # "run it", "practice tasks") — conservative classifier, only fires on
-        # short control-like turns. Applies the same toggles/actions as the
-        # slash commands above and skips the model call for this turn.
-        intent = intents.classify(line)
-        if intent:
-            if "trace" in intent:
-                apply_trace(intent["trace"])
-            if "strict" in intent:
-                apply_strict(intent["strict"])
-            if intent.get("run"):
-                do_run()
-            if "train" in intent:
-                _run_train(intent["train"])
-            continue
-
-        # Concrete workspace requests run through the guarded agent so the
-        # answer is backed by real inspection, file changes, validation, and a
-        # persistent checklist instead of being a prose-only suggestion.
-        # An explicit public-web request is not workspace work.  The shared
-        # chat boundary already gives it a tightly scoped research agent, but
-        # the REPL used to intercept it first and send it to the general
-        # workbench loop.  That wasted tool calls and could produce a
-        # checklist-backed "complete" response with no relevant sources.
-        work_refusal = intents.containment_egress_refusal(line)
-        if work_refusal:
-            started_at = time.monotonic()
-            last_response = work_refusal
-            last_run_source = work_refusal
-            last_turn_metrics = None
-            _print_chat_result(work_refusal, started_at, label="Sonder")
-            continue
-
-        if intents.classify_work(line) and not web_intents.explicit_search(line):
-            if not workspace_root:
-                embedded_path, remainder = _split_existing_workspace_prefix(line)
-                if embedded_path:
-                    # Path already named the folder - consume it instead of asking.
-                    server._clear_managed_repl_conversation()
-                    workspace_root = embedded_path
-                    print("workspace: %s" % workspace_root)
-                    task = remainder or line
-                    if remainder:
-                        print(_paint("(using folder from your message; working on: %s)" % remainder, _Ansi.muted))
-                    run_workspace_work(task)
+                        print(_run_catalogued(line, cmd))
                     continue
-                pending_workspace_work = line
-                last_iid = None
-                last_response = None
-                last_run_source = None
-                last_turn_metrics = None
-                print(
-                    "That looks like project work — which folder should I use?\n"
-                    "  Existing: /workspace <path>\n"
-                    "  Create:   /workspace-create <path>\n"
-                    "Or say more about what you meant and I will clarify before touching files.\n"
-                    "Guarded project work and runs stay inside the selected directory."
-                )
-                continue
-            run_workspace_work(line)
-            continue
 
-        started_at = time.monotonic()
-        indicator = _begin_chat_turn()
-        try:
-            out = server.sonder(line, trace=trace, strict=strict, persona=persona,
-                                session=session_id, project=project,
-                                tier=active_tier or "", model_override=active_model or "",
-                                location_consent=location_consent)
-        except BaseException:
-            if indicator is not None:
-                indicator.stop()
-            raise
-        last_turn_metrics = _latest_repl_turn_metrics(session_id)
-        if _is_repl_error(out):
-            _print_chat_result(out, started_at, label="Sonder error", error=True,
-                               indicator=indicator)
-            continue
+                # Passive learning: if the previous turn is still pending an outcome,
+                # check whether this line is plain feedback on it ("thanks, that
+                # worked" / "no that's wrong") rather than a new task. Conservative
+                # classifier — only fires on short, non-question/imperative turns.
+                if last_iid:
+                    signal = feedback.classify_signal(line)
+                    if signal:
+                        server.record_outcome(last_iid, signal)
+                        last_iid = None
+                        print("(learned: %s recorded)" % signal)
+                        continue
+                    fb = feedback.classify_feedback(line)
+                    if fb == "positive":
+                        server.record_outcome(last_iid, "accepted")
+                        last_iid = None
+                        print("(learned: \U0001F44D recorded)")
+                        continue
+                    if fb == "negative":
+                        server.record_outcome(last_iid, "rejected")
+                        last_iid = None
+                        print("(learned: \U0001F44E recorded)")
+                        continue
 
-        last_iid = server.parse_interaction_id(out)
-        last_response = out
-        last_run_source = _answer_only(out)
-        cleaned = _strip_footer(out)
-        _print_chat_result(cleaned, started_at, offer_feedback=bool(last_iid),
-                           indicator=indicator, interaction_id=last_iid)
+                # Natural-language control intents ("strict on, show your reasoning",
+                # "run it", "practice tasks") — conservative classifier, only fires on
+                # short control-like turns. Applies the same toggles/actions as the
+                # slash commands above and skips the model call for this turn.
+                intent = intents.classify(line)
+                if intent:
+                    if "trace" in intent:
+                        apply_trace(intent["trace"])
+                    if "strict" in intent:
+                        apply_strict(intent["strict"])
+                    if intent.get("run"):
+                        do_run()
+                    if "train" in intent:
+                        _run_train(intent["train"])
+                    continue
+
+                # Concrete workspace requests run through the guarded agent so the
+                # answer is backed by real inspection, file changes, validation, and a
+                # persistent checklist instead of being a prose-only suggestion.
+                # An explicit public-web request is not workspace work.  The shared
+                # chat boundary already gives it a tightly scoped research agent, but
+                # the REPL used to intercept it first and send it to the general
+                # workbench loop.  That wasted tool calls and could produce a
+                # checklist-backed "complete" response with no relevant sources.
+                work_refusal = intents.containment_egress_refusal(line)
+                if work_refusal:
+                    started_at = time.monotonic()
+                    last_response = work_refusal
+                    last_run_source = work_refusal
+                    last_turn_metrics = None
+                    _print_chat_result(work_refusal, started_at, label="Sonder")
+                    continue
+
+                if intents.classify_work(line) and not web_intents.explicit_search(line):
+                    if not workspace_root:
+                        embedded_path, remainder = _split_existing_workspace_prefix(line)
+                        if embedded_path:
+                            # Path already named the folder - consume it instead of asking.
+                            server._clear_managed_repl_conversation()
+                            workspace_root = embedded_path
+                            print("workspace: %s" % workspace_root)
+                            task = remainder or line
+                            if remainder:
+                                print(_paint("(using folder from your message; working on: %s)" % remainder, _Ansi.muted))
+                            run_workspace_work(task)
+                            continue
+                        pending_workspace_work = line
+                        last_iid = None
+                        last_response = None
+                        last_run_source = None
+                        last_turn_metrics = None
+                        print(
+                            "That looks like project work — which folder should I use?\n"
+                            "  Existing: /workspace <path>\n"
+                            "  Create:   /workspace-create <path>\n"
+                            "Or say more about what you meant and I will clarify before touching files.\n"
+                            "Guarded project work and runs stay inside the selected directory."
+                        )
+                        continue
+                    run_workspace_work(line)
+                    continue
+
+                started_at = time.monotonic()
+                indicator = _begin_chat_turn()
+                try:
+                    out = server.sonder(line, trace=trace, strict=strict, persona=persona,
+                                        session=session_id, project=project,
+                                        tier=active_tier or "", model_override=active_model or "",
+                                        location_consent=location_consent)
+                except BaseException:
+                    if indicator is not None:
+                        indicator.stop()
+                    raise
+                last_turn_metrics = _latest_repl_turn_metrics(session_id)
+                if _is_repl_error(out):
+                    _print_chat_result(out, started_at, label="Sonder error", error=True,
+                                       indicator=indicator)
+                    continue
+
+                last_iid = server.parse_interaction_id(out)
+                last_response = out
+                last_run_source = _answer_only(out)
+                cleaned = _strip_footer(out)
+                _print_chat_result(cleaned, started_at, offer_feedback=bool(last_iid),
+                                   indicator=indicator, interaction_id=last_iid)
+        except KeyboardInterrupt:
+            # Ctrl-C during a turn cancels that turn (its cancellation
+            # scope was cancelled by the signal handler) and returns to
+            # the prompt. A Ctrl-C at the idle prompt still exits.
+            announce_interrupted_turn()
+            continue
 
 
 if __name__ == "__main__":

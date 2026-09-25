@@ -483,6 +483,7 @@ from sonder_runtime.domain.retry_after import retry_after_seconds as _retry_afte
 from sonder_runtime.domain.cancellation_policy import (
     cancellation_requested as _cancel_requested,
 )
+from sonder_runtime.application import foreground_turns as _foreground_turns
 from sonder_runtime.domain.code_gate_policy import (
     code_gate_target as _code_gate_target_policy,
 )
@@ -4618,7 +4619,10 @@ def _post_model(
     attempt_index = 0
     while attempt_index < max_attempts:
         attempt = attempt_index + 1
-        if _cancel_requested(cancel_check):
+        # An interrupted foreground turn (REPL Ctrl-C) cancels its scope in
+        # the shared cancellation tree; no further request may be sent for
+        # it even when a caller swallowed the original interrupt.
+        if _cancel_requested(cancel_check) or _foreground_turns.cancel_requested():
             raise ModelCallError(
                 "cancelled",
                 "model call cancelled before another request was sent",
@@ -20222,7 +20226,10 @@ def _agent_turn(
         transcript += context_text
 
     def ensure_not_cancelled():
-        if cancel_check is not None and _cancel_requested(cancel_check):
+        if (
+            (cancel_check is not None and _cancel_requested(cancel_check))
+            or _foreground_turns.cancel_requested()
+        ):
             if _standalone_lanes.current() is not None:
                 _standalone_lanes.current().request_cancel()
             raise ModelCallError(

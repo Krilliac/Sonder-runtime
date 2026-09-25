@@ -507,6 +507,12 @@ def response_span(
         response["status"] = "error"
         record_event("response_error", summary=_short(exc, 180))
         raise
+    except KeyboardInterrupt:
+        # An operator interrupt cancels the turn; it is neither a success nor
+        # a runtime error, and it must not stay "running" in the feed.
+        response["status"] = "cancelled"
+        record_event("response_cancelled", summary="interrupted by the operator")
+        raise
     finally:
         response["elapsed_ms"] = int((time.time() - response["started_at"]) * 1000)
         if response["status"] == "complete":

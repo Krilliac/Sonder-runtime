@@ -96,6 +96,22 @@ versioned and additive-only. Interactive terminals ignore the flag.
 - Raw composer history (Up/Down, Ctrl+R) is process-local and never
   persisted; credential-bearing lines are excluded (`_history_safe()`).
 
+## Interrupting a turn
+
+- Ctrl-C while a turn runs cancels that turn and returns to the prompt;
+  the session keeps going. Each turn runs in its own scope of the
+  foreground cancellation tree
+  (`sonder_runtime/application/foreground_turns.py`); the SIGINT handler
+  cancels that scope before unwinding, so model requests and agent steps
+  for the turn are refused from then on even if a layer swallowed the
+  interrupt. Detached background work (autopilot runs, fleets) is not in
+  the turn's scope and keeps running; use `/autopilot cancel` or
+  `/agentcancel` for it.
+- A cancelled turn clears the per-turn handles: feedback, `/run`, and the
+  latest-answer views no longer point at the previous answer. The
+  activity feed records the turn as `cancelled`.
+- Ctrl-C (or Ctrl-D, or `/exit`) at the idle prompt ends the session.
+
 ## Observability surfaces (read-only)
 
 - `activity_tracker` (adapters/observability) is the response/tool
