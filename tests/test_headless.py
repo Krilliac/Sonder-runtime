@@ -134,6 +134,41 @@ def test_python_exe_ignores_broken_venv(monkeypatch, tmp_path):
     assert H.python_exe() == "C:/Python/python.exe"
 
 
+def test_python_exe_uses_posix_venv_bin_python(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    venv_bin = root / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").write_text("", encoding="utf-8")
+    monkeypatch.delenv("SONDER_PYTHON", raising=False)
+    monkeypatch.setattr(H, "repo_root", lambda: root)
+    monkeypatch.setattr(
+        H.engine_bundle, "discover_engine_bundle", lambda _root: None
+    )
+    monkeypatch.setattr(H, "_python_works", lambda path: True)
+    monkeypatch.setattr(H.sys, "executable", "/usr/bin/python3")
+
+    assert H.python_exe() == str(venv_bin / "python")
+
+
+def test_python_exe_prefers_native_venv_layout(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    for rel in (("venv", "bin", "python"), ("venv", "Scripts", "python.exe")):
+        path = root.joinpath(*rel)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+    monkeypatch.delenv("SONDER_PYTHON", raising=False)
+    monkeypatch.setattr(H, "repo_root", lambda: root)
+    monkeypatch.setattr(
+        H.engine_bundle, "discover_engine_bundle", lambda _root: None
+    )
+    monkeypatch.setattr(H, "_python_works", lambda path: True)
+
+    monkeypatch.setattr(H.os, "name", "posix")
+    assert H.python_exe().endswith("python") and "bin" in H.python_exe()
+    monkeypatch.setattr(H.os, "name", "nt")
+    assert H.python_exe().endswith("python.exe")
+
+
 def test_runtime_executables_honor_explicit_bundle_environment(monkeypatch):
     monkeypatch.setenv("SONDER_PYTHON", "C:/bundle/python.exe")
     monkeypatch.setenv("SONDER_OLLAMA_EXE", "C:/bundle/ollama.exe")

@@ -66,9 +66,17 @@ def python_exe() -> str:
         bundle = None
     if bundle is not None and _python_works(str(bundle.python_executable)):
         return str(bundle.python_executable)
-    venv = repo_root() / "venv" / "Scripts" / "python.exe"
-    if venv.exists() and _python_works(str(venv)):
-        return str(venv)
+    # Probe both venv layouts: Windows (Scripts/python.exe) and POSIX
+    # (bin/python). Only the Windows one used to be checked, so running this
+    # module directly on Linux/macOS without SONDER_PYTHON silently used
+    # whatever interpreter launched it instead of the repo venv. The native
+    # layout is tried first.
+    windows = repo_root() / "venv" / "Scripts" / "python.exe"
+    posix = repo_root() / "venv" / "bin" / "python"
+    candidates = (windows, posix) if os.name == "nt" else (posix, windows)
+    for venv in candidates:
+        if venv.exists() and _python_works(str(venv)):
+            return str(venv)
     return sys.executable or "python"
 
 
