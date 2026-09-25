@@ -21,6 +21,10 @@ void main() {
         ['1.2s', '1.4s', '2.8s', '8.2s']);
     expect([1250, 1350, 2750, 8192].map(compactCount),
         ['1.2k', '1.4k', '2.8k', '8.2k']);
+    // Decimal ties that are not exact binary fractions (the old fixed1
+    // 0.15 / 0.05 cases): CPython's '%.1f' follows the stored double.
+    expect([1050, 1150, 1450].map(durationLabel), ['1.1s', '1.1s', '1.4s']);
+    expect([1050, 1150, 1450].map(compactCount), ['1.1k', '1.1k', '1.4k']);
   });
 
   test('durationLabel matches style.duration_label', () {

@@ -50,6 +50,10 @@ void main() {
       expect(isModeRaise('auto', 'plan'), isFalse);
       expect(isModeRaise('auto', 'manual'), isFalse);
       expect(isModeRaise('manual', 'someNewMode'), isTrue);
+      // Resolved like the server: case and unambiguous prefixes still raise.
+      expect(isModeRaise('manual', 'AUTO'), isTrue);
+      expect(isModeRaise('manual', 'au'), isTrue);
+      expect(isModeRaise('manual', 'accept-edits'), isTrue);
     });
 
     test('palette labels say where intercepted commands go', () {
@@ -87,6 +91,23 @@ void main() {
     expect(find.byKey(const Key('raise-mode-sheet')), findsOneWidget);
     expect(find.textContaining('manual → auto', findRichText: true),
         findsOneWidget);
+    expect(find.text('Switch to auto'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('raise-mode-cancel')));
+    await tester.pumpAndSettle();
+    expect(backend.modePosts, isEmpty);
+    expect(backend.turns, isEmpty);
+    await unmountChat(tester);
+  });
+
+  testWidgets('/mode AUTO (server-resolved spelling) still opens the sheet',
+      (tester) async {
+    final backend = FakeChatBackend()..mode = permissionModeFor('manual');
+    await pumpChat(tester, backend);
+    await tester.enterText(find.byType(TextField), '/mode AUTO');
+    await tester.testTextInput.receiveAction(TextInputAction.send);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('raise-mode-sheet')), findsOneWidget);
     expect(find.text('Switch to auto'), findsOneWidget);
     await tester.tap(find.byKey(const Key('raise-mode-cancel')));
     await tester.pumpAndSettle();
