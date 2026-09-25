@@ -22329,10 +22329,20 @@ def _autopilot_cancel(run_id: str, request_owner: str | None = None) -> str:
     """Request cancellation; an active task result is discarded."""
     _maybe_live_reload()
     run = autopilot_store.request_cancel(run_id, request_owner=request_owner)
-    return (
-        autopilot_controller.format_run(run, include_report=False)
-        if run else "autopilot request rejected: no accessible run matches '%s'." % run_id
-    )
+    if not run:
+        return "autopilot request rejected: no accessible run matches '%s'." % run_id
+    # An active run only records the request here; echoing its unchanged
+    # "running" status alone read as if the cancel had been ignored.
+    if run.get("status") in autopilot_store.ACTIVE_STATUSES:
+        prefix = (
+            "autopilot cancellation requested; the run stops at its next host "
+            "checkpoint and the active task result is discarded"
+        )
+    elif run.get("status") == "cancelled":
+        prefix = "autopilot cancelled"
+    else:
+        prefix = "autopilot run is already %s" % run.get("status", "finished")
+    return "%s\n%s" % (prefix, autopilot_controller.format_run(run, include_report=False))
 
 
 def _autopilot_status(run_id: str = "", include_finished: bool = True, request_owner: str | None = None) -> str:
