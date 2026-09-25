@@ -18,7 +18,11 @@ void main() {
               calls++;
               if (calls == 1) {
                 expect(r.headers['X-Sonder-Account-Token'], 'account');
-                throw http.ClientException('unreachable');
+                // Only a refused connection (no request byte written) may
+                // fall back; see api_fallback_test.dart for the policy.
+                throw http.ClientException(
+                    'SocketException: Connection refused (OS Error: '
+                    'Connection refused, errno = 111)');
               }
               expect(r.url.host, '127.0.0.1');
               expect(r.headers.containsKey('X-Sonder-Account-Token'), isFalse);

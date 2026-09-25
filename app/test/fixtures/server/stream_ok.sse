@@ -1,0 +1,14 @@
+: keep-alive
+
+: keep-alive
+
+data: {"id": "chatcmpl-a1b2c3d4e5f6", "object": "chat.completion.chunk", "created": 1790335000, "model": "sonder", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "PELI"}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-a1b2c3d4e5f6", "object": "chat.completion.chunk", "created": 1790335000, "model": "sonder", "choices": [{"index": 0, "delta": {"content": "CAN"}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-a1b2c3d4e5f6", "object": "chat.completion.chunk", "created": 1790335000, "model": "sonder", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "sonder_elapsed_ms": 136293, "sonder_receipt": {"request_id": "req_c4303a90110e42eb967f40b997a7c088", "model": "sonder", "tier": "chat", "elapsed_ms": 136293}, "sonder_activity": {"id": "r000004", "label": "chat:sonder", "surface": "http", "model": "sonder", "status": "complete", "elapsed_ms": 136250, "tool_calls": 0, "model_calls": 1}}
+
+data: {"id": "chatcmpl-a1b2c3d4e5f6", "object": "chat.completion.chunk", "created": 1790335000, "model": "sonder", "choices": [], "usage": {"prompt_tokens": 2600, "completion_tokens": 143, "total_tokens": 2743}}
+
+data: [DONE]
+

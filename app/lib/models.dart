@@ -34,6 +34,18 @@ class ChatResponseMetadata {
   final int modelCalls;
   final int toolCalls;
 
+  /// `sonder_receipt.chat_work.work_run_id`: the routed work run behind this
+  /// turn, or empty. With [workStatus] `running` the answer is not in the
+  /// reply yet; fetch it with `WorkRunsApi.get`.
+  final String workRunId;
+
+  /// `sonder_receipt.chat_work.status` (`running`, `returned`, `refused`,
+  /// `cancelled`, `budget_exceeded`, `interrupted`, `failed`, `unknown`).
+  final String workStatus;
+
+  /// A permission-gate refusal carried by this turn, or null.
+  final ChatRefusal? refusal;
+
   const ChatResponseMetadata({
     this.completionId = '',
     this.requestId = '',
@@ -48,7 +60,13 @@ class ChatResponseMetadata {
     this.totalTokens = 0,
     this.modelCalls = 0,
     this.toolCalls = 0,
+    this.workRunId = '',
+    this.workStatus = '',
+    this.refusal,
   });
+
+  /// True while the answer is still being produced by a work run.
+  bool get workRunning => workRunId.isNotEmpty && workStatus == 'running';
 
   factory ChatResponseMetadata.fromJson(Map<String, dynamic> json) =>
       ChatResponseMetadata(
@@ -65,6 +83,33 @@ class ChatResponseMetadata {
         totalTokens: _metadataCount(json['total_tokens']),
         modelCalls: _metadataCount(json['model_calls']),
         toolCalls: _metadataCount(json['tool_calls']),
+        workRunId: _workRunIdOrEmpty(json['work_run_id']),
+        workStatus: _boundedMetadataText(json['work_status'], 32),
+        refusal: json['refusal'] is Map
+            ? ChatRefusal.fromJson(
+                Map<String, dynamic>.from(json['refusal'] as Map))
+            : null,
+      );
+
+  /// A copy with the work-run fields replaced (after a refresh or cancel).
+  ChatResponseMetadata withWork({String? workRunId, String? workStatus}) =>
+      ChatResponseMetadata(
+        completionId: completionId,
+        requestId: requestId,
+        model: model,
+        tier: tier,
+        finishReason: finishReason,
+        status: status,
+        cache: cache,
+        elapsedMs: elapsedMs,
+        promptTokens: promptTokens,
+        completionTokens: completionTokens,
+        totalTokens: totalTokens,
+        modelCalls: modelCalls,
+        toolCalls: toolCalls,
+        workRunId: workRunId ?? this.workRunId,
+        workStatus: workStatus ?? this.workStatus,
+        refusal: refusal,
       );
 
   bool get isEmpty =>
@@ -80,7 +125,10 @@ class ChatResponseMetadata {
       completionTokens == 0 &&
       totalTokens == 0 &&
       modelCalls == 0 &&
-      toolCalls == 0;
+      toolCalls == 0 &&
+      workRunId.isEmpty &&
+      workStatus.isEmpty &&
+      refusal == null;
 
   Map<String, Object> toJson() => {
         'completion_id': completionId,
@@ -96,6 +144,9 @@ class ChatResponseMetadata {
         'total_tokens': totalTokens,
         'model_calls': modelCalls,
         'tool_calls': toolCalls,
+        if (workRunId.isNotEmpty) 'work_run_id': workRunId,
+        if (workStatus.isNotEmpty) 'work_status': workStatus,
+        if (refusal != null) 'refusal': refusal!.toJson(),
       };
 
   /// Compact, content-free evidence suitable for a collapsed diagnostics row.
@@ -120,8 +171,80 @@ class ChatResponseMetadata {
     if (cache.isNotEmpty) {
       lines.add(cache == 'hit' ? 'cache: hit (replayed)' : 'cache: $cache');
     }
+    if (workRunId.isNotEmpty) {
+      lines.add(
+          'work run: $workRunId${workStatus.isEmpty ? '' : ' ($workStatus)'}');
+    }
+    if (refusal?.callId.isNotEmpty == true) {
+      lines.add('refused call: ${refusal!.callId}');
+    }
     return lines.join('\n');
   }
+}
+
+String _workRunIdOrEmpty(Object? value) {
+  final text = value?.toString().trim() ?? '';
+  return RegExp(r'^wr-[0-9a-f]{32}$').hasMatch(text) ? text : '';
+}
+
+/// A permission gate refused a call in this turn.
+///
+/// Read from `sonder_receipt.refusal` once the server publishes it (server
+/// S1); until then [ChatRefusal.fromText] recognises the refusal wording.
+/// [callId] is non-empty only when the call can be approved once.
+class ChatRefusal {
+  final String callId;
+  final String tool;
+  final String reason;
+  final List<String> remedies;
+
+  const ChatRefusal({
+    this.callId = '',
+    this.tool = '',
+    this.reason = '',
+    this.remedies = const [],
+  });
+
+  static final RegExp _callId = RegExp(r'/approve ([0-9a-f]{8,64})\b');
+  static final RegExp _refusedPrefix =
+      RegExp(r'^\s*refused(?:[:\s]|$)', caseSensitive: false);
+
+  factory ChatRefusal.fromJson(Map<String, dynamic> json) {
+    final id = json['call_id']?.toString().trim() ?? '';
+    final remedies = json['remedies'] is List
+        ? (json['remedies'] as List)
+            .map((r) => _boundedMetadataText(r, 512))
+            .where((r) => r.isNotEmpty)
+            .take(8)
+            .toList(growable: false)
+        : const <String>[];
+    return ChatRefusal(
+      callId: RegExp(r'^[0-9a-f]{8,64}$').hasMatch(id) ? id : '',
+      tool: _boundedMetadataText(json['tool'], 128),
+      reason: _boundedMetadataText(json['reason'], 1024),
+      remedies: remedies,
+    );
+  }
+
+  /// Text fallback until server S1: the reply starts with `refused` and may
+  /// name `/approve <call id>`. Returns null for any other reply.
+  static ChatRefusal? fromText(String text) {
+    if (!_refusedPrefix.hasMatch(text)) return null;
+    final id = _callId.firstMatch(text)?.group(1) ?? '';
+    final firstLine = text.trim().split('\n').first;
+    return ChatRefusal(
+      callId: id,
+      reason: _boundedMetadataText(firstLine, 1024),
+      remedies: id.isEmpty ? const [] : ['/approve $id'],
+    );
+  }
+
+  Map<String, Object> toJson() => {
+        if (callId.isNotEmpty) 'call_id': callId,
+        if (tool.isNotEmpty) 'tool': tool,
+        if (reason.isNotEmpty) 'reason': reason,
+        if (remedies.isNotEmpty) 'remedies': remedies,
+      };
 }
 
 class ChatMessage {

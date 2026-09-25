@@ -1,12 +1,37 @@
-import 'account_session.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
 import 'package:http/http.dart' as http;
 
-import 'models.dart';
+import 'account_session.dart';
 import 'agent_lanes.dart';
+import 'api/approvals.dart';
+import 'api/chat.dart';
+import 'api/port.dart';
+import 'api/sessions.dart';
+import 'api/stream.dart';
+import 'api/transport.dart';
+import 'api/work_runs.dart';
+import 'models.dart';
+
+// The API layer is split by domain under lib/api/; this file stays the
+// barrel so every `import 'api.dart'` keeps working.
+export 'api/approvals.dart';
+export 'api/chat.dart';
+export 'api/port.dart';
+export 'api/sessions.dart';
+export 'api/stream.dart';
+export 'api/transport.dart'
+    show
+        SonderException,
+        CancelToken,
+        SonderEndpoint,
+        describeServerError,
+        responseException,
+        isPreRequestConnectFailure,
+        newIdempotencyKey;
+export 'api/work_runs.dart';
 
 /// Return the catalog spelling of a saved model selector when it still exists.
 ///
@@ -23,75 +48,6 @@ String resolveCatalogModel(Iterable<String> models, String selected) {
     }
   }
   return available.isEmpty ? selected : available.first;
-}
-
-/// Return a bounded, user-facing error message from a Sonder/OpenAI response.
-///
-/// The HTTP API uses the OpenAI-compatible `{error: {message: ...}}` shape for
-/// rejected chat requests. Keeping that explanation lets the chat surface say
-/// *why* an exact model or policy request was rejected instead of reducing all
-/// failures to an unhelpful status code. A few older routes use a top-level
-/// `message` or string `error`, so accept those shapes as well.
-String _boundedResponseMetadata(Object? value, [int limit = 256]) {
-  final text = value?.toString().trim() ?? '';
-  if (text.length <= limit) return text;
-  return '${text.substring(0, limit)}...';
-}
-
-SonderException _responseException(http.Response response, String fallback) {
-  var message = fallback;
-  var type = '';
-  var code = '';
-  var correlationId = _boundedResponseMetadata(
-    response.headers['x-sonder-correlation-id'],
-  );
-  var retryable = const {408, 429, 502, 503, 504}.contains(response.statusCode);
-  try {
-    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
-    if (decoded is Map) {
-      final error = decoded['error'];
-      final candidate = error is Map
-          ? error['message']
-          : (error is String ? error : decoded['message']);
-      final detail = candidate?.toString().trim() ?? '';
-      if (detail.isNotEmpty) {
-        // Error responses are untrusted server input; keep a malformed proxy
-        // response from turning into an unbounded chat transcript entry.
-        message =
-            detail.length <= 1024 ? detail : '${detail.substring(0, 1024)}...';
-      }
-      if (error is Map) {
-        type = _boundedResponseMetadata(error['type'], 64);
-        code = _boundedResponseMetadata(error['code'], 128);
-        correlationId =
-            error['correlation_id']?.toString().trim().isNotEmpty == true
-                ? _boundedResponseMetadata(error['correlation_id'])
-                : correlationId;
-        retryable =
-            error['retryable'] is bool ? error['retryable'] == true : retryable;
-      } else {
-        correlationId =
-            decoded['correlation_id']?.toString().trim().isNotEmpty == true
-                ? _boundedResponseMetadata(decoded['correlation_id'])
-                : correlationId;
-        retryable = decoded['retryable'] is bool
-            ? decoded['retryable'] == true
-            : retryable;
-      }
-    }
-  } catch (_) {
-    // A non-JSON response still gets the stable status-code fallback.
-  }
-  final retryAfter = int.tryParse(response.headers['retry-after'] ?? '');
-  return SonderException(
-    message,
-    httpStatus: response.statusCode,
-    type: type,
-    code: code,
-    correlationId: correlationId,
-    retryable: retryable,
-    retryAfterSeconds: retryAfter == null || retryAfter < 0 ? null : retryAfter,
-  );
 }
 
 class LauncherOperation {
@@ -256,10 +212,11 @@ class SonderLauncherApi {
       throw SonderException('Host launcher authentication failed.');
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw SonderException(
-        body['error']?.toString() ??
-            body['message']?.toString() ??
-            'Host launcher returned HTTP ${response.statusCode}.',
+      // responseException reads only string fields, so an envelope never
+      // renders as a Dart map.
+      throw responseException(
+        response,
+        'Host launcher returned HTTP ${response.statusCode}.',
       );
     }
     return LauncherStatus.fromJson(body);
@@ -759,7 +716,7 @@ class PermissionMode {
 ///   POST <base>/v1/chat/completions   { model, messages[], stream }
 /// with an optional `Authorization: Bearer <key>` header when the host
 /// enabled auth. This mirrors sonder_client.py, but for a GUI.
-class SonderApi {
+class SonderApi implements SonderApiPort {
   Future<Map<String, dynamic>> _agentRequest(
     String path, {
     Map<String, String>? query,
@@ -767,11 +724,14 @@ class SonderApi {
   }) async {
     final uri = _uri('/v1/agent-lanes$path').replace(queryParameters: query);
     final response = await (body == null
-            ? _requestGet(uri, headers: _headers())
-            : _requestPost(uri, headers: _headers(), body: jsonEncode(body)))
-        .timeout(const Duration(seconds: 35));
+        ? requestGet(uri,
+            headers: _headers(), timeout: const Duration(seconds: 35))
+        : requestPost(uri,
+            headers: _headers(),
+            body: jsonEncode(body),
+            timeout: const Duration(seconds: 35)));
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw _responseException(
+      throw responseException(
         response,
         'Could not load agent conversations (HTTP ${response.statusCode}).',
       );
@@ -857,23 +817,42 @@ class SonderApi {
         ),
       );
 
+  @override
   final String baseUrl; // e.g. https://sonder.example.com
   final AccountSession? accountSession;
   final String apiKey; // empty when the server has auth disabled
   final String localFallbackUrl;
 
-  http.Client? _chatClient;
+  /// Upper bound on a non-streamed turn (and on time-to-headers for a
+  /// streamed one). On expiry the request's client is closed.
+  final Duration chatTimeout;
+
+  /// A streamed turn with no bytes (keep-alives included) for this long is
+  /// abandoned. The server sends a keep-alive every ~15 s.
+  final Duration streamStallTimeout;
+
+  /// Tokens of the [chatDetailed]/[chatStream] turns in flight on this
+  /// instance, for [cancelChat]. Passive calls ([chat], [recordFeedback])
+  /// never register here.
+  final Set<CancelToken> _activeTurns = {};
 
   SonderApi({
     required this.baseUrl,
     this.apiKey = '',
     this.accountSession,
     this.localFallbackUrl = 'http://127.0.0.1:11435',
+    this.chatTimeout = const Duration(minutes: 5),
+    this.streamStallTimeout = const Duration(seconds: 45),
   });
 
+  /// Cancel every [chatDetailed]/[chatStream] turn in flight on this
+  /// instance. Prefer passing a [CancelToken] to the call and cancelling
+  /// that: it stops exactly one request.
+  @override
   void cancelChat() {
-    _chatClient?.close();
-    _chatClient = null;
+    for (final token in List.of(_activeTurns)) {
+      token.cancel();
+    }
   }
 
   static final RegExp _relativeLocationIntent = RegExp(
@@ -953,9 +932,9 @@ class SonderApi {
         'success,message,country,country_code,region,region_code,city,'
         'timezone';
     try {
-      final response =
-          await _requestGet(Uri.parse('https://ipwho.is/?fields=$fields'))
-              .timeout(const Duration(seconds: 10));
+      final response = await requestGet(
+          Uri.parse('https://ipwho.is/?fields=$fields'),
+          timeout: const Duration(seconds: 10));
       if (response.statusCode != 200) return null;
       final decoded = jsonDecode(utf8.decode(response.bodyBytes));
       if (decoded is! Map<String, dynamic> || decoded['success'] == false) {
@@ -987,22 +966,30 @@ class SonderApi {
     }
   }
 
-  Uri _uri(String path, [String? rootUrl]) {
-    final root = (rootUrl ?? baseUrl).trim().replaceAll(RegExp(r'/+$'), '');
-    return Uri.parse('$root$path');
-  }
+  /// Where this client sends requests, with its credentials.
+  @override
+  SonderEndpoint get endpoint => SonderEndpoint(
+        baseUrl: baseUrl,
+        apiKey: apiKey,
+        accountSession: accountSession,
+      );
 
-  Map<String, String> _headers([String? keyOverride]) {
-    final h = <String, String>{'Content-Type': 'application/json'};
-    final key = keyOverride ?? apiKey;
-    if (key.trim().isNotEmpty) {
-      h['Authorization'] = 'Bearer ${key.trim()}';
-    }
-    if (keyOverride == null && accountSession?.matches(baseUrl) == true) {
-      h['X-Sonder-Account-Token'] = accountSession!.token;
-    }
-    return h;
-  }
+  /// Routed work runs (`/v1/work-runs`).
+  @override
+  WorkRunsApi get workRuns => WorkRunsApi(endpoint);
+
+  /// HTTP approvals (`/v1/approvals`, server S2; tolerates a 404).
+  @override
+  ApprovalsApi get approvals => ApprovalsApi(endpoint);
+
+  /// Durable server sessions (`/v1/sessions/<id>/replay|export`).
+  @override
+  SessionsApi get sessions => SessionsApi(endpoint);
+
+  Uri _uri(String path, [String? rootUrl]) => endpoint.uri(path, rootUrl);
+
+  Map<String, String> _headers([String? keyOverride]) =>
+      endpoint.headers(keyOverride);
 
   bool get _canFallback {
     final primary = baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
@@ -1015,27 +1002,46 @@ class SonderApi {
         'Fell back to local server ${localFallbackUrl.trim()}.';
   }
 
-  /// Verify connectivity + auth. Returns the list of model ids the server
-  /// advertises (typically just ["sonder"]). Throws [SonderException]
-  /// on any failure so the UI can show a precise reason.
-  Future<List<String>> listModels() async {
-    late http.Response resp;
+  /// The readable error for a non-2xx [response].
+  SonderException _failure(
+    http.Response response, {
+    String? fallback,
+    String action = 'do this',
+  }) =>
+      describeServerError(
+        responseException(
+          response,
+          fallback ?? httpStatusFallback(response.statusCode),
+        ),
+        endpoint.serverUri,
+        action: action,
+      );
+
+  /// GET [path] bounded by [timeout]; transport failures become a readable
+  /// "Cannot reach server" error bound to this host (never the fallback).
+  Future<http.Response> _get(Uri uri, Duration timeout) async {
     try {
-      resp = await _requestGet(_uri('/v1/models'), headers: _headers())
-          .timeout(const Duration(seconds: 15));
+      return await requestGet(uri, headers: _headers(), timeout: timeout);
     } catch (e) {
       // A silent local retry made connection tests authenticate a different
       // machine, turning bad URLs and API keys into false green results.
-      throw SonderException('Cannot reach server: $e');
+      throw SonderException('Cannot reach server: $e',
+          cause: e, code: SonderException.unreachableCode, retryable: true);
     }
-    if (resp.statusCode == 401) {
-      throw _responseException(
-        resp,
-        'Unauthorized — check the API key.',
-      );
-    }
+  }
+
+  /// Verify connectivity + auth. Returns the list of model ids the server
+  /// advertises (typically just ["sonder"]). Throws [SonderException]
+  /// on any failure so the UI can show a precise reason.
+  @override
+  Future<List<String>> listModels() async {
+    final resp = await _get(_uri('/v1/models'), const Duration(seconds: 15));
     if (resp.statusCode != 200) {
-      throw SonderException('Server returned HTTP ${resp.statusCode}.');
+      throw _failure(
+        resp,
+        fallback:
+            resp.statusCode == 401 ? 'Unauthorized — check the API key.' : null,
+      );
     }
     try {
       final obj = jsonDecode(resp.body) as Map<String, dynamic>;
@@ -1049,26 +1055,21 @@ class SonderApi {
     }
   }
 
+  @override
   Future<SystemInfo> systemInfo() async {
-    late http.Response resp;
-    try {
-      resp = await _requestGet(_uri('/v1/sonder/status'), headers: _headers())
-          .timeout(const Duration(seconds: 20));
-    } catch (e) {
-      // Status must stay bound to the configured host; otherwise polling can
-      // silently replace a remote machine's diagnostics with this laptop's.
-      throw SonderException('Cannot reach server: $e');
-    }
-    if (resp.statusCode == 401) {
-      throw SonderException('Unauthorized - check the API key.');
-    }
+    // Status must stay bound to the configured host; otherwise polling can
+    // silently replace a remote machine's diagnostics with this laptop's.
+    final resp =
+        await _get(_uri('/v1/sonder/status'), const Duration(seconds: 20));
     if (resp.statusCode != 200) {
-      throw SonderException('Server returned HTTP ${resp.statusCode}.');
+      throw _failure(
+        resp,
+        fallback:
+            resp.statusCode == 401 ? 'Unauthorized - check the API key.' : null,
+      );
     }
     try {
-      final obj =
-          jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
-      return SystemInfo.fromJson(obj);
+      return SystemInfo.fromJson(decodeJsonObject(resp, 'system status'));
     } catch (_) {
       throw SonderException('Could not parse system status.');
     }
@@ -1079,18 +1080,24 @@ class SonderApi {
     String cursor = '',
     int pageSize = 32,
   }) async {
-    final response = await _requestPost(
+    final response = await requestPost(
       _uri('/v1/sonder/ollama-pool'),
       headers: _headers(),
       body: jsonEncode(
           {'refresh': refresh, 'cursor': cursor, 'page_size': pageSize}),
-    ).timeout(const Duration(seconds: 60));
+      timeout: const Duration(seconds: 60),
+    );
     if (response.statusCode == 401 || response.statusCode == 403) {
-      throw SonderException('Administrator authorization is required.');
+      throw responseException(
+        response,
+        'Administrator authorization is required.',
+      ).copyWith(message: 'Administrator authorization is required.');
     }
     if (response.statusCode != 200) {
-      throw SonderException(
-          'Worker page unavailable. Inspect the first page again.');
+      throw _failure(
+        response,
+        fallback: 'Worker page unavailable. Inspect the first page again.',
+      );
     }
     if (response.bodyBytes.length > 65536) {
       throw SonderException('Worker page exceeds the response limit.');
@@ -1099,60 +1106,48 @@ class SonderApi {
         jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>);
   }
 
-  /// Durable update state for the System page (SPEC-4 section 14).
+  /// Durable update state for the Runtime page (SPEC-4 section 14).
   ///
   /// Admin-only on the server; a non-admin key gets 403 and the UI simply
   /// hides the update section rather than treating it as an error.
   Future<UpdateStatus?> fetchUpdateStatus() async {
-    late http.Response resp;
-    try {
-      resp = await _requestGet(_uri('/v1/admin/updates/status'),
-              headers: _headers())
-          .timeout(const Duration(seconds: 15));
-    } catch (e) {
-      throw SonderException('Cannot reach server: $e');
-    }
+    final resp = await _get(
+        _uri('/v1/admin/updates/status'), const Duration(seconds: 15));
     if (resp.statusCode == 403 || resp.statusCode == 404) {
       // Not authorized for update control, or the route is unavailable on
       // this build: no update section, not a failure.
       return null;
     }
-    if (resp.statusCode == 401) {
-      throw SonderException('Unauthorized - check the API key.');
-    }
     if (resp.statusCode != 200) {
-      throw SonderException('Server returned HTTP ${resp.statusCode}.');
+      throw _failure(
+        resp,
+        fallback:
+            resp.statusCode == 401 ? 'Unauthorized - check the API key.' : null,
+      );
     }
     try {
-      final obj =
-          jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
-      return UpdateStatus.fromJson(obj);
+      return UpdateStatus.fromJson(decodeJsonObject(resp, 'update status'));
     } catch (_) {
       throw SonderException('Could not parse update status.');
     }
   }
 
   /// Admin-only extension registry projection. Unauthorized/older servers
-  /// hide this optional system section rather than failing the whole refresh.
+  /// hide this optional runtime section rather than failing the whole refresh.
   Future<ExtensionRegistryStatus?> fetchExtensionRegistry() async {
-    late http.Response resp;
-    try {
-      resp = await _requestGet(_uri('/v1/extensions'), headers: _headers())
-          .timeout(const Duration(seconds: 15));
-    } catch (e) {
-      throw SonderException('Cannot reach server: $e');
-    }
+    final resp =
+        await _get(_uri('/v1/extensions'), const Duration(seconds: 15));
     if (resp.statusCode == 403 || resp.statusCode == 404) return null;
-    if (resp.statusCode == 401) {
-      throw SonderException('Unauthorized - check the API key.');
-    }
     if (resp.statusCode != 200) {
-      throw SonderException('Server returned HTTP ${resp.statusCode}.');
+      throw _failure(
+        resp,
+        fallback:
+            resp.statusCode == 401 ? 'Unauthorized - check the API key.' : null,
+      );
     }
     try {
-      final obj =
-          jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
-      return ExtensionRegistryStatus.fromJson(obj);
+      return ExtensionRegistryStatus.fromJson(
+          decodeJsonObject(resp, 'extension registry status'));
     } catch (_) {
       throw SonderException('Could not parse extension registry status.');
     }
@@ -1163,24 +1158,19 @@ class SonderApi {
   /// Fetched once and cached by the caller: the catalog is a few hundred
   /// entries, so filtering it client-side per keystroke costs nothing and a
   /// request per keystroke would cost a round trip.
+  @override
   Future<CommandCatalog> fetchCommands() async {
-    late http.Response resp;
-    try {
-      resp = await _requestGet(_uri('/v1/commands'), headers: _headers())
-          .timeout(const Duration(seconds: 15));
-    } catch (e) {
-      throw SonderException('Cannot reach server: $e');
-    }
-    if (resp.statusCode == 401) {
-      throw SonderException('Unauthorized - check the API key.');
-    }
+    final resp = await _get(_uri('/v1/commands'), const Duration(seconds: 15));
     if (resp.statusCode != 200) {
-      throw SonderException('Server returned HTTP ${resp.statusCode}.');
+      throw _failure(
+        resp,
+        fallback:
+            resp.statusCode == 401 ? 'Unauthorized - check the API key.' : null,
+      );
     }
     try {
-      final obj =
-          jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
-      return CommandCatalog.fromJson(obj);
+      return CommandCatalog.fromJson(
+          decodeJsonObject(resp, 'the command catalog'));
     } catch (_) {
       throw SonderException('Could not parse the command catalog.');
     }
@@ -1198,22 +1188,16 @@ class SonderApi {
   }) async {
     final uri = _uri('/v1/commands/complete')
         .replace(queryParameters: {'q': q, 'limit': '$limit'});
-    late http.Response resp;
-    try {
-      resp = await _requestGet(uri, headers: _headers())
-          .timeout(const Duration(seconds: 10));
-    } catch (e) {
-      throw SonderException('Cannot reach server: $e');
-    }
-    if (resp.statusCode == 401) {
-      throw SonderException('Unauthorized - check the API key.');
-    }
+    final resp = await _get(uri, const Duration(seconds: 10));
     if (resp.statusCode != 200) {
-      throw SonderException('Server returned HTTP ${resp.statusCode}.');
+      throw _failure(
+        resp,
+        fallback:
+            resp.statusCode == 401 ? 'Unauthorized - check the API key.' : null,
+      );
     }
     try {
-      final obj =
-          jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+      final obj = decodeJsonObject(resp, 'command completions');
       final matches = obj['matches'];
       if (matches is! List) return const [];
       return matches
@@ -1230,23 +1214,16 @@ class SonderApi {
   Future<String> commandHelp(String topic) async {
     final uri =
         _uri('/v1/commands/help').replace(queryParameters: {'topic': topic});
-    late http.Response resp;
-    try {
-      resp = await _requestGet(uri, headers: _headers())
-          .timeout(const Duration(seconds: 15));
-    } catch (e) {
-      throw SonderException('Cannot reach server: $e');
-    }
-    if (resp.statusCode == 401) {
-      throw SonderException('Unauthorized - check the API key.');
-    }
+    final resp = await _get(uri, const Duration(seconds: 15));
     if (resp.statusCode != 200) {
-      throw SonderException('Server returned HTTP ${resp.statusCode}.');
+      throw _failure(
+        resp,
+        fallback:
+            resp.statusCode == 401 ? 'Unauthorized - check the API key.' : null,
+      );
     }
     try {
-      final obj =
-          jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
-      return obj['text']?.toString() ?? '';
+      return decodeJsonObject(resp, 'command help')['text']?.toString() ?? '';
     } catch (_) {
       throw SonderException('Could not parse command help.');
     }
@@ -1259,25 +1236,22 @@ class SonderApi {
   /// rendered after a failed read would be a guess, and a wrong mode is worse
   /// than none — the whole point of showing it is knowing what the agent will
   /// do before you send.
+  @override
   Future<PermissionMode?> fetchPermissionMode() async {
-    late http.Response resp;
-    try {
-      resp = await _requestGet(_uri('/v1/permission-mode'), headers: _headers())
-          .timeout(const Duration(seconds: 10));
-    } catch (e) {
-      throw SonderException('Cannot reach server: $e');
-    }
+    final resp =
+        await _get(_uri('/v1/permission-mode'), const Duration(seconds: 10));
     if (resp.statusCode == 404) return null;
-    if (resp.statusCode == 401) {
-      throw SonderException('Unauthorized - check the API key.');
-    }
     if (resp.statusCode != 200) {
-      throw SonderException('Server returned HTTP ${resp.statusCode}.');
+      throw _failure(
+        resp,
+        fallback:
+            resp.statusCode == 401 ? 'Unauthorized - check the API key.' : null,
+        action: 'read the permission mode',
+      );
     }
     try {
-      final obj =
-          jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
-      return PermissionMode.fromJson(obj);
+      return PermissionMode.fromJson(
+          decodeJsonObject(resp, 'the permission mode'));
     } catch (_) {
       throw SonderException('Could not parse the permission mode.');
     }
@@ -1286,48 +1260,52 @@ class SonderApi {
   /// Switch the autonomy mode (POST /v1/permission-mode) and return the state
   /// the server reports afterwards, so the UI shows what actually took effect
   /// rather than what was requested.
-  Future<PermissionMode> setPermissionMode(String mode) async {
+  ///
+  /// The server treats this authenticated POST as the attended confirmation
+  /// for raising the mode, so callers must confirm a raise with the person
+  /// first (plan P0-4). Each call carries a fresh `Idempotency-Key`: a
+  /// retried network send cannot switch twice. A 403 becomes "Only an
+  /// administrator can change the permission mode." (code `FORBIDDEN`).
+  @override
+  Future<PermissionMode> setPermissionMode(String mode,
+      {String? idempotencyKey}) async {
     final wanted = mode.trim();
     if (wanted.isEmpty) {
       throw SonderException('A permission mode name is required.');
     }
     late http.Response resp;
     try {
-      resp = await _requestPost(
+      resp = await requestPost(
         _uri('/v1/permission-mode'),
-        headers: _headers(),
+        headers: {
+          ..._headers(),
+          'Idempotency-Key': idempotencyKey ?? newIdempotencyKey('mode'),
+        },
         body: jsonEncode({'mode': wanted}),
-      ).timeout(const Duration(seconds: 10));
+        timeout: const Duration(seconds: 10),
+      );
     } catch (e) {
-      throw SonderException('Cannot reach server: $e');
-    }
-    if (resp.statusCode == 401) {
-      throw SonderException('Unauthorized - check the API key.');
+      throw SonderException('Cannot reach server: $e',
+          cause: e, code: SonderException.unreachableCode, retryable: true);
     }
     if (resp.statusCode == 404) {
-      throw SonderException('This server does not support permission modes.');
+      throw SonderException('This server does not support permission modes.',
+          httpStatus: 404);
     }
     if (resp.statusCode != 200) {
       // A rejected mode name is the common case here, and the server's own
-      // wording ("unknown mode 'x'. modes: ...") is more useful than ours.
-      var detail = '';
-      try {
-        final body = jsonDecode(utf8.decode(resp.bodyBytes));
-        if (body is Map) {
-          detail =
-              body['error']?.toString() ?? body['message']?.toString() ?? '';
-        }
-      } catch (_) {
-        // Non-JSON error body; fall through to the status code.
-      }
-      throw SonderException(
-        detail.isNotEmpty ? detail : 'Server returned HTTP ${resp.statusCode}.',
+      // wording ("unknown mode 'x'. modes: ...") is more useful than ours;
+      // responseException reads it from the string `error` field.
+      throw _failure(
+        resp,
+        fallback:
+            resp.statusCode == 401 ? 'Unauthorized - check the API key.' : null,
+        action: 'change the permission mode',
       );
     }
     try {
-      final obj =
-          jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
-      return PermissionMode.fromJson(obj);
+      return PermissionMode.fromJson(
+          decodeJsonObject(resp, 'the permission mode'));
     } catch (_) {
       throw SonderException('Could not parse the permission mode.');
     }
@@ -1341,7 +1319,9 @@ class SonderApi {
   /// typed as the last user message.
   ///
   /// Callers that want the model's reasoning alongside the answer should use
-  /// [chatDetailed]; this returns the answer only.
+  /// [chatDetailed]; this returns the answer only. It is not tied to
+  /// [cancelChat]; pass [cancel] to stop it.
+  @override
   Future<String> chat(
     List<ChatMessage> messages, {
     String model = 'sonder',
@@ -1349,37 +1329,61 @@ class SonderApi {
     String sessionId = '',
     String project = '',
     bool allowApproximateLocation = false,
+    CancelToken? cancel,
   }) async {
-    final reply = await chatDetailed(
+    final reply = await _chatOnce(
       messages,
       model: model,
       contextSize: contextSize,
       sessionId: sessionId,
       project: project,
       allowApproximateLocation: allowApproximateLocation,
+      cancel: cancel ?? CancelToken(),
+      allowFallback: true,
     );
     return reply.text;
   }
 
-  /// Send the conversation and return the reply plus any model reasoning.
+  /// Record passive feedback (`/copied`, `/good`, …) for the current thread.
   ///
-  /// `sonder_reasoning` is present only when the server has been configured to
-  /// expose it (SONDER_EXPOSE_REASONING, and the caller clears
-  /// SONDER_REASONING_AUDIENCE). Absence is the normal case, and means this
-  /// deployment does not expose reasoning — not that the model had none.
-  Future<ChatReply> chatDetailed(
-    List<ChatMessage> messages, {
+  /// Uses its own client and no cancel token, so it can never take over a
+  /// running turn's Stop, and never falls back to the local server (feedback
+  /// recorded on another machine would train the wrong runtime).
+  @override
+  Future<void> recordFeedback(
+    String command, {
     String model = 'sonder',
     String contextSize = '8192',
     String sessionId = '',
     String project = '',
-    bool allowApproximateLocation = false,
+  }) async {
+    await _chatOnce(
+      [ChatMessage(role: Role.user, content: command)],
+      model: model,
+      contextSize: contextSize,
+      sessionId: sessionId,
+      project: project,
+      allowApproximateLocation: false,
+      cancel: CancelToken(),
+      allowFallback: false,
+      timeout: const Duration(seconds: 30),
+    );
+  }
+
+  Future<String> _chatBody(
+    List<ChatMessage> messages, {
+    required String model,
+    required String contextSize,
+    required String sessionId,
+    required String project,
+    required bool allowApproximateLocation,
+    required bool stream,
   }) async {
     final locationHint =
         allowApproximateLocation && _needsApproximateLocation(messages)
             ? await _discoverApproximateLocation()
             : null;
-    final body = jsonEncode({
+    return jsonEncode({
       'model': model,
       'context_size': contextSize,
       if (sessionId.trim().isNotEmpty) 'session': sessionId.trim(),
@@ -1393,50 +1397,116 @@ class SonderApi {
           .where((m) => !m.pending && !m.error)
           .map((m) => m.toWire())
           .toList(),
-      'stream': false,
+      'stream': stream,
     });
+  }
+
+  /// Send the conversation and return the reply plus any model reasoning.
+  ///
+  /// `sonder_reasoning` is present only when the server has been configured to
+  /// expose it (SONDER_EXPOSE_REASONING, and the caller clears
+  /// SONDER_REASONING_AUDIENCE). Absence is the normal case, and means this
+  /// deployment does not expose reasoning — not that the model had none.
+  ///
+  /// [cancel] stops exactly this call: it owns its own `http.Client`, the
+  /// token closes that client, and the call completes with a `CANCELLED`
+  /// [SonderException]. The client is closed on every path.
+  ///
+  /// The turn is re-sent to [localFallbackUrl] (without credentials) only
+  /// when the primary refused the connection or did not resolve — never
+  /// after a timeout, TLS error or partial response, because the server may
+  /// already be running tools. A timeout closes the client.
+  ///
+  /// When the answer is still being produced by a work run,
+  /// [ChatReply.pendingWorkRunId] is set and the text is a neutral
+  /// placeholder; fetch the answer with [workRuns].
+  @override
+  Future<ChatReply> chatDetailed(
+    List<ChatMessage> messages, {
+    String model = 'sonder',
+    String contextSize = '8192',
+    String sessionId = '',
+    String project = '',
+    bool allowApproximateLocation = false,
+    CancelToken? cancel,
+  }) async {
+    final token = cancel ?? CancelToken();
+    _activeTurns.add(token);
+    try {
+      return await _chatOnce(
+        messages,
+        model: model,
+        contextSize: contextSize,
+        sessionId: sessionId,
+        project: project,
+        allowApproximateLocation: allowApproximateLocation,
+        cancel: token,
+        allowFallback: true,
+      );
+    } finally {
+      _activeTurns.remove(token);
+    }
+  }
+
+  Future<ChatReply> _chatOnce(
+    List<ChatMessage> messages, {
+    required String model,
+    required String contextSize,
+    required String sessionId,
+    required String project,
+    required bool allowApproximateLocation,
+    required CancelToken cancel,
+    required bool allowFallback,
+    Duration? timeout,
+  }) async {
+    final body = await _chatBody(
+      messages,
+      model: model,
+      contextSize: contextSize,
+      sessionId: sessionId,
+      project: project,
+      allowApproximateLocation: allowApproximateLocation,
+      stream: false,
+    );
+    if (cancel.isCancelled) throw SonderException.cancelled();
 
     late http.Response resp;
     String warning = '';
-    final client = _NoRedirectClient(http.Client());
-    _chatClient = client;
     try {
-      resp = await client
-          .post(_uri('/v1/chat/completions'), headers: _headers(), body: body)
-          .timeout(const Duration(minutes: 5));
+      resp = await requestPost(
+        _uri('/v1/chat/completions'),
+        headers: _headers(),
+        body: body,
+        timeout: timeout ?? chatTimeout,
+        cancel: cancel,
+      );
+    } on SonderException {
+      rethrow; // Cancelled: never re-send.
     } catch (e) {
-      if (_canFallback) {
-        try {
-          resp = await client
-              .post(
-                _uri('/v1/chat/completions', localFallbackUrl),
-                headers: _headers(''),
-                body: body,
-              )
-              .timeout(const Duration(minutes: 5));
-          warning = _fallbackWarning('chat', e);
-        } catch (_) {
-          _chatClient = null;
-          throw SonderException.transport(e, baseUrl);
-        }
-      } else {
-        _chatClient = null;
+      if (!(allowFallback && _canFallback && isPreRequestConnectFailure(e))) {
         throw SonderException.transport(e, baseUrl);
       }
-    } finally {
-      _chatClient = null;
+      try {
+        resp = await requestPost(
+          _uri('/v1/chat/completions', localFallbackUrl),
+          headers: _headers(''),
+          body: body,
+          timeout: timeout ?? chatTimeout,
+          cancel: cancel,
+        );
+        warning = _fallbackWarning('chat', e);
+      } on SonderException {
+        rethrow;
+      } catch (_) {
+        throw SonderException.transport(e, baseUrl);
+      }
     }
 
-    if (resp.statusCode == 401) {
-      throw _responseException(
-        resp,
-        'Unauthorized — check the API key.',
-      );
-    }
     if (resp.statusCode != 200) {
-      throw _responseException(
+      throw _failure(
         resp,
-        'Server returned HTTP ${resp.statusCode}.',
+        fallback:
+            resp.statusCode == 401 ? 'Unauthorized — check the API key.' : null,
       );
     }
 
@@ -1447,45 +1517,14 @@ class SonderApi {
       if (choices.isEmpty) {
         throw SonderException('Empty response from server.');
       }
-      final msg = (choices.first as Map<String, dynamic>)['message']
-          as Map<String, dynamic>?;
-      final content = msg?['content']?.toString() ?? '';
-      final reply = content.trimRight();
-      final reasoning = obj['sonder_reasoning']?.toString().trim() ?? '';
       final choice = choices.first as Map<String, dynamic>;
-      final receipt = obj['sonder_receipt'] is Map
-          ? Map<String, dynamic>.from(obj['sonder_receipt'] as Map)
-          : const <String, dynamic>{};
-      final usage = obj['usage'] is Map
-          ? Map<String, dynamic>.from(obj['usage'] as Map)
-          : const <String, dynamic>{};
-      final activity = obj['sonder_activity'] is Map
-          ? Map<String, dynamic>.from(obj['sonder_activity'] as Map)
-          : const <String, dynamic>{};
-      final headerElapsed = int.tryParse(
-        resp.headers['x-sonder-elapsed-ms'] ?? '',
-      );
-      final metadata = ChatResponseMetadata.fromJson({
-        'completion_id': obj['id'],
-        'request_id':
-            receipt['request_id'] ?? resp.headers['x-sonder-correlation-id'],
-        'model': receipt['model'] ?? obj['model'],
-        'tier': receipt['tier'],
-        'finish_reason': choice['finish_reason'],
-        'status': activity['status'],
-        'cache': receipt['cache'],
-        'elapsed_ms':
-            receipt['elapsed_ms'] ?? obj['sonder_elapsed_ms'] ?? headerElapsed,
-        'prompt_tokens': usage['prompt_tokens'],
-        'completion_tokens': usage['completion_tokens'],
-        'total_tokens': usage['total_tokens'],
-        'model_calls': activity['model_calls'],
-        'tool_calls': activity['tool_calls'],
-      });
-      return ChatReply(
-        text: warning.isEmpty ? reply : '$warning\n\n$reply',
-        reasoning: reasoning,
-        metadata: metadata.isEmpty ? null : metadata,
+      final msg = choice['message'] as Map<String, dynamic>?;
+      return chatReplyFrom(
+        content: msg?['content']?.toString() ?? '',
+        completion: obj,
+        headers: resp.headers,
+        finishReason: choice['finish_reason']?.toString() ?? '',
+        warning: warning,
       );
     } on SonderException {
       rethrow;
@@ -1494,14 +1533,83 @@ class SonderApi {
     }
   }
 
+  /// Stream one turn with `stream: true` (plan P1-1).
+  ///
+  /// Emits [ChatStreamOpened] when the headers arrive, [ChatStreamKeepAlive]
+  /// for each `: keep-alive` comment, [ChatStreamDelta] per content
+  /// fragment, and one final [ChatStreamDone] carrying the same [ChatReply]
+  /// [chatDetailed] would return. Failures are [SonderException] stream
+  /// errors (see [openChatStream]). After the headers, [streamStallTimeout]
+  /// without a byte abandons the turn; keep-alives reset it.
+  @override
+  Stream<ChatStreamEvent> chatStream(
+    List<ChatMessage> messages, {
+    String model = 'sonder',
+    String contextSize = '8192',
+    String sessionId = '',
+    String project = '',
+    bool allowApproximateLocation = false,
+    CancelToken? cancel,
+  }) async* {
+    final token = cancel ?? CancelToken();
+    _activeTurns.add(token);
+    try {
+      final body = await _chatBody(
+        messages,
+        model: model,
+        contextSize: contextSize,
+        sessionId: sessionId,
+        project: project,
+        allowApproximateLocation: allowApproximateLocation,
+        stream: true,
+      );
+      var warning = '';
+      final events = openChatStream(
+        ChatStreamRequest(
+          uri: _uri('/v1/chat/completions'),
+          headers: _headers(),
+          body: body,
+          cancel: token,
+          headerTimeout: chatTimeout,
+          stallTimeout: streamStallTimeout,
+        ),
+        onConnectError: (error) {
+          if (!_canFallback || !isPreRequestConnectFailure(error)) return null;
+          warning = _fallbackWarning('chat', error);
+          return ChatStreamRequest(
+            uri: _uri('/v1/chat/completions', localFallbackUrl),
+            headers: _headers(''),
+            body: body,
+            cancel: token,
+            headerTimeout: chatTimeout,
+            stallTimeout: streamStallTimeout,
+          );
+        },
+      );
+      await for (final event in events) {
+        if (event is ChatStreamDone && warning.isNotEmpty) {
+          yield ChatStreamDone(ChatReply(
+            text: '$warning\n\n${event.reply.text}',
+            reasoning: event.reply.reasoning,
+            metadata: event.reply.metadata,
+          ));
+        } else {
+          yield event;
+        }
+      }
+    } finally {
+      _activeTurns.remove(token);
+    }
+  }
+
+  @override
   Future<void> logout() async {
     if (accountSession?.matches(baseUrl) != true) {
       throw SonderException('No account session for this server.');
     }
     try {
-      final response = await _requestPost(_uri('/v1/sonder/logout'),
-              headers: _headers(), body: '{}')
-          .timeout(const Duration(seconds: 20));
+      final response = await requestPost(_uri('/v1/sonder/logout'),
+          headers: _headers(), body: '{}');
       if (response.statusCode != 200 ||
           jsonDecode(response.body)['ok'] != true) {
         throw SonderException(
@@ -1513,134 +1621,96 @@ class SonderApi {
     }
   }
 
-  Future<String> register(String username, String password) async {
-    return _accountAction('/v1/sonder/register', username, password);
+  /// Create an account (POST /v1/sonder/register).
+  ///
+  /// Success is 200 or 201 with `ok: true`; the result reads
+  /// "Account <u> created (role <r>)." Creating the first administrator
+  /// needs the PC's bootstrap secret: without it the server answers 403 and
+  /// this throws a [SonderException] whose `needsBootstrapSecret` is true.
+  /// [bootstrapSecret] is sent once as `X-Sonder-Bootstrap-Secret` and is
+  /// never stored here.
+  @override
+  Future<String> register(String username, String password,
+      {String bootstrapSecret = ''}) async {
+    serverOrigin(baseUrl);
+    late http.Response resp;
+    try {
+      resp = await requestPost(
+        _uri('/v1/sonder/register'),
+        headers: {
+          ..._headers(),
+          if (bootstrapSecret.trim().isNotEmpty)
+            'X-Sonder-Bootstrap-Secret': bootstrapSecret.trim(),
+        },
+        body: jsonEncode({'username': username, 'password': password}),
+      );
+    } catch (e) {
+      throw SonderException('Account request could not be completed.',
+          cause: e, code: SonderException.unreachableCode, retryable: true);
+    }
+    Map<String, dynamic>? obj;
+    try {
+      final decoded = jsonDecode(utf8.decode(resp.bodyBytes));
+      if (decoded is Map) obj = Map<String, dynamic>.from(decoded);
+    } catch (_) {
+      obj = null;
+    }
+    final ok = obj?['ok'] == true;
+    if ((resp.statusCode == 200 || resp.statusCode == 201) && ok) {
+      final account = obj?['account'];
+      if (account is Map) {
+        final name = boundedResponseMetadata(account['username'], 128);
+        final role = boundedResponseMetadata(account['role'], 32);
+        return 'Account ${name.isEmpty ? username : name} created'
+            '${role.isEmpty ? '' : ' (role $role)'}.';
+      }
+      final message = obj?['message'];
+      return message is String && message.trim().isNotEmpty
+          ? message.trim()
+          : 'Account $username created.';
+    }
+    if (resp.statusCode >= 200 && resp.statusCode < 300) {
+      throw SonderException(
+        obj?['message'] is String
+            ? boundedResponseMetadata(obj!['message'], 1024)
+            : 'Account request failed.',
+        httpStatus: resp.statusCode,
+      );
+    }
+    throw _failure(resp, action: 'create accounts');
   }
 
+  @override
   Future<String> login(String username, String password) async {
     serverOrigin(baseUrl);
     late http.Response resp;
     try {
-      resp = await _requestPost(
+      resp = await requestPost(
         _uri('/v1/sonder/login'),
         headers: _headers(),
         body: jsonEncode({'username': username, 'password': password}),
-      ).timeout(const Duration(seconds: 20));
+      );
     } catch (e) {
-      throw SonderException('Login could not be completed.');
+      throw SonderException('Login could not be completed.',
+          cause: e, code: SonderException.unreachableCode, retryable: true);
     }
-    final obj = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
-    if (resp.statusCode != 200 || obj['ok'] != true) {
-      throw SonderException('Login was not accepted.');
-    }
-    return obj['token']?.toString() ?? '';
-  }
-
-  Future<String> _accountAction(
-    String path,
-    String username,
-    String password,
-  ) async {
-    serverOrigin(baseUrl);
-    late http.Response resp;
+    Map<String, dynamic>? obj;
     try {
-      resp = await _requestPost(
-        _uri(path),
-        headers: _headers(),
-        body: jsonEncode({'username': username, 'password': password}),
-      ).timeout(const Duration(seconds: 20));
-    } catch (e) {
-      throw SonderException('Account request could not be completed.');
+      final decoded = jsonDecode(utf8.decode(resp.bodyBytes));
+      if (decoded is Map) obj = Map<String, dynamic>.from(decoded);
+    } catch (_) {
+      obj = null;
     }
-    final obj = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
-    if (resp.statusCode != 200 || obj['ok'] != true) {
-      throw SonderException(
-        obj['message']?.toString() ?? 'Account request failed.',
-      );
+    if (resp.statusCode == 200 && obj?['ok'] == true) {
+      return obj?['token']?.toString() ?? '';
     }
-    return obj['message']?.toString() ?? 'OK';
+    if (resp.statusCode == 200 ||
+        (resp.statusCode == 401 && obj?['ok'] == false)) {
+      throw SonderException('Login was not accepted.',
+          httpStatus: resp.statusCode);
+    }
+    throw _failure(resp);
   }
-}
-
-class SonderException implements Exception {
-  final String message;
-
-  /// The underlying error, kept so a details view can show it without the
-  /// chat bubble having to lead with it.
-  final Object? cause;
-
-  /// Structured server diagnostics. These are deliberately bounded metadata,
-  /// never the raw response body, prompt, credentials or provider traceback.
-  final int? httpStatus;
-  final String type;
-  final String code;
-  final String correlationId;
-  final bool retryable;
-  final int? retryAfterSeconds;
-
-  SonderException(
-    this.message, {
-    this.cause,
-    this.httpStatus,
-    this.type = '',
-    this.code = '',
-    this.correlationId = '',
-    this.retryable = false,
-    this.retryAfterSeconds,
-  });
-
-  String get diagnosticText {
-    final lines = <String>[];
-    if (httpStatus != null) lines.add('HTTP $httpStatus');
-    if (type.isNotEmpty) lines.add('type: $type');
-    if (code.isNotEmpty) lines.add('code: $code');
-    if (correlationId.isNotEmpty) lines.add('request: $correlationId');
-    if (retryAfterSeconds != null) {
-      lines.add('retry after: ${retryAfterSeconds}s');
-    } else if (retryable) {
-      lines.add('retryable: yes');
-    }
-    return lines.join('\n');
-  }
-
-  /// Turn a transport failure into something a person can act on.
-  ///
-  /// These used to reach the chat bubble verbatim, so the first thing a new
-  /// user saw was "ClientException with SocketException: The remote computer
-  /// refused the network connection (OS Error: ..., errno = 1225), address =
-  /// 127.0.0.1, port = 56249". Every part of that is either noise (an
-  /// ephemeral local port number) or jargon (errno 1225), and none of it
-  /// says the one thing that matters: the server is not running.
-  factory SonderException.transport(Object error, String baseUrl) {
-    final text = error.toString();
-    final refused = text.contains('refused') ||
-        text.contains('errno = 1225') ||
-        text.contains('errno = 111') ||
-        text.contains('Connection closed before full header');
-    final timedOut =
-        text.contains('TimeoutException') || text.contains('timed out');
-
-    if (refused) {
-      return SonderException(
-        'Cannot reach the Sonder server at $baseUrl.\n\n'
-        "It does not look like it is running. Open the System page and use "
-        'Start server, or check the server URL in Settings.',
-        cause: error,
-      );
-    }
-    if (timedOut) {
-      return SonderException(
-        'The Sonder server at $baseUrl did not respond in time.\n\n'
-        'A model loading for the first time can take a while — the System '
-        'page shows whether the server is up.',
-        cause: error,
-      );
-    }
-    return SonderException('Could not reach $baseUrl.', cause: error);
-  }
-
-  @override
-  String toString() => message;
 }
 
 class SystemInfo {
@@ -2693,18 +2763,6 @@ class AutopilotEvent {
   }
 }
 
-/// One assistant turn: the answer, plus the model's reasoning when the
-/// deployment exposes it. [reasoning] is empty in the normal case.
-class ChatReply {
-  final String text;
-  final String reasoning;
-  final ChatResponseMetadata? metadata;
-
-  const ChatReply({required this.text, this.reasoning = '', this.metadata});
-
-  bool get hasReasoning => reasoning.trim().isNotEmpty;
-}
-
 class ActivityStatus {
   final int activeCount;
   final int totalToolCalls;
@@ -3539,38 +3597,5 @@ class SystemModel {
       id: json['id']?.toString() ?? '',
       ownedBy: json['owned_by']?.toString() ?? '',
     );
-  }
-}
-
-class _NoRedirectClient extends http.BaseClient {
-  final http.Client inner;
-  _NoRedirectClient(this.inner);
-  @override
-  Future<http.StreamedResponse> send(http.BaseRequest request) {
-    request.followRedirects = false;
-    return inner.send(request);
-  }
-
-  @override
-  void close() => inner.close();
-}
-
-Future<http.Response> _requestGet(Uri uri,
-    {Map<String, String>? headers}) async {
-  final client = _NoRedirectClient(http.Client());
-  try {
-    return await client.get(uri, headers: headers);
-  } finally {
-    client.close();
-  }
-}
-
-Future<http.Response> _requestPost(Uri uri,
-    {Map<String, String>? headers, Object? body}) async {
-  final client = _NoRedirectClient(http.Client());
-  try {
-    return await client.post(uri, headers: headers, body: body);
-  } finally {
-    client.close();
   }
 }
