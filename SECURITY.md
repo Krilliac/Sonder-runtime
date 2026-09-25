@@ -48,6 +48,10 @@ shell access on the host, and size the sandbox accordingly.
 
 Mitigations that are already in place and worth knowing about:
 
+- Raising the permission mode (to `acceptEdits` or `auto`) needs an attended
+  caller: the console's `/mode` or an administrator's
+  `POST /v1/permission-mode`. MCP clients and the HTTP chat may only lower it
+  (or return from `plan` to `manual`).
 - `file_delete` is **dry-run by default** and requires a confirmation string
   that matches one the tool returned; it also enforces root restrictions and
   a developer-authorization check.

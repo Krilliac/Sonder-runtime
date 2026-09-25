@@ -559,7 +559,10 @@ def _mode_command(argument):
             wanted = wanted[: -len(flag)].strip()
             explain = True
             break
-    return server.permission_mode(mode=wanted, explain=explain)
+    # The console is the attended surface: a person typed this, so it may
+    # raise autonomy (unattended callers may only lower it).
+    with permission_policy.attended_mode_change():
+        return server.permission_mode(mode=wanted, explain=explain)
 
 
 def _run_catalogued(line, cmd):

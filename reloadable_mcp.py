@@ -70,7 +70,10 @@ def _refuse_if_gated(name: str, arguments=None) -> None:
     ``GATE_CONTROL_TOOLS`` is exempt, because the refusal below names
     ``permission_mode`` as the remedy and ``plan`` would otherwise refuse that
     tool too -- leaving a client that selected ``plan`` no way to select
-    anything else, across restarts, since the mode persists to disk.
+    anything else, across restarts, since the mode persists to disk. The
+    exemption is a way *out*, not *up*: ``server.permission_mode`` itself
+    refuses an unattended request to raise the mode above ``manual``
+    (``permission_modes.unattended_escalation_refusal``).
 
     Imported lazily: ``permission_modes`` resolves the command catalog, which
     imports ``server``, which imports this module.

@@ -11034,6 +11034,9 @@ def permission_mode(mode: str = "", explain: bool = False) -> str:
     every mode, including auto.
 
     Elevation is a separate axis no mode grants; see permission_policy.
+    Raising the mode above manual needs an attended caller (the console's
+    /mode, or an administrator's POST /v1/permission-mode); from here an
+    unattended client may only lower it or return from plan to manual.
     """
     _maybe_live_reload()
     started = time.time()
@@ -11044,6 +11047,13 @@ def permission_mode(mode: str = "", explain: bool = False) -> str:
         elif explain:
             output = permission_modes.describe(wanted)
         else:
+            refusal = permission_modes.unattended_escalation_refusal(wanted)
+            if refusal:
+                _record_direct_tool(
+                    "permission_mode", {"mode": wanted}, ok=False, started=started,
+                    summary="unattended escalation refused",
+                )
+                return refusal
             permission_modes.set_mode(wanted)
             output = permission_modes.describe()
     except ValueError as exc:

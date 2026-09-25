@@ -190,8 +190,24 @@ the gate. Sonder's *own* agent and loop paths get no exemption -- a model
 Sonder is running must not be able to lift its own restraint, and
 ``_agent_dispatch`` cannot reach the tool at all. But an external model
 driving Sonder over MCP reaches ``reloadable_mcp`` and therefore *can* lift
-``plan``. That is the accepted price of not trapping an operator whose only
-client is an MCP one; it is not an accident, and it is not "console-only".
+``plan`` -- back to ``manual``, and no further.
+
+Raising autonomy is attended-only
+---------------------------------
+The exemption lets a caller *out* of ``plan``; it must not let one *up* the
+dial. An unattended caller (an MCP client, the HTTP chat's ``/permission_mode``
+fall-through, ``control_command``) that asks ``permission_mode`` for a mode
+more autonomous than both the current mode and ``manual`` -- ``acceptEdits``
+or ``auto`` from ``manual``, ``auto`` from ``acceptEdits`` -- is refused with
+the remedy named (``unattended_escalation_refusal``). Otherwise the mode, which
+persists in ``SONDER_HOME`` and governs every surface sharing that home, could
+be switched to ``auto`` by any MCP client and then used to run host programs.
+Lowering the mode, and returning from ``plan`` to ``manual``, stay allowed
+everywhere. The attended surfaces are the console's ``/mode`` and Shift+Tab
+(which run inside ``attended_mode_change()``) and the administrator-authorized
+``POST /v1/permission-mode`` endpoint, which sets the mode directly. A new
+surface is unattended until it says otherwise: that is the fail-closed
+default.
 
 Rules and modes compose; they do not race
 -------------------------------------------
@@ -295,6 +311,12 @@ AUTO = "auto"
 # Cycle order for the keybinding: least autonomy -> most.
 MODES = (PLAN, MANUAL, ACCEPT_EDITS, AUTO)
 DEFAULT_MODE = MANUAL
+
+# Set only by surfaces where a person is present to make a mode change
+# (the console). Default False: every other caller is unattended.
+_ATTENDED_MODE_CHANGE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "sonder_attended_mode_change", default=False,
+)
 
 ALLOW, ASK, DENY = "allow", "ask", "deny"
 
@@ -785,9 +807,59 @@ def current_mode() -> str:
         return _STATE["mode"]
 
 
-def set_mode(name: str) -> str:
-    """Set the mode by exact name or unambiguous prefix. Returns the new mode."""
-    _load()
+class attended_mode_change:
+    """Context in which a mode change is made by a person who is present.
+
+    Only the console enters it (``/mode`` and the Shift+Tab keybinding).
+    Protocol and HTTP callers never do, so they cannot raise autonomy.
+    """
+
+    def __enter__(self):
+        self._token = _ATTENDED_MODE_CHANGE.set(True)
+        return self
+
+    def __exit__(self, *exc):
+        _ATTENDED_MODE_CHANGE.reset(self._token)
+        return False
+
+
+def mode_change_attended() -> bool:
+    return bool(_ATTENDED_MODE_CHANGE.get())
+
+
+def is_unattended_escalation(current: str, target: str) -> bool:
+    """True when *target* is more autonomous than both *current* and manual.
+
+    That is the change an unattended caller may not make: it can always lower
+    the mode, and can always get from ``plan`` back to the ``manual`` default.
+    """
+    order = {mode: index for index, mode in enumerate(MODES)}
+    if current not in order or target not in order:
+        return True
+    return order[target] > max(order[current], order[DEFAULT_MODE])
+
+
+def unattended_escalation_refusal(target_name: str) -> str:
+    """"" when an unattended caller may select *target_name*, else the refusal.
+
+    Raises ``ValueError`` for an unknown mode, like ``set_mode``.
+    """
+    target = resolve_mode(target_name)
+    current = current_mode()
+    if mode_change_attended() or not is_unattended_escalation(current, target):
+        return ""
+    return (
+        "refused: raising the permission mode from %s to %s needs a person to "
+        "confirm it, and this caller is unattended (an MCP client, the HTTP "
+        "chat, or a control command). Run /mode %s at the Sonder console, or "
+        "have an administrator use the app's permission-mode control "
+        "(POST /v1/permission-mode). Lowering the mode, or returning from plan "
+        "to manual, is allowed here." % (current, target, target)
+    )
+
+
+def resolve_mode(name: str) -> str:
+    """The mode *name* selects (exact name or unambiguous prefix)."""
     wanted = str(name or "").strip().lower().replace(" ", "").replace("-", "")
     if not wanted:
         raise ValueError("mode name is required")
@@ -804,6 +876,18 @@ def set_mode(name: str) -> str:
         raise ValueError(
             "unknown mode '%s'. modes: %s" % (name, ", ".join(MODES))
         )
+    return match
+
+
+def set_mode(name: str) -> str:
+    """Set the mode by exact name or unambiguous prefix. Returns the new mode.
+
+    This is the storage primitive; it does not ask who is changing the mode.
+    The ``permission_mode`` tool consults ``unattended_escalation_refusal``
+    first, which is where unattended callers are held to lowering only.
+    """
+    _load()
+    match = resolve_mode(name)
     with _LOCK:
         _STATE["mode"] = match
     _save()

@@ -53,6 +53,15 @@ of the model — an uncensored or "abliterated" model changes what it will
   (`SONDER_ISOLATED_APPROVAL_CODE`, `SONDER_ISOLATED_WRITE_APPROVAL_CODE`) are
   retired the same way; a writable isolated workspace needs a one-shot approval
   of exactly that call.
+- **Only an attended caller can raise the permission mode.** The
+  `permission_mode` tool stays exempt from the gate so a client in `plan` can
+  always get back to `manual`, but an unattended caller (an MCP client, the
+  HTTP chat's `/permission_mode`, a control command) asking for a mode above
+  both the current one and `manual` -- `acceptEdits`/`auto` from `manual`,
+  `auto` from `acceptEdits` -- is refused with the remedy named: `/mode <m>`
+  at the console, or an administrator's `POST /v1/permission-mode`. Lowering
+  the mode is allowed from every surface. The mode persists in `SONDER_HOME`
+  and governs every surface sharing it, which is why raising it is attended.
 - **A worker whose lease is gone may look but not touch.** The autopilot
   controller installs an effect fence for each task
   (`sonder_runtime/adapters/execution/effect_fence.py`); the permission gate

@@ -54,6 +54,10 @@ class PermissionPolicyProvider:
     def set_mode(self, name: str) -> str:
         return _engine().set_mode(name)
 
+    def attended_mode_change(self):
+        """Context for a mode change a present person makes (console only)."""
+        return _engine().attended_mode_change()
+
     def modes(self) -> tuple[str, ...]:
         return tuple(_engine().MODES)
 
