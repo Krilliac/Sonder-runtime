@@ -650,8 +650,10 @@ def _resolve_auth_mode(api_key="", require_account=False, configured=None):
         _serve_logger.info(f"Auth mode resolved, mode={mode!r} (explicit)")
         _serve_logger.debug(f"_resolve_auth_mode: explicit mode={mode!r}")
         return mode
-    if not api_key and not require_account:
-        _serve_logger.warning("auth mode defaulting to local-open: no API key or account requirement configured")
+    # No warning here: this also runs at import time, before the launcher's
+    # secrets file and typed configuration are applied, so "no API key" would
+    # routinely be false.  main() warns about local-open once the effective
+    # mode is known (see _warn_if_local_open).
     if api_key:
         _serve_logger.debug("_resolve_auth_mode: inferred api-key mode from API key presence")
         return "api-key"
@@ -1646,6 +1648,17 @@ def _effective_auth_mode():
         if REQUIRE_ACCOUNT:
             return "account"
     return AUTH_MODE
+
+
+def _warn_if_local_open():
+    """Warn about an unauthenticated listener from the *effective* mode only."""
+    if _effective_auth_mode() != "local-open":
+        return False
+    _serve_logger.warning(
+        "auth mode is local-open: no API key or account requirement configured; "
+        "the loopback listener accepts unauthenticated local clients"
+    )
+    return True
 
 
 def _auth_context(auth_header="", account_header=""):
@@ -7185,6 +7198,7 @@ def main(
         BOUND_PORT = port
         url = "http://%s:%d" % (HOST, port)
         _serve_logger.info(f"Server listening on {url}, auth_mode={_effective_auth_mode()!r}")
+        _warn_if_local_open()
         print("sonder_serve listening on %s" % url)
         print("auth mode: %s" % _effective_auth_mode())
         try:
