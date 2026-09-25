@@ -561,15 +561,16 @@ def _env_min_sim():
     """The SONDER_MIN_SIM override, or the calibrated default when unusable.
 
     A malformed value used to raise out of every orchestrated turn, and NaN
-    silently disabled retrieval (every comparison with NaN is false).  Only a
-    finite number is an operator's threshold; a value above 1.0 still
-    deliberately disables lesson injection.
+    silently disabled retrieval (every comparison with NaN is false).  Any
+    other number is the operator's threshold: a value above 1.0 (including
+    ``inf``) deliberately disables lesson injection, so it must never fall
+    back to the default and re-enable injection.
     """
     try:
         value = float(os.environ.get("SONDER_MIN_SIM", str(DEFAULT_MIN_SIM)))
     except ValueError:
         return DEFAULT_MIN_SIM
-    return value if math.isfinite(value) else DEFAULT_MIN_SIM
+    return DEFAULT_MIN_SIM if math.isnan(value) else value
 
 
 def retrieve_with_ids(
