@@ -299,6 +299,35 @@ def run_isolated(
     process_memory_mb: int | None = None, job_memory_mb: int | None = None,
     active_processes: int | None = None,
 ) -> dict[str, object]:
+    """Run ``command`` below low MIC; attach the typed ``low`` attestation.
+
+    The result keeps the historical schema (``exit_code``, ``output``,
+    ``passed``, ``job`` and optional ``integrity_failed``) and adds
+    ``attestation``: an ``IsolationAttestation`` built from this supervisor's
+    own Job report, never from candidate output.
+    """
+    from sonder_runtime.application.selfmod.candidate_isolation import (
+        LOW_INTEGRITY,
+        IsolationAttestation,
+    )
+
+    result = _run_low_integrity(
+        command, cwd=cwd, timeout=timeout, protected_paths=protected_paths,
+        process_memory_mb=process_memory_mb, job_memory_mb=job_memory_mb,
+        active_processes=active_processes,
+    )
+    result["attestation"] = IsolationAttestation.from_supervisor_result(
+        result, expected_kind=LOW_INTEGRITY, supervisor_uid=None,
+    )
+    return result
+
+
+def _run_low_integrity(
+    command: Sequence[str], *, cwd: str | os.PathLike[str], timeout: int,
+    protected_paths: Sequence[str | os.PathLike[str]] = (),
+    process_memory_mb: int | None = None, job_memory_mb: int | None = None,
+    active_processes: int | None = None,
+) -> dict[str, object]:
     """Run ``command`` below low MIC and return a selfmod-compatible result.
 
     The Job limits default to the historical 2 GiB/process, 4 GiB/job and 32

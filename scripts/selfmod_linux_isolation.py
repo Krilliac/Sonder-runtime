@@ -51,6 +51,15 @@ from typing import Any
 ATTESTATION = "linux-uid"
 CANDIDATE_UID_ENV = "SONDER_SELFMOD_CANDIDATE_UID"
 CANDIDATE_GID_ENV = "SONDER_SELFMOD_CANDIDATE_GID"
+ISOLATION_DOC = "docs/architecture/REMAINING-SELFMOD-517-LINUX-ISOLATION.md"
+# The one operator-facing explanation for a Linux host that has not been
+# provisioned for unattended candidate checks.  It names what to set and
+# where the requirements are documented, so a refusal is actionable.
+UNCONFIGURED_GUIDANCE = (
+    f"Linux candidate isolation is not configured: set {CANDIDATE_UID_ENV} to a "
+    f"dedicated, otherwise unused, unprivileged uid (optionally {CANDIDATE_GID_ENV}) "
+    f"and run the selfmod supervisor as root; see {ISOLATION_DOC}"
+)
 
 _MIB = 1024 ** 2
 DEFAULT_PROCESS_MEMORY_MB = 2048
@@ -120,6 +129,63 @@ def candidate_supervisor() -> tuple[Callable[..., dict[str, object]], str]:
     return selfmod_low_integrity.run_isolated, "low"
 
 
+def candidate_isolation_preflight() -> str | None:
+    """Say why this host cannot isolate unattended candidate checks, or ``None``.
+
+    Callers that are about to create a selfmod run (``nightly_selfmod``) use
+    this to refuse before any run, backup or workspace exists.  The checks
+    are host facts only: Linux, a root supervisor, ``no_new_privs``, and a
+    configured, unprivileged, currently spare candidate uid.  ``run_isolated``
+    re-checks all of them under the exclusive uid claim for every candidate
+    command, so passing preflight never authorizes a launch by itself.
+
+    On Windows the low-integrity supervisor proves its own boundary for each
+    command, so there is nothing to pre-check here.
+    """
+    if os.name == "nt":
+        return None
+    if not sys.platform.startswith("linux"):
+        return (
+            f"unsupported platform: no selfmod candidate supervisor exists for "
+            f"{sys.platform}; see {ISOLATION_DOC}"
+        )
+    if not os.environ.get(CANDIDATE_UID_ENV, "").strip():
+        return UNCONFIGURED_GUIDANCE
+    try:
+        _require_host()
+        uid, gid = candidate_identity(None, None)
+        _require_spare_identity(uid, gid)
+    except LinuxIsolationUnavailable as exc:
+        return f"{exc}; see {ISOLATION_DOC}"
+    return None
+
+
+def require_not_candidate_writable(paths: Sequence[str | os.PathLike[str]]) -> None:
+    """Refuse when the configured candidate uid could write any of ``paths``.
+
+    For host state the parent legitimately mutates between candidate checks
+    (the selfmod ledger with its baseline, tested-byte digests and
+    decisions), a before/after content digest would flag the parent's own
+    writes.  This applies the same pre-launch exposure rules as
+    ``protected_paths`` (no symlink, no candidate-owned or -writable ancestor,
+    no ACL) without the content comparison.  Raises
+    ``LinuxIsolationUnavailable``/``ProtectedPathExposed``.
+    """
+    _require_host()
+    uid, gid = candidate_identity(None, None)
+    _verify_protected([Path(item) for item in paths], uid, gid)
+
+
+def _attested(result: dict[str, object]) -> dict[str, object]:
+    """Attach the typed isolation attestation built from this supervisor's report."""
+    from sonder_runtime.application.selfmod.candidate_isolation import IsolationAttestation
+
+    result["attestation"] = IsolationAttestation.from_supervisor_result(
+        result, expected_kind=ATTESTATION, supervisor_uid=os.geteuid(),
+    )
+    return result
+
+
 def candidate_identity(uid: int | None, gid: int | None) -> tuple[int, int]:
     """Resolve the dedicated candidate uid/gid (explicit value, then environment)."""
     try:
@@ -127,7 +193,8 @@ def candidate_identity(uid: int | None, gid: int | None) -> tuple[int, int]:
             configured = os.environ.get(CANDIDATE_UID_ENV, "").strip()
             if not configured:
                 raise LinuxIsolationUnavailable(
-                    f"no dedicated candidate uid is configured ({CANDIDATE_UID_ENV})"
+                    f"no dedicated candidate uid is configured ({CANDIDATE_UID_ENV}); "
+                    + UNCONFIGURED_GUIDANCE
                 )
             uid = int(configured)
         if gid is None:
@@ -489,11 +556,11 @@ def run_isolated(
         raise LinuxIsolationUnavailable("candidate uid/gid must be unprivileged (non-zero)")
     claim = _claim_identity(uid)
     try:
-        return _run_claimed(
+        return _attested(_run_claimed(
             command, cwd=cwd, timeout=timeout, protected_paths=protected_paths,
             process_memory_mb=process_memory_mb, job_memory_mb=job_memory_mb,
             active_processes=active_processes, uid=uid, gid=gid,
-        )
+        ))
     finally:
         os.close(claim)
 

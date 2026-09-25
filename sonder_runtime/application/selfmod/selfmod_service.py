@@ -550,6 +550,32 @@ class GuardedLegacySelfmodService:
         )
         return SelfmodIntegrationState(run, governance, lifecycle)
 
+    def journaled_stage(
+        self,
+        run_id: str,
+        stage: str,
+        request: object,
+        invoke: Callable[[], Mapping[str, object]],
+    ) -> Mapping[str, object]:
+        """Run one legacy stage that a host driver invokes itself, journaled.
+
+        Unattended drivers (``scripts/nightly_selfmod.py``) call the legacy
+        module with arguments the typed methods do not model (candidate
+        isolation limits, protected evaluator truth, nightly review kinds).
+        This gives those calls the same effect-journal identity, per-attempt
+        numbering for repeatable stages, phase precondition and success
+        predicate as the typed methods.  It fails closed when no binding
+        factory is composed: a driver that asks for journaling must never
+        silently run the stage unjournaled.
+        """
+        if stage not in _STAGE_EFFECTS:
+            raise InvalidInput(f"unknown selfmod stage {stage!r}")
+        if self._effect_binding_factory is None:
+            raise Forbidden("selfmod stage journaling requires a composed effect binding")
+        if not callable(invoke):
+            raise TypeError("invoke must be callable")
+        return self._mutating_call(run_id, stage, request, invoke)
+
     def _mutating_call(
         self,
         run_id: str,

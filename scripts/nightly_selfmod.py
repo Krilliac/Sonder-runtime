@@ -53,9 +53,24 @@ WHAT THE GATES DO AND DO NOT PROVE
   - The parent records SHA-256 digests of every changed file and of the diff
     before the first gate and re-verifies them before review, before the
     branch commit and before deployment. A mismatch rejects the candidate.
-  - On unsupported hosts the isolation helper fails closed for the
-    unattended check. If no matching held-out suite exists, the evaluator is
-    unavailable and the candidate is rejected.
+  - On Linux, every candidate check runs through the uid-separated
+    supervisor (scripts/selfmod_linux_isolation.py) once an operator sets
+    SONDER_SELFMOD_CANDIDATE_UID to a dedicated unprivileged uid and runs
+    this stage as root. The candidate runs as that uid with no_new_privs and
+    rlimits; it cannot write the held-out snapshot, the backup bundle (the
+    rollback point), the selfmod database (baseline, tested digests,
+    decisions) or the live checkout, and the supervisor re-digests that truth
+    after every check. Like low integrity it does not bound reads or network.
+  - The parent-scored gate accepts only the typed isolation attestation of
+    the supervisor this host selected ("low" on Windows, "linux-uid" on a
+    configured Linux host); neither can vouch for the other.
+  - On a Linux host without a configured candidate uid, and on any other
+    unsupported host, run() refuses before creating a run and names the
+    setting to configure. If no matching held-out suite exists, the evaluator
+    is unavailable and the candidate is rejected.
+  - Each mutating stage (backup, workspace, begin_testing, every gate,
+    review, approve, deploy) is admitted through the bootstrap-composed
+    selfmod stage journal, with per-attempt identities for repeatable stages.
 """
 from __future__ import annotations
 
@@ -80,6 +95,8 @@ if str(REPO) not in sys.path:
 
 import selfmod
 from scripts import selfmod_host_grader
+from scripts import selfmod_linux_isolation
+from sonder_runtime.application.selfmod.candidate_isolation import accepted_probe_attestation
 
 _HELD_OUT_MAX_FILES = 2048
 _HELD_OUT_MAX_BYTES = 32 * 1024 * 1024
@@ -322,17 +339,89 @@ def _regression_command(py: str, *, ignore_paths=(), kind: str = "regression",
 
 
 def _record_candidate_test(run_id, kind, command, *, timeout, protected_paths=(),
-                           isolation=None):
+                           isolation=None, stages=None):
     """Run one unattended gate with isolation selected explicitly.
 
     Keeping this choice at the nightly call site prevents the ordinary
-    selfmod API from inheriting a process-global security mode.
+    selfmod API from inheriting a process-global security mode.  ``run()``
+    always passes its composed stage journal, so each gate is admitted as its
+    own per-attempt ``record_test`` effect; ``stages=None`` is only the
+    direct seam used by unit tests of this helper.
     """
-    return selfmod.record_test(
-        run_id, kind, command, timeout=timeout,
-        protected_paths=protected_paths, low_integrity=True,
-        isolation=isolation,
-    )
+    protected = tuple(str(path) for path in protected_paths)
+
+    def invoke():
+        return selfmod.record_test(
+            run_id, kind, command, timeout=timeout,
+            protected_paths=protected, low_integrity=True,
+            isolation=isolation,
+        )
+
+    if stages is None:
+        return invoke()
+    return stages.journaled_stage(run_id, "record_test", {
+        "kind": str(kind), "command": [str(item) for item in command],
+        "timeout": timeout, "protected_paths": list(protected),
+        "isolation": dict(isolation or {}),
+    }, invoke)
+
+
+def _compose_stage_journal():
+    """Return the production selfmod stage journal (fail closed).
+
+    This is the bootstrap-composed ``GuardedLegacySelfmodService``: its
+    binding factory is the host's ``_compose_selfmod_binding`` over the
+    shared worker-effects journal, so every nightly mutation stage gets the
+    same journal identity (and per-attempt numbering for repeatable stages)
+    as the typed selfmod service.
+    """
+    from sonder_runtime.bootstrap.app import default_app
+
+    factory = getattr(default_app(), "selfmod_service", None)
+    if not callable(factory):
+        raise RuntimeError("the application graph does not compose a selfmod service")
+    return factory()
+
+
+def _evaluator_truth_paths(run_id, held_out) -> tuple[str, ...]:
+    """Evaluator truth every candidate gate must leave byte-for-byte untouched.
+
+    The held-out snapshot and the rollback point (the sealed backup bundle
+    and its manifest, which also records the baseline hashes).  Supervisors
+    refuse to launch when any of these is candidate-writable (Linux) and
+    re-digest them after each check.  The selfmod ledger is checked for
+    candidate write exposure once per run instead (``_isolation_refusal``):
+    the parent writes it between gates, so its bytes are not stable.
+    """
+    paths = [str(path) for path in held_out.get("protected_paths", ())]
+    bundle = selfmod._backup_dir(run_id)
+    if bundle.is_dir():
+        paths.append(str(bundle))
+        # The Windows supervisor digests files only; name them explicitly.
+        for name in ("manifest.json", "manifest.sha256"):
+            if (bundle / name).is_file():
+                paths.append(str(bundle / name))
+    return tuple(dict.fromkeys(paths))
+
+
+def _isolation_refusal() -> str | None:
+    """Why this host cannot isolate unattended candidates, else ``None``.
+
+    On a Linux host with the uid supervisor selected, the selfmod ledger
+    (baseline, tested digests, decisions) and its directory chain must also
+    be closed to the candidate uid before any run starts.
+    """
+    refusal = selfmod_linux_isolation.candidate_isolation_preflight()
+    if refusal:
+        return refusal
+    _runner, kind = selfmod_linux_isolation.candidate_supervisor()
+    if kind == selfmod_linux_isolation.ATTESTATION:
+        try:
+            selfmod_linux_isolation.require_not_candidate_writable([selfmod.database_path()])
+        except selfmod_linux_isolation.LinuxIsolationUnavailable as error:
+            return "selfmod ledger is exposed to the candidate uid: %s; see %s" % (
+                str(error)[:300], selfmod_linux_isolation.ISOLATION_DOC)
+    return None
 
 
 # The selfmod model sees only the candidate module. These suites are selected
@@ -570,6 +659,9 @@ def _prepare_held_out(target: str, workspace: Path, timeout: int,
         key=lambda path: len(path.parts), reverse=True,
     ):
         directory.chmod(0o555)
+    # The root itself (0700 from mkdtemp) must be readable by a candidate
+    # that runs as a distinct uid on Linux; it stays unwritable by it.
+    suite_root.chmod(0o555)
     payload = {
         "root": str(workspace),
         "suite_root": str(suite_root),
@@ -1239,20 +1331,31 @@ def _binding_mismatch(run_id, workspace: Path, binding: dict) -> str | None:
 
 
 def _parent_scored_gate(run_id: str, workspace: Path, target: str,
-                        function_name: str, held_out: dict, timeout: int) -> dict:
-    """Score a low candidate probe against assertions retained by the host."""
+                        function_name: str, held_out: dict, timeout: int,
+                        *, stages=None, protected_paths=None) -> dict:
+    """Score an isolated candidate probe against assertions retained by the host.
+
+    The probe must carry the typed attestation of the supervisor this host
+    selected: ``low`` from the Windows low-integrity Job, or ``linux-uid``
+    from the Linux uid-separated supervisor.  Neither supervisor can vouch
+    for the other, and an unattested probe never reaches the grader.
+    """
     cases = held_out["host_cases"]
     command, nonce = selfmod_host_grader.challenge(
         workspace, _module_name_for_target(target) or "", function_name,
         cases, python=_test_python(),
     )
+    if protected_paths is None:
+        protected_paths = held_out.get("protected_paths", ())
     probe = _record_candidate_test(
         run_id, "host_probe", command, timeout=timeout,
-        protected_paths=held_out.get("protected_paths", ()),
+        protected_paths=protected_paths, stages=stages,
     )
-    if (not isinstance(probe, dict) or not probe.get("passed")
-            or probe.get("isolation") != "low" or not probe.get("test_id")):
-        return {"passed": False, "detail": "parent challenge lacked an attested low probe"}
+    _runner, selected_kind = selfmod_linux_isolation.candidate_supervisor()
+    if (not isinstance(probe, dict) or not probe.get("test_id")
+            or accepted_probe_attestation(probe, selected_kind=selected_kind) is None):
+        return {"passed": False,
+                "detail": f"parent challenge lacked an attested {selected_kind} probe"}
     passed, detail = selfmod_host_grader.grade(probe.get("output", ""), nonce, cases)
     if passed:
         try:
@@ -1294,7 +1397,8 @@ def _reject_unbound(run_id, stage: str, mismatch: str) -> str:
     return "candidate rejected: %s (%s)" % (mismatch, stage)
 
 
-def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
+def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0,
+        stages=None):
     """Drive one selfmod lifecycle.
 
     branch=True commits a verified candidate to its own selfmod/<run-id>
@@ -1302,6 +1406,11 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     is the continuous-run mode. branch=False follows the configured
     selfmod mode instead, which under auto-low-risk deploys into the
     working tree.
+
+    ``stages`` is the selfmod stage journal (a ``GuardedLegacySelfmodService``
+    with a composed effect binding).  When omitted the production graph's
+    service is composed; a host that cannot compose it refuses to start a
+    run rather than mutate unjournaled.
     """
     settings = selfmod.settings()
     if not settings.get("enabled"):
@@ -1309,6 +1418,13 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     mode = settings.get("mode") or "propose"
     if mode == "observe":
         return "mode=observe (observation only, no candidate created)"
+
+    # Every candidate check runs under an OS-enforced supervisor.  Refuse
+    # before any run, backup or workspace exists when this host cannot
+    # provide one (on Linux: no dedicated candidate uid configured).
+    refusal = _isolation_refusal()
+    if refusal:
+        return "candidate isolation unavailable, no run started: %s" % refusal
 
     # A dirty tree cannot produce a committed improvement -- selfmod's deploy
     # refuses to commit when the run started with uncommitted changes -- so
@@ -1319,6 +1435,13 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     if status.strip():
         return ("working tree dirty (%d path(s)); a run started here could not "
                 "be committed, so none was started" % len(status.splitlines()))
+
+    if stages is None:
+        try:
+            stages = _compose_stage_journal()
+        except Exception as error:
+            return ("selfmod stage journal unavailable (%s); refusing to mutate "
+                    "without journaled effects" % type(error).__name__)
 
     proposal_deadline = time.monotonic() + min(300.0, max(60.0, float(test_timeout)))
     proposed = propose_objective(
@@ -1354,9 +1477,11 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
 
     # The lifecycle refuses a workspace without a verified backup, which is
     # the whole basis of rollback: no restore point, no isolated edit.
-    selfmod.create_backup(run_id)
+    stages.journaled_stage(run_id, "create_backup", {},
+                           lambda: selfmod.create_backup(run_id))
     selfmod.verify_backup(run_id)
-    selfmod.prepare_workspace(run_id)
+    stages.journaled_stage(run_id, "prepare_workspace", {},
+                           lambda: selfmod.prepare_workspace(run_id))
     workspace = selfmod.candidate_path(run_id)
     original = (workspace / target).read_text(encoding="utf-8", errors="replace")
 
@@ -1418,7 +1543,8 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
         _discard_workspace(run_id)
         return "candidate made no change"
 
-    selfmod.begin_testing(run_id)
+    stages.journaled_stage(run_id, "begin_testing", {},
+                           lambda: selfmod.begin_testing(run_id))
     # Bind the bytes that will be tested to the bytes that may be promoted.
     # Computed here, in the parent, before any candidate process runs.
     binding = _candidate_binding(workspace, diff.get("changed_files") or (), diff.get("diff") or "")
@@ -1435,6 +1561,7 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     else:
         log("  lint: Ruff unavailable; Python compilation is the syntax gate")
     held_out = _prepare_held_out(target, workspace, test_timeout, function_name)
+    truth = _evaluator_truth_paths(run_id, held_out)
     workers = _regression_workers()
     for kind in REGRESSION_KINDS:
         checks.append((kind, _regression_command(
@@ -1451,8 +1578,9 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
             # the isolated checkout.
             outcome = _record_candidate_test(
                 run_id, kind, command, timeout=test_timeout,
-                protected_paths=held_out.get("protected_paths", ()) if kind == "held_out" else (),
+                protected_paths=truth,
                 isolation=_regression_isolation(kind, workers) if kind in REGRESSION_KINDS else None,
+                stages=stages,
             )
             passed = bool(outcome.get("passed")) if isinstance(outcome, dict) else bool(outcome)
             results.append((kind, passed))
@@ -1464,6 +1592,7 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
         if held_out.get("host_cases"):
             outcome = _parent_scored_gate(
                 run_id, workspace, target, function_name, held_out, test_timeout,
+                stages=stages, protected_paths=truth,
             )
             passed = bool(outcome.get("passed"))
             results.append(("host_grade", passed))
@@ -1491,12 +1620,15 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     mismatch = _binding_mismatch(run_id, workspace, binding)
     if mismatch:
         return _reject_unbound(run_id, "before review", mismatch)
-    reviewed = selfmod.review(
-        run_id, require_kinds={"syntax", "held_out", *REGRESSION_KINDS},
-        unevaluated=("%s: %s" % UNEVALUATED_PARTITION,) + (
-            (f"host_grade: no safe parent-scored assertion for {function_name}",)
-            if not held_out.get("host_cases") else ()
-        ),
+    require_kinds = {"syntax", "held_out", *REGRESSION_KINDS}
+    unevaluated = ("%s: %s" % UNEVALUATED_PARTITION,) + (
+        (f"host_grade: no safe parent-scored assertion for {function_name}",)
+        if not held_out.get("host_cases") else ()
+    )
+    reviewed = stages.journaled_stage(
+        run_id, "review",
+        {"require_kinds": sorted(require_kinds), "unevaluated": list(unevaluated)},
+        lambda: selfmod.review(run_id, require_kinds=require_kinds, unevaluated=unevaluated),
     )
     # A PASS lands on reviewing and may auto-advance to approved under
     # auto-low-risk; a FAIL lands on rejected/restored with last_error set.
@@ -1554,8 +1686,10 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     mismatch = _binding_mismatch(run_id, workspace, binding)
     if mismatch:
         return _reject_unbound(run_id, "before deploy", mismatch)
-    selfmod.approve(run_id, approver="nightly")
-    selfmod.deploy(run_id, expected_digests=binding["files"])
+    stages.journaled_stage(run_id, "approve", {"approver": "nightly"},
+                           lambda: selfmod.approve(run_id, approver="nightly"))
+    stages.journaled_stage(run_id, "deploy", {"expected_digests": dict(binding["files"])},
+                           lambda: selfmod.deploy(run_id, expected_digests=binding["files"]))
     run = selfmod.get_run(run_id)
     return "DEPLOYED %s to %s (commit %s)" % (
         run_id, target, (run.get("deployed_commit") or "")[:10] or "none")

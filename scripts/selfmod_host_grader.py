@@ -228,6 +228,30 @@ def grade(output: str, nonce: str, cases: Sequence[dict]) -> tuple[bool, str]:
     return True, f"parent-scored {len(cases)} assertion(s); expected sha256={receipt}"
 
 
+def _attested_pass(isolated: object, attestation: str) -> bool:
+    """True only for a passing result carrying the selected supervisor's attestation."""
+    import os
+
+    from sonder_runtime.application.selfmod.candidate_isolation import (
+        IsolationAttestation,
+        IsolationAttestationError,
+    )
+
+    if not isinstance(isolated, dict):
+        return False
+    try:
+        typed = IsolationAttestation.from_supervisor_result(
+            isolated, expected_kind=attestation,
+            supervisor_uid=os.geteuid() if hasattr(os, "geteuid") else None,
+        )
+    except IsolationAttestationError:
+        return False
+    supplied = isolated.get("attestation")
+    if supplied is not None and supplied != typed:
+        return False
+    return typed.passed and isolated.get("exit_code") == 0
+
+
 def clean_replay(
     repository: Path, workspace: Path, state_root: Path, starting_commit: str,
     tested_files: dict[str, str | None], module: str, function: str,
@@ -254,6 +278,9 @@ def clean_replay(
         return False, "clean replay workspace overlaps candidate authority"
     state_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="sonder-clean-", dir=state_root) as parent:
+        # mkdtemp is 0700; a Linux candidate runs as a distinct uid and must
+        # be able to read (never write) the supervisor-owned fresh checkout.
+        Path(parent).chmod(0o755)
         clean = Path(parent) / "candidate"
         added = False
         result = (False, "clean replay was not evaluated")
@@ -287,9 +314,7 @@ def clean_replay(
                 command, cwd=clean, timeout=timeout,
                 protected_paths=(*protected_paths, *(clean / rel for rel in tested_files)),
             )
-            if (isolated.get("exit_code") != 0 or isolated.get("passed") is not True
-                    or isolated.get("integrity_failed")
-                    or (isolated.get("job") or {}).get("integrity") != attestation):
+            if not _attested_pass(isolated, attestation):
                 result = (False, "fresh checkout lacked a successful isolated probe")
             else:
                 result = grade(str(isolated.get("output") or ""), nonce, cases)

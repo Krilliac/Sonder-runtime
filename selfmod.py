@@ -27,6 +27,11 @@ from pathlib import Path, PurePosixPath
 import sonder_paths
 import sonder_logging
 from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
+from sonder_runtime.application.selfmod.candidate_isolation import (
+    ISOLATION_KINDS,
+    IsolationAttestation,
+    IsolationAttestationError,
+)
 
 
 MODES = ("observe", "propose", "auto-low-risk")
@@ -73,7 +78,7 @@ SENSITIVE_PARTS = (
 )
 # Attestations a candidate supervisor may build.  Each is accepted only from
 # the supervisor that constructs it (see ``_record_command``).
-_ISOLATED_ATTESTATIONS = frozenset({"low", "linux-uid"})
+_ISOLATED_ATTESTATIONS = ISOLATION_KINDS
 DEFAULT_BUDGETS = {
     "max_files_inspected": 80,
     "max_files_changed": 8,
@@ -696,12 +701,18 @@ def apply_candidate_changes(run_id, changes):
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         encoded = str(content).encode("utf-8")
+        # mkstemp creates 0600.  Keep the replaced file's mode (0644 for a new
+        # file) so a candidate evaluated as a distinct uid can read, but not
+        # write, the bytes under test, and a deploy does not narrow the mode.
+        mode = stat.S_IMODE(target.stat().st_mode) if target.is_file() else 0o644
         fd, tmp_name = tempfile.mkstemp(prefix=target.name + ".selfmod-", dir=target.parent)
         try:
             with os.fdopen(fd, "wb") as stream:
                 stream.write(encoded)
                 stream.flush()
                 os.fsync(stream.fileno())
+            if os.name != "nt":
+                os.chmod(tmp_name, mode)
             os.replace(tmp_name, target)
         finally:
             with contextlib.suppress(OSError):
@@ -855,6 +866,7 @@ def _record_command(
     run_id = run["id"]
     isolation_failed = False
     attestation = "unverified"
+    typed_attestation = None
     # ``low_integrity`` is explicit for unattended candidate checks.  Keep the
     # environment fallback for older callers and operators that already opt in
     # through the process environment, but do not make nightly's choice a
@@ -885,19 +897,26 @@ def _record_command(
             code = int(isolated["exit_code"])
             output = str(isolated.get("output") or "")
             job = isolated.get("job")
-            # The low-integrity supervisor, not the candidate's stdout,
-            # constructs this report from the process handle and Job. A
+            # The selected supervisor, not the candidate's stdout, constructs
+            # this report from the kernel's view of the candidate.  A
             # missing/conflicting report is an isolation failure even if
-            # candidate-controlled output claims low integrity or exit 0.
-            if (not isinstance(job, dict) or job.get("integrity") != expected
-                    or isolated.get("passed") is not (code == 0)
-                    or (expected == "linux-uid" and (
-                        type(job.get("uid")) is not int or job["uid"] <= 0
-                        or job["uid"] == os.geteuid()))):
+            # candidate-controlled output claims isolation or exit 0.  The
+            # typed attestation is re-derived here from the report; one the
+            # supervisor attached must agree with it.
+            try:
+                typed = IsolationAttestation.from_supervisor_result(
+                    isolated, expected_kind=expected,
+                    supervisor_uid=os.geteuid() if hasattr(os, "geteuid") else None,
+                )
+            except IsolationAttestationError:
+                raise RuntimeError("invalid supervisor attestation") from None
+            supplied = isolated.get("attestation")
+            if supplied is not None and supplied != typed:
                 raise RuntimeError("invalid supervisor attestation")
-            if isolated.get("integrity_failed"):
+            if typed.integrity_failed:
                 raise RuntimeError("evaluator integrity failed")
             attestation = expected
+            typed_attestation = typed
             output = (output + "\nSELFMOD ISOLATION: %s\n" % _json(job))[-100_000:]
         except Exception as exc:
             # A missing token/ACL/Job capability rejects this check.  It
@@ -911,10 +930,15 @@ def _record_command(
                 # (not root, uid in use, candidate-writable truth), never
                 # candidate output.
                 reason = str(exc)[:300] if isinstance(exc, RuntimeError) else type(exc).__name__
+            elif os.name != "nt":
+                reason = "unsupported platform"
+                if sys.platform.startswith("linux"):
+                    # The Windows supervisor is selected on Linux only when
+                    # no dedicated candidate uid is configured; say how to
+                    # configure the Linux boundary instead.
+                    reason += "; %s" % _linux_isolation_unconfigured()
             else:
-                reason = "unsupported platform" if os.name != "nt" else (
-                    str(exc) if known else type(exc).__name__
-                )
+                reason = str(exc) if known else type(exc).__name__
             output = "%s isolation unavailable: %s" % (
                 "linux-uid" if expected == "linux-uid" else "low-integrity", reason,
             )
@@ -944,7 +968,17 @@ def _record_command(
         _event(conn, run_id, "test", "%s exit=%s expected=%s duration_ms=%s" % (kind, code, "failure" if expect_failure else "success", duration))
     return {"kind": kind, "command": list(command), "exit_code": code,
             "duration_ms": duration, "output": output, "passed": passed,
-            "test_id": test_id, "isolation": attestation}
+            "test_id": test_id, "isolation": attestation,
+            "attestation": typed_attestation}
+
+
+def _linux_isolation_unconfigured() -> str:
+    """The actionable refusal for a Linux host without a candidate uid."""
+    try:
+        from scripts.selfmod_linux_isolation import UNCONFIGURED_GUIDANCE
+    except ImportError:
+        return "Linux candidate isolation is not configured"
+    return UNCONFIGURED_GUIDANCE
 
 
 def record_reproducer_before(run_id, command, timeout=None):

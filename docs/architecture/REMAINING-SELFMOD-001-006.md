@@ -39,7 +39,62 @@ an adapter result; governance does not create or remove the worktree.
   `remote_push_allowed=False`; requesting automatic remote push is refused.
   Actual deployment remains an explicitly separate executor concern.
 
+## Journaled legacy stages on the nightly path
+
+`GuardedLegacySelfmodService` journals each legacy mutating stage under its
+own worker-effect identity. The stages are `create_backup`,
+`prepare_workspace`, `record_reproducer_before`, `begin_testing`,
+`record_test`, `review`, `approve`, `deploy` and `rollback`. Repeatable
+stages get per-attempt identities derived from the durable journal
+(`selfmod-record-test:<run>:attempt-<n>`), and a retry refuses while an
+earlier attempt is unresolved.
+
+The unattended nightly driver now uses those identities in production:
+
+- `GuardedLegacySelfmodService.journaled_stage(run_id, stage, request, invoke)`
+  applies the same identity, phase precondition and success predicate to a
+  legacy call that the host driver makes itself. It raises `Forbidden` when no
+  effect binding factory is composed, and `InvalidInput` for an unknown stage.
+  It never runs a stage unjournaled.
+- `scripts/nightly_selfmod.run` gets the stage journal from
+  `_compose_stage_journal()`, which returns `default_app().selfmod_service()`.
+  That is the bootstrap service whose binding factory is
+  `_compose_selfmod_binding` over the shared worker-effects journal. If the
+  service cannot be composed, the run refuses before it creates anything.
+- The driver routes these calls through `journaled_stage`: `create_backup`,
+  `prepare_workspace`, `begin_testing`, every candidate gate (`record_test`,
+  including the parent-scored `host_probe`), `review`, `approve` and `deploy`.
+  A failed gate is a settled `failed` outcome. An exception leaves the intent
+  `uncertain`, so the run needs reconciliation before that stage can be
+  retried.
+
+What remains:
+
+- `verify_backup`, `record_host_grade`, `reject` and `cancel` still run outside
+  the journal. None of them has a stage entry or success predicate.
+- The operator REPL/HTTP path (`server._selfmod_command` and
+  `_execute_selfmod_run` in `server.py`) still calls the legacy module
+  directly. Wiring it needs a change to `server.py`, which is outside this
+  slice.
+- Self-mod operation families have no provider verifier. An `uncertain`
+  stage can be cleared only by future trusted reconciliation.
+
 ## Evidence
+
+`tests/test_wiring_selfmod_linux_nightly.py` runs `nightly_selfmod.run` with
+the stage journal from `build_application(...).selfmod_service()`. It then
+reads the journal back:
+
+- backup, workspace, `begin_testing` attempt 1 and review are `completed`;
+- there are five contiguous `record_test` attempts;
+- a rejected candidate's failing gate is a settled `failed` effect.
+
+`test_production_stage_journal_is_the_bootstrap_selfmod_service` checks that
+the default composition returns the bootstrap service.
+`tests/test_wiring_selfmod_attestation.py` checks that `journaled_stage` fails
+closed. `tests/test_wiring_selfmod_compute_cancel_attempts.py` drives the
+companion compute-cancel attempt identities through the bootstrap-composed
+compute worker and the HTTP facade (`dispatch_compute_job_cancel`).
 
 `tests/test_remaining_selfmod_governance.py` covers guarded ordering,
 worktree isolation and cleanliness metadata, failed verification and review,
