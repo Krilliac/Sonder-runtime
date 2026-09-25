@@ -661,7 +661,14 @@ def build_application(
         nonlocal canonical_session_capture
         if canonical_session_capture is None:
             logger.debug("lazy-init session capture service")
-            canonical_session_capture = SessionCaptureService(get_session_repository())
+            from ..platform.logging import redactor_for_config as _session_redactor
+
+            # Durable session events are redacted by the same redactor the
+            # logs and tool audit use (known secret values + shapes).
+            canonical_session_capture = SessionCaptureService(
+                get_session_repository(),
+                redact=_session_redactor(config or SonderConfig()).redact,
+            )
         return canonical_session_capture
 
     def get_compaction_service() -> SessionCompactionService:

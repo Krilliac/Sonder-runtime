@@ -103,6 +103,11 @@ of the model — an uncensored or "abliterated" model changes what it will
 - **operations.db** stores identifiers, counts, hashes, durations, and
   redacted paths only — never prompts, memory text, workspace contents, or
   credentials.
+- **Session capture is redacted before it is stored**: prompts, messages,
+  tool arguments/results and provider payloads written to `sessions.db` pass
+  through the same redactor first, and the stored (redacted) form is what
+  replay and export read, so replay stays deterministic. `sessions.db` is
+  still a private store: do not share it any more than `memory.db`.
 - **Recall is project-scoped**; cross-project recall requires an explicit
   override.
 - **Owner-only state on POSIX** (`sonder_runtime/platform/private_files.py`):

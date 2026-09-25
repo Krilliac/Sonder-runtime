@@ -82,12 +82,24 @@ MAX_WALK_DEPTH = 32
 MAX_WALK_ITEMS = 10_000
 
 
-def redact_structure(value, redact=None, *, _depth=0, _budget=None):
+# A mapping key that names a credential. Its string value is replaced whole
+# when a walk asks for key awareness: ``{"password": "hunter2"}`` carries no
+# shape a text pattern can see once the key and value are separate objects.
+SENSITIVE_KEY = re.compile(
+    r"(?i)^(?:.*[_-])?(?:api[_-]?key|auth[_-]?secret|client[_-]?secret|secret|"
+    r"token|access[_-]?token|refresh[_-]?token|password|passwd|credentials?|"
+    r"authorization|cookie|private[_-]?key)$"
+)
+
+
+def redact_structure(value, redact=None, *, sensitive_keys=False, _depth=0, _budget=None):
     """Redact every string inside a JSON-shaped structure, preserving shape.
 
     ``redact`` is a ``str -> str`` callable (defaults to :func:`redact_text`
     with patterns only). Dict keys, numbers, bools, and None pass through
-    unchanged. Beyond :data:`MAX_WALK_DEPTH` or :data:`MAX_WALK_ITEMS` the
+    unchanged. With ``sensitive_keys=True`` a non-empty string stored under a
+    key matching :data:`SENSITIVE_KEY` is replaced with :data:`REDACTED`
+    outright. Beyond :data:`MAX_WALK_DEPTH` or :data:`MAX_WALK_ITEMS` the
     remaining subtree is replaced with :data:`REDACTED` rather than returned
     unexamined: when the walker must stop checking, it must not pass content
     it has stopped checking.
@@ -103,12 +115,23 @@ def redact_structure(value, redact=None, *, _depth=0, _budget=None):
         return redact(value)
     if isinstance(value, dict):
         return {
-            key: redact_structure(item, redact, _depth=_depth + 1, _budget=_budget)
+            key: (
+                REDACTED
+                if sensitive_keys and isinstance(key, str) and isinstance(item, str)
+                and item and SENSITIVE_KEY.match(key)
+                else redact_structure(
+                    item, redact, sensitive_keys=sensitive_keys,
+                    _depth=_depth + 1, _budget=_budget,
+                )
+            )
             for key, item in value.items()
         }
     if isinstance(value, (list, tuple)):
         walked = [
-            redact_structure(item, redact, _depth=_depth + 1, _budget=_budget)
+            redact_structure(
+                item, redact, sensitive_keys=sensitive_keys,
+                _depth=_depth + 1, _budget=_budget,
+            )
             for item in value
         ]
         return tuple(walked) if isinstance(value, tuple) else walked
