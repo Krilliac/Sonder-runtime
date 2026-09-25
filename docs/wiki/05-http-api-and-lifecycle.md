@@ -205,6 +205,22 @@ for that principal and action. A key longer than 512 characters, or a repeated
 `Idempotency-Key` header, is rejected with `400 invalid_request` before
 dispatch rather than running the action without replay protection.
 
+One key names one request. Reusing a key for a *different* request (another
+action, mode, fanout model, or session) is refused and nothing runs. On
+`/v1/permission-mode` and `/v1/fanout/<id>/{cancel,resume,synthesize}` a
+refusal is never a `200`; it answers with `error.code`:
+
+| Code | Status | Meaning |
+|---|---|---|
+| `IDEMPOTENCY_KEY_REUSED` | 422 | The key already names a different request. |
+| `IDEMPOTENT_ACTION_COMPLETED` | 409 | It completed before this server process; not re-run. |
+| `IDEMPOTENT_ACTION_UNCERTAIN` | 409 | An interrupted process left its outcome uncertain; not re-run. |
+| `IDEMPOTENCY_CAPACITY_EXHAUSTED` | 429 | Receipt budget full; retry later (`Retry-After`). |
+| `IDEMPOTENCY_RECEIPT_UNAVAILABLE` | 503 | Receipt store unavailable; nothing started. |
+
+Chat-routed actions (slash work controls, natural work) keep answering with
+the refusal text as the assistant reply.
+
 ## Graceful drain
 
 On `SIGTERM`/`SIGINT` or `POST /v1/admin/drain`: state → DRAINING, reject

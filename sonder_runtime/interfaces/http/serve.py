@@ -1078,54 +1078,124 @@ def _receipt_owner_scope(context):
     return "rw-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+class IdempotencyRefusal(str):
+    """A replay-guard refusal: still readable chat text, never a success.
+
+    Chat and slash surfaces reply with the text itself, exactly as before.
+    Non-chat routes (permission mode, fanout controls) must not mistake the
+    string for a result: they check ``isinstance(result, IdempotencyRefusal)``
+    and answer with ``status`` and ``code`` instead of ``200``.
+    """
+
+    code: str
+    status: int
+    retryable: bool
+
+    def __new__(cls, text, *, code, status, retryable=False):
+        value = super().__new__(cls, text)
+        value.code = code
+        value.status = status
+        value.retryable = retryable
+        return value
+
+
+def _idempotency_refusal_payload(refusal):
+    return {"error": {
+        "message": str(refusal),
+        "type": "rate_limit_error" if refusal.status == 429 else (
+            "server_error" if refusal.status >= 500 else "invalid_request"),
+        "code": refusal.code,
+        "retryable": refusal.retryable,
+    }}
+
+
+def _send_idempotency_refusal(handler, result):
+    """Answer a replay-guard refusal with its status; ``False`` otherwise."""
+    if not isinstance(result, IdempotencyRefusal):
+        return False
+    handler._send_json_payload(
+        _idempotency_refusal_payload(result), status=result.status,
+        headers={"Retry-After": "1"} if result.retryable else None,
+    )
+    return True
+
+
+def _http_action_binding(context, supplied_key, action):
+    """Opaque (binding_key, action_digest) tying one client key to one request."""
+    key = str(supplied_key or "").strip()
+    if not key or len(key) > _MAX_IDEMPOTENCY_KEY_LENGTH:
+        return "", ""
+    binding = "\0".join(("served-action-binding-v1", _state_principal(context), key))
+    return (
+        "bind-" + hashlib.sha256(binding.encode("utf-8")).hexdigest(),
+        hashlib.sha256(
+            ("served-action-request-v1\0" + str(action or "")).encode("utf-8")
+        ).hexdigest(),
+    )
+
+
 def _idempotent_http_action(context, supplied_key, action, factory):
-    """Run an opt-in action once, preserving uncertainty across restarts."""
+    """Run an opt-in action once, preserving uncertainty across restarts.
+
+    Returns the factory's result, or an :class:`IdempotencyRefusal` when the
+    durable guard refused to run it.
+    """
     cache_key = _http_action_idempotency_key(context, supplied_key, action)
     if not cache_key:
         return factory()
+    binding_key, action_digest = _http_action_binding(context, supplied_key, action)
 
     def durable_factory():
         try:
             state = served_action_receipts.claim(
-                cache_key, owner_scope=_receipt_owner_scope(context)
+                cache_key, owner_scope=_receipt_owner_scope(context),
+                binding_key=binding_key, action_digest=action_digest,
             )
         except (OSError, sqlite3.Error, ValueError):
             # An explicit replay key promises no duplicate side effect.  If its
             # durable guard is unavailable, refusing is safer than executing a
             # long-running mutation without a recoverable receipt.
             _serve_logger.error(f"idempotency receipt store unavailable for cache_key={cache_key!r}, refusing action", exc_info=True)
-            refusal = (
+            return IdempotencyRefusal(
                 "idempotency receipt unavailable: the action was not started. "
-                "Retry after restoring local runtime storage."
+                "Retry after restoring local runtime storage.",
+                code="IDEMPOTENCY_RECEIPT_UNAVAILABLE", status=503, retryable=True,
             )
-            return refusal
         if state == served_action_receipts.REJECTED:
             # Admitting this new key would exceed the durable receipt budget
             # (global or this principal's).  Refusing is deterministic
             # backpressure: running without a receipt would silently drop the
             # no-duplicate promise the client asked for.
             _serve_logger.warning(f"idempotency receipt capacity exhausted for cache_key={cache_key!r}")
-            refusal = (
+            return IdempotencyRefusal(
                 "idempotency receipt capacity exhausted: the action was not "
                 "started. Reuse the Idempotency-Key of the retried action, or "
-                "retry after older completed receipts expire."
+                "retry after older completed receipts expire.",
+                code="IDEMPOTENCY_CAPACITY_EXHAUSTED", status=429, retryable=True,
             )
-            return refusal
+        if state == served_action_receipts.CONFLICT:
+            _serve_logger.warning(f"idempotency key reused for a different request, cache_key={cache_key!r}")
+            return IdempotencyRefusal(
+                "idempotency key reused: this Idempotency-Key already names a "
+                "different request, so this one was not started. Use a new "
+                "Idempotency-Key for a new action.",
+                code="IDEMPOTENCY_KEY_REUSED", status=422,
+            )
         if state == "completed":
-            refusal = (
+            return IdempotencyRefusal(
                 "idempotent action refused: it already completed before the "
                 "current server process. It was not run again; query its "
-                "status or submit a new action with a new Idempotency-Key."
+                "status or submit a new action with a new Idempotency-Key.",
+                code="IDEMPOTENT_ACTION_COMPLETED", status=409,
             )
-            return refusal
         if state in {"started", "uncertain"}:
             _serve_logger.warning(f"idempotent action refused with uncertain prior outcome, cache_key={cache_key!r}, state={state!r}")
-            refusal = (
+            return IdempotencyRefusal(
                 "idempotent action refused: it has an uncertain prior outcome "
                 "after an interrupted server process. It was not run again; "
-                "inspect the affected project/status before submitting a new action."
+                "inspect the affected project/status before submitting a new action.",
+                code="IDEMPOTENT_ACTION_UNCERTAIN", status=409,
             )
-            return refusal
         try:
             result = factory()
         except BaseException:
@@ -1150,11 +1220,11 @@ def _idempotent_http_action(context, supplied_key, action, factory):
         # The in-process result cannot outlive the durable receipt: otherwise
         # an expired key remains silently cached until unrelated cache churn.
         cache_ttl_seconds=served_action_receipts.completed_ttl_seconds(),
-        # Capacity rejection writes no durable receipt and explicitly invites
-        # retry after pressure drops, so never freeze that refusal in memory.
+        # Capacity rejection and key-reuse conflicts write no durable receipt
+        # and can change as receipts expire, so never freeze them in memory.
         cache_result=lambda result: not (
-            isinstance(result, str)
-            and result.startswith("idempotency receipt capacity exhausted:")
+            isinstance(result, IdempotencyRefusal)
+            and result.code in ("IDEMPOTENCY_CAPACITY_EXHAUSTED", "IDEMPOTENCY_KEY_REUSED")
         ),
     )
 
@@ -5444,7 +5514,8 @@ class Handler(BaseHTTPRequestHandler):
                     "synthesize\0%s" % synth_model,
                     lambda: runtime._fanout_synthesize_run(_run, synth_model),
                 )
-                self._send_json_payload(payload)
+                if not _send_idempotency_refusal(self, payload):
+                    self._send_json_payload(payload)
             except runtime.ModelCallError as exc:
                 status = exc.status or (
                     400 if exc.kind == "configuration" else
@@ -5466,7 +5537,9 @@ class Handler(BaseHTTPRequestHandler):
                 )
             return True
         if action == "cancel":
-            replay("cancel", lambda: runtime.fanout_store.request_cancel(run_id))
+            cancelled = replay("cancel", lambda: runtime.fanout_store.request_cancel(run_id))
+            if _send_idempotency_refusal(self, cancelled):
+                return True
         else:
             for name in ("include_failed", "retry_unknown"):
                 if name in req and not isinstance(req[name], bool):
@@ -5495,6 +5568,8 @@ class Handler(BaseHTTPRequestHandler):
                 ),
                 resume,
             )
+            if _send_idempotency_refusal(self, resumed):
+                return True
             if resumed is None:
                 self._send_json_payload({"error": {"message": "fanout run is not resumable with the selected retry options", "type": "invalid_request"}}, status=400)
                 return True
@@ -5517,7 +5592,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         try:
-            _idempotent_http_action(
+            result = _idempotent_http_action(
                 context,
                 self.headers.get("Idempotency-Key", ""),
                 "permission-mode\0%s" % wanted,
@@ -5529,7 +5604,10 @@ class Handler(BaseHTTPRequestHandler):
                 status=400,
             )
             return
+        if _send_idempotency_refusal(self, result):
+            return
         self._send_json_payload(server.permission_mode_data())
+
 
     def _with_compute_inventory_admission(self, handler):
         from sonder_runtime.interfaces.http.facades.compute_inventory import inventory_request_slot
