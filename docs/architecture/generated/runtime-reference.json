@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "5d60b6d42b769ac3dca2584ec38d1f63dc209eb5799d2b9f5e60631c87791b49",
+    "catalog_digest": "5258b79008b27955ade6c64d0c033b90699134d28d8d514d862598649b601429",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "5d60b6d42b769ac3dca2584ec38d1f63dc209eb5799d2b9f5e60631c87791b49",
+      "catalog_digest": "5258b79008b27955ade6c64d0c033b90699134d28d8d514d862598649b601429",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -9267,7 +9267,7 @@
       "name": "/crash",
       "native": true,
       "params": [],
-      "risk": "safe",
+      "risk": "execution",
       "summary": "digest a crash (minidump, core, sanitizer/valgrind log)",
       "tool": ""
     },
@@ -13490,7 +13490,7 @@
       "name": "/profile",
       "native": true,
       "params": [],
-      "risk": "safe",
+      "risk": "execution",
       "summary": "hot paths, frame spikes, allocations",
       "tool": ""
     },
@@ -18059,7 +18059,7 @@
     "schemas": 4,
     "tools": 216
   },
-  "digest": "c2d9e729d127e79cc9b383145ba9fa9c3f98ffa3643942d3045bb85033e87392",
+  "digest": "c0188a07cdef15452c61ba933b46aa5aef1a98d7b3949fc09fd974bd323d5dbe",
   "events": [
     {
       "name": "session.started",
@@ -20670,9 +20670,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "5d60b6d42b769ac3dca2584ec38d1f63dc209eb5799d2b9f5e60631c87791b49",
+    "catalog_digest": "5258b79008b27955ade6c64d0c033b90699134d28d8d514d862598649b601429",
     "client": {
-      "digest": "5d60b6d42b769ac3dca2584ec38d1f63dc209eb5799d2b9f5e60631c87791b49",
+      "digest": "5258b79008b27955ade6c64d0c033b90699134d28d8d514d862598649b601429",
       "events": [
         {
           "name": "approval.denied",
