@@ -39,10 +39,12 @@ Prune never removes the newest verified backup, regardless of `--keep`.
 The raw safety copies that `migrate --adopt-epoch2` writes to
 `<state home>/backups/pre-epoch2-<UTC time>/` have no manifest, so they never
 verify as restorable backups. They are listed with `"kind": "pre-epoch2"` and
-take part in `--keep` and tiered retention like any other entry, with one
-extra guard: a pre-epoch2 copy is kept until a verified standard backup newer
-than it exists, because until then it is the only copy of the pre-adoption
-state. Re-running `migrate --adopt-epoch2` on a home that is already adopted
+take part in `--keep` and tiered retention, ranked by their timestamp among
+all entries, with two guards. A pre-epoch2 copy is kept until a verified
+standard backup newer than it exists, because until then it is the only copy
+of the pre-adoption state. And a pre-epoch2 copy never takes a `--keep` slot
+or a daily/weekly/monthly bucket away from a standard backup: standard
+backups are retained exactly as if no pre-epoch2 copies existed. Re-running `migrate --adopt-epoch2` on a home that is already adopted
 and verified is a no-op (`"already_adopted": true`) and takes no new copy.
 
 ## Monitoring backup health

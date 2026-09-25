@@ -135,3 +135,66 @@ def test_tiered_prune_includes_old_pre_epoch2_copies(home, tmp_path, capsys):
     )
 
     assert removed == [str(old)]
+
+
+def _stamp_now():
+    import datetime
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return now.isoformat().replace(":", "-")
+
+
+def test_pre_epoch2_copy_never_displaces_a_standard_backup_from_keep(
+    home, tmp_path, capsys
+):
+    target = tmp_path / "target"
+    _adopt(capsys)
+    capsys.readouterr()
+    older = backup_adapter.create_backup(target)
+    time.sleep(0.01)
+    raw = _fake_pre_epoch2(target, _stamp_now())
+    time.sleep(0.01)
+    backup_adapter.create_backup(target)
+    standard = [
+        e["path"] for e in backup_adapter.list_backups(target) if "kind" not in e
+    ]
+    assert len(standard) == 2
+
+    # keep=2 must keep both standard backups, exactly as before pre-epoch2
+    # copies were listed; the raw copy ranks second overall, so it stays too.
+    assert backup_adapter.prune_backups(target, keep=2) == []
+    remaining = {e["path"] for e in backup_adapter.list_backups(target)}
+    assert remaining == set(standard) | {str(raw)}
+    assert older is not None
+
+    # keep=1: the superseded raw copy falls outside keep and is removed;
+    # the newest verified standard backup is kept.
+    removed = backup_adapter.prune_backups(target, keep=1)
+    assert str(raw) in removed
+    assert not raw.exists()
+
+
+def test_tiered_pre_epoch2_copy_never_displaces_a_standard_day_bucket(
+    home, tmp_path, capsys
+):
+    target = tmp_path / "target"
+    _adopt(capsys)
+    capsys.readouterr()
+    backup_adapter.create_backup(target)
+    old_day = [e for e in backup_adapter.list_backups(target)][0]["path"]
+    manifest_path = backup_adapter.Path(old_day) / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["created_at_utc"] = "2020-03-10T08:00:00.000000Z"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    # Same day as the older standard backup, but later in that day.
+    raw = _fake_pre_epoch2(target, "2020-03-10T09-00-00.000000+00-00")
+    backup_adapter.create_backup(target)
+
+    removed = backup_adapter.prune_backups_tiered(
+        target, daily=2, weekly=2, monthly=2
+    )
+
+    assert old_day not in removed
+    assert (backup_adapter.Path(old_day)).is_dir()
+    # The raw copy also wins the merged 2020-03-10 bucket, so it stays too.
+    assert raw.is_dir()

@@ -620,9 +620,25 @@ def prune_backups(target: str | os.PathLike, *, keep: int) -> list[str]:
             verified_newest = entry["path"]
             break
     protected = _protected_pre_epoch2(backups, verified_newest)
+    # Standard backups keep exactly the retention they had before pre-epoch2
+    # copies were listed: their rank is computed among standard backups only,
+    # so a raw (unrestorable) pre-epoch2 copy never displaces a verified
+    # standard backup from a ``keep`` slot. A pre-epoch2 copy is ranked in the
+    # merged listing and is removed only when it falls outside ``keep`` and is
+    # no longer protected.
+    retained = {
+        e["path"] for e in [b for b in backups if not _is_pre_epoch2(b)][:keep]
+    }
+    retained.update(
+        e["path"] for e in backups[:keep] if _is_pre_epoch2(e)
+    )
     removed = []
-    for entry in backups[keep:]:
-        if entry["path"] == verified_newest or entry["path"] in protected:
+    for entry in backups:
+        if (
+            entry["path"] in retained
+            or entry["path"] == verified_newest
+            or entry["path"] in protected
+        ):
             continue
         candidate = Path(entry["path"])
         if _is_link_or_junction(candidate) or not candidate.is_dir():
@@ -630,6 +646,38 @@ def prune_backups(target: str | os.PathLike, *, keep: int) -> list[str]:
         shutil.rmtree(candidate)
         removed.append(entry["path"])
     return removed
+
+
+def _is_pre_epoch2(entry: dict) -> bool:
+    return entry.get("kind") == "pre-epoch2"
+
+
+def _tier_winners(
+    backups: list[dict], daily: int, weekly: int, monthly: int
+) -> set[str]:
+    """Newest entry of each of the last ``daily`` days, ``weekly`` ISO weeks
+    and ``monthly`` months (``backups`` is newest first)."""
+    import datetime
+
+    day_buckets: dict[str, str] = {}
+    week_buckets: dict[str, str] = {}
+    month_buckets: dict[str, str] = {}
+    for entry in backups:  # newest first
+        stamp = entry["created_at_utc"]
+        day = stamp[:10]
+        month = stamp[:7]
+        try:
+            iso = datetime.date.fromisoformat(day).isocalendar()
+            week = f"{iso.year}-W{iso.week:02d}"
+        except ValueError:
+            week = day
+        day_buckets.setdefault(day, entry["path"])
+        week_buckets.setdefault(week, entry["path"])
+        month_buckets.setdefault(month, entry["path"])
+    winners = set(list(day_buckets.values())[:daily])
+    winners.update(list(week_buckets.values())[:weekly])
+    winners.update(list(month_buckets.values())[:monthly])
+    return winners
 
 
 def prune_backups_tiered(
@@ -667,26 +715,15 @@ def prune_backups_tiered(
         keep.add(newest_verified)
     keep.update(_protected_pre_epoch2(backups, newest_verified))
 
-    day_buckets: dict[str, str] = {}
-    week_buckets: dict[str, str] = {}
-    month_buckets: dict[str, str] = {}
-    for entry in backups:  # newest first
-        stamp = entry["created_at_utc"]
-        day = stamp[:10]
-        month = stamp[:7]
-        try:
-            import datetime
-
-            iso = datetime.date.fromisoformat(day).isocalendar()
-            week = f"{iso.year}-W{iso.week:02d}"
-        except ValueError:
-            week = day
-        day_buckets.setdefault(day, entry["path"])
-        week_buckets.setdefault(week, entry["path"])
-        month_buckets.setdefault(month, entry["path"])
-    keep.update(list(day_buckets.values())[:daily])
-    keep.update(list(week_buckets.values())[:weekly])
-    keep.update(list(month_buckets.values())[:monthly])
+    # Buckets for standard backups are computed among standard backups only
+    # (unchanged retention); a raw pre-epoch2 copy is kept when it would win a
+    # bucket in the merged listing, but it never displaces a standard backup.
+    standard = [b for b in backups if not _is_pre_epoch2(b)]
+    keep.update(_tier_winners(standard, daily, weekly, monthly))
+    keep.update(
+        path for path in _tier_winners(backups, daily, weekly, monthly)
+        if path not in {b["path"] for b in standard}
+    )
 
     removed = []
     for entry in backups:
