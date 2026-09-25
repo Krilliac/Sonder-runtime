@@ -951,7 +951,8 @@ def test_a_multi_tool_branch_is_gated_at_its_most_dangerous_member(monkeypatch):
 
     assert may_run
     assert len(asked) == 1
-    assert "dangerous" in asked[0]
+    # The prompt names the risk in plain words, not the class name.
+    assert "destructive" in asked[0]
 
 
 # --- a piped console has nobody to prompt ---------------------------------
@@ -1225,7 +1226,8 @@ def test_auto_still_asks_before_selfmod(monkeypatch):
 
     assert (may_run, refusal) == (False, "skipped /selfmod")
     assert len(asked) == 1
-    assert "dangerous" in asked[0]
+    # The prompt names the risk in plain words, not the class name.
+    assert "destructive" in asked[0]
 
 
 # --- a catalog that cannot read the registry must refuse, not wave through --
