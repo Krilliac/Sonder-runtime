@@ -28,6 +28,7 @@ from sonder_runtime.domain.build.templates import (
     command_digest,
     network_hardening_args,
     parse_build_profiles,
+    validate_placeholder,
     validate_request_against_model,
 )
 from sonder_runtime.domain.build.tool_targets import classify_targets
@@ -150,12 +151,24 @@ def test_make_variables_and_platform_rules():
 
 
 @pytest.mark.parametrize("target", ["Rebuild", "Publish", "Clean", "core:Rebuild", "core:Publish",
-                                    "core:Clean", "core:Build:Rebuild"])
+                                    "core:Clean", "core:Build:Rebuild", "rebuild", "CLEAN",
+                                    "publish", "core:rebuild"])
 def test_msbuild_destructive_targets_are_refused(target):
     with pytest.raises(TemplateRejected):
         build_argv("msbuild.build", executable=EXE, values={
             "solution": "C:/p/SparkLite.sln", "target": target, "config": "Debug",
             "platform": "x64", "jobs": "2", "log_file": "C:/s/m.log", "binlog": "C:/s/b.binlog"})
+
+
+@pytest.mark.parametrize("name, value", [
+    ("jobs", "\u00b2"), ("jobs", "\u0664"), ("file_target", "@rsp^"),
+    ("build_dir", "//server/share/build"), ("build_dir", "\\\\server\\share\\build"),
+    ("source_dir", "\\\\?\\C:\\src"), ("project_file", "//server/share/core.vcxproj"),
+])
+def test_placeholder_values_refused_without_crashing(name, value):
+    template = TEMPLATES["ninja.compile_one"] if name == "file_target" else TEMPLATES["msbuild.build"]
+    with pytest.raises(TemplateRejected):
+        validate_placeholder(name, value, template=template)
 
 
 def test_request_validation_against_the_cmake_model():
@@ -193,10 +206,11 @@ def test_unresolvable_or_source_dir_presets_are_refused():
     safety = classify_targets(model)
     bad = parse_cmake_presets(json.dumps({"version": 6, "configurePresets": [
         {"name": "env", "generator": "Ninja", "binaryDir": "$env{OUT}"},
-        {"name": "insource", "generator": "Ninja", "binaryDir": "${sourceDir}"}]}).encode(),
+        {"name": "insource", "generator": "Ninja", "binaryDir": "${sourceDir}"},
+        {"name": "parent", "generator": "Ninja", "binaryDir": "${sourceParentDir}"}]}).encode(),
         includes={}, source_root=SOURCE)
     model = finalize_model(replace(model, presets=bad.all()))
-    for name in ("env", "insource"):
+    for name in ("env", "insource", "parent"):
         with pytest.raises(TemplateRejected) as excinfo:
             validate_request_against_model({"action": "configure", "preset": name}, model, safety)
         assert excinfo.value.code == "UNKNOWN_PRESET"

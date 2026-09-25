@@ -57,6 +57,17 @@ MATH = "float normalized_length(const Vec3& v) {\n    float l = lenght(v);\n    
     ("README.md", "OUT_OF_SCOPE_FILE"),
     ("src/core/version.gen.h", "OUT_OF_SCOPE_FILE"),
     ("src/core/types.generated.h", "OUT_OF_SCOPE_FILE"),
+    # Windows aliases of an excluded or out-of-root file.
+    ("Tools/ShaderGen.cpp", "BUILD_TIME_TOOL_SOURCE"),
+    ("SRC/CORE/VERSION.GEN.H", "OUT_OF_SCOPE_FILE"),
+    ("Build/x.cpp", "OUT_OF_SCOPE_FILE"),
+    ("tools/SHADER~1.CPP", "OUT_OF_SCOPE_FILE"),
+    ("C:evil.cpp", "OUT_OF_SCOPE_FILE"),
+    ("src/a.cpp:stream", "OUT_OF_SCOPE_FILE"),
+    ("src/a.cpp.", "OUT_OF_SCOPE_FILE"),
+    ("src./a.cpp", "OUT_OF_SCOPE_FILE"),
+    ("src/CON.cpp", "OUT_OF_SCOPE_FILE"),
+    ("nul.h", "OUT_OF_SCOPE_FILE"),
 ])
 def test_edit_scope_denials(rel, reason):
     assert SCOPE.allows(rel) == (False, reason)
@@ -110,6 +121,26 @@ def test_validate_patch_refusals():
     for hunk, needle in cases:
         texts, reasons = validate_patch(_patch(hunk), scope=SCOPE, current=current)
         assert texts == {} and any(needle in reason for reason in reasons), (hunk, reasons)
+
+
+@pytest.mark.parametrize("replacement", [
+    # A digit separator must not open a phantom char literal that swallows a
+    # string quote and then a phantom comment hiding the next lines.
+    'float l = 1\'000; const char* s = "it\'s /*";\n#pragma comment(lib, "evil")\nfloat l',
+    # In C (or a header a C TU includes) R"( is an identifier and a string.
+    '#define R\nconst char* s = R"(";\n#pragma comment(lib, "evil")\nconst char* t = ")";\nfloat l',
+])
+def test_validate_patch_lexing_cannot_hide_directives(replacement):
+    texts, reasons = validate_patch(_patch(("src/core/math.cpp", "float l", replacement)),
+                                    scope=SCOPE, current={"src/core/math.cpp": MATH})
+    assert texts == {} and any("HOSTILE_DIRECTIVE" in reason for reason in reasons), reasons
+
+
+def test_validate_patch_keeps_cxx_digit_separators_and_raw_strings_benign():
+    replacement = 'const auto big = 1\'000\'000;\nauto r = R"(a /* b)";\nfloat l'
+    texts, reasons = validate_patch(_patch(("src/core/math.cpp", "float l", replacement)),
+                                    scope=SCOPE, current={"src/core/math.cpp": MATH})
+    assert reasons == () and "1'000'000" in texts["src/core/math.cpp"]
 
 
 def test_validate_patch_budgets():

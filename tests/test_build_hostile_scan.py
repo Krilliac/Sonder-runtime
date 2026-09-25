@@ -54,6 +54,18 @@ HOSTILE = [
     '__declspec(allocate(".CRT$XCU")) void* q = 0;\n',
     'bool h = __has_include("/etc/passwd");\n',
     'bool e = __has_embed("../../../../etc/shadow.h");\n',
+    # Bypass shapes: literal concatenation, case, macros and stringizing.
+    'asm(".inc" "bin \\"/etc/passwd\\"");\n',
+    '__asm__(".INCBIN \\"/etc/passwd\\"");\n',
+    '#define BLOB .incbin "/etc/passwd"\n',
+    '#define S(x) #x\nasm(S(.incbin "f"));\n',
+    '__attribute__( (constructor)) static void run3() {}\n',
+    '__attribute((constructor)) static void run4() {}\n',
+    '[[__gnu__::constructor]] static void run5() {}\n',
+    '[[using gnu: constructor]] static void run6() {}\n',
+    '#include <.env>\n',
+    '#include <id_rsa>\n',
+    '#include <.ssh/id_ed25519>\n',
 ]
 
 
@@ -77,6 +89,9 @@ BENIGN = [
     'float length(const Vec3& v) { return std::sqrt(dot(v, v)); }\n',
     'bool h = __has_include("math.h");\n',
     '#define SPARK_VERSION 3\n',
+    'int big = 1\'000\'000; auto f = cfg.file; auto s = obj.section();\n',
+    '[[nodiscard]] int g();\n',
+    'const char* both = "a" "b";\n',
 ]
 
 

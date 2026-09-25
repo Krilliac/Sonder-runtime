@@ -54,6 +54,7 @@ MSBUILD_REFUSED_TARGETS = frozenset({
     "Rebuild", "Clean", "Publish", "Deploy", "Restore", "Pack", "Run", "Test",
     "VSTest", "Install",
 })
+_MSBUILD_REFUSED_FOLDED = frozenset(item.casefold() for item in MSBUILD_REFUSED_TARGETS)
 MIN_TIMEOUT_SECONDS = 30
 DEFAULT_TIMEOUT_SECONDS = 1800
 MAX_TIMEOUT_SECONDS = 7200
@@ -203,7 +204,8 @@ def validate_target_name(value: str, *, system: BuildSystem) -> str:
         if ":" in text:
             raise TemplateRejected("only the :Build MSBuild target suffix is allowed",
                                    code="UNKNOWN_TARGET", rule="msbuild_suffix")
-        if text in MSBUILD_REFUSED_TARGETS:
+        # MSBuild target names are case-insensitive: -t:rebuild runs Rebuild.
+        if text.casefold() in _MSBUILD_REFUSED_FOLDED:
             raise TemplateRejected("MSBuild target %s is refused" % text,
                                    code="UNKNOWN_TARGET", rule="msbuild_refused")
         _model_value(text.replace("\\", "_"), "target", "UNKNOWN_TARGET")
@@ -223,6 +225,10 @@ def _host_path(value: str, what: str, *, suffixes: tuple[str, ...] = ()) -> str:
         raise TemplateRejected("%s contains a refused character" % what)
     if not is_absolute(value):
         raise TemplateRejected("%s must be absolute" % what)
+    if value.replace("\\", "/").startswith("//"):
+        # UNC and device paths (\\server\share, \\?\, \\.\) leave the
+        # local disk and can hand the account's credentials to a remote host.
+        raise TemplateRejected("%s may not be a UNC or device path" % what)
     if suffixes and not value.lower().endswith(suffixes):
         raise TemplateRejected("%s has an unexpected suffix" % what)
     return value
@@ -231,7 +237,7 @@ def _host_path(value: str, what: str, *, suffixes: tuple[str, ...] = ()) -> str:
 def _file_target(value: str, *, template_id: str) -> str:
     if not isinstance(value, str) or not value or len(value) > 4096:
         raise TemplateRejected("file target is required", code="UNKNOWN_FILE")
-    if value[0] == "-" or any(ch in value for ch in "\x00\r\n;,%\"'`$&|<>"):
+    if value[0] in "-@" or any(ch in value for ch in "\x00\r\n;,%\"'`$&|<>"):
         raise TemplateRejected("file target contains a refused character", code="UNKNOWN_FILE")
     if template_id == "ninja.compile_one":
         if not value.endswith("^") or "^" in value[:-1]:
@@ -259,7 +265,8 @@ def validate_placeholder(name: str, value: str, *, template: BuildTemplate) -> s
             raise TemplateRejected("unsupported generator")
         return value
     if name == "jobs":
-        if not isinstance(value, str) or not value.isdigit() or not 1 <= int(value) <= MAX_JOBS:
+        if not isinstance(value, str) or not value.isascii() or not value.isdigit() \
+                or not 1 <= int(value) <= MAX_JOBS:
             raise TemplateRejected("jobs must be 1..%d" % MAX_JOBS)
         return str(int(value))
     if name == "config":
@@ -472,8 +479,9 @@ def validate_request_against_model(
         if not preset_info.binary_dir_resolvable or not preset_info.binary_dir:
             raise TemplateRejected("preset binaryDir depends on the environment",
                                    code="UNKNOWN_PRESET")
-        if model.source_root and rel_under(preset_info.binary_dir, model.source_root) == ".":
-            raise TemplateRejected("preset binaryDir equals the source dir", code="UNKNOWN_PRESET")
+        if model.source_root and rel_under(model.source_root, preset_info.binary_dir) is not None:
+            raise TemplateRejected("preset binaryDir equals or contains the source dir",
+                                   code="UNKNOWN_PRESET")
     build_preset = _field(request, "build_preset")
     if build_preset:
         validate_placeholder("build_preset", build_preset,
