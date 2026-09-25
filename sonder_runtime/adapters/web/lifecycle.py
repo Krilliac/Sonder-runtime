@@ -24,6 +24,7 @@ from dataclasses import replace
 
 from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 
+import logging
 import os
 import socket
 import threading
@@ -82,6 +83,8 @@ _ADMISSION_REJECTION_CODES = frozenset({
 
 _AUTH_BUCKET_CAPACITY = 10
 _AUTH_BUCKET_REFILL_PER_SECOND = 0.5  # one new attempt every 2s after burst
+
+_LOG = logging.getLogger(__name__)
 
 
 class _BoundedTraceBuffer:
@@ -705,11 +708,15 @@ class RuntimeLifecycle:
         sd_notify("STOPPING=1")
         if self._graceful_drain_coordinator is not None:
             result = self.drain_gracefully(reason)
-            if result.clean:
-                try:
-                    self.tracker.transition(ProcessState.STOPPING, "drain complete")
-                except Exception:
-                    pass
+            if not result.flush_completed:
+                self._finish_unflushed_drain()
+            try:
+                self.tracker.transition(
+                    ProcessState.STOPPING,
+                    "drain complete" if result.clean else "drain deadline expired",
+                )
+            except Exception:
+                pass
             return result.clean
         clean = self.coordinator.drain(reason=reason)
         try:
@@ -717,6 +724,28 @@ class RuntimeLifecycle:
         except Exception:
             probe_stopped = False
         return clean and probe_stopped
+
+    def _finish_unflushed_drain(self) -> None:
+        """Run the shutdown hooks a graceful drain did not reach.
+
+        The graceful coordinator refuses every barrier once its deadline has
+        expired, and the flush barrier is what stops the HTTP listener. A
+        request still running at the deadline (a long routed workbench turn)
+        therefore left the process DRAINING with its listener open forever:
+        SIGTERM never ended it. The drain result stays truthfully unclean;
+        this only restores the legacy coordinator's guarantee that the
+        interrupted and flush hooks run once the deadline has passed.
+        """
+        for hook in tuple(self.coordinator._interrupted_hooks):
+            try:
+                hook()
+            except Exception:
+                _LOG.warning("drain interrupted hook failed", exc_info=True)
+        for hook in tuple(self.coordinator._flush_hooks):
+            try:
+                hook()
+            except Exception:
+                _LOG.warning("drain flush hook failed", exc_info=True)
 
     def drain_gracefully(
         self,
