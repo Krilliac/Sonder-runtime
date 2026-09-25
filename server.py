@@ -2662,7 +2662,7 @@ def _autopilot_command(arg: str, project: str = "", request_owner: str | None = 
             launched = _launch_autopilot(ap_result["run_id"])
             prefix = "autopilot bound to goal %s" % active["id"]
             if not launched:
-                prefix = "autopilot already active"
+                prefix = _autopilot_not_launched(ap_result["run_id"])
             return "%s\n  run: %s\n  objective: %s\n  use /autopilot status %s" % (
                 prefix, ap_result["run_id"], active["objective"][:120],
                 ap_result["run_id"],
@@ -3046,12 +3046,13 @@ def _goal_command(arg: str, project: str = "", request_owner: str = "") -> str:
                 )
                 if ap.get("error"):
                     lines.append("autopilot: %s" % ap["error"])
-                else:
-                    _launch_autopilot(ap["run_id"])
+                elif _launch_autopilot(ap["run_id"]):
                     lines.append(
                         "autopilot: %s started (use /autopilot status %s)"
                         % (ap["run_id"], ap["run_id"])
                     )
+                else:
+                    lines.append("autopilot: %s" % _autopilot_not_launched(ap["run_id"]))
             return "\n".join(lines)
         if action == "note":
             if not rest:
@@ -3170,7 +3171,8 @@ def _mission_command(arg: str, project: str = "", request_owner: str = "") -> st
                         "autopilot: %s created (use /autopilot status %s)"
                         % (ap["run_id"], ap["run_id"])
                     )
-                    _launch_autopilot(ap["run_id"])
+                    if not _launch_autopilot(ap["run_id"]):
+                        lines.append("autopilot: %s" % _autopilot_not_launched(ap["run_id"]))
             return "\n".join(lines)
 
         if action in ("done", "complete"):
@@ -22157,6 +22159,33 @@ def _launch_autopilot(run_id: str, max_cycles=12, plan_only=False, request_owner
         return True
 
 
+def _autopilot_not_launched(run_id: str) -> str:
+    """Say why ``_launch_autopilot(run_id)`` just returned False.
+
+    It refuses for two different reasons: this run already has a live worker,
+    or the configured concurrent-run capacity is full.  Only the first is
+    "already active"; the second leaves a brand-new run saved but not started,
+    and reporting it as active told the operator a run was executing when
+    nothing would ever pick it up.
+    """
+    with _AUTOPILOT_THREADS_LOCK:
+        current = _AUTOPILOT_THREADS.get(run_id)
+        if current is not None and current.is_alive():
+            return "autopilot already active"
+        alive = sum(1 for t in _AUTOPILOT_THREADS.values() if t.is_alive())
+        limit = _MAX_AUTOPILOT_RUNS
+    if limit is not None and alive >= limit:
+        return (
+            "autopilot not started: capacity reached (%d of %d concurrent run(s) "
+            "active); run %s is saved and can be started with /autopilot resume %s "
+            "once an active run finishes" % (alive, limit, run_id, run_id)
+        )
+    return (
+        "autopilot not started; run %s is saved and can be started with "
+        "/autopilot resume %s" % (run_id, run_id)
+    )
+
+
 def _autopilot_start(
     objective: str,
     project: str = "",
@@ -22207,7 +22236,7 @@ def _autopilot_start(
         return "autopilot request failed: %s" % exc
     prefix = "autopilot plan started" if plan_only else "autopilot started"
     if not launched:
-        prefix = "autopilot already active"
+        prefix = _autopilot_not_launched(run["id"])
     return "%s\n%s\n  use /autopilot status %s" % (
         prefix, autopilot_controller.format_run(run, include_report=False), run["id"],
     )
@@ -22237,7 +22266,7 @@ def _autopilot_resume(
     except (OSError, RuntimeError, ValueError, autopilot_controller.AutopilotError) as exc:
         return "autopilot request failed: %s" % exc
     return "%s\n%s" % (
-        "autopilot resumed" if launched else "autopilot already active",
+        "autopilot resumed" if launched else _autopilot_not_launched(run["id"]),
         autopilot_controller.format_run(run, include_report=False),
     )
 
@@ -22374,8 +22403,10 @@ def mission_start(
         policy=policy, tier=tier, allow_web=allow_web, project=project,
     )
     # The bridge reports ``autopilot: None`` when ``auto`` is off.
+    not_launched = ""
     if (result.get("autopilot") or {}).get("run_id"):
-        _launch_autopilot(result["autopilot"]["run_id"])
+        if not _launch_autopilot(result["autopilot"]["run_id"]):
+            not_launched = _autopilot_not_launched(result["autopilot"]["run_id"])
     lines = ["mission started"]
     lines.append(_format_goal(result.get("goal")))
     p = result.get("plan")
@@ -22384,6 +22415,8 @@ def mission_start(
     ap = result.get("autopilot")
     if ap:
         lines.append("autopilot: %s" % (ap.get("error") or ap.get("run_id", "")))
+    if not_launched:
+        lines.append("autopilot: %s" % not_launched)
     return "\n".join(lines)
 
 

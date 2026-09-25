@@ -99,6 +99,60 @@ class TestAutopilotCapacity:
         with pytest.raises(ValueError, match="max_autopilot_runs must be >= 1"):
             server.configure_autopilot_capacity(0)
 
+    def _fill_capacity(self, server):
+        server.configure_autopilot_capacity(1)
+        alive_thread = mock.MagicMock()
+        alive_thread.is_alive.return_value = True
+        server._AUTOPILOT_THREADS["existing-run"] = alive_thread
+
+    def test_start_at_capacity_is_not_reported_as_already_active(self):
+        # Live repro: a second `/autopilot run` while one run was executing
+        # answered "autopilot already active" for a brand-new run that was
+        # saved as ready and never started by anything.
+        import server
+        from sonder_runtime.adapters.persistence import autopilot_store
+
+        self._fill_capacity(server)
+        with mock.patch.object(server, "_autopilot_thread_main") as worker:
+            output = server._autopilot_start("List the files in the project", allow_web=False)
+        worker.assert_not_called()
+        assert "already active" not in output
+        assert "capacity reached (1 of 1" in output
+        run_id = output.split("id: ", 1)[1].split()[0]
+        assert "/autopilot resume %s" % run_id in output
+        assert autopilot_store.get_run(run_id)["status"] == "ready"
+
+    def test_resume_at_capacity_names_capacity(self):
+        import server
+
+        self._fill_capacity(server)
+        with mock.patch.object(server, "_autopilot_thread_main"):
+            created = server._autopilot_start("Inspect the project", allow_web=False)
+            run_id = created.split("id: ", 1)[1].split()[0]
+            output = server._autopilot_resume(run_id)
+        assert not output.startswith("autopilot already active")
+        assert output.startswith("autopilot not started: capacity reached")
+
+    def test_goal_auto_at_capacity_does_not_claim_started(self):
+        import server
+
+        self._fill_capacity(server)
+        with mock.patch.object(server, "_autopilot_thread_main") as worker:
+            output = server._goal_command("set --auto Inspect the project")
+        worker.assert_not_called()
+        assert " started (use /autopilot status" not in output
+        assert "capacity reached" in output
+
+    def test_same_run_still_reported_as_already_active(self):
+        import server
+
+        server.configure_autopilot_capacity(4)
+        alive_thread = mock.MagicMock()
+        alive_thread.is_alive.return_value = True
+        server._AUTOPILOT_THREADS["run-1"] = alive_thread
+        assert server._launch_autopilot("run-1") is False
+        assert server._autopilot_not_launched("run-1") == "autopilot already active"
+
     def test_autopilot_uncapped_allows_launch(self):
         import server
         server._MAX_AUTOPILOT_RUNS = None
