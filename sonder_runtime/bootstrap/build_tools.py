@@ -748,9 +748,19 @@ def _compose_fix(*, settings, jobs, models, state_dir, grants, tools_getter,
         return None
     try:
         navigator_factory = clangd_navigator_factory(settings)
+
+        def execute(request):
+            # The typed-tool facade is composed after the build tools, so the
+            # editor resolves it per call. Grant enforcement happens in the
+            # gateway's permission evaluator, not in the editor.
+            facade = tools_getter()
+            if facade is None:
+                raise RuntimeError("the typed tool gateway is not composed yet")
+            return facade.execute(request)
+
         fix = BuildFixService(
             jobs, models,
-            GatewaySourceEditor(tools_getter, grants=grants),
+            GatewaySourceEditor(execute),
             candidate_generator if candidate_generator is not None else ModelCandidateGenerator(
                 model_gateway_getter, route=settings.fix_model_route, redact=redact),
             StrategyFixAdapter(),
@@ -759,6 +769,7 @@ def _compose_fix(*, settings, jobs, models, state_dir, grants, tools_getter,
             job_registry,
             cancellation_tree,
             clock=time.time,
+            grants=grants,
             propose_only_ok=settings.fix_propose_only_ok,
         )
     except Exception:
