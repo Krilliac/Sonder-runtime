@@ -159,7 +159,10 @@ checkout is clean. These commands use no user-selected repository, remote,
 revision, or stash selector. Saved workflows are per-user state by default
 (`%LOCALAPPDATA%\sonder\workflows.json` on Windows), not installation files.
 On first use, an older checkout-root `workflows.json` is copied into that state
-home and left in place for review.
+home and left in place for review. Emotion-vector tuning (`/emotion`) is
+saved to `emotion_vectors.json` in the same state home; the checkout-root file
+is the bundled default, read when no state copy exists and never written
+unless `SONDER_EMOTION_VECTORS` explicitly names it.
 
 ## Where to go next
 

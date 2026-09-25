@@ -157,3 +157,93 @@ def test_resolve_path_still_rejects_a_sibling_checkout(monkeypatch, tmp_path):
     with pytest.raises(ValueError, match="must stay inside workspace"):
         emotion_vectors._resolve_path()
     assert "emotion_vectors.json" not in os.listdir(root)
+
+
+def _bundled(monkeypatch, tmp_path, content=None):
+    import json
+
+    root = tmp_path / "checkout"
+    root.mkdir()
+    monkeypatch.setattr(emotion_vectors, "workspace_root", lambda: str(root))
+    monkeypatch.delenv("SONDER_EMOTION_VECTORS", raising=False)
+    bundled = root / "emotion_vectors.json"
+    if content is not None:
+        bundled.write_text(json.dumps(content), encoding="utf-8")
+    return bundled
+
+
+def test_updates_write_the_state_home_copy_not_the_bundled_file(monkeypatch, tmp_path):
+    import json
+
+    bundled = _bundled(monkeypatch, tmp_path, {"warmth": 0.9})
+    before = bundled.read_bytes()
+
+    vectors, path = emotion_vectors.update_vectors({"calm": 0.4}, mode="merge")
+
+    assert bundled.read_bytes() == before
+    assert path == emotion_vectors._resolve_path(emotion_vectors.state_path())
+    assert json.loads(open(path, encoding="utf-8").read()) == {"calm": 0.4, "warmth": 0.9}
+    assert vectors == {"calm": 0.4, "warmth": 0.9}
+
+
+def test_read_order_is_state_home_then_bundled_default(monkeypatch, tmp_path):
+    _bundled(monkeypatch, tmp_path, {"warmth": 0.9})
+    assert emotion_vectors.read_vectors() == {"warmth": 0.9}
+    assert "warmth=+0.90" in emotion_vectors.system_prompt()
+
+    emotion_vectors.update_vectors({"warmth": 0.1}, mode="replace")
+
+    assert emotion_vectors.read_vectors() == {"warmth": 0.1}
+    assert "warmth=+0.10" in emotion_vectors.system_prompt()
+
+
+def test_status_reads_without_creating_a_file(monkeypatch, tmp_path):
+    import os
+
+    bundled = _bundled(monkeypatch, tmp_path)
+    vectors, path = emotion_vectors.ensure_vectors()
+
+    assert vectors == emotion_vectors.DEFAULT_VECTORS
+    assert not bundled.exists()
+    assert not os.path.exists(emotion_vectors.state_path())
+    assert path == emotion_vectors._resolve_path(str(bundled))
+
+
+def test_bundled_default_is_never_written_without_an_override(monkeypatch, tmp_path):
+    import pytest
+
+    bundled = _bundled(monkeypatch, tmp_path, {"warmth": 0.2})
+    with pytest.raises(ValueError, match="refusing to write the bundled"):
+        emotion_vectors.write_vectors({"warmth": 0.5}, str(bundled))
+    assert '"warmth": 0.2' in bundled.read_text(encoding="utf-8")
+
+
+def test_configured_override_is_still_the_live_file(monkeypatch, tmp_path):
+    import os
+
+    bundled = _bundled(monkeypatch, tmp_path, {"warmth": 0.2})
+    monkeypatch.setenv("SONDER_EMOTION_VECTORS", "custom_vectors.json")
+
+    _vectors, path = emotion_vectors.update_vectors({"calm": 0.3}, mode="replace")
+
+    assert path == str((bundled.parent / "custom_vectors.json").resolve())
+    assert emotion_vectors.read_vectors() == {"calm": 0.3}
+    assert not os.path.exists(emotion_vectors.state_path())
+
+
+def test_emotion_command_leaves_the_tracked_repo_file_untouched():
+    import os
+
+    import server
+
+    tracked = os.path.join(os.path.dirname(os.path.abspath(server.__file__)), "emotion_vectors.json")
+    with open(tracked, "rb") as handle:
+        before = handle.read()
+
+    out = server.emotion_command("joy=5")
+
+    assert "joy=+1.00" in out
+    with open(tracked, "rb") as handle:
+        assert handle.read() == before
+    assert server.emotion_vectors.read_vectors()["joy"] == 1.0
+    assert os.path.exists(server.emotion_vectors.state_path())

@@ -334,6 +334,9 @@ def live_control_plane_inventory(*, additional=None):
             _canonical(Path(override).absolute()) if override else home / name
         )
     atomic.append(home / "workflows.json")
+    # Live emotion-vector tuning is saved beside it (the bundled default in
+    # the checkout is covered by the workspace entry above).
+    atomic.append(home / "emotion_vectors.json")
     from .unsafe_lab import _audit_path
 
     catalog = os.environ.get("SONDER_LANE_TEST_TARGETS_FILE", "").strip()

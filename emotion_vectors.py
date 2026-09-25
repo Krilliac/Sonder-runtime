@@ -7,7 +7,10 @@ model can adjust warmth, confidence, curiosity, and similar response qualities.
 import json
 import os
 import re
+import tempfile
 from pathlib import Path
+
+from sonder_runtime.platform import paths as runtime_paths
 
 
 DEFAULT_VECTORS = {
@@ -103,11 +106,45 @@ def workspace_root():
     return str(Path(__file__).resolve().parent)
 
 
+def bundled_path():
+    """The shipped default vectors: tracked source, read but never written."""
+    return os.path.join(workspace_root(), "emotion_vectors.json")
+
+
+def state_path():
+    """The operator's live copy below the Sonder state home."""
+    return str(runtime_paths.default_home() / "emotion_vectors.json")
+
+
+def _configured_path():
+    return os.environ.get("SONDER_EMOTION_VECTORS", "").strip()
+
+
 def default_path():
-    return os.environ.get(
-        "SONDER_EMOTION_VECTORS",
-        os.path.join(workspace_root(), "emotion_vectors.json"),
-    )
+    """Where updates are written.
+
+    Live tuning (``/emotion``, ``update_emotion_vectors``) is per-user mutable
+    state, not source: writing the default beside the installed Python files
+    dirtied the source checkout and blocked guarded ``/update``.  Writes
+    therefore go to the state home; ``SONDER_EMOTION_VECTORS`` keeps its
+    historical workspace-relative override for operators who deliberately
+    version a vectors file.
+    """
+    return _configured_path() or state_path()
+
+
+def active_path():
+    """Where the effective vectors are read from.
+
+    Read order: the configured override, else the state-home copy when it
+    exists, else the bundled default.
+    """
+    if _configured_path():
+        return _resolve_path()
+    state = _resolve_path(state_path())
+    if os.path.exists(state):
+        return state
+    return _resolve_path(bundled_path())
 
 
 def _inside_workspace(path, root):
@@ -125,18 +162,27 @@ def _inside_workspace(path, root):
         return False
 
 
+def _canonical(candidate):
+    try:
+        return Path(candidate).resolve()
+    except OSError:
+        return Path(os.path.normpath(os.path.abspath(str(candidate))))
+
+
 def _resolve_path(path=None):
+    """Validate a vectors path: inside the checkout or the state home only."""
     path = path or default_path()
     root = Path(workspace_root()).resolve()
     candidate = Path(path).expanduser()
     if not candidate.is_absolute():
         candidate = root / candidate
-    try:
-        resolved = candidate.resolve()
-    except OSError:
-        resolved = Path(os.path.normpath(os.path.abspath(str(candidate))))
-    if not _inside_workspace(resolved, root):
-        raise ValueError("emotion vector path must stay inside workspace: %r" % str(resolved))
+    resolved = _canonical(candidate)
+    home = _canonical(runtime_paths.default_home())
+    if not (_inside_workspace(resolved, root) or _inside_workspace(resolved, home)):
+        raise ValueError(
+            "emotion vector path must stay inside workspace or the Sonder"
+            " state home: %r" % str(resolved)
+        )
     return str(resolved)
 
 
@@ -165,7 +211,7 @@ def normalize_vectors(vectors):
 
 
 def read_vectors(path=None):
-    path = _resolve_path(path)
+    path = _resolve_path(path) if path else active_path()
     if not os.path.exists(path):
         return {}
     with open(path, "r", encoding="utf-8") as f:
@@ -174,24 +220,65 @@ def read_vectors(path=None):
 
 
 def ensure_vectors(path=None):
-    path = _resolve_path(path)
-    if not os.path.exists(path):
-        write_vectors(DEFAULT_VECTORS, path)
-    vectors = read_vectors(path)
+    """Return ``(vectors, path)`` with any missing defaults filled in.
+
+    With no explicit path this never creates a file: it reports the effective
+    vectors (state-home copy, else bundled default, else built-in defaults)
+    and the file they came from.  Missing defaults are backfilled on disk only
+    in a copy the operator owns (the state home or a configured override),
+    never in the tracked bundled file.
+    """
+    if path:
+        path = _resolve_path(path)
+        if not os.path.exists(path):
+            write_vectors(DEFAULT_VECTORS, path)
+        vectors = read_vectors(path)
+        writable = True
+    else:
+        path = active_path()
+        exists = os.path.exists(path)
+        vectors = read_vectors(path) if exists else dict(DEFAULT_VECTORS)
+        writable = exists and _writable(path)
     missing = {name: value for name, value in DEFAULT_VECTORS.items() if name not in vectors}
     if missing:
         vectors.update(missing)
-        write_vectors(vectors, path)
-        vectors = read_vectors(path)
+        if writable:
+            write_vectors(vectors, path)
+            vectors = read_vectors(path)
     return vectors, path
+
+
+def _writable(path):
+    """Whether *path* is a live copy an update may write (not tracked source)."""
+    return bool(_configured_path()) or path != _resolve_path(bundled_path())
 
 
 def write_vectors(vectors, path=None):
     path = _resolve_path(path)
+    if not _writable(path):
+        # The bundled default is tracked source.  Only an explicit operator
+        # override may name it as the live file.
+        raise ValueError(
+            "refusing to write the bundled emotion vectors %s; live updates"
+            " are saved to %s" % (path, _resolve_path(state_path()))
+        )
     normalized = normalize_vectors(vectors)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(normalized, f, indent=2, sort_keys=True)
-        f.write("\n")
+    parent = os.path.dirname(path)
+    os.makedirs(parent, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=os.path.basename(path) + ".", suffix=".tmp", dir=parent,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as f:
+            json.dump(normalized, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
     return path
 
 
@@ -241,7 +328,7 @@ def tune_suggestions(text, step=0.1):
 
 
 def tune_from_text(text, step=0.1, path=None):
-    vectors, path = ensure_vectors(path)
+    vectors, _source = ensure_vectors(path)
     deltas, matched = tune_suggestions(text, step=step)
     explicit = parse_assignments(text)
     updated = dict(vectors)
@@ -249,7 +336,7 @@ def tune_from_text(text, step=0.1, path=None):
         updated[name] = round(_clamp(updated.get(name, 0.0) + delta), 3)
     for name, value in explicit.items():
         updated[name] = value
-    write_vectors(updated, path)
+    path = write_vectors(updated, path)
     return read_vectors(path), path, deltas, explicit, matched
 
 

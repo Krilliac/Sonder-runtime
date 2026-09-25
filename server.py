@@ -16069,7 +16069,9 @@ def emotion_vector_status() -> str:
     """
     _maybe_live_reload()
     vectors, path = emotion_vectors.ensure_vectors()
-    return "emotion vectors: %s\n\n%s" % (path, emotion_vectors.format_vectors(vectors))
+    live = emotion_vectors._resolve_path(emotion_vectors.default_path())
+    source = path if path == live else "%s (bundled default; updates are saved to %s)" % (path, live)
+    return "emotion vectors: %s\n\n%s" % (source, emotion_vectors.format_vectors(vectors))
 
 
 @mcp.tool()
@@ -16081,7 +16083,9 @@ def update_emotion_vectors(vectors_json: str, mode: str = "merge") -> str:
 
     Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,
     or reset/defaults.
-    Direct edits to emotion_vectors.json also apply on the next request.
+    Updates are saved to the state-home copy (<SONDER_HOME>/emotion_vectors.json),
+    never the bundled default; direct edits to that copy also apply on the
+    next request.
     """
     _maybe_live_reload()
     try:
@@ -16106,7 +16110,7 @@ def tune_emotion_vectors(feedback_text: str, step: float = 0.1) -> str:
       "be warmer but more concise"
       "more rigorous, less playful, warmth=0.4"
 
-    This applies small bounded deltas, writes emotion_vectors.json, and the next
+    This applies small bounded deltas, writes the state-home emotion_vectors.json, and the next
     model request picks up the change without restarting.
     """
     _maybe_live_reload()

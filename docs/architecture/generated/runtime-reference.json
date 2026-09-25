@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "03a8fba5755be565b7129ab2252931796ace3291840cd999b1e1775656f1cab9",
+    "catalog_digest": "2de048b0b83182debe9f5923b6b7619dac58156759156c7d461beb6ff2795dd9",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "03a8fba5755be565b7129ab2252931796ace3291840cd999b1e1775656f1cab9",
+      "catalog_digest": "2de048b0b83182debe9f5923b6b7619dac58156759156c7d461beb6ff2795dd9",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -6801,7 +6801,7 @@
           "name": "toolchain_status"
         },
         {
-          "description": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    ",
+          "description": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes the state-home emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -6901,7 +6901,7 @@
           "name": "unload"
         },
         {
-          "description": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Direct edits to emotion_vectors.json also apply on the next request.\n    ",
+          "description": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Updates are saved to the state-home copy (<SONDER_HOME>/emotion_vectors.json),\n    never the bundled default; direct edits to that copy also apply on the\n    next request.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -17872,7 +17872,7 @@
     "schemas": 4,
     "tools": 214
   },
-  "digest": "ca74e1d0315ccff7c13f68c9426a24e4ce684b50e72ff8fb6544dbb689c63994",
+  "digest": "bb6b72dbea840ac92e4849212d72357b52eadbf54d7d055e1775608ab847b879",
   "events": [
     {
       "name": "session.started",
@@ -18342,9 +18342,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "03a8fba5755be565b7129ab2252931796ace3291840cd999b1e1775656f1cab9",
+    "catalog_digest": "2de048b0b83182debe9f5923b6b7619dac58156759156c7d461beb6ff2795dd9",
     "client": {
-      "digest": "03a8fba5755be565b7129ab2252931796ace3291840cd999b1e1775656f1cab9",
+      "digest": "2de048b0b83182debe9f5923b6b7619dac58156759156c7d461beb6ff2795dd9",
       "events": [
         {
           "name": "approval.denied",
@@ -20711,7 +20711,7 @@
           {
             "name": "tune_emotion_vectors",
             "schema_available": true,
-            "summary": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    "
+            "summary": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes the state-home emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    "
           },
           {
             "name": "turn_inspect",
@@ -20731,7 +20731,7 @@
           {
             "name": "update_emotion_vectors",
             "schema_available": true,
-            "summary": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Direct edits to emotion_vectors.json also apply on the next request.\n    "
+            "summary": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Updates are saved to the state-home copy (<SONDER_HOME>/emotion_vectors.json),\n    never the bundled default; direct edits to that copy also apply on the\n    next request.\n    "
           },
           {
             "name": "update_system_profile",
@@ -27523,7 +27523,7 @@
           "name": "toolchain_status"
         },
         {
-          "description": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    ",
+          "description": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes the state-home emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -27623,7 +27623,7 @@
           "name": "unload"
         },
         {
-          "description": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Direct edits to emotion_vectors.json also apply on the next request.\n    ",
+          "description": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Updates are saved to the state-home copy (<SONDER_HOME>/emotion_vectors.json),\n    never the bundled default; direct edits to that copy also apply on the\n    next request.\n    ",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -35671,7 +35671,7 @@
           "name": "toolchain_status"
         },
         {
-          "description": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    ",
+          "description": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes the state-home emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    ",
           "inputSchema": {
             "properties": {
               "feedback_text": {
@@ -35763,7 +35763,7 @@
           "name": "unload"
         },
         {
-          "description": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Direct edits to emotion_vectors.json also apply on the next request.\n    ",
+          "description": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Updates are saved to the state-home copy (<SONDER_HOME>/emotion_vectors.json),\n    never the bundled default; direct edits to that copy also apply on the\n    next request.\n    ",
           "inputSchema": {
             "properties": {
               "mode": {
@@ -43206,7 +43206,7 @@
         },
         {
           "function": {
-            "description": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    ",
+            "description": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes the state-home emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    ",
             "name": "tune_emotion_vectors",
             "parameters": {
               "properties": {
@@ -43310,7 +43310,7 @@
         },
         {
           "function": {
-            "description": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Direct edits to emotion_vectors.json also apply on the next request.\n    ",
+            "description": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Updates are saved to the state-home copy (<SONDER_HOME>/emotion_vectors.json),\n    never the bundled default; direct edits to that copy also apply on the\n    next request.\n    ",
             "name": "update_emotion_vectors",
             "parameters": {
               "properties": {
@@ -43886,7 +43886,7 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "5434e8cc62e68aa86fa90083a3ff6f02f4d79c493cf09a6424ca5706eb550a5e",
+    "server.py": "9f3e3c87a9d2f86e5a0812abd9033a7ef11b31849cdb3af726083fe4a29faef2",
     "sonder_runtime/application/tools/generated_catalogs.py": "57a490ddd581e3e7a5d4b7b73379d205048f1db6de8e7e73c71f1124c6d84900",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
@@ -50223,7 +50223,7 @@
       }
     },
     {
-      "description": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    ",
+      "description": "Live-tune emotion/tone vectors from plain-language feedback.\n\n    Examples:\n      \"be warmer but more concise\"\n      \"more rigorous, less playful, warmth=0.4\"\n\n    This applies small bounded deltas, writes the state-home emotion_vectors.json, and the next\n    model request picks up the change without restarting.\n    ",
       "name": "tune_emotion_vectors",
       "parameters": {
         "properties": {
@@ -50315,7 +50315,7 @@
       }
     },
     {
-      "description": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Direct edits to emotion_vectors.json also apply on the next request.\n    ",
+      "description": "Merge, replace, or clear the live emotion/tone steering vectors.\n\n    `vectors_json` must be a JSON object, for example:\n      {\"warmth\": 0.6, \"brevity\": 0.4, \"urgency\": -0.2}\n\n    Values are clamped to [-1.0, 1.0]. mode: merge (default), replace, clear,\n    or reset/defaults.\n    Updates are saved to the state-home copy (<SONDER_HOME>/emotion_vectors.json),\n    never the bundled default; direct edits to that copy also apply on the\n    next request.\n    ",
       "name": "update_emotion_vectors",
       "parameters": {
         "properties": {

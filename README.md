@@ -277,6 +277,10 @@ now live in the normal per-user state directory (for example,
 `%LOCALAPPDATA%\sonder\workflows.json` on Windows), so new workflow saves no
 longer dirty an installed source tree. Existing root `workflows.json` files are
 copied once on first use; the original is left untouched for review.
+Live tone tuning (`/emotion`, `update_emotion_vectors`) is saved the same way,
+to `emotion_vectors.json` in the state directory. The checkout's
+`emotion_vectors.json` is the bundled default: it is read when no state copy
+exists and is never written unless `SONDER_EMOTION_VECTORS` names it.
 
 Start the loopback OpenAI-compatible API in a second terminal when another
 client needs it. Run `doctor` first if this is a new machine.
