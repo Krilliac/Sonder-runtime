@@ -9,6 +9,7 @@ import 'package:sonder_runtime/chat/transcript.dart';
 import 'package:sonder_runtime/models.dart';
 
 import 'chat_fakes.dart';
+import 'goldens/golden_fonts.dart';
 
 Future<void> _send(WidgetTester tester, String text) async {
   await tester.enterText(find.byType(TextField), text);
@@ -23,7 +24,7 @@ String _statusLine(WidgetTester tester) => tester
 
 void main() {
   // Real Plex metrics, so cell-width fitting behaves as in the app.
-  setUpAll(loadAppFonts);
+  setUpAll(loadGoldenFonts);
 
   group('connection state (P0-3)', () {
     testWidgets('an unreachable server is never "Connected"', (tester) async {

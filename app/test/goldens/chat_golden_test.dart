@@ -12,6 +12,7 @@ import 'package:sonder_runtime/models.dart';
 import 'package:sonder_runtime/theme.dart';
 
 import '../chat_fakes.dart';
+import 'golden_fonts.dart';
 
 /// Lane C goldens. Generate on Linux only:
 ///   flutter test --update-goldens --tags golden test/goldens/chat_golden_test.dart
@@ -87,7 +88,7 @@ Future<void> _golden(WidgetTester tester, String name) async {
 }
 
 void main() {
-  setUpAll(loadAppFonts);
+  setUpAll(loadGoldenFonts);
 
   for (final theme in [ThemeMode.dark, ThemeMode.light]) {
     final t = theme == ThemeMode.dark ? 'dark' : 'light';

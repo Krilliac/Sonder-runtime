@@ -1,8 +1,6 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/chat/backend.dart';
@@ -225,32 +223,4 @@ Future<void> unmountChat(dynamic tester) async {
 Future<String> storedChatText() async {
   final prefs = await SharedPreferences.getInstance();
   return prefs.getKeys().map((k) => '$k=${prefs.get(k)}').join('\n');
-}
-
-/// Load the bundled IBM Plex faces and Material Icons so text measures and
-/// renders as in the app (tests otherwise use the square test font).
-Future<void> loadAppFonts() async {
-  Future<void> load(String family, List<String> paths) async {
-    final loader = FontLoader(family);
-    for (final path in paths) {
-      final bytes = File(path).readAsBytesSync();
-      loader.addFont(Future.value(ByteData.sublistView(bytes)));
-    }
-    await loader.load();
-  }
-
-  await load('IBM Plex Sans', [
-    'fonts/IBMPlexSans-Regular.ttf',
-    'fonts/IBMPlexSans-Medium.ttf',
-    'fonts/IBMPlexSans-SemiBold.ttf',
-  ]);
-  await load('IBM Plex Mono', [
-    'fonts/IBMPlexMono-Regular.ttf',
-    'fonts/IBMPlexMono-Medium.ttf',
-    'fonts/IBMPlexMono-SemiBold.ttf',
-  ]);
-  final flutterRoot = Platform.environment['FLUTTER_ROOT'] ?? '/opt/flutter';
-  final icons = File(
-      '$flutterRoot/bin/cache/artifacts/material_fonts/MaterialIcons-Regular.otf');
-  if (icons.existsSync()) await load('MaterialIcons', [icons.path]);
 }
