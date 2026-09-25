@@ -24,6 +24,11 @@ Guarantees:
   terminal and retries the rest.
 * Foreign runs (an unresolved intent admitted by a worker identity this host
   does not own) are left untouched and reported.
+* Live peers: worker identities are per node, so another live runtime
+  process on this node composes the same identities.  When the caller's
+  ``peer_hosts_live`` probe reports (or cannot rule out) such a peer, the
+  whole pass is deferred before any owner is claimed; each worker's own
+  pre-restart path still reconciles its runs.
 """
 from __future__ import annotations
 
@@ -57,6 +62,8 @@ class StartupReconciliationReport:
     foreign_runs: tuple[str, ...] = ()
     failed_runs: tuple[tuple[str, str], ...] = ()
     truncated: bool = False
+    # Non-empty when the pass claimed nothing, e.g. "live-peer-host-process".
+    deferred: str = ""
 
     @property
     def resolved(self) -> tuple[ReconciledEffect, ...]:
@@ -74,6 +81,7 @@ class StartupReconciliationReport:
             "foreign_runs": len(self.foreign_runs),
             "failed_runs": len(self.failed_runs),
             "truncated": self.truncated,
+            "deferred": self.deferred,
         }
 
 
@@ -111,6 +119,7 @@ def reconcile_unresolved_effects(
     time_budget_seconds: float = DEFAULT_TIME_BUDGET_SECONDS,
     verifier_timeout_seconds: float = DEFAULT_VERIFIER_TIMEOUT_SECONDS,
     emit: Callable[[str, dict[str, object]], None] | None = None,
+    peer_hosts_live: Callable[[], bool] | None = None,
 ) -> StartupReconciliationReport:
     """Reconcile unresolved intents owned by this host, within fixed bounds."""
     if type(owner_epoch) is not int or owner_epoch < 1:
@@ -129,6 +138,21 @@ def reconcile_unresolved_effects(
     grouped, truncated = _unresolved_runs(
         journal, page_limit=page_limit, max_pages=max_pages,
     )
+    if not grouped:
+        # Nothing is unresolved: no owner is claimed and no event is emitted,
+        # so ordinary startups do not add operations noise.
+        _LOG.debug("startup effect reconciliation: no unresolved effects")
+        return StartupReconciliationReport(truncated=truncated)
+    if peer_hosts_live is not None:
+        try:
+            peers = peer_hosts_live() is not False
+        except Exception as exc:  # noqa: BLE001 - an unreadable probe presumes a peer
+            _LOG.warning("worker effect host probe failed: %s", type(exc).__name__)
+            peers = True
+        if peers:
+            return _finish(
+                StartupReconciliationReport(deferred="live-peer-host-process"), emit,
+            )
     reports: list[EffectReconciliationReport] = []
     foreign: list[str] = []
     failed: list[tuple[str, str]] = []
@@ -163,11 +187,20 @@ def reconcile_unresolved_effects(
                 )
                 continue
             reports.append(report)
-    result = StartupReconciliationReport(
+    return _finish(StartupReconciliationReport(
         tuple(reports), tuple(foreign), tuple(failed), truncated,
-    )
+    ), emit)
+
+
+def _finish(
+    result: StartupReconciliationReport,
+    emit: Callable[[str, dict[str, object]], None] | None,
+) -> StartupReconciliationReport:
     summary = result.summary()
-    log = _LOG.warning if (result.fenced or failed or foreign or truncated) else _LOG.info
+    log = _LOG.warning if (
+        result.fenced or result.failed_runs or result.foreign_runs
+        or result.truncated or result.deferred
+    ) else _LOG.info
     log("startup effect reconciliation: %s", summary)
     if emit is not None:
         try:

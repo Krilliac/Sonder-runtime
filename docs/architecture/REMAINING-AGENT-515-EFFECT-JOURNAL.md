@@ -606,6 +606,20 @@ What is now wired (caller -> callee):
     its run stays fenced.
   - A run that contains another host's worker identity is left untouched and
     reported under `foreign_runs`.
+  - Live local peers (review fix). Worker identities are per node, so a
+    second runtime process on the same node (for example `serve` plus an
+    IDE-launched `mcp`) composes the same `<family>:<node>` identities. Each
+    process that composes the worker-effects journal holds an exclusive OS
+    file lock on its own lease under `worker-effect-hosts/` beside the
+    journal (`adapters/persistence/worker_effect_hosts.py`), acquired before
+    any intent can be admitted and held until the process exits. The startup
+    pass first probes the other leases. If one is held, or the probe fails, it
+    claims nothing and reports `deferred="live-peer-host-process"` (also in
+    the event); a peer's in-flight intents and owner epoch stay untouched.
+    Leases of exited processes are reaped when their lock is acquired. A
+    pass that finds nothing unresolved claims nothing and emits no event.
+    Before this fix the pass fenced a live peer's in-flight effects and made
+    its receipt commit fail.
   - A failed pass is logged and keeps every fence in place. It does not stop
     composition.
   - Operators can run the pass again through
@@ -681,6 +695,11 @@ Evidence (end-to-end through `build_application`):
   receipt: the file holds one append and the run holds one append intent. A
   swapped journal identity refuses with `JOURNAL_IDENTITY_MISMATCH` and leaves
   the child `recovery_required`.
+- `tests/test_wiring_journal_live_peer_startup.py`: a real child
+  interpreter composes the application and admits an intent it keeps in
+  flight. A second `build_application` leaves the intent `intent` and the
+  owner epoch unchanged and reports the pass deferred. The peer then commits
+  its receipt, and once it has exited the next pass is no longer deferred.
 - `tests/test_wiring_journal_child_spawn.py` covers three cases: concurrent
   identical dispatch joins with one runner and one intent; a different digest
   is refused; a refused dispatch is followed by a corrected dispatch as
@@ -708,5 +727,15 @@ What remains:
   but clearing them still needs future trusted composition.
 - The journal and child store remain separate files. The cross-store window
   is covered by validation, not by a transaction.
+- While any peer runtime process on the node is live, the startup pass is
+  deferred as a whole, so a crashed third process's orphans stay fenced until
+  their worker is recomposed (pre-restart path) or a later startup finds no
+  live peer. The lease is consulted only by the startup pass: a peer
+  process that lazily composes the process or compute provider still claims
+  the shared `runtime:process-jobs` / `runtime:compute-jobs` run in its
+  constructor (behaviour that predates this slice). Peers in one process
+  share one lease; the lease is local OS
+  evidence and does not coordinate hosts sharing a journal over a network
+  filesystem.
 - No master-spec checkbox changes. LOOP-008, AGENT-006 and SESSION-007 stay
   unverified.

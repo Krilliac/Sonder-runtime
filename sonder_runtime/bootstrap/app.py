@@ -478,8 +478,15 @@ def build_application(
             from ..adapters.persistence.sqlite.effect_journal import SQLiteEffectJournal
             from ..platform.paths import state_path
 
+            from ..adapters.persistence.worker_effect_hosts import host_lease
+
+            journal_path = state_path("worker-effects.db", "SONDER_WORKER_EFFECTS_DB")
+            # Register this process as a live journal host before any intent
+            # can be admitted, so a peer's startup reconciliation never claims
+            # this process's in-flight effects.  Failure refuses the journal.
+            host_lease(journal_path)
             worker_effect_journal = SQLiteEffectJournal(
-                state_path("worker-effects.db", "SONDER_WORKER_EFFECTS_DB"),
+                journal_path,
                 reconciliation_verifiers={
                     "process-start": DurableLocalProcessStartVerifier(get_job_registry),
                     "compute-submit": DurableComputeSubmitVerifier(get_job_registry),
@@ -538,6 +545,17 @@ def build_application(
             worker_effect_reconciliation_report = StartupReconciliationReport()
             return worker_effect_reconciliation_report
         journal = get_worker_effect_journal()
+        from ..adapters.persistence.worker_effect_hosts import host_lease
+
+        lease = host_lease(state_path("worker-effects.db", "SONDER_WORKER_EFFECTS_DB"))
+
+        def peer_hosts_live():
+            # Worker identities are per node, not per process: while another
+            # local runtime process holds its lease, its in-flight intents are
+            # indistinguishable from a crashed predecessor's, so the pass is
+            # deferred (fail closed) to that worker's own pre-restart path.
+            return lease.live_peers() > 0
+
         owned = frozenset(worker_id_for(family) for family in worker_families)
         pending, _more = journal.unresolved_page(limit=100)
         if any(intent.operation_id.startswith("subagent-dispatch:") for intent in pending):
@@ -548,12 +566,14 @@ def build_application(
         def emit(code, detail):
             events.emit(
                 code, summary="worker effect reconciliation", detail=detail,
-                severity="WARNING" if detail.get("fenced") or detail.get("failed_runs") else "INFO",
+                severity="WARNING" if (
+                    detail.get("fenced") or detail.get("failed_runs") or detail.get("deferred")
+                ) else "INFO",
             )
 
         worker_effect_reconciliation_report = reconcile_unresolved_effects(
             journal, owner_epoch=worker_owner_epoch, owns_worker=owned.__contains__,
-            emit=emit, **limits,
+            emit=emit, peer_hosts_live=peer_hosts_live, **limits,
         )
         return worker_effect_reconciliation_report
 

@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 307,
+      "file_count": 308,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -281,6 +281,7 @@
         "sonder_runtime/adapters/persistence/sqlite_factory.py",
         "sonder_runtime/adapters/persistence/terminal_output.py",
         "sonder_runtime/adapters/persistence/tool_audit.py",
+        "sonder_runtime/adapters/persistence/worker_effect_hosts.py",
         "sonder_runtime/adapters/preference_adapters.py",
         "sonder_runtime/adapters/preference_codec.py",
         "sonder_runtime/adapters/preflight.py",
