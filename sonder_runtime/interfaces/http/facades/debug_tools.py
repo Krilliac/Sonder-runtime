@@ -49,6 +49,9 @@ POST_ROUTES = frozenset({
     "/v1/tools/crash-triage", "/v1/tools/crash-digest",
     "/v1/tools/profile-digest", "/v1/tools/profile-capture-digest",
 })
+# Paths and names are data, never lines: NUL, newlines, escapes, C1 controls
+# and bidi overrides are refused outright.
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
 _RUN_ROUTE = re.compile(r"^/v1/tools/debug-runs/(?P<run_id>[^/]{1,80})(?P<cancel>/cancel)?$")
 
 _TRIAGE_KEYS = {"path", "max_threads"}
@@ -143,7 +146,7 @@ def _string(payload: dict, key: str, *, required: bool = False, limit: int = MAX
     value = payload.get(key, "")
     if value is None:
         value = ""
-    if not isinstance(value, str) or len(value) > limit or "\x00" in value:
+    if not isinstance(value, str) or len(value) > limit or _CONTROL_RE.search(value):
         raise _BadRequest()
     if required and not value.strip():
         raise _BadRequest()
@@ -167,7 +170,8 @@ def _symbol_dirs(payload: dict) -> tuple[str, ...]:
         raise _BadRequest()
     out = []
     for item in value:
-        if not isinstance(item, str) or not item or len(item) > MAX_PATH_CHARS or "\x00" in item:
+        if (not isinstance(item, str) or not item or len(item) > MAX_PATH_CHARS
+                or _CONTROL_RE.search(item)):
             raise _BadRequest()
         out.append(item)
     return tuple(out)
@@ -277,7 +281,10 @@ class DebugToolsHttpFacade:
     def crash_digest(self, payload: Any, context: OperationContext, *, admin: bool) -> tuple[int, dict]:
         if not admin:
             return _error(403, "FORBIDDEN")
-        if isinstance(payload, dict) and payload.get("symbol_server") not in (None, False):
+        requested = payload.get("symbol_server") if isinstance(payload, dict) else None
+        if requested is not None and requested is not False:
+            # Only JSON false (or absent) passes; 0, "false" and friends are
+            # treated as a request for egress and refused.
             # Console-only egress: an HTTP caller can never ask for it.
             return _error(403, "SYMBOL_SERVER_NEEDS_CONSOLE")
         guard = self._guard(admin)

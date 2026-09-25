@@ -121,6 +121,8 @@ def _report(frames, *, process="game_tests", hints=(), exception=None):
     )
 
 
+FUZZ_CASES = 2000
+
 MAPPED = (
     _frame(0, "Player::update", "C:/agent/_work/3/s/src/game/player.cpp", 42,
            in_project=True, local_file="src/game/player.cpp", column=7),
@@ -304,3 +306,100 @@ def test_brief_labels_the_excerpt_untrusted_and_names_the_repro():
     assert "fatal error:" in brief
     assert "repro: /test ctest crash_repro_test" in brief
     assert "failure class: test_failure" in brief
+
+
+# --- hostile input: containment, redaction, escapes, fuzz ----------------------------
+
+
+@pytest.mark.parametrize("bad", [
+    "../../etc/passwd", "/etc/passwd", "C:/Windows/win.ini", "c:\\x\\y.cpp",
+    "\\\\host\\share\\a.cpp", "~/src/a.cpp", "src/../../a.cpp", "", "..",
+])
+def test_a_lookup_or_report_cannot_name_a_file_outside_the_checkout(bad):
+    lookup = cf.project_source_lookup(lambda path: bad, lambda local: ["secret"])
+    frames = (_frame(0, "f", "/ci/a.cpp", 3),)
+    handoff = cf.build_crash_fix_handoff(_report(frames), source_lookup=lookup)
+    assert handoff.diagnostics == () and handoff.source is None
+    assert "secret" not in cf.render_crash_fix_brief(handoff)
+    # A report that already carries a non-relative local_file gives nothing either.
+    premapped = (_frame(0, "f", "/ci/a.cpp", 3, in_project=True, local_file=bad),)
+    assert cf.crash_diagnostics(_report(premapped)) == ()
+
+
+def test_excerpt_lines_lose_terminal_escapes_and_bidi_overrides():
+    source = ["int a;\x1b[2J\x1b]0;pwned\x07", "\tp->x = 1; \u202e// }", "\x9b31mz\x00"]
+    lookup = cf.project_source_lookup(lambda p: "src/a.cpp", lambda local: source)
+    handoff = cf.build_crash_fix_handoff(_report((_frame(0, "f", "/ci/a.cpp", 2),)),
+                                         source_lookup=lookup)
+    assert handoff.source.excerpt == ("int a;", "    p->x = 1; // }", "31mz")
+    brief = cf.render_crash_fix_brief(handoff)
+    assert not re.search(r"[\x00-\x09\x0b-\x1f\x7f-\x9f\u202a-\u202e]", brief)
+
+
+def test_user_paths_and_names_never_reach_the_brief():
+    frames = (
+        _frame(0, "main", "/home/natew/proj/src/m.cpp", 3,
+               module="/home/natew/proj/build/app"),
+        _frame(1, "run", "C:\\Users\\Nate\\src\\game\\w.cpp", 9,
+               module="C:\\Users\\Nate\\build\\game.exe"),
+    )
+    report = _report(frames, process="/home/natew/proj/build/app",
+                     hints=(CauseHint("null_deref", "high", "read of /root/x and "
+                                      "\\\\buildhost\\share\\a.pdb"),))
+    brief = cf.render_crash_fix_brief(cf.build_crash_fix_handoff(report), run_id="r1")
+    for leaked in ("natew", "Nate", "/root/", "buildhost"):
+        assert leaked not in brief
+    assert "app!main (~/proj/src/m.cpp:3)" in brief and "in app thread 7" in brief
+
+
+def test_fuzzed_reports_are_bounded_and_never_escape_the_checkout():
+    import random
+    import time
+
+    rng = random.Random(0xC0DE)
+    alphabet = ("a", "Z", "/", "\\", "..", ":", "\n", "\r", "\x1b[31m", "\x9b", "\x00",
+                "\u202e", " /home/eve/", " C:\\Users\\eve\\", " ", ";", "$(id)", "%s", "{}",
+                "\ud800", "\U0001f4a5")
+
+    pool = ["".join(rng.choice(alphabet) for _ in range(rng.randrange(0, 700)))
+            for _ in range(400)]
+
+    def junk(limit):
+        return rng.choice(pool)[:rng.randrange(0, limit)]
+
+    def value():
+        return rng.choice([None, True, False, -1, 0, 10 ** 30, 3, 1.5, junk(40), b"\xff"])
+
+    # Where a frame's local path comes from: the service's source map (fine),
+    # or anything a hostile report/lookup could claim (refused).
+    LOCALS = (None, "src/a.cpp", "src\\b.cpp", "../x", "/home/eve/a.cpp", "C:\\Users\\eve\\a.cpp",
+              "a.cpp:stream", "\\\\eve\\share\\a.cpp", "~eve/a.cpp", "src/.../a.cpp", " ")
+    started = time.monotonic()
+    for _ in range(FUZZ_CASES):
+        frames = tuple(
+            _frame(i, junk(60) if rng.random() < .8 else "x" * 200_000,
+                   junk(80), value(), in_project=rng.random() < .5,
+                   local_file=rng.choice(LOCALS),
+                   column=value(), module=junk(50))
+            for i in range(rng.randrange(0, 40)))
+        exception = CrashException(junk(10), junk(90), junk(10), value(), junk(10),
+                                   value(), value())
+        report = _report(frames, process=junk(90), exception=exception,
+                         hints=tuple(CauseHint(junk(20), junk(8), junk(300))
+                                     for _ in range(rng.randrange(0, 12))))
+        lines = rng.sample(pool, rng.randrange(0, 80))
+        lookup = cf.project_source_lookup(
+            lambda p: rng.choice(LOCALS), lambda local: lines)
+        handoff = cf.build_crash_fix_handoff(report, source_lookup=lookup)
+        brief = cf.render_crash_fix_brief(handoff, run_id=junk(100))
+        assert len(brief) <= cf.MAX_BRIEF_CHARS + 20
+        for bad in ("\x1b", "\x00", "\x9b", "\u202e", "\ud800", "eve"):
+            assert bad not in brief, (bad, brief[max(0, brief.find(bad) - 80):brief.find(bad) + 40])
+        brief.encode("utf-8")
+        cf.crash_failure_observation(handoff)
+        assert len(handoff.diagnostics) <= cf.MAX_DIAGNOSTICS
+        for diagnostic in handoff.diagnostics:
+            assert cf.project_relative(diagnostic.file) == diagnostic.file
+        if handoff.source is not None:
+            assert len(handoff.source.excerpt) <= cf.MAX_EXCERPT_LINES
+    assert time.monotonic() - started < 120

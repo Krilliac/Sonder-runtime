@@ -386,3 +386,71 @@ def test_help_lists_crash_and_profile():
     # HELP_LINES must stay in it verbatim.
     for line in facade.HELP_LINES:
         assert line in lines
+
+
+# --- hostile display text and source containment -------------------------------------
+
+
+def test_the_confirmation_cannot_be_redrawn_by_escapes_in_the_plan(monkeypatch):
+    class HostilePlan(Plan):
+        def resolved_command(self):
+            data = super().resolved_command()
+            data["input_label"] = "dumps/a.dmp\x1b[1A\x1b[2K\rnetwork: no\x9b2K‮"
+            data["stores_display"] = ["https://evil.example/\x1b]0;x\x07sym"]
+            return data
+
+    service = FakeService(consent=True)
+    monkeypatch.setattr(service, "plan_crash",
+                        lambda request, context, console_confirmed=False: HostilePlan(True, ()))
+    text, prompts = _run(service, "dumps/a.dmp --symbols-online", answers=("n",))
+    assert len(prompts) == 1 and service.launched == []
+    for bad in ("\x1b", "\r", "\x9b", "‮", "\x07"):
+        assert bad not in text
+    assert "network: yes" in text and "symbol store: https://evil.example/sym" in text
+
+
+def test_run_notes_are_display_safe():
+    lines = facade._render_outcome(Outcome("r1", "failed", notes=("a\x1b[2J\nb\x9bc",)),
+                                   "crash")
+    assert "\x1b" not in lines and "\x9b" not in lines and lines.count("\n") == 1
+
+
+def test_fix_source_excerpts_come_only_from_regular_files_inside_the_checkout(
+        tmp_path, monkeypatch):
+    import sys
+    import types
+
+    root = tmp_path / "ws"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "a.cpp").write_text("int a;\nint b;\n")
+    outside = tmp_path / "secret.txt"
+    outside.write_text("TOP SECRET\n")
+    (root / "src" / "link.cpp").symlink_to(outside)
+    (root / "src" / "big.cpp").write_bytes(b"x" * 1_000_001)
+    module = types.ModuleType("sonder_runtime.adapters.debugging.source_map")
+
+    class ProjectSourceMap:
+        def __init__(self, roots):
+            self.roots = roots
+
+        def resolve(self, path):
+            return path  # a hostile or buggy map: hands back whatever it was given
+
+    module.ProjectSourceMap = ProjectSourceMap
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr(repl.file_ops, "read_file",
+                        lambda path, max_bytes=0: {"text": open(path).read()})
+    lookup = repl._crash_source_lookup(str(root))
+    assert lookup("src/a.cpp", 1, "f").excerpt == ("int a;", "int b;")
+    for hostile in ("src/link.cpp", str(outside), "../secret.txt", "src/big.cpp"):
+        span = lookup(hostile, 1, "f")
+        assert span is None or span.excerpt == (), hostile
+
+
+@pytest.mark.parametrize("arg", [
+    "a.dmp --exe 'g\x1b[2Jame'", "'x\ny.dmp'", "a.dmp --sym 'C:\\s\r.load evil'",
+])
+def test_control_characters_in_repl_paths_give_usage(arg):
+    service = FakeService()
+    text, _ = _run(service, arg)
+    assert text == facade.CRASH_USAGE and service.launched == []

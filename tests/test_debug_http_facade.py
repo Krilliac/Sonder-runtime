@@ -160,6 +160,15 @@ def test_symbol_server_over_http_is_refused_with_needs_console():
     assert service.calls == []
 
 
+@pytest.mark.parametrize("value", [True, 1, 0, "false", "", [], {}, 0.0])
+def test_anything_but_json_false_for_symbol_server_is_refused(value):
+    facade, service = _facade()
+    status, body = facade.dispatch("POST", "/v1/tools/crash-digest",
+                                   {"path": "x.dmp", "symbol_server": value}, _ctx(), admin=True)
+    assert (status, body["error_code"]) == (403, "SYMBOL_SERVER_NEEDS_CONSOLE")
+    assert service.calls == []
+
+
 def test_service_refusal_code_maps_to_403_too():
     facade, _ = _facade()
     status, body = facade._outcome(Outcome("", "refused", error_code="SYMBOL_SERVER_NEEDS_CONSOLE"),
@@ -315,3 +324,15 @@ def test_interfaces_import_no_domain_module(relative):
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 assert ".domain" not in alias.name, (relative, alias.name)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("path", "x.dmp\n-ex shell id"), ("path", "a\x1b[2J.dmp"), ("executable", "g\x00ame"),
+    ("symbol_dirs", ["ok", "C:\\syms\r\n.load evil"]), ("path", "a\u202e.dmp"),
+])
+def test_control_characters_in_paths_are_refused_before_the_service(field, value):
+    facade, service = _facade()
+    payload = {"path": "x.dmp", field: value}
+    status, body = facade.dispatch("POST", "/v1/tools/crash-digest", payload, _ctx(), admin=True)
+    assert (status, body["error_code"]) == (400, "INVALID_DEBUG_REQUEST")
+    assert service.calls == []

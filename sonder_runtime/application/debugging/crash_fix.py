@@ -34,6 +34,7 @@ from ...domain.diagnostics.model import (
     Severity,
     clean_text,
     make_diagnostic,
+    strip_ansi,
 )
 from ...domain.common.errors import InvalidInput
 from ...domain.strategy.models import FailureClass, FailureObservation, ProgressMetric
@@ -44,6 +45,7 @@ MAX_DIAGNOSTICS = 24
 MAX_EXCERPT_LINES = 40
 MAX_WIRE_CHARS = 240
 MAX_BRIEF_CHARS = 12_000
+_MAX_SCANNED_LINES = 200_000
 UNTRUSTED_LABEL = "from the crashed process, untrusted"
 CRASH_OBSERVATION_CODE = "CRASH_REPRODUCED"
 CRASH_METRIC = "crash_reproduced"
@@ -56,6 +58,68 @@ _CRASH_FAILURE_RE = re.compile(
     r"seg(?:mentation)?\s*fault|\bexception\b|subprocess aborted", re.I,
 )
 _EXE_SUFFIX_RE = re.compile(r"\.(?:exe|out|bin)$", re.I)
+# Excerpt lines keep their indentation but lose every terminal control: C0
+# and C1 controls (C1 CSI is an escape introducer on some terminals) and the
+# bidi overrides/isolates that make displayed source differ from real source.
+_EXCERPT_CONTROL_RE = re.compile(
+    r"[\x00-\x08\x0a-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069\ud800-\udfff]")
+# What ``clean_text`` leaves that is still unsafe in one wire line: C1
+# controls, bidi overrides/isolates and lone surrogates (which cannot even be
+# encoded as UTF-8, so they would break the digest and every JSON writer).
+_WIRE_EXTRA_RE = re.compile(r"[\x80-\x9f\u202a-\u202e\u2066-\u2069\ud800-\udfff]")
+# User-identifying path prefixes in model-visible text (the brief goes to the
+# model): POSIX homes, root's home, Windows profiles and UNC hosts.
+_HOME_PREFIX_RES = (
+    (re.compile(r"(?<![\w.~-])/(?:home|Users)/[^/\s:;,()\[\]'\"]+"), "~"),
+    (re.compile(r"(?<![\w.~-])/root(?=[/\s:;,()\[\]'\"]|$)"), "~"),
+    (re.compile(r"(?<![\w])[A-Za-z]:[\\/](?:Users|Documents and Settings)[\\/][^\\/\s:;,()\[\]'\"]+",
+                re.I), "%USERPROFILE%"),
+    (re.compile(r"(?<![\w\\])\\\\[^\\/\s]+\\[^\\/\s]+"), r"\\\\<unc>"),
+)
+
+
+# --- untrusted text --------------------------------------------------------------
+
+
+def redact_user_paths(text: str) -> str:
+    """Replace home/profile/UNC prefixes so no user or host name reaches the model."""
+    value = str(text or "")
+    for pattern, replacement in _HOME_PREFIX_RES:
+        value = pattern.sub(replacement, value)
+    return value
+
+
+def project_relative(path: Any) -> str:
+    """``path`` as a clean project-relative path, or "" when it is anything else.
+
+    Absolute POSIX paths, drive-letter, UNC and alternate-stream forms, ``~``
+    and any ``..`` (or other dots-only) component are refused: a diagnostic the fix loop may open and edit must
+    name a file inside the checkout, whatever a lookup or a report claims.
+    """
+    text = _text(path, 260).replace("\\", "/")
+    # ":" also covers drive letters and NTFS alternate data streams.
+    if not text or text.startswith(("/", "~")) or ":" in text:
+        return ""
+    parts = [part.strip() for part in text.split("/")]
+    parts = [part for part in parts if part not in ("", ".")]
+    if not parts or any(not part.strip(".") for part in parts):
+        return ""
+    return "/".join(parts)
+
+
+def _excerpt_line(value: Any) -> str:
+    text = strip_ansi(str(value)[:2_000]).rstrip("\r\n").replace("\t", "    ")
+    return _EXCERPT_CONTROL_RE.sub("", text)[:400]
+
+
+def _display_path(value: Any, limit: int) -> str:
+    return redact_user_paths(_text(value, 4_096))[:limit]
+
+
+def _module_name(value: Any) -> str:
+    """A module's file name (``app``, ``ntdll.dll``), never its directory."""
+    text = redact_user_paths(_text(value, 4_096)).replace("\\", "/").rstrip("/")
+    return text.rsplit("/", 1)[-1][:80]
 
 
 # --- types ---------------------------------------------------------------------
@@ -72,11 +136,12 @@ class SourceSpan:
     first_line: int = 1
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "path", clean_text(self.path, 260).replace("\\", "/"))
-        object.__setattr__(self, "symbol", clean_text(self.symbol, MAX_WIRE_CHARS))
-        lines = tuple(str(line)[:400] for line in tuple(self.excerpt)[:MAX_EXCERPT_LINES])
+        object.__setattr__(self, "path", project_relative(self.path))
+        object.__setattr__(self, "symbol", _text(self.symbol, MAX_WIRE_CHARS))
+        lines = tuple(_excerpt_line(line) for line in tuple(self.excerpt)[:MAX_EXCERPT_LINES])
         object.__setattr__(self, "excerpt", lines)
-        if self.line is not None and (not isinstance(self.line, int) or self.line < 1):
+        if self.line is not None and (
+                not isinstance(self.line, int) or isinstance(self.line, bool) or self.line < 1):
             object.__setattr__(self, "line", None)
         if not isinstance(self.first_line, int) or self.first_line < 1:
             object.__setattr__(self, "first_line", 1)
@@ -118,7 +183,10 @@ ReproLookup = Callable[[Any], "ReproSpec | None"]
 
 def _text(value: Any, limit: int = MAX_WIRE_CHARS) -> str:
     raw = getattr(value, "value", value) if value is not None else ""
-    return clean_text(raw, limit)
+    if isinstance(raw, (bytes, bytearray)):
+        raw = bytes(raw[: limit * 4]).decode("utf-8", errors="replace")
+    text = _WIRE_EXTRA_RE.sub("", str(raw)[: max(0, int(limit)) * 8])
+    return clean_text(text, limit)
 
 
 def _crashing_thread(report: Any) -> Any | None:
@@ -140,7 +208,7 @@ def _frames(report: Any) -> tuple[Any, ...]:
 
 def _exception_name(report: Any) -> str:
     exception = getattr(report, "exception", None)
-    name = _text(getattr(exception, "name", ""), 64) if exception is not None else ""
+    name = redact_user_paths(_text(getattr(exception, "name", ""), 64)) if exception is not None else ""
     return re.sub(r"[^A-Za-z0-9_.:-]", "_", name) or "UNKNOWN_CRASH"
 
 
@@ -161,7 +229,7 @@ def _hint_kinds(report: Any) -> tuple[str, ...]:
 
 
 def _frame_label(frame: Any) -> str:
-    module = _text(getattr(frame, "module", ""), 80)
+    module = _module_name(getattr(frame, "module", ""))
     function = _text(getattr(frame, "function", ""), 160)
     if function:
         label = "%s!%s" % (module, function) if module else function
@@ -169,11 +237,12 @@ def _frame_label(frame: Any) -> str:
         offset = getattr(frame, "module_offset", None)
         address = getattr(frame, "address", None)
         label = "%s+%s" % (module or "?", _hex(offset) or "?") if module else (_hex(address) or "?")
-    location = _text(getattr(frame, "local_file", None) or getattr(frame, "file", ""), 160)
+    location = project_relative(getattr(frame, "local_file", None) or "") or _display_path(
+        getattr(frame, "file", ""), 160)
     line = getattr(frame, "line", None)
     if location:
         label += " (%s%s)" % (location, ":%d" % line if isinstance(line, int) else "")
-    return label[:MAX_WIRE_CHARS]
+    return redact_user_paths(label)[:MAX_WIRE_CHARS]
 
 
 # --- diagnostics ---------------------------------------------------------------------
@@ -196,7 +265,7 @@ def _message(report: Any, frame: Any) -> str:
     if hints:
         parts.append("[%s]" % hints[0])
     parts.append("(%s)" % UNTRUSTED_LABEL)
-    return " ".join(parts)
+    return redact_user_paths(" ".join(parts))
 
 
 def crash_diagnostics(report: Any, max_items: int = MAX_DIAGNOSTICS) -> tuple[Diagnostic, ...]:
@@ -210,7 +279,7 @@ def crash_diagnostics(report: Any, max_items: int = MAX_DIAGNOSTICS) -> tuple[Di
     code = "CRASH:" + _exception_name(report)
     out: list[Diagnostic] = []
     for frame in _frames(report):
-        local = getattr(frame, "local_file", None)
+        local = project_relative(getattr(frame, "local_file", None) or "")
         line = getattr(frame, "line", None)
         if not local or not getattr(frame, "in_project", False):
             continue
@@ -315,14 +384,29 @@ def project_source_lookup(
     """
     window = max(1, min(int(max_lines), MAX_EXCERPT_LINES))
     before = max(0, min(int(context_before), window - 1))
+    # A crashing stack names the same few files over and over; each is read
+    # (through the guarded reader) at most once per hand-off.
+    cache: dict[str, tuple[str, ...] | None] = {}
+
+    def lines_of(local: str) -> tuple[str, ...] | None:
+        if local not in cache:
+            if len(cache) >= 8:
+                return None
+            lines = read_lines(local)
+            cache[local] = None if lines is None else tuple(
+                str(text) for _, text in zip(range(_MAX_SCANNED_LINES), lines))
+        return cache[local]
 
     def lookup(path: str, line: int | None, symbol: str) -> SourceSpan | None:
         local = resolve(path)
         if not local:
             return None
+        local = project_relative(local)
+        if not local:
+            return None
         excerpt: tuple[str, ...] = ()
         first_line = 1
-        lines = read_lines(local)
+        lines = lines_of(local)
         if lines is not None:
             start = max(1, (line or 1) - before)
             collected = []
@@ -423,13 +507,13 @@ def _summary(report: Any) -> str:
         address = _hex(getattr(exception, "access_address", None))
         if access or address:
             parts.append(" ".join(p for p in ("%s at" % access if access else "at", address) if p))
-    process = _text(getattr(report, "process_name", ""), 80)
+    process = _module_name(getattr(report, "process_name", ""))
     if process:
         parts.append("in %s" % process)
     thread = getattr(report, "crashing_thread_id", None)
     if thread is not None:
         parts.append("thread %s" % _text(thread, 24))
-    return " ".join(parts)[:MAX_WIRE_CHARS]
+    return redact_user_paths(" ".join(parts))[:MAX_WIRE_CHARS]
 
 
 def build_crash_fix_handoff(
@@ -448,10 +532,10 @@ def build_crash_fix_handoff(
     )
     repro = repro_lookup(mapped) if repro_lookup is not None else None
     hints = tuple(
-        "%s (%s): %s" % (
+        redact_user_paths("%s (%s): %s" % (
             _text(getattr(hint, "kind", ""), 40), _text(getattr(hint, "confidence", ""), 16),
             _text(getattr(hint, "evidence", ""), 160),
-        )
+        ))
         for hint in tuple(getattr(mapped, "hints", ()) or ())[:8]
     )
     return CrashFixHandoff(
@@ -489,7 +573,7 @@ def render_crash_fix_brief(
     """The operator/model brief: diagnostics, untrusted excerpt, repro."""
     header = "crash fix brief"
     if run_id:
-        header += " for %s" % clean_text(run_id, 80)
+        header += " for %s" % _text(run_id, 80)
     if handoff.signature:
         header += " (signature %s, basis %s)" % (handoff.signature, handoff.signature_basis or "?")
     lines = [header, "summary: %s" % handoff.summary]
@@ -522,7 +606,7 @@ def render_crash_fix_brief(
     lines.append(
         "next: edit the code, rebuild with the build tool, then re-run the repro; "
         "crash_reproduced should drop to 0")
-    text = "\n".join(lines)
+    text = redact_user_paths("\n".join(lines))
     if len(text) > max_chars:
         text = text[:max_chars].rstrip() + "\n... (brief cut)"
     return text
@@ -533,6 +617,7 @@ __all__ = [
     "ReproSpec", "SourceLookup", "SourceSpan", "UNTRUSTED_LABEL",
     "build_crash_fix_handoff", "crash_diagnostic_lines", "crash_diagnostics",
     "crash_failure_observation", "crash_progress_metric", "explicit_repro",
-    "map_report_sources", "project_source_lookup", "render_crash_diagnostic",
+    "map_report_sources", "project_relative", "project_source_lookup",
+    "redact_user_paths", "render_crash_diagnostic",
     "render_crash_fix_brief", "repro_from_test_reports", "repro_lookup_for",
 ]

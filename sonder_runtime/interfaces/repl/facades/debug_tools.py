@@ -66,6 +66,11 @@ MAX_PATH_CHARS = 1024
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
 _RENDER_MAX_CHARS = 12_000
 _NEEDS_HOST_TOOL = "CAPTURE_NEEDS_HOST_TOOL"
+# Terminal escapes (CSI/OSC, C0/C1 controls, bidi overrides) are removed from
+# anything shown before the y/N answer or echoed from a run: a crafted file
+# name or note must not be able to redraw the confirmation the operator reads.
+_ESCAPE_SEQ_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|.)?")
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
 
 # Per-console memory for ``/crash fix last`` and ``--repro``: the newest run
 # and report this process rendered, and the selector given with each run.
@@ -80,6 +85,12 @@ class _Usage(Exception):
 
 def _text(value: Any) -> str:
     return str(getattr(value, "value", value) if value is not None else "")
+
+
+def _line(value: Any, limit: int = 240) -> str:
+    """One display-safe line: escapes and controls removed, capped."""
+    text = _ESCAPE_SEQ_RE.sub("", _text(value)[: limit * 4])
+    return _CONTROL_RE.sub(" ", text)[:limit]
 
 
 def _code(exc: BaseException) -> str:
@@ -114,7 +125,9 @@ def _split(arg: str) -> list[str]:
 
 
 def _path(value: str) -> str:
-    if not value or len(value) > MAX_PATH_CHARS or "\x00" in value:
+    # Control characters (NUL, newline, escapes) never belong in a capture
+    # path; refusing them keeps every later display and argv line intact.
+    if not value or len(value) > MAX_PATH_CHARS or _CONTROL_RE.search(value):
         raise _Usage()
     return value
 
@@ -164,7 +177,7 @@ def _render_outcome(outcome: Any, label: str) -> str:
         header += " (%s)" % code
     lines = [header]
     for note in tuple(getattr(outcome, "notes", ()) or ())[:12]:
-        lines.append("  note: %s" % _text(note)[:240])
+        lines.append("  note: %s" % _line(note))
     crash = getattr(outcome, "crash", None)
     profile = getattr(outcome, "profile", None)
     if crash is not None:
@@ -179,21 +192,23 @@ def _render_outcome(outcome: Any, label: str) -> str:
 
 def _render_resolved(resolved: Any) -> str:
     data = resolved if isinstance(resolved, dict) else {}
-    lines = ["resolved command (%s):" % _text(data.get("kind", "crash"))]
-    engines = data.get("engines") or ()
-    lines.append("  engines: %s" % (", ".join(_text(e) for e in engines) or "pure"))
+    lines = ["resolved command (%s):" % _line(data.get("kind", "crash"), 32)]
+    engines = tuple(data.get("engines") or ())[:8]
+    lines.append("  engines: %s" % (", ".join(_line(e, 40) for e in engines) or "pure"))
     for argv in tuple(data.get("display_argvs") or ())[:4]:
-        lines.append("  argv: %s" % " ".join(_text(part) for part in tuple(argv)[:64]))
+        lines.append("  argv: %s" % " ".join(_line(part, 1024) for part in tuple(argv)[:64]))
     lines.append("  input: %s sha256=%s" % (
-        _text(data.get("input_label", "")), _text(data.get("input_sha256", ""))))
+        _line(data.get("input_label", ""), 1024), _line(data.get("input_sha256", ""), 80)))
     lines.append("  network: %s" % ("yes" if data.get("network") else "no"))
     stores = tuple(data.get("stores_display") or ())
     for store in stores[:8]:
-        lines.append("  symbol store: %s" % _text(store))
+        lines.append("  symbol store: %s" % _line(store, 1024))
+    if len(stores) > 8:
+        lines.append("  symbol store: ... %d more" % (len(stores) - 8))
     if data.get("isolation"):
-        lines.append("  isolation: %s" % _text(data.get("isolation")))
+        lines.append("  isolation: %s" % _line(data.get("isolation"), 40))
     if data.get("command_digest"):
-        lines.append("  command digest: %s" % _text(data.get("command_digest"))[:64])
+        lines.append("  command digest: %s" % _line(data.get("command_digest"), 64))
     return "\n".join(lines)
 
 

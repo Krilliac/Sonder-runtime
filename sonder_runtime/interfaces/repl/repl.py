@@ -2547,8 +2547,17 @@ def _crash_source_lookup(workspace=""):
             return None
 
     def read_lines(local):
+        # Only a regular file inside this checkout, reached without a link,
+        # and small enough to read: the excerpt is shown to the model, and a
+        # source map or report must not be able to point it anywhere else.
         try:
-            text = file_ops.read_file(str(root / local), max_bytes=1_000_000)["text"]
+            base = root.resolve()
+            candidate = base / local
+            if candidate.resolve() != candidate or not candidate.resolve().is_relative_to(base):
+                return None
+            if not candidate.is_file() or candidate.stat().st_size > 1_000_000:
+                return None
+            text = file_ops.read_file(str(candidate), max_bytes=1_000_000)["text"]
         except Exception:
             return None
         return text.splitlines()
