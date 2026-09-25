@@ -32,6 +32,9 @@ DEFAULT_PORT = int(os.environ.get("SONDER_PORT", "11435"))
 CONTROL_GATE_ENV = "SONDER_LAUNCHER_CONTROL_GATE"
 CONTROL_GATE_ALLOW = b"\x01"
 _MAX_OLLAMA_TAGS_BYTES = 4 * 1024 * 1024
+# Bounded wait for a SIGTERMed process to exit before ``stop`` reports; kept
+# below the launcher's 60 s stop-action budget.
+STOP_WAIT_SECONDS = 30.0
 
 
 def _child_environment() -> dict[str, str]:
@@ -513,6 +516,17 @@ def stop_pid(name: str, host=DEFAULT_HOST, port=DEFAULT_PORT) -> str:
                     raise OSError(detail)
             else:
                 os.kill(pid, 15)
+        if os.name != "nt" and not wait_until(
+            lambda: not any(pid_alive(pid) for pid in pids), STOP_WAIT_SECONDS
+        ):
+            # SIGTERM only *requests* a graceful shutdown.  Reporting success
+            # while the old server still owns the port made ``restart`` see an
+            # "unmanaged listener" and exit with nothing running, and made the
+            # launcher report every stop as failed.  Never escalate here: a
+            # draining server may legitimately need the time.
+            raise OSError(
+                "still running %ss after SIGTERM" % int(STOP_WAIT_SECONDS)
+            )
         try:
             pid_file(name).unlink()
         except OSError:
