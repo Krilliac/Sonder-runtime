@@ -1326,6 +1326,7 @@ def _is_execution(name: str) -> bool:
     return (
         stem in permission_modes.EXECUTION_TOOLS
         or stem in permission_modes.EXECUTION_COMMANDS
+        or stem in getattr(permission_modes, "NATIVE_EXECUTION_TOOLS", frozenset())
     )
 
 
@@ -1441,6 +1442,14 @@ def _native_risk(group, tool, hit, server, tools_by_name) -> str:
     graded = [
         _risk_for(name, server) for name in reached
         if name in tools_by_name and name not in disarmed
+    ]
+    # Typed-only tools (the build and debug families) are absent from the
+    # legacy registry but are still graded by the gate. An unregistered name
+    # the gate classes as execution must raise the branch too, or /crash and
+    # /profile would publish "safe" for a branch that can launch a debugger.
+    graded += [
+        "execution" for name in reached
+        if name not in tools_by_name and name not in disarmed and _is_execution(name)
     ]
 
     # A branch whose only tool calls are disarmed is graded as what it can

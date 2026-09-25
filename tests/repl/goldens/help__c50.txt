@@ -19,7 +19,7 @@ sonder commands · ### in ## groups
     context      ##  context, compact
     creative     ##  game, asset
     data          #  data_query, data_convert
-    dev          ##  test, digest
+    dev          ##  test, crash
     diagnostics  ##  commands, activity
     execution    ##  run, scripts
     filesystem   ##  read, search

@@ -33,10 +33,15 @@ _CAPTURED_LIVE_PROVIDER_ENV = {
 }
 
 
+# Test-harness controls, not runtime configuration: they survive the ambient
+# scrub so a developer can capture timings or rewrite REPL screen goldens.
+_HARNESS_VARIABLES = frozenset({"SONDER_TEST_TIMINGS", "SONDER_UPDATE_GOLDENS"})
+
+
 def _clear_ambient_deployment_variables() -> None:
     for _ambient_variable in tuple(os.environ):
         if (_ambient_variable.upper().startswith(("SONDER_", "OLLAMA_"))
-                and _ambient_variable.upper() != "SONDER_TEST_TIMINGS"):
+                and _ambient_variable.upper() not in _HARNESS_VARIABLES):
             os.environ.pop(_ambient_variable, None)
 
 

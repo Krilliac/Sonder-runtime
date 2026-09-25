@@ -702,8 +702,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           if (_firstRun) ...[
             const SizedBox(height: 6),
             Text(
-              "Use the PC's IP address on your network or tailnet, for "
-              'example http://192.168.1.20:11435.',
+              'Use the HTTPS address your PC publishes on your tailnet or '
+              'through a TLS proxy, for example https://your-host.example. '
+              'On an emulator, adb reverse lets you use http://127.0.0.1:11435.',
               style: Theme.of(context)
                   .textTheme
                   .bodySmall
@@ -717,9 +718,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
             autocorrect: false,
             decoration: _field(
               'Server URL',
-              hint: 'http://192.168.1.20:11435',
-              helper: 'HTTP works for the API key on your LAN; sign-in needs '
-                  'HTTPS off this device.',
+              hint: 'https://your-host.example',
+              helper: 'HTTPS is required off-device; HTTP is for loopback '
+                  'development only.',
               icon: Icons.dns_outlined,
             ),
           ),
