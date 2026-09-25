@@ -52,7 +52,8 @@ def _resolve_root(root, extra_roots=""):
 
     Every tool in this module hands ``root`` straight to a child process as its
     working directory, and several of them report what they find there --
-    ``secret_scan`` prints the credentials it matches. Until now this function
+    ``secret_scan`` reports which files hold credentials (it once printed
+    the credentials themselves; its findings are now redacted). Until now this function
     resolved any absolute path and returned it, so the only thing standing
     between a caller and an arbitrary directory was whether a caller could
     reach these functions at all. ``fix/cloud-help-drift`` @ ``b8a15ef`` relied
@@ -1051,6 +1052,9 @@ def apply_patch(root=".", patch_text="", check_only=False, timeout=10, extra_roo
 # Security scanning
 # ---------------------------------------------------------------------------
 
+_REDACTED_CREDENTIAL = "[REDACTED CREDENTIAL]"
+
+
 def secret_scan(root=".", timeout=30, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     timeout = _bounded_int(timeout, 30, 5, MAX_TIMEOUT)
@@ -1084,9 +1088,13 @@ def secret_scan(root=".", timeout=30, extra_roots=""):
         for pattern_str, label in secret_patterns:
             for m in re.finditer(pattern_str, content):
                 line_no = content[:m.start()].count("\n") + 1
+                # Never echo the matched text: a 40-character prefix of a
+                # credential is usually the whole credential, and callers
+                # render and durably record this field. Same placeholder as
+                # the packaged scanner (adapters/secret_scan.py).
                 findings.append({
                     "file": rel, "line": line_no, "type": label,
-                    "match": m.group()[:40] + ("..." if len(m.group()) > 40 else ""),
+                    "match": _REDACTED_CREDENTIAL,
                 })
                 if len(findings) >= 100:
                     return {"ok": True, "findings": findings, "files_scanned": scanned, "truncated": True}
