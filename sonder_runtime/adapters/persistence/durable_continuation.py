@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+from sonder_runtime.adapters.persistence.owned_sqlite import (
+    transaction as owned_sqlite_transaction,
+)
 
 from dataclasses import asdict, replace
 from collections.abc import Mapping
@@ -23,6 +26,7 @@ import sqlite3
 from pathlib import Path
 from threading import Lock, Condition
 from time import monotonic, sleep
+from uuid import uuid4
 
 from sonder_runtime.application.ports.subagents import (
     InvalidSubagentRequest,
@@ -34,7 +38,16 @@ from sonder_runtime.application.ports.subagents import (
     SubagentUsage,
     TERMINAL_SUBAGENT_STATUSES,
 )
-from sonder_runtime.application.subagents.continuable import ContinuableCheckpoint
+from sonder_runtime.application.execution.effect_journal import (
+    EffectJournalError,
+    EffectJournalPage,
+)
+from sonder_runtime.application.subagents.checkpoint_provenance import JournalPosition
+from sonder_runtime.application.subagents.continuable import (
+    CheckpointProvenance,
+    ContinuableCheckpoint,
+    provenance_subject_error,
+)
 from sonder_runtime.application.subagents.durable_continuation import (
     ChildSessionLineage,
     DurableChildSession,
@@ -56,7 +69,43 @@ CREATE TABLE IF NOT EXISTS durable_child_session (
     resume_key TEXT NOT NULL DEFAULT '', idempotency_key TEXT NOT NULL DEFAULT '',
     terminal_verification_json TEXT NOT NULL DEFAULT '{}'
 );
+CREATE TABLE IF NOT EXISTS child_checkpoint_provenance (
+    child_id TEXT NOT NULL, sequence INTEGER NOT NULL, version INTEGER NOT NULL,
+    state_digest TEXT NOT NULL, cursor TEXT, journal_identity TEXT NOT NULL,
+    run_id TEXT NOT NULL, worker_id TEXT NOT NULL, owner_epoch INTEGER NOT NULL,
+    settled_position INTEGER NOT NULL, record_digest TEXT NOT NULL,
+    PRIMARY KEY (child_id, sequence)
+);
 """
+
+# Kept out of ``_DDL``: other tooling splits that script on ``;``, which a
+# trigger body contains.  The repository installs these on every open.
+_PROVENANCE_TRIGGERS = (
+    "CREATE TRIGGER IF NOT EXISTS child_checkpoint_provenance_no_update "
+    "BEFORE UPDATE ON child_checkpoint_provenance "
+    "BEGIN SELECT RAISE(ABORT, 'checkpoint provenance is immutable'); END",
+    "CREATE TRIGGER IF NOT EXISTS child_checkpoint_provenance_no_delete "
+    "BEFORE DELETE ON child_checkpoint_provenance "
+    "BEGIN SELECT RAISE(ABORT, 'checkpoint provenance is immutable'); END",
+)
+
+# Every child read joins the provenance stamped for its current checkpoint.
+# Rows written before the provenance table existed, or without a host hook,
+# have no match and read back provenance-absent.
+_SESSION_COLUMNS = (
+    "c.child_id,c.parent_id,c.ancestors_json,c.prompt,c.budget_json,c.metadata_json,c.status,"
+    "c.checkpoint_sequence,c.checkpoint_state_json,c.checkpoint_cursor,c.revision,c.usage_json,"
+    "c.result_json,c.recovery_required,c.cancellation_requested,c.cancellation_reason,"
+    "c.resume_key,c.idempotency_key,c.terminal_verification_json,"
+    "p.version,p.state_digest,p.cursor,p.journal_identity,p.run_id,p.worker_id,"
+    "p.owner_epoch,p.settled_position,p.record_digest"
+)
+_SESSION_FROM = (
+    " FROM durable_child_session c LEFT JOIN child_checkpoint_provenance p"
+    " ON p.child_id=c.child_id AND p.sequence=c.checkpoint_sequence "
+)
+_SESSION_SELECT = "SELECT " + _SESSION_COLUMNS + _SESSION_FROM
+_BASE_COLUMN_COUNT = 19
 
 
 # A public cancellation request may race a worker's terminal update after the
@@ -187,6 +236,8 @@ class SQLiteDurableContinuationRepository:
                 connection.execute("ALTER TABLE durable_child_session ADD COLUMN terminal_verification_json TEXT NOT NULL DEFAULT '{}'")
             connection.execute("CREATE INDEX IF NOT EXISTS ix_child_resume_key ON durable_child_session(parent_id,resume_key,status)")
             connection.execute("CREATE INDEX IF NOT EXISTS ix_child_idempotency_key ON durable_child_session(parent_id,idempotency_key,status)")
+            for trigger in _PROVENANCE_TRIGGERS:
+                connection.execute(trigger)
 
     @contextmanager
     def _connect(self):
@@ -239,6 +290,13 @@ class SQLiteDurableContinuationRepository:
 
     @staticmethod
     def _row(row: tuple) -> DurableChildSession:
+        """Decode a child row, optionally followed by its joined provenance.
+
+        A bare 19-column ``durable_child_session`` row (as the migration
+        snapshot reads it) decodes provenance-absent.
+        """
+        stamp = tuple(row[_BASE_COLUMN_COUNT:])
+        row = tuple(row[:_BASE_COLUMN_COUNT])
         (
             child_id,
             parent_id,
@@ -269,10 +327,21 @@ class SQLiteDurableContinuationRepository:
             resume_key or "",
             idempotency_key or "",
         )
+        provenance = None
+        if sequence is not None and stamp and stamp[0] is not None:
+            (version, state_digest, stamped_cursor, journal_identity, run_id,
+             worker_id, owner_epoch, settled_position, record_digest) = stamp
+            provenance = CheckpointProvenance(
+                child_id, sequence, state_digest, stamped_cursor, journal_identity,
+                run_id, worker_id, owner_epoch, settled_position, record_digest,
+                version,
+            )
         checkpoint = (
             None
             if sequence is None
-            else ContinuableCheckpoint(child_id, sequence, json.loads(state), cursor)
+            else ContinuableCheckpoint(
+                child_id, sequence, json.loads(state), cursor, provenance,
+            )
         )
         return DurableChildSession(
             request,
@@ -292,10 +361,7 @@ class SQLiteDurableContinuationRepository:
         self, connection: sqlite3.Connection, child_id: str
     ) -> DurableChildSession | None:
         row = connection.execute(
-            "SELECT child_id,parent_id,ancestors_json,prompt,budget_json,metadata_json,status,"
-            "checkpoint_sequence,checkpoint_state_json,checkpoint_cursor,revision,usage_json,result_json,"
-            "recovery_required,cancellation_requested,cancellation_reason,resume_key,idempotency_key,"
-            "terminal_verification_json FROM durable_child_session WHERE child_id=?",
+            _SESSION_SELECT + "WHERE c.child_id=?",
             (child_id,),
         ).fetchone()
         return self._row(row) if row else None
@@ -351,6 +417,7 @@ class SQLiteDurableContinuationRepository:
                     json.dumps(session.terminal_verification, sort_keys=True, separators=(",", ":")),
                 ),
             )
+            self._insert_provenance(connection, session.checkpoint)
             if connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE name='continuation_migration_watermark'"
             ).fetchone():
@@ -381,10 +448,7 @@ class SQLiteDurableContinuationRepository:
 
     def _admission_records(self, connection) -> tuple[DurableChildSession, ...]:
         rows = connection.execute(
-            "SELECT child_id,parent_id,ancestors_json,prompt,budget_json,metadata_json,status,"
-            "checkpoint_sequence,checkpoint_state_json,checkpoint_cursor,revision,usage_json,result_json,"
-            "recovery_required,cancellation_requested,cancellation_reason,resume_key,idempotency_key,"
-            "terminal_verification_json FROM durable_child_session"
+            _SESSION_SELECT
         ).fetchall()
         return tuple(self._row(row) for row in rows)
 
@@ -402,12 +466,9 @@ class SQLiteDurableContinuationRepository:
             raise InvalidSubagentRequest("key namespace must be resume or idempotency")
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT child_id,parent_id,ancestors_json,prompt,budget_json,metadata_json,status,"
-                "checkpoint_sequence,checkpoint_state_json,checkpoint_cursor,revision,usage_json,result_json,"
-                "recovery_required,cancellation_requested,cancellation_reason,resume_key,idempotency_key "
-                ",terminal_verification_json "
-                f"FROM durable_child_session WHERE parent_id=? AND {column}=? "
-                "AND status IN (?,?,?) ORDER BY child_id LIMIT 1",
+                _SESSION_SELECT
+                + f"WHERE c.parent_id=? AND c.{column}=? "
+                "AND c.status IN (?,?,?) ORDER BY c.child_id LIMIT 1",
                 (parent_id, key, SubagentStatus.CREATED.value, SubagentStatus.QUEUED.value, SubagentStatus.RUNNING.value),
             ).fetchone()
         return self._row(row) if row else None
@@ -421,11 +482,8 @@ class SQLiteDurableContinuationRepository:
             raise InvalidSubagentRequest("key namespace must be resume or idempotency")
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT child_id,parent_id,ancestors_json,prompt,budget_json,metadata_json,status,"
-                "checkpoint_sequence,checkpoint_state_json,checkpoint_cursor,revision,usage_json,result_json,"
-                "recovery_required,cancellation_requested,cancellation_reason,resume_key,idempotency_key,"
-                "terminal_verification_json FROM durable_child_session "
-                f"WHERE parent_id=? AND {column}=? ORDER BY child_id LIMIT 2",
+                _SESSION_SELECT
+                + f"WHERE c.parent_id=? AND c.{column}=? ORDER BY c.child_id LIMIT 2",
                 (parent_id, key),
             ).fetchall()
         if len(rows) > 1:
@@ -708,6 +766,9 @@ class SQLiteDurableContinuationRepository:
             )
         except InvalidSubagentRequest:
             return None
+        # Same transaction as the compare-and-set below and the mutation
+        # receipt: a failure anywhere before COMMIT leaves neither.
+        self._insert_provenance(connection, checkpoint)
         connection.execute(
             "UPDATE durable_child_session SET checkpoint_sequence=?,checkpoint_state_json=?,"
             "checkpoint_cursor=?,revision=revision+1 WHERE child_id=? AND revision=?",
@@ -720,6 +781,33 @@ class SQLiteDurableContinuationRepository:
             ),
         )
         return self._select(connection, checkpoint.child_id)
+
+    @staticmethod
+    def _insert_provenance(connection, checkpoint: ContinuableCheckpoint | None) -> None:
+        """Persist host-stamped provenance inside the caller's transaction."""
+        if checkpoint is None or checkpoint.provenance is None:
+            return
+        subject_error = provenance_subject_error(checkpoint)
+        if subject_error is not None:
+            raise InvalidSubagentRequest(subject_error)
+        provenance = checkpoint.provenance
+        try:
+            connection.execute(
+                "INSERT INTO child_checkpoint_provenance(child_id,sequence,version,"
+                "state_digest,cursor,journal_identity,run_id,worker_id,owner_epoch,"
+                "settled_position,record_digest) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    provenance.child_id, provenance.sequence, provenance.version,
+                    provenance.state_digest, provenance.cursor,
+                    provenance.journal_identity, provenance.run_id,
+                    provenance.worker_id, provenance.owner_epoch,
+                    provenance.settled_position, provenance.record_digest,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise InvalidSubagentRequest(
+                "checkpoint provenance is already recorded for this sequence"
+            ) from exc
 
     def _apply_update(
         self,
@@ -861,10 +949,8 @@ class SQLiteDurableContinuationRepository:
     def list_active(self) -> tuple[DurableChildSession, ...]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT child_id,parent_id,ancestors_json,prompt,budget_json,metadata_json,status,"
-                "checkpoint_sequence,checkpoint_state_json,checkpoint_cursor,revision,usage_json,result_json,"
-                "recovery_required,cancellation_requested,cancellation_reason,resume_key,idempotency_key,terminal_verification_json FROM durable_child_session "
-                "WHERE status NOT IN (?,?,?,?) ORDER BY child_id",
+                _SESSION_SELECT
+                + "WHERE c.status NOT IN (?,?,?,?) ORDER BY c.child_id",
                 tuple(status.value for status in TERMINAL_SUBAGENT_STATUSES),
             ).fetchall()
         return tuple(self._row(row) for row in rows)
@@ -876,13 +962,117 @@ class SQLiteDurableContinuationRepository:
             raise InvalidSubagentRequest("limit must be positive")
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT child_id,parent_id,ancestors_json,prompt,budget_json,metadata_json,status,"
-                "checkpoint_sequence,checkpoint_state_json,checkpoint_cursor,revision,usage_json,result_json,"
-                "recovery_required,cancellation_requested,cancellation_reason,resume_key,idempotency_key,terminal_verification_json FROM durable_child_session "
-                "ORDER BY rowid LIMIT ?",
+                _SESSION_SELECT
+                + "ORDER BY c.rowid LIMIT ?",
                 (limit,),
             ).fetchall()
         return tuple(self._row(row) for row in rows)
 
 
-__all__ = ["SQLiteDurableContinuationRepository"]
+_JOURNAL_IDENTITY_DDL = (
+    "CREATE TABLE IF NOT EXISTS effect_journal_identity("
+    "id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL)"
+)
+_UNRESOLVED_EFFECT_STATES = ("intent", "uncertain")
+
+
+class SQLiteJournalProvenanceSource:
+    """Read-only journal position source over a SQLite effect journal file.
+
+    A journal needs a durable identity so that a checkpoint stamped against
+    one file cannot be validated against a different (swapped or recreated)
+    one.  The identity is a random value stored in the journal file itself in
+    an additive table the journal ignores.  Only trusted host composition
+    passes ``create_identity=True``; validation reads never mint one, so a
+    missing or recreated journal refuses instead of silently matching.
+    """
+
+    def __init__(self, journal, *, create_identity: bool = False) -> None:
+        path = getattr(journal, "database_path", None)
+        if not isinstance(path, Path):
+            raise TypeError("journal must expose its SQLite database_path")
+        for name in ("effects_since", "settled_high_water"):
+            if not callable(getattr(journal, name, None)):
+                raise TypeError("journal does not implement the effect reader contract")
+        if type(create_identity) is not bool:
+            raise TypeError("create_identity must be a boolean")
+        self._journal, self._path = journal, path
+        if create_identity:
+            self._ensure_identity()
+
+    def _ensure_identity(self) -> str:
+        try:
+            with owned_sqlite_transaction(str(self._path), timeout=5.0) as connection:
+                connection.execute("PRAGMA busy_timeout=5000")
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(_JOURNAL_IDENTITY_DDL)
+                connection.execute(
+                    "INSERT OR IGNORE INTO effect_journal_identity(id,identity) VALUES(1,?)",
+                    ("journal-" + uuid4().hex,),
+                )
+                return str(connection.execute(
+                    "SELECT identity FROM effect_journal_identity WHERE id=1"
+                ).fetchone()[0])
+        except sqlite3.Error as exc:
+            raise EffectJournalError("effect journal identity is unavailable") from exc
+
+    def position(self, run_id: str, worker_id: str) -> JournalPosition | None:
+        """Read identity, current owner epoch and high-water in one snapshot."""
+        for value in (run_id, worker_id):
+            if not isinstance(value, str) or not value.strip():
+                raise EffectJournalError("journal position requires run and worker ids")
+        if not self._path.is_file():
+            return None
+        try:
+            uri = self._path.resolve().as_uri() + "?mode=ro"
+            with owned_sqlite_transaction(uri, uri=True, timeout=5.0) as connection:
+                connection.execute("PRAGMA busy_timeout=5000")
+                connection.execute("BEGIN")
+                if connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='effect_journal_identity'"
+                ).fetchone() is None:
+                    return None
+                identity = connection.execute(
+                    "SELECT identity FROM effect_journal_identity WHERE id=1"
+                ).fetchone()
+                if identity is None:
+                    return None
+                owner = connection.execute(
+                    "SELECT owner_epoch FROM effect_owner WHERE run_id=? AND worker_id=?",
+                    (run_id, worker_id),
+                ).fetchone()
+                high_water = int(connection.execute(
+                    "SELECT COALESCE(MAX(sequence),0) FROM effect_journal WHERE run_id=?",
+                    (run_id,),
+                ).fetchone()[0])
+                first_unresolved = connection.execute(
+                    "SELECT MIN(sequence) FROM effect_journal WHERE run_id=? AND state IN (?,?)",
+                    (run_id, *_UNRESOLVED_EFFECT_STATES),
+                ).fetchone()[0]
+        except sqlite3.Error as exc:
+            raise EffectJournalError("effect journal position is unavailable") from exc
+        settled = high_water if first_unresolved is None else int(first_unresolved) - 1
+        return JournalPosition(
+            str(identity[0]), run_id, worker_id,
+            None if owner is None else int(owner[0]), settled, high_water,
+        )
+
+    def settled_high_water(self, run_id: str) -> int:
+        try:
+            return self._journal.settled_high_water(run_id)
+        except sqlite3.Error as exc:
+            raise EffectJournalError("effect journal is unavailable") from exc
+
+    def effects_since(self, run_id: str, after_sequence: int, *, limit: int = 100,
+                      worker_id: str | None = None) -> EffectJournalPage:
+        if not self._path.is_file():
+            raise EffectJournalError("effect journal file is missing")
+        try:
+            return self._journal.effects_since(
+                run_id, after_sequence, limit=limit, worker_id=worker_id,
+            )
+        except sqlite3.Error as exc:
+            raise EffectJournalError("effect journal is unavailable") from exc
+
+
+__all__ = ["SQLiteDurableContinuationRepository", "SQLiteJournalProvenanceSource"]

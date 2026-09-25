@@ -355,7 +355,7 @@
       ]
     },
     {
-      "file_count": 345,
+      "file_count": 346,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -661,6 +661,7 @@
         "sonder_runtime/application/strategy/tracing.py",
         "sonder_runtime/application/subagents/__init__.py",
         "sonder_runtime/application/subagents/admission.py",
+        "sonder_runtime/application/subagents/checkpoint_provenance.py",
         "sonder_runtime/application/subagents/child_migration.py",
         "sonder_runtime/application/subagents/child_migration_activation.py",
         "sonder_runtime/application/subagents/continuable.py",

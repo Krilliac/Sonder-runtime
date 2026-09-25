@@ -29,7 +29,12 @@ from ..ports.subagents import (
     SubagentRequest, SubagentResult, SubagentSnapshot, SubagentStatus,
     SubagentUsage, TERMINAL_SUBAGENT_STATUSES,
 )
-from .continuable import ContinuableCheckpoint
+from .continuable import (
+    ContinuableCheckpoint, checkpoint_state_digest, provenance_subject_error,
+)
+from .checkpoint_provenance import (
+    CheckpointProvenanceError, CheckpointProvenanceHook, ProvenanceSubject,
+)
 from sonder_runtime.domain.agents.roles import AgentRole, role_budget
 from sonder_runtime.application.owner_process import recorded_owner_is_dead
 
@@ -109,8 +114,16 @@ class DurableCancellation:
 class DurableContinuationService:
     """Worker supervision over a repository-backed child-session record."""
 
-    def __init__(self, repository: DurableContinuationRepository) -> None:
+    def __init__(self, repository: DurableContinuationRepository, *,
+                 checkpoint_provenance: CheckpointProvenanceHook | None = None) -> None:
+        if checkpoint_provenance is not None and not callable(checkpoint_provenance):
+            raise TypeError("checkpoint provenance hook must be callable")
         self._repository = repository
+        # Host-owned provenance source.  Runner code only supplies state and a
+        # cursor; the service stamps provenance after the journal read and
+        # before the child compare-and-set.  Without a hook every checkpoint
+        # is stored provenance-absent and cannot authorize resume-from-state.
+        self._checkpoint_provenance = checkpoint_provenance
         self._controls: dict[str, DurableCancellation] = {}
         self._threads: dict[str, Thread] = {}
         self._lock = Lock()
@@ -522,7 +535,9 @@ class DurableContinuationService:
             nonlocal expected, state
             if child_id in self._storage_failures:
                 raise self._storage_failures[child_id]
-            candidate = ContinuableCheckpoint(child_id, expected + 1, next_state, cursor)
+            candidate = self._stamp_checkpoint(
+                ContinuableCheckpoint(child_id, expected + 1, next_state, cursor)
+            )
             try:
                 saved = self._write("save_checkpoint", candidate, expected_sequence=expected)
             except ContinuationStorageFailure as error:
@@ -593,6 +608,30 @@ class DurableContinuationService:
                                     error=SubagentError("runner_failed", str(exc), True),
                                     usage=usage())
             self._write("update", child_id, status=result.status, usage=result.usage, result=result, recovery_required=True)
+
+    def _stamp_checkpoint(self, candidate: ContinuableCheckpoint) -> ContinuableCheckpoint:
+        """Attach host provenance to a runner-proposed checkpoint.
+
+        The hook reads the effect journal before the child compare-and-set, so
+        the stamped position only names receipts that already committed.  A
+        hook failure or a record for a different subject fails the save; the
+        child keeps its previous checkpoint.
+        """
+        hook = self._checkpoint_provenance
+        if hook is None:
+            return candidate
+        subject = ProvenanceSubject(
+            candidate.child_id, candidate.sequence,
+            checkpoint_state_digest(candidate.state), candidate.cursor,
+        )
+        provenance = hook(subject)
+        stamped = ContinuableCheckpoint(
+            candidate.child_id, candidate.sequence, candidate.state,
+            candidate.cursor, provenance,
+        )
+        if provenance is None or provenance_subject_error(stamped) is not None:
+            raise CheckpointProvenanceError("checkpoint provenance hook returned a foreign record")
+        return stamped
 
     def resume(self, child_id: str, context: OperationContext, runner: Runner) -> SubagentHandle:
         record = self._require(child_id)

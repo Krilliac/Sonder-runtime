@@ -382,3 +382,119 @@ but cannot continue from the saved child state. The next implementation needs:
 
 This is a coordinated lifecycle and persistence change, not an extra checkpoint
 field. Terminal child status text is not a substitute for a dispatch receipt.
+
+## Child checkpoint journal provenance on 2026-09-25 (item 2, validation half of item 3)
+
+This slice implements item 2 of the list above and the validation half of
+item 3, for the SQLite child store and the continuation codec. It does not
+change `LocalSubagentProvider`, the outer `subagent-run` effect, or add a
+production resume adapter. Item 1 (the dispatch receipt) belongs to a
+separate slice.
+
+What now exists:
+
+- `ContinuableCheckpoint.provenance` holds an optional immutable
+  `CheckpointProvenance`, defined in `application/subagents/continuable.py`.
+  It binds `(child_id, sequence, canonical state digest, cursor)` to
+  `(journal identity, run_id, worker_id, owner_epoch, settled position)`. A
+  `record_digest` covers every field. `None` means provenance-absent.
+- `DurableContinuationService(repository, checkpoint_provenance=hook)`
+  accepts an injectable host hook. The runner's `save(state, cursor)` callable
+  has no provenance parameter. The service computes the state digest, calls
+  the hook, and refuses a record whose subject or digest does not match. A
+  refusal fails the save and the child keeps its previous checkpoint. A
+  `provenance` key inside the runner's state is plain data. Without a hook,
+  behaviour is unchanged and checkpoints are stored provenance-absent.
+- `JournalProvenanceStamp` (`application/subagents/checkpoint_provenance.py`)
+  is the host hook. It reads one journal snapshot: identity, current owner
+  epoch and settled high-water. It refuses to stamp for an owner that is not
+  the current epoch, or when the journal identity is missing. It records the
+  settled prefix, not the high-water, so an open outer intent pins the
+  position below itself.
+- `SQLiteDurableContinuationRepository` stores provenance in an additive
+  `child_checkpoint_provenance` table, keyed by `(child_id, sequence)`. The
+  row is inserted in the same `BEGIN IMMEDIATE` transaction as the checkpoint
+  compare-and-set and the mutation receipt. Triggers refuse `UPDATE` and
+  `DELETE`. Every read left-joins the row for the current checkpoint, so
+  rows written before the table existed read back provenance-absent. The
+  store also refuses provenance whose subject does not match the checkpoint.
+- `SQLiteJournalProvenanceSource` gives a SQLite effect journal a durable
+  random identity. The identity lives in an additive
+  `effect_journal_identity` table in the journal file and is minted only when
+  trusted composition passes `create_identity=True`. Validation reads open the
+  file read-only and never mint an identity, so a missing or recreated
+  journal refuses.
+- `continuation_codec` round-trips provenance, and snapshots without the
+  field decode as absent. `postgres_continuation` exposes
+  `encode_child_snapshot` and `decode_child_snapshot`, and its
+  `save_checkpoint` applies the same subject check. In PostgreSQL, provenance
+  lives inside the single child snapshot, so it commits with the
+  compare-and-set by construction.
+- `validate_checkpoint_resume` is a pure decision. It reads the whole run
+  through bounded, contiguous `effects_since` pages. It returns
+  `allowed=True` with `receipts` (settled outcomes at or below the position)
+  and `later_receipts` (settled after it), each keyed by idempotency key.
+  Otherwise it returns a typed `CheckpointResumeRefusal`: no checkpoint,
+  provenance absent, record digest, subject or state digest mismatch, journal
+  missing, unavailable or swapped, run or worker mismatch, stale resumer
+  epoch, epoch ahead, superseded owner, position ahead of the journal, an
+  unresolved intent at or below the position, an unresolved intent reusing a
+  settled idempotency key, any other unresolved intent, an incomplete or
+  inconsistent page, or an exhausted page budget.
+
+Tests: `tests/test_child_checkpoint_journal_provenance.py`. They include
+real `os._exit` crash cuts in a child interpreter at three points: after the
+journal receipt commits but before the child compare-and-set, inside the
+compare-and-set transaction before `COMMIT`, and after the compare-and-set.
+Reopening both files yields either the old checkpoint with its old valid
+provenance or the new one. No reopened checkpoint names a position above the
+journal's settled high-water, and the validator accepts each one. The receipt
+after the old checkpoint appears in `later_receipts`.
+
+Verification on 2026-09-25:
+
+- The new file has 16 tests, all passing. Before the implementation existed,
+  the file failed at collection.
+- Mutation check: 11 planted defects each made at least one test fail, and
+  the sources were then restored. The defects disabled the state-digest,
+  page-end, contiguity, stale-epoch, journal-identity, unresolved-below and
+  overlap checks; stamped the high-water instead of the settled prefix;
+  dropped the service hook; dropped the SQLite provenance insert; and dropped
+  the PostgreSQL subject check.
+- The 19 existing continuation, child-storage, child-migration, worker
+  registry, subagent provider and effect-journal test files, together with the
+  new file: 205 passed, 23 skipped. The skips need a PostgreSQL binding.
+- The 19 other test files that import the child store or provider: 222
+  passed, 13 skipped (PostgreSQL or Windows only).
+- The first run found that `child_migration.py` splits the child DDL on `;`.
+  The immutability triggers are therefore installed separately, when the
+  repository opens a database.
+
+What is not qualified:
+
+- There is no production resume path. Nothing in `LocalSubagentProvider` or
+  bootstrap installs the hook or calls the validator. The outer
+  `subagent-run:{child_id}` intent still pins the settled position at 0 for
+  every production child checkpoint, so production checkpoints would be
+  refused. Item 1 (the dispatch receipt) and a bound resume entry point are
+  required before any checkpoint can authorize continuation. Whole-child
+  fencing remains the only production guarantee.
+- The validator returns receipts. It does not make a runner consume them.
+  Runner-side consumption, and crash cuts around dispatch and terminal
+  publication, remain open (items 3 and 4).
+- The journal and child store are separate files. The protocol is
+  journal-proof-first, with the validator covering the gap. It is not a
+  cross-store transaction. The owner-epoch check in the stamp and the child
+  compare-and-set are not one atomic step. A newer owner that claims between
+  them is detected at validation (`owner_superseded` or `stale_owner_epoch`),
+  not prevented at write time.
+- PostgreSQL is qualified at the codec and `_apply` level only, with no live
+  database. The SQLite-to-PostgreSQL child migration copies
+  `durable_child_session` rows only, so migrated checkpoints arrive
+  provenance-absent (fail-closed).
+- A `save_checkpoint` intent that was retained unresolved before this change
+  cannot be replayed through `mutate`, because the payload now includes the
+  `provenance` field. It stays fenced as an ambiguous mutation, and receipt
+  reconciliation is unchanged.
+- No master-spec checkbox changes. LOOP-008, AGENT-006 and SESSION-007 stay
+  unverified.
