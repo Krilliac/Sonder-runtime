@@ -317,6 +317,44 @@ def test_narrowing_mirrors_the_facade_grammar(cmd, arg, expected):
         assert parser(arg)[0] == expected[0]
 
 
+@pytest.mark.parametrize("sep", ["\xa0", "\x1c", "\x85", "\u2003", "\u3000"])
+@pytest.mark.parametrize("verb", ["status", "result", "cancel", "restore"])
+def test_unicode_separators_cannot_turn_a_fix_into_a_graded_read(verb, sep):
+    """``str.split`` breaks on separators the facade keeps inside a word, so a
+    read-looking line would have been run by the facade as ``build_fix``."""
+    arg = verb + sep + FIX
+    assert facade.parse_fix(arg)[0] == "build_fix"
+    union = command_catalog.console_tools()["/fix-build"]
+    narrowed = command_catalog.narrow_branch_tools("/fix-build", arg, union)
+    assert "build_fix" in narrowed
+
+
+def test_a_unicode_separated_fix_is_asked_as_execution(manual, console):
+    asked, _ = console
+    may_run, _refusal = repl._named_command_gate("/fix-build", "status\xa0" + FIX)
+    assert not may_run and len(asked) == 1 and asked[0].risk == "execution"
+
+
+def test_the_repl_refuses_a_tool_the_gate_did_not_grade(tmp_path, monkeypatch, capsys):
+    """Defence in depth: if narrowing and parsing ever disagree again, the
+    call the facade makes is refused rather than run under the approval."""
+    calls = []
+    monkeypatch.setattr(repl, "_typed_tools", lambda: object())
+    monkeypatch.setattr(repl, "_build_execute_tool",
+                        lambda tool, arguments, workspace="": calls.append(tool) or {"ok": True})
+    monkeypatch.setattr(command_catalog, "narrow_branch_tools",
+                        lambda cmd, arg, tools: ("build_fix_result",))
+    monkeypatch.setattr(repl, "_stdout_is_interactive", lambda: False)
+    repl._build_command("/fix-build", "game", str(tmp_path))
+    assert calls == []
+    assert "BUILD_GATE_MISMATCH" in capsys.readouterr().out
+
+
+def test_usage_text_quoting_the_line_is_made_inert():
+    usage = repl._branch_usage_error("/build", "run --\x1b]52;c;x\x07")
+    assert usage and "\x1b" not in usage and "\x07" not in usage
+
+
 def test_help_block_lists_the_commands_and_their_follow_ups():
     for text in ("/build [model|run|trace]", "/build status|result|cancel <build-job-id>",
                  "/fix-build <target>", "/fix-build status|result|cancel|restore <build-fix-id>"):

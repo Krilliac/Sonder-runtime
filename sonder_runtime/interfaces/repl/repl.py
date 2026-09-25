@@ -2037,7 +2037,8 @@ def _branch_usage_error(cmd, arg):
         if not text:
             return "usage: %s <path>" % command
     elif command in ("/build", "/fix-build"):
-        return _build_usage_error(command, raw)
+        # The usage text quotes words of the line; keep them inert.
+        return S.safe_text(_build_usage_error(command, raw))
     return ""
 
 
@@ -2684,13 +2685,33 @@ def _build_execute_tool(tool, arguments, workspace=""):
     return body
 
 
-def _build_facade(workspace=""):
+def _build_gated_tools(cmd, arg):
+    """The build tools the console gate graded this exact line for.
+
+    ``_named_command_gate`` answered for the member ``narrow_branch_tools``
+    names; the call that follows must be one of those, or the approval (or the
+    "read, no prompt" pass) was for a different tool than the one that runs.
+    """
+    try:
+        tools = command_catalog.console_tools().get(cmd, ())
+    except command_catalog.CatalogUnavailable:
+        return ()
+    return tuple(command_catalog.narrow_branch_tools(cmd, arg, tools))
+
+
+def _build_facade(workspace="", cmd="", arg=""):
     """The REPL build facade over the typed gateway, or one reporting it absent."""
     if _typed_tools() is None:
         return _BuildReplFacade(None)
-    return _BuildReplFacade(
-        lambda tool, arguments: _build_execute_tool(tool, arguments, workspace),
-    )
+    graded = _build_gated_tools(cmd, arg)
+
+    def execute(tool, arguments):
+        if tool not in graded:
+            return {"ok": False, "error_code": "BUILD_GATE_MISMATCH",
+                    "message": "the console gate did not grade this line as %s" % tool}
+        return _build_execute_tool(tool, arguments, workspace)
+
+    return _BuildReplFacade(execute)
 
 
 def _build_outcome_lines(outcome, command, width, elapsed_ms=0):
@@ -2747,7 +2768,7 @@ def _build_command(cmd, arg, workspace=""):
     text, made inert with ``safe_text``.
     """
     started = time.monotonic()
-    outcome = _build_facade(workspace).dispatch(cmd, arg)
+    outcome = _build_facade(workspace, cmd, arg).dispatch(cmd, arg)
     if not _stdout_is_interactive():
         _emit(outcome.text)
         return

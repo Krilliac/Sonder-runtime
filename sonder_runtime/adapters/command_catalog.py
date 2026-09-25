@@ -1171,13 +1171,33 @@ def narrow_branch_tools(cmd, argument, tools):
         narrowed = ("sonder_forget_fact",) if action == "forget" else ("sonder_remember_fact",)
         return narrowed if all(name in union for name in narrowed) else union
     if command in _NATIVE_TYPED_BRANCH_WORK:
-        narrowed = _build_branch_member(command, str(argument or "").split())
+        narrowed = _build_branch_member(command, _build_words(argument))
         return narrowed if narrowed and all(name in union for name in narrowed) else union
     return union
 
 
 _BUILD_JOB_ID = re.compile(r"^build-job-[0-9a-f]{16,32}$")
 _BUILD_FIX_ID = re.compile(r"^build-fix-[0-9a-f]{16,32}$")
+
+
+def _build_words(argument):
+    """Split a build line exactly as the facade's ``split_words`` does, or None.
+
+    The narrowing must see the same tokens the facade will parse. ``str.split``
+    also breaks on NO-BREAK SPACE, U+001C and other Unicode separators that the
+    facade's shell-like splitter keeps inside a word, so ``/fix-build
+    status<U+00A0>build-fix-<id>`` was graded as a read of a fix while the
+    facade ran it as ``build_fix`` on a target of that name. A line the
+    splitter rejects answers None and keeps the strictest member.
+    """
+    lexer = shlex.shlex(str(argument or ""), posix=True)
+    lexer.whitespace_split = True
+    lexer.escape = ""
+    lexer.commenters = ""
+    try:
+        return list(lexer)
+    except ValueError:
+        return None
 
 
 def _build_branch_member(command, words):
@@ -1193,6 +1213,8 @@ def _build_branch_member(command, words):
     spelled ``status`` -- so it reaches ``build_fix``. A form this does not
     recognise answers () and keeps the union.
     """
+    if words is None:
+        return ()
     action = words[0].lower() if words else ""
     if command == "/build":
         if action in ("", "model"):
