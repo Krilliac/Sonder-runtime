@@ -2171,6 +2171,43 @@ def _history_from_messages(messages):
 SERVER_SIDE_HISTORY_TURNS = 8
 
 
+def _durable_session_history(storage_session, limit):
+    """Return the last ``limit`` turns of a durable session transcript.
+
+    Uses the injected session facade's verified, redacted replay projection so
+    history is never rebuilt from a chain that fails its integrity check.  Any
+    unavailability yields ``[]`` and the caller falls back to legacy turns.
+    """
+    facade = _SESSION_FACADE
+    if facade is None:
+        return []
+    try:
+        result = facade.replay(storage_session)
+    except Exception:
+        _serve_logger.warning("durable session history unavailable", exc_info=True)
+        return []
+    if getattr(result, "status_code", None) != 200:
+        return []
+    messages = []
+    for item in (result.body or {}).get("transcript") or ():
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        content = item.get("content")
+        if role not in ("user", "assistant") or not isinstance(content, str):
+            continue
+        if role == "assistant":
+            content = _strip_footer(content.split("=== ACTIVITY")[0])
+        content = content.strip()
+        if content:
+            messages.append({"role": role, "content": content})
+    user_positions = [index for index, message in enumerate(messages)
+                      if message["role"] == "user"]
+    if len(user_positions) > limit:
+        messages = messages[user_positions[-limit]:]
+    return messages
+
+
 def _server_side_history(storage_session, limit=SERVER_SIDE_HISTORY_TURNS):
     """Rebuild prior turns from the stored session for thin clients.
 
@@ -2182,6 +2219,15 @@ def _server_side_history(storage_session, limit=SERVER_SIDE_HISTORY_TURNS):
     """
     if not (storage_session or "").strip():
         return []
+    limit = max(1, int(limit))
+    # The served chat route captures every named model turn in the durable
+    # session store (``_capture_live_session_turn``), including explicit-model
+    # turns that are non-learning and therefore write no legacy interaction
+    # row.  Prefer that transcript; the legacy table remains the fallback for
+    # sessions that predate durable capture.
+    durable = _durable_session_history(storage_session, limit)
+    if durable:
+        return durable
     try:
         import sonder_runtime.adapters.memory_store as memory_store
 
@@ -2194,7 +2240,7 @@ def _server_side_history(storage_session, limit=SERVER_SIDE_HISTORY_TURNS):
     except Exception:
         return []
     history = []
-    for turn in turns[-max(1, int(limit)):]:
+    for turn in turns[-limit:]:
         task = (turn.get("task") or "").strip()
         response = (turn.get("response") or "").split("=== ACTIVITY")[0]
         response = _strip_footer(response).strip()
