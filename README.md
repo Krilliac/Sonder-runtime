@@ -249,7 +249,7 @@ python -m sonder_runtime repl
 ```
 
 <p align="center">
-  <img src="docs/assets/repl/terminal-repl.png" alt="Sonder terminal REPL with a framed dark-blue composer, live context and token statistics, and activity summary" width="1000">
+  <img src="docs/assets/repl/terminal-repl.png" alt="Sonder terminal REPL: a two-line startup banner, a status line with tier, model, mode and context, an answer with its tool rows, and a one-line footer with timing and token counts" width="880">
 </p>
 
 The terminal REPL keeps the current model, active lanes, context budget, token
