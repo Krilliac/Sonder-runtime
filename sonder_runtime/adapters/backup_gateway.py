@@ -7,6 +7,25 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _operator_fault(exc: BaseException) -> bool:
+    """Return whether ``exc`` is an expected, self-describing backup fault.
+
+    Missing/occupied paths, failed verification, and a held maintenance lock
+    are operator conditions whose message is the whole story.  Logging them
+    with ``exc_info`` made the CLI (which has no log handler, so Python's
+    last-resort handler prints to stderr) show a raw traceback ahead of its
+    one-line error.  Unexpected exceptions keep their traceback.
+    """
+    import sonder_runtime.adapters.backup as backup_impl
+    from sonder_runtime.adapters.persistence.operations_store import (
+        MaintenanceLockHeld,
+    )
+
+    return isinstance(
+        exc, (OSError, backup_impl.BackupError, MaintenanceLockHeld)
+    )
+
+
 class LegacyBackupGateway:
     @staticmethod
     def _implementation():
@@ -25,8 +44,13 @@ class LegacyBackupGateway:
         logger.info(f"backup started for target={target!r}")
         try:
             result = self._implementation().create_backup(target)
-        except Exception:
-            logger.error(f"backup create failed for target={target!r}", exc_info=True)
+        except Exception as exc:
+            expected = _operator_fault(exc)
+            logger.error(
+                f"backup create failed for target={target!r}"
+                + (f": {exc}" if expected else ""),
+                exc_info=not expected,
+            )
             raise
         logger.info(f"backup completed for target={target!r}")
         return result
@@ -82,12 +106,21 @@ class LegacyBackupGateway:
         logger.info(f"backup full restore started dir={backup_dir!r}, destination={destination!r}")
         try:
             result = self._implementation().restore_to_empty(backup_dir, destination)
-        except Exception:
-            logger.critical(
-                f"backup full restore failed for dir={backup_dir!r} destination={destination!r} — "
-                f"disaster recovery operation did not complete, data may be unrecoverable",
-                exc_info=True,
-            )
+        except Exception as exc:
+            expected = _operator_fault(exc)
+            if expected:
+                # A refused restore (missing/unverifiable backup, occupied
+                # destination) wrote nothing; it is not a data-loss event.
+                logger.error(
+                    f"backup full restore refused for dir={backup_dir!r} "
+                    f"destination={destination!r}: {exc}"
+                )
+            else:
+                logger.critical(
+                    f"backup full restore failed for dir={backup_dir!r} destination={destination!r} — "
+                    f"disaster recovery operation did not complete, data may be unrecoverable",
+                    exc_info=True,
+                )
             raise
         logger.info(f"backup full restore completed dir={backup_dir!r}, destination={destination!r}")
         return result

@@ -620,10 +620,11 @@ def _backup_failure(verb: str, exc: BaseException) -> int:
 
 def cmd_backup(args) -> int:
     from .adapters.backup import BackupError
+    from .adapters.persistence.operations_store import MaintenanceLockHeld
 
     try:
         return _cmd_backup(args)
-    except (BackupError, OSError) as exc:
+    except (BackupError, MaintenanceLockHeld, OSError) as exc:
         return _backup_failure("backup", exc)
 
 
@@ -684,10 +685,11 @@ def _cmd_backup(args) -> int:
 
 def cmd_restore(args) -> int:
     from .adapters.backup import BackupError
+    from .adapters.persistence.operations_store import MaintenanceLockHeld
 
     try:
         return _cmd_restore(args)
-    except (BackupError, OSError) as exc:
+    except (BackupError, MaintenanceLockHeld, OSError) as exc:
         return _backup_failure("restore", exc)
 
 

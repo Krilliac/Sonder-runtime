@@ -102,6 +102,63 @@ def test_backup_prune_keep_below_one_is_a_clean_error(home, capsys, keep):
     assert "Traceback" not in err and "at least one" in err
 
 
+def _gateway_records(caplog):
+    return [
+        record for record in caplog.records
+        if record.name == "sonder_runtime.adapters.backup_gateway"
+        and record.levelno >= 40
+    ]
+
+
+def test_expected_backup_faults_are_logged_without_a_traceback(
+    home, tmp_path, capsys, caplog
+):
+    # The CLI has no logging handler, so Python's last-resort handler printed
+    # every exc_info record as a raw traceback ahead of the clean message.
+    target = tmp_path / "a-file"
+    target.write_text("x", encoding="utf-8")
+    caplog.set_level("ERROR")
+    assert main(["backup", "create", "--target", str(target)]) == 1
+    assert main(["restore", "apply", str(tmp_path / "missing"),
+                 str(tmp_path / "dest"), "--confirm", "restore"]) == 1
+    records = _gateway_records(caplog)
+    assert len(records) == 2
+    assert not any(record.exc_info for record in records)
+    assert "backup create failed" in records[0].getMessage()
+    assert "restore refused" in records[1].getMessage()
+
+
+def test_unexpected_backup_faults_keep_their_traceback(
+    home, tmp_path, monkeypatch, caplog
+):
+    import sonder_runtime.adapters.backup as backup_impl
+
+    def boom(_target):
+        raise ZeroDivisionError("defect")
+
+    monkeypatch.setattr(backup_impl, "create_backup", boom)
+    caplog.set_level("ERROR")
+    with pytest.raises(ZeroDivisionError):
+        main(["backup", "create"])
+    records = _gateway_records(caplog)
+    assert records and records[0].exc_info is not None
+
+
+def test_concurrent_backup_lock_is_a_clean_error(home, monkeypatch, capsys):
+    import sonder_runtime.adapters.backup as backup_impl
+    from sonder_runtime.adapters.persistence.operations_store import (
+        MaintenanceLockHeld,
+    )
+
+    def held(_target):
+        raise MaintenanceLockHeld("backup", "backup-1", "backup in progress")
+
+    monkeypatch.setattr(backup_impl, "create_backup", held)
+    assert main(["backup", "create"]) == 1
+    err = capsys.readouterr().err
+    assert "backup failed" in err and "backup in progress" in err
+
+
 def test_smoke_json_emits_a_document(home, capsys):
     capsys.readouterr()
     rc = main(["smoke", "--skip-ollama", "--json",
