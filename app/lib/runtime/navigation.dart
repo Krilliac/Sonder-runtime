@@ -63,19 +63,21 @@ class _SystemCompactNav extends StatelessWidget {
       child: SizedBox(
         key: const Key('system-section-nav'),
         height: 52,
-        child: ListView.separated(
+        // A plain scrolling row, not a lazy list: every destination exists
+        // for screen readers and "Jump to section" even when off-screen.
+        child: SingleChildScrollView(
           scrollDirection: Axis.horizontal,
-          itemCount: destinations.length,
-          separatorBuilder: (_, __) => const SizedBox(width: 8),
-          itemBuilder: (context, index) {
-            final destination = destinations[index];
-            return ActionChip(
-              avatar: Icon(destination.icon, size: 17),
-              label: Text(destination.label),
-              tooltip: 'Jump to ${destination.label}',
-              onPressed: () => onSelect(destination),
-            );
-          },
+          child: Row(children: [
+            for (final destination in destinations) ...[
+              ActionChip(
+                avatar: Icon(destination.icon, size: 17),
+                label: Text(destination.label),
+                tooltip: 'Jump to ${destination.label}',
+                onPressed: () => onSelect(destination),
+              ),
+              const SizedBox(width: 8),
+            ],
+          ]),
         ),
       ),
     );
