@@ -1,3 +1,3 @@
 /hlep
-? unknown  command /hlep | did you mean /help? | /help lists all
+? unknown  /hlep | did you mean /help? | /help lists all
 >

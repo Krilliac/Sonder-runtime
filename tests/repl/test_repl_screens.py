@@ -160,7 +160,7 @@ def test_live_line_carries_phase_time_and_cancel_hint_and_no_json(variant):
     if name in ("dumb80", "plain80"):
         assert "working" in progress
         return
-    assert re.search(r"working . routing . \d+s", progress), progress
+    assert re.search(r"working . (?:routing|thinking) . \d+s", progress), progress
     if name != "c50":
         assert "Ctrl-C cancels" in progress
 
@@ -247,7 +247,7 @@ def test_arrow_and_shift_tab_never_start_a_turn(session):
     session.send(b"/nosuc\x1b[DX\r")
     session.wait_prompt(mark)
     # Commands are case-insensitive, so the edited "/nosuXc" is echoed lowered.
-    assert "unknown  command /nosuxc" in "\n".join(session.screen(mark))
+    assert "unknown  /nosuxc" in "\n".join(session.screen(mark))
 
 
 def test_ctrl_c_once_clears_twice_exits(session):

@@ -289,6 +289,13 @@ def test_live_line_shows_phase_elapsed_model_and_cancel_hint(monkeypatch):
     line = indicator._render()
     assert line == "◈ working · routing · 3s · sonder:latest · Ctrl-C cancels"
 
+    # Between response_start and the first returned model call the tracker
+    # has no event, so a long first call reads "thinking", never "routing".
+    monkeypatch.setattr(indicator, "_span", lambda: {
+        "events": [{"kind": "response_start"}], "model_calls": 0, "tokens_in": 0,
+    })
+    assert " · thinking · " in indicator._render()
+
     monkeypatch.setattr(indicator, "_span", lambda: {
         "events": [{"kind": "model_call"}], "model_calls": 1, "tokens_in": 2600,
     })
@@ -687,6 +694,11 @@ def test_status_line_never_invents_idle_when_status_is_unknown(monkeypatch):
     title = sonder_repl._status_text("code", width=80, permission={"mode": "manual"})
 
     assert "0 agents" not in title and "0 lanes" not in title
+    monkeypatch.setattr(sonder_repl, "_endpoint", lambda: ("http://127.0.0.1:1", False))
+    monkeypatch.setattr(sonder_repl, "_pool_words", lambda: "Ollama: unknown")
+    long_form = sonder_repl._status_long(
+        sonder_repl._status_state("code", permission={"mode": "manual"}), 80)
+    assert "0 running" not in long_form and "unknown" in long_form
 
 
 def test_status_long_form_names_every_field_and_the_pool_in_words(monkeypatch):

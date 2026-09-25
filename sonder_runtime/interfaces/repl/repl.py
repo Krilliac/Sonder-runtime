@@ -1114,6 +1114,13 @@ def _emit(text):
         if rendered is not None:
             print(rendered)
             return
+    emit_event = getattr(sys.stdout, "emit_event", None)
+    if (callable(emit_event) and not hasattr(sys.stdout, "raw_line")
+            and _is_repl_error(value)):
+        # ``repl --json``: a command error is an ``error`` event (P2-6), not
+        # ordinary output a consumer would have to pattern-match.
+        emit_event("error", value)
+        return
     print(value)
 
 
@@ -1148,8 +1155,12 @@ def _as_notice(value, title=None):
             continue
         first, _, rest = text.partition("\n")
         if kind == "unknown":
-            return S.notice(kind, first[len("unknown "):], rest.strip() or None,
-                            width=_cols())
+            # "? unknown  /hlep · did you mean /help? · ..." -- the kind word
+            # already says "unknown", so the title starts at the name.
+            title = first[len("unknown "):]
+            if title.startswith("command "):
+                title = title[len("command "):]
+            return S.notice(kind, title, rest.strip() or None, width=_cols())
         body = first[len(prefix):].strip()
         head = title if title is not None else _CURRENT_LINE[0]
         if not head:
@@ -1474,7 +1485,7 @@ def _status_state(tier=None, *, context=None, model_override=None,
         lambda: server.execution_status_data(),
     ).counts(status)
     context = context if isinstance(context, dict) else {}
-    return S.StatusState(
+    state = S.StatusState(
         mode=mode, tier=resolved_tier, model=str(model or ""),
         ctx_used=context.get("used"), ctx_limit=context.get("limit"),
         agents=agents if isinstance(agents, int) else 0,
@@ -1482,6 +1493,10 @@ def _status_state(tier=None, *, context=None, model_override=None,
         project=str(project or "default"), elevated=elevated,
         elevated_reason=reason,
     )
+    # The status line omits zero counts; /status must not print an unknown
+    # execution status as "0 running" (the old "[lanes ? | agents ?]").
+    state.execution_known = isinstance(agents, int) and isinstance(lanes, int)
+    return state
 
 
 def _status_text(tier=None, *, width=None, **kwargs):
@@ -1498,7 +1513,8 @@ def _status_long(state, width):
         ("context", ("%s of %s tokens" % (_compact_count(state.ctx_used),
                                             _compact_count(state.ctx_limit)))
          if state.ctx_limit else "unknown"),
-        ("agents", "%d running, %d lanes" % (state.agents, state.lanes)),
+        ("agents", ("%d running, %d lanes" % (state.agents, state.lanes))
+         if getattr(state, "execution_known", True) else "unknown (execution status unavailable)"),
         ("project", state.project),
     ]
     endpoint, live = _endpoint()
@@ -1845,6 +1861,12 @@ class _WorkingIndicator:
             phase = str(last.get("tool") or last.get("name") or "tool")
         elif calls or kind == "model_call":
             phase = "model call %d" % (calls + 1)
+        elif span:
+            # The tracker records a model call only when it returns, so from
+            # ``response_start`` to the first return the turn is routing and
+            # then waiting on the model with no event between them.  Name
+            # that honestly rather than showing "routing" for minutes.
+            phase = "thinking"
         else:
             phase = "routing"
         key = (len(events), calls, tokens)
@@ -2744,6 +2766,10 @@ def _model_listing(tier, active_model, tiers, installed, width):
     reasons = {}
     for name in sorted(set(server.TIERS).difference(tiers)):
         reason = _unselectable_tier_reason(name) or "unavailable"
+        if name in getattr(server, "CLOUD_TIERS", ()) and "SONDER_ALLOW_CLOUD" in reason:
+            # The listing is a footnote, not the refusal: the full sentence
+            # is what ``/model cloud-code`` (and the turn) still answers.
+            reason = "cloud off %s SONDER_ALLOW_CLOUD=1 to opt in (prompts then leave this machine)" % S.g("sep")
         reasons.setdefault(reason, []).append(name)
     configured = {str(name).casefold() for name in server.TIERS}
     for name, env_name in OPTIONAL_LOCAL_TIERS:
@@ -2924,9 +2950,13 @@ def _refusal_notice(line, refusal):
     if text.startswith("skipped "):
         diverted = _DIVERTED_ANSWER
         detail = None
-        if diverted:
+        if diverted and _history_safe(diverted):
             detail = "your %s was not run; press %s to recall it" % (
                 diverted, S.g("up"))
+        elif diverted:
+            # A credential line never enters history, so there is nothing to
+            # recall, and the notice names only the command word.
+            detail = "your %s was not run" % diverted.split(None, 1)[0]
         return S.notice("skipped", command, detail, width=_cols())
     if text.startswith("refused "):
         _cmd, _sep, reason = text[len("refused "):].partition(": ")
@@ -3594,7 +3624,9 @@ def main(*, machine_output=False):
                 )) if attended else None,
             )
         except EOFError:
-            if not machine_output:
+            # Only a terminal needs the newline after the prompt; on a pipe
+            # (plain or NDJSON) it would be a stray trailing empty line.
+            if attended:
                 print()
             break
         except KeyboardInterrupt:

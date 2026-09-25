@@ -69,15 +69,20 @@ def test_ndjson_makes_every_stdout_line_json(fake, tmp_path):
     assert "=== ACTIVITY" not in turns[0]["answer"]
     outputs = [row for row in rows if row.get("schema") == "sonder.repl-output.v1"]
     assert any("unknown command /nosuch" in row["text"] for row in outputs)
+    # EOF on a pipe adds no stray empty event after the last result.
+    assert not (rows[-1].get("event") == "output" and rows[-1].get("text") == "")
 
 
 @pytest.mark.integration
 def test_json_mode_emits_error_events_and_no_trailing_empty_output(fake, tmp_path):
-    result = _run(fake, tmp_path, "/nosuch\nexplode now\n", "--json")
+    result = _run(fake, tmp_path, "/read /etc/shadow\n/nosuch\nexplode now\n", "--json")
     assert result.returncode == 0, result.stderr
     rows = [json.loads(line) for line in result.stdout.decode("utf-8").splitlines()]
     assert rows, result.stderr
-    assert any(row["event"] == "error" for row in rows)
+    errors = [row["text"] for row in rows if row["event"] == "error"]
+    # Both the refused command and the failed turn are error events.
+    assert any("outside allowed roots" in text for text in errors), rows
+    assert any("fake model crashed" in text for text in errors), rows
     assert not (rows[-1]["event"] == "output" and rows[-1]["text"] == "")
 
 
@@ -272,3 +277,14 @@ def test_logs_command_tails_and_sanitizes(monkeypatch, tmp_path):
     assert sonder_repl._logs_command("abc").startswith("usage: /logs")
     monkeypatch.setattr(sonder_repl.repl_notices, "repl_log_path", lambda: None)
     assert "not being saved" in sonder_repl._logs_command("")
+
+
+def test_skip_notice_never_offers_to_recall_a_credential_answer(monkeypatch, repl_runtime):
+    monkeypatch.setattr(sonder_repl, "_stdout_is_interactive", lambda: True)
+    monkeypatch.setattr(sonder_repl, "_DIVERTED_ANSWER", "/env")
+    kept = S.strip_ansi(sonder_repl._refusal_notice("/runtime status", "skipped /runtime"))
+    assert "your /env was not run; press" in kept
+    monkeypatch.setattr(sonder_repl, "_DIVERTED_ANSWER", "/login hunter2")
+    secret = S.strip_ansi(sonder_repl._refusal_notice("/runtime status", "skipped /runtime"))
+    assert "hunter2" not in secret and "recall" not in secret
+    assert "your /login was not run" in secret

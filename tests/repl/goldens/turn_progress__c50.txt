@@ -1,2 +1,2 @@
 hold on, what is RAII?
-◈ working · routing · <t> · Ctrl-C cancels
+◈ working · thinking · <t> · Ctrl-C cancels

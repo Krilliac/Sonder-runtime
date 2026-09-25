@@ -5,9 +5,8 @@ tiers
   fast           sonder:latest
   general        sonder:latest
   unavailable
-    cloud-code, cloud-general  hosted/cloud tiers are disabled. Set
-                               SONDER_ALLOW_CLOUD=1 to opt in; prompts sent to
-                               cloud tiers leave this machine.
+    cloud-code, cloud-general  cloud off · SONDER_ALLOW_CLOUD=1 to opt in
+                               (prompts then leave this machine)
     reasoning                  no model set · SONDER_REASONING
     vision                     no model set · SONDER_VISION
 installed (ollama)
