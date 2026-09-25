@@ -26,7 +26,7 @@ CLASSIFIED_NAMES = [
     "memory.db",             # all stored memories
     "memory.db-wal",         # sqlite sidecar
     "combined_personal.jsonl",  # personal chat/training corpus
-    ".env",                  # dotenv secret
+    # ".env" is a credential store now: see test_file_read_credential_stores.
     "secrets.json",          # secret bundle
     "credentials.json",      # secret bundle
     "server.pem",            # *.pem private material
@@ -76,9 +76,12 @@ def test_read_file_allows_ordinary_workspace_file(workspace):
 
 
 def test_developer_token_can_read_a_secret(workspace):
-    (workspace / ".env").write_text("API_KEY=abc", encoding="utf-8")
-    out = file_ops.read_file(".env", developer_authorized=True)
-    assert out["text"] == "API_KEY=abc"
+    # A developer token still opens classified secrets such as secrets.json;
+    # credential stores (.env, keys, cloud configs) are covered separately in
+    # tests/test_file_read_credential_stores.py and are not opened by it.
+    (workspace / "secrets.json").write_text('{"k": "v"}', encoding="utf-8")
+    out = file_ops.read_file("secrets.json", developer_authorized=True)
+    assert out["text"] == '{"k": "v"}'
 
 
 def test_bypass_can_read_a_secret(workspace):
@@ -146,7 +149,7 @@ def test_server_file_read_refuses_secret_without_token(workspace):
     (workspace / ".env").write_text("API_KEY=abc", encoding="utf-8")
     out = server.file_read(".env")
     assert out.startswith("ERROR:")
-    assert "protected Sonder secret/control-plane" in out
+    assert "credential store" in out
     assert "API_KEY" not in out
 
 

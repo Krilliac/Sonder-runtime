@@ -76,6 +76,17 @@ of the model — an uncensored or "abliterated" model changes what it will
 - **Guarded file tools** operate only inside configured roots
   (`SONDER_FILE_ROOTS`); path canonicalization blocks traversal and
   symlink escape. Deletes are dry-run unless an explicit confirm matches.
+- **Credential stores are denied by default, even inside a root.** The direct
+  read tools (`file_read`, `file_read_range`, `data_inspect`, `image_inspect`,
+  and the source of `file_copy`/`file_move`) refuse `.ssh`, `.aws`, `.azure`,
+  `.gnupg`, `.kube`, `.docker/config.json`, `.git/config`, `.netrc`,
+  `.git-credentials`, `.pgpass`, OpenSSH key files (`id_rsa`, `id_ed25519`,
+  ...) and `.env*` -- regardless of a developer token or `SONDER_FILE_BYPASS`.
+  The only way to read one is a root that names it: add the store directory
+  itself (`~/.ssh`) or the exact file (`/proj/.env`) to `file_roots.local` or
+  `SONDER_FILE_ROOTS` (a one-shot `/approve` of a call whose `extra_roots`
+  names it works once). Classified secrets inside a named store (key files,
+  `.env`) still need a developer token as before.
 - **Permission policy** (`domain/execution/policy.py`, `permission_rules.py`)
   is first-match glob: `allow` / `ask` / `deny`, defaulting to `ask`, with
   `file_delete` denied and read-only status tools allowed by default.

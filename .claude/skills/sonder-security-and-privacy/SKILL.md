@@ -106,8 +106,17 @@ tier-3 in change control). Sources: `SECURITY.md` mitigation list,
 - Secrets never read/written: `SECRET_FILES` (`.credentials.json`, `.netrc`,
   `.token`, `auth.json`, `credentials.json`, `secrets.json`, `token.json`) and
   `SECRET_SUFFIXES` (`.key`, `.p12`, `.pem`, `.pfx`).
-- Sensitive directories never traversed for reads:
-  `SENSITIVE_READ_DIRECTORIES = {.git, .ssh, .aws, .azure, .kube}`.
+- Sensitive directories never traversed by the repository/transfer/batch/
+  inspection lanes: `SENSITIVE_READ_DIRECTORIES = {.git, .ssh, .aws, .azure, .kube}`.
+  OpenSSH key names (`id_rsa`, `id_ed25519`, ...) are also `SECRET_FILES`.
+- Credential stores denied by default to the direct read tools (`file_read`,
+  `file_read_range`, `data_inspect`, `image_inspect`, copy/move sources) even
+  inside a root and even with a developer token or bypass:
+  `CREDENTIAL_READ_DIRECTORIES` (`.ssh .aws .azure .gnupg .kube`),
+  `CREDENTIAL_READ_FILES` (`.netrc`, `.git-credentials`, `.pgpass`, key files),
+  `CREDENTIAL_READ_PAIRS` (`.docker/config.json`, `.git/config`) and `.env*`.
+  Only an operator-configured root that names the store (the directory itself
+  or the exact file) allows it (`credential_read_component`).
 - Control-plane config protected: `CONTROL_CONFIG_FILES` includes
   `permissions.json`, `file_roots.local`, `workflows.json`.
 - Personal corpus protected (`_is_personal_corpus`): `combined_personal.jsonl`

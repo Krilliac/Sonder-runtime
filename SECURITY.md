@@ -53,6 +53,11 @@ Mitigations that are already in place and worth knowing about:
   a developer-authorization check.
 - File operations are constrained to configured roots; escaping them takes an
   explicit `extra_roots` or a bypass token.
+- Credential stores (`.ssh`, `.aws`, `.azure`, `.gnupg`, `.kube`,
+  `.docker/config.json`, `.git/config`, `.netrc`, `.git-credentials`,
+  `.pgpass`, OpenSSH key files, `.env*`) are refused by the direct read tools
+  even inside an allowed root and even with a developer token or bypass,
+  unless an operator-configured file root names the store itself.
 - Structured `data_query` reads are bounded and side-effect-free: SQLite uses
   a read-only URI and deny-by-default authorizer, while JSON/JSONL/CSV/TSV use
   exact structured filters and projections without expression evaluation.

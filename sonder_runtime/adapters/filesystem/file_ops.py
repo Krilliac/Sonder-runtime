@@ -50,9 +50,26 @@ CONTROL_CONFIG_FILES = {
 SECRET_FILES = {
     ".credentials.json", ".netrc", ".token", "auth.json",
     "credentials.json", "secrets.json", "token.json",
+    # OpenSSH private keys carry no secret suffix.
+    "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_rsa",
 }
 SECRET_SUFFIXES = {".key", ".p12", ".pem", ".pfx"}
 SENSITIVE_READ_DIRECTORIES = {".git", ".ssh", ".aws", ".azure", ".kube"}
+# Credential stores the direct read tools (file_read, file_read_range,
+# data_inspect, image_inspect, file_copy/move sources) deny by default even
+# inside an allowed root, and even with a developer token or bypass: a key
+# pair or cloud credential is never ordinary workspace content. The one way
+# to read one is an operator-configured root that *names* it -- the store's
+# directory itself (``~/.ssh``), a path inside it, or the exact file
+# (``/proj/.env``) listed in ``file_roots.local`` or ``SONDER_FILE_ROOTS``.
+# See ``credential_read_component``.
+CREDENTIAL_READ_DIRECTORIES = frozenset({".ssh", ".aws", ".azure", ".gnupg", ".kube"})
+CREDENTIAL_READ_FILES = frozenset({
+    ".netrc", "_netrc", ".git-credentials", ".pgpass",
+    "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_rsa",
+})
+# (directory, file) pairs whose file is a credential store only in context.
+CREDENTIAL_READ_PAIRS = frozenset({(".docker", "config.json"), (".git", "config")})
 # Sonder's own first-party package below the install root. The mutation guard
 # used to recognize Sonder modules only by ``parent == root``, which was true
 # when every module sat directly in the install directory. The SPEC-3 Phase 5
@@ -459,13 +476,75 @@ def _is_protected_read_path(path: Path) -> bool:
     return _is_protected_mutation_path(path) or _is_personal_corpus(path)
 
 
+def _is_env_file(name: str) -> bool:
+    return name == ".env" or name == ".envrc" or name.startswith(".env.")
+
+
+def _credential_part(parts) -> str:
+    """The credential-store component in *parts*, or "" when there is none."""
+    lowered = [str(part).lower() for part in parts]
+    last = len(lowered) - 1
+    for index, part in enumerate(lowered):
+        if part in CREDENTIAL_READ_DIRECTORIES:
+            return part
+        if index < last and (part, lowered[index + 1]) in CREDENTIAL_READ_PAIRS:
+            return "%s/%s" % (part, lowered[index + 1])
+        if index == last and (part in CREDENTIAL_READ_FILES or _is_env_file(part)):
+            return part
+    return ""
+
+
+def credential_read_component(path: Path) -> str:
+    """Why reading *path* would expose a credential store ("" if it would not).
+
+    The classification is made relative to every operator-configured root
+    that contains the path: when one of those roots already lies inside the
+    store (or is the file itself) the operator has named it explicitly and the
+    read is allowed. A path outside every root (a bypass read) is judged on
+    its full absolute form, so bypass never unlocks a credential store.
+    """
+    resolved = _resolve_best_effort(path)
+    containing = [
+        root for root in (_resolve_best_effort(item) for item in allowed_roots())
+        if resolved == root or _is_inside(resolved, root)
+    ]
+    if not containing:
+        return _credential_part(resolved.parts[1:])
+    found = ""
+    for root in containing:
+        if any(part.lower() in CREDENTIAL_READ_DIRECTORIES for part in root.parts):
+            # The root is the store (``~/.ssh``) or lies inside it: named.
+            return ""
+        relative = () if resolved == root else resolved.relative_to(root).parts
+        part = _credential_part(relative)
+        if not part:
+            return ""
+        found = found or part
+    return found
+
+
+def _require_credential_read_access(path: Path) -> None:
+    component = credential_read_component(path)
+    if component:
+        # The path goes before the phrase so the output redactor never reads
+        # "token: <path>" as a credential assignment.
+        raise PermissionError(
+            "refusing to read %s: %s is a credential store, denied by default. "
+            "To allow it, add that exact file or directory as a file root "
+            "(file_roots.local or SONDER_FILE_ROOTS)" % (path, component)
+        )
+
+
 def _require_read_access(path: Path, authorized: bool) -> None:
     """Refuse a non-authorized read of a secret/control-plane path.
 
     ``authorized`` is the developer-token OR bypass signal (mirroring the
     escape hatch the write guard honors for a developer token). Fails closed
     with a clear error; an unclassified workspace file is never affected.
+    Credential stores (``CREDENTIAL_READ_*``) are refused first and are not
+    opened by that escape hatch; only a root that names them allows them.
     """
+    _require_credential_read_access(path)
     if _is_protected_read_path(path) and not authorized:
         raise PermissionError(
             "refusing to read protected Sonder secret/control-plane path %s "
