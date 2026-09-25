@@ -4,8 +4,15 @@ class _OperationalCapabilitiesPanel extends StatelessWidget {
   final OperationalCapabilitiesInfo info;
   final SonderApi api;
 
+  /// False when the Deployment panel already shows takeover and failback, so
+  /// the page never lists the same capability twice (plan P2-10).
+  final bool showRecoveryRows;
+
   const _OperationalCapabilitiesPanel(
-      {super.key, required this.info, required this.api});
+      {super.key,
+      required this.info,
+      required this.api,
+      this.showRecoveryRows = true});
 
   String _capabilityValue(OperationalCapabilityInfo capability) {
     if (capability.available) {
@@ -41,12 +48,14 @@ class _OperationalCapabilitiesPanel extends StatelessWidget {
           label: 'Managed app work',
           value: _capabilityValue(info.managedAppWork),
           ok: info.managedAppWork.available,
+          off: true,
         ),
         _StatusRow(
           label: 'Inference pool',
           value:
               '${info.workerSummary}; ${_capabilityValue(info.requestLevelPooling)}',
           ok: info.requestLevelPooling.available,
+          off: true,
         ),
         if (info.poolSchemaVersion == 2)
           _StatusRow(
@@ -58,52 +67,63 @@ class _OperationalCapabilitiesPanel extends StatelessWidget {
           label: 'Whole-job placement',
           value: _capabilityValue(info.wholeJobPlacement),
           ok: info.wholeJobPlacement.available,
+          off: true,
         ),
         _StatusRow(
           label: 'Model sharding',
           value: _capabilityValue(info.modelSharding),
           ok: info.modelSharding.available,
+          off: true,
         ),
         _StatusRow(
           label: 'Memory replication',
           value: _capabilityValue(info.memoryReplicationTransport),
           ok: info.memoryReplicationTransport.available,
+          off: true,
         ),
-        _StatusRow(
-          label: 'Automatic takeover',
-          value: _automaticAvailabilityValue(
-            info.automaticTakeoverAvailable,
-            'takeover',
+        if (showRecoveryRows) ...[
+          _StatusRow(
+            label: 'Automatic takeover',
+            value: _automaticAvailabilityValue(
+              info.automaticTakeoverAvailable,
+              'takeover',
+            ),
+            ok: info.automaticTakeoverAvailable,
+            off: true,
           ),
-          ok: info.automaticTakeoverAvailable,
-        ),
-        _StatusRow(
-          label: 'Automatic failback',
-          value: _automaticAvailabilityValue(
-            info.automaticFailbackAvailable,
-            'failback',
+          _StatusRow(
+            label: 'Automatic failback',
+            value: _automaticAvailabilityValue(
+              info.automaticFailbackAvailable,
+              'failback',
+            ),
+            ok: info.automaticFailbackAvailable,
+            off: true,
           ),
-          ok: info.automaticFailbackAvailable,
-        ),
+        ],
         _StatusRow(
           label: 'Artifact transfer',
           value: _capabilityValue(info.artifactTransferTransport),
           ok: info.artifactTransferTransport.available,
+          off: true,
         ),
         _StatusRow(
           label: 'Automatic memory migration',
           value: _capabilityValue(info.automaticMemoryMigration),
           ok: info.automaticMemoryMigration.available,
+          off: true,
         ),
         _StatusRow(
           label: 'Automatic artifact migration',
           value: _capabilityValue(info.automaticArtifactMigration),
           ok: info.automaticArtifactMigration.available,
+          off: true,
         ),
         _StatusRow(
           label: 'Indefinite scale',
           value: _capabilityValue(info.indefiniteScale),
           ok: info.indefiniteScale.available,
+          off: true,
         ),
       ],
     );

@@ -53,16 +53,19 @@ class _DeploymentPanel extends StatelessWidget {
           label: 'Private compute',
           value: _capabilityValue(privateCompute),
           ok: privateCompute.available,
+          off: true,
         ),
         _StatusRow(
           label: 'Automatic takeover',
           value: _capabilityValue(takeover),
           ok: takeover.available,
+          off: true,
         ),
         _StatusRow(
           label: 'Automatic failback',
           value: _capabilityValue(failback),
           ok: failback.available,
+          off: true,
         ),
         if (info.recoveryPosture != null)
           _StatusRow(
@@ -75,16 +78,19 @@ class _DeploymentPanel extends StatelessWidget {
           label: 'State replication',
           value: _capabilityValue(replication),
           ok: replication.available,
+          off: true,
         ),
         _StatusRow(
           label: 'Worker fencing',
           value: _capabilityValue(fencing),
           ok: fencing.available,
+          off: true,
         ),
         _StatusRow(
           label: 'Quorum',
           value: _capabilityValue(quorum),
           ok: quorum.available,
+          off: true,
         ),
         if (info.controlStateScope.isNotEmpty)
           _StatusRow(

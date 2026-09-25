@@ -56,48 +56,74 @@ class _StatusRow extends StatelessWidget {
   final String label;
   final String value;
   final bool ok;
+
+  /// When [ok] is false, render "off by design" (muted `–`) instead of a
+  /// problem dot. Single-PC rows read `– off`, never red (plan P2-10).
+  final bool off;
   final VoidCallback? onCopy;
 
   const _StatusRow({
     required this.label,
     required this.value,
     required this.ok,
+    this.off = false,
     this.onCopy,
   });
 
   @override
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
-    final color = ok ? tokens.ok : tokens.danger;
+    final muted = !ok && off;
+    final color = ok
+        ? tokens.ok
+        : muted
+            ? tokens.muted
+            : tokens.danger;
+    final word = ok
+        ? 'ok'
+        : muted
+            ? 'off'
+            : 'problem';
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: Container(
-              width: 7,
-              height: 7,
-              decoration: BoxDecoration(
-                color: color,
-                borderRadius: BorderRadius.circular(4),
-              ),
+          Semantics(
+            label: word,
+            child: SizedBox(
+              width: 10,
+              child: muted
+                  ? Text('–',
+                      key: const Key('status-row-off'),
+                      style: tokens.mono(12, color: color))
+                  : Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Container(
+                        key: Key(ok ? 'status-row-ok' : 'status-row-problem'),
+                        width: 7,
+                        height: 7,
+                        decoration: BoxDecoration(
+                          color: color,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                      ),
+                    ),
             ),
           ),
-          const SizedBox(width: 10),
+          const SizedBox(width: 8),
           SizedBox(
             width: 120,
             child: Text(label, style: Theme.of(context).textTheme.labelLarge),
           ),
           const SizedBox(width: 12),
           Expanded(
-            child: SelectableText(value, style: tokens.mono(12)),
+            child: SelectableText(value,
+                style: tokens.mono(12, color: muted ? tokens.text2 : null)),
           ),
           if (onCopy != null)
             IconButton(
-              tooltip: 'Copy',
-              visualDensity: VisualDensity.compact,
+              tooltip: 'Copy $label',
               onPressed: onCopy,
               icon: const Icon(Icons.copy, size: 16),
             ),
@@ -115,7 +141,7 @@ class _Section extends StatelessWidget {
   final String title;
   final Widget child;
 
-  const _Section({super.key, required this.title, required this.child});
+  const _Section({required this.title, required this.child});
 
   @override
   Widget build(BuildContext context) {

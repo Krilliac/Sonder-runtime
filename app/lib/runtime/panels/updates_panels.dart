@@ -3,7 +3,7 @@ part of '../runtime_screen.dart';
 class _ExtensionRegistrySection extends StatelessWidget {
   final ExtensionRegistryStatus status;
 
-  const _ExtensionRegistrySection({super.key, required this.status});
+  const _ExtensionRegistrySection({required this.status});
 
   @override
   Widget build(BuildContext context) {
@@ -77,6 +77,7 @@ class _UpdateSection extends StatelessWidget {
                 ? '${active.version} (${active.releaseId})'
                 : 'source checkout',
             ok: active != null,
+            off: true,
           ),
           if (previous != null)
             _StatusRow(
