@@ -325,20 +325,13 @@ def _build_grant_registry():
     return BuildFixGrantRegistry(current_mode=lambda: permission_policy.current_mode())
 
 
-def _tool_executor_chain(build_tools, build_grants, debug_tools, developer_tools):
-    """Build -> Debug -> Developer -> Packaged: each serves its own names, then delegates."""
-    return build_tool_executor(
-        build_tools,
-        debug_tool_executor(debug_tools,
-                            developer_tool_executor(developer_tools, PackagedToolExecutor())),
-        grants=build_grants,
-    )
+def _debug_executor_chain(debug_tools, developer_tools):
+    """Debug -> Developer -> Packaged: each serves its own names, then delegates.
 
-
-def _tool_permission_resolvers(build_tools, build_grants, debug_tools):
-    """The host-planned tools' permission resolvers: build and debug, one table."""
-    return {**build_permission_resolvers(build_tools, grants=build_grants),
-            **debug_permission_resolvers(debug_tools)}
+    The build tools' executor sits in front of this chain (``build_tool_executor``).
+    """
+    return debug_tool_executor(
+        debug_tools, developer_tool_executor(developer_tools, PackagedToolExecutor()))
 
 
 def build_application(
@@ -1141,10 +1134,13 @@ def build_application(
                 lane_test_catalog = LaneTestCatalog.load(catalog_path)
                 lane_tools = compose_lane_test_tools(
                     tools, lane_test_catalog, get_process_job_provider(), audit=tool_audit,
-                    files=_tool_executor_chain(build_tools, build_grants, debug_tools,
-                                               developer_tools),
+                    files=build_tool_executor(
+                        build_tools, _debug_executor_chain(debug_tools, developer_tools),
+                        grants=build_grants,
+                    ),
                     developer_tools=developer_tools,
-                    resolvers=_tool_permission_resolvers(build_tools, build_grants, debug_tools),
+                    resolvers={**build_permission_resolvers(build_tools, grants=build_grants),
+                               **debug_permission_resolvers(debug_tools)},
                     grant_authorities=(build_grants,),
                 )
             def authorize_lane_grant(lane, context):
@@ -1731,14 +1727,18 @@ def build_application(
 
     tools = ToolApplicationFacade.compose(
         typed_tool_registry(),
-        _tool_executor_chain(build_tools, build_grants, debug_tools, developer_tools),
+        build_tool_executor(
+            build_tools, _debug_executor_chain(debug_tools, developer_tools),
+            grants=build_grants,
+        ),
         policy=typed_tool_policy(),
         redactor=PatternOutputRedactor(runtime_redactor.redact),
         receipts=ReceiptStore(),
         audit=tool_audit,
         permissions=(DeveloperToolPermissionEvaluator(
             developer_tools, policy_names=POLICY_NAMES,
-            resolvers=_tool_permission_resolvers(build_tools, build_grants, debug_tools),
+            resolvers={**build_permission_resolvers(build_tools, grants=build_grants),
+                       **debug_permission_resolvers(debug_tools)},
             grant_authorities=(build_grants,),
         ),),
     )

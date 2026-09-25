@@ -604,8 +604,8 @@ def render_crash_fix_brief(
         lines.append("repro: none found (pass --repro NAME to /crash, or run /test first)")
     lines.append("failure class: %s" % handoff.failure_class.value)
     lines.append(
-        "next: edit the code, rebuild with the build tool, then re-run the repro; "
-        "crash_reproduced should drop to 0")
+        "next: edit the code, rebuild with build_job (action=build, or compile_one on "
+        "the diagnostic's file), then re-run the repro; crash_reproduced should drop to 0")
     text = redact_user_paths("\n".join(lines))
     if len(text) > max_chars:
         text = text[:max_chars].rstrip() + "\n... (brief cut)"

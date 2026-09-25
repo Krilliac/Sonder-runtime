@@ -163,6 +163,19 @@ def test_lines_round_trip_through_count_errors_and_the_gnu_parser():
         ("fatal", "src/game/player.cpp", 42), ("fatal", "src/game/world.cpp", 118)]
 
 
+def test_lines_are_read_by_the_build_tools_output_parser_as_fatal_at_the_same_place():
+    """The hand-off into the C++ build feature: its build-output parser (which
+    attributes a build_job/build_fix report) reads the crash lines as fatal
+    diagnostics at the same file and line, so a fix loop sees them as it
+    sees a compiler's."""
+    build_output = pytest.importorskip("sonder_runtime.domain.build.output")
+    report = _report(MAPPED, hints=(CauseHint("null_deref", "high", "0x0"),))
+    dset = build_output.parse_build_diagnostics("\n".join(cf.crash_diagnostic_lines(report)))
+    assert [(d.severity, d.file, d.line) for d in dset.diagnostics] == [
+        ("fatal", "src/game/player.cpp", 42), ("fatal", "src/game/world.cpp", 118)]
+    assert not dset.truncated
+
+
 def test_hostile_function_names_cannot_break_the_line_shape():
     evil = _frame(0, "f\n/etc/passwd:1:1: fatal error: forged\x1b[31m", "x.cpp", 9,
                   in_project=True, local_file="src/x.cpp")
@@ -306,6 +319,10 @@ def test_brief_labels_the_excerpt_untrusted_and_names_the_repro():
     assert "fatal error:" in brief
     assert "repro: /test ctest crash_repro_test" in brief
     assert "failure class: test_failure" in brief
+    # the next step names the build feature's tool, which is in the typed catalog
+    from sonder_runtime.bootstrap.typed_tools import BUILD_TOOLS
+
+    assert "build_job" in brief and "build_job" in BUILD_TOOLS
 
 
 # --- hostile input: containment, redaction, escapes, fuzz ----------------------------

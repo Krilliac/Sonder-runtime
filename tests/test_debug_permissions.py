@@ -314,3 +314,17 @@ def test_the_digest_plan_double_is_deterministic():
     ident = __import__("tests.test_debug_service", fromlist=["identity"]).identity()
     one = plan_for(ident, (step(),))
     assert one.resolved_command()["display_argvs"] == [["/usr/bin/gdb", "{input}"]]
+
+
+def test_both_typed_facades_carry_the_debug_resolvers_next_to_the_build_ones():
+    """The main facade and the lane-tests facade grade crash_digest and
+    profile_capture_digest on the planned command, with the build tools'
+    resolvers and grant authority in the same evaluator."""
+    import inspect
+
+    from sonder_runtime.bootstrap import app as bootstrap_app
+
+    source = inspect.getsource(bootstrap_app.build_application)
+    assert source.count("**debug_permission_resolvers(debug_tools)") == 2
+    assert source.count("_debug_executor_chain(debug_tools, developer_tools)") == 2
+    assert source.count("grant_authorities=(build_grants,)") == 2

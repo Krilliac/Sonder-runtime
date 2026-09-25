@@ -2571,7 +2571,7 @@ def _crash_command(arg, workspace=""):
     words = str(arg or "").split()
     fix = bool(words) and words[0].lower() == "fix"
     _render_crash_command(
-        _debug_services(), arg, context, confirm=_confirm_answer,
+        _debug_services(), arg, context, out=_emit, confirm=_confirm_answer,
         source_lookup=_crash_source_lookup(workspace) if fix else None,
         test_reports=(lambda: _recent_test_reports(context)) if fix else None,
     )
@@ -2585,7 +2585,7 @@ def _confirm_answer(prompt):
 
 
 def _profile_command(arg, workspace=""):
-    _render_profile_command(_debug_services(), arg, _developer_context(workspace))
+    _render_profile_command(_debug_services(), arg, _developer_context(workspace), out=_emit)
 
 
 def _inventory_stale(snapshot):
