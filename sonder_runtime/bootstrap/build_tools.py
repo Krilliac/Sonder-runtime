@@ -148,6 +148,8 @@ class BuildFixGrantRegistry(BuildFixGrantBook):
         self._current_mode = current_mode
         self._pending_lock = threading.Lock()
         self._pending: dict[str, _Pending] = {}
+        self._lines_lock = threading.Lock()
+        self._lines_used: dict[str, int] = {}
 
     # -- approvals -------------------------------------------------------------------
 
@@ -240,15 +242,29 @@ class BuildFixGrantRegistry(BuildFixGrantBook):
         if any(arguments.get(knob) for knob in _GUARD_KNOBS):
             return ""
         try:
-            self._host_checks(grant.spec, request.tool_name, arguments)
+            lines = self._host_checks(grant.spec, request.tool_name, arguments)
         except _OutOfScope as exc:
             logger.info("build_fix grant does not cover %s: %s", request.tool_name, exc)
             return ""
-        decision = self.authorize(token, principal_id=principal_id,
-                                  tool_name=request.tool_name, arguments=arguments)
-        if not decision.allowed:
-            logger.info("build_fix grant does not cover %s: %s", request.tool_name, decision.reason)
-            return ""
+        with self._lines_lock:
+            # Cumulative line budget over the job's writes ('-' and '+' each
+            # count): the loop validates at most ``max_changed_lines`` of
+            # candidate change, and each applied line is written once and
+            # reverted at most once, so 4x bounds every legitimate job.
+            for stale in [key for key in self._lines_used if self.lookup(key) is None]:
+                self._lines_used.pop(stale, None)
+            used = self._lines_used.get(token, 0)
+            if used + lines > grant.spec.max_changed_lines * 4:
+                logger.info("build_fix grant line budget exhausted (%d + %d)", used, lines)
+                return ""
+            decision = self.authorize(token, principal_id=principal_id,
+                                      tool_name=request.tool_name, arguments=arguments)
+            if not decision.allowed:
+                logger.info("build_fix grant does not cover %s: %s", request.tool_name,
+                            decision.reason)
+                return ""
+            if lines:
+                self._lines_used[token] = used + lines
         return decision.source
 
     def covers_child_build(self, token: str, principal_id: str, build_plan: Any) -> bool:
@@ -266,8 +282,11 @@ class BuildFixGrantRegistry(BuildFixGrantBook):
             platform=text("platform"), world=text("world"), network=text("network"))
         return decision.allowed
 
-    def _host_checks(self, spec: BuildFixGrantSpec, tool: str, arguments: Mapping[str, Any]) -> None:
-        """What only the host can check: links, file kind, build dir, per-write lines."""
+    def _host_checks(self, spec: BuildFixGrantSpec, tool: str, arguments: Mapping[str, Any]) -> int:
+        """What only the host can check: links, file kind, build dir, per-write lines.
+
+        Returns the call's changed lines ('-' and '+' each count; 0 for a read).
+        """
         if tool == "text_patch":
             root = arguments.get("root")
             if not isinstance(root, str) or not os.path.isabs(root):
@@ -283,15 +302,18 @@ class BuildFixGrantRegistry(BuildFixGrantBook):
                 self._in_root(spec, os.path.join(real_root, *rel.split("/")))
             if changed > spec.max_changed_lines * 2:  # a replaced line is one '-' and one '+'
                 raise _OutOfScope("the patch changes more lines than the fix may")
-            return
+            return changed
         path = arguments.get("path")
         self._in_root(spec, path)
         if tool == "write_file":
             content = arguments.get("content")
             if not isinstance(content, str) or len(content) > MAX_GRANT_FILE_BYTES:
                 raise _OutOfScope("content is not bounded text")
-            if _changed_lines(_read_bounded(path), content) > spec.max_changed_lines:
+            before = _read_bounded(path)
+            if _changed_lines(before, content) > spec.max_changed_lines:
                 raise _OutOfScope("the write changes more lines than the fix may")
+            return _changed_lines(before, content, both=True)
+        return 0
 
     @staticmethod
     def _in_root(spec: BuildFixGrantSpec, path: Any) -> str:
@@ -303,7 +325,7 @@ class BuildFixGrantRegistry(BuildFixGrantBook):
         if not _inside(real, spec.project_root) or _norm(real) == _norm(spec.project_root):
             raise _OutOfScope("path is outside the project root")
         build_dir = spec.build_dir
-        if build_dir and _norm(build_dir) != _norm(spec.project_root) and _inside(real, build_dir):
+        if build_dir and _inside(real, build_dir):
             raise _OutOfScope("path is inside the build directory")
         if not os.path.isfile(real):
             raise _OutOfScope("grant file calls touch existing regular files only")
@@ -336,12 +358,13 @@ def _read_bounded(path: str) -> str:
     return b"".join(chunks).decode("utf-8", errors="replace")
 
 
-def _changed_lines(before: str, after: str) -> int:
+def _changed_lines(before: str, after: str, *, both: bool = False) -> int:
+    """Changed lines: a replaced line counts once, or as '-' and '+' with ``both``."""
     matcher = difflib.SequenceMatcher(None, before.splitlines(), after.splitlines(), autojunk=False)
     changed = 0
     for op, i1, i2, j1, j2 in matcher.get_opcodes():
         if op != "equal":
-            changed += max(i2 - i1, j2 - j1)
+            changed += (i2 - i1) + (j2 - j1) if both else max(i2 - i1, j2 - j1)
     return changed
 
 

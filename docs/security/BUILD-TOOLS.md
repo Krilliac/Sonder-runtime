@@ -62,8 +62,10 @@ The grant is bound to three things:
   `EditScope` refuses build scripts, build-time tool sources, generated files
   and denied names such as `.env` and key files.
 - **Budgets.** At most 6 distinct files, the plan's write count and 400
-  changed lines per write, counted by the evaluator before the write; the loop
-  holds its total to 400 changed lines.
+  changed lines per write, counted by the evaluator before the write. Across
+  the job the evaluator also caps the writes' total at 1600 changed lines
+  (`-` and `+` each count): a candidate and its revert for each of the 400
+  changed lines the loop itself allows.
 
 The grant never:
 

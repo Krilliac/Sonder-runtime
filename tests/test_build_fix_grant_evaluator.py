@@ -206,6 +206,33 @@ def test_file_and_line_budgets_hold(stack):
                                      "mode": "overwrite"})
 
 
+def test_the_cumulative_line_budget_holds_across_writes(stack):
+    # Each write stays under the per-write cap, but the job's writes together
+    # ('-' and '+' each count) may not exceed 4 x max_changed_lines: a
+    # candidate and its revert for every line the loop may change.
+    path = stack.root / "src" / "f0.cpp"
+    first = "".join("int a%d;\n" % n for n in range(350))
+    second = "".join("int b%d;\n" % n for n in range(350))
+    assert _write(stack, "write_file", {"path": str(path), "content": first,
+                                        "mode": "overwrite"}).success
+    assert _write(stack, "write_file", {"path": str(path), "content": second,
+                                        "mode": "overwrite"}).success
+    with pytest.raises(Forbidden):
+        _write(stack, "write_file", {"path": str(path), "content": first, "mode": "overwrite"})
+    assert path.read_text() == second
+
+
+def test_a_build_dir_at_the_project_root_leaves_nothing_writable(tmp_path):
+    from sonder_runtime.application.build.grants import BuildFixGrantSpec
+    from sonder_runtime.bootstrap.build_tools import _OutOfScope
+
+    source = tmp_path / "a.cpp"
+    source.write_text("int a;\n")
+    spec = BuildFixGrantSpec(project_root=str(tmp_path), build_dir=str(tmp_path), target="game")
+    with pytest.raises(_OutOfScope):
+        BuildFixGrantRegistry._in_root(spec, str(source))
+
+
 def test_the_grant_carries_network_only_when_the_fix_was_approved_with_it(stack, monkeypatch):
     child = SimpleNamespace(template_id="cmake.build", network="enforced_off", target="game",
                             config="", platform="", world="host", build_dir=str(stack.root / "build"))

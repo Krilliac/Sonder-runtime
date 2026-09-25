@@ -147,8 +147,9 @@ it, every write the fix makes is refused unattended under `manual`.
    - `write_file` uses `mode=overwrite`;
    - the patch neither creates, deletes nor renames a file;
    - the budgets hold: at most 6 distinct files, the plan's write count, and
-     at most 400 changed lines per write (the loop itself holds its total to
-     400 changed lines).
+     at most 400 changed lines per write, and at most 1600 changed lines
+     (`-` and `+` each count) across the job's writes: a candidate and its
+     revert for each of the 400 changed lines the loop itself allows.
 
    The receipt's `policy_match` then names `build_fix_grant:<plan_digest>`. If
    any condition fails, normal grading applies, which refuses the write
