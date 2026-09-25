@@ -1,10 +1,12 @@
 """Canonical structured logging, redaction, and child-environment policy."""
 from __future__ import annotations
 
-from dataclasses import fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 import json
 import logging
+import logging.handlers
 import os
+from pathlib import Path
 import re
 import time
 from typing import Iterable
@@ -240,14 +242,181 @@ def configure_logging(
     return root
 
 
+# --- interactive REPL logging ---------------------------------------------
+#
+# A terminal REPL must not print JSON log lines over its banner, prompt or
+# live line. Its records go to a private rotating file instead; WARNING+ is
+# also handed to a notice sink the REPL drains between turns, and piped runs
+# get ERROR on stderr as text. serve and mcp keep ``configure_logging``.
+
+REPL_LOG_NAME = "repl.log"
+REPL_LOG_MAX_BYTES = 1_000_000
+REPL_LOG_BACKUPS = 5
+REPL_LOG_FILE_MODE = 0o600
+
+CONSOLE_NOTICES = "notices"
+CONSOLE_STDERR_ERRORS = "stderr-errors"
+CONSOLE_STDERR_JSON = "stderr-json"
+
+
+class PrivateRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """Rotating file whose every generation is created owner-only (0600)."""
+
+    def _open(self):
+        fd = os.open(
+            self.baseFilename,
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0),
+            REPL_LOG_FILE_MODE,
+        )
+        try:
+            # A file created before this handler existed may be wider.
+            os.chmod(self.baseFilename, REPL_LOG_FILE_MODE)
+        except OSError:
+            pass
+        return os.fdopen(fd, "a", encoding=self.encoding, errors=self.errors)
+
+
+class NoticeQueueHandler(logging.Handler):
+    """Hand redacted WARNING+ records to an injected ``sink``.
+
+    ``sink(level, levelname, component, message, created)`` is normally
+    ``ReplNoticeQueue.push`` from ``application.ports.repl_notices``; it is
+    injected so this platform module never imports the application layer.
+    """
+
+    def __init__(self, sink, *, redactor: Redactor | None = None,
+                 level: int = logging.WARNING) -> None:
+        if not callable(sink):
+            raise TypeError("notice sink must be callable")
+        super().__init__(level)
+        self._sink = sink
+        self._redactor = redactor or Redactor()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            component = getattr(record, "component", None) or record.name
+            self._sink(
+                record.levelno,
+                record.levelname,
+                self._redactor.redact(str(component)),
+                self._redactor.redact(record.getMessage()),
+                record.created,
+            )
+        except Exception:
+            # Never let a notice failure reach the terminal as a traceback.
+            pass
+
+
+@dataclass(frozen=True)
+class ReplLoggingPlan:
+    """What ``configure_repl_logging`` installed, for the caller and tests."""
+
+    console: str
+    file_path: str | None
+    file_level: str | None
+    fallback_reason: str | None = None
+
+
+def _level_name(value, default: str) -> str:
+    name = str(value or "").strip().upper()
+    return name if name in ("DEBUG", "INFO", "WARNING", "ERROR") else default
+
+
+def repl_log_stderr_requested(env=None) -> bool:
+    """``SONDER_REPL_LOG_STDERR=1`` restores JSON logs on stderr."""
+    source = os.environ if env is None else env
+    return str(source.get("SONDER_REPL_LOG_STDERR", "")).strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def configure_repl_logging(
+    *,
+    home,
+    interactive: bool,
+    notice_sink=None,
+    redactor: Redactor | None = None,
+    env=None,
+    stream=None,
+    log_format: str = "json",
+) -> ReplLoggingPlan:
+    """Install the root handlers for ``python -m sonder_runtime repl``.
+
+    - ``SONDER_REPL_LOG_STDERR=1``: the old behaviour, logs on stderr in
+      ``log_format`` at ``SONDER_REPL_LOG_LEVEL`` (default WARNING).
+    - Otherwise every record at ``SONDER_REPL_LOG_LEVEL`` (default INFO) goes
+      to ``<home>/logs/repl.log`` as JSON, rotating 5 x 1 MB, mode 0600, and
+      * ``interactive`` with a ``notice_sink``: WARNING+ goes to the sink;
+      * else: ERROR+ goes to stderr as redacted text.
+    - If the log file cannot be opened, the stderr behaviour is used and the
+      reason is returned in the plan.
+    """
+    source = os.environ if env is None else env
+    redactor = redactor or Redactor(env=source)
+    root = logging.getLogger()
+    if repl_log_stderr_requested(source):
+        level = _level_name(source.get("SONDER_REPL_LOG_LEVEL"), "WARNING")
+        configure_logging(level=level, log_format=log_format,
+                          redactor=redactor, stream=stream)
+        return ReplLoggingPlan(CONSOLE_STDERR_JSON, None, None)
+    file_level = _level_name(source.get("SONDER_REPL_LOG_LEVEL"), "INFO")
+    try:
+        from sonder_runtime.platform.private_files import ensure_private_dir
+
+        log_dir = ensure_private_dir(Path(home) / "logs")
+        path = os.fspath(log_dir / REPL_LOG_NAME)
+        file_handler = PrivateRotatingFileHandler(
+            path, maxBytes=REPL_LOG_MAX_BYTES, backupCount=REPL_LOG_BACKUPS,
+            encoding="utf-8", errors="replace",
+        )
+    except (OSError, ValueError, TypeError) as exc:
+        configure_logging(level="WARNING", log_format=log_format,
+                          redactor=redactor, stream=stream)
+        return ReplLoggingPlan(
+            CONSOLE_STDERR_JSON, None, None,
+            fallback_reason="%s: %s" % (type(exc).__name__, exc),
+        )
+    file_handler.setLevel(getattr(logging, file_level))
+    file_handler.setFormatter(JsonFormatter(redactor))
+    if interactive and notice_sink is not None:
+        console = NoticeQueueHandler(notice_sink, redactor=redactor)
+        console_kind = CONSOLE_NOTICES
+    else:
+        console = _SafeStreamHandler(stream)
+        console.setLevel(logging.ERROR)
+        console.setFormatter(RedactingTextFormatter(redactor))
+        console_kind = CONSOLE_STDERR_ERRORS
+    root.setLevel(min(file_handler.level, console.level))
+    for old in list(root.handlers):
+        if old not in (file_handler, console):
+            try:
+                old.close()
+            except Exception:
+                pass
+    root.handlers[:] = [file_handler, console]
+    return ReplLoggingPlan(console_kind, path, file_level)
+
+
 __all__ = [
+    "CONSOLE_NOTICES",
+    "CONSOLE_STDERR_ERRORS",
+    "CONSOLE_STDERR_JSON",
     "REDACTED",
     "REDACTION_FAILED",
+    "REPL_LOG_BACKUPS",
+    "REPL_LOG_FILE_MODE",
+    "REPL_LOG_MAX_BYTES",
+    "REPL_LOG_NAME",
     "JsonFormatter",
+    "NoticeQueueHandler",
+    "PrivateRotatingFileHandler",
     "RedactingTextFormatter",
     "Redactor",
+    "ReplLoggingPlan",
     "SECRET_ENV_VARS",
     "child_environment",
     "configure_logging",
+    "configure_repl_logging",
     "redactor_for_config",
+    "repl_log_stderr_requested",
 ]

@@ -110,3 +110,14 @@ The flag never changes interactive terminals, and the flagless piped
 default never changes. Known failure shapes additionally get a one-line
 `hint:` under the interactive error panel only — piped output stays
 byte-stable.
+
+## REPL logs
+
+`python -m sonder_runtime repl` writes its log records to
+`SONDER_HOME/logs/repl.log` (JSON, owner-only `0600`, rotating 5 x 1 MB) at
+`SONDER_REPL_LOG_LEVEL` (default `INFO`), so no JSON line lands on the
+terminal. On a terminal, WARNING and above are also queued and shown between
+turns as one short notice; piped and `--json` runs print only ERROR records
+to stderr, as text. `SONDER_REPL_LOG_STDERR=1` restores the old behaviour:
+JSON on stderr at `SONDER_REPL_LOG_LEVEL` (default `WARNING`). `serve` and
+`mcp` logging is unchanged.

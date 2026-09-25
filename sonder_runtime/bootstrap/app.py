@@ -387,7 +387,8 @@ def build_application(
     # wrapped by the typed lifecycle shell so cancellation/deadline and
     # publication health are visible before it reaches the model gateway.
     if embedding_provider is None:
-        logger.warning("no embedding provider supplied, falling back to local legacy adapter")
+        # The local adapter is the default, so this is an INFO startup fact.
+        logger.info("no embedding provider supplied, falling back to local legacy adapter")
         import sonder_runtime.adapters.embeddings as legacy_embeddings
 
         def embedding_provider(request, context):

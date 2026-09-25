@@ -1463,13 +1463,33 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
             name,
             source="non-interactive", call_id=call,
         )
-    reasons = {
-        ALLOW: "%s allows %s tools" % (MODE_LABELS.get(active, active), risk),
-        ASK: "%s asks before %s tools" % (MODE_LABELS.get(active, active), risk),
-        DENY: "%s forbids %s tools" % (MODE_LABELS.get(active, active), risk),
-    }
-    return Decision(action, active, risk, reasons[action], name, source="mode",
-                    call_id=call)
+    return Decision(action, active, risk, mode_reason(action, active, risk), name,
+                    source="mode", call_id=call)
+
+
+# Plain words for each risk class, used in the reason an operator reads at an
+# approval prompt. Never the class name itself ("ask tools" means nothing to
+# a person deciding whether to type y).
+RISK_PLAIN = {
+    "safe": "commands that only read",
+    "ask": "commands that contact services or touch the workspace",
+    "mutation": "commands that change files",
+    "execution": "commands that run programs",
+    "dangerous": "destructive or administrative commands",
+    UNCLASSIFIED: "commands it cannot classify",
+}
+
+
+def mode_reason(action: str, mode: str, risk: str) -> str:
+    """Plain reason for a mode decision: which mode, what it does, to what.
+
+    ``manual mode asks before commands that contact services or touch the
+    workspace``. Always names the mode and the effect in words.
+    """
+    label = "%s mode" % MODE_LABELS.get(mode, mode)
+    what = RISK_PLAIN.get(risk, "%s commands" % risk)
+    verb = {ALLOW: "allows", ASK: "asks before", DENY: "blocks"}.get(action, action)
+    return "%s %s %s" % (label, verb, what)
 
 
 # --- presentation ---------------------------------------------------------

@@ -74,7 +74,9 @@ class RuntimeModelConfiguration:
             if not str(env.get(variable, "")).strip()
         ]
         if empty_local_tiers:
-            logger.warning(f"local tiers with no model configured: {empty_local_tiers} -- requests needing these capabilities will fall back to general-purpose models")
+            # INFO: optional tiers are unset on a default install; /model and
+            # /doctor report them, and the REPL log file keeps this record.
+            logger.info(f"local tiers with no model configured: {empty_local_tiers} -- requests needing these capabilities will fall back to general-purpose models")
         return cls(
             stable_alias=stable_alias,
             local_code_model=str(env.get("SONDER_CODE_LOCAL", stable_alias)),

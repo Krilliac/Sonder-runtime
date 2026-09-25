@@ -45,6 +45,10 @@ KEY_RIGHT = "<right>"
 KEY_HOME = "<home>"
 KEY_END = "<end>"
 KEY_DELETE = "<delete>"
+# Shift+Tab. Windows consoles deliver it through msvcrt.getwch() as a prefix
+# byte (``\x00`` or ``\xe0``) followed by scan code 0x0F; VT input mode
+# delivers ``ESC [ Z``. Both become this token.
+KEY_MODE_CYCLE = "<mode-cycle>"
 
 # handle_key's return values.
 CONTINUE = "continue"   # keep reading; the caller should repaint
@@ -67,6 +71,24 @@ MAX_ROWS = 8
 HISTORY_LIMIT = 200
 
 CSI = "\x1b["
+# Bracketed paste (xterm ``CSI ?2004h``): the terminal wraps pasted text in
+# these markers, so a pasted newline is text, never Enter.
+BRACKETED_PASTE_ON = CSI + "?2004h"
+BRACKETED_PASTE_OFF = CSI + "?2004l"
+PASTE_START = "[200~"
+PASTE_END = CSI + "201~"
+PASTE_LIMIT = 256 * 1024
+_SHIFT_TAB_SCAN = "\x0f"
+_WINDOWS_KEY_PREFIXES = ("\x00", "\xe0")
+_WINDOWS_SCAN_KEYS = {
+    "H": KEY_UP, "P": KEY_DOWN, "K": KEY_LEFT,
+    "M": KEY_RIGHT, "G": KEY_HOME, "O": KEY_END,
+    "S": KEY_DELETE, _SHIFT_TAB_SCAN: KEY_MODE_CYCLE,
+}
+_VT_CSI_KEYS = {
+    "[A": KEY_UP, "[B": KEY_DOWN, "[C": KEY_RIGHT, "[D": KEY_LEFT,
+    "[H": KEY_HOME, "[F": KEY_END, "[3~": KEY_DELETE, "[Z": KEY_MODE_CYCLE,
+}
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
@@ -367,6 +389,26 @@ class MenuState:
             action = self.handle_key(ch)
         return action
 
+    def insert_text(self, text: str) -> None:
+        """Insert pasted text at the cursor as literal text, never as keys.
+
+        Line breaks are kept as ``\n`` (the accepted line is one message);
+        tabs become a space and every other control character is dropped, so
+        a paste can neither submit the line nor inject a terminal sequence.
+        """
+        raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+        clean = "".join(
+            ch if ch == "\n" else (" " if ch == "\t" else ch)
+            for ch in raw
+            if ch in ("\n", "\t") or not unicodedata.category(ch).startswith("C")
+        )
+        if not clean:
+            return
+        self.buffer = self.buffer[:self.cursor] + clean + self.buffer[self.cursor:]
+        self.cursor += len(clean)
+        self.dismissed = False
+        self._reset_selection()
+
     # -- rendering --------------------------------------------------------
 
     def render_rows(self, prefix=None, width: int = 0, height: int = 0) -> list:
@@ -599,6 +641,12 @@ def _wrap_cells(text: str, width: int) -> list[str]:
     row: list[str] = []
     used = 0
     for cluster in _grapheme_clusters(text):
+        if cluster == "\n":
+            # A pasted line break is a hard row break, never a drawn byte.
+            rows.append("".join(row))
+            row = []
+            used = 0
+            continue
         cells = _cluster_width(cluster)
         if cells and used + cells > limit and row:
             rows.append("".join(row))
@@ -606,7 +654,7 @@ def _wrap_cells(text: str, width: int) -> list[str]:
             used = 0
         row.append(cluster)
         used += cells
-    if row or not rows:
+    if row or not rows or text.endswith("\n"):
         rows.append("".join(row))
     return rows
 
@@ -704,6 +752,23 @@ def _enable_windows_vt_output() -> bool:
         return False
 
 
+def enable_vt() -> bool:
+    """True when the terminal will interpret VT/ANSI sequences.
+
+    POSIX terminals always do (``True``). On Windows this turns on
+    ``ENABLE_VIRTUAL_TERMINAL_PROCESSING`` for stdout and returns whether that
+    worked; ``False`` (legacy conhost, redirected handle, any error) means the
+    caller should use no colour, no OSC 8 links and ASCII glyphs. It never
+    raises.
+    """
+    if os.name != "nt":
+        return True
+    try:
+        return bool(_enable_windows_vt_output())
+    except Exception:
+        return False
+
+
 def clear_terminal_presentation(stream) -> None:
     """Discard scrollback and clear the visible terminal without input state.
 
@@ -752,7 +817,105 @@ def available() -> bool:
         return False
 
 
+def _msvcrt_importable() -> bool:
+    try:
+        _msvcrt()
+        return True
+    except Exception:
+        return False
+
+
+# The raw Windows composer (the only reader with a key map) handles Shift+Tab.
+# POSIX input() / readline cannot bind a key to a Python callback, so the hint
+# must say "/mode to switch" there. Show a Shift+Tab hint only when
+# ``supports_mode_cycle and available()``.
+supports_mode_cycle = _msvcrt_importable()
+
+
+def cycle_permission_mode() -> str:
+    """Advance the permission mode one step through the existing mode service.
+
+    Wrapped in ``attended_mode_change``: a key press at the console is a
+    person who is present, the same authority ``/mode`` has.
+    """
+    from sonder_runtime.adapters.security.permission_policy import (
+        permission_policy,
+    )
+
+    with permission_policy.attended_mode_change():
+        return str(permission_policy.cycle_mode(1))
+
+
 # --- the raw reader -------------------------------------------------------
+
+
+# Kinds returned by :func:`read_key`.
+KIND_KEY = "key"
+KIND_PASTE = "paste"
+KIND_IGNORE = "ignore"
+
+
+def _read_paste(getwch) -> str:
+    """Collect pasted text up to the ``ESC [201~`` end marker."""
+    chunk: list[str] = []
+    tail = ""
+    size = 0
+    while True:
+        ch = getwch()
+        tail = (tail + ch)[-len(PASTE_END):]
+        chunk.append(ch)
+        size += 1
+        if tail == PASTE_END:
+            del chunk[-len(PASTE_END):]
+            return "".join(chunk)
+        if size >= PASTE_LIMIT:
+            # A runaway paste without an end marker still ends as text.
+            return "".join(chunk)
+
+
+def read_key(getwch, kbhit) -> tuple[str, str]:
+    """Read one logical key from a Windows console. Pure over its two probes.
+
+    ``getwch``/``kbhit`` are ``msvcrt``'s (or fakes in tests). Returns
+    ``(KIND_KEY, token_or_char)``, ``(KIND_PASTE, text)`` or
+    ``(KIND_IGNORE, "")``. Mappings:
+
+    * ``\x00``/``\xe0`` + scan code: arrows, Home/End/Delete, and
+      ``0x0F`` = Shift+Tab -> :data:`KEY_MODE_CYCLE`;
+    * ``ESC [200~ ... ESC [201~`` (bracketed paste) -> ``KIND_PASTE``;
+    * ``ESC [Z`` and the VT arrow sequences (VT input mode);
+    * a lone ``ESC`` (nothing pending) is Esc.
+    """
+    ch = getwch()
+    if ch in _WINDOWS_KEY_PREFIXES:
+        second = getwch()
+        key = _WINDOWS_SCAN_KEYS.get(second)
+        return (KIND_KEY, key) if key is not None else (KIND_IGNORE, "")
+    if ch != _ESC:
+        return KIND_KEY, ch
+    if not _pending(kbhit):
+        return KIND_KEY, _ESC
+    first = getwch()
+    if first != "[":
+        # Alt+key or an unknown sequence: never type the ESC as text.
+        return KIND_IGNORE, ""
+    seq = first
+    while len(seq) < 16:
+        nxt = getwch()
+        seq += nxt
+        if "@" <= nxt <= "~":
+            break
+    if seq == PASTE_START:
+        return KIND_PASTE, _read_paste(getwch)
+    key = _VT_CSI_KEYS.get(seq)
+    return (KIND_KEY, key) if key is not None else (KIND_IGNORE, "")
+
+
+def _pending(kbhit) -> bool:
+    try:
+        return bool(kbhit())
+    except Exception:
+        return False
 
 
 def _cell_width(ch: str) -> int:
@@ -787,6 +950,11 @@ def _input_lines_by_cells(text: str, columns: int) -> list[str]:
     current: list[str] = []
     used = 0
     for ch in str(text or ""):
+        if ch == "\n":
+            lines.append("".join(current))
+            current = []
+            used = 0
+            continue
         cells = _cell_width(ch)
         # A zero-width mark must remain with the rendered character before it
         # even at a wrap boundary.  It has no cursor cell of its own.
@@ -796,7 +964,7 @@ def _input_lines_by_cells(text: str, columns: int) -> list[str]:
             used = 0
         current.append(ch)
         used += cells
-    if current or not lines:
+    if current or not lines or str(text or "").endswith("\n"):
         lines.append("".join(current))
     return lines
 
@@ -887,9 +1055,17 @@ def _cursor_cell(prompt: str, buffer: str, cursor: int, width: int,
     visible_prompt = _ANSI_ESCAPE_RE.sub("", str(prompt or ""))
     prefix = visible_prompt + str(buffer or "")[:max(0, int(cursor))]
     columns = max(1, int(width) - 1)
-    cells = _display_width(prefix)
-    row = cells // columns
-    column = cells % columns
+    if "\n" in prefix:
+        # Pasted line breaks: mirror _input_lines_by_cells row for row.
+        rows = _input_lines_by_cells(prefix, columns)
+        row = len(rows) - 1
+        column = sum(_cell_width(ch) for ch in rows[-1])
+        if column >= columns:
+            row, column = row + 1, 0
+    else:
+        cells = _display_width(prefix)
+        row = cells // columns
+        column = cells % columns
     if row >= max(1, int(line_count)):
         row = max(0, int(line_count) - 1)
         column = columns
@@ -1022,8 +1198,17 @@ def _clear_screen(state: MenuState, stream) -> None:
     state._drawn_cursor_row = 0
 
 
+def _set_bracketed_paste(stream, on: bool) -> None:
+    try:
+        stream.write(BRACKETED_PASTE_ON if on else BRACKETED_PASTE_OFF)
+        stream.flush()
+    except Exception:
+        pass
+
+
 def _read_line_raw(prompt: str, completer=None, history=None, frame: str = "",
-                   frame_style: str = "", argument_completer=None) -> str:
+                   frame_style: str = "", argument_completer=None,
+                   mode_cycle=None, refresh_frame=None) -> str:
     msvcrt = _msvcrt()
     stream = sys.stdout
     state = MenuState(
@@ -1031,10 +1216,37 @@ def _read_line_raw(prompt: str, completer=None, history=None, frame: str = "",
         argument_completer=argument_completer,
     )
     recalled = HistoryCursor(history)
+    kbhit = getattr(msvcrt, "kbhit", None) or (lambda: False)
+    paste_mode = enable_vt()
+    if paste_mode:
+        _set_bracketed_paste(stream, True)
     try:
         _paint(state, prompt, stream)
         while True:
-            ch = msvcrt.getwch()
+            kind, ch = read_key(msvcrt.getwch, kbhit)
+            if kind == KIND_IGNORE:
+                continue
+            if kind == KIND_PASTE:
+                state.insert_text(ch)
+                recalled.reset_search()
+                _paint(state, prompt, stream)
+                continue
+            if ch == KEY_MODE_CYCLE:
+                try:
+                    (mode_cycle or cycle_permission_mode)()
+                    if refresh_frame is not None:
+                        state.frame = str(refresh_frame() or state.frame)
+                except Exception:
+                    pass  # a mode-service fault must not cost the prompt
+                _paint(state, prompt, stream)
+                continue
+            if ch in _ENTER and state.buffer and _pending(kbhit):
+                # Consoles without bracketed paste deliver a multi-line paste
+                # as keys; an Enter with more input already queued behind it
+                # is a pasted line break, not a submit.
+                state.insert_text("\n")
+                _paint(state, prompt, stream)
+                continue
             if ch == _CTRL_R:
                 state.buffer = recalled.reverse_search(state.buffer)
                 state.cursor = len(state.buffer)
@@ -1042,16 +1254,10 @@ def _read_line_raw(prompt: str, completer=None, history=None, frame: str = "",
                 state._reset_selection()
                 _paint(state, prompt, stream)
                 continue
-            if ch in ("\x00", "\xe0"):
-                # Windows delivers arrows as a prefix byte plus a scan code.
-                second = msvcrt.getwch()
-                key = {
-                    "H": KEY_UP, "P": KEY_DOWN, "K": KEY_LEFT,
-                    "M": KEY_RIGHT, "G": KEY_HOME, "O": KEY_END,
-                    "S": KEY_DELETE,
-                }.get(second)
-                if key is None:
-                    continue
+            if ch in (KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_HOME,
+                      KEY_END, KEY_DELETE):
+                # read_key already translated the prefix byte + scan code.
+                key = ch
                 # A slash prefix alone is not enough to reserve arrows: paths
                 # and other ordinary slash-looking prose can have no palette
                 # matches and should retain normal terminal history recall.
@@ -1080,12 +1286,16 @@ def _read_line_raw(prompt: str, completer=None, history=None, frame: str = "",
                 # term alive invisibly.
                 if ch not in (_CTRL_R,):
                     recalled.reset_search()
-            if action == ACCEPT:
+            if action in (ACCEPT, INTERRUPT):
+                # Leave paste mode before the accepted line is written, so the
+                # line is the last thing on screen.
+                if paste_mode:
+                    _set_bracketed_paste(stream, False)
+                    paste_mode = False
                 _finish(state, prompt, stream)
+                if action == INTERRUPT:
+                    raise KeyboardInterrupt
                 return state.buffer
-            if action == INTERRUPT:
-                _finish(state, prompt, stream)
-                raise KeyboardInterrupt
             if action == CLEAR:
                 _clear_screen(state, stream)
             _paint(state, prompt, stream)
@@ -1099,11 +1309,15 @@ def _read_line_raw(prompt: str, completer=None, history=None, frame: str = "",
         except Exception:
             pass
         raise
+    finally:
+        if paste_mode:
+            _set_bracketed_paste(stream, False)
 
 
 def read_line(prompt: str = "", *, enabled: bool = True, history=None,
               frame: str = "", frame_style: str = "", argument_completer=None,
-              fallback_prompt: str | None = None) -> str:
+              fallback_prompt: str | None = None, mode_cycle=None,
+              refresh_frame=None) -> str:
     """Read one line, showing a live command menu while it starts with ``/``.
 
     Falls back to builtin :func:`input` whenever the menu cannot or should not
@@ -1111,6 +1325,10 @@ def read_line(prompt: str = "", *, enabled: bool = True, history=None,
     menu degrades to an ordinary prompt; it never takes the REPL with it.
     ``KeyboardInterrupt`` is deliberately not caught, so Ctrl+C behaves exactly
     as it does under :func:`input`.
+
+    Shift+Tab calls ``mode_cycle()`` (default :func:`cycle_permission_mode`)
+    and then, when given, ``refresh_frame()`` for the new composer title, and
+    keeps editing the same line.
     """
     fallback = prompt if fallback_prompt is None else str(fallback_prompt)
     if not enabled or not available():
@@ -1118,7 +1336,9 @@ def read_line(prompt: str = "", *, enabled: bool = True, history=None,
     try:
         return _read_line_raw(prompt, history=history, frame=frame,
                               frame_style=frame_style,
-                              argument_completer=argument_completer)
+                              argument_completer=argument_completer,
+                              mode_cycle=mode_cycle,
+                              refresh_frame=refresh_frame)
     except KeyboardInterrupt:
         raise
     except EOFError:

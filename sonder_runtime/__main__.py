@@ -1135,6 +1135,46 @@ def cmd_serve(args) -> int:
     return 0
 
 
+def _repl_is_interactive(*, machine_output: bool, stdin=None, stdout=None) -> bool:
+    if machine_output:
+        return False
+    for stream in (stdin or sys.stdin, stdout or sys.stdout):
+        try:
+            if not stream.isatty():
+                return False
+        except (AttributeError, OSError, ValueError):
+            return False
+    return True
+
+
+def _configure_repl_logging(config, *, machine_output: bool, stdin=None, stdout=None):
+    """Keep JSON log lines off the interactive REPL (serve/MCP unchanged).
+
+    Records go to ``SONDER_HOME/logs/repl.log``; on a terminal, WARNING+ is
+    queued in ``application.ports.repl_notices`` for the REPL to drain between
+    turns. ``SONDER_REPL_LOG_STDERR=1`` restores JSON on stderr.
+    """
+    from sonder_runtime.application.ports import repl_notices
+    from sonder_runtime.platform.logging import configure_repl_logging
+
+    interactive = _repl_is_interactive(
+        machine_output=machine_output, stdin=stdin, stdout=stdout,
+    )
+    queue = repl_notices.ReplNoticeQueue() if interactive else None
+    plan = configure_repl_logging(
+        home=runtime_paths.default_home(),
+        interactive=interactive,
+        notice_sink=None if queue is None else queue.push,
+        redactor=_redactor_for_config(config),
+        log_format=config.observability.log_format,
+    )
+    repl_notices.install_repl_notices(
+        queue if plan.console == "notices" else None,
+        log_path=plan.file_path,
+    )
+    return plan
+
+
 def cmd_repl(args) -> int:
     try:
         config = _load_config(args)
@@ -1142,18 +1182,7 @@ def cmd_repl(args) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     _configure_typed_home(config)
-    from sonder_runtime.platform.logging import configure_logging
-    # Interactive REPL must stay readable. JSON INFO lines on stdout/stderr
-    # drown the composer unless the operator explicitly opts into REPL logs.
-    # Serve/MCP keep their configured observability level unchanged.
-    repl_level = (os.environ.get("SONDER_REPL_LOG_LEVEL") or "").strip().upper()
-    if repl_level not in ("DEBUG", "INFO", "WARNING", "ERROR"):
-        repl_level = "WARNING"
-    configure_logging(
-        level=repl_level,
-        log_format=config.observability.log_format,
-        redactor=_redactor_for_config(config),
-    )
+    _configure_repl_logging(config, machine_output=bool(args.json))
     _export_runtime_environment(config)
     import sonder_runtime.adapters.persistence.migrations as sonder_migrations
     try:
