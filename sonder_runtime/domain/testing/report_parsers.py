@@ -12,6 +12,7 @@ import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Iterable, Sequence
+from xml.parsers import expat
 
 from ..common.errors import InvalidInput
 from .report import MAX_FAILURES, TestFailure, TestTotals
@@ -50,10 +51,44 @@ def _guard_xml(data: bytes) -> ET.Element:
         raise InvalidInput("report exceeds %d bytes" % MAX_DOCUMENT_BYTES)
     if _FORBIDDEN_XML.search(data):
         raise InvalidInput("report XML declares a DOCTYPE or ENTITY; refused")
+    # The byte scan only sees ASCII-compatible encodings; a UTF-16 (or other
+    # declared-encoding) document spells ``<!DOCTYPE`` in other bytes. The
+    # parser itself therefore refuses every declaration, in any encoding,
+    # before ``xml.etree`` builds (and would expand) anything.
+    _refuse_declarations(bytes(data))
     try:
         return ET.fromstring(bytes(data))
     except ET.ParseError as exc:
         raise InvalidInput("report XML is malformed: %s" % exc) from None
+    except (LookupError, ValueError) as exc:
+        raise InvalidInput("report XML is unreadable: %s" % type(exc).__name__) from None
+
+
+class _DeclarationRefused(Exception):
+    pass
+
+
+def _refuse(*_args) -> None:
+    raise _DeclarationRefused()
+
+
+def _refuse_declarations(data: bytes) -> None:
+    """Parse once with every DTD hook refusing; InvalidInput on any declaration."""
+    parser = expat.ParserCreate()
+    parser.StartDoctypeDeclHandler = _refuse
+    parser.EntityDeclHandler = _refuse
+    parser.UnparsedEntityDeclHandler = _refuse
+    parser.NotationDeclHandler = _refuse
+    parser.ExternalEntityRefHandler = _refuse
+    parser.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
+    try:
+        parser.Parse(data, True)
+    except _DeclarationRefused:
+        raise InvalidInput("report XML declares a DOCTYPE or ENTITY; refused") from None
+    except expat.ExpatError as exc:
+        raise InvalidInput("report XML is malformed: %s" % exc) from None
+    except (LookupError, ValueError) as exc:
+        raise InvalidInput("report XML is unreadable: %s" % type(exc).__name__) from None
 
 
 def _relative(path: str, strip_prefix: str) -> str:
@@ -228,8 +263,8 @@ def parse_go_test_json(text: str) -> ParsedResults:
             continue
         try:
             event = json.loads(line)
-        except ValueError:
-            continue
+        except (ValueError, RecursionError):
+            continue  # malformed or pathologically nested: not an event
         if not isinstance(event, dict):
             continue
         action = event.get("Action")
@@ -375,7 +410,7 @@ def parse_jest_json(data: bytes, *, strip_prefix: str = "") -> ParsedResults:
         raise InvalidInput("report exceeds %d bytes" % MAX_DOCUMENT_BYTES)
     try:
         body = json.loads(bytes(data).decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as exc:
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise InvalidInput("jest report is not JSON: %s" % type(exc).__name__) from None
     if not isinstance(body, dict):
         raise InvalidInput("jest report is not an object")

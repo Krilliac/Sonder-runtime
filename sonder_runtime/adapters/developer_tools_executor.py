@@ -143,6 +143,11 @@ class DeveloperToolExecutor:
         except (FileNotFoundError, IsADirectoryError, NotADirectoryError) as exc:
             code = "DIGEST_SOURCE_REJECTED" if name == "output_digest" else "INVALID_INPUT"
             return self._failure(name, code, type(exc).__name__, started)
+        except (OSError, RecursionError) as exc:
+            # Host-side I/O failures carry host paths in their text; report the
+            # kind only (the log keeps the detail for the operator).
+            logger.warning("developer tool %s failed on the host", name, exc_info=True)
+            return self._failure(name, "HOST_IO_FAILURE", type(exc).__name__, started)
         output = _dumps(payload)
         return ToolExecutionResult(
             tool_name=name, success=True, output=output,

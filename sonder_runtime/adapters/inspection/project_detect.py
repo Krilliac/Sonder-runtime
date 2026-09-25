@@ -662,7 +662,7 @@ def detect_project(
         except UnicodeDecodeError as exc:
             if not add_error(relative, "invalid UTF-8 at byte %d" % exc.start):
                 break
-        except (configparser.Error, ET.ParseError, json.JSONDecodeError, tomllib.TOMLDecodeError, OSError, PermissionError, ValueError) as exc:
+        except (configparser.Error, ET.ParseError, json.JSONDecodeError, tomllib.TOMLDecodeError, OSError, PermissionError, ValueError, RecursionError) as exc:
             if not add_error(relative, "malformed %s: %s" % (kind, exc)):
                 break
     result["languages"].sort(key=lambda row: (row["name"].casefold(), row["source"]))

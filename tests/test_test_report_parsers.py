@@ -341,3 +341,68 @@ def test_pathological_text_parses_quickly():
     parse_unittest_text(("FAIL: " + "a" * 4096 + "\n") * 2000)
     parse_go_test_json(("{" + "\"a\":" * 1000 + "\n") * 500)
     assert time.monotonic() - started < 5
+
+
+@pytest.mark.parametrize("prolog", ['<?xml version="1.0" encoding="UTF-16"?>', ""])
+def test_a_doctype_in_a_non_ascii_encoding_is_refused_before_expansion(prolog):
+    # The byte scan cannot see ``<!DOCTYPE`` spelt in UTF-16; the parser's own
+    # declaration hook must refuse it before any entity is expanded.
+    body = ('<!DOCTYPE x [<!ENTITY a "AAAA"><!ENTITY b "&a;&a;&a;&a;">]>'
+            '<testsuite><testcase name="&b;"><failure message="&b;"/></testcase></testsuite>')
+    data = (prolog + body).encode("utf-16")
+    assert b"<!DOCTYPE" not in data  # the ASCII scan alone would miss it
+    with pytest.raises(InvalidInput, match="DOCTYPE or ENTITY"):
+        parse_junit_xml(data)
+    with pytest.raises(InvalidInput, match="DOCTYPE or ENTITY"):
+        parse_trx((prolog + body.replace("testsuite", "TestRun")).encode("utf-16"))
+    # control: the same encoding without declarations parses
+    plain = (prolog + '<testsuite><testcase name="a"/></testsuite>').encode("utf-16")
+    assert _totals(parse_junit_xml(plain)) == (1, 0, 0, 0, 1)
+
+
+def test_an_unknown_declared_encoding_is_an_input_error():
+    with pytest.raises(InvalidInput):
+        parse_junit_xml(b'<?xml version="1.0" encoding="ITF-8"?><testsuite/>')
+    with pytest.raises(InvalidInput):
+        parse_trx(b'<?xml version="1.0" encoding="UTF68"?><TestRun/>')
+
+
+def test_pathologically_nested_json_is_an_input_error_not_a_crash():
+    with pytest.raises(InvalidInput):
+        parse_jest_json(b"[" * 200_000)
+    parsed = parse_go_test_json('{"a":' + "[" * 200_000 + "\n" + GO_JSON)
+    assert parsed.totals.total == parse_go_test_json(GO_JSON).totals.total
+
+
+def test_mutated_reports_only_ever_raise_input_errors():
+    import random
+
+    rng = random.Random(20260925)
+    fixtures = [PYTEST_XUNIT2, CTEST_JUNIT, SUREFIRE_A, SUREFIRE_B, TRX,
+                JEST.encode() if isinstance(JEST, str) else JEST,
+                GO_JSON.encode(), LIBTEST.encode(), UNITTEST.encode()]
+    binary = (parse_junit_xml, parse_trx, parse_jest_json)
+    text = (parse_go_test_json, parse_libtest_text, parse_unittest_text)
+    started = time.monotonic()
+    for _ in range(1500):
+        data = bytearray(rng.choice(fixtures))
+        operation = rng.randrange(4)
+        if operation == 0 and data:
+            data = data[: rng.randrange(len(data))]
+        elif operation == 1:
+            for _ in range(rng.randrange(1, 16)):
+                if data:
+                    data[rng.randrange(len(data))] = rng.randrange(256)
+        elif operation == 2:
+            data = bytearray(rng.randrange(256) for _ in range(rng.randrange(256)))
+        else:
+            cut = rng.randrange(len(data) + 1)
+            data = data[:cut] + data[cut:cut + 40] * 3 + data[cut:]
+        for parser in binary:
+            try:
+                parser(bytes(data))
+            except InvalidInput:
+                pass
+        for parser in text:
+            parser(bytes(data).decode("utf-8", "replace"))
+    assert time.monotonic() - started < 60

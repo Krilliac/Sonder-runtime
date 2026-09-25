@@ -198,3 +198,37 @@ def test_old_run_dirs_are_pruned_to_the_retention_bound(tmp_path, root):
         launcher.start(_plan(tmp_path, root, "/usr/bin/make"), local_owner_context(correlation_id="c"),
                        "test-run-" + "4" * 32)
     assert sorted(item.name for item in root.iterdir()) == ["old3", "old4"]
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX FIFOs only")
+def test_a_fifo_planted_as_the_report_does_not_block_collection(root):
+    import threading
+
+    run = root / "r-fifo"
+    run.mkdir()
+    os.mkfifo(run / "junit.xml")
+    outcome = {}
+    worker = threading.Thread(
+        target=lambda: outcome.setdefault("r", ReportArtifactCollector(str(root)).collect(_meta(run))),
+        daemon=True)
+    worker.start()
+    worker.join(10)
+    assert not worker.is_alive(), "collecting a FIFO report blocked"
+    parsed, _, note = outcome["r"]
+    assert parsed is None and "no readable report" in note
+
+
+@pytest.mark.skipif(not hasattr(os, "link"), reason="hard links unavailable")
+def test_a_hard_link_planted_as_the_report_is_refused(tmp_path, root):
+    run = root / "r-link"
+    run.mkdir()
+    outside = tmp_path / "outside.xml"
+    outside.write_bytes(JUNIT)
+    os.link(outside, run / "junit.xml")
+    parsed, _, note = ReportArtifactCollector(str(root)).collect(_meta(run))
+    assert parsed is None and "no readable report" in note
+    # control: the same bytes as an ordinary file are collected
+    os.unlink(run / "junit.xml")
+    (run / "junit.xml").write_bytes(JUNIT)
+    parsed, _, _ = ReportArtifactCollector(str(root)).collect(_meta(run))
+    assert parsed is not None and parsed.totals.total == 2

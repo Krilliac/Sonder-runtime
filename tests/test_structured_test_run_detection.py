@@ -365,3 +365,32 @@ def test_the_inventory_path_is_launched_as_recorded_not_resolved(tmp_path, allow
     plan = planner.plan(TestRunRequest(project=str(project)), _context())
     assert plan.argv[0] == str(proxy)
     assert plan.checked_executables == (str(proxy),)
+
+
+def test_an_option_shaped_dotnet_project_file_never_reaches_argv(allowed, planner):
+    csproj = ('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><IsTestProject>true</IsTestProject>'
+              '</PropertyGroup></Project>')
+    project = allowed / "dn-evil"
+    project.mkdir()
+    (project / "-p:Evil=1.csproj").write_text(csproj)
+    with pytest.raises(InvalidInput) as caught:
+        _plan(planner, project, runner="dotnet")
+    assert _code(caught) == detection.NO_RUNNER_DETECTED
+    # control: an ordinary project file name is planned
+    good = allowed / "dn-good"
+    good.mkdir()
+    (good / "App.Tests.csproj").write_text(csproj)
+    plan = _plan(planner, good, runner="dotnet")
+    assert plan.argv[1:3] == ("test", "App.Tests.csproj")
+
+
+def test_a_deeply_nested_package_json_does_not_crash_planning(allowed, planner):
+    project = allowed / "js-nested"
+    project.mkdir()
+    (project / "package.json").write_text('{"scripts": {"test": "jest"}, "x": ' + "[" * 100_000 + "}")
+    (project / "package-lock.json").write_text("{}")
+    try:
+        plan = _plan(planner, project, runner="npm")
+    except InvalidInput:
+        return  # a refusal is fine; an uncaught RecursionError is not
+    assert plan.report_format.value == "text_digest"

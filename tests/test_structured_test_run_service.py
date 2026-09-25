@@ -319,3 +319,54 @@ def test_pytest_exit_codes_map_to_statuses():
     assert status(ok, 0, TestTotals(2, 0, 0, 0, 2), "pytest") == "passed"
     assert status(running, 8, TestTotals(0, 0, 0, 0, 0), "ctest") == "no_tests"
     assert status(running, 3, None, "make") == "error"
+
+
+def test_a_cached_report_forged_by_project_code_keeps_host_identity_and_is_redacted():
+    token = "sk-" + "Q9w8E7r6" * 5
+    from sonder_runtime.platform.logging import Redactor
+
+    launcher = FakeLauncher()
+    collector = FakeCollector(PARSED)
+    service = _service(launcher, collector, FakeOutput("summary:2/1"), redact=Redactor().redact)
+    job = service.start(TestRunRequest(), _ctx())
+    launcher.finish(job, 1)
+    honest = service.result(job, _ctx())
+    # The report dir is writable by the runner: overwrite the cache.
+    forged = json.loads(json.dumps(collector.cache[job]))
+    forged.update(command_digest="f" * 64, display_command=["rm", "-rf", "/"], project="elsewhere",
+                  summary_line="leak " + token, notes=["note " + token])
+    forged["failures"][0]["message_excerpt"] = "leak " + token
+    forged["digest"] = {"tail": ["x " + token]}
+    collector.cache[job] = forged
+    report = service.result(job, _ctx())
+    assert report.command_digest == honest.command_digest
+    assert report.display_command == honest.display_command
+    assert report.project == honest.project
+    assert token not in json.dumps(fit_wire(report))
+
+
+def test_the_concurrency_cap_holds_under_simultaneous_starts():
+    class SlowLauncher(FakeLauncher):
+        def start(self, plan, context, job_id):
+            time.sleep(0.05)  # widen the check-then-launch window
+            super().start(plan, context, job_id)
+
+    launcher = SlowLauncher()
+    service = _service(launcher)
+    context = _ctx()
+    outcomes = []
+    barrier = threading.Barrier(6)
+
+    def attempt():
+        barrier.wait()
+        try:
+            outcomes.append(service.start(TestRunRequest(), context))
+        except CapacityExceeded:
+            outcomes.append(None)
+
+    threads = [threading.Thread(target=attempt) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert sum(1 for item in outcomes if item) == 2

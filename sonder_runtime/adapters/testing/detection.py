@@ -373,7 +373,7 @@ class ProjectTestPlanner:
             return ""
         try:
             body = json.loads(raw.decode("utf-8-sig"))
-        except (UnicodeDecodeError, ValueError):
+        except (UnicodeDecodeError, ValueError, RecursionError):
             return ""
         scripts = body.get("scripts") if isinstance(body, dict) else None
         script = scripts.get("test") if isinstance(scripts, dict) else None
@@ -452,7 +452,10 @@ class ProjectTestPlanner:
             template = js_template(runner, self._package_test_tool(cwd))
         elif runner is TestRunner.DOTNET:
             project_file = detected[2] if len(detected) == 3 else ""
+            # A project file name is project-controlled text that lands in argv:
+            # it may not read as an option (``-p:...``, ``--...``).
             if not project_file or "/" in project_file or "\\" in project_file \
+                    or project_file.startswith(("-", "@")) \
                     or not _regular_file(cwd / project_file):
                 raise _error(NO_RUNNER_DETECTED, "the dotnet test project file is missing")
             placeholders["project_file"] = project_file

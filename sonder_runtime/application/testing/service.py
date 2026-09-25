@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -126,6 +127,7 @@ class TestRunService:
         self._redact = redact
         self._clock = clock
         self._max_concurrent = max_concurrent_per_principal
+        self._start_lock = threading.Lock()
 
     # -- planning and launch -------------------------------------------------
 
@@ -138,14 +140,17 @@ class TestRunService:
               plan: TestRunPlan | None = None) -> str:
         if context.expired or context.cancellation.cancelled:
             raise InvalidInput("the operation was cancelled or expired before the run started")
-        if self._launcher.running_for(context.principal_id) >= self._max_concurrent:
-            error = CapacityExceeded(
-                "at most %d test runs may run at once per caller" % self._max_concurrent)
-            error.code = TEST_RUN_BUSY
-            raise error
         plan = plan if plan is not None else self.plan(request, context)
         job_id = JOB_ID_PREFIX + uuid.uuid4().hex
-        self._launcher.start(plan, context, job_id)
+        # The cap check and the launch are one step: two concurrent calls by
+        # one caller must not both pass the check before either has started.
+        with self._start_lock:
+            if self._launcher.running_for(context.principal_id) >= self._max_concurrent:
+                error = CapacityExceeded(
+                    "at most %d test runs may run at once per caller" % self._max_concurrent)
+                error.code = TEST_RUN_BUSY
+                raise error
+            self._launcher.start(plan, context, job_id)
         return job_id
 
     def run(self, request: TestRunRequest, context: OperationContext, *,
@@ -247,8 +252,8 @@ class TestRunService:
         cached = self._collector.load_cached(meta)
         if cached is not None:
             try:
-                return report_from_wire(cached)
-            except (KeyError, TypeError, ValueError):
+                return self._from_cache(job_id, report_from_wire(cached), meta)
+            except (KeyError, TypeError, ValueError, RecursionError):
                 pass  # a corrupt cache is recomputed, never trusted
         if exit_code is None and isinstance(record.result, Mapping):
             code = record.result.get("exit_code")
@@ -318,6 +323,38 @@ class TestRunService:
         except OSError:
             report = replace(report, notes=(*report.notes, "report cache could not be written")[:MAX_NOTES])
         return report
+
+    def _from_cache(self, job_id: str, report: TestReport, meta: Mapping[str, str]) -> TestReport:
+        """A cached report with host-owned identity restored and text re-redacted.
+
+        The cache lives in the run's report directory, which the runner (project
+        code) can write to; its identity fields therefore come from the durable
+        job metadata, and every text field passes the redactor again.
+        """
+        return replace(
+            report,
+            runner=str(meta.get("runner", "")),
+            job_id=job_id,
+            command_digest=str(meta.get("command_digest", "")),
+            display_command=self._display(meta),
+            project=str(meta.get("cwd_label", "")),
+            selector=str(meta.get("selector", "")),
+            failures=tuple(self._redact_failure(item) for item in report.failures),
+            summary_line=one_line(self._redact(report.summary_line), MAX_SUMMARY_CHARS),
+            digest=self._redact_value(report.digest, 0) if report.digest is not None else None,
+            notes=tuple(one_line(self._redact(note), 200) for note in report.notes)[:MAX_NOTES],
+        )
+
+    def _redact_value(self, value: Any, depth: int) -> Any:
+        if isinstance(value, str):
+            return self._redact(value)
+        if depth >= 8:
+            return None
+        if isinstance(value, Mapping):
+            return {str(key): self._redact_value(item, depth + 1) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._redact_value(item, depth + 1) for item in value]
+        return value
 
     @staticmethod
     def _plan_notes(meta: Mapping[str, str]) -> list[str]:

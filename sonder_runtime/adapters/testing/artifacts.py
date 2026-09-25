@@ -36,6 +36,7 @@ MAX_CACHE_BYTES = 1024 * 1024
 CACHE_NAME = "report.json"
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _BINARY = getattr(os, "O_BINARY", 0)
+_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
 
 def _is_reparse(path: Path) -> bool:
@@ -57,13 +58,16 @@ def read_bounded(path: Path, limit: int, *, not_before: float | None = None) -> 
     if _is_reparse(path):
         return None
     try:
-        descriptor = os.open(str(path), os.O_RDONLY | _NOFOLLOW | _BINARY)
+        # O_NONBLOCK: a FIFO planted by project code must not block the open.
+        descriptor = os.open(str(path), os.O_RDONLY | _NOFOLLOW | _NONBLOCK | _BINARY)
     except OSError:
         return None
     with os.fdopen(descriptor, "rb") as handle:
         info = os.fstat(handle.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
             return None
+        if info.st_nlink > 1:
+            return None  # a hard link planted by project code may alias any file
         if not_before is not None and info.st_mtime < not_before:
             return None
         data = handle.read(limit + 1)
@@ -178,7 +182,7 @@ class ReportArtifactCollector:
             return None
         try:
             body = json.loads(data.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
+        except (UnicodeDecodeError, ValueError, RecursionError):
             return None
         if not isinstance(body, dict) or body.get("job_id") != plan_meta.get("job_id"):
             return None
