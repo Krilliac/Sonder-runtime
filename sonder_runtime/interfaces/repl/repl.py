@@ -1562,6 +1562,107 @@ class _WorkingIndicator:
             pass
 
 
+_TODO_USAGE = (
+    "usage: /todo [list] | /todo add <title> | /todo start <id> | "
+    "/todo done <id> | /todo block <id> | /todo show <id>\n"
+    "       /todo plan <title> | <step> | <step> ...\n"
+    "       /todo progress | /todo delete <id> | "
+    "/todo depend <id> <depends-on-id>"
+)
+_RUN_USAGE = (
+    "usage: /run [seconds]  (runs the previous fenced code block, not a"
+    " filename or shell command)"
+)
+# ``/todo <action>`` forms whose branch needs a non-empty remainder, with the
+# usage it prints without one.
+_TODO_ID_USAGE = {
+    "done": "usage: /todo done <task-id>", "complete": "usage: /todo done <task-id>",
+    "finish": "usage: /todo done <task-id>",
+    "start": "usage: /todo start <task-id>", "doing": "usage: /todo start <task-id>",
+    "block": "usage: /todo block <task-id>", "blocked": "usage: /todo block <task-id>",
+    "show": "usage: /todo show <task-id>", "view": "usage: /todo show <task-id>",
+    "delete": "usage: /todo delete <task-id>", "rm": "usage: /todo delete <task-id>",
+    "remove": "usage: /todo delete <task-id>",
+}
+_TODO_KNOWN_ACTIONS = frozenset(_TODO_ID_USAGE) | {
+    "list", "ls", "add", "create", "new", "plan", "progress", "status",
+    "depend", "dep", "blockedby",
+}
+_MCP_ACTIONS = frozenset({"status", "show", "audit", "list", "refresh", "help", "?"})
+
+
+def _is_int(text):
+    try:
+        int(text)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _branch_usage_error(cmd, arg):
+    """The usage text a named branch answers for ``arg`` without any tool call.
+
+    The permission gate grades a command by the tools its branch can reach,
+    so it used to run before the branch's own grammar: a bare ``/register``
+    asked for approval of a dangerous command and then printed usage, and
+    ``/todo bogus`` or ``/fact forget`` were refused as destructive instead of
+    being told how to type the command.  This mirrors exactly the argument
+    checks those branches make before calling anything, so a malformed line is
+    answered here and never reaches the gate.  It is pure: no tool, no state,
+    and an empty result means "let the gate and the branch decide".
+    """
+    command = str(cmd or "").strip().lower()
+    raw = str(arg or "")
+    text = raw.strip()
+    if command == "/register":
+        if len(raw.split(None, 1)) != 2:
+            return "usage: /register <username> <password>"
+    elif command in ("/run", "/runwindow", "/runnew", "/runconsole", "/runproject"):
+        if text and not _is_int(text):
+            return _RUN_USAGE
+    elif command in ("/train", "/learn"):
+        if text and not _is_int(text):
+            return "usage: /train [N]  (N must be an integer, default %d)" % TRAIN_DEFAULT_N
+    elif command == "/fact":
+        if not text:
+            return "usage: /fact <text> | /fact forget <id> confirm"
+        lowered = text.lower()
+        if lowered == "forget" or lowered.startswith("forget "):
+            bits = text.split()
+            if len(bits) != 3 or bits[2].lower() != "confirm":
+                return "usage: /fact forget <id> confirm"
+    elif command in ("/todo", "/task", "/tasks"):
+        if not text:
+            return ""
+        action, _, rest = text.partition(" ")
+        action = action.lower()
+        if action not in _TODO_KNOWN_ACTIONS:
+            return _TODO_USAGE
+        if action in _TODO_ID_USAGE and not rest.strip():
+            return _TODO_ID_USAGE[action]
+        if action == "plan":
+            steps = [part.strip() for part in rest.split("|") if part.strip()]
+            if len(steps) < 2:
+                return "usage: /todo plan <title> | <step> | <step> ..."
+        if action in ("depend", "dep", "blockedby") and len(rest.split()) != 2:
+            return "usage: /todo depend <task-id> <depends-on-id>"
+    elif command in ("/mcp", "/convergence"):
+        action = text.lower()
+        if action and action not in _MCP_ACTIONS:
+            return "usage: /mcp [status|refresh|help]  (unknown MCP action '%s')" % action
+    elif command in ("/write", "/append"):
+        if len(raw.split(None, 1)) != 2:
+            return "usage: %s <path> <text>" % command
+    elif command == "/edit":
+        pieces = raw.split("|", 2)
+        if len(pieces) != 3 or not pieces[0].strip():
+            return "usage: /edit <path>|<old>|<new>"
+    elif command in ("/read", "/mkdir", "/delete"):
+        if not text:
+            return "usage: %s <path>" % command
+    return ""
+
+
 def _workspace_scoped_path(workspace, raw):
     """Resolve a file-command path against the selected ``/workspace``.
 
@@ -2011,7 +2112,7 @@ def _parse_run_timeout(arg):
     try:
         value = int(arg)
     except ValueError:
-        print("usage: /run [seconds]  (runs the previous fenced code block, not a filename or shell command)")
+        print(_RUN_USAGE)
         return None
     return grounding.clamp_timeout(value)
 
@@ -2776,6 +2877,14 @@ def main(*, machine_output=False):
                     # One choke point for every hand-written branch below, including
                     # the ones forwarded to server.control_command. Commands handled by
                     # _run_catalogued (the `else`) are gated there instead.
+                    # A line the branch can only answer with its usage text reaches
+                    # no tool, so answer it before the gate: nobody should be asked to
+                    # approve (or be refused) a "dangerous" command that would only
+                    # have printed how to use it.
+                    usage = _branch_usage_error(cmd, arg)
+                    if usage:
+                        print(usage)
+                        continue
                     may_run, refusal = _named_command_gate(cmd, arg)
                     if not may_run:
                         box = _box_chars()
@@ -2960,13 +3069,7 @@ def main(*, machine_output=False):
                                 else:
                                     print("usage: /todo depend <task-id> <depends-on-id>")
                             else:
-                                print(
-                                    "usage: /todo [list] | /todo add <title> | /todo start <id> | "
-                                    "/todo done <id> | /todo block <id> | /todo show <id>\n"
-                                    "       /todo plan <title> | <step> | <step> ...\n"
-                                    "       /todo progress | /todo delete <id> | "
-                                    "/todo depend <id> <depends-on-id>"
-                                )
+                                print(_TODO_USAGE)
                     elif cmd == "/quality":
                         print(server.memory_quality_report())
                     elif cmd == "/qualityfix":
@@ -3316,7 +3419,7 @@ def main(*, machine_output=False):
                         a = (arg or "").strip()
                         if not a:
                             print("usage: /fact <text> | /fact forget <id> confirm")
-                        elif a.lower().startswith("forget "):
+                        elif a.lower() == "forget" or a.lower().startswith("forget "):
                             bits = a.split()
                             if len(bits) != 3 or bits[2].lower() != "confirm":
                                 print("usage: /fact forget <id> confirm")

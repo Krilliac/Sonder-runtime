@@ -96,6 +96,21 @@ versioned and additive-only. Interactive terminals ignore the flag.
 - Raw composer history (Up/Down, Ctrl+R) is process-local and never
   persisted; credential-bearing lines are excluded (`_history_safe()`).
 
+## Usage errors before the permission gate
+
+- A line a command can only answer with its usage text (`/register` with
+  no password, `/todo bogus`, `/fact forget` without `<id> confirm`,
+  `/mcp bogus`, `/run abc`, a bare `/read`) prints that usage without
+  reaching the permission gate, so nobody is asked to approve, or is
+  refused, a command that would not have run anything
+  (`_branch_usage_error()` in `interfaces/repl/repl.py`). Well-formed
+  lines are gated exactly as before.
+- Catalogued `/tool` lines reject positional words beyond what the
+  command's parameters take (`/status detail` answers
+  `/status: unexpected argument 'detail'. usage: /status`). The excess
+  words used to be dropped silently. A single free-text parameter still
+  takes the whole remainder.
+
 ## Workspace scope for file commands
 
 - With a `/workspace` selected, `/files`, `/read`, `/write`, `/append`,
