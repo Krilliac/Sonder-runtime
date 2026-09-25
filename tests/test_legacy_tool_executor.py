@@ -198,6 +198,22 @@ def test_web_fetch_requires_context_cloud_consent(executor):
     assert result.error_code == "PermissionError"
 
 
+@pytest.mark.parametrize("call", [
+    ToolCall("web_fetch", {"url": "https://example.test", "max_chars": 1200}),
+    ToolCall("web_search", {"query": "sonder runtime"}),
+])
+def test_network_tool_refusal_is_a_tool_result_not_a_fault(executor, monkeypatch, call):
+    # With consent given but SONDER_WEB_TOOLS off, the adapters raise
+    # RuntimeError; native MCP answered that with -32603 "internal MCP
+    # handler error" instead of the refusal.
+    monkeypatch.setenv("SONDER_WEB_TOOLS", "0")
+    context = local_owner_context(correlation_id="req_web", cloud_allowed=True)
+    result = executor.execute(call, context)
+    assert result.ok is False
+    assert result.error_code == "RuntimeError"
+    assert "disabled by SONDER_WEB_TOOLS" in result.output
+
+
 def test_guard_rejection_surfaces_as_not_ok(executor):
     # Escaping the workspace root must fail closed as ok=False, not raise.
     result = executor.execute(

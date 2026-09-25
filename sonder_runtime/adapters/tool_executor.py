@@ -14,6 +14,11 @@ from ..application.ports.tool_executor import ToolCall, ToolResult
 from .filesystem.typed import GuardedFileSystemAdapter
 
 
+_NETWORK_REFUSAL_TOOLS = frozenset({
+    "web_fetch", "web_search", "weather_lookup", "approximate_location_lookup",
+})
+
+
 class ToolExecutorAdapter:
     """Execute the supported application tools through packaged guards."""
 
@@ -287,6 +292,13 @@ class ToolExecutorAdapter:
             # real fault and propagates.
             report = getattr(exc, "report", None)
             if not isinstance(report, dict):
+                if call.tool in _NETWORK_REFUSAL_TOOLS:
+                    # The network adapters refuse with RuntimeError when web
+                    # tools are disabled or every provider failed: an
+                    # operator-visible outcome, not a runtime fault.
+                    return ToolResult(
+                        ok=False, error_code=type(exc).__name__, output=str(exc),
+                    )
                 raise
             return ToolResult(
                 ok=False, error_code=type(exc).__name__,
