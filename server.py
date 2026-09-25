@@ -19855,10 +19855,28 @@ def _agent_checklist_mark(checklist_id, states, item, status, note):
         states[item] = status
 
 
+_AGENT_CHECKLIST_ITEMS = 4
+_AGENT_CHECKLIST_TERMINAL = frozenset(("done", "blocked", "canceled"))
+
+
 def _agent_checklist_fail(checklist_id, states, reason, item=1):
-    """Leave persistent, honest task state when an agent exits early."""
+    """Leave persistent, honest task state when an agent exits early.
+
+    The failing step is ``blocked`` and the report step ``done``.  Every other
+    step this run left open -- an inspection still ``in_progress``, a
+    validation still ``pending`` -- is closed as ``canceled``: the run will
+    never finish it, and a row left open under a blocked parent read in
+    ``/tasks`` like live work that was still going.
+    """
     _agent_checklist_mark(checklist_id, states, item, "blocked", reason)
     _agent_checklist_mark(checklist_id, states, 4, "done", "failure included in end report")
+    for other in range(1, _AGENT_CHECKLIST_ITEMS + 1):
+        if other in (item, 4) or states.get(other) in _AGENT_CHECKLIST_TERMINAL:
+            continue
+        _agent_checklist_mark(
+            checklist_id, states, other, "canceled",
+            "not completed: the agent stopped early (%s)" % str(reason or "failure")[:200],
+        )
 
 
 _AGENT_MODEL_FAILURE = threading.local()

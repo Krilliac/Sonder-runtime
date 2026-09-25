@@ -8,7 +8,10 @@ A Claude-style local loop: the model chooses one JSON tool call at a time,
 receives the observation, and continues until it returns
 `{"final": "..."}` or hits `max_steps`. It enforces:
 
-- a **guaranteed checklist** (inspect → implement → validate → report);
+- a **guaranteed checklist** (inspect → implement → validate → report).
+  If the run stops early, the failing step is `blocked`, the report step is
+  `done`, and any step it left open is closed as `canceled`, so `/tasks`
+  never shows an abandoned attempt as live work;
 - **inspect-before-mutate** (no file change before workspace evidence);
 - **validate-after-mutate** (a grounded check must pass before final);
 - **negative-claim review** ("there are no X files" triggers a re-check);
