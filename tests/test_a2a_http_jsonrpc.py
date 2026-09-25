@@ -161,3 +161,64 @@ def test_default_application_handler_rejects_non_text_a2a_message():
         assert "text message parts" in str(error)
     else:
         raise AssertionError("non-text A2A message must be rejected")
+
+
+class _DurableApplication:
+    """The production job service, which raises NotFound for a missing job."""
+
+    def __init__(self, tmp_path):
+        from sonder_runtime.adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
+        from sonder_runtime.application.capabilities.jobs import JobRegistryService
+
+        self.jobs = JobRegistryService(SQLiteDurableJobRegistry(tmp_path / "jobs.db"))
+        self.chat_calls = []
+        application = self
+
+        class _CountingChat(_Chat):
+            def complete(self, command, context):
+                application.chat_calls.append(command.content)
+                return super().complete(command, context)
+
+        self.chat = _CountingChat()
+
+    def job_service(self):
+        return self.jobs
+
+    def agent_registry(self):
+        return _Registry()
+
+
+def _rpc(handler, method, params):
+    return dispatch_a2a_jsonrpc_route(
+        handler, "POST", "/a2a",
+        {"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+    ).body
+
+
+def test_send_message_admits_a_new_task_on_the_durable_job_service(tmp_path):
+    """A first SendMessage has no job yet; that is admission, not an error.
+
+    The production job service raises NotFound for an unknown job.  The
+    handler treated that as an internal failure, so every new A2A message
+    answered -32603 without ever reaching chat.
+    """
+    application = _DurableApplication(tmp_path)
+    handler = build_application_a2a_handler(application, base_url="https://sonder.test")
+    params = {"message": {"messageId": "msg-durable", "role": "ROLE_USER",
+                          "parts": [{"text": "hello"}]}}
+
+    first = _rpc(handler, "SendMessage", params)
+    assert "error" not in first, first
+    assert first["result"]["task"]["status"]["state"] == "TASK_STATE_COMPLETED"
+    replay = _rpc(handler, "SendMessage", params)
+    assert replay["result"] == first["result"]
+    assert application.chat_calls == ["hello"]
+    task_id = first["result"]["task"]["id"]
+    assert _rpc(handler, "GetTask", {"id": task_id})["result"] == first["result"]
+
+
+def test_unknown_task_is_reported_as_task_not_found(tmp_path):
+    handler = build_application_a2a_handler(_DurableApplication(tmp_path), base_url="https://sonder.test")
+    for method in ("GetTask", "CancelTask"):
+        body = _rpc(handler, method, {"id": "missing-task"})
+        assert body["error"] == {"code": -32001, "message": "task not found"}, (method, body)

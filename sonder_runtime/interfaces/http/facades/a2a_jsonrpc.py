@@ -9,7 +9,8 @@ from typing import Any, Mapping
 from ....application.chat.handle_chat import ChatCommand
 from ....application.context import local_owner_context
 from ....application.ports.jobs import JobIdentity, JobStatus
-from ...a2a.jsonrpc import A2AJsonRpcTransport
+from ....application.errors import NotFound
+from ...a2a.jsonrpc import A2AJsonRpcTransport, A2ATaskNotFound
 from .a2a import A2AAgentCardFacade
 
 
@@ -63,9 +64,17 @@ def build_application_a2a_handler(
         return None
     card_facade = card_facade or A2AAgentCardFacade()
 
+    def find(job_id):
+        # The durable job service raises NotFound for an unknown id; a
+        # missing task is an ordinary outcome here, not a handler failure.
+        try:
+            return jobs().get(job_id)
+        except NotFound:
+            return None
+
     def task_payload(record):
         if record is None:
-            raise ValueError("task not found")
+            raise A2ATaskNotFound()
         state = {
             "pending": "TASK_STATE_WORKING",
             "claimed": "TASK_STATE_WORKING",
@@ -129,7 +138,7 @@ def build_application_a2a_handler(
             raise ValueError("A2A chat admission is not configured")
         job_id = "a2a-" + hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:32]
         service = jobs()
-        existing = service.get(job_id)
+        existing = find(job_id)
         if existing is not None:
             return {"task": task_payload(existing)}
         identity = JobIdentity(
@@ -184,7 +193,7 @@ def build_application_a2a_handler(
             task_id = params.get("id")
             if not isinstance(task_id, str) or not task_id.strip():
                 raise ValueError("task id is required")
-            return {"task": task_payload(jobs().get(task_id))}
+            return {"task": task_payload(find(task_id))}
         if method == "ListTasks":
             page_size = params.get("pageSize", 100)
             if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 100:
@@ -200,9 +209,12 @@ def build_application_a2a_handler(
             task_id = params.get("id")
             if not isinstance(task_id, str) or not task_id.strip():
                 raise ValueError("task id is required")
-            records = jobs().cancel(task_id, reason="A2A cancellation")
+            try:
+                records = jobs().cancel(task_id, reason="A2A cancellation")
+            except NotFound:
+                raise A2ATaskNotFound() from None
             if not records:
-                raise ValueError("task cancellation returned no record")
+                raise A2ATaskNotFound()
             return {"task": task_payload(records[-1])}
         raise ValueError(f"A2A method {method} is not configured")
 
