@@ -2991,12 +2991,14 @@ def refresh_goal_proposals(scope: str = "") -> dict:
     return {"proposed": proposed, "skipped": skipped, "error": ""}
 
 
-def _goal_command(arg: str, request_owner: str = "") -> str:
+def _goal_command(arg: str, project: str = "", request_owner: str = "") -> str:
     """User-facing goal bookkeeping.
 
     Slash commands originate only from the user's own chat input, so this
     layer is authorized to pass actor="user"; goal_store independently
     enforces that closure and adoption can never come from model output.
+    ``project`` is the session project, used to scope a ``set --auto`` run the
+    same way ``/autopilot --goal`` scopes one.
     """
     import goal_store
 
@@ -3039,7 +3041,7 @@ def _goal_command(arg: str, request_owner: str = "") -> str:
                     lines.append("plan: %d steps decomposed" % plan_result["step_count"])
             if auto:
                 ap = _composition.goal_to_autopilot(
-                    goal, project=_resolve_project(project) if 'project' in dir() else "",
+                    goal, project=_resolve_project(project) or "",
                     request_owner=request_owner,
                 )
                 if ap.get("error"):
@@ -3082,7 +3084,7 @@ def _goal_command(arg: str, request_owner: str = "") -> str:
                 "/goal decline <id>)"
             )
         if action == "adopt":
-            return "adopted\n" + _fmt(goal_store.adopt(rest, actor="user"))
+            return "adopted\n" + _format_goal(goal_store.adopt(rest, actor="user"))
         if action == "decline":
             goal = goal_store.decline(rest, actor="user")
             return "declined proposal %s" % goal["id"]
@@ -3475,7 +3477,9 @@ def control_command(prompt: str, history=None, session="", project="",
     if cmd == "/approve":
         return _approve_command(arg, operator_approved=bool(operator_approved))
     if cmd in ("/goal", "/goals"):
-        return _goal_command(arg, request_owner=autopilot_request_owner or "")
+        return _goal_command(
+            arg, project=project, request_owner=autopilot_request_owner or "",
+        )
     if cmd in ("/mission",):
         return _mission_command(arg, project=project, request_owner=autopilot_request_owner or "")
     if cmd in ("/ensemble",):
@@ -17477,7 +17481,6 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
     return ""
 
 
-_AGENT_DECISION_REPAIR_LIMIT = 2
 def _agent_generate_decision(
     gen,
     step_prompt,
