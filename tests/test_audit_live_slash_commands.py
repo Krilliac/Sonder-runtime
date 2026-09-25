@@ -60,6 +60,8 @@ def test_handler_failures_are_the_dispatcher_error_forms():
         "file_read failed: OSError: disk gone",
         "/file_read failed: boom",
         "loop is catalogued but not callable here.",
+        "task operation failed: sqlite3.OperationalError: locked",
+        "autopilot request failed: autopilot accepts local tiers only",
         "report\nTraceback (most recent call last):\n  File \"x\", line 1",
     ):
         assert _MODULE.classify(200, _reply(text)) == "handler_failure", text

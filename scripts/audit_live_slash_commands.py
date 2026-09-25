@@ -223,12 +223,15 @@ def _content(body: str) -> str:
     return body
 
 
-# The catalogued dispatcher's own error replies: ``<tool> failed: ...`` and
-# ``<tool> is catalogued but not callable here.``  Matched only at the start of
-# the reply, because a report may legitimately quote those words in prose
+# Handler error replies: the catalogued dispatcher's ``<tool> failed: ...`` and
+# ``<tool> is catalogued but not callable here.``, and branch errors such as
+# ``task operation failed: ...`` or ``autopilot request failed: ...`` (a short
+# subject of up to four words).  Matched only at the start of the reply,
+# because a report may legitimately quote those words in prose
 # (``/system_profile_text`` says "when /run reports ... a traceback").
 _HANDLER_FAILURE = re.compile(
-    r"/?[\w.-]+ (?:failed: |is catalogued but not callable)", re.IGNORECASE,
+    r"/?[\w.-]+(?: [\w.-]+){0,3} (?:failed: |is catalogued but not callable)",
+    re.IGNORECASE,
 )
 
 
