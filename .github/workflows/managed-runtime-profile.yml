@@ -32,8 +32,14 @@ jobs:
           cache-dependency-path: |
             requirements-dev.txt
             requirements-runtime.txt
+      # uv installs the same requirement file into setup-python's interpreter
+      # (--system), where the pip install used to land, several times faster.
       - name: Install focused test dependencies
-        run: python -m pip install -r requirements-dev.txt
+        # pwsh does not stop on a failing native command; check each one.
+        run: |
+          python -m pip install uv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv pip install -r requirements-dev.txt --system
       - name: Provision dedicated managed runtime through canonical installer
         shell: pwsh
         run: |

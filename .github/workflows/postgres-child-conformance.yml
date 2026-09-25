@@ -36,7 +36,11 @@ jobs:
             requirements-runtime.txt
             requirements-postgres.txt
       - name: Install pinned Python drivers and test dependencies
-        run: python -m pip install -r requirements-dev.txt -r requirements-postgres.txt
+        # uv installs the same requirement files into setup-python's
+        # interpreter (--system), where the pip install used to land.
+        run: |
+          python -m pip install uv
+          uv pip install -r requirements-dev.txt -r requirements-postgres.txt --system
       - name: Install PostgreSQL 18 from the official PGDG repository
         run: |
           sudo apt-get update

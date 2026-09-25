@@ -13,8 +13,12 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
+      # uv installs the same requirement file into setup-python's interpreter
+      # (--system), where the pip install used to land, several times faster.
       - name: Install test dependencies
-        run: python -m pip install -r requirements-dev.txt
+        run: |
+          python -m pip install uv
+          uv pip install -r requirements-dev.txt --system
       - name: Build a hermetic, locally pinned scratch fixture
         shell: bash
         run: |

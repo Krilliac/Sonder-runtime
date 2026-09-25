@@ -39,8 +39,12 @@ jobs:
           cache-dependency-path: |
             requirements-dev.txt
             requirements-runtime.txt
+      # uv installs the same requirement file into setup-python's interpreter
+      # (--system), where the pip install used to land, several times faster.
       - name: Install deps (stdlib core + mcp for server import)
-        run: python -m pip install -r requirements-dev.txt
+        run: |
+          python -m pip install uv
+          uv pip install -r requirements-dev.txt --system
       # The release workflow calls this same job at the tag's exact SHA. A
       # broken runtime smoke or mismatched version triad must block publication.
       - name: Run tag-time runtime smoke
@@ -131,9 +135,15 @@ jobs:
           python-version: "3.12"
       - name: Install dependencies in a fresh Windows venv
         id: install-focused-venv
+        # The stdlib still creates the venv (so it keeps its own pip); uv only
+        # performs the requirement install, into that venv's interpreter.
+        # pwsh does not stop on a failing native command; check each one.
         run: |
           python -m venv "$env:RUNNER_TEMP\sonder-ci-venv"
-          & "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe" -m pip install -r requirements-dev.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip install uv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv pip install -r requirements-dev.txt --python "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe"
       - name: Exercise managed owner, artifact verifier, and lifecycle regressions
         run: >-
           & "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe" -m pytest -q
