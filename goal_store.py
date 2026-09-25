@@ -36,6 +36,7 @@ import time
 import uuid
 
 import sonder_paths
+from sonder_runtime.platform.private_files import prepare_private_sqlite
 
 MAX_OBJECTIVE_CHARS = 8_000
 MAX_CRITERION_CHARS = 500
@@ -87,6 +88,8 @@ def _connection():
     if conn is not None:
         with _suppress_sqlite():
             conn.close()
+    # Owner-only store (and WAL/SHM), like every packaged SQLite store.
+    prepare_private_sqlite(path)
     conn = sqlite3.connect(path, timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")

@@ -100,6 +100,17 @@ of the model — an uncensored or "abliterated" model changes what it will
   credentials.
 - **Recall is project-scoped**; cross-project recall requires an explicit
   override.
+- **Owner-only state on POSIX** (`sonder_runtime/platform/private_files.py`):
+  the state home (`SONDER_HOME`) is created `0700`, and every SQLite store
+  opened through the connection factory (`memory.db`, `sessions.db`,
+  `approvals.db`, `goals.db`, ...) plus its `-wal`/`-shm`/`-journal` sidecars
+  and the tool-audit JSONL are created `0600`. An existing home or store left
+  group/world-readable by an older build is tightened when it is next opened,
+  but only if the current user owns it; symlinks, other accounts' files, sticky
+  shared directories (`/tmp`), `/` and the user's own home directory are never
+  changed, and no mode is ever widened. Windows is unchanged: the default home
+  under `%LOCALAPPDATA%` inherits a user-only ACL, and a custom `SONDER_HOME`
+  there needs an equivalent ACL set by the operator.
 
 ## Update trust
 

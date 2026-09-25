@@ -1026,7 +1026,7 @@
       ]
     },
     {
-      "file_count": 44,
+      "file_count": 45,
       "name": "platform",
       "python_files": [
         "sonder_runtime/platform/__init__.py",
@@ -1058,6 +1058,7 @@
         "sonder_runtime/platform/npu_policy.py",
         "sonder_runtime/platform/paths.py",
         "sonder_runtime/platform/private_cot_policy.py",
+        "sonder_runtime/platform/private_files.py",
         "sonder_runtime/platform/process.py",
         "sonder_runtime/platform/reasoning_policy.py",
         "sonder_runtime/platform/runtime_summary.py",
