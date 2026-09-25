@@ -31,12 +31,10 @@ import contextvars
 import difflib
 import logging
 import os
-import posixpath
-import secrets
 import stat
 import threading
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
@@ -49,6 +47,15 @@ from ..adapters.build.executor import (
     os_error_text,
 )
 from ..adapters.security.permission_evaluator import SURFACES
+from ..application.build.grants import (
+    FILE_TOOLS,
+    GRANT_SOURCE_PREFIX,
+    BuildFixGrantBook,
+    BuildFixGrantSpec,
+    diff_files_and_lines,
+    grant_token_from,
+    restore_plan_digest,
+)
 from ..application.context import LOCAL_OWNER
 from ..application.tools.typed_gateway import default_tool_context
 from ..domain.common.errors import Forbidden, SonderError
@@ -56,17 +63,10 @@ from .developer_tools import ToolResolver
 
 logger = logging.getLogger(__name__)
 
-GRANT_POLICY_PREFIX = "build_fix_grant:"
-GRANT_TOKEN_PREFIX = "bfg-"
-GRANT_TOOLS = frozenset({"text_patch", "write_file", "read_file"})
-MAX_GRANTS = 64
+GRANT_POLICY_PREFIX = GRANT_SOURCE_PREFIX
 MAX_PENDING_PLANS = 64
 CLAIM_WINDOW_SECONDS = 300.0
-MAX_GRANT_SECONDS = 14_400 + 600
-DEFAULT_MAX_FILES = 6
-DEFAULT_MAX_CHANGED_LINES = 400
 MAX_GRANT_FILE_BYTES = 2 * 1024 * 1024
-MAX_PATCH_CHARS = 1_000_000
 MAX_PROFILES_BYTES = 256 * 1024
 BRIEF_MAX_CHARS = 480  # environment_probe caps the capability summary at 480
 BUILD_BRIEF_MAX_CHARS = 220
@@ -97,209 +97,134 @@ def _realpath_unchanged(path: str) -> str | None:
     return real
 
 
-def _value(obj: Any, name: str, default: Any = None) -> Any:
-    if isinstance(obj, Mapping):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
-
-
 @dataclass
-class _Grant:
-    """One minted build-fix grant (process memory only, never persisted)."""
+class _Pending:
+    """An approval the evaluator recorded for one request, not yet claimed."""
 
-    token: str
+    kind: str  # "fix" | "restore"
     principal_id: str
-    request_id: str
     plan_digest: str
-    project_root: str
-    build_dir: str
-    scope: Any
-    max_files: int
-    max_changed_lines: int
-    expires_at: float
     minted_at: float
-    network: str
-    template_ids: frozenset[str]
-    target: str
-    config: str
-    platform: str
-    world: str
-    job_id: str = ""
-    claimed: bool = False
-    revoked: bool = False
-    files_used: set[str] = field(default_factory=set)
-    lines_used: int = 0
-
-    @property
-    def policy_match(self) -> str:
-        return GRANT_POLICY_PREFIX + self.plan_digest
+    plan: Any = None
 
 
-class BuildFixGrantRegistry:
-    """Mint, bind, match and expire build-fix grants (F1).
+class _OutOfScope(Exception):
+    pass
 
-    Life of a grant:
 
-    1. The permission evaluator allows ``build_fix`` (an operator answered the
-       console prompt, an allow rule matched, ``auto`` mode, or a one-shot
-       approval of exactly this planned call) and ``mint``s a grant for that
-       request, from the fix plan's ``grant_spec`` and ``scope``.
-    2. The executor ``claim``s it for the same request and principal, and
-       ``bind``s it to the job it starts. An unclaimed grant dies after
-       ``CLAIM_WINDOW_SECONDS``.
-    3. The fix loop's typed writes carry the token as the request's
-       ``approval_token``; ``authorize_granted`` admits a write only when the
-       principal, job liveness, path and budgets all match. Anything else is
-       ``""`` -- normal grading, which refuses an unattended write.
-    4. The grant ends when its job ends (``job_active``), at ``expires_at``,
-       or on ``revoke``/``revoke_job``.
+class BuildFixGrantRegistry(BuildFixGrantBook):
+    """The evaluator side of the build-fix grant (F1), over the lane-B2 book.
+
+    The policy is ``application.build.grants``: the grant value, its spec and
+    the pure scope, template and budget matching. This class adds what only
+    the host can check and the request binding of the permission evaluator:
+
+    1. ``mint``: the evaluator allowed one ``build_fix`` call (console answer,
+       allow rule, ``auto`` or a one-shot approval of exactly this planned
+       call); the approved plan is parked under that request id.
+    2. ``claim``: the executor serving the same request (and principal) takes
+       the plan once, within ``CLAIM_WINDOW_SECONDS``, and the book records
+       the approval of its ``plan_digest``. ``BuildFixService.start(plan=)``
+       then ``issue``s the grant for its job, consuming the approval; the
+       service revokes it when the job ends. A start that fails ``withdraw``s
+       the approval, so one approval yields at most one grant.
+    3. ``authorize_granted``: a typed ``read_file``/``text_patch``/
+       ``write_file`` call carrying ``grant_carrier(token)`` is admitted only
+       when the book covers it (principal, expiry, edit scope, budgets) *and*
+       the host checks hold: no links in the path, an existing bounded
+       regular file, the build directory excluded, no guard knobs, not
+       ``plan`` mode, and at most ``max_changed_lines`` per write. Anything
+       else is ``""`` -- normal grading, which refuses an unattended write.
+       Deny rules and fences are checked after a match by the evaluator's
+       preflight and still refuse.
+
+    ``build_fix_restore`` approvals follow the same path (``mint_restore`` /
+    ``claim_restore``), bound to ``restore_plan_digest(job_id, files)``.
     """
 
     def __init__(self, *, clock: Callable[[], float] = time.time,
-                 current_mode: Callable[[], str] | None = None,
-                 job_active: Callable[[str, str], bool] | None = None) -> None:
-        self._clock = clock
+                 current_mode: Callable[[], str] | None = None) -> None:
+        super().__init__(clock=clock)
         self._current_mode = current_mode
-        self._job_active = job_active
-        self._lock = threading.Lock()
-        self._grants: dict[str, _Grant] = {}
+        self._pending_lock = threading.Lock()
+        self._pending: dict[str, _Pending] = {}
 
-    def set_job_liveness(self, job_active: Callable[[str, str], bool] | None) -> None:
-        """``job_active(principal_id, job_id)``: the fix job is still running."""
-        self._job_active = job_active
+    # -- approvals -------------------------------------------------------------------
 
-    # -- minting ---------------------------------------------------------------------
+    def _park(self, request_id: str, pending: _Pending) -> None:
+        with self._pending_lock:
+            self._purge_pending_locked(pending.minted_at)
+            self._pending.pop(request_id, None)
+            while len(self._pending) >= MAX_PENDING_PLANS:
+                self._pending.pop(next(iter(self._pending)))
+            self._pending[request_id] = pending
 
-    def mint(self, *, principal_id: str, request_id: str, plan: Any) -> str:
-        """A new grant for one approved ``build_fix`` request; returns its token."""
-        spec = _value(plan, "grant_spec")
-        scope = _value(plan, "scope")
-        if spec is None or scope is None or not callable(getattr(scope, "allows", None)):
+    def _purge_pending_locked(self, now: float) -> None:
+        for key in [key for key, item in self._pending.items()
+                    if now - item.minted_at > CLAIM_WINDOW_SECONDS]:
+            self._pending.pop(key, None)
+
+    def mint(self, *, principal_id: str, request_id: str, plan: Any) -> None:
+        """Record the approval of one ``build_fix`` request for its planned fix."""
+        spec = getattr(plan, "grant_spec", None)
+        digest = str(getattr(plan, "plan_digest", "") or "")
+        if not isinstance(spec, BuildFixGrantSpec) or spec.scope is None:
             raise Forbidden("build_fix plan carries no grant spec or edit scope")
-        project_root = str(_value(spec, "project_root", "") or "")
-        build_dir = str(_value(spec, "build_dir", "") or "")
-        real_root = _realpath_unchanged(project_root) if project_root else None
-        if not real_root or not os.path.isabs(real_root):
+        real_root = _realpath_unchanged(spec.project_root) if spec.project_root else None
+        if not real_root or _norm(real_root) != _norm(spec.project_root):
             raise Forbidden("build_fix grant needs a real, absolute project root")
+        if not principal_id or not request_id or len(digest) != 64:
+            raise Forbidden("build_fix approval needs a principal, a request and a plan digest")
+        self._park(str(request_id), _Pending("fix", str(principal_id), digest, self._clock(), plan))
+        logger.info("build_fix approval recorded plan=%s", digest[:16])
+
+    def mint_restore(self, *, principal_id: str, request_id: str, job_id: str,
+                     files: tuple[str, ...]) -> None:
+        """Record the approval of one ``build_fix_restore`` request."""
+        if not principal_id or not request_id or not isinstance(job_id, str) or not job_id:
+            return
+        digest = restore_plan_digest(job_id, tuple(files))
+        self._park(str(request_id), _Pending("restore", str(principal_id), digest, self._clock()))
+
+    def _claim(self, request_id: str, principal_id: str, kind: str) -> _Pending | None:
         now = self._clock()
-        expires = _value(spec, "expires_at", None)
-        limit = now + MAX_GRANT_SECONDS
-        try:
-            expires_at = min(float(expires), limit) if expires is not None else limit
-        except (TypeError, ValueError):
-            expires_at = limit
-        if expires_at <= now:
-            raise Forbidden("build_fix grant would already be expired")
+        with self._pending_lock:
+            self._purge_pending_locked(now)
+            pending = self._pending.get(request_id)
+            if pending is None or pending.kind != kind or pending.principal_id != principal_id:
+                return None
+            self._pending.pop(request_id, None)
+        self.approve(pending.plan_digest, principal_id)
+        return pending
 
-        def bounded(name: str, default: int) -> int:
-            value = _value(spec, name, default)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                return default
-            return min(value, default)
+    def claim(self, request_id: str, principal_id: str) -> Any:
+        """The approved plan of exactly this request and principal, once (or None)."""
+        pending = self._claim(str(request_id), str(principal_id), "fix")
+        return pending.plan if pending is not None else None
 
-        grant = _Grant(
-            token=GRANT_TOKEN_PREFIX + secrets.token_hex(24),
-            principal_id=str(principal_id),
-            request_id=str(request_id),
-            plan_digest=str(_value(plan, "plan_digest", "") or "")[:128] or "unknown",
-            project_root=real_root,
-            build_dir=os.path.realpath(build_dir) if build_dir else "",
-            scope=scope,
-            max_files=bounded("max_files", DEFAULT_MAX_FILES),
-            max_changed_lines=bounded("max_changed_lines", DEFAULT_MAX_CHANGED_LINES),
-            expires_at=expires_at,
-            minted_at=now,
-            network=str(_value(spec, "network", "") or ""),
-            template_ids=frozenset(str(item) for item in (_value(spec, "template_ids", ()) or ())),
-            target=str(_value(spec, "target", "") or ""),
-            config=str(_value(spec, "config", "") or ""),
-            platform=str(_value(spec, "platform", "") or ""),
-            world=str(_value(spec, "world", "") or ""),
-        )
-        with self._lock:
-            self._purge_locked(now)
-            if len(self._grants) >= MAX_GRANTS:
-                raise Forbidden("too many live build_fix grants")
-            self._grants[grant.token] = grant
-        logger.info("build_fix grant minted plan=%s", grant.plan_digest[:16])
-        return grant.token
-
-    def claim(self, request_id: str, principal_id: str) -> str:
-        """The token minted for exactly this request and principal, once."""
-        now = self._clock()
-        with self._lock:
-            self._purge_locked(now)
-            for grant in self._grants.values():
-                if (grant.request_id == request_id and grant.principal_id == principal_id
-                        and not grant.claimed and not grant.revoked
-                        and now - grant.minted_at <= CLAIM_WINDOW_SECONDS):
-                    grant.claimed = True
-                    return grant.token
-        return ""
-
-    def bind(self, token: str, job_id: str) -> None:
-        with self._lock:
-            grant = self._grants.get(token)
-            if grant is not None and grant.claimed and not grant.job_id:
-                grant.job_id = str(job_id)
-
-    def revoke(self, token: str) -> None:
-        with self._lock:
-            grant = self._grants.pop(token, None)
-            if grant is not None:
-                grant.revoked = True
-
-    def revoke_job(self, job_id: str) -> None:
-        with self._lock:
-            for token in [t for t, g in self._grants.items() if g.job_id == job_id]:
-                self._grants.pop(token).revoked = True
-
-    def token_for(self, principal_id: str, job_id: str) -> str:
-        """The live token bound to a principal's fix job (for the fix service)."""
-        with self._lock:
-            for grant in self._grants.values():
-                if grant.principal_id == principal_id and grant.job_id == job_id and not grant.revoked:
-                    return grant.token
-        return ""
+    def claim_restore(self, request_id: str, principal_id: str, job_id: str,
+                      files: tuple[str, ...]) -> bool:
+        """Whether this restore request was approved for exactly these files."""
+        pending = self._claim(str(request_id), str(principal_id), "restore")
+        if pending is None:
+            return False
+        if pending.plan_digest != restore_plan_digest(job_id, tuple(files)):
+            self.withdraw(pending.plan_digest, str(principal_id))
+            return False
+        return True
 
     def __len__(self) -> int:
-        with self._lock:
-            return len(self._grants)
-
-    def _purge_locked(self, now: float) -> None:
-        for token in [t for t, g in self._grants.items()
-                      if g.revoked or g.expires_at <= now
-                      or (not g.claimed and now - g.minted_at > CLAIM_WINDOW_SECONDS)]:
-            self._grants.pop(token, None)
+        with self._pending_lock:
+            self._purge_pending_locked(self._clock())
+            pending = len(self._pending)
+        return pending + self.live()
 
     # -- matching --------------------------------------------------------------------
 
-    def _live(self, token: str, principal_id: str) -> _Grant | None:
-        now = self._clock()
-        with self._lock:
-            grant = self._grants.get(token)
-            if grant is None or grant.revoked or grant.expires_at <= now:
-                return None
-            if grant.principal_id != principal_id or not grant.claimed or not grant.job_id:
-                return None
-        active = self._job_active
-        if active is not None:
-            try:
-                alive = bool(active(grant.principal_id, grant.job_id))
-            except Exception:
-                logger.warning("build_fix grant liveness check failed", exc_info=True)
-                alive = False
-            if not alive:
-                self.revoke(token)
-                return None
-        return grant
-
     def authorize_granted(self, request) -> str:
         """Grant authority protocol: a policy match when the grant covers the call."""
-        token = getattr(request, "approval_token", None)
-        if not isinstance(token, str) or not token.startswith(GRANT_TOKEN_PREFIX):
-            return ""
-        if request.tool_name not in GRANT_TOOLS:
+        token = grant_token_from(getattr(request, "approval_token", None))
+        if not token or request.tool_name not in FILE_TOOLS:
             return ""
         if self._current_mode is not None:
             try:
@@ -307,102 +232,82 @@ class BuildFixGrantRegistry:
                     return ""  # the grant never lifts plan mode
             except Exception:
                 return ""
-        grant = self._live(token, request.scope.principal_id)
-        if grant is None:
+        principal_id = request.scope.principal_id
+        grant = self.lookup(token)
+        if grant is None or grant.principal_id != principal_id:
             return ""
         arguments = dict(request.arguments)
         if any(arguments.get(knob) for knob in _GUARD_KNOBS):
             return ""
         try:
-            files, lines = self._effect(grant, request.tool_name, arguments)
+            self._host_checks(grant.spec, request.tool_name, arguments)
         except _OutOfScope as exc:
             logger.info("build_fix grant does not cover %s: %s", request.tool_name, exc)
             return ""
-        if files:
-            with self._lock:
-                used = grant.files_used | set(files)
-                if len(used) > grant.max_files or grant.lines_used + lines > grant.max_changed_lines:
-                    logger.info("build_fix grant budget exhausted (files=%d lines=%d)",
-                                len(used), grant.lines_used + lines)
-                    return ""
-                grant.files_used = used
-                grant.lines_used += lines
-        return grant.policy_match
+        decision = self.authorize(token, principal_id=principal_id,
+                                  tool_name=request.tool_name, arguments=arguments)
+        if not decision.allowed:
+            logger.info("build_fix grant does not cover %s: %s", request.tool_name, decision.reason)
+            return ""
+        return decision.source
 
     def covers_child_build(self, token: str, principal_id: str, build_plan: Any) -> bool:
-        """Whether a child build plan matches the grant's template family and tuple."""
-        grant = self._live(token, principal_id)
-        if grant is None:
-            return False
-        template = str(_value(build_plan, "template_id", "") or "")
-        if grant.template_ids and template not in grant.template_ids:
-            return False
-        network = str(_value(build_plan, "network", "") or "")
-        if network == "allowed" and grant.network != "allowed":
-            return False
-        for name in ("target", "config", "platform", "world"):
-            expected = getattr(grant, name)
-            if expected and str(_value(build_plan, name, "") or "") not in ("", expected):
-                return False
-        build_dir = str(_value(build_plan, "build_dir", "") or "")
-        return not grant.build_dir or (bool(build_dir) and
-                                       _norm(os.path.realpath(build_dir)) == _norm(grant.build_dir))
+        """Whether a child build plan matches the grant's template family and tuple.
 
-    def _in_scope(self, grant: _Grant, path: str) -> str:
-        """The project-relative path of an editable file, or raise ``_OutOfScope``."""
-        if not isinstance(path, str) or not path or "\x00" in path or not os.path.isabs(path):
-            raise _OutOfScope("grant writes need an absolute path")
-        real = _realpath_unchanged(path)
-        if real is None:
-            raise _OutOfScope("path traverses a link")
-        if not _inside(real, grant.project_root) or _norm(real) == _norm(grant.project_root):
-            raise _OutOfScope("path is outside the project root")
-        if grant.build_dir and _inside(real, grant.build_dir):
-            raise _OutOfScope("path is inside the build directory")
-        rel = os.path.relpath(real, grant.project_root).replace(os.sep, "/")
-        if rel.startswith("../") or rel == "..":
-            raise _OutOfScope("path escapes the project root")
-        try:
-            allowed, reason = grant.scope.allows(rel)
-        except Exception as exc:
-            raise _OutOfScope("edit scope refused: %s" % type(exc).__name__) from None
-        if not allowed:
-            raise _OutOfScope(str(reason or "not editable"))
-        return rel
+        ``token`` is the raw grant token or its ``grant_carrier`` form. (The fix
+        service matches its own child builds with ``match_child_build``.)
+        """
+        def text(name: str) -> str:
+            return str(getattr(build_plan, name, "") or "")
 
-    def _effect(self, grant: _Grant, tool: str, arguments: Mapping[str, Any]) -> tuple[tuple[str, ...], int]:
-        if tool == "read_file":
-            self._in_scope(grant, arguments.get("path"))
-            return (), 0
+        decision = self.authorize_build(
+            grant_token_from(token) or token, principal_id=principal_id, template_id=text("template_id"),
+            build_dir=text("build_dir"), target=text("target"), config=text("config"),
+            platform=text("platform"), world=text("world"), network=text("network"))
+        return decision.allowed
+
+    def _host_checks(self, spec: BuildFixGrantSpec, tool: str, arguments: Mapping[str, Any]) -> None:
+        """What only the host can check: links, file kind, build dir, per-write lines."""
+        if tool == "text_patch":
+            root = arguments.get("root")
+            if not isinstance(root, str) or not os.path.isabs(root):
+                raise _OutOfScope("patch needs an absolute root")
+            real_root = _realpath_unchanged(root)
+            if real_root is None or not _inside(real_root, spec.project_root):
+                raise _OutOfScope("patch root is outside the project root")
+            parsed = diff_files_and_lines(arguments.get("patch"))
+            if parsed is None:
+                raise _OutOfScope("patch is not a well-formed diff")
+            files, changed = parsed
+            for rel in files:
+                self._in_root(spec, os.path.join(real_root, *rel.split("/")))
+            if changed > spec.max_changed_lines * 2:  # a replaced line is one '-' and one '+'
+                raise _OutOfScope("the patch changes more lines than the fix may")
+            return
+        path = arguments.get("path")
+        self._in_root(spec, path)
         if tool == "write_file":
-            if arguments.get("mode", "overwrite") != "overwrite":
-                raise _OutOfScope("only overwrite writes are covered")
-            path = arguments.get("path")
-            rel = self._in_scope(grant, path)
             content = arguments.get("content")
             if not isinstance(content, str) or len(content) > MAX_GRANT_FILE_BYTES:
                 raise _OutOfScope("content is not bounded text")
-            before = _read_bounded(path)
-            return (rel,), _changed_lines(before, content)
-        if tool == "text_patch":
-            root = arguments.get("root")
-            patch = arguments.get("patch")
-            if not isinstance(root, str) or not os.path.isabs(root) \
-                    or not isinstance(patch, str) or len(patch) > MAX_PATCH_CHARS:
-                raise _OutOfScope("patch needs an absolute root and bounded text")
-            real_root = _realpath_unchanged(root)
-            if real_root is None or not _inside(real_root, grant.project_root):
-                raise _OutOfScope("patch root is outside the project root")
-            targets, lines = _patch_targets(patch)
-            rels = tuple(dict.fromkeys(
-                self._in_scope(grant, os.path.join(real_root, *target.split("/")))
-                for target in targets))
-            return rels, lines
-        raise _OutOfScope("tool is not covered")
+            if _changed_lines(_read_bounded(path), content) > spec.max_changed_lines:
+                raise _OutOfScope("the write changes more lines than the fix may")
 
-
-class _OutOfScope(Exception):
-    pass
+    @staticmethod
+    def _in_root(spec: BuildFixGrantSpec, path: Any) -> str:
+        if not isinstance(path, str) or not path or "\x00" in path or not os.path.isabs(path):
+            raise _OutOfScope("grant file calls need an absolute path")
+        real = _realpath_unchanged(path)
+        if real is None:
+            raise _OutOfScope("path traverses a link")
+        if not _inside(real, spec.project_root) or _norm(real) == _norm(spec.project_root):
+            raise _OutOfScope("path is outside the project root")
+        build_dir = spec.build_dir
+        if build_dir and _norm(build_dir) != _norm(spec.project_root) and _inside(real, build_dir):
+            raise _OutOfScope("path is inside the build directory")
+        if not os.path.isfile(real):
+            raise _OutOfScope("grant file calls touch existing regular files only")
+        return real
 
 
 def _read_bounded(path: str) -> str:
@@ -438,41 +343,6 @@ def _changed_lines(before: str, after: str) -> int:
         if op != "equal":
             changed += max(i2 - i1, j2 - j1)
     return changed
-
-
-def _patch_path(header: str) -> str:
-    raw = header[4:].split("\t", 1)[0].strip()
-    if raw.startswith('"') or raw == "/dev/null" or not raw:
-        raise _OutOfScope("patch creates, deletes or quotes a path")
-    if raw.startswith(("a/", "b/")):
-        raw = raw[2:]
-    rel = posixpath.normpath(raw.replace("\\", "/"))
-    if rel.startswith(("/", "../")) or rel in ("..", ".") or (len(rel) > 1 and rel[1] == ":"):
-        raise _OutOfScope("patch path is not project-relative")
-    return rel
-
-
-def _patch_targets(patch: str) -> tuple[tuple[str, ...], int]:
-    targets: list[str] = []
-    lines = 0
-    for line in patch.splitlines():
-        if line.startswith("--- "):
-            source = _patch_path(line)
-            targets.append(source)
-        elif line.startswith("+++ "):
-            dest = _patch_path(line)
-            if targets and targets[-1] != dest:
-                raise _OutOfScope("patch renames a file")
-            if not targets:
-                targets.append(dest)
-        elif line.startswith(("rename ", "copy ", "new file", "deleted file", "old mode", "new mode",
-                              "Binary files", "GIT binary patch")):
-            raise _OutOfScope("patch carries a file-level operation")
-        elif line.startswith(("+", "-")):
-            lines += 1
-    if not targets:
-        raise _OutOfScope("patch names no file")
-    return tuple(targets), lines
 
 
 # --- permission resolvers -------------------------------------------------------------
@@ -600,9 +470,27 @@ def build_permission_resolvers(services, *, grants: BuildFixGrantRegistry | None
             grants.mint(principal_id=resolved.scope.principal_id,
                         request_id=resolved.request_id, plan=plan)
 
+    def resolve_restore(request):
+        return request
+
+    def after_restore(resolved, verdict) -> None:
+        # The restore's own writes are covered by a grant bound to exactly
+        # this job and file list (restore_plan_digest), minted only here.
+        del verdict
+        if grants is None:
+            return
+        files = resolved.arguments.get("files") or ()
+        job_id = resolved.arguments.get("job_id")
+        if isinstance(job_id, str) and isinstance(files, (list, tuple)) \
+                and all(isinstance(item, str) for item in files):
+            grants.mint_restore(principal_id=resolved.scope.principal_id,
+                                request_id=resolved.request_id, job_id=job_id, files=tuple(files))
+
     return {
         "build_job": ToolResolver(resolve_job, on_surface=True, after_allow=after_job),
         "build_fix": ToolResolver(resolve_fix, on_surface=True, after_allow=after_fix),
+        "build_fix_restore": ToolResolver(resolve_restore, on_surface=True,
+                                          after_allow=after_restore),
     }
 
 
@@ -723,6 +611,7 @@ def compose_build_tools(*, config, inventory, digest, process_job_provider: Call
                            InMemoryBuildDirLeases(is_active=build_job_liveness(launcher)),
                            clock=time.time)
     fix = _compose_fix(settings=settings, jobs=jobs, models=models, state_dir=state_dir,
+                       inventory=inventory,
                        grants=grants, tools_getter=tools_getter,
                        model_gateway_getter=model_gateway_getter, job_registry=job_registry,
                        cancellation_tree=cancellation_tree, redact=redact_display,
@@ -731,7 +620,7 @@ def compose_build_tools(*, config, inventory, digest, process_job_provider: Call
     return BuildToolServices(model=models, jobs=jobs, fix=fix)
 
 
-def _compose_fix(*, settings, jobs, models, state_dir, grants, tools_getter,
+def _compose_fix(*, settings, jobs, models, state_dir, grants, tools_getter, inventory,
                  model_gateway_getter, job_registry, cancellation_tree, redact,
                  candidate_generator=None):
     """The build-fix loop (lane B2), or None when its packages are absent."""
@@ -743,11 +632,12 @@ def _compose_fix(*, settings, jobs, models, state_dir, grants, tools_getter,
         from ..adapters.build.source_editor import GatewaySourceEditor
         from ..application.build.fix_service import BuildFixService
         from ..application.build.strategy_bridge import StrategyFixAdapter
+        from ..application.cancellation_tree import CancellationTree
     except ImportError:
         logger.info("build_fix is not composed: the fix-loop package is absent")
         return None
     try:
-        navigator_factory = clangd_navigator_factory(settings)
+        navigator_factory = clangd_navigator_factory(settings, inventory)
 
         def execute(request):
             # The typed-tool facade is composed after the build tools, so the
@@ -762,40 +652,97 @@ def _compose_fix(*, settings, jobs, models, state_dir, grants, tools_getter,
             jobs, models,
             GatewaySourceEditor(execute),
             candidate_generator if candidate_generator is not None else ModelCandidateGenerator(
-                model_gateway_getter, route=settings.fix_model_route, redact=redact),
+                _LazyModelGateway(model_gateway_getter), route=settings.fix_model_route,
+                redact=redact),
             StrategyFixAdapter(),
             navigator_factory,
             FilePreimageStore(os.path.join(state_dir, "build-fix")),
-            job_registry,
-            cancellation_tree,
+            _LazyJobRegistry(job_registry),
+            cancellation_tree if cancellation_tree is not None else CancellationTree(),
             clock=time.time,
             grants=grants,
             propose_only_ok=settings.fix_propose_only_ok,
+            operator_max_timeout=settings.max_timeout_seconds,
         )
     except Exception:
         logger.error("build_fix could not be composed; it will report unavailable", exc_info=True)
         return None
-    if grants is not None:
-        status = getattr(fix, "is_active", None)
-        if callable(status):
-            grants.set_job_liveness(lambda principal, job_id: bool(status(principal, job_id)))
+    # The service issues each grant from the approval its start() claims and
+    # revokes it when the job ends, so the grant lives exactly as long as it.
     return fix
 
 
-def clangd_navigator_factory(settings) -> Callable[..., Any] | None:
+class _LazyJobRegistry:
+    """The durable job registry, resolved on first use (composition stays lazy).
+
+    ``compose_build_tools`` receives the registry as a getter; the fix service
+    takes the registry itself (``start``/``transition``/``poll``/...).
+    """
+
+    def __init__(self, getter: Callable[[], Any]) -> None:
+        self._getter = getter
+
+    def __getattr__(self, name: str) -> Any:
+        registry = self._getter()
+        if registry is None:
+            raise AttributeError(name)
+        return getattr(registry, name)
+
+
+class _LazyModelGateway:
+    """The runtime model gateway, resolved per call (composition stays lazy).
+
+    ``ModelCandidateGenerator`` takes a gateway with ``generate`` (and, for
+    the residency check, ``resolve_route``); the runtime hands the build tools
+    a getter. A missing gateway or resolver raises, and the generator treats
+    an unclassifiable route as refused (no source leaves the host).
+    """
+
+    def __init__(self, getter: Callable[[], Any] | None) -> None:
+        self._getter = getter
+
+    def _gateway(self) -> Any:
+        gateway = self._getter() if self._getter is not None else None
+        if gateway is None:
+            raise RuntimeError("the model gateway is not composed")
+        return gateway
+
+    def generate(self, request: Any, context: Any) -> Any:
+        return self._gateway().generate(request, context)
+
+    def resolve_route(self, request: Any, context: Any) -> Any:
+        resolve = getattr(self._gateway(), "resolve_route", None)
+        if not callable(resolve):
+            raise RuntimeError("the model gateway cannot classify routes")
+        return resolve(request, context)
+
+
+def clangd_navigator_factory(settings, inventory: Any = None) -> Callable[..., Any] | None:
     """A ``BuildNavigator`` factory over clangd, or None when clangd is absent (lane D).
 
-    Nothing is launched here: the factory starts a session per fix job, only
-    when the inventory resolves ``clangd``.
+    The fix service calls ``factory(model, ctx)`` once per fix job with the
+    job's cached build model (``source_root``/``build_dir``); composition and
+    tests may also pass ``inventory``/``project_root``/``build_dir`` by name.
+    Nothing is launched here: the navigator's session starts on first use,
+    and only when the inventory resolves ``clangd``.
     """
     try:
         from ..adapters.build.clangd import ClangdNavigator
     except ImportError:
         return None
     enable_config = bool(getattr(settings, "clangd_config", False))
+    bound_inventory = inventory
 
-    def factory(*, inventory, project_root: str, build_dir: str, **kwargs):
-        record = inventory.lookup("clangd") if inventory is not None else None
+    def factory(model: Any = None, ctx: Any = None, *, inventory: Any = None,
+                project_root: str = "", build_dir: str = "", **kwargs):
+        del ctx
+        lookup = inventory if inventory is not None else bound_inventory
+        if model is not None:
+            project_root = project_root or str(getattr(model, "source_root", "") or "")
+            build_dir = build_dir or str(getattr(model, "build_dir", "") or "")
+        if lookup is None or not project_root:
+            return None
+        record = lookup.lookup("clangd")
         if record is None:
             return None
         return ClangdNavigator(str(record.path), project_root=project_root,

@@ -521,6 +521,18 @@ class BuildFixGrantBook:
             self._expire(now)
             return (principal_id, plan_digest) in self._approvals
 
+    def withdraw(self, plan_digest: str, principal_id: str) -> None:
+        """Drop an approval no grant was issued from (the start failed)."""
+        with self._lock:
+            self._approvals.pop((principal_id, plan_digest), None)
+
+    def granted_job(self, job_id: str) -> bool:
+        """Whether a live grant is bound to ``job_id``."""
+        now = self._clock()
+        with self._lock:
+            self._expire(now)
+            return str(job_id) in self._by_job
+
     def issue(self, spec: BuildFixGrantSpec, *, principal_id: str, job_id: str,
               plan_digest: str) -> BuildFixGrant | None:
         """Mint the grant for an approved plan; None when there is no approval."""

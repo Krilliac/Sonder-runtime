@@ -49,9 +49,10 @@ that makes a background repair possible under `manual` mode.
 
 The grant is bound to three things:
 
-- **The principal and the job.** The token is claimed only by the request that
-  minted it, and only by the same principal. It is bound to the job id and dies
-  with the job.
+- **The principal and the job.** The approval is claimed only by the request
+  that was approved, and only by the same principal. The fix service issues the
+  grant for that job from the approval (one approval, at most one grant); it is
+  bound to the job id and revoked when the job ends.
 - **The edit scope.** A covered path must be all of these:
   - absolute;
   - reached without links;
@@ -60,8 +61,9 @@ The grant is bound to three things:
 
   `EditScope` refuses build scripts, build-time tool sources, generated files
   and denied names such as `.env` and key files.
-- **Budgets.** At most 6 files and 400 changed lines, counted by the evaluator
-  before the write.
+- **Budgets.** At most 6 distinct files, the plan's write count and 400
+  changed lines per write, counted by the evaluator before the write; the loop
+  holds its total to 400 changed lines.
 
 The grant never:
 

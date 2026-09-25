@@ -80,7 +80,7 @@ def stack(tmp_path, project, port_doubles):
     assert started.success, started.output
     job_id = output(started)["job_id"]
     token = services.fix.started[-1][2]
-    assert token.startswith("bfg-")
+    assert token.startswith("build_fix_grant:"), "the approval became the job's grant"
     return SimpleNamespace(tools=tools, audit=audit, grants=grants, services=services,
                            job_id=job_id, token=token, clock=clock, root=project)
 
@@ -229,17 +229,48 @@ def test_the_grant_carries_network_only_when_the_fix_was_approved_with_it(stack,
 def test_an_unclaimed_grant_dies_and_claims_are_single_use(port_doubles, tmp_path):
     clock = Clock()
     grants = BuildFixGrantRegistry(clock=clock)
-    fix = FakeFix(tmp_path, tmp_path / "build", clock=clock)
+    fix = FakeFix(tmp_path, tmp_path / "build", clock=clock, grants=grants)
     from tests.test_build_executor import FixRequestDouble
 
-    plan = fix.plan(FixRequestDouble(target="game"), None)
-    token = grants.mint(principal_id="owner", request_id="r1", plan=plan)
-    assert grants.claim("r1", "account:b") == ""
-    assert grants.claim("r1", "owner") == token
-    assert grants.claim("r1", "owner") == ""
+    request = FixRequestDouble(target="game")
+    plan = fix.plan(request, None)
+    grants.mint(principal_id="owner", request_id="r1", plan=plan)
+    assert grants.claim("r1", "account:b") is None
+    assert grants.claim("r1", "owner") is plan
+    assert grants.claim("r1", "owner") is None, "one approval, one claim"
+    # The claim approved the plan once: one grant is issued, the next start has none.
+    ctx = SimpleNamespace(principal_id="owner")
+    first = fix.start(request, ctx, plan=plan)
+    second = fix.start(request, ctx, plan=plan)
+    assert fix.started[-2][2] and not fix.started[-1][2]
+    assert grants.granted_job(first) and not grants.granted_job(second)
     grants.mint(principal_id="owner", request_id="r2", plan=plan)
     clock.now += 301
-    assert grants.claim("r2", "owner") == ""
+    assert grants.claim("r2", "owner") is None
+
+
+def test_a_failed_start_leaves_no_approval_behind(port_doubles, tmp_path):
+    from tests.test_build_executor import FixRequestDouble
+
+    grants = BuildFixGrantRegistry()
+    grants.mint(principal_id="owner", request_id="r1",
+                plan=FakeFix(tmp_path, tmp_path / "build").plan(FixRequestDouble(target="game"), None))
+    plan = grants.claim("r1", "owner")
+    assert grants.approved(plan.plan_digest, "owner")
+    grants.withdraw(plan.plan_digest, "owner")
+    assert not grants.approved(plan.plan_digest, "owner") and len(grants) == 0
+
+
+def test_a_mismatched_plan_is_refused_by_the_real_service(port_doubles):
+    from sonder_runtime.application.build.fix_ports import BuildFixRequest
+    from sonder_runtime.application.build.fix_service import BuildFixService
+
+    service = BuildFixService(None, None, None, None, None, None, None, None, None, clock=time.time)
+    ctx = SimpleNamespace(expired=False, cancellation=SimpleNamespace(cancelled=False))
+    with pytest.raises(Exception) as caught:
+        service.start(BuildFixRequest(target="game"), ctx,
+                      plan=SimpleNamespace(request=BuildFixRequest(target="core")))
+    assert "does not match" in str(caught.value)
 
 
 def test_lane_tests_evaluator_keeps_test_run_and_gains_the_build_resolvers(port_doubles, tmp_path):

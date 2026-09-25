@@ -305,9 +305,11 @@ class BuildToolExecutor:
     """Serve the build tools; delegate everything else to ``fallback``.
 
     ``grants`` is the in-process build-fix grant registry the permission
-    evaluator mints into when ``build_fix`` is approved; ``build_fix`` claims
-    the grant minted for its own request (``context.correlation_id``) and
-    binds it to the job it starts, so it lives exactly as long as that job.
+    evaluator records approvals in when ``build_fix`` (or
+    ``build_fix_restore``) is allowed. ``build_fix`` claims the plan approved
+    for its own request (``context.correlation_id``) and starts exactly that
+    plan; the fix service issues the job's grant from the approval and
+    revokes it when the job ends, so it lives exactly as long as that job.
     """
 
     NAMES = frozenset(BUILD_TYPED_TOOLS)
@@ -388,22 +390,23 @@ class BuildToolExecutor:
         request = build_fix_request(arguments)
         wait = _int(arguments, "wait_seconds", 0, 0, MAX_WAIT_SECONDS)
         grants = self._grants
-        token = ""
-        if grants is not None:
-            token = grants.claim(context.correlation_id, context.principal_id)
+        # The plan approved for exactly this request (and principal), once: the
+        # service starts that plan and issues the job's grant from the approval.
+        plan = grants.claim(context.correlation_id, context.principal_id) \
+            if grants is not None else None
         fix = self._services.fix
         try:
-            job_id = fix.start(request, context, grant_token=token)
-        except BaseException:
-            if token:
-                grants.revoke(token)
-            raise
-        if token:
-            grants.bind(token, job_id)
+            job_id = fix.start(request, context, plan=plan)
+        finally:
+            if plan is not None:
+                # A start that issued the grant consumed the approval; any other
+                # outcome must not leave it for a later call.
+                grants.withdraw(plan.plan_digest, context.principal_id)
+        granted = grants is not None and plan is not None and grants.granted_job(job_id)
         if wait:
             return self._ok(fix.result(job_id, context, wait_seconds=wait))
         return {"ok": True, "object": "build_fix_status", "job_id": job_id, "status": "running",
-                "grant": "bound" if token else "none",
+                "grant": "bound" if granted else "none",
                 "next": "call build_fix_result with this job_id to wait for the report"}
 
     def _build_fix_result(self, arguments: Mapping[str, Any], context: OperationContext) -> dict:
@@ -420,7 +423,16 @@ class BuildToolExecutor:
                 not isinstance(item, str) or not item or len(item) > 1024 or "\x00" in item
                 for item in files):
             raise InvalidInput("files must be at most 6 project-relative paths")
-        return self._ok(self._services.fix.restore(job_id, context, files=tuple(files)))
+        from ...application.build.grants import restore_plan_digest
+
+        grants = self._grants
+        approved = grants is not None and grants.claim_restore(
+            context.correlation_id, context.principal_id, job_id, tuple(files))
+        try:
+            return self._ok(self._services.fix.restore(job_id, context, files=tuple(files)))
+        finally:
+            if approved:
+                grants.withdraw(restore_plan_digest(job_id, tuple(files)), context.principal_id)
 
     # -- helpers ---------------------------------------------------------------
 

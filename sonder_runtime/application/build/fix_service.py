@@ -39,6 +39,7 @@ a restart ``recover()`` marks unfinished fixes interrupted and
 """
 from __future__ import annotations
 
+import json
 import logging
 import posixpath
 import re
@@ -161,6 +162,13 @@ class _NeverCancelled:
 def _clip(text: object, limit: int = _MAX_NOTE_CHARS) -> str:
     value = " ".join(str(text or "").split())
     return value[:limit]
+
+
+def _context_text(item: Any) -> str:
+    """One navigator item as text (clangd returns wire mappings)."""
+    if isinstance(item, Mapping):
+        return json.dumps(dict(item), sort_keys=True, ensure_ascii=False, default=str)
+    return str(item)
 
 
 def _is_report(value: Any) -> bool:
@@ -417,6 +425,9 @@ class BuildFixService:
               plan: BuildFixPlan | None = None) -> str:
         if context.expired or context.cancellation.cancelled:
             raise InvalidInput("the operation was cancelled or expired before the fix started")
+        if plan is not None and (not isinstance(plan, BuildFixPlan) or plan.request != request):
+            # An approval binds to the plan of exactly this request.
+            raise InvalidInput("the approved fix plan does not match this request")
         plan = plan if plan is not None else self.plan(request, context)
         job_id = BUILD_FIX_PREFIX + uuid.uuid4().hex
         lease = self._jobs.reserve(plan.build_plan.build_dir, job_id, context)
@@ -641,13 +652,13 @@ class BuildFixService:
         grant = None
         if self._grants is not None and wanted:
             spec = BuildFixGrantSpec(
-                project_root=project_root, build_dir=project_root, target="",
+                project_root=project_root, build_dir="", target="",
                 scope_digest=FileSetScope(wanted).digest(), max_files=min(len(wanted), 6),
                 expires_at=float(self._clock()) + 120.0, max_writes=len(wanted),
                 scope=FileSetScope(wanted),
             )
             grant = self._grants.issue(spec, principal_id=context.principal_id, job_id=job_id + ":restore",
-                                       plan_digest=restore_plan_digest(job_id, wanted))
+                                       plan_digest=restore_plan_digest(job_id, tuple(files)))
         edit_ctx = EditContext(operation=context, project_root=project_root, job_id=job_id,
                                grant_token=grant.token if grant else "")
         try:
@@ -1000,7 +1011,7 @@ class BuildFixService:
         include_context: tuple[str, ...] = ()
         if navigator is not None:
             try:
-                include_context = tuple(_clip(item, 600) for item in
+                include_context = tuple(_clip(_context_text(item), 600) for item in
                                         navigator.context_for(focus, diags, run.ctx,
                                                               max_items=8)[:8])
             except Exception as exc:  # noqa: BLE001 - navigation is optional

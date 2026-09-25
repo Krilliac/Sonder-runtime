@@ -99,8 +99,9 @@ def test_a_console_operator_is_asked_once_and_the_surface_decides(tmp_path, port
     receipt = gateway_call(tools, "build_fix", {"target": "game"}, source="repl", gate="surface")
     assert receipt.success, receipt.output
     assert receipt.policy_match.endswith("permission:surface")
-    assert len(services.fix.planned) == 2  # once to mint the grant, once by start()
-    assert services.fix.started[0][2].startswith("bfg-"), "the approval minted the fix's grant"
+    assert len(services.fix.planned) == 1, "start() runs exactly the plan that was approved"
+    assert services.fix.started[0][2].startswith("build_fix_grant:"), \
+        "the approval became the fix's grant"
     assert ledger.pending() == []
 
 

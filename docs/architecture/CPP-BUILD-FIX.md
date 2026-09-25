@@ -124,37 +124,47 @@ it, every write the fix makes is refused unattended under `manual`.
    - `auto`;
    - a one-shot approval of the planned call.
 
-   It then mints a grant from the fix plan's `grant_spec` and `scope`. The
-   grant lives in process memory only. It is keyed to the principal and the
-   request.
-2. The executor claims the grant for the same request and principal, passes
-   the token to `BuildFixService.start(request, context, grant_token=...)`,
-   and binds it to the returned job id. An unclaimed grant dies after 300
-   seconds.
+   It then records the approval of that request's fix plan
+   (`BuildFixGrantRegistry.mint`), in process memory only, keyed to the
+   principal and the request. The grant values and the scope, template and
+   budget matching live in `application/build/grants.py`; the registry in
+   `bootstrap/build_tools.py` extends that book with the request binding and
+   the host-only checks.
+2. The executor claims the approved plan for the same request and principal
+   (once; an unclaimed approval dies after 300 seconds) and calls
+   `BuildFixService.start(request, context, plan=<approved plan>)`. The
+   service refuses a plan that does not match the request, and issues the
+   job's `BuildFixGrant` from the approval, consuming it: one approval yields
+   at most one grant. A start that fails withdraws the approval.
 3. The fix loop's typed writes (`text_patch`, `write_file`, `read_file`) carry
-   the token as `approval_token`. The grant admits a write only when all of
-   these hold:
-   - the principal matches;
-   - the job is still active;
-   - the path is absolute, reached without links, inside the project root and
-     outside the build directory;
+   `build_fix_grant:<token>` as `approval_token`. The grant admits a call
+   only when all of these hold:
+   - the principal matches and the grant has not expired or been revoked;
+   - the path is absolute, reached without links, an existing regular file,
+     inside the project root and outside the build directory;
    - `EditScope.allows(rel)` holds;
    - no guard knob (`extra_roots`, `bypass`, `developer_authorized`) is set;
-   - `write_file` uses `mode=overwrite` on an existing file;
+   - `write_file` uses `mode=overwrite`;
    - the patch neither creates, deletes nor renames a file;
-   - the budgets hold: at most 6 files and 400 changed lines.
+   - the budgets hold: at most 6 distinct files, the plan's write count, and
+     at most 400 changed lines per write (the loop itself holds its total to
+     400 changed lines).
 
    The receipt's `policy_match` then names `build_fix_grant:<plan_digest>`. If
    any condition fails, normal grading applies, which refuses the write
    unattended.
-4. The grant ends when the job ends, at `expires_at`, or on revoke. It:
+4. The service revokes the grant when the job ends; it also ends at
+   `expires_at`. It:
    - never adds roots;
    - never lifts `plan` mode;
    - never covers the network unless the fix itself was approved with
      `allow_network`;
    - covers child builds only for the plan's template family and its
-     (build dir, target, config, platform, world) tuple
-     (`covers_child_build`).
+     (build dir, target, config, platform, world, network) tuple
+     (`match_child_build`).
+5. `build_fix_restore` follows the same path: its approval is bound to the job
+   id and the requested file list, and the restore's own writes are covered by
+   a grant scoped to exactly the job's pre-imaged files.
 
 ## Surfaces
 

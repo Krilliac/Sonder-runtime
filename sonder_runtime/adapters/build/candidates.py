@@ -15,7 +15,7 @@ not a retry.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Callable
 
 from ...application.build.fix_ports import ResidencyRefused
 from ...application.context import OperationContext
@@ -42,7 +42,8 @@ class ModelCandidateGenerator:
     """Propose one ``CandidatePatch`` per call through the model gateway."""
 
     def __init__(self, gateway: Any, *, route: str = DEFAULT_ROUTE, alternate_route: str = "",
-                 options: dict | None = None) -> None:
+                 options: dict | None = None,
+                 redact: Callable[[str], str] | None = None) -> None:
         for name, value in (("route", route), ("alternate_route", alternate_route)):
             if value and not _ROUTE_RE.fullmatch(value):
                 raise ValueError("%s must be a bounded route name" % name)
@@ -54,6 +55,11 @@ class ModelCandidateGenerator:
         self._route = route
         self._alternate = alternate_route
         self._options = dict(options or {})
+        # F18: the prompt (source window, diagnostics, context) passes the
+        # runtime redactor before it reaches any model route. A redacted
+        # anchor no longer matches the file, so such a candidate is rejected
+        # by validation instead of writing a redaction back.
+        self._redact = redact
         self.calls = 0
 
     @property
@@ -94,12 +100,20 @@ class ModelCandidateGenerator:
                 "text was not sent" % tier)
         return "cloud" if cloud else "local"
 
+    def _redacted(self, text: str) -> str:
+        if self._redact is None:
+            return text
+        redacted = self._redact(text)
+        if not isinstance(redacted, str):
+            raise ResidencyRefused("the redactor returned no text; source text was not sent")
+        return redacted
+
     def propose(self, evidence: RepairEvidence, ctx: OperationContext, *,
                 route_hint: str = "") -> CandidatePatch:
         tier = self._alternate if route_hint == "alternate" and self.has_alternate else self._route
         self.residency(tier, ctx)
         request = ModelRequest(
-            prompt=repair_prompt(evidence),
+            prompt=self._redacted(repair_prompt(evidence)),
             tier=tier,
             system=SYSTEM_PROMPT,
             options=dict(self._options),

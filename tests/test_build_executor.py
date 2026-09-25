@@ -269,43 +269,59 @@ class FakeFixPlan:
 
 
 class FakeFix:
-    def __init__(self, project_root="", build_dir="", *, clock=time.time):
+    """``BuildFixService`` double with the real service's signatures (checked by
+    ``test_service_doubles_match_the_real_signatures``) and its grant protocol:
+    ``start(plan=)`` issues the job's grant from the approval the executor
+    claimed, and the grant is revoked when the job ends."""
+
+    def __init__(self, project_root="", build_dir="", *, clock=time.time, grants=None):
         self.project_root = str(project_root)
         self.build_dir = str(build_dir)
         self.clock = clock
+        self.grants = grants
         self.planned, self.started, self.restored = [], [], []
         self.active: set[str] = set()
         self.owners: dict[str, str] = {}
 
     def plan(self, request, context):
+        from sonder_runtime.application.build.grants import BuildFixGrantSpec
+
         if request.target not in FakeJobs.TARGETS or not request.target:
             raise coded(InvalidInput, "UNKNOWN_TARGET", "no such target")
         self.planned.append(request)
         network = "allowed" if request.allow_network else "enforced_off"
-        spec = SimpleNamespace(
-            project_root=self.project_root, build_dir=self.build_dir, target=request.target,
-            config=request.config, platform=request.platform,
+        scope = FakeScope()
+        spec = BuildFixGrantSpec(
+            project_root=self.project_root or "/nonexistent", build_dir=self.build_dir,
+            target=request.target, config=request.config, platform=request.platform,
             template_ids=("cmake.build", "ninja.compile_one"), world="host", network=network,
-            scope_digest="s" * 64, max_files=6, max_changed_lines=400,
-            expires_at=self.clock() + 3600,
+            scope_digest="5" * 64, max_files=6, max_changed_lines=400,
+            expires_at=self.clock() + 3600, allow_network=bool(request.allow_network), scope=scope,
         )
         digest = _digest(request.target, request.config, request.platform, request.attempts,
                          request.apply, request.revert_after, network)
-        return FakeFixPlan(spec, FakeScope(), digest, request)
+        return FakeFixPlan(spec, scope, digest, request)
 
-    def start(self, request, context, *, grant_token=""):
-        self.plan(request, context)
+    def start(self, request, context, *, plan=None):
+        from sonder_runtime.application.build.grants import grant_carrier
+
+        if plan is not None and plan.request != request:
+            raise InvalidInput("the approved fix plan does not match this request")
+        plan = plan if plan is not None else self.plan(request, context)
         job_id = "build-fix-" + uuid.uuid4().hex
-        self.started.append((request, context.principal_id, grant_token))
+        grant = None
+        if self.grants is not None:
+            grant = self.grants.issue(plan.grant_spec, principal_id=context.principal_id,
+                                      job_id=job_id, plan_digest=plan.plan_digest)
+        self.started.append((request, context.principal_id, grant_carrier(grant.token) if grant else ""))
         self.active.add(job_id)
         self.owners[job_id] = context.principal_id
         return job_id
 
-    def is_active(self, principal_id, job_id):
-        return job_id in self.active and self.owners.get(job_id) == principal_id
-
     def finish(self, job_id):
         self.active.discard(job_id)
+        if self.grants is not None:
+            self.grants.revoke(job_id)
 
     def _owned(self, job_id, context):
         if self.owners.get(job_id) != context.principal_id:
@@ -318,9 +334,9 @@ class FakeFix:
                 "stop_reason": "" if status == "running" else "FIXED",
                 "verification_scope": "target"}
 
-    def cancel(self, job_id, context):
+    def cancel(self, job_id, context, *, reason="cancelled"):
         self._owned(job_id, context)
-        self.active.discard(job_id)
+        self.finish(job_id)
         return {"object": "build_fix_status", "job_id": job_id, "status": "cancelled"}
 
     def restore(self, job_id, context, *, files=()):
@@ -340,7 +356,7 @@ def compose_facade(tmp_path, services, *, grants=None, network_decider=None, fal
                    developer=None):
     grants = grants if grants is not None else BuildFixGrantRegistry()
     if services is not None and getattr(services, "fix", None) is not None:
-        grants.set_job_liveness(services.fix.is_active)
+        services.fix.grants = grants  # the service issues and revokes the job grants
     audit = DurableToolAuditRepository(tmp_path / "audit.jsonl")
     evaluator = DeveloperToolPermissionEvaluator(
         developer, policy_names=POLICY_NAMES,

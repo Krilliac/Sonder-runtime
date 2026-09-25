@@ -150,7 +150,7 @@ def runtime(tmp_path, monkeypatch):
     )
     holder["tools"] = tools
     try:
-        yield tools, services, workspace
+        yield tools, services, workspace, grants
     finally:
         if previous is None:
             runtime_paths.reset_home()
@@ -202,7 +202,7 @@ def _wait_job(tools, body, tool="build_job_result", limit=240):
 def test_model_build_fix_build(runtime, compiler):
     if not shutil.which(compiler):
         pytest.skip("%s is not installed" % compiler)
-    tools, services, workspace = runtime
+    tools, services, workspace, grants = runtime
     project = workspace / ("sparklite-" + compiler.replace("+", "p"))
     _project(project, shutil.which(compiler))
     common = {"project": str(project), "build_dir": str(project / "build")}
@@ -235,10 +235,16 @@ def test_model_build_fix_build(runtime, compiler):
         assert services.fix is not None, "the fix-loop package is present but did not compose"
         _, started = _call(tools, "build_fix", {**common, "target": "game", "attempts": 3})
         assert started.get("ok"), started
+        assert started.get("grant") == "bound", "the approval became the job's grant"
         fixed = _wait_job(tools, started, tool="build_fix_result", limit=600)
         assert fixed["status"] == "fixed", fixed
         changed = {item.get("rel") for item in fixed.get("files", [])}
         assert changed == {"src/core/math.cpp"}
+        # The fix's own writes went through the gateway under its grant.
+        writes = [receipt for receipt in tools.receipts
+                  if receipt.tool_name in ("text_patch", "write_file")]
+        assert writes and all("build_fix_grant:" in receipt.policy_match for receipt in writes)
+        assert len(grants) == 0, "the grant died with the job"
     else:
         receipt, body = _call(tools, "write_file", {"path": str(project / "src/core/math.cpp"),
                                                     "content": MATH_GOOD, "mode": "overwrite"})

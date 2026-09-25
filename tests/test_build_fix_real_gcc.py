@@ -4,13 +4,15 @@ Production pieces all the way down: the build model and job services with
 the guarded tree reader, planner, scrubbed environment, durable launcher and
 collector (lane B1); the fix loop, strategy bridge, pre-image store and the
 gateway source editor (this lane); the real typed tool gateway with the
-packaged file primitives and the SQLite effect journal. Two stand-ins:
+packaged file primitives and the SQLite effect journal. One stand-in:
 
 * the candidate generator is scripted and deterministic (a hostile patch,
   then a regression, then the fix);
-* the permission evaluator is a minimal stand-in for lane C's generalized
-  evaluator: a call carrying a ``BuildFixGrant`` the book covers is admitted,
-  everything else is refused as an unattended caller would be.
+* nothing else: the permission evaluator is lane C's real
+  ``DeveloperToolPermissionEvaluator`` with the real ``BuildFixGrantRegistry``
+  as its grant authority, under ``manual`` mode with the fix running as an
+  unattended worker, so a write is admitted only when the fix's grant covers
+  it (the registry is also the grant book the service issues from).
 """
 from __future__ import annotations
 
@@ -22,6 +24,8 @@ import uuid
 from pathlib import Path
 
 import pytest
+
+import permission_modes as pm
 
 pytest.importorskip("sonder_runtime.domain.build.repair", reason="needs lane A-domain-build")
 pytest.importorskip("sonder_runtime.adapters.build.launcher", reason="needs lane B1-run-and-model")
@@ -41,7 +45,6 @@ from sonder_runtime.adapters.process_termination import ProcessTreeSupervisor  #
 from sonder_runtime.adapters.typed_tool_executor import PackagedToolExecutor  # noqa: E402
 from sonder_runtime.application.build.fix_ports import BuildFixRequest, EditContext, EditRefused  # noqa: E402
 from sonder_runtime.application.build.fix_service import BuildFixService  # noqa: E402
-from sonder_runtime.application.build.grants import BuildFixGrantBook, grant_token_from  # noqa: E402
 from sonder_runtime.application.build.model_service import BuildModelService, LruBuildModelCache  # noqa: E402
 from sonder_runtime.application.build.ports import BuildJobRequest  # noqa: E402
 from sonder_runtime.application.build.run_service import (  # noqa: E402
@@ -55,7 +58,13 @@ from sonder_runtime.application.context import local_owner_context  # noqa: E402
 from sonder_runtime.application.execution.effect_journal import EffectState  # noqa: E402
 from sonder_runtime.application.ports.jobs import JobStatus  # noqa: E402
 from sonder_runtime.application.tools.facade import ToolApplicationFacade  # noqa: E402
-from sonder_runtime.bootstrap.typed_tools import typed_tool_policy, typed_tool_registry  # noqa: E402
+from sonder_runtime.bootstrap.build_tools import BuildFixGrantRegistry  # noqa: E402
+from sonder_runtime.bootstrap.developer_tools import DeveloperToolPermissionEvaluator  # noqa: E402
+from sonder_runtime.bootstrap.typed_tools import (  # noqa: E402
+    POLICY_NAMES,
+    typed_tool_policy,
+    typed_tool_registry,
+)
 from sonder_runtime.domain.build.repair import CandidatePatch, FixStopReason, PatchHunk  # noqa: E402
 from sonder_runtime.domain.build.report import BuildJobReport  # noqa: E402
 from sonder_runtime.domain.common.errors import Forbidden  # noqa: E402
@@ -89,29 +98,6 @@ def host_executable_guard(path: str) -> str:
     if not Path(path).is_absolute() or not Path(path).resolve().is_file():
         raise PermissionError("host executable rejected")
     return path
-
-
-class GrantOnlyEvaluator:
-    """Stand-in for lane C's evaluator: grants admit, nothing else is asked."""
-
-    def __init__(self, book):
-        self.book = book
-        self.decisions = []
-
-    def authorize(self, tool_name, scope, permission):
-        raise Forbidden("unattended caller: %s needs an approval" % tool_name)
-
-    def authorize_request(self, request):
-        token = grant_token_from(request.approval_token)
-        if token:
-            decision = self.book.authorize(token, principal_id=request.scope.principal_id,
-                                           tool_name=request.tool_name, arguments=request.arguments)
-            self.decisions.append((request.tool_name, decision.allowed, decision.reason))
-            if decision.allowed:
-                return decision.source
-        error = Forbidden("unattended caller: %s is not covered by a fix grant" % request.tool_name)
-        error.policy_match = "permission:unattended"
-        raise error
 
 
 class ScriptedGenerator:
@@ -155,8 +141,15 @@ class Stack:
                                     self.models,
                                     InMemoryBuildDirLeases(is_active=build_job_liveness(self.launcher)),
                                     clock=time.time)
-        self.book = BuildFixGrantBook(clock=time.time)
-        self.evaluator = GrantOnlyEvaluator(self.book)
+        # manual mode, no rules, no one-shot approvals: an unattended write
+        # passes only when the fix's grant covers it.
+        monkeypatch.setattr(pm, "current_mode", lambda: pm.MANUAL)
+        monkeypatch.setattr(pm, "_rule_lookup", lambda _tool: None)
+        monkeypatch.setattr(pm, "_approval_ledger", lambda: None)
+        pm.reset_unattended_for_tests()
+        self.book = BuildFixGrantRegistry(clock=time.time, current_mode=lambda: pm.current_mode())
+        self.evaluator = DeveloperToolPermissionEvaluator(
+            None, policy_names=POLICY_NAMES, grant_authorities=(self.book,))
         self.tools = ToolApplicationFacade.compose(
             typed_tool_registry(), PackagedToolExecutor(), policy=typed_tool_policy(),
             permissions=(self.evaluator,),
@@ -180,7 +173,8 @@ class Stack:
 
     @staticmethod
     def context():
-        return local_owner_context(correlation_id=uuid.uuid4().hex)
+        # The fix runs unattended: nobody can answer a prompt for its writes.
+        return local_owner_context(correlation_id=uuid.uuid4().hex, source="worker")
 
     def build(self, root, **kwargs):
         job = self.jobs.start(BuildJobRequest(project=str(root), **kwargs), self.context())
@@ -231,9 +225,12 @@ def test_the_fix_loop_repairs_the_seeded_error_end_to_end(tmp_path, monkeypatch,
     plan = service.plan(request, context)
     assert "build" in plan.scope.excluded_dirs[0]
     assert "tools/shadergen.cpp" in plan.scope.excluded_rel
-    # Lane C's evaluator records the approval of this exact plan on ALLOW.
-    stack.book.approve(plan.plan_digest, context.principal_id)
-    job = service.start(request, context)
+    # Lane C's evaluator records the approval of this exact plan on ALLOW; the
+    # executor claims it for its request and starts exactly that plan.
+    stack.book.mint(principal_id=context.principal_id, request_id="approved-call", plan=plan)
+    claimed = stack.book.claim("approved-call", context.principal_id)
+    assert claimed is plan
+    job = service.start(request, context, plan=claimed)
     report = service.result(job, context, wait_seconds=120)
     deadline = time.monotonic() + 600
     while not hasattr(report, "stop_reason") and time.monotonic() < deadline:
@@ -281,6 +278,18 @@ def test_the_fix_loop_repairs_the_seeded_error_end_to_end(tmp_path, monkeypatch,
     assert stack.book.live() == 0
     records = stack.strategies[0].records
     assert records and records[0].failure == "HYPOTHESIS_REJECTED"
+
+    # build_fix_restore: unattended and unapproved, its writes are refused ...
+    with pytest.raises(EditRefused):
+        service.restore(job, context)
+    assert (root / MATH).read_text() == fixed
+    # ... the evaluator's approval of exactly this restore covers them, once.
+    stack.book.mint_restore(principal_id=context.principal_id, request_id="restore-call",
+                            job_id=job, files=())
+    assert stack.book.claim_restore("restore-call", context.principal_id, job, ())
+    restored = service.restore(job, context)
+    assert restored["restored"] == [MATH] and (root / MATH).read_text() == original
+    assert stack.book.live() == 0
 
 
 @pytest.mark.skipif(not HAVE_TOOLS, reason="cmake and ninja are required")
