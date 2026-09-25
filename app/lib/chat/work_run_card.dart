@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 
 import '../api.dart';
 import '../theme.dart';
-import 'backend.dart';
 import 'classify.dart';
 import 'lines.dart';
 import 'notice.dart';
@@ -24,9 +23,9 @@ export 'classify.dart' show WorkRunRef, workRunOf;
 /// never shown.
 class WorkRunCard extends StatefulWidget {
   final WorkRunRef run;
-  final Future<WorkRunInfo> Function(String id) fetch;
-  final Future<WorkRunInfo> Function(String id) cancel;
-  final ValueChanged<WorkRunInfo> onResolved;
+  final Future<WorkRun> Function(String id) fetch;
+  final Future<WorkRun> Function(String id) cancel;
+  final ValueChanged<WorkRun> onResolved;
 
   /// Poll delays, in order; the last one repeats.
   final List<Duration> backoff;
@@ -49,7 +48,7 @@ class WorkRunCard extends StatefulWidget {
 }
 
 class _WorkRunCardState extends State<WorkRunCard> with WidgetsBindingObserver {
-  WorkRunInfo? _info;
+  WorkRun? _info;
 
   /// Seconds on screen, for runs whose start the server has not told us yet.
   int _ticks = 0;
@@ -277,8 +276,8 @@ class _WorkRunCardState extends State<WorkRunCard> with WidgetsBindingObserver {
 /// WORK_CAPACITY_EXHAUSTED.
 Future<void> showRunningWork(
   BuildContext context, {
-  required Future<List<WorkRunInfo>> Function() list,
-  required Future<WorkRunInfo> Function(String id) cancel,
+  required Future<List<WorkRun>> Function() list,
+  required Future<WorkRun> Function(String id) cancel,
 }) =>
     showDialog<void>(
       context: context,
@@ -286,8 +285,8 @@ Future<void> showRunningWork(
     );
 
 class _RunningWorkDialog extends StatefulWidget {
-  final Future<List<WorkRunInfo>> Function() list;
-  final Future<WorkRunInfo> Function(String id) cancel;
+  final Future<List<WorkRun>> Function() list;
+  final Future<WorkRun> Function(String id) cancel;
   const _RunningWorkDialog({required this.list, required this.cancel});
 
   @override
@@ -295,7 +294,7 @@ class _RunningWorkDialog extends StatefulWidget {
 }
 
 class _RunningWorkDialogState extends State<_RunningWorkDialog> {
-  List<WorkRunInfo>? _runs;
+  List<WorkRun>? _runs;
   String _error = '';
   final Set<String> _stopping = <String>{};
 
@@ -317,7 +316,7 @@ class _RunningWorkDialogState extends State<_RunningWorkDialog> {
     }
   }
 
-  Future<void> _stop(WorkRunInfo run) async {
+  Future<void> _stop(WorkRun run) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -363,7 +362,7 @@ class _RunningWorkDialogState extends State<_RunningWorkDialog> {
                   if (runs != null && runs.isEmpty)
                     const ChatNotice(
                         kind: ChatStatusKind.note, title: 'No work runs'),
-                  for (final run in runs ?? const <WorkRunInfo>[])
+                  for (final run in runs ?? const <WorkRun>[])
                     Row(children: [
                       Expanded(
                         child: Text(

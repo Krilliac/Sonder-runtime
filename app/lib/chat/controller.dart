@@ -856,7 +856,7 @@ class ChatController extends ChangeNotifier {
 
   /// A work run finished: its persisted answer replaces the hand-off text in
   /// the same message, which is then saved.
-  Future<void> resolveWorkRun(int entryId, WorkRunInfo run) async {
+  Future<void> resolveWorkRun(int entryId, WorkRun run) async {
     final i = _indexOf(entryId);
     if (i < 0) return;
     final old = _entries[i].message;

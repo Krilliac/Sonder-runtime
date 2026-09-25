@@ -95,14 +95,20 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   static String _identityOf(Settings s) =>
       '${s.serverUrl}\u0000${s.apiKey}\u0000${s.accountSession?.token ?? ''}';
 
-  ChatBackend _backendFor(Settings s) =>
-      widget.backendFactory?.call(s) ?? SonderApiChatBackend.fromSettings(s);
+  /// The one [SonderApi] for the current server identity. Chat turns,
+  /// Stop, feedback, work runs, approvals and the Agents page share it; it
+  /// is replaced only when the server, key or account changes. (Building a
+  /// fresh instance per access made Stop cancel nothing.)
+  late SonderApi _api = _apiFor(widget.settings);
 
-  SonderApi get _api => SonderApi(
-        baseUrl: widget.settings.serverUrl,
-        apiKey: widget.settings.apiKey,
-        accountSession: widget.settings.accountSession,
+  static SonderApi _apiFor(Settings s) => SonderApi(
+        baseUrl: s.serverUrl,
+        apiKey: s.apiKey,
+        accountSession: s.accountSession,
       );
+
+  ChatBackend _backendFor(Settings s) =>
+      widget.backendFactory?.call(s) ?? SonderApiChatBackend.withApi(_api);
 
   void _controlChanged() {
     if (mounted) setState(() {});
@@ -150,6 +156,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final identity = _identityOf(s);
     final changed = identity != _identity;
     _identity = identity;
+    if (changed) _api = _apiFor(s);
     _chat.updateBackend(_backendFor(s), identityChanged: changed);
     _chat.syncModel(s.model);
   }

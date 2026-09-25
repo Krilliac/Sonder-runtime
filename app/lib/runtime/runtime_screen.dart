@@ -159,6 +159,9 @@ class _RuntimeScreenState extends State<RuntimeScreen>
   @override
   void didUpdateWidget(covariant RuntimeScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.settings != widget.settings) {
+      _api = _apiFor(widget.settings);
+    }
     if (oldWidget.dataSource != widget.dataSource ||
         oldWidget.settings != widget.settings) {
       _data = _dataSourceFor(widget);
@@ -285,10 +288,13 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     if (mounted) await _loadExtras();
   }
 
-  SonderApi get _api => SonderApi(
-        baseUrl: widget.settings.serverUrl,
-        apiKey: widget.settings.apiKey,
-        accountSession: widget.settings.accountSession,
+  /// One [SonderApi] per server identity, rebuilt when the settings change.
+  late SonderApi _api = _apiFor(widget.settings);
+
+  static SonderApi _apiFor(Settings s) => SonderApi(
+        baseUrl: s.serverUrl,
+        apiKey: s.apiKey,
+        accountSession: s.accountSession,
       );
 
   SonderLauncherApi get _launcherApi => SonderLauncherApi(

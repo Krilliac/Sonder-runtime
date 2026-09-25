@@ -75,7 +75,7 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
     expect(backend.workRunGets, hasLength(2));
 
-    backend.workRun = (id) => WorkRunInfo(
+    backend.workRun = (id) => WorkRun(
         id: id, status: 'returned', output: 'The PSO cache now warms at load.');
     await tester.tap(find.byKey(const Key('work-run-refresh')));
     await tester.pump();
@@ -134,7 +134,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(backend.workRunCancels, [_runId]);
 
-    backend.workRun = (id) => WorkRunInfo(id: id, status: 'cancelled');
+    backend.workRun = (id) => WorkRun(id: id, status: 'cancelled');
     await tester.pump(const Duration(seconds: 3));
     await tester.pump();
     expect(find.byKey(const Key('work-run-card')), findsNothing);
@@ -163,7 +163,7 @@ void main() {
   testWidgets('429 WORK_CAPACITY_EXHAUSTED lists running runs with Stop',
       (tester) async {
     final backend = FakeChatBackend()
-      ..runningWork = [const WorkRunInfo(id: _runId, status: 'running')];
+      ..runningWork = [const WorkRun(id: _runId, status: 'running')];
     await pumpChat(tester, backend);
     await tester.enterText(find.byType(TextField), 'one more job');
     await tester.testTextInput.receiveAction(TextInputAction.send);

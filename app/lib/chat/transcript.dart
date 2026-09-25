@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 
+import '../api.dart' show WorkRun;
 import '../models.dart';
 import '../theme.dart';
 import '../workspace_ui.dart' show conversationWidth;
@@ -42,10 +43,10 @@ class TranscriptActions {
   final VoidCallback onChangeMode;
   final Future<ApprovalOutcome> Function(String callId, Duration ttl)?
       onApprove;
-  final Future<WorkRunInfo> Function(String id) fetchWorkRun;
-  final Future<WorkRunInfo> Function(String id) cancelWorkRun;
-  final Future<List<WorkRunInfo>> Function() listWorkRuns;
-  final void Function(int entryId, WorkRunInfo run) onWorkRunResolved;
+  final Future<WorkRun> Function(String id) fetchWorkRun;
+  final Future<WorkRun> Function(String id) cancelWorkRun;
+  final Future<List<WorkRun>> Function() listWorkRuns;
+  final void Function(int entryId, WorkRun run) onWorkRunResolved;
 
   const TranscriptActions({
     required this.onStop,

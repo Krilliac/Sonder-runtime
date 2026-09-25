@@ -42,6 +42,7 @@ abstract interface class SonderApiPort {
     String sessionId,
     String project,
     bool allowApproximateLocation,
+    String? history,
     CancelToken? cancel,
   });
 
@@ -52,6 +53,7 @@ abstract interface class SonderApiPort {
     String sessionId,
     String project,
     bool allowApproximateLocation,
+    String? history,
     CancelToken? cancel,
   });
 

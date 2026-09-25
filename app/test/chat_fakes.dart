@@ -72,8 +72,8 @@ class FakeChatBackend implements ChatBackend {
   Object? modeWriteError;
   List<String> models = const ['sonder'];
 
-  WorkRunInfo Function(String id)? workRun;
-  WorkRunInfo Function(String id)? cancelWorkRunResult;
+  WorkRun Function(String id)? workRun;
+  WorkRun Function(String id)? cancelWorkRunResult;
   ApprovalOutcome approvalOutcome =
       const ApprovalOutcome(ApprovalStatus.approved, nonce: 'n_c41a');
 
@@ -136,23 +136,23 @@ class FakeChatBackend implements ChatBackend {
   }
 
   @override
-  Future<WorkRunInfo> getWorkRun(String id) async {
+  Future<WorkRun> getWorkRun(String id) async {
     workRunGets.add(id);
-    return (workRun ?? (i) => WorkRunInfo(id: i, status: 'running'))(id);
+    return (workRun ?? (i) => WorkRun(id: i, status: 'running'))(id);
   }
 
   @override
-  Future<WorkRunInfo> cancelWorkRun(String id) async {
+  Future<WorkRun> cancelWorkRun(String id) async {
     workRunCancels.add(id);
     return (cancelWorkRunResult ??
         (i) =>
-            WorkRunInfo(id: i, status: 'running', cancelRequested: true))(id);
+            WorkRun(id: i, status: 'running', cancelRequested: true))(id);
   }
 
-  List<WorkRunInfo> runningWork = const [];
+  List<WorkRun> runningWork = const [];
 
   @override
-  Future<List<WorkRunInfo>> listWorkRuns() async => runningWork;
+  Future<List<WorkRun>> listWorkRuns() async => runningWork;
 
   @override
   Future<ApprovalOutcome> approveCall(String callId,

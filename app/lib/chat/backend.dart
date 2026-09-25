@@ -1,7 +1,5 @@
 import 'dart:async';
-import 'dart:convert';
 
-import 'package:http/http.dart' as http;
 
 import '../account_session.dart';
 import '../api.dart';
@@ -12,9 +10,9 @@ import '../settings.dart';
 ///
 /// The chat controller talks only to this interface so its behaviour
 /// (streaming, cancellation, work runs, approvals, the status poll) is
-/// testable with a double, and so lane A's transport rewrite (`lib/api/**`:
-/// `chatDetailed(cancel:)`, `api/stream.dart`, `api/work_runs.dart`,
-/// `api/approvals.dart`) plugs in by changing [SonderApiChatBackend] alone.
+/// testable with a double. [SonderApiChatBackend] adapts lane A's
+/// [SonderApiPort] (`chatStream(cancel:)`, `recordFeedback`, `workRuns`,
+/// `approvals`) to it.
 abstract class ChatBackend {
   /// The server this backend talks to, for display.
   String get serverUrl;
@@ -33,9 +31,9 @@ abstract class ChatBackend {
   Future<PermissionMode?> fetchPermissionMode();
   Future<PermissionMode> setPermissionMode(String mode);
 
-  Future<WorkRunInfo> getWorkRun(String id);
-  Future<WorkRunInfo> cancelWorkRun(String id);
-  Future<List<WorkRunInfo>> listWorkRuns();
+  Future<WorkRun> getWorkRun(String id);
+  Future<WorkRun> cancelWorkRun(String id);
+  Future<List<WorkRun>> listWorkRuns();
 
   /// Approve exactly one refused call once (`POST /v1/approvals/<call_id>`).
   Future<ApprovalOutcome> approveCall(String callId, {Duration ttl});
@@ -101,60 +99,6 @@ abstract class ChatTurn {
   void cancel();
 }
 
-/// A persisted HTTP work run (`GET /v1/work-runs/<id>`).
-class WorkRunInfo {
-  final String id;
-  final String status;
-  final DateTime? createdAt;
-  final DateTime? updatedAt;
-  final DateTime? deadlineAt;
-  final bool cancelRequested;
-  final String output;
-  final bool outputTruncated;
-
-  const WorkRunInfo({
-    required this.id,
-    required this.status,
-    this.createdAt,
-    this.updatedAt,
-    this.deadlineAt,
-    this.cancelRequested = false,
-    this.output = '',
-    this.outputTruncated = false,
-  });
-
-  bool get isRunning => status == 'running';
-
-  factory WorkRunInfo.fromJson(Map<String, dynamic> json) {
-    DateTime? ts(Object? v) {
-      if (v is num) {
-        return DateTime.fromMillisecondsSinceEpoch((v * 1000).round());
-      }
-      final parsed = double.tryParse(v?.toString() ?? '');
-      if (parsed != null) {
-        return DateTime.fromMillisecondsSinceEpoch((parsed * 1000).round());
-      }
-      return DateTime.tryParse(v?.toString() ?? '');
-    }
-
-    String text(Object? v, int limit) {
-      final s = v?.toString() ?? '';
-      return s.length <= limit ? s : s.substring(0, limit);
-    }
-
-    return WorkRunInfo(
-      id: text(json['id'], 64),
-      status: text(json['status'], 32),
-      createdAt: ts(json['created_at']),
-      updatedAt: ts(json['updated_at']),
-      deadlineAt: ts(json['deadline_at']),
-      cancelRequested: json['cancel_requested'] == true,
-      output: text(json['output'], 200000),
-      outputTruncated: json['output_truncated'] == true,
-    );
-  }
-}
-
 enum ApprovalStatus { approved, unsupported, forbidden, failed }
 
 class ApprovalOutcome {
@@ -171,28 +115,30 @@ class ApprovalOutcome {
   });
 }
 
-/// The adapter over today's [SonderApi].
+/// The adapter over lane A's [SonderApiPort].
 ///
-/// At 5f8c7665 the API has no streaming, no work-run or approval client and
-/// no per-call cancel token, so this adapter:
-///  * runs each turn on its **own** [SonderApi] instance, so Stop cancels
-///    that turn's client and never a passive feedback call (P0-6 at the
-///    call site; lane A removes the shared slot itself);
-///  * emits a single [TurnDone] (no deltas) until lane A's `api/stream.dart`
-///    lands — the UI already renders deltas;
-///  * speaks the work-run and approval routes directly with the same auth
-///    headers as [SonderApi]; replace with lane A's `WorkRunsApi` and
-///    approvals client at merge.
+///  * One long-lived API instance per backend (per server identity): Stop,
+///    feedback, work runs and approvals all talk to the same [SonderApi].
+///  * Each turn owns its own [CancelToken], so Stop cancels exactly that
+///    turn's request and never a passive feedback call or another turn.
+///  * Turns stream through [SonderApiPort.chatStream] (deltas, then the
+///    final reply); a server that answers with plain JSON still yields one
+///    [TurnDone].
+///  * Work runs and approvals use lane A's [WorkRunsApi] / [ApprovalsApi].
 class SonderApiChatBackend implements ChatBackend {
-  final String baseUrl;
-  final String apiKey;
-  final AccountSession? accountSession;
+  final SonderApiPort api;
+
+  SonderApiChatBackend.withApi(this.api);
 
   SonderApiChatBackend({
-    required this.baseUrl,
-    this.apiKey = '',
-    this.accountSession,
-  });
+    required String baseUrl,
+    String apiKey = '',
+    AccountSession? accountSession,
+  }) : api = SonderApi(
+          baseUrl: baseUrl,
+          apiKey: apiKey,
+          accountSession: accountSession,
+        );
 
   factory SonderApiChatBackend.fromSettings(Settings settings) =>
       SonderApiChatBackend(
@@ -201,183 +147,84 @@ class SonderApiChatBackend implements ChatBackend {
         accountSession: settings.accountSession,
       );
 
-  SonderApi _api() => SonderApi(
-        baseUrl: baseUrl,
-        apiKey: apiKey,
-        accountSession: accountSession,
+  @override
+  String get serverUrl => api.baseUrl;
+
+  @override
+  ChatTurn startTurn(TurnRequest request) => _ApiTurn(api, request);
+
+  @override
+  Future<void> recordFeedback(String command, TurnRequest context) =>
+      api.recordFeedback(
+        command,
+        model: context.model,
+        contextSize: context.contextSize,
+        sessionId: context.sessionId,
+        project: context.project,
       );
 
   @override
-  String get serverUrl => baseUrl;
+  Future<SystemInfo> systemInfo() => api.systemInfo();
 
   @override
-  ChatTurn startTurn(TurnRequest request) => _ApiTurn(_api(), request);
+  Future<List<String>> listModels() => api.listModels();
 
   @override
-  Future<void> recordFeedback(String command, TurnRequest context) async {
-    await _api().chatDetailed(
-      [ChatMessage(role: Role.user, content: command)],
-      model: context.model,
-      contextSize: context.contextSize,
-      sessionId: context.sessionId,
-      project: context.project,
-      allowApproximateLocation: context.allowApproximateLocation,
-    );
-  }
+  Future<CommandCatalog> fetchCommands() => api.fetchCommands();
 
   @override
-  Future<SystemInfo> systemInfo() => _api().systemInfo();
-
-  @override
-  Future<List<String>> listModels() => _api().listModels();
-
-  @override
-  Future<CommandCatalog> fetchCommands() => _api().fetchCommands();
-
-  @override
-  Future<PermissionMode?> fetchPermissionMode() => _api().fetchPermissionMode();
+  Future<PermissionMode?> fetchPermissionMode() => api.fetchPermissionMode();
 
   @override
   Future<PermissionMode> setPermissionMode(String mode) async {
     try {
-      return await _api().setPermissionMode(mode);
+      return await api.setPermissionMode(mode);
     } on SonderException catch (e) {
       throw normalizeModeError(e);
     }
   }
 
-  Map<String, String> _headers() {
-    final h = <String, String>{'Content-Type': 'application/json'};
-    if (apiKey.trim().isNotEmpty) {
-      h['Authorization'] = 'Bearer ${apiKey.trim()}';
-    }
-    if (accountSession?.matches(baseUrl) == true) {
-      h['X-Sonder-Account-Token'] = accountSession!.token;
-    }
-    return h;
-  }
-
-  Uri _uri(String path) =>
-      Uri.parse('${baseUrl.trim().replaceAll(RegExp(r'/+$'), '')}$path');
-
-  Future<http.Response> _send(String method, String path,
-      {Object? body}) async {
-    final client = http.Client();
+  /// Work runs need a developer or admin account; say so in those words.
+  Future<T> _workRuns<T>(Future<T> Function(WorkRunsApi runs) call) async {
     try {
-      final request = http.Request(method, _uri(path))
-        ..followRedirects = false
-        ..headers.addAll(_headers());
-      if (body != null) request.body = jsonEncode(body);
-      final streamed =
-          await client.send(request).timeout(const Duration(seconds: 20));
-      return await http.Response.fromStream(streamed)
-          .timeout(const Duration(seconds: 20));
-    } catch (e) {
-      throw SonderException.transport(e, baseUrl);
-    } finally {
-      client.close();
-    }
-  }
-
-  SonderException _httpError(http.Response resp, String fallback) {
-    var message = fallback;
-    var code = '';
-    try {
-      final decoded = jsonDecode(utf8.decode(resp.bodyBytes));
-      if (decoded is Map && decoded['error'] is Map) {
-        final err = decoded['error'] as Map;
-        message = err['message']?.toString() ?? message;
-        code = err['code']?.toString() ?? '';
-      } else if (decoded is Map && decoded['message'] != null) {
-        message = decoded['message'].toString();
+      return await call(api.workRuns);
+    } on SonderException catch (e) {
+      if (e.httpStatus == 403) {
+        throw e.copyWith(
+            message: 'Work runs need a developer or admin account.');
       }
-    } catch (_) {}
-    if (message.length > 512) message = '${message.substring(0, 512)}…';
-    return SonderException(message,
-        httpStatus: resp.statusCode,
-        code: code,
-        retryAfterSeconds: int.tryParse(resp.headers['retry-after'] ?? ''));
-  }
-
-  Future<WorkRunInfo> _workRun(String method, String path) async {
-    final resp = await _send(method, path);
-    if (resp.statusCode == 403) {
-      throw SonderException('Work runs need a developer or admin account.',
-          httpStatus: 403, code: 'FORBIDDEN');
+      rethrow;
     }
-    if (resp.statusCode != 200) {
-      throw _httpError(
-          resp, 'Work run request failed (HTTP ${resp.statusCode}).');
-    }
-    final decoded = jsonDecode(utf8.decode(resp.bodyBytes));
-    if (decoded is! Map<String, dynamic>) {
-      throw SonderException('Unreadable work run response.');
-    }
-    return WorkRunInfo.fromJson(decoded);
   }
 
   @override
-  Future<WorkRunInfo> getWorkRun(String id) =>
-      _workRun('GET', '/v1/work-runs/${Uri.encodeComponent(id)}');
+  Future<WorkRun> getWorkRun(String id) => _workRuns((r) => r.get(id));
 
   @override
-  Future<WorkRunInfo> cancelWorkRun(String id) =>
-      _workRun('POST', '/v1/work-runs/${Uri.encodeComponent(id)}/cancel');
+  Future<WorkRun> cancelWorkRun(String id) => _workRuns((r) => r.cancel(id));
 
   @override
-  Future<List<WorkRunInfo>> listWorkRuns() async {
-    final resp = await _send('GET', '/v1/work-runs');
-    if (resp.statusCode == 403) {
-      throw SonderException('Work runs need a developer or admin account.',
-          httpStatus: 403, code: 'FORBIDDEN');
-    }
-    if (resp.statusCode != 200) {
-      throw _httpError(resp, 'Could not list work runs.');
-    }
-    final decoded = jsonDecode(utf8.decode(resp.bodyBytes));
-    final runs = decoded is Map ? decoded['runs'] : null;
-    if (runs is! List) return const [];
-    return runs
-        .whereType<Map>()
-        .map((r) => WorkRunInfo.fromJson(Map<String, dynamic>.from(r)))
-        .toList(growable: false);
-  }
+  Future<List<WorkRun>> listWorkRuns() => _workRuns((r) => r.list());
 
   @override
   Future<ApprovalOutcome> approveCall(String callId,
       {Duration ttl = const Duration(minutes: 15)}) async {
-    final http.Response resp;
     try {
-      resp = await _send('POST', '/v1/approvals/${Uri.encodeComponent(callId)}',
-          body: {'ttl_seconds': ttl.inSeconds});
+      final issued = await api.approvals.approve(callId, ttl: ttl);
+      return ApprovalOutcome(ApprovalStatus.approved,
+          nonce: issued.nonce,
+          ttlSeconds:
+              issued.ttlSeconds > 0 ? issued.ttlSeconds : ttl.inSeconds);
     } on SonderException catch (e) {
+      if (e.code == ApprovalsApi.unavailableCode) {
+        return const ApprovalOutcome(ApprovalStatus.unsupported);
+      }
+      if (e.httpStatus == 401 || e.httpStatus == 403) {
+        return const ApprovalOutcome(ApprovalStatus.forbidden,
+            message: 'Approvals need a developer or admin account.');
+      }
       return ApprovalOutcome(ApprovalStatus.failed, message: e.message);
     }
-    if (resp.statusCode == 404 || resp.statusCode == 405) {
-      return const ApprovalOutcome(ApprovalStatus.unsupported);
-    }
-    if (resp.statusCode == 401 || resp.statusCode == 403) {
-      return const ApprovalOutcome(ApprovalStatus.forbidden,
-          message: 'Approvals need a developer or admin account.');
-    }
-    if (resp.statusCode != 200 && resp.statusCode != 201) {
-      return ApprovalOutcome(ApprovalStatus.failed,
-          message: _httpError(resp, 'The approval was not accepted.').message);
-    }
-    var nonce = '';
-    var ttlSeconds = ttl.inSeconds;
-    try {
-      final decoded = jsonDecode(utf8.decode(resp.bodyBytes));
-      if (decoded is Map) {
-        final approval =
-            decoded['approval'] is Map ? decoded['approval'] as Map : decoded;
-        nonce = approval['nonce']?.toString() ?? '';
-        ttlSeconds = int.tryParse(approval['ttl_seconds']?.toString() ?? '') ??
-            ttlSeconds;
-      }
-    } catch (_) {}
-    return ApprovalOutcome(ApprovalStatus.approved,
-        nonce: nonce, ttlSeconds: ttlSeconds);
   }
 
   @override
@@ -410,27 +257,37 @@ SonderException normalizeModeError(SonderException e) {
 }
 
 class _ApiTurn implements ChatTurn {
-  final SonderApi _api;
+  final CancelToken _cancel = CancelToken();
   final _controller = StreamController<TurnEvent>();
-  bool _cancelled = false;
 
-  _ApiTurn(this._api, TurnRequest request) {
-    unawaited(_run(request));
+  _ApiTurn(SonderApiPort api, TurnRequest request) {
+    unawaited(_run(api, request));
   }
 
-  Future<void> _run(TurnRequest r) async {
+  Future<void> _run(SonderApiPort api, TurnRequest r) async {
     try {
-      final reply = await _api.chatDetailed(
+      await for (final event in api.chatStream(
         r.history,
         model: r.model,
         contextSize: r.contextSize,
         sessionId: r.sessionId,
         project: r.project,
         allowApproximateLocation: r.allowApproximateLocation,
-      );
-      if (!_cancelled) _controller.add(TurnDone(reply));
+        history: r.historyMode,
+        cancel: _cancel,
+      )) {
+        if (_cancel.isCancelled) break;
+        switch (event) {
+          case ChatStreamDelta(:final text):
+            if (text.isNotEmpty) _controller.add(TurnDelta(text));
+          case ChatStreamDone(:final reply):
+            _controller.add(TurnDone(reply));
+          case ChatStreamOpened() || ChatStreamKeepAlive():
+            break;
+        }
+      }
     } catch (e, st) {
-      if (!_cancelled) _controller.addError(e, st);
+      if (!_cancel.isCancelled) _controller.addError(e, st);
     } finally {
       if (!_controller.isClosed) await _controller.close();
     }
@@ -439,10 +296,7 @@ class _ApiTurn implements ChatTurn {
   @override
   Stream<TurnEvent> get events => _controller.stream;
 
+  /// Cancels this turn's request only (its own token).
   @override
-  void cancel() {
-    if (_cancelled) return;
-    _cancelled = true;
-    _api.cancelChat();
-  }
+  void cancel() => _cancel.cancel();
 }

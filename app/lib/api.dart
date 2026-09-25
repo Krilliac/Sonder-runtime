@@ -1378,7 +1378,11 @@ class SonderApi implements SonderApiPort {
     required String project,
     required bool allowApproximateLocation,
     required bool stream,
+    String? history,
   }) async {
+    if (history != null && history != 'client' && history != 'auto') {
+      throw ArgumentError.value(history, 'history', 'must be client or auto');
+    }
     final locationHint =
         allowApproximateLocation && _needsApproximateLocation(messages)
             ? await _discoverApproximateLocation()
@@ -1390,6 +1394,9 @@ class SonderApi implements SonderApiPort {
       if (project.trim().isNotEmpty) 'project': project.trim(),
       'location_consent': allowApproximateLocation,
       if (locationHint != null) 'location_hint': locationHint,
+      // Server S5: "client" means use only the messages sent, never inject
+      // the session's durable history (a cancelled turn stays gone).
+      if (history != null) 'history': history,
       'messages': messages
           // A transport/policy failure is local UI state, not an assistant
           // answer. Replaying it as model-visible history would make a
@@ -1428,6 +1435,7 @@ class SonderApi implements SonderApiPort {
     String sessionId = '',
     String project = '',
     bool allowApproximateLocation = false,
+    String? history,
     CancelToken? cancel,
   }) async {
     final token = cancel ?? CancelToken();
@@ -1440,6 +1448,7 @@ class SonderApi implements SonderApiPort {
         sessionId: sessionId,
         project: project,
         allowApproximateLocation: allowApproximateLocation,
+        history: history,
         cancel: token,
         allowFallback: true,
       );
@@ -1457,6 +1466,7 @@ class SonderApi implements SonderApiPort {
     required bool allowApproximateLocation,
     required CancelToken cancel,
     required bool allowFallback,
+    String? history,
     Duration? timeout,
   }) async {
     final body = await _chatBody(
@@ -1466,6 +1476,7 @@ class SonderApi implements SonderApiPort {
       sessionId: sessionId,
       project: project,
       allowApproximateLocation: allowApproximateLocation,
+      history: history,
       stream: false,
     );
     if (cancel.isCancelled) throw SonderException.cancelled();
@@ -1549,6 +1560,7 @@ class SonderApi implements SonderApiPort {
     String sessionId = '',
     String project = '',
     bool allowApproximateLocation = false,
+    String? history,
     CancelToken? cancel,
   }) async* {
     final token = cancel ?? CancelToken();
@@ -1561,6 +1573,7 @@ class SonderApi implements SonderApiPort {
         sessionId: sessionId,
         project: project,
         allowApproximateLocation: allowApproximateLocation,
+        history: history,
         stream: true,
       );
       var warning = '';
