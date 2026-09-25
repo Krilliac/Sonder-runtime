@@ -65,6 +65,23 @@ Keep parallelism bounded (`-n 4` rather than `-n auto`) when other builds or
 agent fleets are running; the suite spawns real subprocesses in places, so
 worker count understates process count.
 
+### `--dist load` versus `--dist worksteal` (measured 2026-09-25)
+
+CI keeps `--dist load`. Work-stealing was measured against it on a
+2,347-test subset (`tests/production` plus `tests/test_r*`, `test_t*`,
+`test_u*`) with `-n 4`, four runs each, interleaved back to back on a shared
+4-CPU container:
+
+| Mode | Runs (s) | Median |
+|---|---|---:|
+| `load` | 345, 297, 224, 306 | ~302 s |
+| `worksteal` | 343, 342, 248, 324 | ~333 s |
+
+Worksteal was slower in three of four adjacent pairs. The spread within one
+mode (224-345 s) is wider than the gap, so read this as "not better here",
+not as a precise penalty; re-measure before switching on other hardware.
+`pytest-xdist>=3.2` is pinned because `scripts/test_fast.py` uses worksteal.
+
 Parallel runs are also a flakiness detector: each worker starts with cold
 process state, so a test that only passes because an earlier test warmed a
 cache fails immediately under xdist. That is how the `/api/show`
