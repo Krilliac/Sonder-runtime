@@ -189,6 +189,10 @@ def _pids(path: Path, limit=30.0) -> list[int]:
 def env(tmp_path, monkeypatch):
     monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path / "allowed"))
     monkeypatch.setenv("SONDER_LAUNCHER_LEAK_CHECK", "should-not-leak")
+    # SONDER_* names are already scrubbed by child_environment(); these are not,
+    # so they prove the step runs with a replacement environment.
+    monkeypatch.setenv("DEBUGGER_LEAK_CANARY", "should-not-leak")
+    monkeypatch.setenv("GDBHISTFILE", "/tmp/should-not-leak")
     return Env(tmp_path)
 
 
@@ -207,6 +211,7 @@ def test_a_chain_binds_nonce_rundir_and_input_and_cleans_up(env):
     assert seen["cwd"] == str(rundir / "cwd") and seen["rundir"] == str(rundir)
     assert seen["env"].get("HOME") == str(rundir / "home")
     assert "SONDER_LAUNCHER_LEAK_CHECK" not in seen["env"]
+    assert "DEBUGGER_LEAK_CANARY" not in seen["env"] and "GDBHISTFILE" not in seen["env"]
     assert seen["input"].startswith(str(rundir / "in"))
     assert bytes.fromhex(seen["data"]) == (env.allowed / "core.1").read_bytes()[:16]
     # the plan kept its placeholders; only the launched argv carries values

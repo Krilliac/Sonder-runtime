@@ -387,3 +387,72 @@ def test_an_rsds_path_naming_a_fifo_plans_no_step_and_finishes_fast(stack, tmp_p
 def test_minidump_stackwalk_on_a_real_breakpad_dump():
     _need("minidump-stackwalk")
     pytest.skip("no Linux Breakpad minidump writer is installed on this host")
+
+
+# -- nothing executes from the capture or the executable's directory ------------------------
+
+
+def test_gdb_does_not_auto_load_scripts_beside_the_core_or_the_executable(stack, crasher, tmp_path):
+    _need("gdb")
+    core, binary = _into(stack, crasher, "core", "binary")
+    marker = tmp_path / "AUTO_LOADED"
+    for folder in {core.parent, binary.parent}:
+        (folder / ".gdbinit").write_text("shell touch %s\n" % marker)
+    (binary.parent / (binary.name + "-gdb.py")).write_text("open(%r, 'w').write('x')\n" % str(marker))
+    (binary.parent / (binary.name + "-gdb.gdb")).write_text("shell touch %s\n" % marker)
+    outcome = stack.service.crash(CrashDigestRequest(str(core), executable=str(binary), engine="gdb"),
+                                  ctx(), wait_seconds=90)
+    assert outcome.status == "complete", outcome
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("engine", ["gdb", "lldb"])
+def test_hostile_capture_and_executable_names_are_plain_arguments(stack, crasher, engine):
+    _need(engine)
+    folder = stack.allowed / "d;$(touch PWNED)'\"`touch PWNED`"
+    folder.mkdir()
+    core = folder / "core;$(touch PWNED).-ex shell touch PWNED"
+    binary = folder / "-ex shell touch PWNED"
+    shutil.copy(crasher["core"], core)
+    shutil.copy(crasher["binary"], binary)
+    outcome = stack.service.crash(CrashDigestRequest(str(core), executable=str(binary), engine=engine),
+                                  ctx(), wait_seconds=90)
+    assert outcome.status == "complete", outcome
+    rundir = stack.state / "debug-runs" / outcome.run_id
+    assert not any(path.name == "PWNED" for path in stack.state.rglob("*"))
+    assert not any(path.name == "PWNED" for path in stack.allowed.rglob("*"))
+    assert sorted(os.listdir(rundir)) == ["chain.json", "plan.json", "result.json"]
+
+
+def test_a_launched_debugger_sees_only_the_host_owned_argv_environment_and_cwd(tmp_path, crasher,
+                                                                              monkeypatch):
+    """A recording shim stands in for gdb under the real provider."""
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path / "allowed"))
+    for key in ("LD_PRELOAD", "PYTHONPATH", "GDBHISTFILE", "LLDB_DEBUGSERVER_PATH", "_NT_SYMBOL_PATH",
+                "DEBUGINFOD_CACHE_PATH", "INIT", "DEBUGGER_LEAK_CANARY"):
+        monkeypatch.setenv(key, "/nonexistent/should-not-leak")
+    monkeypatch.setenv("DEBUGINFOD_URLS", "http://127.0.0.1:9")
+    record = tmp_path / "seen.json"
+    fake = tmp_path / "bin" / "gdb"
+    fake.parent.mkdir()
+    fake.write_text("#!%s -I\nimport json, os, sys\njson.dump({'argv': sys.argv, 'env': dict(os.environ), "
+                    "'cwd': os.getcwd(), 'cwd_entries': os.listdir('.')}, open(%r, 'w'))\n"
+                    % (sys.executable, str(record)))
+    fake.chmod(0o755)
+    stack = Stack(tmp_path, lookup=HostLookup({"gdb": str(fake)}), isolation=False)
+    core, binary = _into(stack, crasher, "core", "binary")
+    stack.service.crash(CrashDigestRequest(str(core), executable=str(binary), engine="gdb"), ctx(),
+                        wait_seconds=60)
+    import json
+
+    seen = json.loads(record.read_text())
+    assert set(seen["env"]) <= {"PATH", "HOME", "LANG", "TMPDIR", "DEBUGINFOD_URLS", "PERF_CONFIG",
+                                "LC_CTYPE"}, seen["env"]
+    assert seen["env"]["DEBUGINFOD_URLS"] == "" and seen["env"]["PATH"] == "/usr/bin:/bin"
+    assert seen["cwd"].endswith("/cwd") and seen["cwd_entries"] == []
+    assert seen["env"]["HOME"].startswith(str(stack.state / "debug-runs"))
+    argv = seen["argv"][1:]
+    assert argv[:4] == ["-nx", "-nh", "-batch", "-q"]
+    assert argv[argv.index("-iex") + 1] == "set auto-load off"
+    assert argv[-2] == str(binary) and argv[-1].startswith(str(stack.state / "debug-runs"))
+    assert not any(item in ("-x", "--command", "source") for item in argv)

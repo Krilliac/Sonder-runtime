@@ -68,7 +68,7 @@ from ...domain.debugging.symbol_path import (
     store_display,
 )
 from ..host_tools.guards import is_windows_apps_alias
-from .symbol_dirs import contain_symbol_dirs
+from .symbol_dirs import PLACEHOLDER_TEXT, contain_symbol_dirs
 
 GIB = 1 << 30
 MAX_SYMBOLIZER_STEPS = 3
@@ -224,7 +224,10 @@ class HostDebugPlanner:
             return ""
         if self._source is None:
             raise debug_error(EXECUTABLE_REQUIRED, "executables cannot be verified here")
-        return self._source.contained_file(path)
+        contained = self._source.contained_file(path)
+        if PLACEHOLDER_TEXT.search(contained):
+            raise InvalidInput("executable path spells a {placeholder}")
+        return contained
 
     def _stat_identity(self, path: str) -> str:
         try:

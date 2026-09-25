@@ -29,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
+import re
 import stat
 import struct
 import threading
@@ -77,6 +78,7 @@ _SANITIZER_MARKERS = (
     b"ERROR: LeakSanitizer", b"WARNING: MemorySanitizer", b"ERROR: MemorySanitizer",
     b"runtime error:", b"ERROR: ThreadSanitizer",
 )
+_PLAIN_SUFFIX = re.compile(r"\.[A-Za-z0-9_-]{1,15}")
 _TRACY_MAGICS = (b"tlZ\x04", b"tZst", b"tr\xfdP")
 
 
@@ -504,7 +506,11 @@ class GuardedCaptureSource:
     def stage(self, identity: CaptureIdentity, rundir: str, *, strategy: str,
               dest_name: str = "", extra_roots: str = "") -> str:
         """Place the capture for the debugger; returns the path bound to ``{input}``."""
-        name = dest_name or ("capture" + (Path(identity.path).suffix[:16] or ".bin"))
+        # The staged name is bound into debugger argv: keep only a plain suffix.
+        suffix = Path(identity.path).suffix[:16]
+        if not _PLAIN_SUFFIX.fullmatch(suffix):
+            suffix = ".bin"
+        name = dest_name or ("capture" + suffix)
         dest = Path(rundir) / "in" / name
         if strategy == "copy":
             copy_guarded(self._opener, identity, dest, extra_roots)

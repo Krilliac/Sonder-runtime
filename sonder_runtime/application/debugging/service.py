@@ -67,6 +67,9 @@ MAX_RUN_WAIT_SECONDS = 120
 MAX_RESULT_WAIT_SECONDS = 60
 MAX_DIRECTORY_FILES = 64
 DIRECTORY_READ_BUDGET = 256 << 20
+# Opening a capture streams its sha256 (up to 5 s each); 64 large files would
+# otherwise keep one tool call busy for minutes.
+DIRECTORY_SECONDS = 30.0
 OUTPUT_WINDOW_BYTES = 2_000_000
 OUTPUT_HEAD_BYTES = 65_536
 MAX_NOTES = 32
@@ -347,8 +350,9 @@ class DebugDigestService:
         reports = []
         notes: list[str] = []
         used = 0
+        deadline = self._clock() + DIRECTORY_SECONDS
         for listed in identities:
-            if used >= DIRECTORY_READ_BUDGET:
+            if used >= DIRECTORY_READ_BUDGET or self._clock() > deadline:
                 notes.append("directory read budget exhausted; later files were not read")
                 break
             try:
@@ -619,6 +623,6 @@ class DebugDigestService:
 
 
 __all__ = [
-    "DIRECTORY_READ_BUDGET", "DebugDigestService", "MAX_RESULT_WAIT_SECONDS",
+    "DIRECTORY_READ_BUDGET", "DIRECTORY_SECONDS", "DebugDigestService", "MAX_RESULT_WAIT_SECONDS",
     "MAX_RUN_WAIT_SECONDS",
 ]

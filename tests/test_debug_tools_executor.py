@@ -207,3 +207,58 @@ def test_crash_reports_from_the_readers_fit_48_kb():
     assert len(result.output.encode("utf-8")) <= MAX
     assert body["ok"] is True and body["crash"]["truncated"] is True
     assert body["crash"]["untrusted_strings"] is True
+
+
+# -- model-visible host paths ---------------------------------------------------
+
+def _host_redactor(path):
+    return path.replace("/home/op", "~").replace("/srv/proj", "[WORKSPACE]")
+
+
+def test_notes_and_messages_are_path_redacted_on_the_wire():
+    outcome = DebugRunOutcome("debug-run-" + "a" * 32, "complete", notes=(
+        "module /home/op/build/game.so has no symbols",
+        "source /home/bob/ci/render.cpp mapped to Engine/Render/render.cpp",
+        "mac build at /Users/carol/src/x.mm",
+        "[WORKSPACE] stays; relative src/op/x.c stays",
+    ), command_digest="d" * 64)
+    executor = DebugToolExecutor(FakeService(outcome), Fallback(), path_redactor=lambda: _host_redactor)
+    result, body = run(executor, "crash_digest", {"path": "/w/core.1"})
+    assert body["notes"] == [
+        "module ~/build/game.so has no symbols",
+        "source /home/<user>/ci/render.cpp mapped to Engine/Render/render.cpp",
+        "mac build at /Users/<user>/src/x.mm",
+        "[WORKSPACE] stays; relative src/op/x.c stays",
+    ]
+    assert body["command_digest"] == "d" * 64
+
+
+def test_failure_messages_are_path_redacted():
+    error = debug_error("CAPTURE_REJECTED", "capture /home/op/secret/core.1 rejected")
+    executor = DebugToolExecutor(FakeService(error=error), Fallback(), path_redactor=lambda: _host_redactor)
+    result, body = run(executor, "crash_digest", {"path": "/w/core.1"})
+    assert "/home/op" not in result.output and "~/secret/core.1" in body["message"]
+
+
+def test_os_permission_errors_do_not_name_the_path():
+    error = PermissionError(13, "Permission denied", "/home/op/private/core.1")
+    result, body = run(DebugToolExecutor(FakeService(error=error), Fallback()), "crash_digest",
+                       {"path": "/w/core.1"})
+    assert body["error_code"] == "CAPTURE_REJECTED" and "private" not in result.output
+
+
+def test_crash_report_module_and_frame_paths_are_redacted_on_the_wire():
+    model = pytest.importorskip("sonder_runtime.domain.crash.model")
+    frame = model.StackFrame(index=0, module="game", function="Renderer::Submit",
+                             file="/home/op/src/render.cpp", line=7)
+    report = model.CrashReport(
+        source_kind="elf_core", threads=(model.ThreadSummary(1, "main", True, (frame,)),),
+        modules=(model.ModuleInfo(name="game", path="/home/bob/build/game"),
+                 model.ModuleInfo(name="w.exe", path="C:\\Users\\dana\\w.exe")))
+    outcome = DebugRunOutcome("debug-run-" + "a" * 32, "complete", crash=report)
+    executor = DebugToolExecutor(FakeService(outcome), Fallback(), path_redactor=lambda: _host_redactor)
+    result, body = run(executor, "crash_digest", {"path": "/w/core.1"})
+    for name in ("/home/op", "bob", "dana"):
+        assert name not in result.output
+    top = body["crash"]["threads"][0]["frames"][0]
+    assert top["file"] == "~/src/render.cpp" and top["function"] == "Renderer::Submit"

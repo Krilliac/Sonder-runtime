@@ -26,7 +26,7 @@ from sonder_runtime.application.debugging.ports import (  # noqa: E402
     CrashDigestRequest,
     ProfileDigestRequest,
 )
-from sonder_runtime.domain.common.errors import SonderError  # noqa: E402
+from sonder_runtime.domain.common.errors import InvalidInput, SonderError  # noqa: E402
 from sonder_runtime.domain.crash.model import (  # noqa: E402
     CrashReport,
     ModuleInfo,
@@ -142,6 +142,16 @@ def test_an_executable_outside_the_roots_is_refused(root, tmp_path):
         planner().plan_crash(CrashDigestRequest("/w/core", executable=str(outside), engine="gdb"),
                              ctx(), network_allowed=False, identity=core_identity(), tier0=None)
     assert caught.value.code == "CAPTURE_REJECTED"
+
+
+def test_an_executable_spelling_a_placeholder_is_refused(root):
+    """The launcher rewrites ``{rundir}`` in bindings; a host path must never carry one."""
+    path = root / "game{rundir}"
+    path.write_bytes(b"\x7fELF" + b"\x00" * 60)
+    with pytest.raises(SonderError) as caught:
+        planner().plan_crash(CrashDigestRequest("/w/core", executable=str(path), engine="gdb"),
+                             ctx(), network_allowed=False, identity=core_identity(), tier0=None)
+    assert caught.value.code == "INVALID_INPUT" or isinstance(caught.value, InvalidInput)
 
 
 def test_no_netns_when_the_probe_fails_or_unshare_is_missing(root):

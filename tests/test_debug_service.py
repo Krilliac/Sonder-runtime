@@ -396,6 +396,24 @@ def test_triage_of_a_directory_buckets_at_most_the_requested_files(stack):
     assert any("core.3" in note and "not a crash capture" in note for note in notes)
 
 
+def test_directory_triage_stops_at_its_wall_clock_budget(stack):
+    """Opening each capture hashes it (up to 5 s); 64 slow files must not take minutes."""
+    stack.source.directory = tuple(identity(path="/w/d/core.%d" % i, label="core.%d" % i)
+                                   for i in range(64))
+    service = stack.service()
+    clock = service._clock
+    original = stack.source.open_reader
+
+    def slow_open(*args, **kwargs):
+        clock.now += 5.0  # one budgeted hash per file
+        return original(*args, **kwargs)
+
+    stack.source.open_reader = slow_open
+    buckets, notes = service.triage_detail(CrashTriageRequest("/w/d/", max_files=64), ctx("mcp"))
+    assert len(stack.source.opened) <= 7
+    assert any("budget exhausted" in note for note in notes)
+
+
 def test_triage_refuses_profiles_and_perfetto(stack):
     stack.source.kind = "chrome_trace"
     with pytest.raises(SonderError) as caught:

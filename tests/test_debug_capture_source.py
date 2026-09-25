@@ -373,3 +373,33 @@ def test_symbol_files_are_staged_through_the_same_guard(root, tmp_path):
     link.symlink_to(pdb)
     with pytest.raises((SonderError, OSError, PermissionError)):
         source.stage_file(str(link), str(tmp_path / "other.pdb"))
+
+
+@pytest.mark.parametrize("name,staged", [
+    ("core.1", "capture.1"),
+    ("game.dmp", "capture.dmp"),
+    ("core.{nonce}", "capture.bin"),
+    ("core.-ex shell touch x", "capture.bin"),
+    ("core.$(id)", "capture.bin"),
+    ("core", "capture.bin"),
+])
+def test_the_staged_name_keeps_only_a_plain_suffix(root, tmp_path, name, staged):
+    """The staged path is bound into debugger argv; a hostile suffix must not ride along."""
+    capture = root / name
+    capture.write_bytes(elf_header(4) + b"a" * 64)
+    source = GuardedCaptureSource()
+    ident = _open(source, capture)
+    rundir = tmp_path / "run"
+    (rundir / "in").mkdir(parents=True)
+    assert os.path.basename(source.stage(ident, str(rundir), strategy="copy")) == staged
+
+
+@pytest.mark.parametrize("path", ["{rundir}", "sym/{nonce}/x", "a{input}"])
+def test_symbol_dirs_spelling_a_placeholder_are_rejected(root, path):
+    from sonder_runtime.adapters.debugging.symbol_dirs import contain_symbol_dir
+
+    target = root / path
+    target.mkdir(parents=True)
+    with pytest.raises(SonderError) as caught:
+        contain_symbol_dir(str(target), system="Linux")
+    assert _code(caught) == "SYMBOL_PATH_REJECTED"

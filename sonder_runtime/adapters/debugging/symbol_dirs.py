@@ -12,6 +12,7 @@ debugger reading symbols from a network drive is egress.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path, PureWindowsPath
 from typing import Callable
 
@@ -20,6 +21,9 @@ from ..filesystem import file_ops
 
 DRIVE_REMOTE = 4
 MAX_SYMBOL_DIRS = 8
+# Launch-time bindings substitute ``{rundir}`` inside planner-built values; a
+# host path spelling a placeholder would be rewritten into the run directory.
+PLACEHOLDER_TEXT = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
 
 
 def _drive_type_windows(root: str) -> int:  # pragma: no cover - Windows only
@@ -45,6 +49,8 @@ def contain_symbol_dir(path: str, extra_roots: str = "", *, system: str | None =
     ``exists=False`` stops after the lexical and drive checks (planning on a
     host that does not have the directory, e.g. tests of Windows plans).
     """
+    if PLACEHOLDER_TEXT.search(str(path or "")):
+        raise _reject("symbol dir spells a {placeholder}")
     from ...domain.debugging.symbol_path import SymbolPathRejected, lexical_symbol_dir
 
     host = system or ("Windows" if os.name == "nt" else "Linux")
@@ -95,4 +101,4 @@ def contain_symbol_dirs(paths, extra_roots: str = "", **kwargs) -> tuple[str, ..
     return tuple(out)
 
 
-__all__ = ["DRIVE_REMOTE", "MAX_SYMBOL_DIRS", "contain_symbol_dir", "contain_symbol_dirs"]
+__all__ = ["DRIVE_REMOTE", "MAX_SYMBOL_DIRS", "PLACEHOLDER_TEXT", "contain_symbol_dir", "contain_symbol_dirs"]

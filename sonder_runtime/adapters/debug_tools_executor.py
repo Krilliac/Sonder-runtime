@@ -10,13 +10,22 @@ strings -- the same envelope as ``DeveloperToolExecutor``.
 
 A model call can never set ``console_confirmed``: ``symbol_server=true``
 through this executor is always ``SYMBOL_SERVER_NEEDS_CONSOLE``.
+
+Everything returned here is model-visible, so host paths in it are redacted
+on the way out: module paths, source files, labels, notes and messages go
+through the -2 ``display_redactor`` (workspace roots, the home directory and
+the user name) and home directories of other users named by the capture
+(``/home/<name>``, ``/Users/<name>``, ``C:\\Users\\<name>``) lose the name.
+The service keeps the unredacted report for the console and the crash-fix
+hand-off; only this wire copy is redacted.
 """
 from __future__ import annotations
 
 import json
 import logging
+import re
 import time
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from ..application.context import OperationContext
 from ..application.debugging.ports import (
@@ -47,6 +56,61 @@ DEBUG_TYPED_TOOLS = ("crash_triage", "crash_digest", "profile_digest", "profile_
 MAX_WIRE_BYTES = 48_000
 DEFAULT_RUN_WAIT_SECONDS = 60
 UNAVAILABLE_MESSAGE = "debug tools are not composed in this runtime"
+
+# A path token starts a string or follows a separator, so relative source
+# paths such as ``Engine/Render/x.cpp`` are never cut in half.
+_PATH_TOKEN = re.compile(r"(?<![\w.~/\\-])(?:[A-Za-z]:[\\/]|\\\\|/)[^\s'\"<>|,;()\[\]{}]*")
+_FOREIGN_HOME = re.compile(r"^(/(?:home|Users)/)([^/]+)(?=/|$)")
+_FOREIGN_WINDOWS_HOME = re.compile(r"^([A-Za-z]:[\\/])Users[\\/][^\\/]+(?=$|[\\/])", re.IGNORECASE)
+# Identity and enum fields are never paths; leave them byte-exact.
+_NOT_PATHS = frozenset({
+    "object", "run_id", "command_digest", "input_sha256", "signature", "signature_basis",
+    "status", "error_code", "debug_id", "engines", "staging", "egress_isolation", "symbols",
+    "trust", "symbolication", "source_kind", "next",
+})
+
+
+def default_path_redactor() -> Callable[[str], str]:
+    """The -2 display redactor for this host (identity when it cannot be built)."""
+    try:
+        from .host_tools.guards import display_redactor
+
+        return display_redactor()
+    except Exception:  # pragma: no cover - the guard module ships with the runtime
+        logger.warning("display redactor unavailable; debug wire paths are not redacted",
+                       exc_info=True)
+        return lambda text: text
+
+
+def redact_paths(text: str, path_redactor: Callable[[str], str]) -> str:
+    """Redact every path token in ``text`` (host identity and foreign home dirs)."""
+    if not isinstance(text, str) or not text or ("/" not in text and "\\" not in text):
+        return text
+
+    def one(match: re.Match) -> str:
+        token = match.group(0)
+        try:
+            redacted = path_redactor(token)
+        except Exception:
+            redacted = token
+        if redacted == token:
+            # Home directories of other users (the machine that crashed).
+            redacted = _FOREIGN_HOME.sub(r"\1<user>", token)
+            redacted = _FOREIGN_WINDOWS_HOME.sub(r"\1Users\\<user>", redacted)
+        return redacted
+
+    return _PATH_TOKEN.sub(one, text)
+
+
+def redact_wire(value: Any, path_redactor: Callable[[str], str], key: str = "") -> Any:
+    """``value`` with every path-bearing string redacted (dicts and lists walked)."""
+    if isinstance(value, str):
+        return value if key in _NOT_PATHS else redact_paths(value, path_redactor)
+    if isinstance(value, Mapping):
+        return {name: redact_wire(item, path_redactor, str(name)) for name, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [redact_wire(item, path_redactor, key) for item in value]
+    return value
 
 
 def _dumps(payload: Mapping[str, Any]) -> str:
@@ -142,9 +206,12 @@ class DebugToolExecutor:
 
     NAMES = frozenset(DEBUG_TYPED_TOOLS)
 
-    def __init__(self, service, fallback) -> None:
+    def __init__(self, service, fallback, *,
+                 path_redactor: Callable[[], Callable[[str], str]] | None = None) -> None:
         self._service = service
         self._fallback = fallback
+        # A factory: the home directory, user and file roots are read per call.
+        self._path_redactor = path_redactor or default_path_redactor
 
     def execute(self, descriptor: ToolDescriptor, call: ToolCall, context: OperationContext,
                 execution_class: ExecutionClass) -> ToolExecutionResult:
@@ -162,7 +229,9 @@ class DebugToolExecutor:
         except ImportError:
             return self._failure(name, DEBUG_TOOLS_UNAVAILABLE, UNAVAILABLE_MESSAGE, started)
         except PermissionError as exc:
-            return self._failure(name, "CAPTURE_REJECTED", str(exc) or "refused", started)
+            # An OS PermissionError names the host path; report the kind only.
+            message = type(exc).__name__ if getattr(exc, "filename", None) else (str(exc) or "refused")
+            return self._failure(name, "CAPTURE_REJECTED", message, started)
         except (FileNotFoundError, IsADirectoryError, NotADirectoryError) as exc:
             return self._failure(name, "CAPTURE_REJECTED", type(exc).__name__, started)
         except (OSError, RecursionError, MemoryError) as exc:
@@ -170,7 +239,7 @@ class DebugToolExecutor:
             logger.warning("debug tool %s failed on the host", name, exc_info=True)
             return self._failure(name, "HOST_IO_FAILURE", type(exc).__name__, started)
         payload["ok"] = True
-        payload = self._fit(payload)
+        payload = self._fit(redact_wire(payload, self._path_redactor()))
         return ToolExecutionResult(
             tool_name=name, success=True, output=_dumps(payload),
             duration_ms=max(0, int((time.monotonic() - started) * 1000)),
@@ -273,9 +342,9 @@ class DebugToolExecutor:
             evidence.setdefault("input_sha256", crash["input_sha256"][:128])
         return evidence
 
-    @staticmethod
-    def _failure(name: str, code: str, message: str, started: float) -> ToolExecutionResult:
-        body = {"ok": False, "error_code": code, "message": str(message)[:400]}
+    def _failure(self, name: str, code: str, message: str, started: float) -> ToolExecutionResult:
+        message = redact_paths(str(message), self._path_redactor())
+        body = {"ok": False, "error_code": code, "message": message[:400]}
         return ToolExecutionResult(
             tool_name=name, success=False, output=_dumps(body), error_code=code,
             error=str(message)[:400],
@@ -285,5 +354,6 @@ class DebugToolExecutor:
 
 
 __all__ = [
-    "DEBUG_TYPED_TOOLS", "DebugToolExecutor", "crash_digest_request", "profile_request",
+    "DEBUG_TYPED_TOOLS", "DebugToolExecutor", "crash_digest_request", "default_path_redactor",
+    "profile_request", "redact_paths", "redact_wire",
 ]
