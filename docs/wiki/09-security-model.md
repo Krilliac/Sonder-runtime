@@ -145,7 +145,13 @@ of the model — an uncensored or "abliterated" model changes what it will
   shared directories (`/tmp`), `/` and the user's own home directory are never
   changed, and no mode is ever widened. Windows is unchanged: the default home
   under `%LOCALAPPDATA%` inherits a user-only ACL, and a custom `SONDER_HOME`
-  there needs an equivalent ACL set by the operator.
+  there needs an equivalent ACL set by the operator. On a host that runs
+  uid-separated self-modification candidates (`SONDER_SELFMOD_CANDIDATE_UID`
+  set) the home is `0711` instead -- the candidate uid can traverse it to its
+  workspace under `selfmod/workspaces` but cannot list or read it, and the
+  stores stay `0600`. A home already tightened to `0700` before that uid was
+  configured is never widened automatically: run `chmod 0711 "$SONDER_HOME"`
+  once when enabling Linux candidate isolation.
 
 ## Update trust
 

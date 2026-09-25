@@ -161,3 +161,24 @@ def test_prepare_private_file_creates_and_tightens(tmp_path, loose_umask):
     fresh = tmp_path / "audit" / "fresh.jsonl"
     private_files.prepare_private_file(fresh)
     assert _mode(fresh) == 0o600
+
+
+def test_selfmod_candidate_host_home_is_traverse_only(tmp_path, monkeypatch, loose_umask):
+    """A uid-separated selfmod candidate must reach selfmod/workspaces."""
+    monkeypatch.setenv("SONDER_SELFMOD_CANDIDATE_UID", "260001")
+    fresh = tmp_path / "fresh-home"
+    paths.configure_home(fresh)
+    try:
+        paths.state_path("selfmod")
+    finally:
+        paths.reset_home()
+    assert _mode(fresh) == 0o711
+    existing = tmp_path / "existing-home"
+    existing.mkdir()
+    os.chmod(existing, 0o755)
+    paths.configure_home(existing)
+    try:
+        paths.state_path("selfmod")
+    finally:
+        paths.reset_home()
+    assert _mode(existing) == 0o711

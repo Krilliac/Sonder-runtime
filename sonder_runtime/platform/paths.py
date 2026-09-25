@@ -174,16 +174,25 @@ def default_home() -> Path:
     return Path.home() / ".local" / "share" / "sonder"
 
 
-def ensure_home() -> Path:
+def _home_needs_candidate_traverse() -> bool:
+    """A uid-separated selfmod candidate must traverse the home (0711)."""
+    return bool(os.environ.get("SONDER_SELFMOD_CANDIDATE_UID", "").strip())
+
+
+def _ensure_state_home(home: Path) -> Path:
     # The state home holds credentials, sessions and conversations; it is
     # owner-only on POSIX (see ``private_files`` for the exact rules).
-    return ensure_private_dir(default_home())
+    return ensure_private_dir(home, traverse=_home_needs_candidate_traverse())
+
+
+def ensure_home() -> Path:
+    return _ensure_state_home(default_home())
 
 
 def state_path(name: str, env_var: str = "") -> str:
     configured = _configured_home()
     if configured is not None:
-        ensure_private_dir(configured)
+        _ensure_state_home(configured)
         return str(configured / name)
     if env_var:
         override = os.environ.get(env_var, "").strip()

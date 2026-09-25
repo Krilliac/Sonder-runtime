@@ -8,7 +8,12 @@ inside a ``0755`` state home, readable by every local account on a shared host.
 The rules, applied at the state-home and store-open choke points:
 
 * the state home directory is created ``0700``; an existing one owned by the
-  current user has its group/other bits removed;
+  current user has its group/other bits removed. One narrow exception: on a
+  host that runs uid-separated self-modification candidates
+  (``SONDER_SELFMOD_CANDIDATE_UID`` set), the candidate uid must traverse the
+  home to reach its workspace under ``selfmod/workspaces``, so the home is
+  ``0711`` there -- traverse only, no listing, no read -- and every store in
+  it is still ``0600``;
 * SQLite databases (and their ``-wal``/``-shm``/``-journal`` sidecars) and the
   JSONL audit stores are created ``0600``; existing ones owned by the current
   user are tightened to owner-only when they are opened. SQLite creates new
@@ -39,10 +44,12 @@ import threading
 from pathlib import Path
 
 PRIVATE_DIR_MODE = 0o700
+TRAVERSE_DIR_MODE = 0o711
 PRIVATE_FILE_MODE = 0o600
 SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 
 _GROUP_OTHER_BITS = 0o077
+_GROUP_OTHER_READ_WRITE_BITS = 0o066
 _logger = logging.getLogger(__name__)
 _SECURED_DIRS: set[str] = set()
 _SECURED_DIRS_LOCK = threading.Lock()
@@ -66,11 +73,13 @@ def _never_tighten(path: str, info: os.stat_result) -> bool:
     return bool(home) and real == home
 
 
-def restrict_to_owner(path: str | os.PathLike[str]) -> bool:
+def restrict_to_owner(path: str | os.PathLike[str], *, keep_traverse: bool = False) -> bool:
     """Remove group/other permission bits from an existing path we own.
 
-    Returns True when the mode was changed. Symlinks, paths owned by another
-    account, already-private paths, and shared directories are left alone.
+    ``keep_traverse`` leaves the group/other execute (traverse) bits of a
+    directory in place and removes only read/write. Returns True when the
+    mode was changed. Symlinks, paths owned by another account,
+    already-private paths, and shared directories are left alone.
     """
     if not supported():
         return False
@@ -82,32 +91,41 @@ def restrict_to_owner(path: str | os.PathLike[str]) -> bool:
     if stat.S_ISLNK(info.st_mode) or info.st_uid != os.geteuid():
         return False
     current = stat.S_IMODE(info.st_mode)
-    if not current & _GROUP_OTHER_BITS:
+    bits = (
+        _GROUP_OTHER_READ_WRITE_BITS
+        if keep_traverse and stat.S_ISDIR(info.st_mode) else _GROUP_OTHER_BITS
+    )
+    if not current & bits:
         return False
     if stat.S_ISDIR(info.st_mode) and _never_tighten(text, info):
         return False
     try:
-        os.chmod(text, current & ~_GROUP_OTHER_BITS)
+        os.chmod(text, current & ~bits)
     except OSError as error:
         _logger.debug("could not restrict private path mode: %s", type(error).__name__)
         return False
     return True
 
 
-def ensure_private_dir(path: str | os.PathLike[str]) -> Path:
+def ensure_private_dir(path: str | os.PathLike[str], *, traverse: bool = False) -> Path:
     """Create *path* (and parents) and make the leaf directory owner-only.
 
-    Intermediate directories keep the process default: only the state
-    directory itself is Sonder's to restrict. The result is cached per path so
-    the per-lookup cost after the first call is one set membership test.
+    ``traverse=True`` makes it ``0711`` instead of ``0700`` (see the module
+    docstring for the one caller that needs it). Intermediate directories keep
+    the process default: only the state directory itself is Sonder's to
+    restrict. The result is cached per path so the per-lookup cost after the
+    first call is one set membership test.
     """
     directory = Path(path)
-    key = os.fspath(directory)
+    key = "%s\0%d" % (os.fspath(directory), int(traverse))
     with _SECURED_DIRS_LOCK:
         if key in _SECURED_DIRS and directory.is_dir():
             return directory
-    directory.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIR_MODE)
-    restrict_to_owner(directory)
+    directory.mkdir(
+        parents=True, exist_ok=True,
+        mode=TRAVERSE_DIR_MODE if traverse else PRIVATE_DIR_MODE,
+    )
+    restrict_to_owner(directory, keep_traverse=traverse)
     with _SECURED_DIRS_LOCK:
         _SECURED_DIRS.add(key)
     return directory
@@ -149,6 +167,7 @@ def prepare_private_sqlite(path: str | os.PathLike[str], *, create: bool = True)
 __all__ = [
     "PRIVATE_DIR_MODE",
     "PRIVATE_FILE_MODE",
+    "TRAVERSE_DIR_MODE",
     "SQLITE_SIDECAR_SUFFIXES",
     "ensure_private_dir",
     "prepare_private_file",
