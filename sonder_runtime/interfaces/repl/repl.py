@@ -1312,6 +1312,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /activity [watch]  show once, or poll projected new events until Ctrl+C
   /work <task>       execute a guarded tool-using workflow with checklist/report
   /autopilot ...     persistent plan/run/status/resume/pause/cancel autonomy
+  /mission ...       one goal + optional task plan + autopilot (status|start|done|abandon)
   /runtime ...       shared local model mappings and execution-lane tiers
   /stash ...         save/restore this install's source edits for a guarded update
   /hardware          detect RAM, GPU runtime, VRAM, and offload support
@@ -1326,6 +1327,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /inventory [path]  summarize a guarded workspace with explicit scan budgets
   /tree [path]       list a guarded folder tree
   /search q|root|g   search text under a guarded root (optional glob)
+  /vision img|question  ask the local vision tier about a guarded image
   /programs [query]  find installed programs available to the workbench
   /scripts q|root    find runnable scripts under a guarded root
   /image <path>      inspect image metadata and dimensions

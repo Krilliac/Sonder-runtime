@@ -1208,7 +1208,9 @@ def _help_summaries() -> dict:
                 break
     out: dict[str, str] = {}
     for line in block.splitlines():
-        match = re.match(r"^\s+(/[a-z]\w*)", line)
+        # Hyphenated names are commands too: ``/workspace-create`` must not be
+        # read as ``/workspace`` and lose its description to that entry.
+        match = re.match(r"^\s+(/[a-z][\w-]*)", line)
         if not match:
             continue
         # The block is column-aligned, but a long argument list can eat the

@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "5599c9d0c78ad36e5490d5d450bb3c1c96216a1ec6edcedf17c28e1941172cf8",
+    "catalog_digest": "90bc993f319362d6732bb49b5ee3000686901d1ffa64330231877dadedb5f2cf",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "5599c9d0c78ad36e5490d5d450bb3c1c96216a1ec6edcedf17c28e1941172cf8",
+      "catalog_digest": "90bc993f319362d6732bb49b5ee3000686901d1ffa64330231877dadedb5f2cf",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -12465,7 +12465,7 @@
       "native": true,
       "params": [],
       "risk": "ask",
-      "summary": "",
+      "summary": "one goal + optional task plan + autopilot (status|start|done|abandon)",
       "tool": ""
     },
     {
@@ -15937,7 +15937,7 @@
       "native": true,
       "params": [],
       "risk": "ask",
-      "summary": "",
+      "summary": "ask the local vision tier about a guarded image",
       "tool": ""
     },
     {
@@ -16321,7 +16321,7 @@
       "native": true,
       "params": [],
       "risk": "mutation",
-      "summary": "",
+      "summary": "create a guarded directory, select it, and resume queued work",
       "tool": ""
     },
     {
@@ -17842,7 +17842,7 @@
     "schemas": 4,
     "tools": 214
   },
-  "digest": "24d819f5e6dd6208a940af041f2195ec469e1e4db4c62cde8325ab1fd82a151f",
+  "digest": "807ab09f5aae8d02f851eda994f3a59b467f190c1b029e73449f63a61dc4dab8",
   "events": [
     {
       "name": "session.started",
@@ -18312,9 +18312,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "5599c9d0c78ad36e5490d5d450bb3c1c96216a1ec6edcedf17c28e1941172cf8",
+    "catalog_digest": "90bc993f319362d6732bb49b5ee3000686901d1ffa64330231877dadedb5f2cf",
     "client": {
-      "digest": "5599c9d0c78ad36e5490d5d450bb3c1c96216a1ec6edcedf17c28e1941172cf8",
+      "digest": "90bc993f319362d6732bb49b5ee3000686901d1ffa64330231877dadedb5f2cf",
       "events": [
         {
           "name": "approval.denied",

@@ -114,3 +114,20 @@ def test_persona_names_are_case_insensitive(monkeypatch, capsys):
     out = capsys.readouterr().out.splitlines()
     assert "persona: reviewer" in out
     assert out[-1].startswith("persona: reviewer (available: ")
+
+
+def test_every_catalogued_command_has_a_description():
+    """``/workspace-create`` lost its HELP line to ``/workspace`` (the summary
+    parser stopped a name at the hyphen) and the newly reachable ``/mission``
+    and ``/vision`` had none, so ``/help`` listed them as "(no description)"."""
+    import command_catalog
+
+    command_catalog.reset_cache()
+    missing = sorted(
+        command.name for command in command_catalog.catalog()
+        if not str(command.summary or "").strip()
+    )
+    assert missing == []
+    summaries = command_catalog._help_summaries()
+    assert "create a guarded directory" in summaries["/workspace-create"]
+    assert "create a guarded directory" not in summaries["/workspace"]
