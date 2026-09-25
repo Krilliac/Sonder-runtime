@@ -331,6 +331,16 @@ def validate_checkpoint_resume(
             return _refuse(R.OWNER_EPOCH_AHEAD,
                            "checkpoint epoch is ahead of the journal owner", checkpoint)
         read = _read_run(journal, run_id, page_limit=page_limit, max_pages=max_pages)
+        if not isinstance(read, CheckpointResumeDecision):
+            # Pages are separate read snapshots.  Re-read the identity and
+            # owner so a journal swapped or reclaimed while the pages were
+            # read refuses instead of mixing two journals or two owners.
+            confirm = journal.position(run_id, worker_id)
+            if (confirm is None
+                    or confirm.journal_identity != position.journal_identity
+                    or confirm.current_owner_epoch != current_epoch):
+                return _refuse(R.JOURNAL_CHANGED,
+                               "effect journal changed while it was being read", checkpoint)
     except EffectJournalError as exc:
         return _refuse(R.JOURNAL_UNAVAILABLE, f"effect journal read failed: {exc}", checkpoint)
     if isinstance(read, CheckpointResumeDecision):

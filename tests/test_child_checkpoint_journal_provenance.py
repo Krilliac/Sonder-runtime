@@ -419,6 +419,41 @@ def test_validator_refusals_each_have_a_distinct_typed_reason(tmp_path):
     }
 
 
+class _SwapAfterPages:
+    """Serve pages from one journal, then report another identity/owner."""
+
+    def __init__(self, first, second):
+        self._first, self._second, self._paged = first, second, False
+
+    def position(self, run_id, worker_id):
+        return (self._second if self._paged else self._first).position(run_id, worker_id)
+
+    def settled_high_water(self, run_id):
+        return self._first.settled_high_water(run_id)
+
+    def effects_since(self, run_id, after_sequence, *, limit=100, worker_id=None):
+        page = self._first.effects_since(run_id, after_sequence, limit=limit, worker_id=worker_id)
+        self._paged = not page.truncated or self._paged
+        return page
+
+
+def test_journal_swapped_or_reclaimed_during_paging_is_refused(tmp_path):
+    env, checkpoint = _refusal_env(tmp_path, "base")
+    other = _env(tmp_path / "other")
+    other.journal.claim_owner(RUN, WORKER, 2)
+    swapped = _validate(checkpoint, _SwapAfterPages(env.source, other.source))
+    assert swapped.reason is Refusal.JOURNAL_CHANGED
+
+    class _Reclaimed(_SwapAfterPages):
+        def position(self, run_id, worker_id):
+            position = self._first.position(run_id, worker_id)
+            return replace(position, current_owner_epoch=3) if self._paged else position
+
+    reclaimed = _validate(checkpoint, _Reclaimed(env.source, None))
+    assert reclaimed.reason is Refusal.JOURNAL_CHANGED
+    assert _validate(checkpoint, _SwapAfterPages(env.source, env.source)).allowed  # control
+
+
 def test_checkpoint_written_by_a_superseded_owner_is_refused(tmp_path):
     env = _env(tmp_path)
     _effect(env.binding, "a")

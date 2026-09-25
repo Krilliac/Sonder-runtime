@@ -81,12 +81,16 @@ CREATE TABLE IF NOT EXISTS child_checkpoint_provenance (
 # Kept out of ``_DDL``: other tooling splits that script on ``;``, which a
 # trigger body contains.  The repository installs these on every open.
 _PROVENANCE_TRIGGERS = (
-    "CREATE TRIGGER IF NOT EXISTS child_checkpoint_provenance_no_update "
-    "BEFORE UPDATE ON child_checkpoint_provenance "
-    "BEGIN SELECT RAISE(ABORT, 'checkpoint provenance is immutable'); END",
-    "CREATE TRIGGER IF NOT EXISTS child_checkpoint_provenance_no_delete "
-    "BEFORE DELETE ON child_checkpoint_provenance "
-    "BEGIN SELECT RAISE(ABORT, 'checkpoint provenance is immutable'); END",
+    (
+        "CREATE TRIGGER IF NOT EXISTS child_checkpoint_provenance_no_update "
+        "BEFORE UPDATE ON child_checkpoint_provenance "
+        "BEGIN SELECT RAISE(ABORT, 'checkpoint provenance is immutable'); END"
+    ),
+    (
+        "CREATE TRIGGER IF NOT EXISTS child_checkpoint_provenance_no_delete "
+        "BEFORE DELETE ON child_checkpoint_provenance "
+        "BEGIN SELECT RAISE(ABORT, 'checkpoint provenance is immutable'); END"
+    ),
 )
 
 # Every child read joins the provenance stamped for its current checkpoint.

@@ -440,7 +440,9 @@ What now exists:
   epoch, epoch ahead, superseded owner, position ahead of the journal, an
   unresolved intent at or below the position, an unresolved intent reusing a
   settled idempotency key, any other unresolved intent, an incomplete or
-  inconsistent page, or an exhausted page budget.
+  inconsistent page, or an exhausted page budget. After the last page it
+  re-reads the journal identity and current owner epoch and refuses with
+  `journal_changed_during_validation` if either moved while pages were read.
 
 Tests: `tests/test_child_checkpoint_journal_provenance.py`. They include
 real `os._exit` crash cuts in a child interpreter at three points: after the
@@ -453,7 +455,8 @@ after the old checkpoint appears in `later_receipts`.
 
 Verification on 2026-09-25:
 
-- The new file has 16 tests, all passing. Before the implementation existed,
+- The new file has 16 tests, all passing (17 after review added the
+  swapped-or-reclaimed-during-paging case). Before the implementation existed,
   the file failed at collection.
 - Mutation check: 11 planted defects each made at least one test fail, and
   the sources were then restored. The defects disabled the state-digest,
@@ -491,7 +494,11 @@ What is not qualified:
 - PostgreSQL is qualified at the codec and `_apply` level only, with no live
   database. The SQLite-to-PostgreSQL child migration copies
   `durable_child_session` rows only, so migrated checkpoints arrive
-  provenance-absent (fail-closed).
+  provenance-absent (fail-closed). A child migration that was paused before
+  this change and resumed after it recomputes page digests over snapshots
+  that now carry `"provenance": null`, so the recorded page digests no
+  longer match and the resume is refused (fail-closed; restart the
+  migration).
 - A `save_checkpoint` intent that was retained unresolved before this change
   cannot be replayed through `mutate`, because the payload now includes the
   `provenance` field. It stays fenced as an ambiguous mutation, and receipt
