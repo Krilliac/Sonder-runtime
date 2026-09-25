@@ -784,6 +784,14 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
                     and name == "sonder_runtime.domain.artifact_mobility_label"
                 ):
                     continue
+                # One pure known-credential format list must govern the log
+                # redactor, the domain redaction set and the contribution
+                # privacy classifier; a platform copy would drift.
+                if (
+                    rel.as_posix() == "sonder_runtime/platform/logging.py"
+                    and name == "sonder_runtime.domain.security.credential_formats"
+                ):
+                    continue
                 # State-path initialization can migrate a legacy database before
                 # bootstrap exists. It shares the OS lock and non-destructive
                 # identity probes instead of reimplementing these boundaries.

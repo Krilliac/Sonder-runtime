@@ -12,6 +12,9 @@ from typing import Iterable
 from sonder_runtime.platform.child_environment_policy import (
     unsafe_child_secret_name,
 )
+# Exact reviewed exception (scripts/check_architecture.py): the pure shared
+# credential formats, reused rather than copied.
+from sonder_runtime.domain.security.credential_formats import CREDENTIAL_FORMATS
 
 REDACTED = "[REDACTED]"
 REDACTION_FAILED = "[REDACTION_FAILED]"
@@ -73,6 +76,9 @@ _PATTERNS: tuple[re.Pattern, ...] = (
         r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
         re.DOTALL,
     ),
+    # Free-standing provider keys (AKIA..., ghp_..., sk-..., JWTs): the same
+    # known-credential formats the contribution privacy classifier refuses.
+    *CREDENTIAL_FORMATS,
 )
 
 

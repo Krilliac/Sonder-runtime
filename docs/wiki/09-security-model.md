@@ -91,8 +91,13 @@ of the model — an uncensored or "abliterated" model changes what it will
 ## Data protection
 
 - **Redaction before logging** (`sonder_logging.py`): bearer tokens, API
-  keys, known secret env values, URL credentials, private-key blocks, and
-  configured workspace path prefixes are stripped. A redaction failure
+  keys, known secret env values, URL credentials, private-key blocks,
+  free-standing known provider credentials (AWS `AKIA`/`ASIA` keys, GitHub,
+  GitLab, OpenAI, Hugging Face, npm, PyPI, Google, Stripe, Slack tokens and
+  JWTs), and configured workspace path prefixes are stripped. The provider
+  formats live once in `domain/security/credential_formats.py` and are shared
+  by the log redactor, the domain redaction set and the contribution privacy
+  classifier. A redaction failure
   replaces the whole detail with `[REDACTION_FAILED]` and increments a
   metric — it degrades observability, never privacy.
 - **operations.db** stores identifiers, counts, hashes, durations, and

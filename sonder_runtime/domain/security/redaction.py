@@ -17,6 +17,8 @@ from __future__ import annotations
 import re
 from typing import Iterable
 
+from sonder_runtime.domain.security.credential_formats import CREDENTIAL_FORMATS
+
 REDACTED = "[REDACTED]"
 REDACTION_FAILED = "[REDACTION_FAILED]"
 WORKSPACE_LABEL = "[WORKSPACE]"
@@ -41,6 +43,9 @@ PATTERNS: tuple[re.Pattern, ...] = (
         r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
         re.DOTALL,
     ),
+    # Free-standing provider keys (AKIA..., ghp_..., sk-..., JWTs), shared
+    # with the contribution privacy classifier.
+    *CREDENTIAL_FORMATS,
 )
 
 

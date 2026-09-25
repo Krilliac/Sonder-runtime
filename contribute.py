@@ -20,6 +20,7 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 import sonder_runtime.adapters.memory_store as memory_store  # noqa
 import sonder_paths  # noqa
+from sonder_runtime.domain.security import credential_formats  # noqa
 
 MAX_LEN = 300
 
@@ -130,16 +131,8 @@ PRIVATE_RULES = [
     ),
     (
         "known_credential",
-        re.compile(
-            r"(?<![A-Za-z0-9])(?:sk-(?:proj-)?[A-Za-z0-9_-]{12,}|"
-            r"github_pat_[A-Za-z0-9_]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|"
-            r"glpat-[A-Za-z0-9_-]{12,}|hf_[A-Za-z0-9]{12,}|"
-            r"npm_[A-Za-z0-9]{12,}|pypi-[A-Za-z0-9_-]{16,}|"
-            r"ya29\.[A-Za-z0-9_-]{12,}|"
-            r"A(?:KI|SI)A[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|"
-            r"[rs]k_(?:live|test)_[A-Za-z0-9]{16,}|GOCSPX-[A-Za-z0-9_-]{20,}|"
-            r"xox[baprs]-[A-Za-z0-9-]{10,})"
-        ),
+        # Shared with the log/session Redactor; one list for both boundaries.
+        credential_formats.KNOWN_CREDENTIAL,
         "<known-credential>",
     ),
     (
@@ -178,10 +171,7 @@ PRIVATE_RULES = [
     ),
     (
         "jwt",
-        re.compile(
-            r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\."
-            r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
-        ),
+        credential_formats.JWT,
         "<jwt>",
     ),
 ]
