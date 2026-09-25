@@ -391,3 +391,105 @@ def test_windows_ninja_with_msvc_needs_vcvars(tmp_path, allowed):
     p.plan_run(BuildJobRequest(project=str(root), action="configure",
                                generator="Visual Studio 17 2022"), None, ctx())
     assert env.calls[-1] == ("cmake", "")
+
+
+def ninja_preset_tree(allowed):
+    """A Ninja File API tree with a utility target and build presets that name it."""
+    root = allowed / "pre"
+    write(root / "CMakeLists.txt", "project(x)\n")
+    write(root / "src/main.cpp", "int main() {}\n")
+    write(root / "CMakePresets.json", {
+        "version": 6,
+        "configurePresets": [{"name": "dbg", "generator": "Ninja", "binaryDir": "${sourceDir}/build/dbg"},
+                             {"name": "rel", "generator": "Ninja", "binaryDir": "${sourceDir}/build/rel"}],
+        "buildPresets": [
+            {"name": "deployer", "configurePreset": "dbg", "targets": ["app", "deploy"]},
+            {"name": "inherited", "configurePreset": "dbg", "inherits": "deployer"},
+            {"name": "native", "configurePreset": "dbg", "nativeToolOptions": ["-t", "commands"]},
+            {"name": "plain", "configurePreset": "dbg", "targets": "app"},
+            {"name": "release", "configurePreset": "rel"},
+        ]})
+    for sub in ("dbg", "rel"):
+        build = root / "build" / sub
+        reply = build / ".cmake/api/v1/reply"
+        write(reply / "index-2026-01-01T00-00-00-0000.json", {
+            "cmake": {"version": {"string": "3.28.3"}, "generator": {"name": "Ninja", "multiConfig": False}},
+            "objects": [{"kind": "codemodel", "version": {"major": 2, "minor": 6},
+                         "jsonFile": "codemodel-v2-1.json"}]})
+        write(reply / "codemodel-v2-1.json", {
+            "kind": "codemodel", "version": {"major": 2, "minor": 6},
+            "paths": {"source": str(root).replace("\\", "/"), "build": str(build).replace("\\", "/")},
+            "configurations": [{"name": "Debug", "targets": [
+                {"name": "app", "id": "app::@1", "jsonFile": "target-app.json"},
+                {"name": "deploy", "id": "deploy::@1", "jsonFile": "target-deploy.json"}]}]})
+        write(reply / "target-app.json", {
+            "name": "app", "id": "app::@1", "type": "EXECUTABLE",
+            "sources": [{"path": "src/main.cpp", "compileGroupIndex": 0}],
+            "compileGroups": [{"language": "CXX", "sourceIndexes": [0]}]})
+        write(reply / "target-deploy.json", {"name": "deploy", "id": "deploy::@1", "type": "UTILITY",
+                                             "sources": []})
+        write(build / "CMakeCache.txt", "CMAKE_GENERATOR:INTERNAL=Ninja\nCMAKE_BUILD_TYPE:STRING=Debug\n")
+    return root
+
+
+def test_build_presets_cannot_widen_what_runs(tmp_path, allowed):
+    root = ninja_preset_tree(allowed)
+    p = planner(tmp_path)
+    with pytest.raises(SonderError) as excinfo:
+        plan(p, root, build_dir="build/dbg", target="deploy")
+    assert excinfo.value.code == "UTILITY_TARGET_REFUSED"
+    # A preset's targets are checked like a requested target, through inherits too.
+    for name in ("deployer", "inherited"):
+        with pytest.raises(SonderError) as excinfo:
+            plan(p, root, build_dir="build/dbg", build_preset=name)
+        assert excinfo.value.code == "UTILITY_TARGET_REFUSED", name
+    # nativeToolOptions are argv the host never validated.
+    with pytest.raises(SonderError) as excinfo:
+        plan(p, root, build_dir="build/dbg", build_preset="native")
+    assert excinfo.value.code == "ACTION_UNSUPPORTED"
+    # An explicit --target replaces the preset's targets; a clean preset plans.
+    explicit, _ = plan(p, root, build_dir="build/dbg", build_preset="deployer", target="app")
+    assert explicit.argv[-4:] == ("--target", "app", "--parallel", explicit.argv[-1])
+    fine, _ = plan(p, root, build_dir="build/dbg", build_preset="plain")
+    assert fine.template_id == "cmake.build.preset" and "--preset" in fine.argv
+
+
+def test_a_preset_must_build_the_leased_build_dir(tmp_path, allowed):
+    root = ninja_preset_tree(allowed)
+    p = planner(tmp_path)
+    # The lease and model name build/dbg; the preset would build build/rel.
+    with pytest.raises(SonderError) as excinfo:
+        plan(p, root, build_dir="build/dbg", build_preset="release")
+    assert excinfo.value.code == "BUILD_TREE_REJECTED"
+    ok, _ = plan(p, root, build_dir="build/rel", build_preset="release")
+    assert ok.build_dir == str(root / "build" / "rel")
+    configure = BuildJobRequest(project=str(root), action="configure", preset="rel", build_dir="build/dbg")
+    with pytest.raises(SonderError) as excinfo:
+        p.plan_run(configure, None, ctx())
+    assert excinfo.value.code == "BUILD_TREE_REJECTED"
+
+
+def test_a_build_dir_outside_the_callers_grant_is_refused(tmp_path, allowed):
+    root, _ = cmake_tree(allowed)
+    (allowed / "other").mkdir()
+    granted = replace_context(ctx(), workspace_roots=(str(root),))
+    p = planner(tmp_path)
+    request = BuildJobRequest(project=str(root), action="configure", generator="Ninja",
+                              build_dir=str(allowed / "other" / "b"))
+    with pytest.raises(SonderError) as excinfo:
+        p.plan_run(request, None, granted)
+    assert excinfo.value.code == "PROJECT_OUTSIDE_ROOTS"
+    assert p.plan_run(request, None, ctx()).build_dir == str(allowed / "other" / "b")
+    if os.name != "nt":
+        (allowed / "hop").symlink_to(allowed / "other")
+        hop = BuildJobRequest(project=str(root), action="configure", generator="Ninja",
+                              build_dir=str(allowed / "hop" / "new"))
+        with pytest.raises(SonderError) as excinfo:
+            p.plan_run(hop, None, ctx())
+        assert excinfo.value.code == "BUILD_TREE_REJECTED"
+
+
+def replace_context(context, **changes):
+    from dataclasses import replace as dc_replace
+
+    return dc_replace(context, **changes)

@@ -347,7 +347,12 @@ class VcvarsCapture:
         with self._lock:
             cached = self._cache.get(key)
             if cached is not None:
-                return cached, True
+                # The cache file is private, but a cached entry is still
+                # re-filtered: only allowlisted keys and in-installation PATH
+                # entries may ever reach a build, whatever the file holds.
+                refiltered = self._refilter(cached, root)
+                if refiltered is not None:
+                    return refiltered, True
             wrapper = self._ensure_wrapper()
             system_root = self._system_root()
             if not re.match(r"^[A-Za-z]:\\[^&|<>^%\"\r\n]+$", system_root or ""):
@@ -370,6 +375,16 @@ class VcvarsCapture:
             self._cache.put(key, values, stored_at=self._clock())
             self._verify_wrapper(Path(wrapper))
             return values, False
+
+    def _refilter(self, cached: Mapping[str, str], root: str) -> dict[str, str] | None:
+        lines = "\n".join("%s=%s" % (name, value) for name, value in cached.items()
+                          if isinstance(name, str) and isinstance(value, str)
+                          and "\n" not in name and "\n" not in value and "\r" not in value)
+        values = self._parse(lines, root, dict(self._base()))
+        folded = {name.casefold() for name in values}
+        if "path" not in folded or "include" not in folded:
+            return None
+        return values
 
     @staticmethod
     def _parse(output: str, root: str, base: Mapping[str, str]) -> dict[str, str]:
@@ -434,7 +449,8 @@ def _posix_path_entries(value: str, *, project_local: Callable[[str], bool]) -> 
     return kept
 
 
-def _windows_path_entries(value: str, system_root: str) -> list[str]:
+def _windows_path_entries(value: str, system_root: str,
+                          project_local: Callable[[str], bool] | None = None) -> list[str]:
     kept: list[str] = []
     if system_root:
         kept.extend((ntpath.join(system_root, "System32"), system_root,
@@ -446,6 +462,8 @@ def _windows_path_entries(value: str, system_root: str) -> list[str]:
             continue
         if _win_norm(entry) in seen:
             continue
+        if project_local is not None and project_local(entry):
+            continue  # a checkout directory on PATH could plant cl.exe or link.exe
         seen.add(_win_norm(entry))
         kept.append(entry)
         if len(kept) >= MAX_PATH_ENTRIES:
@@ -465,6 +483,11 @@ class ScrubbedEnvironmentProvider:
         self._source = source or (lambda: dict(os.environ))
         self._passthrough = tuple(name for name in dict.fromkeys(passthrough) if passthrough_allowed(name))
         self._vcvars = vcvars
+        # A Windows-shaped PATH is only checked against the project roots on
+        # Windows itself (or with an injected check): off Windows the default
+        # guard would read ``C:\\...`` as a path relative to the cwd.
+        self._windows_project_local = project_local if project_local is not None or os.name == "nt" \
+            else None
         if project_local is None:
             from ..host_tools.guards import project_local
         self._project_local = project_local
@@ -496,7 +519,8 @@ class ScrubbedEnvironmentProvider:
                 if value is not None and "\n" not in value:
                     environment[key] = value
             system_root = environment.get("SystemRoot", "")
-            entries = _windows_path_entries(self._lookup(source, "PATH") or "", system_root)
+            entries = _windows_path_entries(self._lookup(source, "PATH") or "", system_root,
+                                            self._windows_project_local)
             environment["PATH"] = ";".join(entries)
             environment.update(WINDOWS_PINNED)
         else:

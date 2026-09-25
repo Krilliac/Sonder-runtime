@@ -240,3 +240,34 @@ def test_wrapper_digest_is_pinned():
     assert hashlib.sha256(WRAPPER_BYTES).hexdigest() == \
         hashlib.sha256(b'@echo off & call "%SONDER_VCVARS_BAT%" %SONDER_VCVARS_ARGS% '
                        b'>nul 2>&1 || exit /b 1 & set\r\n').hexdigest()
+
+
+def test_a_tampered_cache_entry_is_refiltered_before_use(tmp_path):
+    import json
+
+    provider, _, run = build(tmp_path)
+    provider.environment(system="ninja", family="msvc")
+    cache_file = tmp_path / "build-env" / "vcvars-cache.json"
+    data = json.loads(cache_file.read_text())
+    for entry in data.values():
+        entry["env"]["LD_PRELOAD"] = r"C:\Users\op\evil.dll"
+        entry["env"]["OPENAI_API_KEY"] = FAKE_SECRET
+        for key in list(entry["env"]):
+            if key.casefold() == "path":
+                entry["env"][key] = r"C:\Users\op\evil;" + entry["env"][key]
+    cache_file.write_text(json.dumps(data))
+    if os.name != "nt":
+        os.chmod(cache_file, 0o600)
+    env = provider.environment(system="ninja", family="msvc")
+    assert env.cache_hit and len(run.calls) == 1
+    values = dict(env.pairs)
+    assert "LD_PRELOAD" not in values and FAKE_SECRET not in "".join(values.values())
+    assert r"C:\Users\op\evil" not in values["Path"].split(";")
+
+
+def test_a_project_local_windows_path_entry_is_dropped(tmp_path):
+    provider = ScrubbedEnvironmentProvider(
+        host="windows", source=lambda: dict(HOST_ENV, PATH=r"C:\Tools\cmake\bin;D:\proj\tools"),
+        project_local=lambda path: path.lower().startswith("d:\\proj"))
+    path = dict(provider.environment(system="msbuild", family="").pairs)["PATH"].split(";")
+    assert r"C:\Tools\cmake\bin" in path and r"D:\proj\tools" not in path

@@ -23,6 +23,7 @@ indistinguishable from a job that does not exist.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import uuid
 from datetime import datetime
@@ -69,6 +70,10 @@ def _float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _normalize_dir(path: str) -> str:
+    return os.path.normcase(os.path.normpath(path))
+
+
 def _one_line(text: str, limit: int) -> str:
     return " ".join(str(text or "").split())[:limit]
 
@@ -84,7 +89,9 @@ class InMemoryBuildDirLeases:
     def __init__(self, *, is_active: Callable[[str], bool] | None = None,
                  normalize: Callable[[str], str] | None = None) -> None:
         self._is_active = is_active
-        self._normalize = normalize or (lambda path: path)
+        # The default folds case and separators the way the host's file system
+        # does, so ``C:\\B`` and ``c:/b/`` are one lease on Windows.
+        self._normalize = normalize or _normalize_dir
         self._holders: dict[str, BuildDirLease] = {}
         self._children: dict[str, BuildDirLease] = {}
         self._lock = threading.Lock()

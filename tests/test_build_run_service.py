@@ -2,6 +2,7 @@
 child leases for a build fix, ownership, timeout and cancellation."""
 from __future__ import annotations
 
+import os
 import threading
 import uuid
 from dataclasses import replace
@@ -274,3 +275,13 @@ def test_request_validation():
     with pytest.raises(SonderError):
         BuildJobRequest(target="a\x00b")
     assert BuildJobRequest(action="COMPILE_ONE").action == "compile_one"
+
+
+def test_lease_keys_are_normalized_paths(tmp_path):
+    leases = InMemoryBuildDirLeases()
+    base = str(tmp_path / "b")
+    leases.acquire(base, "build-job-" + "1" * 16, "p")
+    for alias in (base + os.sep, str(tmp_path / "b" / ".." / "b")):
+        with pytest.raises(SonderError) as excinfo:
+            leases.acquire(alias, "build-job-" + "2" * 16, "p")
+        assert excinfo.value.code == "BUILD_DIR_BUSY"

@@ -45,6 +45,7 @@ from ...application.build.ports import (
     RUNNER_UNAVAILABLE,
     UNKNOWN_FILE,
     UNKNOWN_PRESET,
+    UTILITY_TARGET_REFUSED,
     BuildJobPlan,
     BuildJobRequest,
     BuildModelRequest,
@@ -73,6 +74,7 @@ from ...domain.build.model import (
     PresetInfo,
     finalize_model,
     generator_from_name,
+    loads_bounded_json,
     path_label,
 )
 from ...domain.build.tool_targets import apply_safety, classify_targets
@@ -87,6 +89,13 @@ TRACE_COMPILERS = ("g++", "gcc", "clang++", "clang", "clang-cl", "cl", "c++", "c
 KNOWN_LAUNCHER_TOOLS = ("ccache", "sccache", "buildcache")
 _BUILD_DIR_NAME_RE = re.compile(r"^(?:build|build-[A-Za-z0-9_.-]{1,64}|cmake-build-[A-Za-z0-9_.-]{1,64}|out)$")
 _LAUNCHER_KEYS = ("CMAKE_C_COMPILER_LAUNCHER", "CMAKE_CXX_COMPILER_LAUNCHER", "CMAKE_CUDA_COMPILER_LAUNCHER")
+# Build-preset fields a checkout can use to widen what ``cmake --build --preset``
+# runs: ``targets`` selects targets (a utility target such as ``deploy`` would
+# bypass TargetSafety) and ``nativeToolOptions`` appends arbitrary arguments to
+# the native tool. Neither is visible in the model's PresetInfo.
+MAX_PRESET_BYTES = 1024 * 1024
+MAX_PRESET_TARGETS = 64
+_MAX_PRESET_INHERIT_DEPTH = 16
 
 
 def _error(code: str, message: str):
@@ -205,9 +214,15 @@ class ProjectBuildPlanner:
             except (PermissionError, ValueError):
                 raise _error(PROJECT_OUTSIDE_ROOTS,
                              "the build directory is outside the authorized roots") from None
+            grants = tuple(Path(item).resolve() for item in (getattr(context, "workspace_roots", None) or ()))
+            if grants and not any(_inside(str(candidate), str(grant)) for grant in grants):
+                raise _error(PROJECT_OUTSIDE_ROOTS,
+                             "the build directory is outside this caller's workspace grant")
             anchor = candidate
             while not anchor.exists() and anchor.parent != anchor:
                 anchor = anchor.parent
+            if _norm(self._realpath(str(anchor))) != _norm(str(anchor)):
+                raise _error(BUILD_TREE_REJECTED, "the build directory traverses a symlink or junction")
             base = anchor
         else:
             base = root
@@ -460,6 +475,7 @@ class ProjectBuildPlanner:
         log_file = str(log_dir / LOG_FILE_NAME)
         ctx = _PlanContext(location=location, model=model, request=request, validated=validated,
                            log_dir=str(log_dir), log_file=log_file, notes=notes)
+        ctx.operation = context
         if request.profile:
             self._plan_profile(ctx)
         elif action == ACTION_CONFIGURE:
@@ -492,15 +508,23 @@ class ProjectBuildPlanner:
         request, validated, location = ctx.request, ctx.validated, ctx.location
         if validated.preset is not None:
             preset = validated.preset
+            # ``cmake --preset`` configures the preset's binaryDir whatever
+            # build_dir says: the lease, the File API query and the model
+            # must all name that directory, checked against the caller's grant.
             build_dir = self._check_build_dir(Path(location.project_root), Path(preset.binary_dir),
-                                              _AnyContext())
+                                              ctx.operation)
+            if request.build_dir and location.build_dir and \
+                    _norm(location.build_dir) != _norm(str(build_dir)):
+                raise _error(BUILD_TREE_REJECTED,
+                             "preset %s configures %s, not the requested build directory"
+                             % (preset.name, preset.binary_dir_label or "its binaryDir"))
             template = tpl.TEMPLATES["cmake.configure.preset"]
             values = {"preset": preset.name}
             ctx.generator = preset.generator
         else:
             build_dir = Path(location.build_dir) if location.build_dir else \
                 Path(location.project_root) / "build"
-            build_dir = self._check_build_dir(Path(location.project_root), build_dir, _AnyContext())
+            build_dir = self._check_build_dir(Path(location.project_root), build_dir, ctx.operation)
             generator = request.generator or self._default_generator()
             template = tpl.TEMPLATES["cmake.configure"]
             values = {"source_dir": location.project_root, "build_dir": str(build_dir),
@@ -560,6 +584,7 @@ class ProjectBuildPlanner:
             ctx.cwd = location.build_dir
             return
         if validated.build_preset is not None:
+            self._check_build_preset(ctx, validated.build_preset, target)
             ctx.template = tpl.TEMPLATES["cmake.build.preset"]
             ctx.values = {"build_preset": validated.build_preset.name, "jobs": self._jobs(request)}
             ctx.cwd = location.project_root
@@ -579,6 +604,90 @@ class ProjectBuildPlanner:
         generator = model.generator
         if self._host == "windows" and generator in (Generator.NINJA, Generator.NINJA_MULTI, Generator.NMAKE):
             ctx.vcvars_family = self._model_family(model) if self._model_family(model) in ("msvc", "clang_cl") else ""
+
+    def _check_build_preset(self, ctx: "_PlanContext", preset: PresetInfo, target: str) -> None:
+        """Refuse a build preset that builds elsewhere or widens what runs.
+
+        The lease, the model and the report all describe ``location.build_dir``;
+        ``cmake --build --preset`` builds the preset's binaryDir, so they must
+        be the same directory. A preset's ``targets`` are validated like a
+        requested target (an explicit ``--target`` overrides them), and
+        ``nativeToolOptions`` are refused: they are argv the host never saw.
+        """
+        location, model = ctx.location, ctx.model
+        if not preset.binary_dir or not location.build_dir or \
+                _norm(preset.binary_dir) != _norm(location.build_dir):
+            raise _error(BUILD_TREE_REJECTED,
+                         "build preset %s builds %s, not the requested build directory; pass "
+                         "build_dir for that tree" % (preset.name, preset.binary_dir_label or "its binaryDir"))
+        targets, native = self._build_preset_fields(Path(location.project_root), preset.name)
+        if native:
+            raise _error(ACTION_UNSUPPORTED,
+                         "build preset %s passes nativeToolOptions to the build tool; build without "
+                         "the preset (build_dir, config, target)" % preset.name)
+        if target:
+            return  # --target on the command line replaces the preset's targets
+        safety = classify_targets(model)
+        for name in targets:
+            try:
+                tpl.validate_request_against_model(
+                    replace(ctx.request, action="build", target=name, config="", platform="",
+                            preset="", build_preset="", file=""),
+                    model, safety, operator_utility_allow=self._utility_allow)
+            except BuildDomainError as exc:
+                code = getattr(exc, "code", "") or UTILITY_TARGET_REFUSED
+                raise _error(code, "build preset %s names a refused target: %s"
+                             % (preset.name, exc)) from None
+        if targets:
+            ctx.notes.append("build preset %s targets %s" % (preset.name, ", ".join(targets[:8])))
+
+    def _build_preset_fields(self, root: Path, name: str) -> tuple[tuple[str, ...], bool]:
+        """(every ``targets`` entry, any ``nativeToolOptions``) along ``name``'s inherit chain.
+
+        Conservative: every definition of a name in every preset file is
+        considered, and values found anywhere in the chain count, so a
+        duplicate or a shadowed parent can only cause a refusal, never hide one.
+        """
+        raw = self._reader.read_presets(str(root))
+        pool: dict[str, list[dict]] = {}
+        for _label, data in (*raw.presets, *raw.preset_includes):
+            try:
+                document = loads_bounded_json(data, max_bytes=MAX_PRESET_BYTES, what="presets",
+                                              code=UNKNOWN_PRESET)
+            except BuildDomainError as exc:
+                raise _domain_error(exc) from None
+            items = document.get("buildPresets") if isinstance(document, dict) else None
+            for item in (items if isinstance(items, list) else [])[:1024]:
+                if isinstance(item, dict) and isinstance(item.get("name"), str):
+                    pool.setdefault(item["name"], []).append(item)
+        targets: list[str] = []
+        native = False
+        seen: set[str] = set()
+        queue: list[tuple[str, int]] = [(name, 0)]
+        while queue:
+            current, depth = queue.pop()
+            if current in seen or depth > _MAX_PRESET_INHERIT_DEPTH:
+                continue
+            seen.add(current)
+            for item in pool.get(current, ()):
+                value = item.get("targets")
+                if value is not None:
+                    values = [value] if isinstance(value, str) else value
+                    if not isinstance(values, list) or len(values) > MAX_PRESET_TARGETS or \
+                            not all(isinstance(entry, str) for entry in values):
+                        raise _error(UNKNOWN_PRESET, "build preset %s has malformed targets" % name)
+                    targets.extend(entry for entry in values if entry not in targets)
+                options = item.get("nativeToolOptions")
+                if options not in (None, [], ()):
+                    native = True
+                parents = item.get("inherits")
+                parents = [parents] if isinstance(parents, str) else parents
+                for parent in (parents if isinstance(parents, list) else [])[:16]:
+                    if isinstance(parent, str):
+                        queue.append((parent, depth + 1))
+        if len(targets) > MAX_PRESET_TARGETS:
+            raise _error(UNKNOWN_PRESET, "build preset %s names too many targets" % name)
+        return tuple(targets), native
 
     def _msbuild_defaults(self, model: BuildModel, validated) -> tuple[str, str]:
         config = validated.config or (model.configs[0] if model.configs else "")
@@ -898,12 +1007,6 @@ class ProjectBuildPlanner:
         return self._redact(text)
 
 
-class _AnyContext:
-    """Build-dir checks for host-derived dirs (preset binaryDir, default build/)."""
-
-    workspace_roots: tuple = ()
-
-
 class _PlanContext:
     def __init__(self, *, location, model, request, validated, log_dir, log_file, notes):
         self.location = location
@@ -937,6 +1040,7 @@ class _PlanContext:
         self.template_note = ""
         self.executable_override = ""
         self.profile_daemon = False
+        self.operation: OperationContext | None = None
 
 
 __all__ = ["BINLOG_NAME", "MSBUILD_LOG_NAME", "ProjectBuildPlanner"]

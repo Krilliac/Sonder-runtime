@@ -119,6 +119,13 @@ def test_private_modes_and_network_enforcement_as_uid_65534(tmp_path, http_serve
         pytest.skip("cmake is required")
     # pytest's own tmp root is 0700 root-owned; the unprivileged uid needs a
     # directory whose ancestors it can traverse.
+    readable = subprocess.run(
+        ["setpriv", "--reuid=%d" % UID, "--regid=%d" % UID, "--clear-groups", "--",
+         sys.executable, "-I", "-c", "import os,sys; os.stat(os.path.join(sys.argv[1], 'sonder_runtime', "
+         "'__init__.py')); open(sys.argv[2]).close()", str(REPO), sys.executable],
+        capture_output=True, timeout=60, cwd="/", env={"PATH": "/usr/bin:/bin"})
+    if readable.returncode != 0:
+        pytest.skip("the checkout or interpreter is not readable by uid %d here" % UID)
     base = Path(tempfile.mkdtemp(prefix="sonder-unpriv-", dir="/tmp"))
     os.chown(base, UID, UID)
     request_cleanup(base)
