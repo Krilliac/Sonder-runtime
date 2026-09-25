@@ -3,9 +3,20 @@ from __future__ import annotations
 
 import json
 
+from ...domain.diagnostics.digest import digest_text, render_digest
 
-def format_run_result(title: str, data: dict) -> str:
-    """Render a harness result while preserving its diagnostic sections."""
+
+DIGEST_MAX_CHARS = 2000
+
+
+def format_run_result(title: str, data: dict, *, digest: bool = False) -> str:
+    """Render a harness result while preserving its diagnostic sections.
+
+    ``digest=True`` appends, after everything else, a bounded ``digest:``
+    block (final line, run summary, failure lines, first parsed errors) over
+    the captured stdout and stderr. Without it the rendering is unchanged
+    byte for byte.
+    """
     lines = [
         title,
         "  command: %s" % json.dumps(data.get("command") or [], ensure_ascii=False),
@@ -36,4 +47,11 @@ def format_run_result(title: str, data: dict) -> str:
         lines.extend(["stderr:", data["stderr"].rstrip()])
     if data.get("stdout_truncated") or data.get("stderr_truncated"):
         lines.append("  output truncated: true")
+    if digest and (data.get("stdout") or data.get("stderr")):
+        combined = "%s\n%s" % (data.get("stdout") or "", data.get("stderr") or "")
+        block = render_digest(
+            digest_text(combined, source_kind="text"), max_chars=DIGEST_MAX_CHARS,
+        )
+        lines.append("digest:")
+        lines.extend("  " + line for line in block.splitlines())
     return "\n".join(lines)

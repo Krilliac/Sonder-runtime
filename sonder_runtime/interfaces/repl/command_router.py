@@ -130,6 +130,21 @@ def _weather_action(match):
     return ("/weather %s" % arg).strip() if arg else None
 
 
+_TEST_RUNNER_WORDS = {
+    "pytest": "pytest", "ctest": "ctest", "cargo test": "cargo", "go test": "go",
+    "dotnet test": "dotnet", "npm test": "npm", "pnpm test": "pnpm",
+    "yarn test": "yarn", "gradle test": "gradle", "mvn test": "maven",
+    "make test": "make",
+}
+
+
+def _test_runner_action(match):
+    """"run cargo test" -> /test cargo (runner names as /test spells them)."""
+    words = re.sub(r"\s+", " ", match.group("arg").strip().lower())
+    runner = _TEST_RUNNER_WORDS.get(words)
+    return "/test %s" % runner if runner else None
+
+
 def _rule(pattern, action):
     return (re.compile(pattern, re.I), action)
 
@@ -312,6 +327,22 @@ _RULES = [
     _rule(r"^(?:weather|forecast)\s+(?P<arg>[A-Z][\w\s,.-]+?)\s*[?!.]*$",
           _weather_action),
     _rule(r"^(?:weather|forecast)\s*[?!.]*$", _weather_action),
+
+    # --- developer tools ---
+    # Whole-turn forms only. "which toolchains are installed" stays with /env
+    # (host OS + shells); these name the categorized inventory, a test run of
+    # the current project, or a digest of one job/log.
+    _rule(r"^(?:show|list)\s+(?:me\s+)?(?:the\s+|my\s+)?(?:tool\s+inventory|"
+          r"(?:installed|available)\s+(?:dev(?:eloper)?\s+)?tools(?:\s+by\s+category)?)"
+          r"\s*[?!.]*$", _fixed("/tools")),
+    _rule(r"^tool\s+inventory\s*[?!.]*$", _fixed("/tools")),
+    _rule(r"^run\s+(?:the\s+|all\s+(?:the\s+)?)?(?:project'?s?\s+)?tests?\s*[?!.]*$",
+          _fixed("/test")),
+    _rule(r"^run\s+(?P<arg>pytest|ctest|cargo\s+test|go\s+test|dotnet\s+test|npm\s+test|"
+          r"pnpm\s+test|yarn\s+test|gradle\s+test|mvn\s+test|make\s+test)\s*[?!.]*$",
+          _test_runner_action),
+    _rule(r"^summari[sz]e\s+(?:the\s+)?(?:output|log)\s+(?:of|for|from)\s+"
+          r"(?:job\s+)?(?P<arg>\S+)\s*$", _with_arg("/digest")),
 
     # --- environment ---
     _rule(r"^(?:show\s+(?:the\s+)?|what\s+)?(?:host\s+)?environment\b(?:\s+are\s+you\s+(?:on|in))?\s*\??$",

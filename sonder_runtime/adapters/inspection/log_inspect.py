@@ -430,6 +430,51 @@ def _fit_output(report, max_output):
             raise LogInspectError("log summary exceeds the output byte ceiling")
 
 
+def _guarded_window(
+    path, *, extra_roots, max_file_bytes, max_scan_bytes, tail_lines, max_lines,
+    deadline,
+):
+    """Resolve, open no-follow, identity-check and read one bounded window."""
+    target = resolve_log_path(path, extra_roots=extra_roots)
+    try:
+        with _open_guarded_binary(target, extra_roots) as (handle, metadata):
+            if metadata.st_size > max_file_bytes:
+                raise LogInspectError("log exceeds the file byte ceiling")
+            lines, window = _read_window(
+                handle, metadata.st_size, max_scan_bytes,
+                tail_lines, max_lines, deadline,
+            )
+    except LogInspectError:
+        raise
+    except (OSError, PermissionError, ValueError) as exc:
+        raise LogInspectError("log could not be safely read: %s" % exc) from exc
+    return lines, window, target
+
+
+def read_guarded_text_window(
+    path, *, extra_roots="", max_file_bytes=HARD_MAX_FILE_BYTES,
+    max_scan_bytes=DEFAULT_MAX_SCAN_BYTES, tail_lines=0,
+    max_lines=DEFAULT_MAX_LINES, timeout=DEFAULT_TIMEOUT_SECONDS,
+):
+    """Return ``(lines, window, target)`` for one guarded text file.
+
+    The same allowed-root, sensitive-path, reparse-point, no-follow open and
+    identity re-check path ``inspect_log`` uses, without any parsing. Every
+    limit is clamped to the module's hard ceilings; ``tail_lines > 0`` reads
+    the last ``max_scan_bytes`` of the file and keeps its last lines.
+    """
+    deadline = time.monotonic() + _bounded_timeout(timeout)
+    return _guarded_window(
+        path,
+        extra_roots=extra_roots,
+        max_file_bytes=_bounded_int(max_file_bytes, HARD_MAX_FILE_BYTES, 1, HARD_MAX_FILE_BYTES),
+        max_scan_bytes=_bounded_int(max_scan_bytes, DEFAULT_MAX_SCAN_BYTES, 1, HARD_MAX_SCAN_BYTES),
+        tail_lines=_bounded_int(tail_lines, 0, 0, HARD_MAX_TAIL_LINES),
+        max_lines=_bounded_int(max_lines, DEFAULT_MAX_LINES, 1, HARD_MAX_LINES),
+        deadline=deadline,
+    )
+
+
 def inspect_log(
     path, *, tail_lines=0, context_lines=DEFAULT_CONTEXT_LINES,
     max_file_bytes=DEFAULT_MAX_FILE_BYTES,
@@ -463,19 +508,11 @@ def inspect_log(
         "tail_lines": _bounded_int(tail_lines, 0, 0, HARD_MAX_TAIL_LINES),
     }
     deadline = time.monotonic() + limits["timeout_seconds"]
-    target = resolve_log_path(path, extra_roots=extra_roots)
-    try:
-        with _open_guarded_binary(target, extra_roots) as (handle, metadata):
-            if metadata.st_size > limits["max_file_bytes"]:
-                raise LogInspectError("log exceeds the file byte ceiling")
-            lines, window = _read_window(
-                handle, metadata.st_size, limits["max_scan_bytes"],
-                limits["tail_lines"], limits["max_lines"], deadline,
-            )
-    except LogInspectError:
-        raise
-    except (OSError, PermissionError, ValueError) as exc:
-        raise LogInspectError("log could not be safely read: %s" % exc) from exc
+    lines, window, target = _guarded_window(
+        path, extra_roots=extra_roots, max_file_bytes=limits["max_file_bytes"],
+        max_scan_bytes=limits["max_scan_bytes"], tail_lines=limits["tail_lines"],
+        max_lines=limits["max_lines"], deadline=deadline,
+    )
 
     available_lines = window["lines_seen"]
     selected = lines

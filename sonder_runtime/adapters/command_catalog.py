@@ -223,6 +223,8 @@ _CATEGORY_BY_TOOL = {
     "hardware_profile": "system",
     "environment_status": "system",
     "toolchain_status": "system",
+    "tool_inventory": "system",
+    "output_digest": "dev",
     "npu_status": "system",
     "cloud_opt_in": "security",
     "system_profile_text": "persona",
@@ -312,6 +314,7 @@ _CATEGORY_BY_SLASH = {
     "/accept": "memory", "/pass": "memory", "/fail": "memory",
     "/todo": "planning", "/plan": "planning",
     "/cot": "system", "/debug": "system", "/env": "system", "/toolstatus": "system",
+    "/tools": "system", "/test": "dev", "/digest": "dev",
     "/trace": "system", "/strict": "system", "/dump": "system",
     "/whoami": "security", "/admin": "security", "/accounts": "security",
     "/login": "security", "/register": "security", "/setaccount": "security",
@@ -497,6 +500,16 @@ _UNREGISTERED_BRANCH_WORK = {
     # it is: a verdict is visible to `/permissions`, can be overridden by a
     # rule, and stays inside the map the floor checks.
     "/location": "location",
+    # The developer-tool console commands front the composed application
+    # services, not a registered MCP tool, so static discovery sees no work
+    # below them. ``/test`` launches the project's test runner and is graded
+    # by the execution-class ``test_run`` (ask in manual, refused in plan);
+    # ``/tools`` runs only fixed host version probes and ``/digest`` reads a
+    # guarded file or job output, so both are graded by the safe tools that
+    # do the same kind of work.
+    "/test": "test_run",
+    "/tools": "toolchain_status",
+    "/digest": "log_inspect",
 }
 
 

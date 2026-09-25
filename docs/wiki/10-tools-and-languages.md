@@ -289,6 +289,41 @@ messages, and bounded first/last-failure context. Prefix or tail inspection is
 available under file, scan-byte, line, per-line, result, output, and time caps.
 Callers cannot supply regular expressions or executable parsing rules.
 
+## Build/test output digest — `output_digest` / `/digest`
+
+`output_digest` summarizes one guarded log file, or the caller's own test-run
+job output, into:
+- the final line (`tail -1`)
+- the recognized run summary, for pytest, unittest, cargo, go, ctest, jest,
+  vitest, dotnet, maven, gradle and make
+- the `FAILED`/`ERROR` lines
+- the first compiler or test errors, parsed into typed diagnostics: gcc,
+  clang, ld, MSVC, dotnet, rustc, tsc, eslint, go, Python tracebacks and
+  pytest
+- repeated-error groups
+- a short tail
+
+It is the structured form of `pytest ... > out.txt; tail -1 out.txt; grep -E
+"^(FAILED|ERROR) " out.txt`. Everything is redacted before parsing and is
+bounded.
+
+- Files go through the same guarded no-follow window as `log_inspect`, and
+  credential stores are refused.
+- For a model, a job digest is limited to that principal's own `test_run` and
+  lane-test jobs.
+
+The legacy `test_run`, `build_run`, `lint_run` and `typecheck_run` renderings
+end with a bounded `digest:` block.
+
+In the REPL:
+- `/digest <job|path>` digests a job or a log.
+- `/tools` shows the categorized host tool inventory.
+- `/test [runner] [selector]` starts a structured test run.
+
+`/tools` no longer aliases `/activity`.
+
+The details are in [Build diagnostics and output digest](../build-diagnostics-digest.md).
+
 ## Other tool families
 
 - **Local service probe:** `local_service_probe` performs bounded,

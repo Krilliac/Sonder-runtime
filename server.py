@@ -3450,7 +3450,7 @@ def control_command(prompt: str, history=None, session="", project="",
         return context_compaction_plan()
     if cmd in ("/commands", "/cmds"):
         return command_registry_list(arg.strip())
-    if cmd in ("/activity", "/tools"):
+    if cmd == "/activity":
         return activity_status()
     if cmd in ("/autopilot", "/auto"):
         return _autopilot_command(arg, project=project, request_owner=autopilot_request_owner)
@@ -12827,7 +12827,7 @@ def test_run(
         _record_direct_tool("test_run", args, ok=False, started=started, summary=str(exc),
                             evidence={"error": str(exc)})
         return "ERROR: %s" % exc
-    output = _format_run_result("test run (%s)" % data.get("framework", "?"), data)
+    output = _format_run_result("test run (%s)" % data.get("framework", "?"), data, digest=True)
     _record_direct_tool(
         "test_run", args, ok=data.get("ok", False), started=started,
         summary="exit %s" % data.get("returncode"),
@@ -12854,7 +12854,7 @@ def lint_run(
         _record_direct_tool("lint_run", args, ok=False, started=started, summary=str(exc),
                             evidence={"error": str(exc)})
         return "ERROR: %s" % exc
-    output = _format_run_result("lint (%s, %s)" % (data.get("tool", "?"), data.get("mode", "check")), data)
+    output = _format_run_result("lint (%s, %s)" % (data.get("tool", "?"), data.get("mode", "check")), data, digest=True)
     _record_direct_tool(
         "lint_run", args, ok=data.get("ok", False), started=started,
         summary="exit %s" % data.get("returncode"),
@@ -12906,7 +12906,7 @@ def typecheck_run(
         _record_direct_tool("typecheck_run", args, ok=False, started=started, summary=str(exc),
                             evidence={"error": str(exc)})
         return "ERROR: %s" % exc
-    output = _format_run_result("typecheck (%s)" % data.get("tool", "?"), data)
+    output = _format_run_result("typecheck (%s)" % data.get("tool", "?"), data, digest=True)
     _record_direct_tool(
         "typecheck_run", args, ok=data.get("ok", False), started=started,
         summary="exit %s" % data.get("returncode"),
@@ -13184,7 +13184,7 @@ def build_run(
         _record_direct_tool("build_run", args, ok=False, started=started, summary=str(exc),
                             evidence={"error": str(exc)})
         return "ERROR: %s" % exc
-    output = _format_run_result("build", data)
+    output = _format_run_result("build", data, digest=True)
     _record_direct_tool("build_run", args, ok=data.get("ok", False), started=started, summary="exit %s" % data.get("returncode"), output=output, evidence=data)
     return output
 
@@ -16642,6 +16642,8 @@ def tool_manifest() -> str:
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
         "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
         "toolchain_status": "Run one fixed, bounded, local version probe for a tool already discovered by environment_status; it never accepts a command or arguments.",
+        "tool_inventory": "Report the categorized host tool inventory (compilers, build systems, test runners, linters, package managers, runtimes, containers, VCS, cloud CLIs, editors) with redacted paths and cached fixed-probe versions.",
+        "output_digest": "Summarize a guarded log file or your own test-run job output: final line, run summary counts, FAILED/ERROR lines, first parsed compiler/test errors, and a short tail.",
         "hardware_profile": "Detect cross-vendor accelerators and report conservative resident, unified-memory, and GPU+RAM-spill model plans without changing host settings.",
         "data_inspect/data_query/sqlite_mutate": "Preview structured data, run bounded read-only queries, or explicitly preview/apply one guarded parameterized SQLite DML statement.",
         "data_convert": "Preview or atomically create a non-overwriting JSON/JSONL/CSV/TSV conversion with explicit ordered fields.",
@@ -16819,6 +16821,8 @@ AGENT_TOOL_HELP = """Available tools:
 - scaffold_project: {"kind": "cpp-msvc|cpp-cmake|csharp|rust|python|node|typescript|go|java-maven", "name": "MyApp", "root": "MyApp"} -- writes the full skeleton (.sln/.vcxproj/Cargo.toml/...); use this instead of hand-writing build/solution files
 - environment_status: {} -- host OS, shells, installed toolchains; check before choosing command shapes
 - toolchain_status: {"name": "cargo|git|cmake|...", "refresh": false} -- fixed, local-only version probe for a discovered tool; no command or arguments
+- tool_inventory: {"category": "compiler|build_system|test_runner|linter_formatter|...", "name": "", "refresh": false} -- categorized installed-tool inventory with versions; paths redacted
+- output_digest: {"path": "<task-relevant log file>", "job_id": "", "tail_lines": 20} -- pass exactly one of path or job_id; tail -1 + FAILED/ERROR lines + first parsed errors
 - hardware_profile: {"workload": "general|chat|coding|agentic|research", "refresh": false} -- cross-vendor device inventory and conservative local-model fit; detection is not backend readiness
 - script_search: {"query": "build", "root": ".", "max_results": 100}
 - program_search: {"query": "python", "max_results": 50}
@@ -16925,6 +16929,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "evaluation_history_status",
     "memory_quality_report", "memory_privacy_review", "system_improvement_report", "master_status", "master_capacity",
     "self_heal_check", "status", "system_profile_text", "environment_status", "toolchain_status", "hardware_profile",
+    "tool_inventory", "output_digest",
     "emotion_vector_status", "preferences_status", "tool_manifest",
     "memory_search", "web_search", "web_fetch", "weather_lookup",
     "test_discover",
@@ -16975,6 +16980,8 @@ an exact symbol named by the task; do not default to Python or server.py.
 - program_search: {"query": "<required program name>", "max_results": 50}
 - environment_status: {"refresh": false}
 - toolchain_status: {"name": "cargo|git|cmake|...", "refresh": false} -- fixed local version probe; no command, executable path, or arguments
+- tool_inventory: {"category": "compiler|build_system|test_runner|...", "name": "", "refresh": false} -- categorized installed-tool inventory; paths redacted
+- output_digest: {"path": "<task-relevant log file>", "job_id": "", "tail_lines": 20} -- exactly one of path or job_id; bounded failure summary
 - hardware_profile: {"workload": "general|chat|coding|agentic|research", "refresh": false}
 - image_inspect: {"path": "<task-relevant image path>"}
 - data_inspect: {"path": "<task-relevant data file>", "max_bytes": 256000}
@@ -17448,6 +17455,13 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
         return scope_error
     try:
         if tool_name in {"file_read", "file_digest", "file_read_range", "image_inspect", "data_inspect", "data_query", "log_inspect", "artifact_risk_inspect"}:
+            file_ops.resolve_repository_read_path(
+                args.get("path", ""),
+                allow_workspace_root=False,
+                reject_sensitive=True,
+                extra_roots=trusted_extra_roots,
+            )
+        elif tool_name == "output_digest" and str(args.get("path") or "").strip():
             file_ops.resolve_repository_read_path(
                 args.get("path", ""),
                 allow_workspace_root=False,
@@ -18058,6 +18072,18 @@ def _agent_dispatch(
         return toolchain_status(
             name=args.get("name", ""),
             refresh=bool(args.get("refresh", False)),
+        )
+    if tool_name == "tool_inventory":
+        return tool_inventory(
+            category=args.get("category", ""),
+            name=args.get("name", ""),
+            refresh=bool(args.get("refresh", False)),
+        )
+    if tool_name == "output_digest":
+        return output_digest(
+            path=args.get("path", ""),
+            job_id=args.get("job_id", ""),
+            tail_lines=args.get("tail_lines", 20),
         )
     if tool_name == "run_project":
         return run_project(
@@ -19091,6 +19117,7 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "build_run", "build_clean",
     "ensemble_codegen_build_loop",
     "rename_symbol", "find_references", "diff_files", "apply_patch", "secret_scan",
+    "output_digest",
 })
 _PROJECT_SCOPED_EXECUTION_TOOLS = frozenset({"workspace_run", "script_run"})
 # The developer-workflow tools (harness_tools.py).  Every OTHER project-scoped
@@ -19141,6 +19168,7 @@ _PROJECT_BOUND_AGENT_TOOLS = (
         "master_capacity", "self_heal_check", "status", "system_profile_text",
         "emotion_vector_status", "preferences_status", "context_policy_status",
         "environment_status", "toolchain_status", "hardware_profile",
+        "tool_inventory", "output_digest",
         "process_list", "process_memory_risk_inspect",
     })
 )
@@ -19152,6 +19180,7 @@ _CLOUD_AGENT_NESTED_MODEL_TOOLS = frozenset({
 _CLOUD_AGENT_LOCAL_ONLY_TOOLS = frozenset({
     "agent_lane",
     "environment_status", "toolchain_status", "hardware_profile", "file_policy",
+    "tool_inventory", "output_digest",
     "workspace_inventory", "directory_tree", "file_find", "file_read",
     "file_read_range", "file_digest", "text_search", "repo_status",
     "repo_diff", "artifact_risk_inspect", "process_list",
@@ -19357,6 +19386,17 @@ def _project_scope_args(tool_name, args, project):
         )
         if raw_cwd and not cwd_is_abs:
             scoped["cwd"] = os.path.join(project, raw_cwd)
+        return scoped
+
+    if tool_name == "output_digest":
+        # ``path`` is optional (a job digest names ``job_id`` instead), so an
+        # omitted path must stay omitted rather than becoming the project dir.
+        raw_path = str(scoped.get("path") or "").strip()
+        is_abs = os.path.isabs(raw_path) or bool(
+            re.match(r"^[A-Za-z]:[\\/]", raw_path)
+        )
+        if raw_path and not is_abs:
+            scoped["path"] = os.path.normpath(os.path.join(project, raw_path))
         return scoped
 
     if tool_name == "ensemble_codegen_build_loop":
@@ -19727,6 +19767,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "memory_quality_report", "memory_privacy_review", "artifact_ground",
     "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
     "status", "diagnostics", "toolchain_status", "process_list", "process_memory_risk_inspect",
+    "tool_inventory", "output_digest",
     "test_discover", "test_run", "lint_run", "format_code", "typecheck_run",
     "dependency_audit", "find_references", "diff_files", "secret_scan",
     "build_run",
@@ -19789,6 +19830,7 @@ _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
     "data_inspect", "data_query", "text_search", "script_search",
     "program_search", "image_inspect", "environment_status", "toolchain_status", "hardware_profile", "repo_status", "repo_diff", "project_detect",
+    "tool_inventory", "output_digest",
     "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
     "process_list", "process_memory_risk_inspect",
 })
@@ -20049,6 +20091,13 @@ def _agent_turn(
             "answer. Lead with the outcome and disclose failures."
         )
     else:
+        # Composing the application installs the host capability-summary hook
+        # the brief below reads. It never probes the host here, and a failure
+        # only leaves the brief without its capabilities suffix.
+        try:
+            _application()
+        except Exception:
+            pass
         default_agent_system = (
             "You are a local tool-using coding agent. Inspect real workspace evidence before making claims. "
             "For action tasks, use tools instead of merely describing commands. Prefer workspace_inventory, directory_tree, "
@@ -21651,6 +21700,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "project_detect",
     "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
     "program_search", "image_inspect", "memory_search", "web_search", "toolchain_status",
+    "tool_inventory", "output_digest",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
     # test_discover / find_references / diff_files / secret_scan /
@@ -24832,6 +24882,160 @@ def toolchain_status(name: str, refresh: bool = False) -> str:
         summary="ok" if ok else "unavailable",
         output=output,
         evidence={"tool": result.get("tool", ""), "ok": ok},
+    )
+    return output
+
+
+# Model-visible payload ceiling shared with the native MCP frame headroom.
+_DEVELOPER_TOOL_OUTPUT_BYTES = 48_000
+
+
+def _developer_tool_services():
+    """The composed developer tools, or None when this runtime has none."""
+    try:
+        return getattr(_application(), "developer_tools", None)
+    except Exception:
+        return None
+
+
+def _developer_tool_json(payload):
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _developer_tool_context(source="mcp"):
+    from sonder_runtime.application.context import local_owner_context
+
+    return local_owner_context(correlation_id=uuid.uuid4().hex, source=source)
+
+
+def _tool_inventory_payload(category, name, refresh):
+    services = _developer_tool_services()
+    if services is None or getattr(services, "inventory", None) is None:
+        return {"ok": False, "error_code": "DEVELOPER_TOOLS_UNAVAILABLE"}
+    try:
+        from sonder_runtime.domain.host_tools.model import view_to_wire
+
+        view = services.inventory.view(
+            category=(str(category or "").strip().lower() or None),
+            name=(str(name or "").strip() or None),
+            refresh=bool(refresh),
+            redacted=True,
+        )
+        wire = dict(view_to_wire(view))
+    except (InvalidInput, ValueError, TypeError) as exc:
+        return {
+            "ok": False, "error_code": "INVALID_INVENTORY_QUERY",
+            "detail": str(exc)[:200],
+        }
+    except Exception as exc:
+        return {
+            "ok": False, "error_code": "TOOL_INVENTORY_UNAVAILABLE",
+            "detail": type(exc).__name__,
+        }
+    payload = {"ok": True, **wire}
+    tools = list(payload.get("tools") or [])
+    payload["tools"] = tools
+    while tools and len(_developer_tool_json(payload).encode("utf-8")) > _DEVELOPER_TOOL_OUTPUT_BYTES:
+        tools.pop()
+        payload["truncated"] = True
+    return payload
+
+
+@mcp.tool()
+def tool_inventory(category: str = "", name: str = "", refresh: bool = False) -> str:
+    """Report the categorized host tool inventory (compilers, build systems,
+    test runners, linters, debuggers, package managers, runtimes, containers,
+    VCS, database clients, media/doc tools, cloud CLIs, editors, shells).
+
+    Filter by ``category`` or a tool ``name``. Paths are redacted; versions
+    come only from fixed, bounded, host-owned probes. ``refresh`` re-probes
+    the host instead of using the cached snapshot. Local-only host data.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    payload = _tool_inventory_payload(category, name, refresh)
+    ok = bool(payload.get("ok"))
+    output = _developer_tool_json(payload)
+    _record_direct_tool(
+        "tool_inventory",
+        {"category": str(category or "")[:40], "name": str(name or "")[:64],
+         "refresh": bool(refresh)},
+        ok=ok,
+        started=started,
+        summary=(
+            "%d tools" % len(payload.get("tools") or []) if ok
+            else payload.get("error_code", "unavailable")
+        ),
+        output=output,
+        evidence={"ok": ok},
+    )
+    return output
+
+
+def _output_digest_payload(path, job_id, tail_lines):
+    path_text = str(path or "").strip()
+    job_text = str(job_id or "").strip()
+    if bool(path_text) == bool(job_text):
+        return {
+            "ok": False, "error_code": "INVALID_DIGEST_REQUEST",
+            "detail": "pass exactly one of path or job_id",
+        }
+    services = _developer_tool_services()
+    if services is None or getattr(services, "digest", None) is None:
+        return {"ok": False, "error_code": "DEVELOPER_TOOLS_UNAVAILABLE"}
+    from sonder_runtime.domain.common.errors import NotFound, SonderError
+
+    try:
+        tail = max(1, min(int(tail_lines), 200))
+    except (TypeError, ValueError):
+        tail = 20
+    context = _developer_tool_context()
+    try:
+        if job_text:
+            digest = services.digest.digest_job(
+                job_text, context, tail_lines=tail, operator=False,
+            )
+        else:
+            digest = services.digest.digest_file(path_text, context, tail_lines=tail)
+    except NotFound:
+        return {"ok": False, "error_code": "JOB_NOT_FOUND"}
+    except PermissionError:
+        return {"ok": False, "error_code": "DIGEST_SOURCE_REJECTED"}
+    except InvalidInput as exc:
+        return {"ok": False, "error_code": "INVALID_DIGEST_REQUEST", "detail": str(exc)[:200]}
+    except SonderError as exc:
+        return {"ok": False, "error_code": getattr(exc, "code", "DIGEST_UNAVAILABLE")}
+    except Exception as exc:
+        return {"ok": False, "error_code": "DIGEST_UNAVAILABLE", "detail": type(exc).__name__}
+    # Keep the whole JSON (envelope included) under the model payload ceiling.
+    return {"ok": True, "digest": digest.to_wire(max_bytes=_DEVELOPER_TOOL_OUTPUT_BYTES - 64)}
+
+
+@mcp.tool()
+def output_digest(path: str = "", job_id: str = "", tail_lines: int = 20) -> str:
+    """Summarize a guarded log file or your own test-run job output.
+
+    The structured form of ``tail -1 out.txt; grep -E "^(FAILED|ERROR) " out.txt``:
+    final line, recognized run summary (pytest, unittest, cargo, go, ctest,
+    jest, vitest, dotnet, maven, gradle, make), failure lines, first parsed
+    compiler/test errors, repeated-error groups, and a short tail. Pass exactly
+    one of ``path`` (inside allowed roots; credential stores refused) or
+    ``job_id``. Everything is redacted and bounded.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    payload = _output_digest_payload(path, job_id, tail_lines)
+    ok = bool(payload.get("ok"))
+    output = _developer_tool_json(payload)
+    _record_direct_tool(
+        "output_digest",
+        {"path": str(path or "")[:256], "job_id": str(job_id or "")[:80],
+         "tail_lines": tail_lines},
+        ok=ok,
+        started=started,
+        summary="digest" if ok else payload.get("error_code", "unavailable"),
+        output=output,
+        evidence={"ok": ok},
     )
     return output
 

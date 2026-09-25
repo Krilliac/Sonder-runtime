@@ -57,7 +57,11 @@ _SPACE_RE = re.compile(r"\s+")
 _TEMPLATE_QUOTED_RE = re.compile(
     r"'[^'\n]{0,200}'|\"[^\"\n]{0,200}\"|`[^`\n]{0,200}`|‘[^’\n]{0,200}’"
 )
-_TEMPLATE_PATH_RE = re.compile(r"(?:[A-Za-z]:)?(?:[\w.~-]{0,128}[/\\]){1,32}[\w.~-]{1,128}")
+# A path token: starts at a token boundary (so non-token positions fail at
+# once) and contains at least one separator. Linear in the token length.
+_TEMPLATE_PATH_RE = re.compile(
+    r"(?:(?<=[\s'\"`(\[=,:<])|^)[^\s'\"`()\[\],<>]*[/\\][^\s'\"`()\[\],<>]*"
+)
 _TEMPLATE_HEX_RE = re.compile(r"\b0[xX][0-9A-Fa-f]+\b")
 _TEMPLATE_NUMBER_RE = re.compile(r"\d+")
 

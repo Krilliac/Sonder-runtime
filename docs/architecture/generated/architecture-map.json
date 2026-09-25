@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 324,
+      "file_count": 326,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -98,6 +98,8 @@
         "sonder_runtime/adapters/conversational_subagents.py",
         "sonder_runtime/adapters/delegated_verification.py",
         "sonder_runtime/adapters/developer_tools_executor.py",
+        "sonder_runtime/adapters/diagnostics/__init__.py",
+        "sonder_runtime/adapters/diagnostics/sources.py",
         "sonder_runtime/adapters/embedding_cache.py",
         "sonder_runtime/adapters/embeddings.py",
         "sonder_runtime/adapters/eval_history_reader.py",
@@ -373,7 +375,7 @@
       ]
     },
     {
-      "file_count": 356,
+      "file_count": 359,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -444,6 +446,9 @@
         "sonder_runtime/application/control_plane/snapshot.py",
         "sonder_runtime/application/control_state.py",
         "sonder_runtime/application/developer_tools.py",
+        "sonder_runtime/application/diagnostics/__init__.py",
+        "sonder_runtime/application/diagnostics/ports.py",
+        "sonder_runtime/application/diagnostics/service.py",
         "sonder_runtime/application/errors.py",
         "sonder_runtime/application/evaluation/__init__.py",
         "sonder_runtime/application/evaluation/case_manifest.py",
@@ -735,7 +740,7 @@
       ]
     },
     {
-      "file_count": 59,
+      "file_count": 60,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -763,6 +768,7 @@
         "sonder_runtime/bootstrap/control_state_rehearsal.py",
         "sonder_runtime/bootstrap/delegated_verification.py",
         "sonder_runtime/bootstrap/developer_tools.py",
+        "sonder_runtime/bootstrap/diagnostics.py",
         "sonder_runtime/bootstrap/doctor_checks.py",
         "sonder_runtime/bootstrap/doctor_formatting.py",
         "sonder_runtime/bootstrap/evaluation.py",
@@ -800,7 +806,7 @@
       ]
     },
     {
-      "file_count": 201,
+      "file_count": 206,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -870,6 +876,11 @@
         "sonder_runtime/domain/control_timeout.py",
         "sonder_runtime/domain/deadline_scheduler.py",
         "sonder_runtime/domain/deployment_topology.py",
+        "sonder_runtime/domain/diagnostics/__init__.py",
+        "sonder_runtime/domain/diagnostics/digest.py",
+        "sonder_runtime/domain/diagnostics/model.py",
+        "sonder_runtime/domain/diagnostics/parsers.py",
+        "sonder_runtime/domain/diagnostics/summary.py",
         "sonder_runtime/domain/distillation_policy.py",
         "sonder_runtime/domain/doctor_result.py",
         "sonder_runtime/domain/doctor_specs.py",
@@ -1007,7 +1018,7 @@
       ]
     },
     {
-      "file_count": 53,
+      "file_count": 54,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -1053,6 +1064,7 @@
         "sonder_runtime/interfaces/repl/command_router.py",
         "sonder_runtime/interfaces/repl/facades/__init__.py",
         "sonder_runtime/interfaces/repl/facades/agent_lanes.py",
+        "sonder_runtime/interfaces/repl/facades/developer_tools.py",
         "sonder_runtime/interfaces/repl/facades/status_model.py",
         "sonder_runtime/interfaces/repl/handler.py",
         "sonder_runtime/interfaces/repl/repl.py",

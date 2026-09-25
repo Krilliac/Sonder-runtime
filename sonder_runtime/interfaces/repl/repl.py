@@ -70,6 +70,16 @@ from sonder_runtime.interfaces.repl.facades import (
     PermissionModeFacade,
     RecoveryPostureFacade,
 )
+from sonder_runtime.interfaces.repl.facades.developer_tools import (
+    TEST_ACTIONS as _TEST_ACTIONS,
+    TEST_USAGE as _TEST_USAGE,
+    poll_test_result as _poll_test_result,
+    render_digest_command as _render_digest_command,
+    render_test_followup as _render_test_followup,
+    render_tools_command as _render_tools_command,
+    start_test_command as _start_test_command,
+)
+from sonder_runtime.application.context import local_owner_context as _local_owner_context
 
 # Optional: the live filtering "/" menu. Absent or unusable (piped stdin,
 # non-Windows, dumb terminal) the REPL falls back to plain input().
@@ -1386,6 +1396,9 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /workspace-create <path>  create a guarded directory, select it, and resume queued work
   /env [refresh]     show the host OS, shells, and installed toolchains
   /toolstatus <name> run the fixed local version probe for a discovered tool
+  /tools [refresh|category|name]  categorized host tool inventory with versions
+  /test [runner] [selector]  run the project's tests; /test status|result|cancel <job>
+  /digest <job|path> summarize job output or a log: final line, failures, errors
   /location [on|off] allow approximate IP location for "my area" weather answers
   /stats             show Sonder Runtime's learning stats
   /context           show context, session, and memory health meters
@@ -2122,6 +2135,121 @@ def _artifact_mobility_command(arg):
         return json.dumps(payload, sort_keys=True)
     except Exception:
         return json.dumps({"outcome_code": "UNAVAILABLE"})
+
+
+def _developer_services():
+    """The composed developer tools (inventory, test runs, digest) or None."""
+    try:
+        return getattr(server._application(), "developer_tools", None)
+    except Exception:
+        return None
+
+
+def _developer_context(workspace=""):
+    import uuid
+    from pathlib import Path
+
+    root = Path(workspace) if workspace else file_ops.workspace_root()
+    return _local_owner_context(
+        correlation_id=uuid.uuid4().hex, source="repl", workspace_roots=(root,),
+    )
+
+
+def _tools_command(arg):
+    """``/tools``: the operator sees full, unredacted host paths."""
+    return _render_tools_command(_developer_services(), arg)
+
+
+def _digest_command(arg, workspace=""):
+    return _render_digest_command(
+        _developer_services(), arg, _developer_context(workspace),
+    )
+
+
+def _test_command(
+    arg, workspace="", *, poll_seconds=1.0, progress_every=10.0,
+    clock=time.monotonic, out=print,
+):
+    """``/test``: start a structured run and wait for its report.
+
+    Ctrl+C while waiting cancels the job through the durable provider (its
+    process tree is killed) instead of leaving it running unobserved.
+    """
+    services = _developer_services()
+    context = _developer_context(workspace)
+    words = str(arg or "").split()
+    if words and words[0].lower() in _TEST_ACTIONS:
+        if len(words) != 2:
+            out(_TEST_USAGE)
+            return
+        out(_render_test_followup(services, words[0], words[1], context))
+        return
+    text, job_id = _start_test_command(services, arg, context, project=workspace or ".")
+    out(text)
+    if job_id is None:
+        return
+    started = clock()
+    last_progress = started
+    try:
+        while True:
+            polled_at = clock()
+            text, done = _poll_test_result(
+                services, job_id, context, wait_seconds=poll_seconds,
+            )
+            if done:
+                out(text)
+                return
+            now = clock()
+            if now - last_progress >= progress_every:
+                out("  ... %s still running (%ds); Ctrl+C cancels" % (
+                    job_id, int(now - started),
+                ))
+                last_progress = now
+            if now - polled_at < poll_seconds / 4:
+                # A result call that returned early must not become a spin.
+                time.sleep(min(0.25, poll_seconds))
+    except KeyboardInterrupt:
+        out(_render_test_followup(services, "cancel", job_id, context))
+
+
+def _inventory_stale(snapshot):
+    try:
+        from sonder_runtime.domain.host_tools.model import is_stale
+
+        return bool(is_stale(snapshot, now=time.time(), ttl_seconds=86_400))
+    except Exception:
+        created = getattr(snapshot, "created_at", 0) or 0
+        return time.time() - float(created) >= 86_400
+
+
+def _start_tool_inventory_warmup():
+    """Refresh a missing or stale host tool snapshot off the input thread."""
+    services = _developer_services()
+    inventory = getattr(services, "inventory", None) if services is not None else None
+    if inventory is None:
+        return None
+    try:
+        cached = inventory.cached()
+    except Exception:
+        cached = None
+    if cached is not None and not _inventory_stale(cached):
+        return None
+
+    def warm():
+        try:
+            inventory.snapshot()
+        except Exception as exc:  # warm-up is best effort only
+            import logging
+
+            logging.getLogger(__name__).debug(
+                "tool inventory warm-up failed: %s", type(exc).__name__,
+            )
+
+    thread = owned_runtime_thread(
+        target=warm, daemon=True, name="sonder-tool-inventory-warm",
+    )
+    thread.start()
+    return thread
 
 
 def _lanes_command(arg):
@@ -2909,6 +3037,8 @@ def main(*, machine_output=False):
 
     if not machine_output:
         print(_startup_banner(strict, persona, project, active_tier))
+        if _stdout_is_interactive():
+            _start_tool_inventory_warmup()
 
     while True:
         # ``/workspace`` may select/create a directory in response to a prior
@@ -3212,7 +3342,13 @@ def main(*, machine_output=False):
                         print(server.control_command(line, session=session_id, project=project))
                     elif cmd in ("/agentretry", "/retryagent"):
                         print(server.control_command(line, session=session_id, project=project))
-                    elif cmd in ("/activity", "/tools"):
+                    elif cmd == "/tools":
+                        print(_tools_command(arg))
+                    elif cmd == "/test":
+                        _test_command(arg, workspace_root)
+                    elif cmd == "/digest":
+                        print(_digest_command(arg, workspace_root))
+                    elif cmd == "/activity":
                         if arg.strip().lower() in ("watch", "tail"):
                             _watch_activity()
                         else:
