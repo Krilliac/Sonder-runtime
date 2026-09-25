@@ -951,3 +951,18 @@ def test_disabled_reload_with_pending_edit_is_not_reported_as_refresh_pending(
         assert "pending edit ignored" in status
     finally:
         sys.modules.pop(module_name, None)
+
+
+def test_unregistered_tool_is_reported_unknown_not_permission_refused():
+    """A name no tool carries is an unknown tool, not a gate refusal.
+
+    The gate ran first and told the caller "nothing could classify" the name
+    and to add a permission rule for it -- advice to allow a tool that does
+    not exist.
+    """
+    import server
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    with pytest.raises(ToolError) as refused:
+        asyncio.run(server.mcp.call_tool("no_such_tool_registered", {}))
+    assert str(refused.value) == "Unknown tool: no_such_tool_registered"

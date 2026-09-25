@@ -605,6 +605,10 @@ class ReloadableMCPServer(MCPServer):
 
     async def call_tool(self, name: str, arguments: dict, context=None):
         self.refresh_if_changed()
+        if self._tool_manager.get_tool(name) is None:
+            # Nothing would run, so there is nothing to gate: answer as an
+            # unknown tool rather than advising a permission rule for it.
+            raise ToolError(f"Unknown tool: {name}")
         # The reach scope wraps the gate and the call: the roots a one-shot
         # approval covered appear only once the gate has spent it for exactly
         # this call, and vanish when the call is over.
