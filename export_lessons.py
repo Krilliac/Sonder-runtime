@@ -16,10 +16,12 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 import contribute  # noqa
 import sonder_runtime.adapters.memory_store as memory_store  # noqa
+import sonder_paths  # noqa
 
 
 def main(out="lessons.jsonl", db=None):
-    db = db or os.path.join(os.path.dirname(__file__), "memory.db")
+    # Same store every other tool uses (SONDER_DB/SONDER_HOME); see contribute.
+    db = db or sonder_paths.memory_db_path()
     conn = memory_store.connect(db)
     try:
         # Do not create a second, weaker "safe export" policy here.  Lessons
