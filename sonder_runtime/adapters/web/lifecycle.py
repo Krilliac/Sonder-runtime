@@ -709,7 +709,9 @@ class RuntimeLifecycle:
         if self._graceful_drain_coordinator is not None:
             result = self.drain_gracefully(reason)
             if not result.flush_completed:
-                self._finish_unflushed_drain()
+                self._finish_unflushed_drain(
+                    interrupted=not result.descendants_settled,
+                )
             try:
                 self.tracker.transition(
                     ProcessState.STOPPING,
@@ -725,7 +727,7 @@ class RuntimeLifecycle:
             probe_stopped = False
         return clean and probe_stopped
 
-    def _finish_unflushed_drain(self) -> None:
+    def _finish_unflushed_drain(self, *, interrupted: bool) -> None:
         """Run the shutdown hooks a graceful drain did not reach.
 
         The graceful coordinator refuses every barrier once its deadline has
@@ -735,12 +737,15 @@ class RuntimeLifecycle:
         SIGTERM never ended it. The drain result stays truthfully unclean;
         this only restores the legacy coordinator's guarantee that the
         interrupted and flush hooks run once the deadline has passed.
+        As there, interrupted hooks run only when in-flight work did not
+        settle; a flush that merely failed does not mark work interrupted.
         """
-        for hook in tuple(self.coordinator._interrupted_hooks):
-            try:
-                hook()
-            except Exception:
-                _LOG.warning("drain interrupted hook failed", exc_info=True)
+        if interrupted:
+            for hook in tuple(self.coordinator._interrupted_hooks):
+                try:
+                    hook()
+                except Exception:
+                    _LOG.warning("drain interrupted hook failed", exc_info=True)
         for hook in tuple(self.coordinator._flush_hooks):
             try:
                 hook()
