@@ -100,6 +100,27 @@ merging.
 python scripts\select_regression_tests.py --format args | % { scripts\run-tests.cmd -q $_.Split(" ") }
 ```
 
+`scripts/test_fast.py` does the selection and the run in one step, with the
+wrappers `scripts/test-fast.sh` and `scripts\test-fast.cmd` resolving the
+interpreter the way `run-tests.cmd` does (`SONDER_PYTHON`, else the checkout's
+`venv`):
+
+```bash
+scripts/test-fast.sh                  # change since merge-base(HEAD, origin/main)
+scripts/test-fast.sh --since HEAD~3   # change since any ref
+scripts/test-fast.sh --working-tree   # uncommitted edits only (vs HEAD)
+scripts/test-fast.sh --all            # full suite, same flags
+scripts/test-fast.sh -n 4 -- -x -k gate   # own options, then pytest's after --
+scripts/test-fast.sh --dry-run        # print the pytest command only
+```
+
+It runs `pytest -n auto --dist worksteal --ff` (passthrough arguments come
+after these, so they override them) and always prints the selector's
+uncovered-identifier list: a green selected set says nothing about a changed
+name no test mentions. A vacuous selection exits 2, as the selector does --
+it is an infrastructure failure, never "nothing to run". When `origin/main`
+is unavailable the selector's own default base is used.
+
 ## Where the fixed costs live
 
 - **Collection (~19 s)** is dominated by importing 770+ test modules, most of

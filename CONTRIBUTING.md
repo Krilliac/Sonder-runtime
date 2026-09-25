@@ -26,6 +26,12 @@ For iterating on a change, `scripts/select_regression_tests.py` picks the
 test files your diff actually touches, and
 [docs/wiki/20-test-suite-performance.md](docs/wiki/20-test-suite-performance.md)
 covers timing captures, slow-test ranking, and bounded parallel runs.
+`scripts/test-fast.sh` (or `scripts\test-fast.cmd`, both wrapping
+`scripts/test_fast.py`) runs that selection in one step: the files your change
+since the merge-base with `origin/main` touches, under
+`-n auto --dist worksteal --ff`, followed by the list of changed identifiers
+no test mentions. `--working-tree` selects from uncommitted edits only,
+`--all` runs the full suite, and anything after `--` goes to pytest.
 
 A green suite is expected, not impressive — say what you *verified*, not what
 you believe. "Reproduced the failure, fixed it, the new test fails without the
