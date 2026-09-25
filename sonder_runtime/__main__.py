@@ -1275,10 +1275,17 @@ def cmd_mcp(args) -> int:
         owned_application = default_app(config=config)
         configure_legacy_application(owned_application)
 
+    from sonder_runtime.adapters.security import unsafe_lab
+
     try:
         McpCommand(build_legacy_server_mcp_runtime()).execute(_configure_mcp_legacy)
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
+        return 2
+    except unsafe_lab.UnsafeLabError as exc:
+        # Same refusal contract as --native: a clean message and exit 2, not
+        # a traceback and exit 1. The gate still runs before any adapter.
+        print(f"MCP startup refused: {exc}", file=sys.stderr)
         return 2
     finally:
         if owned_application is not None:

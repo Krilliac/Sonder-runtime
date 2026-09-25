@@ -45,7 +45,12 @@ account. Do not use `sudo`.
 
 Sonder refuses misspellings/truthy shorthand, non-loopback binding, and
 root/elevated execution. It also refuses malformed or non-loopback Ollama
-endpoints and any hosted/cloud model opt-in. A successful activation prints
+endpoints and any hosted/cloud model opt-in. `python -m sonder_runtime mcp`
+(legacy or `--native`) reports a refusal as one `MCP startup refused: <reason>`
+line on stderr and exits 2 before any adapter starts. An OLLAMA_HOST origin
+with a single trailing slash (`http://127.0.0.1:11434/`) is accepted exactly as
+the configuration loader accepts it; any other path is still refused. A
+successful activation prints
 the warning through `status()` and `diagnostics()` and durably appends it to
 `$SONDER_HOME/audit/unsafe-lab.jsonl`. `SONDER_UNSAFE_LAB_AUDIT_PATH` may point
 that record at a persistent evidence volume, but never at a host-mounted

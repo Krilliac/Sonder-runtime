@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -167,7 +168,7 @@ def test_audit_write_failure_blocks_mcp_startup(monkeypatch, tmp_path):
     [("true", False, "exactly match"), (ACK, True, "root or elevated")],
 )
 def test_mcp_startup_refuses_invalid_gate_before_adapter(
-    monkeypatch, ack, privileged, match
+    monkeypatch, capsys, ack, privileged, match
 ):
     from sonder_runtime.__main__ import cmd_mcp
 
@@ -178,8 +179,13 @@ def test_mcp_startup_refuses_invalid_gate_before_adapter(
     monkeypatch.setattr(unsafe_lab, "is_privileged", lambda: privileged)
     monkeypatch.setattr(server.mcp, "run", lambda: calls.append("mcp"))
 
-    with pytest.raises(unsafe_lab.UnsafeLabError, match=match):
-        cmd_mcp(object())
+    # A refusal is a clean usage-class exit (2) with the reason on stderr,
+    # matching --native, and the adapter never starts.
+    assert cmd_mcp(object()) == 2
+    err = capsys.readouterr().err
+    assert "MCP startup refused" in err
+    assert re.search(match, err)
+    assert "Traceback" not in err
     assert calls == []
 
 
@@ -198,7 +204,7 @@ def test_mcp_startup_refuses_invalid_gate_before_adapter(
     ],
 )
 def test_mcp_startup_refuses_nonlocal_model_transport_before_adapter(
-    monkeypatch, environment, match
+    monkeypatch, capsys, environment, match
 ):
     from sonder_runtime.__main__ import cmd_mcp
 
@@ -213,8 +219,13 @@ def test_mcp_startup_refuses_nonlocal_model_transport_before_adapter(
     monkeypatch.setattr(unsafe_lab, "is_privileged", lambda: False)
     monkeypatch.setattr(server.mcp, "run", lambda: calls.append("mcp"))
 
-    with pytest.raises(unsafe_lab.UnsafeLabError, match=match):
-        cmd_mcp(object())
+    # A refusal is a clean usage-class exit (2) with the reason on stderr,
+    # matching --native, and the adapter never starts.
+    assert cmd_mcp(object()) == 2
+    err = capsys.readouterr().err
+    assert "MCP startup refused" in err
+    assert re.search(match, err)
+    assert "Traceback" not in err
     assert calls == []
 
 
@@ -581,3 +592,34 @@ def test_root_bypass_requires_exact_active_unsafe_gate(monkeypatch, tmp_path):
     unsafe_lab._audited_processes.discard(os.getpid())
     allowed = server.file_read(str(outside))
     assert "outside-root-evidence" in allowed
+
+
+@pytest.mark.parametrize(
+    "url", ["http://localhost:11434/", "http://127.0.0.1:11434/", "http://[::1]:11434/"]
+)
+def test_unsafe_lab_gate_accepts_single_trailing_slash_like_config(
+    monkeypatch, url
+):
+    from sonder_runtime.platform import unsafe_lab_policy
+
+    env = {unsafe_lab.ACK_ENV: ACK, "SONDER_HOST": "127.0.0.1", "OLLAMA_HOST": url}
+    assert unsafe_lab_policy.validation_error(env) == ""
+    # The configuration loader accepts the same value with the same ack.
+    monkeypatch.setattr(unsafe_lab, "is_privileged", lambda: False)
+    sonder_config.load_config(None, env=env)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:11434//",
+        "http://localhost:11434/api",
+        "http://localhost:11434/?x=1",
+        "http://localhost:11434/#frag",
+    ],
+)
+def test_unsafe_lab_gate_still_refuses_real_paths(url):
+    from sonder_runtime.platform import unsafe_lab_policy
+
+    env = {unsafe_lab.ACK_ENV: ACK, "SONDER_HOST": "127.0.0.1", "OLLAMA_HOST": url}
+    assert "without a path" in unsafe_lab_policy.validation_error(env)
