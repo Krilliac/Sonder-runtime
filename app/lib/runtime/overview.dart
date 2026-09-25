@@ -209,7 +209,7 @@ List<OverviewRow> overviewRows({
         label: 'Work runs',
         value: 'need a developer or admin account'));
   } else if (workRuns != null) {
-    final running = workRuns.where((run) => run.running).toList();
+    final running = workRuns.where((run) => run.isRunning).toList();
     if (running.isEmpty) {
       rows.add(OverviewRow(
           status: RuntimeStatus.note,
@@ -225,7 +225,7 @@ List<OverviewRow> overviewRows({
           status: RuntimeStatus.running,
           label: 'Work runs',
           value: '${running.length} running · ${first.shortId} '
-              '${compactDuration(first.age(clock))}',
+              '${compactDuration(first.elapsed(clock) ?? Duration.zero)}',
           actionLabel: 'Open',
           onAction: onOpenWorkRuns));
     }

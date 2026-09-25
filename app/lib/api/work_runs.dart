@@ -59,6 +59,10 @@ class WorkRun {
   /// True when [output] is the answer the chat turn was waiting for.
   bool get hasAnswer => status == 'returned' && output.isNotEmpty;
 
+  /// `wr-7c1e…` style short id for rows and titles; the full id stays in
+  /// semantics and copy actions.
+  String get shortId => id.length <= 12 ? id : '${id.substring(0, 7)}…';
+
   /// Wall-clock budget, when both ends are known.
   Duration? get budget => createdAt == null || deadlineAt == null
       ? null

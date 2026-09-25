@@ -374,7 +374,7 @@ void main() {
         const source = HttpRuntimeDataSource(
             baseUrl: 'http://pc.test:11435/', apiKey: 'k');
         final runs = await source.workRuns();
-        expect(runs.single.running, isTrue);
+        expect(runs.single.isRunning, isTrue);
         expect(runs.single.budget, const Duration(minutes: 30));
         final approvals = await source.approvals();
         expect(approvals.supported, isFalse);
@@ -654,7 +654,9 @@ void main() {
       ));
       await settleLive(tester);
       expect(find.textContaining("Can't reach"), findsNothing);
-      expect(find.textContaining('Unauthorized'), findsWidgets);
+      // Lane A keeps the server's own 401 reason instead of a generic
+      // "Unauthorized" (describeServerError).
+      expect(find.textContaining('denied'), findsWidgets);
       await tester.pumpWidget(const SizedBox());
     }, () => client);
   });

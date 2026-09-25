@@ -1,11 +1,12 @@
 /// Read models and a small HTTP source for the Runtime detail views: work
 /// runs (P1-4), jobs, fanout and compute (P1-10) and pending approvals.
 ///
-/// Lane A owns the transport (`lib/api/**`, including `api/work_runs.dart`
-/// and `api/approvals.dart`). Until those land, the Runtime screen reads
-/// these routes through [RuntimeDataSource], so tests use a fake and the
-/// merge only swaps [HttpRuntimeDataSource] for an adapter over lane A's
-/// clients. Errors are [SonderException]s carrying `httpStatus` and `code`.
+/// Work runs and approvals use lane A's DTOs and clients ([WorkRun],
+/// [WorkRunsApi], [PendingApproval], [IssuedApproval], [ApprovalsApi]); this
+/// file adds only the admin read models lane A has no client for (jobs,
+/// fanout, compute). The screen reads everything through
+/// [RuntimeDataSource], so tests use a fake. Errors are [SonderException]s
+/// carrying `httpStatus` and `code`.
 library;
 
 import 'dart:async';
@@ -29,49 +30,6 @@ DateTime? _epoch(Object? value) {
 String _text(Object? value, [int limit = 160]) {
   final text = value?.toString().trim() ?? '';
   return text.length <= limit ? text : '${text.substring(0, limit)}…';
-}
-
-/// One routed HTTP work run, as `GET /v1/work-runs` lists it.
-class WorkRun {
-  final String id;
-  final String status;
-  final DateTime? createdAt;
-  final DateTime? updatedAt;
-  final DateTime? deadlineAt;
-  final bool cancelRequested;
-
-  const WorkRun({
-    required this.id,
-    required this.status,
-    this.createdAt,
-    this.updatedAt,
-    this.deadlineAt,
-    this.cancelRequested = false,
-  });
-
-  factory WorkRun.fromJson(Map<String, dynamic> json) => WorkRun(
-        id: _text(json['id'], 80),
-        status: _text(json['status'], 32).toLowerCase(),
-        createdAt: _epoch(json['created_at']),
-        updatedAt: _epoch(json['updated_at']),
-        deadlineAt: _epoch(json['deadline_at']),
-        cancelRequested: json['cancel_requested'] == true,
-      );
-
-  bool get running => status == 'running';
-
-  /// `wr-7c1e…` style short id for rows; the full id stays in semantics.
-  String get shortId {
-    if (id.length <= 12) return id;
-    return '${id.substring(0, 7)}…';
-  }
-
-  Duration age(DateTime now) =>
-      createdAt == null ? Duration.zero : now.difference(createdAt!);
-
-  Duration? get budget => createdAt == null || deadlineAt == null
-      ? null
-      : deadlineAt!.difference(createdAt!);
 }
 
 /// One durable job from `GET /v1/jobs` (admin).
@@ -156,44 +114,30 @@ class ComputeNode {
       );
 }
 
-/// One pending call or open approval from `GET /v1/approvals` (server S2).
-class PendingApproval {
-  final String callId;
-  final String tool;
-  final String preview;
-  final String nonce;
-  final bool open;
-
-  const PendingApproval({
-    required this.callId,
-    required this.tool,
-    this.preview = '',
-    this.nonce = '',
-    this.open = false,
-  });
-
-  factory PendingApproval.fromJson(Map<String, dynamic> json,
-          {bool open = false}) =>
-      PendingApproval(
-        callId: _text(json['call_id'], 64),
-        tool: _text(json['tool'], 64),
-        preview: _text(json['preview'] ?? json['summary']),
-        nonce: _text(json['nonce'], 64),
-        open: open,
-      );
-}
-
+/// The Review list's view of `GET /v1/approvals`: lane A's
+/// [PendingApproval] and [IssuedApproval] rows, plus whether the server has
+/// the route at all.
 class ApprovalsPage {
   /// False when the server predates HTTP approvals (a 404 on the route).
   final bool supported;
   final List<PendingApproval> pending;
-  final List<PendingApproval> open;
+  final List<IssuedApproval> open;
 
   const ApprovalsPage({
     required this.supported,
     this.pending = const [],
     this.open = const [],
   });
+
+  /// [snapshot] is null when the server has no approvals route.
+  factory ApprovalsPage.fromSnapshot(ApprovalsSnapshot? snapshot) =>
+      snapshot == null
+          ? const ApprovalsPage(supported: false)
+          : ApprovalsPage(
+              supported: true,
+              pending: snapshot.pending,
+              open: snapshot.open,
+            );
 }
 
 /// Everything the Runtime detail views read beyond `/v1/sonder/status`.
@@ -291,21 +235,22 @@ class HttpRuntimeDataSource implements RuntimeDataSource {
     return rows is List ? rows.whereType<Map<String, dynamic>>().toList() : [];
   }
 
-  @override
-  Future<List<WorkRun>> workRuns() async => _rows(
-          await _send('GET', _uri('/v1/work-runs'), 'Could not load work runs'),
-          'runs')
-      .map(WorkRun.fromJson)
-      .toList();
+  SonderEndpoint get _endpoint => SonderEndpoint(
+        baseUrl: baseUrl,
+        apiKey: apiKey,
+        accountSession: accountSession,
+      );
 
   @override
-  Future<WorkRun?> cancelWorkRun(String id) async {
-    if (!RegExp(r'^wr-[0-9a-f]{32}$').hasMatch(id)) {
+  Future<List<WorkRun>> workRuns() =>
+      WorkRunsApi(_endpoint, timeout: timeout).list();
+
+  @override
+  Future<WorkRun?> cancelWorkRun(String id) {
+    if (!isWorkRunId(id)) {
       throw ArgumentError.value(id, 'id', 'not a work run id');
     }
-    final decoded = await _send('POST', _uri('/v1/work-runs/$id/cancel'),
-        'Could not stop the work run');
-    return decoded is Map<String, dynamic> ? WorkRun.fromJson(decoded) : null;
+    return WorkRunsApi(_endpoint, timeout: timeout).cancel(id);
   }
 
   @override
@@ -333,24 +278,6 @@ class HttpRuntimeDataSource implements RuntimeDataSource {
       .toList();
 
   @override
-  Future<ApprovalsPage> approvals() async {
-    try {
-      final decoded =
-          await _send('GET', _uri('/v1/approvals'), 'Could not load approvals');
-      return ApprovalsPage(
-        supported: true,
-        pending: _rows(decoded, 'pending')
-            .map((row) => PendingApproval.fromJson(row))
-            .toList(),
-        open: _rows(decoded, 'approvals')
-            .map((row) => PendingApproval.fromJson(row, open: true))
-            .toList(),
-      );
-    } on SonderException catch (error) {
-      if (error.httpStatus == 404) {
-        return const ApprovalsPage(supported: false);
-      }
-      rethrow;
-    }
-  }
+  Future<ApprovalsPage> approvals() async => ApprovalsPage.fromSnapshot(
+      await ApprovalsApi(_endpoint, timeout: timeout).list());
 }

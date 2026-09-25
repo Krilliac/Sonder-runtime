@@ -373,16 +373,12 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
-    expect(find.text('System'), findsOneWidget);
-    expect(find.text('Runtime architecture'), findsOneWidget);
+    // Lane D renamed the page title from "System" to "Runtime" (plan P2-10).
+    expect(find.text('System'), findsNothing);
     expect(
-      find.textContaining('not a standalone foundation model'),
-      findsOneWidget,
-    );
-    expect(
-      find.textContaining('training runs through PEFT/Hugging Face'),
-      findsOneWidget,
-    );
+        find.descendant(
+            of: find.byType(AppBar), matching: find.text('Runtime')),
+        findsOneWidget);
     expect(find.byTooltip('Back to chat'), findsOneWidget);
     expect(find.text('Chat'), findsOneWidget);
     expect(find.byKey(const Key('system-section-nav')), findsOneWidget);
@@ -393,6 +389,29 @@ void main() {
       ),
       findsOneWidget,
     );
+    // The Runtime overview now leads the page, so the architecture note
+    // sits further down the page's own vertical list.
+    await tester.scrollUntilVisible(
+      find.text('Runtime architecture'),
+      400,
+      scrollable: find
+          .descendant(
+            of: find.byType(SystemScreen),
+            matching: find.byWidgetPredicate((w) =>
+                w is Scrollable && w.axisDirection == AxisDirection.down),
+          )
+          .first,
+    );
+    expect(find.text('Runtime architecture'), findsOneWidget);
+    expect(
+      find.textContaining('not a standalone foundation model'),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('training runs through PEFT/Hugging Face'),
+      findsOneWidget,
+    );
+    expect(find.byTooltip('Back to chat'), findsOneWidget);
 
     await tester.tap(find.byTooltip('Back to chat'));
     await tester.pump();

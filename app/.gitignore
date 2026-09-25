@@ -23,3 +23,6 @@ web/
 .idea/
 *.iml
 .DS_Store
+
+# Golden comparison output written by failing matchesGoldenFile tests.
+/test/goldens/failures/

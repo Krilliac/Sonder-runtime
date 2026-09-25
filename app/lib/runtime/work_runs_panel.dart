@@ -8,7 +8,6 @@ import 'package:flutter/material.dart';
 import '../api.dart';
 import '../theme.dart';
 import 'overview.dart';
-import 'runtime_data.dart';
 import 'status_word.dart';
 
 RuntimeStatus workRunStatus(WorkRun run) => switch (run.status) {
@@ -34,8 +33,8 @@ String workRunWord(WorkRun run) => switch (run.status) {
 /// `4m of 30m budget` for a running row, `12m ago` once it settled.
 String workRunDetail(WorkRun run, DateTime now) {
   final budget = run.budget;
-  if (run.running) {
-    final used = compactDuration(run.age(now));
+  if (run.isRunning) {
+    final used = compactDuration((run.elapsed(now) ?? Duration.zero));
     return budget == null ? used : '$used of ${compactDuration(budget)} budget';
   }
   final settled = run.updatedAt ?? run.createdAt;
@@ -146,7 +145,7 @@ class WorkRunsPanel extends StatelessWidget {
                 overflow: TextOverflow.ellipsis,
               ),
             ),
-            if (run.running && !run.cancelRequested && onStop != null)
+            if (run.isRunning && !run.cancelRequested && onStop != null)
               TextButton(
                 onPressed: () => _confirmStop(context, run),
                 style: TextButton.styleFrom(minimumSize: const Size(48, 48)),

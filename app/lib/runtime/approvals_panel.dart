@@ -50,18 +50,14 @@ class ApprovalsPanel extends StatelessWidget {
       return const RuntimePanelNote(
           status: RuntimeStatus.ok, word: 'ok', text: 'Nothing waiting.');
     }
-    Widget row(PendingApproval item) => Padding(
+    Widget row(RuntimeStatus status, String? word, List<String> parts) =>
+        Padding(
           padding: const EdgeInsets.symmetric(vertical: 3),
           child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            RuntimeStatusWord(item.open ? RuntimeStatus.ok : RuntimeStatus.ask,
-                word: item.open ? 'approved' : null, width: 116),
+            RuntimeStatusWord(status, word: word, width: 116),
             Expanded(
               child: Text(
-                [
-                  item.tool.isEmpty ? 'call' : item.tool,
-                  if (item.callId.isNotEmpty) 'call ${item.callId}',
-                  if (item.preview.isNotEmpty) item.preview,
-                ].join(' · '),
+                parts.join(' · '),
                 maxLines: 3,
                 overflow: TextOverflow.ellipsis,
                 style: tokens.mono(12, color: tokens.text2),
@@ -69,12 +65,23 @@ class ApprovalsPanel extends StatelessWidget {
             ),
           ]),
         );
+    Widget pendingRow(PendingApproval item) => row(RuntimeStatus.ask, null, [
+          item.tool.isEmpty ? 'call' : item.tool,
+          if (item.callId.isNotEmpty) 'call ${item.callId}',
+          if (item.preview.isNotEmpty) item.preview,
+        ]);
+    Widget openRow(IssuedApproval item) =>
+        row(RuntimeStatus.ok, 'approved', [
+          item.tool.isEmpty ? 'call' : item.tool,
+          if (item.callId.isNotEmpty) 'call ${item.callId}',
+          if (item.ttlSeconds > 0) '${item.ttlSeconds}s once',
+        ]);
     return Column(
       key: const Key('approvals-panel'),
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        for (final item in current.pending) row(item),
-        for (final item in current.open) row(item),
+        for (final item in current.pending) pendingRow(item),
+        for (final item in current.open) openRow(item),
       ],
     );
   }
