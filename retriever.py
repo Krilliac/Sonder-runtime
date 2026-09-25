@@ -1,5 +1,6 @@
 """Hybrid lexical+semantic retrieval over distilled lessons. RRF fusion."""
 import hashlib
+import math
 import os
 import re
 from datetime import datetime, timedelta, timezone
@@ -556,12 +557,27 @@ def _mmr_lambda():
     return max(0.0, min(1.0, value))
 
 
+def _env_min_sim():
+    """The SONDER_MIN_SIM override, or the calibrated default when unusable.
+
+    A malformed value used to raise out of every orchestrated turn, and NaN
+    silently disabled retrieval (every comparison with NaN is false).  Only a
+    finite number is an operator's threshold; a value above 1.0 still
+    deliberately disables lesson injection.
+    """
+    try:
+        value = float(os.environ.get("SONDER_MIN_SIM", str(DEFAULT_MIN_SIM)))
+    except ValueError:
+        return DEFAULT_MIN_SIM
+    return value if math.isfinite(value) else DEFAULT_MIN_SIM
+
+
 def retrieve_with_ids(
     conn, task, k=5, embed_fn=None, min_sim=None,
     embedding_model=None, embedding_revision=None,
 ):
     if min_sim is None:
-        min_sim = float(os.environ.get("SONDER_MIN_SIM", str(DEFAULT_MIN_SIM)))
+        min_sim = _env_min_sim()
 
     usage_stats = usage_stats_with_attribution(conn)
     quarantined = quarantined_lessons(usage_stats, task)

@@ -855,3 +855,29 @@ def test_lesson_usage_stats_counts_each_population_separately():
     assert row["scored_execution"] == 3
     assert row["avg_reward_caller"] == -0.5
     assert row["avg_reward_execution"] == 1.0
+
+
+import pytest
+
+
+@pytest.mark.parametrize("raw", ["garbage", "", "nan", "inf", "-inf", "0.6.2"])
+def test_malformed_min_sim_env_falls_back_to_calibrated_default(monkeypatch, raw):
+    # A malformed SONDER_MIN_SIM used to raise ValueError out of every
+    # orchestrated turn (orchestrator._run retrieves before generating), and
+    # "nan" silently disabled retrieval because every comparison is false.
+    monkeypatch.setenv("SONDER_MIN_SIM", raw)
+    c = ms.connect(":memory:")
+    ms.add_lesson(c, "near", "on-topic lesson", e.to_blob([1.0, 0.0]), "i")
+    ms.add_lesson(c, "far", "off-topic lesson", e.to_blob([0.0, 1.0]), "i")
+
+    assert r._env_min_sim() == r.DEFAULT_MIN_SIM
+    assert r.retrieve(c, "query", embed_fn=lambda t: [1.0, 0.0]) == ["on-topic lesson"]
+
+
+def test_explicit_min_sim_env_is_still_honoured(monkeypatch):
+    c = ms.connect(":memory:")
+    ms.add_lesson(c, "near", "on-topic lesson", e.to_blob([1.0, 0.0]), "i")
+
+    monkeypatch.setenv("SONDER_MIN_SIM", " 1.5 ")
+    assert r._env_min_sim() == 1.5
+    assert r.retrieve(c, "query", embed_fn=lambda t: [1.0, 0.0]) == []
