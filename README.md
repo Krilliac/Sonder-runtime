@@ -1,7 +1,10 @@
 # Sonder Runtime
 
 <p align="center">
-  <img src="docs/assets/brand/sonder-runtime-badge.png" alt="Sonder Runtime" width="720">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/sonder-runtime-banner-dark.svg">
+    <img src="docs/assets/brand/sonder-runtime-banner-light.svg" alt="Sonder Runtime" width="720">
+  </picture>
 </p>
 
 <p align="center"><strong>Your models. Your memory. Your machine.</strong></p>
