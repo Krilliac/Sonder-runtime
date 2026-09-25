@@ -3438,3 +3438,51 @@ def test_admin_drain_rejects_ambiguous_framing_before_dispatch(monkeypatch):
     assert response.startswith(b"HTTP/1.0 400"), response
     assert b"multiple Content-Length headers are not supported" in response
     assert called == []
+
+
+def test_http_register_forwards_hosted_bootstrap_policy(monkeypatch, tmp_path):
+    """POST /v1/sonder/register must reach the engine's hosted policy.
+
+    The HTTP route passes the hosted-registration policy as keyword-only
+    arguments (``trusted_local=False`` plus the bootstrap secret, the
+    additional-registration opt-in and the acting account). The account
+    provider once accepted only ``(conn, username, password)``, so every
+    registration raised TypeError and answered 500.
+    """
+    import admin_auth
+    import memory_store
+    secret = "bootstrap-secret-123456"
+    monkeypatch.setenv("SONDER_BOOTSTRAP_SECRET", secret)
+    path = str(tmp_path / "register.sqlite")
+    monkeypatch.setattr(ts.server, "_open_db", lambda: memory_store.connect(path))
+    monkeypatch.setattr(ts, "AUTH_MODE", "account")
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts, "ALLOW_REGISTRATION", False)
+    monkeypatch.setattr(ts.Handler, "_auth_rate_limited", lambda self: False)
+    body = json.dumps({"username": "owner", "password": "password123"})
+    headers = {"Content-Type": "application/json"}
+    with _http_server(monkeypatch) as port:
+        # Without the one-use secret the hosted bootstrap is refused, which
+        # proves trusted_local=False reached the engine (a trusted local
+        # caller would have been admitted).
+        status, _, payload = _request(port, "POST", "/v1/sonder/register",
+                                      body=body, headers=headers)
+        assert status == 403, payload
+        status, _, payload = _request(
+            port, "POST", "/v1/sonder/register", body=body,
+            headers={**headers, "X-Sonder-Bootstrap-Secret": secret})
+        assert status == 201, payload
+        assert json.loads(payload)["account"]["role"] == "admin"
+        # The secret is spent and additional registration is not enabled.
+        other = json.dumps({"username": "second", "password": "password123"})
+        status, _, payload = _request(
+            port, "POST", "/v1/sonder/register", body=other,
+            headers={**headers, "X-Sonder-Bootstrap-Secret": secret})
+        assert status == 403, payload
+    conn = memory_store.connect(path)
+    try:
+        assert admin_auth.login(conn, "owner", "password123")[0]
+        assert conn.execute("SELECT COUNT(*) FROM accounts").fetchone()[0] == 1
+    finally:
+        conn.close()
