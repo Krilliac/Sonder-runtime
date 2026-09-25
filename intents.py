@@ -133,8 +133,10 @@ _CONTENT_ONLY_FOLLOWUP_RE = re.compile(
 )
 # Persisting the text into the workspace is workspace work even for a poem.
 _CONTENT_ONLY_PERSIST_RE = re.compile(
-    r"\b(?:save|saves|saving|saved|commit|commits|push|store|put|append|insert|"
-    r"place)\b|\b(?:in|into|to|under|inside)\s+(?:the\s+|our\s+|my\s+|this\s+|a\s+)?"
+    r"\b(?:save|saves|saving|saved|commit|commits|push|append|insert)\b"
+    # "store"/"put"/"place" are also ordinary topic nouns ("a poem about a
+    # store"); as verbs they need a destination, which the clause below names.
+    r"|\b(?:in|into|to|under|inside)\s+(?:the\s+|our\s+|my\s+|this\s+|a\s+)?"
     r"(?:new\s+)?(?:repo|repository|project|workspace|codebase|folder|directory|"
     r"file|docs|readme)\b"
 )

@@ -73,6 +73,9 @@ def _lane(prompt: str) -> str:
     "Write a poem about a database",
     "Compose a short song about our server",
     "Please write me a funny story about the test suite",
+    # "store"/"place" are topic nouns here, not persistence verbs.
+    "Write a poem about the data store for the server",
+    "Write a limerick about the place where the api lives",
 ])
 def test_explanatory_conversational_and_content_prompts_stay_in_chat(prompt):
     assert _lane(prompt) == "chat"
