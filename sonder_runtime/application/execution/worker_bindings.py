@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import asdict, is_dataclass
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 from typing import Any, Callable, Mapping, TypeVar
 
 from .effect_journal import (
@@ -27,6 +29,7 @@ from .effect_journal import (
 
 
 T = TypeVar("T")
+_LOG = logging.getLogger(__name__)
 
 
 def _digest(value: Any) -> str:
@@ -63,8 +66,13 @@ class AuthenticatedWorkerBinding:
     worker_id: str
     owner_epoch: int
     scope: str
+    # Trusted composition opts in to bounded verifier reconciliation before
+    # restart.  Without it, restart refuses until an explicit ``reconcile``.
+    auto_reconcile: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.auto_reconcile) is not bool:
+            raise TypeError("auto_reconcile must be a boolean")
         for name in ("run_id", "worker_id", "scope"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
@@ -80,13 +88,9 @@ class AuthenticatedWorkerBinding:
             self.journal, self.run_id, self.worker_id, self.owner_epoch, self.scope,
         )
 
-    def recover_before_restart(
-        self,
-        *,
-        live_workers: Mapping[str, int] | None = None,
-        max_records: int = 100,
-    ) -> RecoveryDecision:
-        """Refuse worker restart while an old owner needs reconciliation."""
+    def _claim_and_recover(
+        self, *, live_workers: Mapping[str, int] | None, max_records: int,
+    ) -> "EffectReconciliationReport":
         claim_owner = getattr(self.journal, "claim_owner", None)
         if callable(claim_owner):
             # Advance the durable fence before inspecting old effects.  Even
@@ -101,10 +105,122 @@ class AuthenticatedWorkerBinding:
             live_workers={} if live_workers is None else live_workers,
             max_records=max_records,
         )
-        if decision.action == "reconcile":
-            raise EffectJournalError(
-                "worker restart requires explicit reconciliation of uncertain effects"
+        return EffectReconciliationReport(
+            self.run_id, self.worker_id, decision.action, decision,
+        )
+
+    def reconcile_before_restart(
+        self,
+        *,
+        live_workers: Mapping[str, int] | None = None,
+        max_records: int = 100,
+        verifier_timeout_seconds: float = 2.0,
+        deadline_monotonic: float | None = None,
+    ) -> "EffectReconciliationReport":
+        """Claim this owner, fence orphans, and try the trusted verifiers.
+
+        Bounded by ``max_records`` (the journal's recovery page) and by an
+        optional monotonic deadline; each verifier call is bounded by its own
+        timeout inside the journal.  Only intents admitted by this worker
+        identity are reconciled: another worker's intent keeps the fence.
+        Nothing here invokes an effect.  A verifier either returns a typed
+        proof, which the journal applies with a durable ``verified:`` receipt,
+        or the intent stays ``uncertain`` and the run stays fenced.  Re-running
+        after a crash is safe: resolved intents are terminal and skipped.
+        """
+        initial = self._claim_and_recover(
+            live_workers=live_workers, max_records=max_records,
+        )
+        decision = initial.decision
+        if decision.action != "reconcile":
+            return initial
+        reconcile = getattr(self.journal, "reconcile", None)
+        get_intent = getattr(self.journal, "get", None)
+        resolved: list[ReconciledEffect] = []
+        fenced: list[ReconciledEffect] = []
+        for intent_id in decision.intent_ids:
+            record = get_intent(intent_id) if callable(get_intent) else None
+            if record is None:
+                fenced.append(ReconciledEffect(intent_id, "", "unknown", "intent is not readable"))
+                continue
+            if record.state not in {EffectState.INTENT, EffectState.UNCERTAIN}:
+                resolved.append(ReconciledEffect(
+                    intent_id, record.operation_id, record.state.value, "already terminal",
+                ))
+                continue
+            if record.worker_id != self.worker_id:
+                fenced.append(ReconciledEffect(
+                    intent_id, record.operation_id, record.state.value,
+                    "admitted by another worker identity",
+                ))
+                continue
+            if not callable(reconcile):
+                fenced.append(ReconciledEffect(
+                    intent_id, record.operation_id, record.state.value,
+                    "journal has no verifier reconciliation",
+                ))
+                continue
+            if deadline_monotonic is not None and monotonic() >= deadline_monotonic:
+                fenced.append(ReconciledEffect(
+                    intent_id, record.operation_id, record.state.value,
+                    "reconciliation time budget exhausted",
+                ))
+                continue
+            try:
+                settled = reconcile(
+                    intent_id, owner_epoch=self.owner_epoch,
+                    timeout_seconds=verifier_timeout_seconds,
+                )
+            except (EffectJournalError, KeyError) as exc:
+                fenced.append(ReconciledEffect(
+                    intent_id, record.operation_id, record.state.value,
+                    f"{type(exc).__name__}: {exc}"[:512],
+                ))
+                continue
+            if settled.state in {EffectState.COMPLETED, EffectState.FAILED}:
+                resolved.append(ReconciledEffect(
+                    intent_id, settled.operation_id, settled.state.value, settled.detail,
+                ))
+            else:
+                fenced.append(ReconciledEffect(
+                    intent_id, settled.operation_id, settled.state.value,
+                    "verifier returned no definitive proof",
+                ))
+        report = EffectReconciliationReport(
+            self.run_id, self.worker_id, "resume" if not fenced else "reconcile",
+            decision, tuple(resolved), tuple(fenced),
+        )
+        log = _LOG.warning if fenced else _LOG.info
+        log(
+            "effect reconciliation before restart: run=%s worker=%s resolved=%d fenced=%d",
+            self.run_id, self.worker_id, len(resolved), len(fenced),
+        )
+        return report
+
+    def recover_before_restart(
+        self,
+        *,
+        live_workers: Mapping[str, int] | None = None,
+        max_records: int = 100,
+    ) -> RecoveryDecision:
+        """Refuse worker restart while an old owner needs reconciliation.
+
+        With ``auto_reconcile`` (set by trusted composition), unresolved
+        intents left by a dead owner are first offered to the journal's
+        trusted verifiers (bounded).  Restart proceeds only when every one of
+        them is proven; otherwise the run stays fenced and
+        ``EffectRecoveryRequired`` carries the typed report.
+        """
+        if self.auto_reconcile:
+            report = self.reconcile_before_restart(
+                live_workers=live_workers, max_records=max_records,
             )
+        else:
+            report = self._claim_and_recover(
+                live_workers=live_workers, max_records=max_records,
+            )
+        if report.fenced or report.action == "reconcile":
+            raise EffectRecoveryRequired(report)
         restore_checkpoint = getattr(self.journal, "restore_checkpoint", None)
         if callable(restore_checkpoint):
             try:
@@ -113,7 +229,46 @@ class AuthenticatedWorkerBinding:
                 raise EffectJournalError(
                     "worker restart requires checkpoint reconciliation"
                 ) from exc
-        return decision
+        if report.resolved:
+            return RecoveryDecision(
+                self.run_id, "resume",
+                tuple(item.intent_id for item in report.resolved),
+                report.decision.high_water,
+                "unresolved effects were proven by host verifiers",
+            )
+        return report.decision
+
+
+@dataclass(frozen=True, slots=True)
+class ReconciledEffect:
+    """One intent examined by bounded reconciliation, and what happened."""
+
+    intent_id: str
+    operation_id: str
+    state: str
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class EffectReconciliationReport:
+    """Outcome of ``reconcile_before_restart`` for one (run, worker)."""
+
+    run_id: str
+    worker_id: str
+    action: str
+    decision: RecoveryDecision
+    resolved: tuple[ReconciledEffect, ...] = ()
+    fenced: tuple[ReconciledEffect, ...] = ()
+
+
+class EffectRecoveryRequired(EffectJournalError):
+    """Restart is refused: unresolved effects could not be proven."""
+
+    def __init__(self, report: EffectReconciliationReport) -> None:
+        super().__init__(
+            "worker restart requires explicit reconciliation of uncertain effects"
+        )
+        self.report = report
 
 
 def journaled_effect(
@@ -219,4 +374,7 @@ def _publish_outcome(
             )
 
 
-__all__ = ["AuthenticatedWorkerBinding", "journaled_effect"]
+__all__ = [
+    "AuthenticatedWorkerBinding", "EffectReconciliationReport",
+    "EffectRecoveryRequired", "ReconciledEffect", "journaled_effect",
+]

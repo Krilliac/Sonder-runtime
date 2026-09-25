@@ -490,15 +490,72 @@ def build_application(
             )
         return worker_effect_journal
 
+    # Worker families this composition owns.  Startup reconciliation only
+    # claims unresolved intents admitted by one of these identities.
+    worker_families = ("process", "compute", "subagent", "selfmod")
+
+    def worker_id_for(family: str) -> str:
+        return f"{family}:{effective_config.compute.node_id}"
+
     def worker_binding(*, family: str, scope: str, run_id: str):
-        """Compose an authenticated binding from host-owned worker metadata."""
+        """Compose an authenticated binding from host-owned worker metadata.
+
+        ``auto_reconcile`` makes every restart of a production worker offer
+        unresolved intents to the journal's trusted verifiers (bounded) before
+        refusing; unprovable intents stay fenced.
+        """
         from ..application.execution.worker_bindings import AuthenticatedWorkerBinding
 
-        worker_id = f"{family}:{effective_config.compute.node_id}"
+        if family not in worker_families:
+            raise ValueError(f"unknown worker family: {family!r}")
         return AuthenticatedWorkerBinding(
-            get_worker_effect_journal(), run_id, worker_id,
-            worker_owner_epoch, scope,
+            get_worker_effect_journal(), run_id, worker_id_for(family),
+            worker_owner_epoch, scope, auto_reconcile=True,
         )
+
+    worker_effect_reconciliation_report = None
+
+    def reconcile_worker_effects(**limits):
+        """Bounded verifier reconciliation of unresolved worker effects.
+
+        Called once at composition and available to operators.  It reads the
+        journal only when the durable file already exists (a fresh install
+        has nothing to reconcile), never executes an effect, and leaves every
+        unprovable intent fenced.  The durable receipt of a proof is the
+        journal's ``verified:`` detail; the pass also emits a content-free
+        ``worker.effects.reconciled`` operations event.
+        """
+        nonlocal worker_effect_reconciliation_report
+        from ..application.execution.effect_reconciliation import (
+            StartupReconciliationReport,
+            reconcile_unresolved_effects,
+        )
+        from ..platform.paths import state_path
+
+        if worker_effect_journal is None and not Path(
+            state_path("worker-effects.db", "SONDER_WORKER_EFFECTS_DB")
+        ).is_file():
+            worker_effect_reconciliation_report = StartupReconciliationReport()
+            return worker_effect_reconciliation_report
+        journal = get_worker_effect_journal()
+        owned = frozenset(worker_id_for(family) for family in worker_families)
+        pending, _more = journal.unresolved_page(limit=100)
+        if any(intent.operation_id.startswith("subagent-dispatch:") for intent in pending):
+            # Compose the durable child store on this thread first; the
+            # verifier later reads it from its bounded worker thread.
+            get_continuation_repository()
+
+        def emit(code, detail):
+            events.emit(
+                code, summary="worker effect reconciliation", detail=detail,
+                severity="WARNING" if detail.get("fenced") or detail.get("failed_runs") else "INFO",
+            )
+
+        worker_effect_reconciliation_report = reconcile_unresolved_effects(
+            journal, owner_epoch=worker_owner_epoch, owns_worker=owned.__contains__,
+            emit=emit, **limits,
+        )
+        return worker_effect_reconciliation_report
 
     def _compose_subagent_binding(run_id: str):
         binding = worker_binding(
@@ -989,7 +1046,34 @@ def build_application(
                     if not isinstance(child_repository_factory, HostChildRepositoryFactory):
                         raise TypeError("child repository factory requires trusted host composition")
                     continuation_repository = child_repository_factory(config or SonderConfig())
-                continuation_service = DurableContinuationService(continuation_repository)
+                from ..adapters.persistence.durable_continuation import (
+                    SQLiteJournalProvenanceSource,
+                )
+                from ..application.subagents.checkpoint_provenance import (
+                    JournalProvenanceStamp,
+                    ProvenanceBinding,
+                )
+                # Every durable child checkpoint is stamped with the effect
+                # journal position it relies on.  The journal identity is
+                # minted here, by trusted composition, and nowhere else.
+                provenance_journal = SQLiteJournalProvenanceSource(
+                    get_worker_effect_journal(), create_identity=True,
+                )
+
+                def child_provenance_binding(subject):
+                    # Same run, worker and epoch as _compose_subagent_binding;
+                    # the stamp refuses unless that epoch is the current owner.
+                    return ProvenanceBinding(
+                        f"subagent:{subject.child_id}", worker_id_for("subagent"),
+                        worker_owner_epoch,
+                    )
+
+                continuation_service = DurableContinuationService(
+                    continuation_repository,
+                    checkpoint_provenance=JournalProvenanceStamp(
+                        provenance_journal, child_provenance_binding,
+                    ),
+                )
                 from ..application.worker_registry.continuation import (
                     ContinuationWorkerRegistry,
                 )
@@ -1018,6 +1102,7 @@ def build_application(
                     dispatch_verifier=DurableSubagentDispatchVerifier(
                         lambda: continuation_repository
                     ),
+                    provenance_journal=provenance_journal,
                 )
                 from ..application.ports.subagents import SubagentBudget
 
@@ -1538,6 +1623,7 @@ def build_application(
         memory_replication=memory_replication_service,
         process_job_provider=get_process_job_provider,
         job_recovery=recover_jobs,
+        worker_effect_reconciliation=reconcile_worker_effects,
         workflow_engine=get_workflow_engine,
         agent_registry=get_agent_registry,
         config=config,
@@ -1580,6 +1666,16 @@ def build_application(
         except Exception:
             application.close_providers(timeout=5)
             raise
+    try:
+        # Runtime startup: resolve what the host can prove about effects a
+        # crashed predecessor left unresolved.  Failure is logged and leaves
+        # every fence in place (fail closed); it does not block composition.
+        reconcile_worker_effects()
+    except Exception as exc:  # noqa: BLE001 - fences remain; restart path retries
+        logger.warning(
+            "startup worker effect reconciliation failed; unresolved effects stay fenced: %s",
+            type(exc).__name__,
+        )
     if inference_pool is not None:
         ollama_pool.configure_typed_pool(inference_pool)
     return application

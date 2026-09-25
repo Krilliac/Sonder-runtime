@@ -19,11 +19,14 @@ cross-store atomicity.  The protocol is journal-proof-first: an effect's
 receipt commits before the host stamps the position it may rely on, and the
 child compare-and-set commits afterwards.  A crash between the two leaves the
 previous checkpoint and its older, still-valid provenance.  This module does
-not provide a production resume adapter.
+not itself resume anything: ``LocalSubagentProvider.resume`` (composed in
+``bootstrap/app.py``) calls these validators before claiming a child.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import contextlib
+import contextvars
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
@@ -295,7 +298,7 @@ def validate_checkpoint_resume(
     if not isinstance(checkpoint, ContinuableCheckpoint):
         raise TypeError("checkpoint must be a ContinuableCheckpoint")
     provenance = checkpoint.provenance
-    if provenance is None:
+    if checkpoint.provenance_absent or provenance is None:
         return _refuse(R.PROVENANCE_ABSENT,
                        "checkpoint has no journal provenance; whole-child fencing applies",
                        checkpoint)
@@ -392,9 +395,118 @@ def validate_checkpoint_resume(
     )
 
 
+class ChildResumeRefused(InvalidSubagentRequest):
+    """A child may not resume from its checkpoint; it stays recovery_required."""
+
+    recovery_required = True
+
+    def __init__(self, decision: CheckpointResumeDecision) -> None:
+        reason = decision.reason.value if decision.reason is not None else "refused"
+        super().__init__(f"child resume refused ({reason}): {decision.detail}")
+        self.decision = decision
+        self.reason = decision.reason
+
+
+_RESUMED: contextvars.ContextVar[CheckpointResumeDecision | None] = contextvars.ContextVar(
+    "sonder_child_resume_decision", default=None,
+)
+
+
+def resume_receipts() -> Mapping[str, SettledReceipt]:
+    """Settled receipts a resumed child runner must consume, by idempotency key.
+
+    Empty outside a resumed runner.  Includes outcomes at or below the
+    checkpoint position and those settled after it (for example an effect
+    whose receipt committed just before a crash, ahead of the next checkpoint).
+    """
+    decision = _RESUMED.get()
+    if decision is None:
+        return _frozen()
+    return _frozen({**decision.receipts, **decision.later_receipts})
+
+
+@contextlib.contextmanager
+def resumed_from(decision: CheckpointResumeDecision) -> Iterator[CheckpointResumeDecision]:
+    """Bind an allowed resume decision for the runner thread."""
+    if not isinstance(decision, CheckpointResumeDecision) or not decision.allowed:
+        raise TypeError("resumed_from requires an allowed resume decision")
+    token = _RESUMED.set(decision)
+    try:
+        yield decision
+    finally:
+        _RESUMED.reset(token)
+
+
+def validate_uncheckpointed_resume(
+    journal: ProvenanceJournal | None,
+    *,
+    run_id: str,
+    worker_id: str,
+    resumer_owner_epoch: int,
+    admission_operations: frozenset[str],
+    page_limit: int = DEFAULT_PAGE_LIMIT,
+    max_pages: int = DEFAULT_MAX_PAGES,
+) -> CheckpointResumeDecision:
+    """Decide whether a child that never checkpointed may restart from empty state.
+
+    Allowed only when the resumer holds the journal's current owner epoch and
+    every intent of the run is settled and is one of ``admission_operations``
+    (the child's dispatch attempts).  Any other intent means the old runner
+    made progress that no checkpoint describes, so restarting from empty state
+    could repeat it; that refuses with ``NO_CHECKPOINT``.
+    """
+    for name, value in (("run_id", run_id), ("worker_id", worker_id)):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} is required")
+    if type(resumer_owner_epoch) is not int or resumer_owner_epoch < 1:
+        raise ValueError("resumer_owner_epoch must be positive")
+    if type(page_limit) is not int or not 1 <= page_limit <= _MAX_PAGE_LIMIT:
+        raise ValueError("page_limit must be within 1..10000")
+    if type(max_pages) is not int or not 1 <= max_pages <= _MAX_PAGES:
+        raise ValueError("max_pages must be within 1..10000")
+    R = CheckpointResumeRefusal
+    if journal is None:
+        return _refuse(R.JOURNAL_MISSING, "no effect journal is available")
+    try:
+        position = journal.position(run_id, worker_id)
+        if position is None:
+            return _refuse(R.JOURNAL_MISSING, "effect journal or its identity is missing")
+        if position.current_owner_epoch is None or position.current_owner_epoch != resumer_owner_epoch:
+            return _refuse(R.STALE_OWNER_EPOCH,
+                           "resumer does not hold the journal's current owner epoch")
+        read = _read_run(journal, run_id, page_limit=page_limit, max_pages=max_pages)
+        if not isinstance(read, CheckpointResumeDecision):
+            confirm = journal.position(run_id, worker_id)
+            if (confirm is None or confirm.journal_identity != position.journal_identity
+                    or confirm.current_owner_epoch != position.current_owner_epoch):
+                return _refuse(R.JOURNAL_CHANGED, "effect journal changed while it was being read")
+    except EffectJournalError as exc:
+        return _refuse(R.JOURNAL_UNAVAILABLE, f"effect journal read failed: {exc}")
+    if isinstance(read, CheckpointResumeDecision):
+        return read
+    records, final_page = read
+    receipts: dict[str, SettledReceipt] = {}
+    for record in records:
+        if record.state in _UNRESOLVED:
+            return _refuse(R.UNRESOLVED_AFTER_POSITION,
+                           f"journal sequence {record.sequence} requires reconciliation")
+        if record.operation_id not in admission_operations:
+            return _refuse(R.NO_CHECKPOINT,
+                           "child made journaled progress but saved no checkpoint")
+        receipts[record.idempotency_key] = _receipt(record)
+    if final_page.settled_high_water != final_page.high_water:
+        return _refuse(R.JOURNAL_CHANGED, "journal settled high-water moved during validation")
+    return CheckpointResumeDecision(
+        True, None, "child has no checkpoint and no journaled progress beyond admission",
+        settled_position=final_page.high_water, resume_state=MappingProxyType({}),
+        receipts=_frozen(receipts),
+    )
+
+
 __all__ = [
+    "ChildResumeRefused", "resume_receipts", "resumed_from",
     "CheckpointProvenanceError", "CheckpointProvenanceHook", "CheckpointResumeDecision",
     "CheckpointResumeRefusal", "JournalPosition", "JournalProvenanceStamp",
     "ProvenanceBinding", "ProvenanceJournal", "ProvenanceSubject", "SettledReceipt",
-    "validate_checkpoint_resume",
+    "validate_checkpoint_resume", "validate_uncheckpointed_resume",
 ]

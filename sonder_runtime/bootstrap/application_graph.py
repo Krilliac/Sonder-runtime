@@ -93,6 +93,9 @@ class Application:
     memory_replication: Any | None = None
     process_job_provider: Callable[[], ProcessJobProvider] | None = None
     job_recovery: Callable[..., JobRecoveryReport] | None = None
+    # Bounded verifier reconciliation of unresolved worker effects.  Runs once
+    # during composition; operators may re-run it.  Never executes an effect.
+    worker_effect_reconciliation: Callable[..., Any] | None = None
     config: SonderConfig | None = None
     vision: VisionService | None = None
     web_provider: WebProvider | None = None

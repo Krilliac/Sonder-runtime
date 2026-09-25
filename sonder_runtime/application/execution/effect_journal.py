@@ -13,6 +13,7 @@ import contextvars
 import logging
 from dataclasses import dataclass
 from enum import Enum
+from types import MappingProxyType
 from typing import Any, Iterator, Mapping, Protocol
 
 _LOG = logging.getLogger(__name__)
@@ -20,6 +21,22 @@ _LOG = logging.getLogger(__name__)
 
 class EffectJournalError(ValueError):
     """The journal rejected an invalid or conflicting transition."""
+
+
+class SettledEffectReplay(EffectJournalError):
+    """A resumed worker asked to re-invoke an effect whose receipt is settled.
+
+    Raised before the journal is touched.  The resumed worker must consume the
+    settled receipt it was handed instead of repeating the effect.
+    """
+
+    def __init__(self, idempotency_key: str, receipt_key: str) -> None:
+        super().__init__(
+            "effect already settled before resume; consume its receipt "
+            f"{receipt_key!r} instead of re-invoking it"
+        )
+        self.idempotency_key = idempotency_key
+        self.receipt_key = receipt_key
 
 
 class EffectState(str, Enum):
@@ -195,7 +212,9 @@ class EffectJournal(Protocol):
     def outcome_and_checkpoint(
         self, outcome: EffectOutcome, state: object,
     ) -> Mapping[str, object] | None: ...
-    def reconcile(self, intent_id: str, *, owner_epoch: int) -> EffectIntent: ...
+    def reconcile(
+        self, intent_id: str, *, owner_epoch: int, timeout_seconds: float = 2.0,
+    ) -> EffectIntent: ...
 
 
 @dataclass
@@ -213,6 +232,11 @@ class JournalBinding:
             operation_id, self.scope, self.owner_epoch, idempotency_key,
             request_digest, reconciliation,
         )
+        settled = _SETTLED.get()
+        if settled is not None and idempotency_key in settled:
+            # A resumed worker was handed this receipt; repeating the effect
+            # is refused before any journal write.
+            raise SettledEffectReplay(idempotency_key, settled[idempotency_key])
         existing = getattr(self.journal, "get", lambda _intent_id: None)(intent.intent_id)
         stored = self.journal.begin(intent)
         if existing is not None or stored.replayed:
@@ -251,8 +275,39 @@ _CURRENT: contextvars.ContextVar[JournalBinding | None] = contextvars.ContextVar
 )
 
 
+_SETTLED: contextvars.ContextVar[Mapping[str, str] | None] = contextvars.ContextVar(
+    "sonder_effect_settled_receipts", default=None,
+)
+
+
 def current() -> JournalBinding | None:
     return _CURRENT.get()
+
+
+def settled_receipt(idempotency_key: str) -> str | None:
+    """Return the settled receipt key a resumed worker must consume, if any."""
+    settled = _SETTLED.get()
+    return None if settled is None else settled.get(idempotency_key)
+
+
+@contextlib.contextmanager
+def settled_receipts(receipts: Mapping[str, str]) -> Iterator[Mapping[str, str]]:
+    """Bind receipts (idempotency key -> receipt key) settled before a resume.
+
+    While bound, ``JournalBinding.begin_request`` refuses those keys with
+    ``SettledEffectReplay`` instead of admitting a second intent.
+    """
+    if not isinstance(receipts, Mapping) or any(
+        not isinstance(key, str) or not key or not isinstance(value, str) or not value
+        for key, value in receipts.items()
+    ):
+        raise TypeError("settled receipts must map idempotency keys to receipt keys")
+    frozen = MappingProxyType(dict(receipts))
+    token = _SETTLED.set(frozen)
+    try:
+        yield frozen
+    finally:
+        _SETTLED.reset(token)
 
 
 @contextlib.contextmanager
@@ -269,4 +324,5 @@ def bound(binding: JournalBinding) -> Iterator[JournalBinding]:
 __all__ = ["EffectIntent", "EffectJournal", "EffectJournalError", "EffectJournalPage",
            "EffectJournalReader", "EffectOutcome",
            "EffectReconciliationVerifier", "EffectState", "JournalBinding",
-           "ReconciliationProof", "RecoveryDecision", "bound", "current"]
+           "ReconciliationProof", "RecoveryDecision", "SettledEffectReplay", "bound",
+           "current", "settled_receipt", "settled_receipts"]

@@ -356,7 +356,7 @@
       ]
     },
     {
-      "file_count": 346,
+      "file_count": 347,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -444,6 +444,7 @@
         "sonder_runtime/application/execution/__init__.py",
         "sonder_runtime/application/execution/containment.py",
         "sonder_runtime/application/execution/effect_journal.py",
+        "sonder_runtime/application/execution/effect_reconciliation.py",
         "sonder_runtime/application/execution/facade.py",
         "sonder_runtime/application/execution/process_jobs.py",
         "sonder_runtime/application/execution/tool_service.py",

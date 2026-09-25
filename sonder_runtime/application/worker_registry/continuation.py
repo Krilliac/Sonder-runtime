@@ -331,6 +331,14 @@ class ContinuationWorkerRegistry(WorkerRegistry):
                 # classify the conflict; never retry the create.
                 active = self._repository.get_active_by_key(launch.parent_id, launch.resume_key, "resume")
                 if active is not None:
+                    joined = self._project(active)
+                    if joined.launch == launch:
+                        # Operator decision (#515): an identical concurrent
+                        # admission joins the reservation the other caller
+                        # created.  Only an exact launch (same owner nonce,
+                        # scope, prompt, budget and keys) joins; the provider
+                        # then returns one handle and starts one runner.
+                        return joined, False
                     raise DuplicateWorkerError("active worker resume key already exists") from exc
                 raise WorkerRegistryError("worker admission was rejected by durable child storage") from exc
         return self._project(created), True

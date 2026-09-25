@@ -40,6 +40,14 @@ DISPATCH_RECONCILIATION = "query"
 MAX_ADMISSION_SCAN = 1000
 _PAGE = 100
 _SHA256 = re.compile(r"[a-f0-9]{64}\Z")
+# A dispatch refused synchronously before any durable admission is a
+# definitive no-effect outcome.  A later corrected dispatch of the same child
+# id is journaled as a new attempt with its own operation and idempotency
+# identity; the attempt count is bounded so a caller cannot grow a run
+# without limit.
+ATTEMPT_MARKER = "#dispatch-attempt-"
+MAX_DISPATCH_ATTEMPTS = 8
+REFUSED_RECEIPT_PREFIX = f"{DISPATCH_FAMILY}-refused:"
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -55,19 +63,54 @@ def _sha256(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value)).hexdigest()
 
 
-def dispatch_operation_id(child_id: str) -> str:
-    return f"{DISPATCH_FAMILY}:{child_id}"
+def dispatch_operation_id(child_id: str, attempt: int = 1) -> str:
+    _check_attempt(attempt)
+    suffix = "" if attempt == 1 else f"{ATTEMPT_MARKER}{attempt}"
+    return f"{DISPATCH_FAMILY}:{child_id}{suffix}"
+
+
+def _check_attempt(attempt: int) -> None:
+    if type(attempt) is not int or not 1 <= attempt <= MAX_DISPATCH_ATTEMPTS:
+        raise ValueError(f"dispatch attempt must be within 1..{MAX_DISPATCH_ATTEMPTS}")
+
+
+def parse_dispatch_operation(operation_id: str) -> tuple[str, int] | None:
+    """Return ``(child_id, attempt)`` for a dispatch operation id, else None."""
+    family, separator, rest = operation_id.partition(":")
+    if family != DISPATCH_FAMILY or not separator or not rest:
+        return None
+    child_id, marker, raw_attempt = rest.partition(ATTEMPT_MARKER)
+    if not marker:
+        return rest, 1
+    if not child_id or not raw_attempt.isdigit() or raw_attempt.startswith("0"):
+        return None
+    attempt = int(raw_attempt)
+    if not 2 <= attempt <= MAX_DISPATCH_ATTEMPTS:
+        return None
+    return child_id, attempt
+
+
+def dispatch_refused_receipt_key(child_id: str, attempt: int = 1) -> str:
+    _check_attempt(attempt)
+    suffix = "" if attempt == 1 else f"{ATTEMPT_MARKER}{attempt}"
+    return f"{REFUSED_RECEIPT_PREFIX}{child_id}{suffix}"
 
 
 def dispatch_run_id(child_id: str) -> str:
     return f"subagent:{child_id}"
 
 
-def dispatch_idempotency_key(request: SubagentRequest) -> str:
-    """The journal key: the durable idempotency key, else the child id."""
+def dispatch_idempotency_key(request: SubagentRequest, attempt: int = 1) -> str:
+    """The journal key: the durable idempotency key, else the child id.
+
+    Attempts after a refused dispatch carry an attempt suffix, because the
+    journal keeps one intent per (run, idempotency key).
+    """
     if not request.child_id:
         raise ValueError("dispatch requires an allocated child_id")
-    return request.idempotency_key or request.child_id
+    _check_attempt(attempt)
+    base = request.idempotency_key or request.child_id
+    return base if attempt == 1 else f"{base}{ATTEMPT_MARKER}{attempt}"
 
 
 def canonical_dispatch_request(request: SubagentRequest) -> dict[str, Any]:
@@ -179,9 +222,11 @@ class DurableSubagentDispatchVerifier:
 
     def admission(
         self, child_id: str, *, parent_id: str, idempotency_key: str,
-        request_digest: str,
+        request_digest: str, attempt: int = 1,
     ) -> SubagentDispatchAdmission | None:
         """Return durable admission only for the exact journaled identity."""
+        if type(attempt) is not int or not 1 <= attempt <= MAX_DISPATCH_ATTEMPTS:
+            return None
         if (
             not isinstance(child_id, str) or not child_id.strip()
             or not isinstance(parent_id, str) or not parent_id.strip()
@@ -201,7 +246,7 @@ class DurableSubagentDispatchVerifier:
             request.child_id != child_id
             or request.parent_id != parent_id
             or record.lineage.parent_id != parent_id
-            or dispatch_idempotency_key(request) != idempotency_key
+            or dispatch_idempotency_key(request, attempt) != idempotency_key
             or dispatch_request_digest(request) != request_digest
         ):
             return None
@@ -215,10 +260,12 @@ class DurableSubagentDispatchVerifier:
         )
 
     def verify(self, intent: EffectIntent) -> ReconciliationProof | None:
-        family, separator, child_id = intent.operation_id.partition(":")
+        parsed = parse_dispatch_operation(intent.operation_id)
+        if parsed is None:
+            return None
+        child_id, attempt = parsed
         if (
-            family != DISPATCH_FAMILY or not separator or not child_id
-            or intent.run_id != dispatch_run_id(child_id)
+            intent.run_id != dispatch_run_id(child_id)
             or intent.scope != DISPATCH_SCOPE
             or not intent.worker_id.startswith("subagent:")
             or intent.reconciliation != DISPATCH_RECONCILIATION
@@ -235,6 +282,7 @@ class DurableSubagentDispatchVerifier:
             parent_id=record.request.parent_id,
             idempotency_key=intent.idempotency_key,
             request_digest=intent.request_digest,
+            attempt=attempt,
         )
         if admission is None:
             return None
@@ -254,8 +302,10 @@ class DurableSubagentDispatchVerifier:
 
 __all__ = [
     "DISPATCH_CONTRACT", "DISPATCH_FAMILY", "DISPATCH_RECONCILIATION",
-    "DISPATCH_SCOPE", "DurableSubagentDispatchVerifier",
-    "SubagentDispatchAdmission", "canonical_dispatch_request",
-    "dispatch_idempotency_key", "dispatch_operation_id",
-    "dispatch_receipt_key", "dispatch_request_digest", "dispatch_run_id",
+    "DISPATCH_SCOPE", "DurableSubagentDispatchVerifier", "MAX_DISPATCH_ATTEMPTS",
+    "REFUSED_RECEIPT_PREFIX", "SubagentDispatchAdmission",
+    "canonical_dispatch_request", "dispatch_idempotency_key",
+    "dispatch_operation_id", "dispatch_receipt_key",
+    "dispatch_refused_receipt_key", "dispatch_request_digest", "dispatch_run_id",
+    "parse_dispatch_operation",
 ]

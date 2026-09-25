@@ -1,16 +1,20 @@
 """Adapters that bind concrete child runners to the application port."""
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Callable, Mapping
+from contextlib import ExitStack
 from dataclasses import replace
 from threading import Event, Lock
 from time import monotonic
 
 from ..application.context import OperationContext
 from ..application.execution.effect_journal import (
+    EffectIntent,
     EffectJournalError,
     EffectState,
+    settled_receipts,
 )
 from ..application.execution.effect_journal import (
     bound as bound_effect_journal,
@@ -19,12 +23,22 @@ from ..application.execution.worker_bindings import (
     AuthenticatedWorkerBinding,
     journaled_effect,
 )
+from ..application.ports.continuation_records import DurableChildSession
 from ..application.ports.subagents import (
     InvalidSubagentRequest,
     SubagentBudget,
     SubagentHandle,
     SubagentRequest,
     SubagentSnapshot,
+    SubagentStatus,
+)
+from ..application.subagents.checkpoint_provenance import (
+    CheckpointResumeDecision,
+    ChildResumeRefused,
+    ProvenanceJournal,
+    resumed_from,
+    validate_checkpoint_resume,
+    validate_uncheckpointed_resume,
 )
 from ..application.subagents.durable_continuation import (
     ContinuableCheckpoint,
@@ -34,13 +48,19 @@ from ..application.subagents.durable_continuation import (
 from .execution.subagent_dispatch_verifier import (
     DISPATCH_CONTRACT,
     DISPATCH_RECONCILIATION,
+    MAX_DISPATCH_ATTEMPTS,
+    REFUSED_RECEIPT_PREFIX,
     DurableSubagentDispatchVerifier,
     canonical_dispatch_request,
     dispatch_idempotency_key,
     dispatch_operation_id,
     dispatch_receipt_key,
+    dispatch_refused_receipt_key,
     dispatch_request_digest,
 )
+
+_LOG = logging.getLogger(__name__)
+_RECOVERABLE = frozenset({SubagentStatus.FAILED, SubagentStatus.TIMED_OUT})
 
 Runner = Callable[[Mapping[str, object], Callable[[Mapping[str, object], str | None], ContinuableCheckpoint], DurableCancellation], str]
 
@@ -127,6 +147,21 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
     released only after that receipt commits and then runs under the same
     binding, so inner effects form a settled prefix above the dispatch.
     Runner completion is not part of the dispatch receipt.
+
+    Concurrent identical spawns join: while this provider's runner for the
+    child is live, a repeat of the exact request returns the live handle and
+    composes no new binding; after it finished, the settled dispatch is
+    reused.  A different request for the same child id is refused.  A
+    dispatch refused synchronously before any durable admission is recorded
+    as a ``failed`` (no-effect) attempt, and a later corrected dispatch is
+    journaled as the next bounded attempt.
+
+    With a ``provenance_journal`` the provider also owns the resume path:
+    ``resume`` (and an exact repeat spawn of a crashed or recoverable child)
+    validates the child checkpoint against the effect journal before claiming
+    it, and runs the runner with the settled receipts bound so completed inner
+    effects are consumed rather than re-invoked.  A refused validation raises
+    ``ChildResumeRefused`` and the child stays ``recovery_required``.
     """
 
     def __init__(
@@ -138,6 +173,7 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
         provider: str = "local",
         effect_binding_factory: Callable[[SubagentRequest, OperationContext], AuthenticatedWorkerBinding] | None = None,
         dispatch_verifier: DurableSubagentDispatchVerifier | None = None,
+        provenance_journal: ProvenanceJournal | None = None,
     ) -> None:
         if provider != "local":
             raise UnsupportedSubagentProvider(
@@ -158,8 +194,14 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
             # The dispatch receipt is read back from the durable child store;
             # without that reader the journal could only trust memory.
             raise TypeError("effect_binding_factory requires a dispatch_verifier")
+        if provenance_journal is not None and (
+            effect_binding_factory is None
+            or not callable(getattr(provenance_journal, "position", None))
+        ):
+            raise TypeError("provenance_journal requires an effect binding and a journal position")
         self._effect_binding_factory = effect_binding_factory
         self._dispatch_verifier = dispatch_verifier
+        self._provenance_journal = provenance_journal
         # Journaled dispatch is serialized per provider, and children whose
         # runner this provider launched are tracked until the runner exits.
         # A repeat spawn of such a child must not compose a fresh binding:
@@ -193,9 +235,13 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
         child_id = request.child_id
         with self._dispatch_lock:
             if child_id in self._live_runners:
-                # The service returns the live handle for a compatible repeat
-                # request, or refuses; it can never start a second runner.
+                # Idempotent join: the service returns the live handle for
+                # the exact repeat request, or refuses a different one; it
+                # can never start a second runner.
                 return self._local_service.spawn(request, context, _refuse_redispatch)
+            existing = self._local_service.record(child_id)
+            if existing is not None and self._resumable(existing, request):
+                return self._resume_locked(existing, context, runner)
             binding = self._effect_binding_factory(request, context)
             if not isinstance(binding, AuthenticatedWorkerBinding):
                 raise TypeError("effect_binding_factory returned an invalid binding")
@@ -215,18 +261,121 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
             gate.publish()
             return handle
 
+    def resume(self, child_id: str, context: OperationContext) -> SubagentHandle:
+        """Resume a crashed or recoverable child from its validated checkpoint.
+
+        Order: prove the old owner is gone (or the child is already
+        recoverable), compose the journal binding (which claims a newer owner
+        epoch and runs bounded verifier reconciliation), confirm the settled
+        dispatch receipt, validate the checkpoint provenance against the
+        journal, then claim the exact validated revision.  Any refusal leaves
+        the child ``recovery_required`` and starts nothing.
+        """
+        if self._effect_binding_factory is None or self._provenance_journal is None:
+            raise InvalidSubagentRequest("child resume requires an effect journal and provenance")
+        with self._dispatch_lock:
+            if child_id in self._live_runners:
+                raise InvalidSubagentRequest("child runner is live in this provider")
+            record = self._local_service.record(child_id)
+            if record is None:
+                raise InvalidSubagentRequest(f"unknown child_id {child_id!r}")
+            request = record.request
+            bounded = self._local_service.bounded_context(context, request.budget)
+            runner = (self._runner_factory(request, bounded)
+                      if self._runner_factory else self._runner)
+            return self._resume_locked(record, context, runner)
+
+    def _resumable(self, record: DurableChildSession, request: SubagentRequest) -> bool:
+        """An exact repeat of a crashed or recoverable child routes to resume."""
+        if self._provenance_journal is None or record.cancellation_requested:
+            return False
+        if dispatch_request_digest(record.request) != dispatch_request_digest(request):
+            return False
+        if record.status in _RECOVERABLE:
+            return record.recovery_required
+        return (
+            record.status is SubagentStatus.RUNNING
+            and not self._local_service.runner_alive(record.request.child_id)
+        )
+
+    def _resume_locked(
+        self, record: DurableChildSession, context: OperationContext, runner: Runner,
+    ) -> SubagentHandle:
+        child_id = record.request.child_id
+        if record.status is SubagentStatus.RUNNING:
+            # Raises ContinuationCleanupRequired unless the recorded owner is
+            # another, provably dead process.
+            record = self._local_service.release_dead_owner(child_id)
+        if record.status not in _RECOVERABLE or not record.recovery_required:
+            raise InvalidSubagentRequest("child session is not recoverable")
+        request = record.request
+        context = self._local_service.bounded_context(context, request.budget)
+        binding = self._effect_binding_factory(request, context)  # type: ignore[misc]
+        if not isinstance(binding, AuthenticatedWorkerBinding):
+            raise TypeError("effect_binding_factory returned an invalid binding")
+        attempts = self._dispatch_attempts(binding, child_id)
+        admitted = attempts[-1] if attempts else None
+        if admitted is None or admitted.state is not EffectState.COMPLETED:
+            raise InvalidSubagentRequest("child has no settled dispatch receipt to resume from")
+        identity = self._dispatch_identity(request, len(attempts))
+        admission = self._dispatch_verifier.admission(  # type: ignore[union-attr]
+            child_id, attempt=len(attempts), **identity,
+        )
+        if (admission is None or admission.receipt_key != admitted.receipt_key
+                or admitted.request_digest != identity["request_digest"]):
+            raise EffectJournalError("settled subagent dispatch is not provable from the child store")
+        if record.checkpoint is None:
+            decision = validate_uncheckpointed_resume(
+                self._provenance_journal, run_id=binding.run_id,
+                worker_id=binding.worker_id, resumer_owner_epoch=binding.owner_epoch,
+                admission_operations=frozenset(
+                    dispatch_operation_id(child_id, attempt)
+                    for attempt in range(1, len(attempts) + 1)
+                ),
+            )
+        else:
+            decision = validate_checkpoint_resume(
+                record.checkpoint, self._provenance_journal, run_id=binding.run_id,
+                worker_id=binding.worker_id, resumer_owner_epoch=binding.owner_epoch,
+            )
+        if not decision.allowed:
+            _LOG.warning(
+                "child resume refused: child=%s reason=%s",
+                child_id, decision.reason.value if decision.reason else "",
+            )
+            raise ChildResumeRefused(decision)
+        bounded_runner = self._bounded_runner(
+            request, context, runner, binding, None, resume=decision,
+        )
+        self._live_runners.add(child_id)
+        try:
+            handle = self._local_service.resume(
+                child_id, context, bounded_runner, expected_revision=record.revision,
+            )
+        except BaseException:
+            self._live_runners.discard(child_id)
+            raise
+        _LOG.info(
+            "child resumed from checkpoint: child=%s sequence=%s settled_receipts=%d",
+            child_id, decision.sequence,
+            len(decision.receipts) + len(decision.later_receipts),
+        )
+        return handle
+
     def _bounded_runner(
         self, request: SubagentRequest, context: OperationContext, runner: Runner,
         binding: AuthenticatedWorkerBinding | None, gate: _DispatchGate | None,
+        *, resume: CheckpointResumeDecision | None = None,
     ) -> Runner:
         budget = request.budget
         child_id = request.child_id
 
         def bounded_runner(state, save, control):
-            if gate is None:
+            if binding is None:
                 return run(state, save, control)
             try:
-                gate.wait(self._receipt_wait(context))
+                if gate is not None:
+                    gate.wait(self._receipt_wait(context))
                 return run(state, save, control)
             finally:
                 with self._dispatch_lock:
@@ -245,9 +394,20 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
             if binding is None:
                 output = runner(state, bounded_save, control)
             else:
-                # Inner tool effects join the same run, above the settled
-                # dispatch receipt.
-                with bound_effect_journal(binding.binding()):
+                with ExitStack() as scope:
+                    # Inner tool effects join the same run, above the settled
+                    # dispatch receipt.
+                    scope.enter_context(bound_effect_journal(binding.binding()))
+                    if resume is not None:
+                        # A resumed runner consumes receipts settled before
+                        # the crash; re-admitting one of them is refused.
+                        scope.enter_context(resumed_from(resume))
+                        scope.enter_context(settled_receipts({
+                            key: receipt.receipt_key
+                            for key, receipt in {
+                                **resume.receipts, **resume.later_receipts,
+                            }.items()
+                        }))
                     output = runner(state, bounded_save, control)
             if not isinstance(output, str):
                 raise InvalidSubagentRequest("local runner output must be text")
@@ -262,6 +422,33 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
 
         return bounded_runner
 
+    @staticmethod
+    def _dispatch_identity(request: SubagentRequest, attempt: int) -> dict[str, str]:
+        return {
+            "parent_id": request.parent_id,
+            "idempotency_key": dispatch_idempotency_key(request, attempt),
+            "request_digest": dispatch_request_digest(request),
+        }
+
+    @staticmethod
+    def _dispatch_attempts(
+        binding: AuthenticatedWorkerBinding, child_id: str,
+    ) -> tuple[EffectIntent, ...]:
+        """Read this child's dispatch attempts in order (bounded)."""
+        get_intent = getattr(binding.journal, "get", None)
+        if not callable(get_intent):
+            return ()
+        attempts: list[EffectIntent] = []
+        for attempt in range(1, MAX_DISPATCH_ATTEMPTS + 1):
+            try:
+                intent = get_intent(f"{binding.run_id}:{dispatch_operation_id(child_id, attempt)}")
+            except KeyError:
+                intent = None
+            if intent is None:
+                break
+            attempts.append(intent)
+        return tuple(attempts)
+
     def _journaled_dispatch(
         self, binding: AuthenticatedWorkerBinding, request: SubagentRequest,
         context: OperationContext, bounded_runner: Runner,
@@ -274,34 +461,38 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
         child_id = request.child_id
         if verifier is None or child_id is None:
             raise EffectJournalError("journaled dispatch requires a verifier and child id")
-        operation_id = dispatch_operation_id(child_id)
-        identity = {
-            "parent_id": request.parent_id,
-            "idempotency_key": dispatch_idempotency_key(request),
-            "request_digest": dispatch_request_digest(request),
-        }
-        get_intent = getattr(binding.journal, "get", None)
-        prior = None
-        if callable(get_intent):
-            try:
-                prior = get_intent(f"{binding.run_id}:{operation_id}")
-            except KeyError:
-                prior = None
-        if (
-            prior is not None
-            and prior.state is EffectState.COMPLETED
-            and prior.idempotency_key == identity["idempotency_key"]
-            and prior.request_digest == identity["request_digest"]
-        ):
-            # Reusing a settled dispatch returns the admitted child only while
-            # the durable child store still proves that exact admission.
-            admission = verifier.admission(child_id, **identity)
-            if admission is None or admission.receipt_key != prior.receipt_key:
+        attempts = self._dispatch_attempts(binding, child_id)
+        attempt = len(attempts) + 1
+        if attempts:
+            prior = attempts[-1]
+            prior_identity = self._dispatch_identity(request, len(attempts))
+            if prior.state is EffectState.COMPLETED:
+                if (prior.idempotency_key != prior_identity["idempotency_key"]
+                        or prior.request_digest != prior_identity["request_digest"]):
+                    # Same child identity, different request: refused before
+                    # any journal write or admission.
+                    raise InvalidSubagentRequest(
+                        "child identity is already admitted for a different request"
+                    )
+                # Reusing a settled dispatch returns the admitted child only
+                # while the durable child store still proves that exact
+                # admission.
+                admission = verifier.admission(child_id, attempt=len(attempts), **prior_identity)
+                if admission is None or admission.receipt_key != prior.receipt_key:
+                    raise EffectJournalError(
+                        "settled subagent dispatch is not provable from the child store"
+                    )
+                return self._local_service.spawn(request, context, _refuse_redispatch), False
+            if not (prior.state is EffectState.FAILED
+                    and prior.receipt_key.startswith(REFUSED_RECEIPT_PREFIX)):
+                # Unresolved or otherwise uncertain: never re-dispatch.
                 raise EffectJournalError(
-                    "settled subagent dispatch is not provable from the child store"
+                    "subagent dispatch attempt is unresolved; reconciliation required"
                 )
-            return self._local_service.spawn(request, context, _refuse_redispatch), False
-
+            if attempt > MAX_DISPATCH_ATTEMPTS:
+                raise InvalidSubagentRequest("subagent dispatch attempt budget exhausted")
+        operation_id = dispatch_operation_id(child_id, attempt)
+        identity = self._dispatch_identity(request, attempt)
         dispatched: dict[str, object] = {}
 
         def dispatch() -> dict[str, object]:
@@ -312,15 +503,16 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
             except InvalidSubagentRequest as error:
                 # A synchronous admission refusal is a failed dispatch only
                 # when the durable store shows no admission of this request.
-                if verifier.admission(child_id, **identity) is not None:
+                if verifier.admission(child_id, attempt=attempt, **identity) is not None:
                     raise
                 dispatched["refused"] = error
                 return {
                     "contract": DISPATCH_CONTRACT,
                     "child_id": child_id,
+                    "attempt": attempt,
                     "refused": type(error).__name__,
                 }
-            admission = verifier.admission(child_id, **identity)
+            admission = verifier.admission(child_id, attempt=attempt, **identity)
             if admission is None:
                 raise EffectJournalError(
                     "subagent dispatch admission is not durably provable"
@@ -336,7 +528,7 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
             receipt_key=lambda receipt: (
                 dispatch_receipt_key(child_id, receipt["admitted_revision"])
                 if "admitted_revision" in receipt
-                else f"subagent-dispatch-refused:{child_id}"
+                else dispatch_refused_receipt_key(child_id, attempt)
             ),
             reconciliation=DISPATCH_RECONCILIATION,
             success=lambda receipt: "admitted_revision" in receipt,

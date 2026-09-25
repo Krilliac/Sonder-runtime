@@ -561,3 +561,152 @@ What is not qualified:
   reconciliation is unchanged.
 - No master-spec checkbox changes. LOOP-008, AGENT-006 and SESSION-007 stay
   unverified.
+
+## Production wiring: startup reconciliation, stamped checkpoints and child resume (2026-09-25)
+
+This slice connects the mechanisms above to real production callers. Every
+item below is reached from `build_application` in `sonder_runtime/bootstrap/app.py`,
+which the runtime entry points (`python -m sonder_runtime` and the HTTP
+server, through `default_app`) compose. The
+end-to-end tests drive that composition, not hand-built services.
+
+*Superseded by this section:* the "What is not qualified" list under the
+provenance slice says that nothing installs the hook or calls the validator,
+and that there is no production resume path. Both statements are now false
+for the SQLite child store.
+
+What is now wired (caller -> callee):
+
+- **Automatic bounded reconciliation.**
+  - At startup, `build_application` calls `reconcile_worker_effects()`, which
+    calls `application/execution/effect_reconciliation.reconcile_unresolved_effects`.
+    That pass pages `SQLiteEffectJournal.unresolved_page` (a new read-only
+    keyset query). For each run whose unresolved intents were all admitted by
+    a worker identity this host owns (`process`, `compute`, `subagent`,
+    `selfmod` on this node), it calls
+    `AuthenticatedWorkerBinding.reconcile_before_restart`. That method claims
+    the host epoch, calls `recover()` so orphans become `uncertain` and the run
+    is fenced, then calls `journal.reconcile()` for each of this worker's
+    intents through the immutable verifier registry.
+  - Before any restart, the production `worker_binding()` sets
+    `auto_reconcile=True`. `recover_before_restart` therefore runs the same
+    bounded reconciliation before it refuses. This covers the process
+    provider and compute worker constructors, `_compose_subagent_binding`
+    (spawn and child resume) and `_compose_selfmod_binding`.
+  - Bounds: at most 64 runs and 16 pages of 100 intents per startup pass, a
+    20 s wall budget, the journal's recovery page per run, and a 2 s
+    timeout on each verifier call.
+  - Observability: a log line for each run and for the whole pass. The
+    content-free `worker.effects.reconciled` event goes to the durable
+    operations sink. Each proof is recorded in the journal's durable
+    `verified:<verifier>:<reference>` detail.
+  - Crash safety: every step is read-only or a single journal transaction. A
+    second pass skips terminal intents.
+  - Nothing invokes an effect. An intent with no proof stays `uncertain` and
+    its run stays fenced.
+  - A run that contains another host's worker identity is left untouched and
+    reported under `foreign_runs`.
+  - A failed pass is logged and keeps every fence in place. It does not stop
+    composition.
+  - Operators can run the pass again through
+    `Application.worker_effect_reconciliation`.
+  - Bindings that tests construct directly keep the old explicit-reconcile
+    semantics (`auto_reconcile=False`).
+- **Stamped child checkpoints.** `get_delegation_service` composes
+  `SQLiteJournalProvenanceSource(get_worker_effect_journal(), create_identity=True)`
+  and `DurableContinuationService(..., checkpoint_provenance=JournalProvenanceStamp(...))`.
+  The binding resolver maps `ProvenanceSubject.child_id` to the same run,
+  worker and epoch as `_compose_subagent_binding`. Every production child
+  checkpoint save therefore runs `_stamp_checkpoint` and
+  `CheckpointProvenance.stamp`. The SQLite store persists the record in the
+  same transaction as the checkpoint compare-and-set.
+- **Child resume path.** `LocalSubagentProvider` receives the same
+  provenance source as `provenance_journal`. `LocalSubagentProvider.resume`
+  follows these steps, and an exact repeat of a crashed or recoverable
+  child's request through `spawn` / `DelegationService.dispatch` takes the
+  same route:
+  1. Prove the old owner dead with `DurableContinuationService.release_dead_owner`.
+     This works only for registry reservations whose recorded pid and host are
+     another, provably dead process. Anything else raises
+     `ContinuationCleanupRequired`.
+  2. Compose the binding. This claims a newer epoch and reconciles.
+  3. Require a settled dispatch receipt that the child store still proves.
+  4. Run `validate_checkpoint_resume`, or run `validate_uncheckpointed_resume`
+     for a child that never checkpointed. The second is allowed only when
+     the run holds nothing but settled dispatch attempts.
+  5. Claim the exact validated revision with `resume(expected_revision=...)`.
+
+  The resumed runner runs with `resumed_from(decision)` and
+  `settled_receipts(...)` bound. `resume_receipts()` and
+  `effect_journal.settled_receipt(key)` hand the runner the receipts settled
+  at or before the checkpoint and those settled after it.
+  `JournalBinding.begin_request` refuses one of those keys with
+  `SettledEffectReplay` before any journal write. A refused validation
+  raises `ChildResumeRefused` with the typed `CheckpointResumeRefusal`
+  reason, and the child stays `FAILED`/`recovery_required`.
+  `ContinuableCheckpoint.provenance_absent` is now the check that the
+  validator uses.
+- **Concurrent spawn decision (operator).**
+  - Two identical concurrent dispatches join. `ContinuationWorkerRegistry`
+    returns the reservation the other caller created when the launch is
+    identical, and the provider's live-runner join returns the same handle.
+    One runner and one `completed` dispatch intent result.
+  - The same child identity with a different request digest is refused with
+    `InvalidSubagentRequest` before any journal write.
+  - A dispatch refused synchronously, with no durable admission, is recorded
+    as a `failed` no-effect attempt (receipt `subagent-dispatch-refused:...`).
+    A corrected dispatch is journaled as the next bounded attempt: operation
+    `subagent-dispatch:{child}#dispatch-attempt-N` and idempotency key
+    `{key}#dispatch-attempt-N`, with N up to 8. The dispatch verifier parses
+    and proves attempts.
+  - An unresolved or uncertain prior attempt still refuses (fail-closed).
+
+Evidence (end-to-end through `build_application`):
+
+- `tests/test_wiring_journal_child_startup_reconcile.py`: a real child
+  interpreter is killed with `os._exit` after durable child admission and
+  before the dispatch receipt. The next composition:
+  - proves the dispatch from the child store;
+  - leaves an unprovable selfmod intent `uncertain` with its run fenced;
+  - leaves a foreign worker's intent untouched;
+  - emits the operations event;
+  - resolves nothing new on a second pass;
+  - then resumes the admitted child through the exact delegation, with no
+    second dispatch intent.
+- `tests/test_wiring_journal_child_resume.py`: a real child interpreter
+  dispatches through `DelegationService`. The runner checkpoints, performs a
+  journaled append, and is killed with `os._exit` after the receipt and before
+  its next checkpoint. The repeated delegation in a new composition finds a
+  stamped checkpoint, resumes from it, and consumes the settled append
+  receipt: the file holds one append and the run holds one append intent. A
+  swapped journal identity refuses with `JOURNAL_IDENTITY_MISMATCH` and leaves
+  the child `recovery_required`.
+- `tests/test_wiring_journal_child_spawn.py` covers three cases: concurrent
+  identical dispatch joins with one runner and one intent; a different digest
+  is refused; a refused dispatch is followed by a corrected dispatch as
+  attempt 2.
+
+What remains:
+
+- PostgreSQL child storage has provenance stamping at the codec level, but
+  the resume path has been exercised only with the SQLite child store.
+  `release_dead_owner` relies on the reservation's recorded pid/host, so a
+  child started without a worker-registry reservation still needs manual
+  owner cleanup (`ContinuationCleanupRequired`).
+- Runner-side consumption is cooperative for effects outside the journal.
+  Journaled effects are refused (`SettledEffectReplay`) if re-admitted, but
+  the production conversational runner makes model calls, not journaled tool
+  effects. Its model-attempt ledger is the session store, not the effect
+  journal.
+- The typed tool gateway uses a fresh `request_id` per call as its
+  idempotency key. A resumed runner that re-issues a gateway tool call
+  therefore gets a new key: the journal still records that call, but it is
+  not matched to the settled receipt. Deterministic gateway request ids for
+  child runners are not implemented.
+- Compute-cancel and selfmod families still have no provider verifier, so
+  startup reconciliation leaves them fenced. That is correct and fail-closed,
+  but clearing them still needs future trusted composition.
+- The journal and child store remain separate files. The cross-store window
+  is covered by validation, not by a transaction.
+- No master-spec checkbox changes. LOOP-008, AGENT-006 and SESSION-007 stay
+  unverified.

@@ -416,9 +416,11 @@ class DurableContinuationService:
             validate_child_budget(budget, parent.request.budget)
 
     def _start(self, child_id: str, context: OperationContext, runner: Runner, *,
-               resuming: bool = False) -> SubagentHandle:
+               resuming: bool = False, expected_revision: int | None = None) -> SubagentHandle:
         self._require_storage_settled(child_id)
         record = self._require(child_id)
+        if expected_revision is not None and record.revision != expected_revision:
+            raise InvalidSubagentRequest("child session changed after resume validation")
         if resuming and (
             not record.recovery_required
             or record.status not in {SubagentStatus.FAILED, SubagentStatus.TIMED_OUT}
@@ -633,11 +635,66 @@ class DurableContinuationService:
             raise CheckpointProvenanceError("checkpoint provenance hook returned a foreign record")
         return stamped
 
-    def resume(self, child_id: str, context: OperationContext, runner: Runner) -> SubagentHandle:
+    def resume(self, child_id: str, context: OperationContext, runner: Runner, *,
+               expected_revision: int | None = None) -> SubagentHandle:
+        """Claim a recoverable child and start ``runner`` from its checkpoint.
+
+        ``expected_revision`` pins the exact durable record a caller validated
+        (checkpoint saves advance the revision), so a checkpoint cannot change
+        between validation and the claim.
+        """
         record = self._require(child_id)
         parent = self._repository.get(record.request.parent_id)
         self._admit(record.request, record.lineage, parent)
-        return self._start(child_id, context, runner, resuming=True)
+        return self._start(child_id, context, runner, resuming=True,
+                           expected_revision=expected_revision)
+
+    def record(self, child_id: str) -> DurableChildSession | None:
+        """Return the durable child record, or ``None`` when it does not exist."""
+        return self._repository.get(child_id)
+
+    def runner_alive(self, child_id: str) -> bool:
+        with self._lock:
+            thread = self._threads.get(child_id)
+        return thread is not None and thread.is_alive()
+
+    def release_dead_owner(self, child_id: str) -> DurableChildSession:
+        """Mark a RUNNING child whose recorded owner process is dead as recoverable.
+
+        Only a worker-registry reservation records the owner's pid and host.
+        The owner must be another service instance and must be proven dead;
+        anything unprovable raises ``ContinuationCleanupRequired`` so the child
+        stays fenced.  The transition is a revision-checked durable update to
+        FAILED with ``recovery_required``; it never starts a runner.
+        """
+        record = self._require(child_id)
+        if record.status is not SubagentStatus.RUNNING:
+            return record
+        if self.runner_alive(child_id):
+            raise InvalidSubagentRequest("child runner is live in this service")
+        metadata = self._metadata(record.request)
+        owner_nonce = metadata.get("owner_nonce", "")
+        if (
+            metadata.get("worker_registry_admitted") != "true"
+            or not owner_nonce or owner_nonce == self._owner_nonce
+            or not recorded_owner_is_dead(metadata)
+        ):
+            raise ContinuationCleanupRequired(child_id)
+        self._require_storage_settled(child_id)
+        result = SubagentResult(
+            child_id, record.request.parent_id, SubagentStatus.FAILED,
+            error=SubagentError("owner_lost", "child owner process exited before completion", True),
+            usage=record.usage,
+        )
+        updated = self._write(
+            "update", child_id, status=SubagentStatus.FAILED,
+            expected_revision=record.revision, usage=record.usage, result=result,
+            recovery_required=True,
+        )
+        if (updated is None or updated.status is not SubagentStatus.FAILED
+                or not updated.recovery_required):
+            raise ContinuationCleanupRequired(child_id)
+        return updated
 
     def recover_after_restart(self) -> tuple[str, ...]:
         if self._storage_failures:
