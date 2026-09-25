@@ -3901,6 +3901,18 @@ def _commands_help_payload(topic="", context=None):
         return {"text": "Command catalog unavailable: %s" % exc}
 
 
+class ServeHTTPServer(ThreadingHTTPServer):
+    """The served listener, with a TCP backlog sized for request bursts.
+
+    ``socketserver`` listens with a backlog of 5.  A burst of concurrent
+    clients then overflows the kernel accept queue and some connections are
+    reset before the admission layer can queue them or answer 429, so the
+    backlog must at least cover the default admission capacity.
+    """
+
+    request_queue_size = 128
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "sonder-serve/1.0"
     # socketserver reads this in setup() and calls connection.settimeout(); a
@@ -7073,7 +7085,7 @@ def main(
             raise SystemExit(1)
         lifecycle.begin_ollama_probe()
         try:
-            factory = ThreadingHTTPServer if _server_factory is None else _server_factory
+            factory = ServeHTTPServer if _server_factory is None else _server_factory
             httpd = factory((HOST, port), Handler)
         except OSError:
             _serve_logger.critical(f"server cannot bind to {HOST}:{port}, port may already be in use", exc_info=True)
