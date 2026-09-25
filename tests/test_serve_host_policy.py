@@ -215,6 +215,17 @@ def test_rejected_host_warning_names_the_host_and_is_rate_limited(monkeypatch, c
     assert "mypc.lan" in warnings[0] and "allowed_hosts" in warnings[0]
 
 
+def test_rejected_host_warnings_are_capped_across_rotating_names(monkeypatch, caplog):
+    # A rebinding page can rotate attacker-chosen names; the per-name limit
+    # alone would log once per request.
+    monkeypatch.setattr(ts, "_REJECTED_HOST_LOG", ts.OrderedDict())
+    with caplog.at_level("WARNING", logger=ts._serve_logger.name):
+        for index in range(50):
+            ts._log_rejected_host("r%d.rebind.example" % index)
+    warnings = [r for r in caplog.records if "HOST_NOT_ALLOWED" in r.getMessage()]
+    assert len(warnings) == ts._REJECTED_HOST_LOG_MAX_NAMES_PER_INTERVAL
+
+
 def test_machine_names_are_computed_once_with_a_bounded_fqdn_lookup(monkeypatch):
     import socket
     import time as _time
@@ -249,6 +260,8 @@ def test_host_policy_pure_rules():
     assert host_decision("192.168.1.20:11435") == HOST_TRUSTED
     assert host_decision("10.0.2.2:8080") == HOST_TRUSTED
     assert host_decision("0.0.0.0:11435", credentials_required=True) is None
+    assert host_decision("[::]:11435") is None
+    assert host_decision("[::ffff:0.0.0.0]:11435", credentials_required=True) is None
     # Names: refused without credentials, credentialed with them.
     assert host_decision("rebind.example:11435") is None
     assert host_decision("rebind.example:11435", credentials_required=True) == HOST_CREDENTIALED

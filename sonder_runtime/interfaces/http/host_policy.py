@@ -196,7 +196,10 @@ def host_decision(value, *, allowed_hosts: Iterable = (), local_names: Iterable 
     name, port = parsed
     address = _ip(name)
     if address is not None:
-        return None if address.is_unspecified else HOST_TRUSTED
+        # ``[::ffff:0.0.0.0]`` is the same unspecified address in IPv6 form.
+        mapped = getattr(address, "ipv4_mapped", None)
+        unspecified = address.is_unspecified or bool(mapped is not None and mapped.is_unspecified)
+        return None if unspecified else HOST_TRUSTED
     if _is_loopback_name(name):
         return HOST_TRUSTED
     for entry in allowed_hosts or ():

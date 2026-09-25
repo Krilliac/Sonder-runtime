@@ -768,6 +768,7 @@ def _machine_host_names():
 
 
 _REJECTED_HOST_LOG_INTERVAL_SECONDS = 60.0
+_REJECTED_HOST_LOG_MAX_NAMES_PER_INTERVAL = 8
 _REJECTED_HOST_LOG = OrderedDict()
 _REJECTED_HOST_LOG_LOCK = threading.Lock()
 
@@ -784,6 +785,14 @@ def _log_rejected_host(value):
     with _REJECTED_HOST_LOG_LOCK:
         last = _REJECTED_HOST_LOG.get(name)
         if last is not None and now - last < _REJECTED_HOST_LOG_INTERVAL_SECONDS:
+            return
+        # A page can rotate attacker-chosen names; the per-name limit alone
+        # would then log once per request. Cap warnings across all names too.
+        recent = sum(
+            1 for stamp in _REJECTED_HOST_LOG.values()
+            if now - stamp < _REJECTED_HOST_LOG_INTERVAL_SECONDS
+        )
+        if recent >= _REJECTED_HOST_LOG_MAX_NAMES_PER_INTERVAL:
             return
         _REJECTED_HOST_LOG[name] = now
         _REJECTED_HOST_LOG.move_to_end(name)
