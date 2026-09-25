@@ -1898,10 +1898,10 @@ class InvocationError(ValueError):
     message text.
 
     ``problem`` is one of ``"unknown-parameter"``, ``"conflicting-duplicate"``,
-    or ``"invalid-value"``; ``command`` is the catalogued slash name; and
-    ``details`` carries the problem-specific evidence (the unknown keys, the
-    duplicated key and both raw values, or the key/raw-value/expected-type
-    triple).
+    ``"invalid-value"``, or ``"unexpected-arguments"``; ``command`` is the
+    catalogued slash name; and ``details`` carries the problem-specific
+    evidence (the unknown keys, the duplicated key and both raw values, the
+    key/raw-value/expected-type triple, or the excess words and the usage).
     """
 
     def __init__(self, message, *, command="", problem="", details=None):
@@ -1969,6 +1969,9 @@ def parse_invocation(line: str):
       coercion used to fall back to the raw string, so ``dry_run=nope``
       reached the tool as a *truthy* string and a typo'd flag silently meant
       the opposite of what it said.
+
+    * more positional words than the open parameters can take -- the excess
+      used to be dropped, so ``/status detail`` ran plain ``/status``.
 
     Positional words keep the historical lenient coercion: they carry no
     stated key=type intent, and free-text parameters legitimately absorb
@@ -2048,16 +2051,34 @@ def parse_invocation(line: str):
         open_params = required or (
             [p for p in candidates if p.name not in _CONTEXT_PARAMS] or candidates
         )
-        if open_params:
-            try:
-                words = shlex.split(leftover)
-            except ValueError:
-                words = leftover.split()
-            # One free-text parameter takes the whole remainder rather than
-            # only its first whitespace-delimited word.
-            if len(open_params) == 1 and open_params[0].type == "str":
-                kwargs[open_params[0].name] = leftover
-            else:
-                for param, value in zip(open_params, words):
-                    kwargs[param.name] = _coerce(value, param.type)
+        try:
+            words = shlex.split(leftover)
+        except ValueError:
+            words = leftover.split()
+        # One free-text parameter takes the whole remainder rather than
+        # only its first whitespace-delimited word.
+        if len(open_params) == 1 and open_params[0].type == "str":
+            kwargs[open_params[0].name] = leftover
+        else:
+            extra = words[len(open_params):]
+            if extra:
+                # Excess positional words used to be dropped: ``/status
+                # detail`` ran plain ``/status`` while looking like it had
+                # honoured the word.  Refuse with the usage instead.
+                raise InvocationError(
+                    "%s: unexpected argument%s %s. usage: %s" % (
+                        command.name,
+                        "" if len(extra) == 1 else "s",
+                        " ".join(repr(word) for word in extra),
+                        command.usage(),
+                    ),
+                    command=command.name,
+                    problem="unexpected-arguments",
+                    details={
+                        "unexpected": list(extra),
+                        "usage": command.usage(),
+                    },
+                )
+            for param, value in zip(open_params, words):
+                kwargs[param.name] = _coerce(value, param.type)
     return command.tool, kwargs
