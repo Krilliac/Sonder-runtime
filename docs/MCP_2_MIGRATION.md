@@ -169,3 +169,31 @@ fails its own import probe.
 copies the closure and runs the real probe against it — the other tests in that
 file supply a runtime or monkeypatch `subprocess.run`, so "the bundle tests
 pass" has never on its own meant "a bundle can be built".
+
+## The stdio frame guard (upstream drops malformed frames)
+
+mcp 2.0.0's `stdio_server` reads lines of any length, and when a line does not
+parse it hands the session a bare exception that the server loop drops
+without replying. `not json`, a JSON array (batch), a truncated object,
+`"jsonrpc": "1.0"`, and an unpaired surrogate escape (`"\ud800"`) all got
+**no response at all**, and `"id": true` was accepted as a *notification*. A
+client waiting on that request id hung. That is upstream behaviour; Sonder does
+not fork it.
+
+`ReloadableMCPServer.run_stdio_async` puts a guard in front of it instead.
+It claims fd 0/1 exactly like upstream (children and stray prints never
+touch the wire) and passes a `_GuardedStdin` as `stdio_server(stdin=...)`.
+The guard reads each line bounded by `LEGACY_MCP_MAX_FRAME_BYTES`, drains an
+oversized line to its newline (so its tail is never read back as a second
+frame), runs the same `jsonrpc_message_adapter` upstream uses, and answers
+anything upstream would drop with a JSON-RPC `-32700`/`-32600` error on the
+server's own write stream, echoing a valid `id` when the frame had one. Only
+frames upstream accepts reach upstream.
+
+The claim uses two upstream-private helpers, `mcp.server.stdio._claim_fd` and
+`_open_stdin_diversion`. If a future mcp release moves them, the server logs
+`legacy MCP frame guard unavailable` on the `sonder.mcp` logger and serves
+through the stock transport rather than failing to start; the frame bound
+and the malformed-frame replies are then absent. When bumping the pin, run
+`tests/test_legacy_mcp_protocol.py`: its real-stdio test fails if the guard
+stops engaging.

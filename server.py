@@ -109,6 +109,7 @@ from sonder_runtime.platform.private_cot_policy import (
 )
 from sonder_runtime.platform.version import (
     running_source_commit_at_import as _running_source_commit,
+    runtime_version as _runtime_version,
 )
 from sonder_runtime.adapters import ollama_lifecycle
 import admin_auth
@@ -4477,7 +4478,11 @@ if reloadable_mcp.is_reloadable_server(_existing_mcp):
 else:
     # Lazy: the MCP SDK is imported (and the registry built) on first use, so
     # importing this module for the REPL, HTTP API or CLI does not pay for it.
-    mcp = reloadable_mcp.LazyReloadableMCPServer("sonder-runtime")
+    # ``version`` is the initialize ``serverInfo.version``; left unset, MCP
+    # clients saw an empty string and could not tell which build answered.
+    mcp = reloadable_mcp.LazyReloadableMCPServer(
+        "sonder-runtime", version=_runtime_version(),
+    )
 _PERSISTENT_MCP = mcp
 
 

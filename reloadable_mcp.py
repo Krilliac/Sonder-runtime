@@ -97,6 +97,69 @@ def _refuse_if_gated(name: str, arguments=None) -> None:
     )
 
 
+def _refuse_unknown_arguments(tool, arguments) -> None:
+    """Reject argument names the tool's declared input schema does not list.
+
+    The upstream argument models ignore extra fields, so ``{"query": "x",
+    "bogus": 1}`` ran as if ``bogus`` had never been sent -- a misspelt
+    ``max_results`` or ``root`` silently fell back to its default and the
+    caller was never told. The native surface rejects these; this is the same
+    contract for the legacy one. A schema that explicitly admits additional
+    properties is honoured.
+    """
+    if not isinstance(arguments, dict) or not arguments:
+        return
+    schema = getattr(tool, "parameters", None)
+    if not isinstance(schema, dict):
+        return
+    extra = schema.get("additionalProperties")
+    if extra is True or isinstance(extra, dict):
+        return
+    properties = schema.get("properties")
+    accepted = set(properties) if isinstance(properties, dict) else set()
+    unknown = sorted(str(key) for key in arguments if key not in accepted)
+    if not unknown:
+        return
+    shown = ", ".join(key[:64] for key in unknown[:8])
+    if len(unknown) > 8:
+        shown += ", ... (%d more)" % (len(unknown) - 8)
+    raise ToolError(
+        "%s does not accept argument(s): %s. Accepted arguments: %s." % (
+            getattr(tool, "name", "tool"), shown,
+            ", ".join(sorted(accepted)) or "(none)",
+        )
+    )
+
+
+def _flag_legacy_error_reply(result):
+    """Mark a legacy ``ERROR:`` reply as an MCP tool error (``isError``).
+
+    The legacy tools report failures and refusals as text beginning with
+    ``ERROR:`` rather than raising, so a client saw ``isError: false`` for a
+    refused ``file_read``, disabled web tools, or an agent that ran out of
+    steps, and had no protocol-level way to tell them from success. The text
+    itself is kept as the error message.
+
+    The classification is the one the loop surface already applies to the same
+    tool output (``loop_text_result``), deliberately reused rather than
+    re-derived so the two surfaces cannot disagree about what failed.
+    """
+    if getattr(result, "is_error", True):
+        return result
+    content = getattr(result, "content", None) or ()
+    if not content:
+        return result
+    first = content[0]
+    text = getattr(first, "text", None)
+    if getattr(first, "type", None) != "text" or not isinstance(text, str):
+        return result
+    from sonder_runtime.domain.loop_result_formatting import loop_text_result
+
+    if loop_text_result("mcp_tool", text)["ok"]:
+        return result
+    return result.model_copy(update={"is_error": True})
+
+
 def _recovery_action(configured_ready: bool) -> str:
     if configured_ready:
         return (
@@ -208,6 +271,139 @@ def _sync_loop_tool_docstring(fn, action_types) -> None:
     tail_at = marker_at + tail_match.start()
     head = doc[: marker_at + len(marker)]
     fn.__doc__ = head + " " + ", ".join(action_types) + "." + doc[tail_at:]
+
+
+# The largest legitimate legacy frame is a ``file_write`` at the write cap
+# (``file_ops.MAX_WRITE_BYTES``, 1 MB) whose content JSON-escapes to at most
+# about twice its size, plus envelope headroom. The upstream stdio transport
+# reads a line of any length, so without this a single frame could hold
+# arbitrary memory and be echoed back whole.
+LEGACY_MCP_MAX_FRAME_BYTES = 2 * 1_000_000 + 64 * 1024
+
+_PARSE_ERROR = -32700
+_INVALID_REQUEST = -32600
+
+
+def _frame_rejection(raw: bytes):
+    """``None`` for a frame the upstream parser accepts, else the reply.
+
+    The reply is ``(request_id, code, message)``. The upstream ``mcp`` stdio
+    transport (2.0.0) hands a frame it cannot parse to the session as a bare
+    exception, which the server loop drops without answering: ``not json``,
+    a JSON array, ``"jsonrpc": "1.0"``, a lone-surrogate escape, and a request
+    whose ``id`` is ``true`` (accepted upstream as a *notification*) all got no
+    response at all, so a client waiting on that id hung. This applies the
+    very same parser first and answers what it refuses with a JSON-RPC error,
+    echoing the id whenever the frame carried a valid one.
+    """
+    import mcp_types
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None, _PARSE_ERROR, "Parse error: frame is not valid UTF-8"
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return None, _PARSE_ERROR, "Parse error: frame is not valid JSON"
+    if not isinstance(value, dict):
+        return None, _INVALID_REQUEST, (
+            "Invalid Request: a frame must be one JSON-RPC object (batches are "
+            "not supported)"
+        )
+    request_id = value.get("id")
+    if "id" in value and type(request_id) not in (int, str):
+        return None, _INVALID_REQUEST, "Invalid Request: id must be a string or integer"
+    try:
+        mcp_types.jsonrpc_message_adapter.validate_json(text, by_name=False)
+    except Exception as exc:
+        kinds = []
+        errors = getattr(exc, "errors", None)
+        if callable(errors):
+            try:
+                kinds = sorted({str(item.get("type", "")) for item in errors()})
+            except Exception:
+                kinds = []
+        if "json_invalid" in kinds:
+            return request_id, _PARSE_ERROR, (
+                "Parse error: frame is not valid JSON-RPC text (for example an "
+                "unpaired UTF-16 surrogate escape)"
+            )
+        return request_id, _INVALID_REQUEST, (
+            "Invalid Request: not a valid JSON-RPC 2.0 message"
+        )
+    return None
+
+
+class _GuardedStdin:
+    """Bounded line source for ``stdio_server`` that answers bad frames.
+
+    It is passed as ``stdio_server(stdin=...)``, whose reader only iterates it,
+    and yields exactly the frames the upstream parser accepts. Everything else
+    is answered here, on the server's own write stream, before the next line
+    is read, so replies keep their order relative to the frames around them.
+    """
+
+    def __init__(self, buffer, *, max_frame_bytes: int = LEGACY_MCP_MAX_FRAME_BYTES):
+        import anyio
+
+        self._buffer = buffer
+        self._max = int(max_frame_bytes)
+        self._ready = anyio.Event()
+        self._write_stream = None
+
+    def attach(self, write_stream) -> None:
+        self._write_stream = write_stream
+        self._ready.set()
+
+    def __aiter__(self):
+        return self._frames()
+
+    async def _readline(self) -> bytes:
+        import anyio.to_thread
+
+        return await anyio.to_thread.run_sync(self._buffer.readline, self._max + 1)
+
+    async def _frames(self):
+        while True:
+            raw = await self._readline()
+            if not raw:
+                return
+            if len(raw) > self._max and not raw.endswith(b"\n"):
+                # Drain the rest of the line so its tail is never read back
+                # as a separate frame (and so a request hidden past the bound
+                # is not executed).
+                while True:
+                    chunk = await self._readline()
+                    if not chunk or chunk.endswith(b"\n"):
+                        break
+                await self._reject(None, _INVALID_REQUEST, (
+                    "Invalid Request: frame exceeds %d bytes" % self._max
+                ))
+                continue
+            if not raw.strip():
+                continue
+            rejection = _frame_rejection(raw)
+            if rejection is None:
+                yield raw.decode("utf-8")
+                continue
+            await self._reject(*rejection)
+
+    async def _reject(self, request_id, code: int, message: str) -> None:
+        import logging
+
+        import mcp_types
+        from mcp.shared.message import SessionMessage
+
+        logging.getLogger("sonder.mcp").warning(
+            "legacy MCP frame rejected: code=%s %s", code, message,
+        )
+        await self._ready.wait()
+        error = mcp_types.JSONRPCError(
+            jsonrpc="2.0", id=request_id,
+            error=mcp_types.ErrorData(code=code, message=message),
+        )
+        await self._write_stream.send(SessionMessage(error))
 
 
 class _ReloadableMCPServerMixin:
@@ -611,6 +807,43 @@ class _ReloadableMCPServerMixin:
                     "error": self._last_error,
                 }
 
+    async def run_stdio_async(self) -> None:
+        """Serve stdio with a bounded frame size and answered parse errors.
+
+        Same claim of fd 0/1 as upstream ``run_stdio_async`` (children and
+        stray prints never touch the wire); only the line source differs --
+        see ``_GuardedStdin``. The claim helpers are upstream-private, so if a
+        future ``mcp`` release moves them this falls back to the stock
+        transport, loudly, rather than failing to serve.
+        """
+        try:
+            from mcp.server import stdio as upstream_stdio
+
+            claim_fd = upstream_stdio._claim_fd
+            open_stdin_diversion = upstream_stdio._open_stdin_diversion
+        except (ImportError, AttributeError):
+            import logging
+
+            logging.getLogger("sonder.mcp").warning(
+                "legacy MCP frame guard unavailable for this mcp release; "
+                "oversized and malformed frames are handled by upstream"
+            )
+            await super().run_stdio_async()
+            return
+        buffer, release = claim_fd(0, sys.stdin, "rb", open_stdin_diversion)
+        try:
+            guard = _GuardedStdin(buffer)
+            async with upstream_stdio.stdio_server(stdin=guard) as (read_stream, write_stream):
+                guard.attach(write_stream)
+                await self._lowlevel_server.run(
+                    read_stream,
+                    write_stream,
+                    self._lowlevel_server.create_initialization_options(),
+                )
+        finally:
+            if release is not None:
+                release()
+
     # The public surface below refreshes but never notifies. MCP 1.x exposed
     # the in-flight request through ``FastMCP.get_context()``, so any of these
     # could reach the client session ambiently; 2.x removed that accessor and
@@ -626,10 +859,14 @@ class _ReloadableMCPServerMixin:
 
     async def call_tool(self, name: str, arguments: dict, context=None):
         self.refresh_if_changed()
-        if self._tool_manager.get_tool(name) is None:
+        tool = self._tool_manager.get_tool(name)
+        if tool is None:
             # Nothing would run, so there is nothing to gate: answer as an
             # unknown tool rather than advising a permission rule for it.
             raise ToolError(f"Unknown tool: {name}")
+        # Before the gate: a call the tool cannot accept runs nothing, so it
+        # must not spend a one-shot approval or be recorded as a refusal.
+        _refuse_unknown_arguments(tool, arguments)
         # The reach scope wraps the gate and the call: the roots a one-shot
         # approval covered appear only once the gate has spent it for exactly
         # this call, and vanish when the call is over.
@@ -639,7 +876,8 @@ class _ReloadableMCPServerMixin:
                           if name == "agent_lane" else arguments)
         with server.approved_call_reach(name, gate_arguments):
             _refuse_if_gated(name, gate_arguments)
-            return await super().call_tool(name, arguments, context)
+            result = await super().call_tool(name, arguments, context)
+        return _flag_legacy_error_reply(result)
 
     async def list_resources(self):
         self.refresh_if_changed()
