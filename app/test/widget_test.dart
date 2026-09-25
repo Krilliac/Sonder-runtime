@@ -109,11 +109,18 @@ void main() {
     expect(find.textContaining('served locally by Ollama'), findsOneWidget);
     // Empty state shows the message composer.
     expect(find.byType(TextField), findsOneWidget);
-    // The telemetry strip stays legible and truthful before a server reply:
-    // unavailable data is an em dash, never a fabricated zero.
-    expect(find.byKey(const Key('status-metric-context')), findsOneWidget);
-    expect(find.byKey(const Key('status-metric-activity')), findsOneWidget);
-    expect(find.byKey(const Key('status-metric-route')), findsOneWidget);
+    // The status strip speaks the REPL's status line. Nothing is fabricated
+    // before a server reply: no ctx field, no zero counts, and the mode word
+    // is present (as "unknown" when the server has not said).
+    expect(find.byKey(const Key('chat-status-strip')), findsOneWidget);
+    final line = tester
+        .widget<Text>(find.byKey(const Key('chat-status-line')))
+        .textSpan!
+        .toPlainText();
+    expect(line, contains('sonder'));
+    expect(line, contains('unknown'));
+    expect(line, isNot(contains('ctx')));
+    expect(line, isNot(contains('0 agents')));
   });
 
   testWidgets('Desktop command shortcut opens the command browser', (
@@ -362,7 +369,7 @@ void main() {
 
     await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('System'));
+    await tester.tap(find.byTooltip('Runtime'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
@@ -401,11 +408,20 @@ void main() {
 
     await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('System'));
+    await tester.tap(find.byTooltip('Runtime'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
-    final list = find.byType(Scrollable).first;
+    // The page's own vertical scrollable, not whatever Scrollable happens
+    // to be first in the tree (the chat route underneath, or a horizontal
+    // strip): dragging that one never hit-tests.
+    final list = find
+        .descendant(
+          of: find.byType(SystemScreen),
+          matching: find.byWidgetPredicate((w) =>
+              w is Scrollable && w.axisDirection == AxisDirection.down),
+        )
+        .last;
     await tester.scrollUntilVisible(
       find.byKey(const Key('autopilot-goal')),
       240,
