@@ -453,7 +453,7 @@ def test_doctor_storage_probe_is_explicit(monkeypatch, isolated_home, capsys):
     monkeypatch.setattr(
         sonder_doctor,
         "storage_checks",
-        lambda config, throughput=False: [
+        lambda config, throughput=False, **_kwargs: [
             ("storage_state", lambda: seen.append(throughput) or ("ok", "probe"))
         ],
     )

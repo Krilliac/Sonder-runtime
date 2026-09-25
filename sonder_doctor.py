@@ -325,9 +325,9 @@ def backup_check(config=None, *, max_age_hours: float = 48.0):
     return check
 
 
-def _check_ollama(*, timeout: float = 5.0) -> dict:
+def _check_ollama(*, timeout: float = 5.0, config=None) -> dict:
     """Probe Ollama reachability read-only via GET /api/tags."""
-    config = _load_config_or_none()
+    config = config if config is not None else _load_config_or_none()
     if config is None:
         return _skip("config unavailable for Ollama endpoint")
     if getattr(getattr(config, "membership", None), "mode", "static") == "external":
@@ -379,7 +379,7 @@ def _check_ollama(*, timeout: float = 5.0) -> dict:
         return {"status": STATUS_FAIL, "detail": "%s: %s" % (host, exc)}
 
 
-def _check_ollama_workers(*, timeout: float = 5.0) -> dict:
+def _check_ollama_workers(*, timeout: float = 5.0, config=None) -> dict:
     """Probe every configured multi-PC Ollama worker independently.
 
     ``_check_ollama`` only verifies the primary endpoint. A remote worker
@@ -388,7 +388,7 @@ def _check_ollama_workers(*, timeout: float = 5.0) -> dict:
     doctor`` until a live request happens to fail over onto it -- an operator
     would not learn PC 2 or PC 3 is down until traffic actually needed it.
     """
-    config = _load_config_or_none()
+    config = config if config is not None else _load_config_or_none()
     if config is None:
         return _skip("config unavailable for Ollama worker endpoints")
     if getattr(getattr(config, "membership", None), "mode", "static") == "external":
@@ -428,7 +428,7 @@ def _check_ollama_workers(*, timeout: float = 5.0) -> dict:
     return _summarize_worker_probe(up, down, len(workers))
 
 
-def _check_ollama_residency(*, timeout: float = 5.0) -> dict:
+def _check_ollama_residency(*, timeout: float = 5.0, config=None) -> dict:
     """Detect Ollama models that outlived their ``keep_alive`` expiry.
 
     ``/api/ps`` reports each resident model's ``expires_at``. Ollama is
@@ -438,7 +438,7 @@ def _check_ollama_residency(*, timeout: float = 5.0) -> dict:
     still in use. This is a read-only observation, not a repair: it never
     unloads anything itself.
     """
-    config = _load_config_or_none()
+    config = config if config is not None else _load_config_or_none()
     if config is None:
         return _skip("config unavailable for Ollama residency check")
     if getattr(getattr(config, "membership", None), "mode", "static") == "external":
@@ -506,8 +506,17 @@ def _check_ollama_residency(*, timeout: float = 5.0) -> dict:
     }
 
 
-def storage_checks(config=None, *, throughput: bool = False):
-    """Build storage checks for a validated config without running them yet."""
+def storage_checks(
+    config=None, *, throughput: bool = False, discover_models: bool = True,
+):
+    """Build storage checks for a validated config without running them yet.
+
+    ``discover_models`` lets ``storage_models`` ask a loopback Ollama daemon
+    which model root it really uses (read-only ``/api/tags`` + ``/api/show``).
+    ``OLLAMA_MODELS`` is the daemon's setting; this process's copy of it is
+    often absent or different, so without discovery the reported root is an
+    assumption and is labelled as one.
+    """
     def loaded_config():
         if config is not None:
             return config
@@ -537,22 +546,77 @@ def storage_checks(config=None, *, throughput: bool = False):
     def models_check():
         from sonder_runtime.adapters import storage as sonder_storage
 
+        import os
+
         cfg = loaded_config()
+        process_root = os.environ.get("OLLAMA_MODELS", "").strip()
+        discovered = None
+        if discover_models and getattr(
+            getattr(cfg, "membership", None), "mode", "static"
+        ) != "external":
+            import sonder_runtime.adapters.inference.ollama_model_root as ollama_model_root
+
+            discovered = ollama_model_root.discover_daemon_model_root(
+                getattr(cfg.ollama, "url", ""),
+                allow_remote=getattr(cfg.ollama, "allow_remote", False) is True,
+            )
+        notes: list[str] = []
+        if discovered:
+            roots = (discovered,)
+            notes.append("reported by the local Ollama daemon")
+            if process_root and (
+                os.path.normcase(os.path.abspath(os.path.expanduser(process_root)))
+                != os.path.normcase(os.path.abspath(discovered))
+            ):
+                notes.append(
+                    "OLLAMA_MODELS in this process (%s) differs from the "
+                    "daemon's root" % process_root
+                )
+        else:
+            roots = sonder_storage.model_roots()
+            notes.append(
+                "from OLLAMA_MODELS in this process; daemon root not verified"
+                if process_root else
+                "assumed Ollama default: OLLAMA_MODELS is unset in this process "
+                "and the daemon's root was not discovered"
+            )
         records = [
             sonder_storage.inspect_root(
                 root,
                 minimum_free_bytes=cfg.state.minimum_free_disk_bytes,
                 role="models",
             )
-            for root in sonder_storage.model_roots()
+            for root in roots
         ]
-        status = STATUS_WARN if any(r["warnings"] for r in records) else STATUS_OK
+        mismatch = len(notes) > 1
+        status = (
+            STATUS_WARN
+            if mismatch or any(r["warnings"] for r in records)
+            else STATUS_OK
+        )
         return {
             "status": status,
-            "detail": " | ".join(sonder_storage.summarize(r) for r in records),
+            "detail": "%s [%s]" % (
+                " | ".join(sonder_storage.summarize(r) for r in records),
+                "; ".join(notes),
+            ),
         }
 
     return [("storage_state", state_check), ("storage_models", models_check)]
+
+
+def ollama_checks(config) -> list[tuple[str, CheckCallable]]:
+    """Bind the Ollama probes to one already-validated configuration.
+
+    The unbound defaults reload configuration from the environment, which
+    ignores ``--config``/``--set`` and probes a different endpoint than the
+    one the ``config`` line of the same report names.
+    """
+    return [
+        ("ollama", lambda: _check_ollama(config=config)),
+        ("ollama_workers", lambda: _check_ollama_workers(config=config)),
+        ("ollama_residency", lambda: _check_ollama_residency(config=config)),
+    ]
 
 
 def default_checks() -> list[tuple[str, CheckCallable]]:

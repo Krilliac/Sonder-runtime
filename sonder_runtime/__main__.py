@@ -403,8 +403,10 @@ def cmd_doctor(args) -> int:
         return 2
     checks = sonder_doctor.default_checks()
     replacements = dict(sonder_doctor.storage_checks(
-        config, throughput=args.storage_probe
+        config, throughput=args.storage_probe,
+        discover_models=not args.skip_ollama,
     ))
+    replacements.update(sonder_doctor.ollama_checks(config))
     replacements["schemas"] = sonder_doctor.schema_check(config)
     replacements["backup"] = sonder_doctor.backup_check(config)
     checks = [

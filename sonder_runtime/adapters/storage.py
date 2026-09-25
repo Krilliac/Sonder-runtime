@@ -369,8 +369,18 @@ def inspect_config(config) -> dict[str, Any]:
     minimum = int(config.state.minimum_free_disk_bytes)
     state = inspect_root(config.state.home, minimum_free_bytes=minimum,
                          role="state")
+    # ``OLLAMA_MODELS`` belongs to the daemon's environment; when this
+    # process does not carry it the root below is Ollama's default, not an
+    # observation.  Say so rather than presenting an assumption as fact
+    # (``doctor`` asks the running daemon; this local report never probes).
+    source = (
+        "OLLAMA_MODELS in this process"
+        if os.environ.get("OLLAMA_MODELS", "").strip()
+        else "assumed Ollama default (OLLAMA_MODELS unset in this process)"
+    )
     models = [
-        inspect_root(root, minimum_free_bytes=minimum, role="models")
+        {**inspect_root(root, minimum_free_bytes=minimum, role="models"),
+         "root_source": source}
         for root in model_roots()
     ]
     return {"state": state, "models": models}
