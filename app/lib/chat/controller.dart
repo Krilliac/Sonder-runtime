@@ -35,18 +35,26 @@ class LiveTurn {
   final String model;
   final int? tokensIn;
 
+  /// Whole seconds since the turn started. Advanced by the controller's
+  /// 1 Hz tick and never behind the wall clock, so it is right after the app
+  /// was suspended and testable under fake time.
+  final int elapsedSeconds;
+
   const LiveTurn({
     required this.startedAt,
     this.phase = 'routing',
     this.model = '',
     this.tokensIn,
+    this.elapsedSeconds = 0,
   });
 
-  LiveTurn copyWith({String? phase, int? tokensIn}) => LiveTurn(
+  LiveTurn copyWith({String? phase, int? tokensIn, int? elapsedSeconds}) =>
+      LiveTurn(
         startedAt: startedAt,
         phase: phase ?? this.phase,
         model: model,
         tokensIn: tokensIn ?? this.tokensIn,
+        elapsedSeconds: elapsedSeconds ?? this.elapsedSeconds,
       );
 }
 
@@ -84,6 +92,7 @@ class ChatController extends ChangeNotifier {
 
   Timer? _pollTimer;
   Timer? _modeTimer;
+  Timer? _liveTimer;
   bool _pollInFlight = false;
   bool _modeInFlight = false;
   bool _paused = false;
@@ -582,6 +591,14 @@ class ChatController extends ChangeNotifier {
     _pendingId = _entries.last.id;
     _turnThreadId = _currentThreadId;
     live.value = LiveTurn(startedAt: DateTime.now(), model: _model);
+    _liveTimer?.cancel();
+    _liveTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      final current = live.value;
+      if (current == null) return;
+      final wall = DateTime.now().difference(current.startedAt).inSeconds;
+      final next = current.elapsedSeconds + 1;
+      live.value = current.copyWith(elapsedSeconds: wall > next ? wall : next);
+    });
 
     final request = TurnRequest(
       history: history,
@@ -652,7 +669,18 @@ class ChatController extends ChangeNotifier {
     _pendingId = _entries.last.id;
   }
 
+  /// Milliseconds the live turn has run, by the same clock as the live line.
+  int? _liveElapsedMs() {
+    final current = live.value;
+    if (current == null) return null;
+    final wall = DateTime.now().difference(current.startedAt).inMilliseconds;
+    final ticks = current.elapsedSeconds * 1000;
+    return wall > ticks ? wall : ticks;
+  }
+
   void _endTurn() {
+    _liveTimer?.cancel();
+    _liveTimer = null;
     _turn = null;
     _turnSub?.cancel();
     _turnSub = null;
@@ -683,7 +711,7 @@ class ChatController extends ChangeNotifier {
   }
 
   void _finishOk(ChatTurn turn, ChatReply reply) {
-    final started = live.value?.startedAt;
+    final elapsed = _liveElapsedMs();
     if (reply.metadata?.tier.isNotEmpty == true) lastTier = reply.metadata!.tier;
     final message = ChatMessage(
       role: Role.assistant,
@@ -692,19 +720,14 @@ class ChatController extends ChangeNotifier {
       responseMetadata: reply.metadata,
     );
     _endTurn();
-    unawaited(_deliver(message,
-        elapsedMs: started == null
-            ? null
-            : DateTime.now().difference(started).inMilliseconds));
+    unawaited(_deliver(message, elapsedMs: elapsed));
     _notify();
     onAnnounce?.call('Sonder replied');
     _afterTurn();
   }
 
   void _finishError(ChatTurn turn, Object e) {
-    final started = live.value?.startedAt;
-    final elapsed =
-        started == null ? null : DateTime.now().difference(started).inMilliseconds;
+    final elapsed = _liveElapsedMs();
     ChatMessage message;
     var retryable = false;
     if (e is SonderException) {
@@ -846,6 +869,7 @@ class ChatController extends ChangeNotifier {
     _disposed = true;
     _pollTimer?.cancel();
     _modeTimer?.cancel();
+    _liveTimer?.cancel();
     _turn?.cancel();
     _turnSub?.cancel();
     status.dispose();

@@ -43,69 +43,77 @@ class PermissionModeChip extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Tooltip(
-          message: tooltip,
-          child: Semantics(
-            button: true,
-            enabled: !readOnly,
-            label: modeDescription,
-            hint: readOnly
-                ? modeReadOnlyText
-                : (busy ? 'Changing mode' : 'Double tap to change mode'),
-            child: InkWell(
-              key: const Key('permission-mode-chip'),
-              onTap: busy || readOnly ? null : onTap,
-              borderRadius: BorderRadius.circular(SonderRadius.pill),
-              child: ConstrainedBox(
-                // A 48 dp hit area around a 28 dp pill (P2-5).
-                constraints: const BoxConstraints(minHeight: 48),
-                child: Center(
-                  widthFactor: 1,
-                  child: Container(
-                    height: 28,
-                    padding: const EdgeInsets.fromLTRB(10, 0, 6, 0),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(SonderRadius.pill),
-                      border: Border.all(color: tokens.hairlineStrong),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(
-                          width: 7,
-                          height: 7,
-                          decoration: BoxDecoration(
-                            color: tone,
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                        Icon(permissionModeIcon(state.mode),
-                            size: 13, color: tone),
-                        const SizedBox(width: 5),
-                        Text(modeLabel,
-                            style: tokens.mono(12,
-                                weight: FontWeight.w500,
-                                color: readOnly ? tokens.text2 : tokens.text)),
-                        if (busy)
-                          Padding(
-                            padding: const EdgeInsets.only(left: 6, right: 2),
-                            child: SizedBox(
-                              width: 11,
-                              height: 11,
-                              child: CircularProgressIndicator(
-                                  strokeWidth: 2, color: tokens.text2),
+        Flexible(
+          child: Tooltip(
+            message: tooltip,
+            child: Semantics(
+              button: true,
+              enabled: !readOnly,
+              label: modeDescription,
+              hint: readOnly
+                  ? modeReadOnlyText
+                  : (busy ? 'Changing mode' : 'Double tap to change mode'),
+              child: InkWell(
+                key: const Key('permission-mode-chip'),
+                onTap: busy || readOnly ? null : onTap,
+                borderRadius: BorderRadius.circular(SonderRadius.pill),
+                child: ConstrainedBox(
+                  // A 48 dp hit area around a 28 dp pill (P2-5).
+                  constraints: const BoxConstraints(minHeight: 48),
+                  child: Center(
+                    widthFactor: 1,
+                    child: Container(
+                      height: 28,
+                      padding: const EdgeInsets.fromLTRB(10, 0, 6, 0),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(SonderRadius.pill),
+                        border: Border.all(color: tokens.hairlineStrong),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 7,
+                            height: 7,
+                            decoration: BoxDecoration(
+                              color: tone,
+                              borderRadius: BorderRadius.circular(4),
                             ),
-                          )
-                        else if (readOnly)
-                          Padding(
-                            padding: const EdgeInsets.only(left: 4, right: 2),
-                            child: Icon(Icons.lock_outline,
-                                size: 13, color: tokens.muted),
-                          )
-                        else
-                          Icon(Icons.expand_more, size: 16, color: tokens.muted),
-                      ],
+                          ),
+                          const SizedBox(width: 6),
+                          Icon(permissionModeIcon(state.mode),
+                              size: 13, color: tone),
+                          const SizedBox(width: 5),
+                          Flexible(
+                            child: Text(modeLabel,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: tokens.mono(12,
+                                    weight: FontWeight.w500,
+                                    color:
+                                        readOnly ? tokens.text2 : tokens.text)),
+                          ),
+                          if (busy)
+                            Padding(
+                              padding: const EdgeInsets.only(left: 6, right: 2),
+                              child: SizedBox(
+                                width: 11,
+                                height: 11,
+                                child: CircularProgressIndicator(
+                                    strokeWidth: 2, color: tokens.text2),
+                              ),
+                            )
+                          else if (readOnly)
+                            Padding(
+                              padding: const EdgeInsets.only(left: 4, right: 2),
+                              child: Icon(Icons.lock_outline,
+                                  size: 13, color: tokens.muted),
+                            )
+                          else
+                            Icon(Icons.expand_more,
+                                size: 16, color: tokens.muted),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -231,8 +239,8 @@ class PermissionModeDialog extends StatelessWidget {
                     color: option.name == state.mode
                         ? cs.primary.withValues(alpha: 0.10)
                         : null,
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 20, vertical: 10),
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -315,7 +323,8 @@ Future<bool> confirmModeRaise(
   required String host,
 }) async {
   final wide = MediaQuery.sizeOf(context).width >= 600;
-  Widget body(BuildContext ctx) => RaiseModeSheet(from: from, to: to, host: host);
+  Widget body(BuildContext ctx) =>
+      RaiseModeSheet(from: from, to: to, host: host);
   final bool? result;
   if (wide) {
     result = await showDialog<bool>(
@@ -381,15 +390,16 @@ class RaiseModeSheet extends StatelessWidget {
           Text(raiseEffect(to, host),
               style: text.bodyMedium?.copyWith(color: tokens.text2)),
           const SizedBox(height: 18),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
+          OverflowBar(
+            alignment: MainAxisAlignment.end,
+            spacing: 8,
+            overflowAlignment: OverflowBarAlignment.end,
             children: [
               TextButton(
                 key: const Key('raise-mode-cancel'),
                 onPressed: () => Navigator.of(context).pop(false),
                 child: const Text('Cancel'),
               ),
-              const SizedBox(width: 8),
               FilledButton(
                 key: const Key('raise-mode-confirm'),
                 style: FilledButton.styleFrom(

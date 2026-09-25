@@ -265,15 +265,16 @@ class _ApprovalSheetState extends State<_ApprovalSheet> {
             ),
           ]),
           const SizedBox(height: 12),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
+          OverflowBar(
+            alignment: MainAxisAlignment.end,
+            spacing: 8,
+            overflowAlignment: OverflowBarAlignment.end,
             children: [
               TextButton(
                 key: const Key('approval-cancel'),
                 onPressed: () => Navigator.of(context).pop(),
                 child: const Text('Cancel'),
               ),
-              const SizedBox(width: 8),
               FilledButton(
                 key: const Key('approval-confirm'),
                 style: FilledButton.styleFrom(

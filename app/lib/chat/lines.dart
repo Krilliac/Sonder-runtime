@@ -17,15 +17,29 @@ const ellipsisGlyph = '…';
 
 String _sep() => ' $sepGlyph ';
 
+/// Python's `'%.1f' % x`: like [double.toStringAsFixed] except that an exact
+/// binary tie (x.25, x.75) rounds half to even, as CPython does.
+String fixed1(double x) {
+  final quarter = x * 4;
+  final scaled = x * 10;
+  final frac = scaled - scaled.floorToDouble();
+  if (quarter == quarter.roundToDouble() && frac == 0.5) {
+    final down = scaled.floorToDouble();
+    final even = down % 2 == 0 ? down : down + 1;
+    return (even / 10).toStringAsFixed(1);
+  }
+  return x.toStringAsFixed(1);
+}
+
 /// `64` -> `64`, `8192` -> `8.2k`, `1250000` -> `1.2M` (style.compact_count).
 String compactCount(num value) {
   final n = value.toDouble();
   if (n.abs() < 1000) return '${n.truncate()}';
   String text;
   if (n.abs() < 1000000) {
-    text = '${(n / 1000).toStringAsFixed(1)}k';
+    text = '${fixed1(n / 1000)}k';
   } else {
-    text = '${(n / 1000000).toStringAsFixed(1)}M';
+    text = '${fixed1(n / 1000000)}M';
   }
   return text.replaceAll('.0k', 'k').replaceAll('.0M', 'M');
 }
@@ -35,7 +49,7 @@ String compactCount(num value) {
 String durationLabel(int ms) {
   final v = ms < 0 ? 0 : ms;
   if (v < 1000) return '${v}ms';
-  if (v < 100000) return '${(v / 1000).toStringAsFixed(1)}s';
+  if (v < 100000) return '${fixed1(v / 1000)}s';
   final seconds = v ~/ 1000;
   final m = seconds ~/ 60;
   final s = seconds % 60;

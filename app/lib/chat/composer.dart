@@ -175,7 +175,7 @@ class ChatComposer extends StatelessWidget {
                         child: Row(
                           children: [
                             if (modeChip != null) ...[
-                              modeChip!,
+                              Flexible(child: modeChip!),
                               const SizedBox(width: 6),
                             ],
                             _CommandsButton(

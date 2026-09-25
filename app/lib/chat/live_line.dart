@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
@@ -12,43 +10,21 @@ const slowTurnSeconds = 20;
 
 /// `◈ working · routing · 12s · sonder:latest   [Stop]` (P1-1, §2.2).
 ///
-/// Ticks at 1 Hz on its own, so the elapsed seconds never rebuild the
-/// transcript around it; phase and token updates arrive through [live].
-class LiveLineView extends StatefulWidget {
+/// The controller ticks [live] at 1 Hz, so the elapsed seconds rebuild this
+/// line and never the transcript around it.
+class LiveLineView extends StatelessWidget {
   final ValueListenable<LiveTurn?> live;
   final VoidCallback? onStop;
 
   const LiveLineView({super.key, required this.live, this.onStop});
 
   @override
-  State<LiveLineView> createState() => _LiveLineViewState();
-}
-
-class _LiveLineViewState extends State<LiveLineView> {
-  Timer? _tick;
-
-  @override
-  void initState() {
-    super.initState();
-    _tick = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() {});
-    });
-  }
-
-  @override
-  void dispose() {
-    _tick?.cancel();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
     return ValueListenableBuilder<LiveTurn?>(
-      valueListenable: widget.live,
+      valueListenable: live,
       builder: (context, turn, _) {
-        final started = turn?.startedAt ?? DateTime.now();
-        final seconds = DateTime.now().difference(started).inSeconds;
+        final seconds = turn?.elapsedSeconds ?? 0;
         final state = LiveState(
           phase: turn?.phase ?? 'working',
           elapsedSeconds: seconds,
@@ -61,7 +37,7 @@ class _LiveLineViewState extends State<LiveLineView> {
           // Leave room for the Stop button, then fit the REPL's line to the
           // cells that remain.
           final cell = _cellWidth(context, style);
-          final room = constraints.maxWidth - (widget.onStop == null ? 0 : 88);
+          final room = constraints.maxWidth - (onStop == null ? 0 : 88);
           final cols = cell <= 0 ? 80 : (room / cell).floor();
           final text = liveLine(state, cols);
           final slowHint = state.slow ? LiveState.defaultSlowHint : '';
@@ -82,12 +58,12 @@ class _LiveLineViewState extends State<LiveLineView> {
                     ),
                   ),
                 ),
-                if (widget.onStop != null)
+                if (onStop != null)
                   Padding(
                     padding: const EdgeInsets.only(left: 8),
                     child: OutlinedButton(
                       key: const Key('live-stop'),
-                      onPressed: widget.onStop,
+                      onPressed: onStop,
                       style: OutlinedButton.styleFrom(
                         minimumSize: const Size(72, 40),
                         visualDensity: VisualDensity.compact,
