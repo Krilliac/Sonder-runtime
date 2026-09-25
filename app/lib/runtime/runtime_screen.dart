@@ -259,7 +259,12 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     });
   }
 
+  /// Work runs with a Stop request in flight: a second confirm while the
+  /// first POST is pending must not send another one.
+  final Set<String> _stopping = {};
+
   Future<void> _stopWorkRun(WorkRun run) async {
+    if (!_stopping.add(run.id)) return;
     try {
       await _data.cancelWorkRun(run.id);
       if (!mounted) return;
@@ -270,8 +275,14 @@ class _RuntimeScreenState extends State<RuntimeScreen>
       setState(() => _message = error.httpStatus == 403
           ? 'Work runs need a developer or admin account.'
           : error.message);
+    } on ArgumentError {
+      // The id did not look like a work run id; nothing was sent.
+      if (!mounted) return;
+      setState(() => _message = 'Could not stop ${run.shortId}: unknown id.');
+    } finally {
+      _stopping.remove(run.id);
     }
-    await _loadExtras();
+    if (mounted) await _loadExtras();
   }
 
   SonderApi get _api => SonderApi(
@@ -404,8 +415,17 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     }
   }
 
+  /// Polls only while this page is the visible route: a route pushed on
+  /// top (or a dialog) pauses them, like a backgrounded app does.
+  bool get _visible {
+    if (!mounted) return false;
+    final route = ModalRoute.of(context);
+    return route == null || route.isCurrent;
+  }
+
   Future<void> _pollSystemInfo() async {
     if (!mounted || !_appActive || _loading || _working || _polling) return;
+    if (!_visible) return;
     _polling = true;
     SystemInfo? info;
     LauncherStatus? launcherInfo;

@@ -236,10 +236,17 @@ class Settings {
     final memoryOnly = memoryOnlyCredentials;
     var stored = true;
     var needed = false;
-    Future<void> guarded(Future<void> Function() write) async {
+    Future<void> guarded(String key, Future<void> Function() write) async {
       needed = true;
       if (memoryOnly) {
         stored = false;
+        // Memory only means nothing at rest: drop a legacy plaintext copy
+        // and any value an older build put in browser storage, so a reload
+        // cannot bring back a key the person has since replaced.
+        await p.remove(key);
+        try {
+          await credentials.delete(key);
+        } catch (_) {}
         return;
       }
       try {
@@ -255,29 +262,35 @@ class Settings {
     // The UI uses the explicit clear methods below when a user removes a
     // previously saved credential or signs out.
     if (apiKey.trim().isNotEmpty) {
-      await guarded(() => _writeCredential(
-            credentials: credentials,
-            preferences: p,
-            key: _kKey,
-            value: apiKey,
-          ));
+      await guarded(
+          _kKey,
+          () => _writeCredential(
+                credentials: credentials,
+                preferences: p,
+                key: _kKey,
+                value: apiKey,
+              ));
     } else {
       await p.remove(_kKey);
     }
     if (launcherToken.trim().isNotEmpty) {
-      await guarded(() => _writeCredential(
-            credentials: credentials,
-            preferences: p,
-            key: _kLauncherToken,
-            value: launcherToken,
-          ));
+      await guarded(
+          _kLauncherToken,
+          () => _writeCredential(
+                credentials: credentials,
+                preferences: p,
+                key: _kLauncherToken,
+                value: launcherToken,
+              ));
     } else {
       await p.remove(_kLauncherToken);
     }
     final account = accountSession;
     if (account != null && account.matches(serverUrl)) {
-      await guarded(() => credentials.write(_kAccount,
-          jsonEncode({'token': account.token, 'origin': account.origin})));
+      await guarded(
+          _kAccount,
+          () => credentials.write(_kAccount,
+              jsonEncode({'token': account.token, 'origin': account.origin})));
     }
     await p.remove(_kAccount);
     await p.setString(_kServer, serverUrl.trim());

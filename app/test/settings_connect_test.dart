@@ -222,6 +222,29 @@ void main() {
     expect(credentials.values.values.join(), isNot(contains('s3cr3t-boot')));
   });
 
+  testWidgets('editing the server URL forgets a bootstrap secret',
+      (tester) async {
+    final connection = FakeConnection();
+    await pumpSettings(tester,
+        connection: connection, serverUrl: 'https://pc.test');
+    await tester.enterText(find.widgetWithText(TextField, 'Username'), 'alice');
+    await tester.enterText(
+        find.widgetWithText(TextField, 'Password'), 'password123');
+    await tester.ensureVisible(find.text('Register'));
+    await tester.tap(find.text('Register'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.byKey(const Key('settings-bootstrap-secret')), 's3cr3t-boot');
+    await tester.enterText(
+        find.widgetWithText(TextField, 'Server URL'), 'https://other.test');
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('settings-bootstrap-secret')), findsNothing);
+    await tester.ensureVisible(find.text('Register'));
+    await tester.tap(find.text('Register'));
+    await tester.pumpAndSettle();
+    expect(connection.registerSecrets, [null, null]);
+  });
+
   group('SettingsConnection.register', () {
     test('201 is success and names the role', () async {
       await http.runWithClient(() async {
@@ -285,8 +308,13 @@ void main() {
     Settings.debugMemoryOnlyCredentials = true;
     addTearDown(() => Settings.debugMemoryOnlyCredentials = null);
     final credentials = MemoryCredentials();
+    // A key an older build left at rest must not come back after a reload.
+    credentials.values['sonder_api_key'] = 'old-key';
+    SharedPreferences.setMockInitialValues({'sonder_api_key': 'old-plain'});
     final result =
         await Settings(apiKey: 'k').save(credentialStore: credentials);
+    final preferences = await SharedPreferences.getInstance();
+    expect(preferences.containsKey('sonder_api_key'), isFalse);
     expect(result.memoryOnly, isTrue);
     expect(result.warning, contains('in memory'));
     expect(credentials.values, isEmpty);

@@ -309,6 +309,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
     for (final controller in _trackedControllers) {
       controller.addListener(_markDirty);
     }
+    _bootstrapServer = _server.text;
+    _server.addListener(_serverEdited);
+  }
+
+  /// The server the bootstrap secret was asked for. The secret belongs to
+  /// that PC only, so editing the URL forgets it rather than sending it to
+  /// whatever host is typed next.
+  String _bootstrapServer = '';
+
+  void _serverEdited() {
+    if (_server.text == _bootstrapServer) return;
+    _bootstrapServer = _server.text;
+    if (_needsBootstrap || _bootstrapSecret.text.isNotEmpty) {
+      setState(_forgetBootstrapSecret);
+    }
   }
 
   @override
@@ -316,6 +331,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     for (final controller in _trackedControllers) {
       controller.removeListener(_markDirty);
     }
+    _server.removeListener(_serverEdited);
     _server.dispose();
     _key.dispose();
     _model.dispose();

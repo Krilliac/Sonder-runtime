@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -220,6 +221,24 @@ void main() {
     await tester.tap(find.text('Stop run'));
     await tester.pumpAndSettle();
     expect(data.cancelled, ['wr-7c1e0000000000000000000000000001']);
+    expect(find.textContaining('Stop requested'), findsOneWidget);
+  });
+
+  testWidgets('a second Stop while the first is pending sends nothing',
+      (tester) async {
+    final gate = Completer<void>();
+    final data = FakeRuntimeData(runs: [runningWorkRun()])
+      ..cancelGate = gate.future;
+    await pumpRuntime(tester, info: healthySystemInfo(), data: data);
+    for (var i = 0; i < 2; i++) {
+      await tester.tap(find.text('Stop…'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Stop run'));
+      await tester.pump();
+    }
+    expect(data.cancelled, hasLength(1));
+    gate.complete();
+    await tester.pumpAndSettle();
     expect(find.textContaining('Stop requested'), findsOneWidget);
   });
 
@@ -636,6 +655,75 @@ void main() {
       await settleLive(tester);
       expect(find.textContaining("Can't reach"), findsNothing);
       expect(find.textContaining('Unauthorized'), findsWidgets);
+      await tester.pumpWidget(const SizedBox());
+    }, () => client);
+  });
+
+  testWidgets('polls stop while the app is paused or a route covers Runtime',
+      (tester) async {
+    var statusReads = 0;
+    final client = MockClient((request) async {
+      if (request.url.path == '/v1/sonder/status') {
+        statusReads++;
+        return http.Response('{"status": "ready", "models": []}', 200);
+      }
+      if (request.url.path == '/v1/work-runs') {
+        return http.Response('{"runs": []}', 200);
+      }
+      return http.Response('{}', 404);
+    });
+    Future<void> wait(Duration total) async {
+      for (var elapsed = Duration.zero;
+          elapsed < total;
+          elapsed += const Duration(milliseconds: 500)) {
+        await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 5)));
+        await tester.pump(const Duration(milliseconds: 500));
+      }
+    }
+
+    final navigator = GlobalKey<NavigatorState>();
+    await http.runWithClient(() async {
+      await tester.pumpWidget(MaterialApp(
+        navigatorKey: navigator,
+        home: RuntimeScreen(
+            settings: Settings(serverUrl: 'http://127.0.0.1:11435')),
+      ));
+      await settleLive(tester);
+      final afterLoad = statusReads;
+      await wait(const Duration(seconds: 6));
+      expect(statusReads, greaterThan(afterLoad), reason: 'visible: polls');
+
+      for (final state in [
+        AppLifecycleState.inactive,
+        AppLifecycleState.hidden,
+        AppLifecycleState.paused,
+      ]) {
+        tester.binding.handleAppLifecycleStateChanged(state);
+      }
+      final paused = statusReads;
+      await wait(const Duration(seconds: 12));
+      expect(statusReads, paused, reason: 'paused: no polls');
+
+      for (final state in [
+        AppLifecycleState.hidden,
+        AppLifecycleState.inactive,
+        AppLifecycleState.resumed,
+      ]) {
+        tester.binding.handleAppLifecycleStateChanged(state);
+      }
+      await settleLive(tester);
+      navigator.currentState!.push(MaterialPageRoute<void>(
+          builder: (_) => const Scaffold(body: Text('covering page'))));
+      await pumpFrames(tester);
+      final covered = statusReads;
+      await wait(const Duration(seconds: 12));
+      expect(statusReads, covered, reason: 'covered: no polls');
+
+      navigator.currentState!.pop();
+      await pumpFrames(tester);
+      await wait(const Duration(seconds: 6));
+      expect(statusReads, greaterThan(covered), reason: 'back: polls again');
       await tester.pumpWidget(const SizedBox());
     }, () => client);
   });

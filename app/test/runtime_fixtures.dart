@@ -94,6 +94,9 @@ class FakeRuntimeData implements RuntimeDataSource {
   List<ComputeNode> nodes;
   Object? computeError;
   final List<String> cancelled = [];
+
+  /// When set, cancel requests wait on it (a slow server).
+  Future<void>? cancelGate;
   int workRunReads = 0;
   int jobReads = 0;
 
@@ -119,6 +122,7 @@ class FakeRuntimeData implements RuntimeDataSource {
   @override
   Future<WorkRun?> cancelWorkRun(String id) async {
     cancelled.add(id);
+    await cancelGate;
     return null;
   }
 
