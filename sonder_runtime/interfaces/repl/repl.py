@@ -2520,6 +2520,14 @@ def main(*, machine_output=False):
 
     def run_workspace_work(task):
         nonlocal last_iid, last_response, last_run_source, last_turn_metrics
+        # "use N workers ..." that the worker-count cue refused (a "why", a
+        # negation, a quote) used to run one foreground lane with no hint.
+        try:
+            ignored_cue = server.master_orchestrator.worker_request_ignored_reason(task)
+        except Exception:
+            ignored_cue = ""
+        if ignored_cue:
+            print(_paint("(note: %s)" % ignored_cue, _Ansi.muted))
         started_at = time.monotonic()
         indicator = _begin_chat_turn("Sonder work")
         try:

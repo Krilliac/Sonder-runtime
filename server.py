@@ -22632,6 +22632,9 @@ def _route_work_request(
     if refusal:
         return refusal
     explicit_worker_cap = master_orchestrator.requested_worker_cap(prompt)
+    ignored_worker_cue = ""
+    with contextlib.suppress(Exception):
+        ignored_worker_cue = master_orchestrator.worker_request_ignored_reason(prompt)
     intent_override = (
         {
             "mode": "fleet",
@@ -22824,8 +22827,9 @@ def _route_work_request(
             plan_only=bool(decision.get("plan_only")),
             wait=False,
         )
-    return "%s\n\n%s" % (
+    return "%s%s\n\n%s" % (
         _execution_route_header(mode, source, reason, confidence, selected_tier),
+        ("\nnote: " + ignored_worker_cue) if ignored_worker_cue and mode != "fleet" else "",
         output,
     )
 

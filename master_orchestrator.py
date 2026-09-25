@@ -595,6 +595,44 @@ def requested_worker_cap(task: str) -> int | None:
     return None if error else min(int(value), ABSOLUTE_MAX_WORKERS)
 
 
+def worker_request_ignored_reason(task: str) -> str:
+    """Why a leading "use N workers" cue was not applied, or "" otherwise.
+
+    ``requested_worker_cap`` deliberately refuses the cue when the request
+    also carries negation, explanatory/meta words, comparatives, quotes, or a
+    second count, so a quoted or discussed worker count never starts a fleet.
+    That refusal used to be silent: "use 2 workers ... report why the test
+    fails" ran one foreground lane with no hint.  This names the reason so the
+    route can say so; it never changes the routing decision itself.
+    """
+    text = str(task or "")
+    match = _AFFIRMATIVE_WORKER_REQUEST.match(text)
+    if not match or requested_worker_cap(text) is not None:
+        return ""
+    cue = match.group(0).strip()
+    for label, pattern in (
+        ("a negation", _WORKER_REQUEST_NEGATION),
+        ("an explanatory or quoting word", _WORKER_REQUEST_META),
+        ("a comparative", _WORKER_REQUEST_COMPARATIVE),
+    ):
+        found = pattern.search(text)
+        if found:
+            detail = "%s (%r)" % (label, found.group(0))
+            break
+    else:
+        if any(quote in text for quote in _WORKER_REQUEST_QUOTES):
+            detail = "quotation marks"
+        elif len(list(_WORKER_COUNT_MENTION.finditer(text))) != 1:
+            detail = "more than one worker count"
+        else:
+            detail = "an invalid worker count"
+    return (
+        "%r was not applied because the request also contains %s, which "
+        "the worker-count cue treats as a quoted or discussed count; to fan "
+        "out anyway, run: /master fleet <task>" % (cue, detail)
+    )
+
+
 def capacity(
     requested_agents: int | str | None = None,
     worker_cap: int | str | None = None,

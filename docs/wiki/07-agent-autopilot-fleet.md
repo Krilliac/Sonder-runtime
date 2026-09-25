@@ -85,6 +85,15 @@ task phrase `use 24 workers`. The override is shown in `master_status` and
 `master_capacity`, ends with that run, and is clamped to the operator ceiling.
 `SONDER_MAX_WORKER_CAP` may lower that ceiling; the compiled absolute ceiling is
 64, so malformed or enormous values cannot create unbounded threads.
+The phrase must start the request (`use|run|spawn|launch N workers|agents`),
+and it is ignored when the request also contains a negation (`not`, `no`,
+`never`, `don't`), an explanatory or quoting word (`ignore`, `quote`,
+`phrase`, `document`, `instruction`, `example`, `say(s)`, `mention(s)`,
+`explain`, `why`), a comparative (`more/fewer/less than`), quotation
+marks or backticks, or a second worker count. This keeps a quoted or
+discussed count from starting a fleet. When a cue is ignored, the route
+header (and the console) prints a `note:` naming the word that disabled
+it; use `/master fleet <task>` to fan out explicitly.
 Statuses `queued → running → done | failed | cancelled | interrupted`, with
 `interrupted`/`failed`/`cancelled` re-dispatchable to `queued`. Claims use
 compare-and-set; heartbeats detect stale owners. Two model instances (e.g.
