@@ -157,8 +157,10 @@ void main() {
     ));
     await tester.pump();
     await tester.pump();
-    expect(find.textContaining('Every work slot on the PC is busy',
-        findRichText: true), findsOneWidget);
+    expect(
+        find.textContaining('Every work slot on the PC is busy',
+            findRichText: true),
+        findsOneWidget);
     expect(find.textContaining('POST /v1/work-runs', findRichText: true),
         findsNothing);
 
