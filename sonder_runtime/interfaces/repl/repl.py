@@ -2853,7 +2853,7 @@ def main(*, machine_output=False):
                     _watch_activity()
                 else:
                     print(server.activity_status())
-            elif cmd in ("/autopilot", "/auto"):
+            elif cmd in ("/autopilot", "/auto", "/mission"):
                 print(server.control_command(
                     line, session=session_id, project=project,
                 ))
@@ -2905,7 +2905,8 @@ def main(*, machine_output=False):
                 "/inventory", "/workspace",
                 "/tree", "/folders", "/search", "/grep",
                 "/programs", "/programfind", "/scripts", "/scriptfind",
-                "/image", "/inspectimage", "/mkdir", "/runprogram", "/runscript",
+                "/image", "/inspectimage", "/vision", "/analyzeimage",
+                "/mkdir", "/runprogram", "/runscript",
                 "/artifactcheck", "/verifyartifact", "/groundartifact",
             ):
                 print(server.control_command(

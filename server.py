@@ -2757,8 +2757,8 @@ def _runtime_command(arg: str) -> str:
             "  /runtime set reasoning=<model> vision=<model>   (specialist "
             "tiers; assign an empty value to leave one unset)\n"
             "  /runtime set embedding=<installed-embedding-model>\n"
-            "  /runtime set router=<tier> workbench=<tier> autopilot=<tier> "
-            "fleet=<tier> review=<tier>\n"
+            "  /runtime set chat=<tier> router=<tier> workbench=<tier> "
+            "autopilot=<tier> fleet=<tier> review=<tier>\n"
             "  /runtime reset\n"
             "Only installed local models are accepted. Embedding changes affect "
             "future vectors only; use /embeddings apply to refresh stored memory. "
@@ -22373,7 +22373,8 @@ def mission_start(
         objective, criteria, auto=auto, plan=plan,
         policy=policy, tier=tier, allow_web=allow_web, project=project,
     )
-    if result.get("autopilot", {}).get("run_id"):
+    # The bridge reports ``autopilot: None`` when ``auto`` is off.
+    if (result.get("autopilot") or {}).get("run_id"):
         _launch_autopilot(result["autopilot"]["run_id"])
     lines = ["mission started"]
     lines.append(_format_goal(result.get("goal")))

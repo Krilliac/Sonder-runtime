@@ -522,3 +522,10 @@ def test_master_uses_fleet_workers_and_review_lane_for_audit(
 
     assert "audited" in output
     assert worker_tiers == ["fast", "general"]
+
+
+def test_runtime_help_names_every_execution_lane():
+    """``/runtime set chat=general`` works, so the help must say it does."""
+    help_text = server._runtime_command("help")
+    for lane in server.runtime_policy.ROUTING_LANES:
+        assert "%s=<tier>" % lane in help_text, lane

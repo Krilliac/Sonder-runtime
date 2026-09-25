@@ -1040,8 +1040,13 @@ _SELFMOD_READ_ACTIONS = frozenset({
 _MCP_READ_ACTIONS = frozenset({"", "status", "show", "audit", "list", "help", "?"})
 # ``server._goal_command`` treats the bare form as ``show``; ``set``/``note``/
 # ``done``/``abandon``/``refresh``/``adopt``/``decline`` mutate, and these
-# only read.
-_GOAL_READ_ACTIONS = frozenset({"", "show", "status", "history", "proposals"})
+# only read (``help``/``?`` fall through to its static usage text).
+_GOAL_READ_ACTIONS = frozenset({
+    "", "show", "status", "history", "proposals", "help", "?",
+})
+# ``server._runtime_command`` renders the policy for the bare form and these
+# and static usage for ``help``/``?``; ``set`` and ``reset`` update it.
+_RUNTIME_READ_ACTIONS = frozenset({"", "status", "show", "list", "help", "?"})
 # ``server._training_command`` renders the plan for the bare form and a plan
 # or a status for these; anything else (``start``, ``deploy``, ``rollback``)
 # reaches the attended lifecycle.
@@ -1090,7 +1095,7 @@ def narrow_branch_tools(cmd, argument, tools):
         return ("preferences_status",)
     if command in ("/contextsize", "/ctxsize") and action == "":
         return ("context_policy_status",)
-    if command in ("/runtime", "/models") and action in ("", "status"):
+    if command in ("/runtime", "/models") and action in _RUNTIME_READ_ACTIONS:
         return ("runtime_policy_status",)
     if command in ("/stash", "/runtime-stash") and action in ("", "status", "list"):
         return ("runtime_source_stash_status",)
