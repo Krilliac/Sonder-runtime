@@ -391,7 +391,7 @@ def _append_replan(
     return plan
 
 
-def format_report(run: dict, review_reason: str = "") -> str:
+def format_report(run: dict, review_reason: str = "", error: str = "") -> str:
     lines = [
         "autopilot end report",
         "  run: %s" % run.get("id", ""),
@@ -418,6 +418,9 @@ def format_report(run: dict, review_reason: str = "") -> str:
             lines.append("        error: %s" % _first_line(task["error"]))
     if review_reason:
         lines.append("  reviewer: %s" % review_reason)
+    if error:
+        # A controller failure is not a reviewer verdict: say what failed.
+        lines.append("  error: %s" % _first_line(error))
     return "\n".join(lines)
 
 
@@ -447,6 +450,8 @@ def format_run(run: dict | None, include_report: bool = True) -> str:
     ]
     if run.get("summary"):
         lines.append("  summary: %s" % run["summary"])
+    if run.get("last_error"):
+        lines.append("  last error: %s" % _first_line(run["last_error"]))
     for task in plan[:12]:
         lines.append("  - %(id)s [%(status)s] %(kind)s: %(title)s" % task)
     if include_report and run.get("final_report"):
@@ -1034,20 +1039,23 @@ def execute_run(
     except Exception as exc:
         latest = autopilot_store.get_run(run["id"]) or run
         flags = autopilot_store.control_flags(run["id"], owner_id)
+        # Name the exception type: a bare "<urlopen error timed out>" from a
+        # planner call is otherwise indistinguishable from a model verdict.
+        error = "%s: %s" % (type(exc).__name__, exc) if str(exc) else type(exc).__name__
         if not flags.get("lost") and flags.get("cancel"):
             stored = autopilot_store.finish_run(
                 run["id"], owner_id, "cancelled",
                 summary="cancelled while controller unwound an error",
-                last_error=str(exc),
-                final_report=format_report(latest, str(exc)),
+                last_error=error,
+                final_report=format_report(latest, error=error),
             )
             if stored:
                 return stored
         stored = autopilot_store.finish_run(
             run["id"], owner_id, "failed",
             summary="autopilot controller failed safely",
-            last_error=str(exc),
-            final_report=format_report(latest, str(exc)),
+            last_error=error,
+            final_report=format_report(latest, error=error),
         )
         if stored:
             return stored
