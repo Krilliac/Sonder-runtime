@@ -199,6 +199,12 @@ body (413) and on any request whose framing was rejected — a duplicated or
 non-numeric `Content-Length`, or a transfer coding, neither of which is
 supported. Nothing beyond the accepted request-size limit is ever read.
 
+An optional `Idempotency-Key` header on a POST makes a served action (slash
+work controls, permission-mode changes, fanout controls, drain) replay-safe
+for that principal and action. A key longer than 512 characters, or a repeated
+`Idempotency-Key` header, is rejected with `400 invalid_request` before
+dispatch rather than running the action without replay protection.
+
 ## Graceful drain
 
 On `SIGTERM`/`SIGINT` or `POST /v1/admin/drain`: state → DRAINING, reject

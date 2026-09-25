@@ -3440,6 +3440,61 @@ def test_admin_drain_rejects_ambiguous_framing_before_dispatch(monkeypatch):
     assert called == []
 
 
+@pytest.mark.parametrize("key_headers", [
+    [("Idempotency-Key", "k" * 513)],
+    [("Idempotency-Key", "first"), ("Idempotency-Key", "second")],
+])
+def test_unusable_idempotency_key_is_rejected_not_silently_ignored(monkeypatch, key_headers):
+    """An over-long or repeated Idempotency-Key must not run the action unguarded.
+
+    The replay helper cannot bind a key longer than its bound, and a repeated
+    header lets a proxy and this server disagree on which key applies.  Either
+    used to execute the mutation without replay protection, so a client retry
+    re-applied an action it had been promised would run once.
+    """
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.Handler, "_auth_rate_limited", lambda self: False)
+    applied = []
+    monkeypatch.setattr(ts.permission_policy, "set_mode", lambda mode: applied.append(mode))
+    body = b'{"mode":"plan"}'
+    with _http_server(monkeypatch) as port:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            conn.putrequest("POST", "/v1/permission-mode")
+            conn.putheader("Content-Type", "application/json")
+            conn.putheader("Content-Length", str(len(body)))
+            for name, value in key_headers:
+                conn.putheader(name, value)
+            conn.endheaders(body)
+            response = conn.getresponse()
+            status, payload = response.status, response.read()
+        finally:
+            conn.close()
+    assert status == 400, payload
+    assert b"Idempotency-Key" in payload
+    assert applied == []
+
+
+def test_bounded_idempotency_key_still_replays(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.Handler, "_auth_rate_limited", lambda self: False)
+    monkeypatch.setattr(ts.served_action_receipts, "claim", lambda *a, **k: "claimed")
+    monkeypatch.setattr(ts.served_action_receipts, "finish", lambda *a, **k: None)
+    applied = []
+    monkeypatch.setattr(ts.permission_policy, "set_mode", lambda mode: applied.append(mode))
+    headers = {"Content-Type": "application/json", "Idempotency-Key": "b" * 512}
+    with _http_server(monkeypatch) as port:
+        for _ in range(2):
+            status, _, payload = _request(port, "POST", "/v1/permission-mode",
+                                          body='{"mode":"plan"}', headers=headers)
+            assert status == 200, payload
+    assert applied == ["plan"]
+
+
 def test_http_register_forwards_hosted_bootstrap_policy(monkeypatch, tmp_path):
     """POST /v1/sonder/register must reach the engine's hosted policy.
 

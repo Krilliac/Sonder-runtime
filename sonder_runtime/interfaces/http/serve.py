@@ -1035,6 +1035,9 @@ def _request_idempotency_key(context, endpoint, supplied_key):
     return "hi-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+_MAX_IDEMPOTENCY_KEY_LENGTH = 512
+
+
 def _http_action_idempotency_key(context, supplied_key, action):
     """Return a principal- and action-bound replay key for HTTP work controls.
 
@@ -1050,9 +1053,9 @@ def _http_action_idempotency_key(context, supplied_key, action):
     key = str(supplied_key or "").strip()
     if not key:
         return ""
-    # HTTP headers are already bounded by the server, but keep this helper's
-    # behavior explicit when it is called directly in tests or embeddings.
-    if len(key) > 512:
+    # The HTTP boundary rejects longer keys (``_validate_idempotency_key``);
+    # keep this helper's behavior explicit when called directly.
+    if len(key) > _MAX_IDEMPOTENCY_KEY_LENGTH:
         return ""
     material = "\0".join((
         "served-action-idempotency-v1",
@@ -4430,6 +4433,22 @@ class Handler(BaseHTTPRequestHandler):
         if len(content_lengths) > 1:
             raise HTTPRequestError(400, "multiple Content-Length headers are not supported")
 
+    def _validate_idempotency_key(self):
+        """Reject an Idempotency-Key the replay guard could not honor.
+
+        A key the replay helpers cannot bind would otherwise run the action
+        without its no-duplicate promise, and a repeated header lets a proxy
+        and this server pick different keys.  Refuse both before dispatch.
+        """
+        keys = self.headers.get_all("Idempotency-Key") or ()
+        if len(keys) > 1:
+            raise HTTPRequestError(400, "multiple Idempotency-Key headers are not supported")
+        if keys and len(keys[0].strip()) > _MAX_IDEMPOTENCY_KEY_LENGTH:
+            raise HTTPRequestError(
+                400,
+                "Idempotency-Key must be at most %d characters" % _MAX_IDEMPOTENCY_KEY_LENGTH,
+            )
+
     def _handle_agent_lane_request(self, method, path, payload=None):
         """Bind lane commands to authenticated identity and configured scope."""
         if path != "/v1/agent-lanes" and not path.startswith("/v1/agent-lanes/"):
@@ -5650,6 +5669,7 @@ class Handler(BaseHTTPRequestHandler):
         self._correlation()
         try:
             self._validate_request_framing()
+            self._validate_idempotency_key()
         except HTTPRequestError as error:
             record_early_chat_metric("malformed_request")
             self._send_json_payload(
