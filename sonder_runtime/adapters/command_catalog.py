@@ -328,7 +328,7 @@ _CATEGORY_BY_SLASH = {
     "/todo": "planning", "/plan": "planning",
     "/cot": "system", "/debug": "system", "/env": "system", "/toolstatus": "system",
     "/tools": "system", "/test": "dev", "/digest": "dev",
-    "/crash": "dev", "/profile": "dev",
+    "/crash": "dev", "/profile": "dev", "/build": "dev", "/fix-build": "dev",
     "/trace": "system", "/strict": "system", "/dump": "system",
     "/whoami": "security", "/admin": "security", "/accounts": "security",
     "/login": "security", "/register": "security", "/setaccount": "security",
@@ -400,10 +400,6 @@ _READ_ONLY = frozenset({
     "live_reload_status", "mcp_runtime_status", "reasoning_show",
     "sonder_sessions", "sonder_stats", "turn_inspect", "workflow_list",
     "memory_export", "policy_explain",
-    # Renders cached model readiness only; the live probe is the separate
-    # ``/runtime status refresh``. Verified by execution, not by reading:
-    # tests/test_runtime_policy_status_trap_check.py.
-    "runtime_policy_status",
     "runtime_source_update_status",
     "runtime_source_stash_status",
     "permission_approvals",
@@ -536,6 +532,22 @@ _UNREGISTERED_BRANCH_WORK = {
     # the branch is graded by the strictest member it can reach.
     "/crash": "crash_digest",
     "/profile": "profile_capture_digest",
+}
+
+# Console branches that front *several* native typed tools, through the typed
+# gateway rather than a registered MCP tool, so static discovery sees none of
+# them. ``/build`` and ``/fix-build`` run the C++ build tools
+# (``interfaces/repl/facades/build_tools.BUILD_COMMAND_SPECS`` lists the same
+# members; a drift test pins the two together). The console gate grades each
+# by its strictest member -- ``build_job`` / ``build_fix`` are ``execution``
+# (``permission_modes.NATIVE_EXECUTION_TOOLS``), ``build_fix_restore`` a
+# mutation -- and ``narrow_branch_tools`` narrows the read forms (``/build
+# model``, ``/build status``, ``/fix-build status``) to the safe member they
+# reach. Approving ``/fix-build <target>`` is what lets the gateway mint the
+# fix's scoped grant for its own in-scope source edits.
+_NATIVE_TYPED_BRANCH_WORK = {
+    "/build": ("build_job", "build_job_result", "build_model"),
+    "/fix-build": ("build_fix", "build_fix_restore", "build_fix_result"),
 }
 
 
@@ -1044,6 +1056,8 @@ def _with_unregistered_work(mapped: dict) -> dict:
     out = dict(mapped)
     for slash, stand_in in _UNREGISTERED_BRANCH_WORK.items():
         out[slash] = tuple(sorted(set(out.get(slash, ())) | {stand_in}))
+    for slash, members in _NATIVE_TYPED_BRANCH_WORK.items():
+        out[slash] = tuple(sorted(set(out.get(slash, ())) | set(members)))
     return out
 
 
@@ -1083,11 +1097,8 @@ _MCP_READ_ACTIONS = frozenset({"", "status", "show", "audit", "list", "help", "?
 _GOAL_READ_ACTIONS = frozenset({
     "", "show", "status", "history", "proposals", "help", "?",
 })
-# ``server._runtime_command`` renders the policy with cached model readiness
-# for the bare form and these and static usage for ``help``/``?``; ``set`` and
-# ``reset`` update it. Only the one-word form is the read: ``status refresh``
-# probes the model endpoint (an outbound socket ``runtime_policy_status`` was
-# verified never to open), so it keeps the branch's strictest grade.
+# ``server._runtime_command`` renders the policy for the bare form and these
+# and static usage for ``help``/``?``; ``set`` and ``reset`` update it.
 _RUNTIME_READ_ACTIONS = frozenset({"", "status", "show", "list", "help", "?"})
 # ``server._training_command`` renders the plan for the bare form and a plan
 # or a status for these; anything else (``start``, ``deploy``, ``rollback``)
@@ -1137,11 +1148,7 @@ def narrow_branch_tools(cmd, argument, tools):
         return ("preferences_status",)
     if command in ("/contextsize", "/ctxsize") and action == "":
         return ("context_policy_status",)
-    if (
-        command in ("/runtime", "/models")
-        and action in _RUNTIME_READ_ACTIONS
-        and len(words) < 2
-    ):
+    if command in ("/runtime", "/models") and action in _RUNTIME_READ_ACTIONS:
         return ("runtime_policy_status",)
     if command in ("/stash", "/runtime-stash") and action in ("", "status", "list"):
         return ("runtime_source_stash_status",)
@@ -1163,7 +1170,47 @@ def narrow_branch_tools(cmd, argument, tools):
     if command == "/fact" and action:
         narrowed = ("sonder_forget_fact",) if action == "forget" else ("sonder_remember_fact",)
         return narrowed if all(name in union for name in narrowed) else union
+    if command in _NATIVE_TYPED_BRANCH_WORK:
+        narrowed = _build_branch_member(command, str(argument or "").split())
+        return narrowed if narrowed and all(name in union for name in narrowed) else union
     return union
+
+
+_BUILD_JOB_ID = re.compile(r"^build-job-[0-9a-f]{16,32}$")
+_BUILD_FIX_ID = re.compile(r"^build-fix-[0-9a-f]{16,32}$")
+
+
+def _build_branch_member(command, words):
+    """The one build tool a ``/build`` or ``/fix-build`` line reaches, or ().
+
+    Literal to the facade's grammar (``parse_build``/``parse_fix``): the bare
+    ``/build`` and ``/build model`` read the build model; ``/build
+    status|result|cancel <build-job-id>`` reach only the caller's own job;
+    ``/build run`` and ``/build trace`` launch. ``/fix-build
+    status|result|cancel <build-fix-id>`` reach only the caller's own fix,
+    ``/fix-build restore <build-fix-id>`` writes pre-images back, and every
+    other ``/fix-build`` line names a target -- including a target that is
+    spelled ``status`` -- so it reaches ``build_fix``. A form this does not
+    recognise answers () and keeps the union.
+    """
+    action = words[0].lower() if words else ""
+    if command == "/build":
+        if action in ("", "model"):
+            return ("build_model",)
+        if action in ("status", "result", "cancel") and len(words) >= 2 \
+                and _BUILD_JOB_ID.fullmatch(words[1]):
+            return ("build_job_result",)
+        if action in ("run", "trace"):
+            return ("build_job",)
+        return ()
+    if not action:
+        return ()
+    if len(words) >= 2 and _BUILD_FIX_ID.fullmatch(words[1]):
+        if action in ("status", "result", "cancel"):
+            return ("build_fix_result",)
+        if action == "restore":
+            return ("build_fix_restore",)
+    return ("build_fix",)
 
 
 # Marker for a branch that is a one-line forward to ``server.control_command``.
@@ -1337,7 +1384,6 @@ def _is_execution(name: str) -> bool:
     return (
         stem in permission_modes.EXECUTION_TOOLS
         or stem in permission_modes.EXECUTION_COMMANDS
-        or stem in getattr(permission_modes, "NATIVE_EXECUTION_TOOLS", frozenset())
     )
 
 
@@ -1454,14 +1500,31 @@ def _native_risk(group, tool, hit, server, tools_by_name) -> str:
         _risk_for(name, server) for name in reached
         if name in tools_by_name and name not in disarmed
     ]
-    # Typed-only tools (the build and debug families) are absent from the
-    # legacy registry but are still graded by the gate. An unregistered name
-    # the gate classes as execution must raise the branch too, or /crash and
-    # /profile would publish "safe" for a branch that can launch a debugger.
-    graded += [
-        "execution" for name in reached
-        if name not in tools_by_name and name not in disarmed and _is_execution(name)
-    ]
+    # The native typed tools a branch fronts through the typed gateway
+    # (``_NATIVE_TYPED_BRANCH_WORK``) are real tools with a declared class in
+    # ``permission_modes.NATIVE_MCP_WORK``; read it directly (``risk_of``
+    # would recurse into this catalog) so ``/build`` is published as the
+    # ``execution`` its ``build_job`` member is graded at the gate. A member
+    # the table does not know is published as ``dangerous``, never blank.
+    native_typed = {
+        member for name in group for member in _NATIVE_TYPED_BRANCH_WORK.get(name, ())
+    }
+    if native_typed:
+        declared_work = getattr(
+            importlib.import_module("permission_modes"), "NATIVE_MCP_WORK", {},
+        )
+        graded.extend(
+            declared_work.get(name, "dangerous") for name in sorted(native_typed & reached)
+        )
+    # A stand-in for work that fronts no registered tool but that the gate
+    # classes as starting a host process (``/crash`` -> ``crash_digest``,
+    # ``/profile`` -> ``profile_capture_digest``) is published as the
+    # ``execution`` the gate decides on. ``_is_execution`` reads only the
+    # permission sets, so this cannot recurse into the catalog.
+    graded.extend(
+        "execution" for name in sorted(reached - disarmed)
+        if name not in tools_by_name and _is_execution(name)
+    )
 
     # A branch whose only tool calls are disarmed is graded as what it can
     # actually do, not as what the tool could do if called differently. The

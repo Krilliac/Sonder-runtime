@@ -83,6 +83,13 @@ from sonder_runtime.interfaces.repl.facades.debug_tools import (
     crash_command as _render_crash_command,
     profile_command as _render_profile_command,
 )
+from sonder_runtime.interfaces.repl.facades.build_tools import (
+    BuildReplFacade as _BuildReplFacade,
+    list_sections as _build_list_sections,
+    result_head as _build_result_head,
+    summary_rows as _build_summary_rows,
+    usage_error as _build_usage_error,
+)
 
 # Optional: the live filtering "/" menu. Absent or unusable (piped stdin,
 # non-Windows, dumb terminal) the REPL falls back to plain input().
@@ -1619,6 +1626,10 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /crash status|result|cancel <run_id>  follow a debugger run
   /profile <capture> [--budget MS] [--top N]  hot paths, frame spikes, allocations
   /profile status|result|cancel <run_id>  follow a profiler run
+  /build [model|run|trace] [target|file] [--config C] [--preset P]  describe, configure, build or compile a C/C++ project
+  /build status|result|cancel <build-job-id>  follow a build job
+  /fix-build <target> [--config C] [--attempts N]  repair a failing C/C++ build target; approving lets the fix edit only its in-scope sources while it runs
+  /fix-build status|result|cancel|restore <build-fix-id>  follow a fix, or write its original files back
   /location [on|off] allow approximate IP location for "my area" weather answers
   /stats             show Sonder Runtime's learning stats
   /context           show context, session, and memory health meters
@@ -2025,6 +2036,8 @@ def _branch_usage_error(cmd, arg):
     elif command in ("/read", "/mkdir", "/delete"):
         if not text:
             return "usage: %s <path>" % command
+    elif command in ("/build", "/fix-build"):
+        return _build_usage_error(command, raw)
     return ""
 
 
@@ -2586,6 +2599,162 @@ def _confirm_answer(prompt):
 
 def _profile_command(arg, workspace=""):
     _render_profile_command(_debug_services(), arg, _developer_context(workspace), out=_emit)
+
+
+def _typed_tools():
+    """The composed typed tool gateway (``Application.tools``) or None."""
+    try:
+        return getattr(server._application(), "tools", None)
+    except Exception:
+        return None
+
+
+def _build_payload(output):
+    try:
+        value = json.loads(output) if isinstance(output, str) and output else {}
+    except ValueError:
+        return {"output": str(output)[:2000]}
+    return value if isinstance(value, dict) else {"output": value}
+
+
+def _build_execute_tool(tool, arguments, workspace=""):
+    """Run one build tool call through the typed gateway, as the console.
+
+    Only reached after the console's own gate answered for this line
+    (``_named_command_gate``: ``build_job``/``build_fix`` are execution, so
+    the operator was asked, or the mode allowed it), so the request says
+    ``gate="surface"``: the gateway records that decision instead of grading
+    the call again as an unattended one. The build resolvers still plan the
+    call on the host (``on_surface``), and a ``build_fix`` the console
+    approved is what mints that fix's scoped ``BuildFixGrant`` -- its own
+    in-scope source edits, while the job lives, nothing wider. A network
+    build still needs its separate ``build_network`` decision.
+    """
+    import uuid
+
+    from sonder_runtime.application.errors import (
+        Cancelled, DeadlineExceeded, Forbidden, InvalidInput,
+    )
+    from sonder_runtime.application.tools.gateway_contract import (
+        ToolGatewayRequest, ToolPermission, ToolScope,
+    )
+
+    tools = _typed_tools()
+    registry = getattr(getattr(tools, "graph", None), "registry", None)
+    descriptor = registry.get(tool) if registry is not None else None
+    if descriptor is None:
+        return {"ok": False, "error_code": "BUILD_TOOLS_UNAVAILABLE",
+                "message": "the build tools are not registered in this runtime"}
+    effects = frozenset(effect.name.lower() for effect in descriptor.effects)
+    context = _developer_context(workspace)
+    try:
+        request = ToolGatewayRequest(
+            request_id="repl-build-" + uuid.uuid4().hex,
+            tool_name=tool,
+            arguments=dict(arguments),
+            scope=ToolScope(
+                principal_id=str(context.principal_id),
+                workspace_roots=tuple(str(root) for root in context.workspace_roots),
+                allowed_effects=effects, source="repl", auth_level=context.auth_level,
+                gate="surface",
+            ),
+            permission=ToolPermission(effects),
+            execution_world="local",
+        )
+        receipt = tools.execute(request)
+    except Forbidden as exc:
+        decision = getattr(exc, "decision", None)
+        decision = dict(decision) if isinstance(decision, dict) else {}
+        code = str(decision.get("error_code") or "PERMISSION_DENIED")
+        message = str(exc)
+        if decision.get("call_id") and decision.get("source") == "unattended":
+            message += " (approve once: /approve %s)" % decision["call_id"]
+        return {"ok": False, "error_code": code, "message": message}
+    except (Cancelled, DeadlineExceeded) as exc:
+        return {"ok": False, "error_code": "BUILD_REQUEST_ABANDONED",
+                "message": type(exc).__name__}
+    except (InvalidInput, ValueError, TypeError) as exc:
+        return {"ok": False, "error_code": "INVALID_BUILD_REQUEST", "message": str(exc)}
+    body = _build_payload(receipt.output)
+    if not receipt.success:
+        return {"ok": False,
+                "error_code": str(receipt.error_code or body.get("error_code") or "BUILD_FAILED"),
+                "message": str(body.get("message") or receipt.error or "")}
+    body.setdefault("ok", True)
+    return body
+
+
+def _build_facade(workspace=""):
+    """The REPL build facade over the typed gateway, or one reporting it absent."""
+    if _typed_tools() is None:
+        return _BuildReplFacade(None)
+    return _BuildReplFacade(
+        lambda tool, arguments: _build_execute_tool(tool, arguments, workspace),
+    )
+
+
+def _build_outcome_lines(outcome, command, width, elapsed_ms=0):
+    """Lay out one build command's outcome with the console components.
+
+    A refusal or an absent service is one notice; a usage error is its plain
+    text; a result is a head line, a key/value table, each list section and
+    the ``next`` step, then the muted footer. Every value is tool output and
+    passes through ``safe_text`` before it is laid out.
+    """
+    if outcome.kind == "unavailable":
+        return [S.notice("warn", command, outcome.text, width=width)]
+    if outcome.kind == "usage":
+        return [S.safe_text(outcome.text)]
+    payload = outcome.payload or {}
+    if outcome.kind == "refused":
+        code = payload.get("error_code") or "FAILED"
+        detail = "%s refused: %s" % (outcome.tool, code)
+        if payload.get("message"):
+            detail += "\n" + str(payload.get("message"))
+        return [S.notice("refused", command, detail, width=width)]
+    lines = []
+    # The state first (it must survive a narrow terminal); the long
+    # identifiers are table rows, where only the value is elided.
+    state = " ".join(str(payload.get(key)) for key in ("status", "stop_reason")
+                     if payload.get(key))
+    head = _build_result_head(payload)
+    title = "%s  %s" % (outcome.tool, state) if state else outcome.tool
+    lines.append(S.s(S.truncate(S.safe_text(title), width - 1), "strong"))
+    ident = [(key, str(payload.get(key))) for key in ("job_id", "object") if payload.get(key)]
+    rows = [(S.safe_text(key), S.safe_text(value))
+            for key, value in ident + _build_summary_rows(payload)]
+    lines.extend(S.table(rows, [(4, 20, "<"), (8, None, "<")], width, indent="  "))
+    for key, total, items in _build_list_sections(payload):
+        lines.append(S.s("  %s (%d)" % (S.safe_text(key), total), "muted"))
+        for item in items:
+            lines.append(S.truncate("    " + S.safe_text(" ".join(item.split())), width - 1))
+    if payload.get("next"):
+        lines.extend(S.wrap("next: " + S.safe_text(payload["next"]), width - 1,
+                            indent="  ", hanging="    "))
+    if not rows and not head:
+        lines.append("  " + S.truncate(S.safe_text(outcome.text), width - 3))
+    lines.append(S.footer(S.FooterState(elapsed_ms=elapsed_ms, ok=True, tool_calls=1, rate=""),
+                          width))
+    return lines
+
+
+def _build_command(cmd, arg, workspace=""):
+    """``/build`` and ``/fix-build``: one typed build tool call per line.
+
+    The permission gate at the top of the slash chain already answered for
+    this line; this only parses (through the facade), runs the one call and
+    lays out its result. Piped or redirected output keeps the facade's plain
+    text, made inert with ``safe_text``.
+    """
+    started = time.monotonic()
+    outcome = _build_facade(workspace).dispatch(cmd, arg)
+    if not _stdout_is_interactive():
+        _emit(outcome.text)
+        return
+    elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
+    for line in _build_outcome_lines(outcome, " ".join(("%s %s" % (cmd, arg)).split()),
+                                     _cols(), elapsed_ms):
+        print(line)
 
 
 def _inventory_stale(snapshot):
@@ -4046,6 +4215,10 @@ def main(*, machine_output=False):
                         _crash_command(arg, workspace_root)
                     elif cmd == "/profile":
                         _profile_command(arg, workspace_root)
+                    elif cmd == "/build":
+                        _build_command(cmd, arg, workspace_root)
+                    elif cmd == "/fix-build":
+                        _build_command(cmd, arg, workspace_root)
                     elif cmd == "/activity":
                         if arg.strip().lower() in ("watch", "tail"):
                             _watch_activity()

@@ -354,6 +354,17 @@ _RULES = [
           r"(?P<arg>\S+\.(?:json|csv|etl|tracy|zst|gz|out|data|txt)|callgrind\.out\.\d+|perf\.data)"
           r"\s*[?!.]*$", _with_arg("/profile")),
     _rule(r"^fix (?:the|that) crash\s*[?!.]*$", _fixed("/crash fix last")),
+    # C/C++ build tools: whole-turn forms that name the build model, or a
+    # build *target* by the word "target". "build a game" or "fix the build
+    # so the tests pass" is work for the agent, not a build call; the target
+    # token is a plain name so the slash line needs no quoting. The resolved
+    # line still goes through the console's approval gate.
+    _rule(r"^(?:show|describe)\s+(?:me\s+)?(?:the\s+)?(?:c\+\+\s+|cmake\s+)?"
+          r"(?:build\s+model|build\s+targets)\s*[?!.]*$", _fixed("/build model")),
+    _rule(r"^build\s+(?:the\s+)?target\s+(?P<arg>[A-Za-z0-9_](?:[A-Za-z0-9_.:+-]{0,62}[A-Za-z0-9_])?)\s*[?!.]*$",
+          lambda m: "/build run %s" % m.group("arg")),
+    _rule(r"^fix\s+(?:the\s+)?(?:failing\s+|broken\s+)?build\s+(?:of|for)\s+(?:the\s+)?target\s+"
+          r"(?P<arg>[A-Za-z0-9_](?:[A-Za-z0-9_.:+-]{0,62}[A-Za-z0-9_])?)\s*[?!.]*$", _with_arg("/fix-build")),
 
     # --- environment ---
     _rule(r"^(?:show\s+(?:the\s+)?|what\s+)?(?:host\s+)?environment\b(?:\s+are\s+you\s+(?:on|in))?\s*\??$",

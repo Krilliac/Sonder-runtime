@@ -129,7 +129,8 @@ def test_refusals_and_reports_render():
 
 def test_specs_are_well_formed_and_register():
     names = [spec.name for spec in BUILD_COMMAND_SPECS]
-    assert names == ["/build", "/fix-build", "/fix-build-restore"]
+    # restore is a /fix-build verb (``/fix-build restore <id>``), not a third command
+    assert names == ["/build", "/fix-build"]
     for spec in BUILD_COMMAND_SPECS:
         assert spec.usage.startswith(spec.name) and spec.summary and spec.tools
         assert set(spec.tools) <= set(BUILD_TOOLS)

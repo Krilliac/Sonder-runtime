@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "fde833ea03d58de3c8aa3defd408f48aaa3093b50047e429242bb190f4288ffa",
+    "catalog_digest": "4c0324dcda57ad4aee1a182a7eb3ff95a2477907ced7d1a43b10827271ced723",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "fde833ea03d58de3c8aa3defd408f48aaa3093b50047e429242bb190f4288ffa",
+      "catalog_digest": "4c0324dcda57ad4aee1a182a7eb3ff95a2477907ced7d1a43b10827271ced723",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -8617,6 +8617,16 @@
     {
       "aliases": [],
       "category": "dev",
+      "name": "/build",
+      "native": true,
+      "params": [],
+      "risk": "execution",
+      "summary": "describe, configure, build or compile a C/C++ project",
+      "tool": ""
+    },
+    {
+      "aliases": [],
+      "category": "dev",
       "name": "/build_clean",
       "native": false,
       "params": [
@@ -10990,6 +11000,16 @@
       "risk": "ask",
       "summary": "Find all references to a symbol across files matching a glob.",
       "tool": "find_references"
+    },
+    {
+      "aliases": [],
+      "category": "dev",
+      "name": "/fix-build",
+      "native": true,
+      "params": [],
+      "risk": "execution",
+      "summary": "repair a failing C/C++ build target; approving lets the fix edit only its in-scope sources while it runs",
+      "tool": ""
     },
     {
       "aliases": [
@@ -14329,7 +14349,7 @@
       "name": "/runtime_policy_status",
       "native": false,
       "params": [],
-      "risk": "safe",
+      "risk": "ask",
       "summary": "Show shared local model mappings, execution-lane tiers and cached model readiness.",
       "tool": "runtime_policy_status"
     },
@@ -18052,14 +18072,14 @@
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
     "capabilities": 216,
-    "commands": 329,
+    "commands": 331,
     "configuration": 220,
     "events": 43,
     "native_tools": 66,
     "schemas": 4,
     "tools": 216
   },
-  "digest": "c375c71352ccfda2f27e9d4a1415095fb9735fde9fd041d09d9cd4cf5bde0aac",
+  "digest": "47ca143e89dd8d2fc358660fa06dee0c8bd8db16d2f0741f143960a91d7b0fe8",
   "events": [
     {
       "name": "session.started",
@@ -20670,9 +20690,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "fde833ea03d58de3c8aa3defd408f48aaa3093b50047e429242bb190f4288ffa",
+    "catalog_digest": "4c0324dcda57ad4aee1a182a7eb3ff95a2477907ced7d1a43b10827271ced723",
     "client": {
-      "digest": "fde833ea03d58de3c8aa3defd408f48aaa3093b50047e429242bb190f4288ffa",
+      "digest": "4c0324dcda57ad4aee1a182a7eb3ff95a2477907ced7d1a43b10827271ced723",
       "events": [
         {
           "name": "approval.denied",

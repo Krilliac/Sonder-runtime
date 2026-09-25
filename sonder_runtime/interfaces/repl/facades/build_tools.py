@@ -1,4 +1,4 @@
-"""REPL presentation for the C++ build tools: ``/build``, ``/fix-build``, ``/fix-build-restore``.
+"""REPL presentation for the C++ build tools: ``/build`` and ``/fix-build``.
 
 Root-free and adapter-free. Every command becomes one typed tool call through
 ``execute_tool(tool_name, arguments) -> Mapping`` (the REPL lane supplies it,
@@ -9,10 +9,16 @@ receipt per call.
 
 Wiring (owned by the REPL lane, docs/architecture/CPP-BUILD-FIX.md):
 
-* ``repl.py`` calls ``register_build_commands(register, facade_getter=...)``
-  where ``register(name, handler, spec)`` installs ``handler(arg) -> str``;
-* ``command_catalog.py`` lists ``BUILD_COMMAND_SPECS`` (name, usage, summary,
-  and the typed tools each command fronts, which grade its risk).
+* ``repl.py`` has one branch per command in its slash chain (so the catalog
+  and the permission-gate map can read them); each branch runs
+  ``BuildReplFacade.dispatch`` after the console's gate answered, and renders
+  the returned ``BuildOutcome`` (``summary_rows``/``list_sections``) with the
+  console's notice/table/footer components. ``register_build_commands``
+  installs the same handlers for a host that registers commands instead;
+* ``command_catalog.py`` maps each command to the typed tools it fronts
+  (``BUILD_COMMAND_SPECS.tools``), which grade its risk, and narrows the read
+  forms (``/build model``, ``/build status``, ``/fix-build status``) to the
+  safe member they reach.
 """
 from __future__ import annotations
 
@@ -34,9 +40,10 @@ BUILD_USAGE = (
 FIX_USAGE = (
     "usage: /fix-build <target> [--config C] [--platform P] [--file F] [--attempts N] "
     "[--revert-after] [--verify-dependents] [--dir D] [--wait S]\n"
-    "       /fix-build status|cancel <build-fix-id> [--wait S]"
+    "       /fix-build status|result|cancel <build-fix-id> [--wait S]\n"
+    "       /fix-build restore <build-fix-id> [file...]"
 )
-RESTORE_USAGE = "usage: /fix-build-restore <build-fix-id> [file...]"
+RESTORE_USAGE = "usage: /fix-build restore <build-fix-id> [file...]"
 
 
 @dataclass(frozen=True)
@@ -56,14 +63,10 @@ BUILD_COMMAND_SPECS = (
     BuildCommandSpec(
         "/fix-build",
         "/fix-build <target> [--config C] [--platform P] [--file F] [--attempts N] "
-        "[--revert-after] [--verify-dependents]",
-        "Repair a failing C/C++ build target with a bounded, verified patch loop",
-        ("build_fix", "build_fix_result"),
-    ),
-    BuildCommandSpec(
-        "/fix-build-restore", "/fix-build-restore <job_id> [file...]",
-        "Write a build fix's stored original files back",
-        ("build_fix_restore",),
+        "[--revert-after] [--verify-dependents] | status|result|cancel|restore <job_id>",
+        "Repair a failing C/C++ build target with a bounded, verified patch loop; "
+        "restore writes a fix's stored original files back",
+        ("build_fix", "build_fix_result", "build_fix_restore"),
     ),
 )
 
@@ -187,6 +190,8 @@ def parse_fix(arg: str) -> tuple[str, dict]:
     words = split_words(arg)
     if not words:
         raise UsageError("/fix-build needs a target")
+    if words[0].lower() == "restore" and len(words) >= 2 and _FIX_ID.fullmatch(words[1]):
+        return _restore_call(words[1:])
     if words[0].lower() in ("status", "result", "cancel") and len(words) >= 2 \
             and _FIX_ID.fullmatch(words[1]):
         verb = words[0].lower()
@@ -203,11 +208,15 @@ def parse_fix(arg: str) -> tuple[str, dict]:
 
 
 def parse_restore(arg: str) -> tuple[str, dict]:
-    words = split_words(arg)
+    """``<build-fix-id> [file...]`` -> ``("build_fix_restore", arguments)``."""
+    return _restore_call(split_words(arg))
+
+
+def _restore_call(words: list[str]) -> tuple[str, dict]:
     if not words or not _FIX_ID.fullmatch(words[0]) or len(words) > 7:
-        raise UsageError("/fix-build-restore <build-fix-id> [file...]")
+        raise UsageError("/fix-build restore <build-fix-id> [file...]")
     if any(word.startswith("--") for word in words[1:]):
-        raise UsageError("/fix-build-restore takes file names only")
+        raise UsageError("/fix-build restore takes file names only")
     arguments: dict[str, Any] = {"job_id": words[0]}
     if words[1:]:
         arguments["files"] = list(words[1:])
@@ -221,38 +230,74 @@ def _scalar(value: Any) -> bool:
     return isinstance(value, (str, int, float, bool)) and not isinstance(value, bytes)
 
 
+_HEAD_KEYS = ("object", "job_id", "status", "stop_reason")
+_ROW_KEYS = ("action", "system", "target", "config", "platform", "world", "network",
+             "isolation_truth", "verification_scope", "exit_code", "duration_seconds",
+             "command_digest")
+_LIST_KEYS = ("first_errors", "attempts", "files", "targets", "notes")
+_LIST_MAX_ITEMS = 24
+_ITEM_MAX_CHARS = 240
+
+
+def refusal(payload: Mapping[str, Any]) -> tuple[str, str] | None:
+    """``(error_code, message)`` for a refused call, else None."""
+    if not isinstance(payload, Mapping) or payload.get("ok") is not False:
+        return None
+    return str(payload.get("error_code") or "FAILED"), str(payload.get("message") or "")
+
+
+def result_head(payload: Mapping[str, Any]) -> str:
+    """``object job_id status stop_reason`` -- whichever are present."""
+    return " ".join(str(payload.get(key)) for key in _HEAD_KEYS if payload.get(key))
+
+
+def summary_rows(payload: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """The scalar facts of one result, in a fixed order, as ``(key, value)``."""
+    rows: list[tuple[str, str]] = []
+    for key in _ROW_KEYS:
+        value = payload.get(key)
+        if _scalar(value) and value != "":
+            rows.append((key, str(value)))
+    command = payload.get("display_command") or payload.get("display_argv")
+    if isinstance(command, list) and command:
+        rows.append(("command", " ".join(str(part) for part in command)))
+    return rows
+
+
+def list_sections(payload: Mapping[str, Any]) -> list[tuple[str, int, list[str]]]:
+    """``(key, total, first items as one-line text)`` for each list the result carries."""
+    sections: list[tuple[str, int, list[str]]] = []
+    for key in _LIST_KEYS:
+        items = payload.get(key)
+        if not isinstance(items, list) or not items:
+            continue
+        lines = []
+        for item in items[:_LIST_MAX_ITEMS]:
+            if isinstance(item, Mapping):
+                text = ", ".join("%s=%s" % (k, v) for k, v in item.items() if _scalar(v))
+            else:
+                text = str(item)
+            lines.append(text[:_ITEM_MAX_CHARS])
+        sections.append((key, len(items), lines))
+    return sections
+
+
 def render_result(tool: str, payload: Mapping[str, Any]) -> str:
     """Operator text for one typed result (the payload is already label-only)."""
     if not isinstance(payload, Mapping):
         return str(payload)[:_RENDER_MAX_CHARS]
-    if payload.get("ok") is False:
-        code = payload.get("error_code") or "FAILED"
-        message = payload.get("message") or ""
-        return "%s refused: %s%s" % (tool, code, (" -- " + str(message)) if message else "")
+    refused = refusal(payload)
+    if refused is not None:
+        code, message = refused
+        return "%s refused: %s%s" % (tool, code, (" -- " + message) if message else "")
     lines: list[str] = []
-    head = [str(payload.get(key)) for key in ("object", "job_id", "status", "stop_reason")
-            if payload.get(key)]
+    head = result_head(payload)
     if head:
-        lines.append("%s: %s" % (tool, " ".join(head)))
-    for key in ("action", "system", "target", "config", "platform", "world", "network",
-                "isolation_truth", "verification_scope", "exit_code", "duration_seconds",
-                "command_digest"):
-        value = payload.get(key)
-        if _scalar(value) and value != "":
-            lines.append("  %s: %s" % (key, value))
-    command = payload.get("display_command") or payload.get("display_argv")
-    if isinstance(command, list) and command:
-        lines.append("  command: %s" % " ".join(str(part) for part in command))
-    for key in ("first_errors", "attempts", "files", "targets", "notes"):
-        items = payload.get(key)
-        if isinstance(items, list) and items:
-            lines.append("  %s (%d):" % (key, len(items)))
-            for item in items[:24]:
-                if isinstance(item, Mapping):
-                    text = ", ".join("%s=%s" % (k, v) for k, v in item.items() if _scalar(v))
-                else:
-                    text = str(item)
-                lines.append("    " + text[:240])
+        lines.append("%s: %s" % (tool, head))
+    lines.extend("  %s: %s" % row for row in summary_rows(payload))
+    for key, total, items in list_sections(payload):
+        lines.append("  %s (%d):" % (key, total))
+        lines.extend("    " + item for item in items)
     if payload.get("next"):
         lines.append("  next: %s" % payload["next"])
     if not lines:
@@ -264,6 +309,29 @@ def render_result(tool: str, payload: Mapping[str, Any]) -> str:
     return text
 
 
+@dataclass(frozen=True)
+class BuildOutcome:
+    """One console command's result, for a surface that lays it out itself.
+
+    ``kind`` is ``"result"`` (the tool answered), ``"refused"`` (the tool or
+    the gateway refused: ``payload`` carries ``error_code``/``message``),
+    ``"usage"`` (the line did not parse; nothing ran) or ``"unavailable"``
+    (the build tools are not composed; nothing ran). ``text`` is always the
+    plain rendering, for piped output and logs.
+    """
+
+    kind: str
+    tool: str
+    payload: Mapping[str, Any] | None
+    text: str
+
+
+_COMMANDS = {
+    "/build": (lambda arg: parse_build(arg), BUILD_USAGE),
+    "/fix-build": (lambda arg: parse_fix(arg), FIX_USAGE),
+}
+
+
 class BuildReplFacade:
     """Run REPL build commands only through ``execute_tool``."""
 
@@ -271,14 +339,28 @@ class BuildReplFacade:
         self._execute_tool = execute_tool
 
     def _run(self, parser: Callable[[str], tuple[str, dict]], usage: str, arg: str) -> str:
+        return self._outcome(parser, usage, arg).text
+
+    def _outcome(self, parser: Callable[[str], tuple[str, dict]], usage: str,
+                 arg: str) -> BuildOutcome:
         if self._execute_tool is None:
-            return NOT_COMPOSED
+            return BuildOutcome("unavailable", "", None, NOT_COMPOSED)
         try:
             tool, arguments = parser(arg)
         except UsageError as exc:
-            return "%s\n%s" % (exc, usage)
+            return BuildOutcome("usage", "", None, "%s\n%s" % (exc, usage))
         payload = self._execute_tool(tool, arguments)
-        return render_result(tool, payload)
+        kind = "refused" if isinstance(payload, Mapping) and refusal(payload) else "result"
+        return BuildOutcome(kind, tool, payload if isinstance(payload, Mapping) else None,
+                            render_result(tool, payload))
+
+    def dispatch(self, command: str, arg: str) -> BuildOutcome:
+        """Run ``/build`` or ``/fix-build`` and return the structured outcome."""
+        entry = _COMMANDS.get(str(command or "").lower())
+        if entry is None:
+            raise ValueError("not a build command: %s" % str(command)[:40])
+        parser, usage = entry
+        return self._outcome(parser, usage, arg)
 
     def build(self, arg: str) -> str:
         return self._run(parse_build, BUILD_USAGE, arg)
@@ -290,9 +372,27 @@ class BuildReplFacade:
         return self._run(parse_restore, RESTORE_USAGE, arg)
 
 
+def usage_error(command: str, arg: str) -> str:
+    """The usage text ``command`` answers for ``arg`` without any tool call, or "".
+
+    Pure: the console asks this before its permission gate, so a malformed
+    line is told how to type the command instead of being asked to approve
+    (or refused) a build that would only have printed usage.
+    """
+    entry = _COMMANDS.get(str(command or "").lower())
+    if entry is None:
+        return ""
+    parser, usage = entry
+    try:
+        parser(arg)
+    except UsageError as exc:
+        return "%s\n%s" % (exc, usage)
+    return ""
+
+
 def register_build_commands(register: Callable[[str, Callable[[str], str], BuildCommandSpec], Any],
                             *, facade_getter: Callable[[], BuildReplFacade | None]) -> None:
-    """Install the three commands; the facade is resolved per call."""
+    """Install the commands; the facade is resolved per call."""
     def handler(method: str) -> Callable[[str], str]:
         def run(arg: str = "") -> str:
             facade = facade_getter()
@@ -301,13 +401,14 @@ def register_build_commands(register: Callable[[str, Callable[[str], str], Build
             return getattr(facade, method)(arg)
         return run
 
-    methods = {"/build": "build", "/fix-build": "fix_build", "/fix-build-restore": "fix_build_restore"}
+    methods = {"/build": "build", "/fix-build": "fix_build"}
     for spec in BUILD_COMMAND_SPECS:
         register(spec.name, handler(methods[spec.name]), spec)
 
 
 __all__ = [
-    "BUILD_COMMAND_SPECS", "BUILD_USAGE", "BuildCommandSpec", "BuildReplFacade", "FIX_USAGE",
-    "NOT_COMPOSED", "RESTORE_USAGE", "UsageError", "parse_build", "parse_fix", "parse_restore",
-    "register_build_commands", "render_result", "split_words",
+    "BUILD_COMMAND_SPECS", "BUILD_USAGE", "BuildCommandSpec", "BuildOutcome", "BuildReplFacade",
+    "FIX_USAGE", "NOT_COMPOSED", "RESTORE_USAGE", "UsageError", "list_sections", "parse_build",
+    "parse_fix", "parse_restore", "refusal", "register_build_commands", "render_result",
+    "result_head", "split_words", "summary_rows", "usage_error",
 ]

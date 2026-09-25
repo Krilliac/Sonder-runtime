@@ -319,10 +319,14 @@ def test_brief_labels_the_excerpt_untrusted_and_names_the_repro():
     assert "fatal error:" in brief
     assert "repro: /test ctest crash_repro_test" in brief
     assert "failure class: test_failure" in brief
-    # the next step names the build feature's tool, which is in the typed catalog
-    from sonder_runtime.bootstrap.typed_tools import BUILD_TOOLS
+    # the next step names the console's build-fix command, which the REPL
+    # routes to the build feature (a real command, not a raw tool name)
+    from sonder_runtime.interfaces.repl.facades.build_tools import BUILD_COMMAND_SPECS
 
-    assert "build_job" in brief and "build_job" in BUILD_TOOLS
+    commands = {spec.name for spec in BUILD_COMMAND_SPECS}
+    assert "/fix-build <target>" in brief and "/fix-build" in commands
+    assert "/build run compile <file>" in brief and "/build" in commands
+    assert "build_job" not in brief
 
 
 # --- hostile input: containment, redaction, escapes, fuzz ----------------------------

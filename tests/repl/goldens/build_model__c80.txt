@@ -1,0 +1,14 @@
+/build model
+build_model  ok
+  object  build_model
+  system  cmake
+  target  game
+  config  Debug
+  targets (3)
+    game
+    engine_core
+    tests
+  done <t> · 1 tool
+
+code · sonder:latest · manual · ctx 0/8.2k
+❯
