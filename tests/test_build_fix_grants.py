@@ -247,6 +247,9 @@ def test_grant_values_are_validated():
     (r"C:\Work\Proj2\a.cpp", r"C:\Work\Proj", None),
     (r"\\server\share\proj\a.cpp", r"\\server\share\proj", "a.cpp"),
     ("/p/a\x00.cpp", "/p", None),
+    # A backslash is a filename byte under a POSIX root, never a separator.
+    ("/p/build\\..\\src\\a.cpp", "/p", None),
+    ("src\\a.cpp", "/p", None),
 ])
 def test_relative_in_root_is_lexical_and_windows_aware(path, root, expected):
     assert relative_in_root(path, root) == expected
@@ -263,3 +266,17 @@ def test_diff_parsing_uses_hunk_counts():
     for bad in ("", "garbage", "--- a/x\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n",
                 "--- a/x\n+++ b/x\n@@ -1,3 +1,3 @@\n-a\n+b\n", "--- a/x\n+++ b/x\n"):
         assert diff_files_and_lines(bad) is None
+
+
+def test_a_patch_that_creates_or_renames_is_never_covered():
+    book, grant, _ = book_with_grant()
+    create = "--- /dev/null\n+++ b/src/core/math.cpp\n@@ -0,0 +1 @@\n+int evil;\n"
+    rename = ("--- a/CMakeLists.txt\n+++ b/src/core/math.cpp\n@@ -1 +1 @@\n-a\n+b\n")
+    for patch in (create, rename):
+        assert diff_files_and_lines(patch) is None
+        decision = book.authorize(grant.token, principal_id="owner", tool_name="text_patch",
+                                  arguments={"root": ROOT, "patch": patch, "apply": True})
+        assert not decision.allowed
+    same = diff("src/core/math.cpp")
+    assert book.authorize(grant.token, principal_id="owner", tool_name="text_patch",
+                          arguments={"root": ROOT, "patch": same, "apply": True}).allowed

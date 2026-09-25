@@ -86,6 +86,10 @@ def relative_in_root(path: object, root: object) -> str | None:
     if "\x00" in path or "\x00" in root:
         return None
     windows = _is_windows_path(root) or _is_windows_path(path)
+    if windows and not _is_windows_path(root):
+        # A backslash is an ordinary filename byte under a POSIX root: reading
+        # it as a separator would check a different path than the one written.
+        return None
     module = ntpath if windows else posixpath
     if not module.isabs(root):
         return None
@@ -305,10 +309,18 @@ def diff_files_and_lines(patch: object) -> tuple[tuple[str, ...], int] | None:
         if not lines[i].startswith("--- ") or i + 1 >= len(lines) \
                 or not lines[i + 1].startswith("+++ "):
             return None
-        path = lines[i + 1][4:].strip()
-        if not path or path == "/dev/null":
-            return None  # deletions are never part of a fix
-        files.append(path[2:] if path.startswith("b/") else path)
+        old = lines[i][4:]
+        path = lines[i + 1][4:]
+        if not path or path == "/dev/null" or old == "/dev/null":
+            return None  # creations and deletions are never part of a fix
+        new_rel = path[2:] if path.startswith("b/") else path
+        old_rel = old[2:] if old.startswith("a/") else old
+        if old_rel != new_rel:
+            # text_patch applies the '+++' path and treats '--- /dev/null' as
+            # a create; a grant speaks only for an in-place modification of
+            # the one path it checked, so both headers must name it exactly.
+            return None
+        files.append(new_rel)
         i += 2
         hunks = 0
         while i < len(lines) and lines[i].startswith("@@ "):

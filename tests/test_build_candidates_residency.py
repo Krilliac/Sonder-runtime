@@ -133,3 +133,13 @@ def test_route_names_are_validated():
         ModelCandidateGenerator(Gateway(), route="bad route; rm -rf /")
     with pytest.raises(TypeError):
         ModelCandidateGenerator(object())
+
+
+def test_without_a_residency_resolver_a_plain_route_name_proves_nothing():
+    gateway = Gateway()  # no resolve_route: residency is unknown
+    with pytest.raises(ResidencyRefused):
+        ModelCandidateGenerator(gateway, route="codegen").propose(evidence(), ctx())
+    assert gateway.requests == []
+    # With cloud consent the unknown route may be used (treated as cloud).
+    ModelCandidateGenerator(gateway, route="codegen").propose(evidence(), ctx(cloud=True))
+    assert len(gateway.requests) == 1

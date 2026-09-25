@@ -81,6 +81,13 @@ class ModelCandidateGenerator:
             if type(route_cloud) is not bool:
                 raise ResidencyRefused("the candidate route has no residency classification")
             cloud = cloud or route_cloud
+        elif not context.cloud_allowed:
+            # No resolver means the route's residency is unknown: a route name
+            # alone does not prove the tier is local. Fail closed.
+            raise ResidencyRefused("the candidate route has no residency resolver; source text "
+                                   "was not sent")
+        else:
+            cloud = True
         if cloud and not context.cloud_allowed:
             raise ResidencyRefused(
                 "route %r may leave the machine and this caller has no cloud consent; source "

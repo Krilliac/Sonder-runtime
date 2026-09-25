@@ -105,6 +105,10 @@ class FakeEditor:
 
     def replace(self, rel, new_text, *, expected_sha256, ctx):
         self.contexts.append(ctx)
+        operation = ctx.operation
+        if operation.cancellation.cancelled or operation.expired:
+            # As the typed gateway does: a cancelled or expired request is refused.
+            raise EditRefused("the request was cancelled or expired", rel=rel)
         if self.refuse_writes:
             raise EditRefused("refused by policy", rel=rel)
         if self.conflict_on_write is not None:
@@ -153,6 +157,7 @@ class FakeJobs:
         self.compile_one_build_dir = None
         self.compile_one_fallback = False
         self.parents = []
+        self.block_from = 0
 
     def plan(self, request, context, *, lease=None):
         action = request.action
@@ -190,7 +195,7 @@ class FakeJobs:
         child = "build-job-" + uuid.uuid4().hex
         self.started.append((child, request.action, request.file or request.target))
         self.parents.append(parent_job_id)
-        if not self.block_builds:
+        if not self.block_builds and not (self.block_from and len(self.started) >= self.block_from):
             self.reports[child] = self._report(child, request)
         else:
             self.pending = (child, request)
@@ -618,3 +623,49 @@ def test_threads_come_from_the_injected_factory(tmp_path):
     job, _ = h.run(attempts=1)
     assert started == ["build-fix-%s" % job[-8:]]
     assert threading.active_count() >= 1
+
+
+def test_a_candidate_being_verified_when_the_fix_is_cancelled_is_reverted(tmp_path):
+    h = Harness(tmp_path, script=[patch("src/a.cpp", "int x = ERR1;", "int x = 1;")], sync=False)
+    h.jobs.block_from = 2  # the baseline finishes; the verification build hangs
+    request = BuildFixRequest(project=h.root, target="core", revert_after=True)
+    context = ctx()
+    job = h.service.start(request, context)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and len(h.jobs.started) < 2:
+        time.sleep(0.01)
+    assert len(h.jobs.started) == 2 and h.editor.writes  # the candidate is on disk
+    h.service.cancel(job, context)
+    report = h.service.result(job, context, wait_seconds=30)
+    assert report.stop_reason is FixStopReason.CANCELLED
+    # The unverified candidate did not survive the cancel, although the run's
+    # own context is cancelled (the gateway refuses cancelled requests).
+    assert h.editor.files == h.originals
+    assert not report.applied
+    assert any("unverified candidate was reverted" in note for note in report.notes)
+
+
+def test_revert_after_still_restores_when_the_wall_budget_ran_out(tmp_path, monkeypatch):
+    clock = {"now": time.monotonic()}
+    h = Harness(tmp_path, script=[
+        patch("src/a.cpp", "int x = ERR1;", "int x = 1;"),
+        patch("src/a.cpp", "int y = ERR2;", "int y = ERR2; int w = ERR3;"),
+    ])
+    started = []
+    real_start = h.jobs.start
+
+    def start(request, context, **kwargs):
+        started.append(request.action)
+        if len(started) == 4:  # the second candidate's check: the budget is gone
+            clock["now"] += 10_000
+        return real_start(request, context, **kwargs)
+
+    h.jobs.start = start
+    monkeypatch.setattr(time, "monotonic", lambda: clock["now"])
+    h.service._monotonic = time.monotonic  # the service's injected clock, same scale
+    job, report = h.run(attempts=4, revert_after=True, timeout_seconds=600)
+    assert report.stop_reason is FixStopReason.BUDGET_EXHAUSTED
+    # The regressed candidate was reverted and revert_after restored the
+    # originals, although the run's own deadline had passed.
+    assert h.editor.files == h.originals
+    assert any("originals were restored" in note for note in report.notes)

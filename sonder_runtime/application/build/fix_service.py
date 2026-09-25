@@ -753,7 +753,23 @@ class BuildFixService:
         except DeadlineExceeded:
             state.stop = FixStopReason.BUDGET_EXHAUSTED
             state.notes.append("the fix's wall budget ran out")
+        self._revert_unjudged(run, state)
         return self._finish(run, state)
+
+    def _revert_unjudged(self, run: _Run, state: "_LoopState") -> None:
+        """A candidate written but never judged (the loop stopped while verifying
+        it) is not the best: put the best back. An uncertain side effect is
+        never reverted blindly."""
+        pending = tuple(sorted(state.pending))
+        state.pending = set()
+        if not pending or state.stop is FixStopReason.UNCERTAIN_SIDE_EFFECT or state.uncertain:
+            return
+        try:
+            self._revert_files(run, state, pending)
+            state.notes.append("the unverified candidate was reverted to the best state")
+        except _Stop as stop:
+            state.stop = FixStopReason.UNCERTAIN_SIDE_EFFECT
+            state.notes.append(stop.note or stop.reason.value)
 
     def _check_live(self, run: _Run) -> None:
         if run.ctx.cancellation.cancelled:
@@ -861,6 +877,7 @@ class BuildFixService:
                     reasons=("propose only: validated, not written or verified",), action="repair"))
                 raise _Stop(FixStopReason.ATTEMPTS_EXHAUSTED,
                             "propose only: the first valid candidate is reported, not applied")
+            state.pending = set(new_texts)
             intents = self._write(run, state, new_texts)
             state.lines_used += _changed_lines(state, new_texts)
             state.files_used |= set(new_texts)
@@ -870,6 +887,7 @@ class BuildFixService:
             if not improved and self._focus_fixed_elsewhere(state, progress, report, focus, new_texts):
                 improved = rebaseline = True
             before = state.best
+            state.pending = set()
             if improved:
                 state.best = progress
                 state.best_report = report
@@ -1052,7 +1070,7 @@ class BuildFixService:
                 continue
             try:
                 receipt = self._editor.replace(rel, target, expected_sha256=state.current_sha[rel],
-                                               ctx=run.edit_ctx)
+                                               ctx=self._cleanup_edit_ctx(run))
             except EditConflict as exc:
                 raise _Stop(FixStopReason.UNCERTAIN_SIDE_EFFECT,
                             "reverting %s failed (%s); nothing further was reverted"
@@ -1153,6 +1171,14 @@ class BuildFixService:
     def _cleanup_ctx(self, run: _Run) -> OperationContext:
         return replace(run.ctx, cancellation=_NeverCancelled(),
                        deadline_monotonic=self._monotonic() + _CHILD_CANCEL_GRACE)
+
+    def _cleanup_edit_ctx(self, run: _Run) -> EditContext:
+        """Reverts must still land after a cancel or an exhausted wall budget:
+        the gateway refuses a cancelled or expired request, which would leave
+        a rejected candidate (or revert_after's edits) on disk. Cleanup edits
+        get a fresh bounded grace deadline and are not cancellable; they still
+        carry the grant, so the grant's scope and budgets apply unchanged."""
+        return replace(run.edit_ctx, operation=self._cleanup_ctx(run))
 
     def _child_build(self, run: _Run, action: str, *, target: str = "", file: str = "") -> Any:
         request = run.plan.request
@@ -1283,7 +1309,7 @@ class BuildFixService:
                 continue
             try:
                 receipt = self._editor.replace(rel, original, expected_sha256=state.current_sha[rel],
-                                               ctx=run.edit_ctx)
+                                               ctx=self._cleanup_edit_ctx(run))
             except (EditConflict, EditRefused) as exc:
                 raise _Stop(FixStopReason.UNCERTAIN_SIDE_EFFECT,
                             "restoring %s failed: %s" % (rel, _clip(exc, 120))) from None
@@ -1347,6 +1373,7 @@ class _LoopState:
         self.best_texts: dict[str, str] = {}
         self.preimaged: set[str] = set()
         self.proposals: dict[str, str] = {}
+        self.pending: set[str] = set()
         self.attempts: list[FixAttemptRecord] = []
         self.decisions: list[Any] = []
         self.effect_intents: list[str] = []
