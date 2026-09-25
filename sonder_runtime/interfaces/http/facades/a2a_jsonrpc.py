@@ -87,7 +87,12 @@ def build_application_a2a_handler(
         }.get(getattr(record.status, "value", str(record.status)), "TASK_STATE_FAILED")
         status = {"state": state}
         if getattr(record, "error", ""):
-            status["message"] = {"role": "ROLE_AGENT", "parts": [{"text": "task failed"}]}
+            # Name the terminal state the task actually reached; a cancelled
+            # task carries its cancel reason in ``error`` but did not fail.
+            summary = {
+                "TASK_STATE_CANCELED": "task cancelled",
+            }.get(state, "task failed")
+            status["message"] = {"role": "ROLE_AGENT", "parts": [{"text": summary}]}
         identity = record.identity
         task = {
             "id": identity.job_id,

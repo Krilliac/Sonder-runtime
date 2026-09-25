@@ -53,6 +53,7 @@ _SPANDA_CONFIG = None
 _MEMORY_REPLICATION_RECEIVER = None
 _MEMORY_REPLICATION_SERVICE = None
 _ACCOUNT_LOGOUT_ADMISSION = threading.BoundedSemaphore(2)
+from sonder_runtime.platform import context_policy
 
 import logging as _logging_module
 _serve_logger = _logging_module.getLogger(__name__)
@@ -395,8 +396,15 @@ def _local_server_log_tail():
             size = stream.tell()
             stream.seek(max(0, size - _LOCAL_LOG_TAIL_BYTES))
             raw = stream.read(_LOCAL_LOG_TAIL_BYTES)
-    except OSError:
-        return "(server log is not available yet)"
+    except FileNotFoundError:
+        return (
+            "(no launcher-managed server log at %s: the server was started "
+            "without the launcher, or its output is redirected elsewhere -- "
+            "read the log where that output goes, e.g. the service journal)" % path
+        )
+    except OSError as error:
+        return "(server log at %s could not be read: %s)" % (
+            path, error.strerror or type(error).__name__)
     # Keep the diagnostic projection stable across Git/OS newline modes;
     # carriage returns are transport framing, not control characters to mask.
     text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n")
@@ -2706,6 +2714,9 @@ def _slash_system_operation(command, argument):
     return ""
 
 
+_BARE_SLASH_COMMAND = re.compile(r"/[A-Za-z][A-Za-z0-9_-]{0,63}")
+
+
 def _handle_slash(content, messages=None, state=None, project="", context=None,
                   idempotency_key=""):
     """Return response text if `content` is a recognized slash command, else None."""
@@ -3074,6 +3085,14 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
     if dispatched is not None:
         return dispatched
 
+    if _BARE_SLASH_COMMAND.fullmatch(stripped):
+        # A lone "/word" is a command attempt, not a sentence: answer without
+        # spending a model call on a typo.  Same text as a hidden command so
+        # the reply does not reveal which names exist for other accounts.
+        return (
+            "No command with that name is available to this account. "
+            "Use /help to list the commands you can run."
+        )
     return None  # not a recognized slash command — fall through to the model
 
 
@@ -6389,6 +6408,10 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
         model = req.get("model", "sonder")
+        if isinstance(model, str):
+            # Surrounding whitespace is not part of a model name; echoing it
+            # back made the response name a model that does not exist.
+            model = model.strip()
         if not isinstance(model, str):
             record_early_chat_metric("invalid_model")
             self._send_json_payload(
@@ -6535,6 +6558,22 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             _serve_logger.error(f"model prewarm failed for selector={model_selector!r}", exc_info=True)
         context_size = req.get("context_size", "")
+        if context_size is None:
+            context_size = ""
+        if context_size != "" and (
+            isinstance(context_size, bool)
+            or not isinstance(context_size, (str, int))
+            or context_policy.parse_strict(context_size) is None
+        ):
+            # Previously any unparseable or non-positive value silently fell
+            # back to the default window; say so instead.
+            record_early_chat_metric("invalid_context_size")
+            self._send_json_payload({"error": {
+                "message": "context_size must be a positive token count, optionally "
+                           "suffixed k or m (e.g. 8192, 32k, 1m)",
+                "type": "invalid_request",
+            }}, status=400)
+            return
         location_consent = req.get("location_consent") is True
         location_hint = req.get("location_hint")
         if location_hint is not None and not isinstance(location_hint, dict):
