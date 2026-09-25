@@ -10,6 +10,15 @@ it does not import an MCP SDK or perform provider/network I/O. The
 An interface adapter remains responsible for encoding these results on the
 actual MCP transport and for any externally authorized connection lifecycle.
 
+A negotiation carries two capability sets. `server_capabilities` is everything
+the server supports, and it is what the `initialize` result advertises: MCP has
+each side declare its own capabilities, so a client that sends
+`capabilities: {}` still learns that `tools` is served. `capabilities` is the
+intersection with the client's advertised keys, and features that need the
+client's opt-in (MCP Tasks) stay gated on it. The native transport reports the
+runtime build version (`sonder_runtime.platform.version.runtime_version()`) as
+`serverInfo.version`.
+
 Focused coverage verifies preferred-version selection, fail-closed legacy
 negotiation, capability intersection, subscription delivery, and removal.
 Formal API-003 checklist status remains unchanged until the complete MCP v2

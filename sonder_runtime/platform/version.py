@@ -82,6 +82,17 @@ def stamped_build_info() -> BuildInfo | None:
     return None
 
 
+def runtime_version() -> str:
+    """The running build's version label, without starting a subprocess.
+
+    A stamped release reports its stamp; a source checkout reports
+    :data:`VERSION`. Protocol surfaces (MCP ``serverInfo.version``) use this so
+    a client can tell which build answered without paying for a git probe.
+    """
+    stamped = stamped_build_info()
+    return stamped.version if stamped is not None else VERSION
+
+
 def build_info() -> BuildInfo:
     stamped = stamped_build_info()
     if stamped is not None:

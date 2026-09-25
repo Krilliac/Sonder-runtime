@@ -36,6 +36,7 @@ from ..application.protocol.mcp_compatibility import (
 from ..application.protocol.mcp_tasks import McpTaskHandler
 from ..domain.tools.descriptors import ToolEffect
 from ..interfaces.mcp.transport import McpTransportError, StdioMcpTransport
+from ..platform.version import runtime_version
 
 _PATH = {"type": "string", "minLength": 1}
 _ROOT = {"type": "string"}
@@ -1116,6 +1117,7 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
         tool_catalog=discovery_tools if discovery is not None else registry,
         tool_handler=execute,
         task_handler=task_handler,
+        server_info_version=runtime_version(),
     )
     try:
         return transport.serve()

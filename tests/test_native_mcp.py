@@ -579,9 +579,43 @@ def test_native_mcp_composes_durable_tasks_when_job_service_is_available():
         output_stream=output,
     )
     rows = [json.loads(line) for line in output.getvalue().splitlines()]
-    assert rows[0]["result"]["capabilities"] == {"tasks": {}}
+    assert rows[0]["result"]["capabilities"] == {"tools": {}, "notifications": {}, "tasks": {}}
     assert rows[1]["result"]["taskId"] == "job-1"
     assert rows[1]["result"]["contentRedacted"] is True
+
+
+def test_native_initialize_advertises_server_capabilities_and_build_version():
+    """A client that sends ``capabilities: {}`` still learns tools are served.
+
+    MCP has each side declare its own capabilities. Initialize used to answer
+    with the intersection, so the official client read ``tools`` as absent
+    even though ``tools/list`` worked. ``serverInfo.version`` names the build,
+    not the ``2.0`` contract label.
+    """
+    from sonder_runtime.platform.version import runtime_version
+
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+        }},
+        {"jsonrpc": "2.0", "id": 2, "method": "tasks/get", "params": {"taskId": "job-1"}},
+    ]
+    app = _app()
+    app.job_service = lambda: _Jobs()
+    output = io.StringIO()
+    run_native_mcp(
+        app,
+        input_stream=io.StringIO("\n".join(json.dumps(item) for item in requests) + "\n"),
+        output_stream=output,
+    )
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    result = rows[0]["result"]
+    assert "tools" in result["capabilities"]
+    assert "tasks" in result["capabilities"]
+    assert result["serverInfo"] == {"name": "sonder-runtime", "version": runtime_version()}
+    # Advertising is not enabling: Tasks still need the client's opt-in.
+    assert rows[1]["error"]["code"] == -32602
+    assert "not negotiated" in rows[1]["error"]["message"]
 
 
 def test_native_legacy_file_read_alias_calls_canonical_executor():

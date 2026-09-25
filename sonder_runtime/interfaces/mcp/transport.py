@@ -107,6 +107,7 @@ class StdioMcpTransport:
         legacy_contract: LegacyMcpContract | None = None,
         notifications: SubscriptionNotificationRouter | None = None,
         connection_id: str = "stdio", limits: McpTransportLimits | None = None,
+        server_info_version: str | None = None,
     ) -> None:
         if not connection_id or not callable(getattr(input_stream, "readline", None)):
             raise ValueError("MCP transport requires an input stream and connection id")
@@ -122,6 +123,13 @@ class StdioMcpTransport:
         self._legacy_contract = legacy_contract
         self._router, self._connection_id = notifications, connection_id
         self._limits = limits or McpTransportLimits()
+        if server_info_version is not None and (
+            not isinstance(server_info_version, str) or not server_info_version.strip()
+        ):
+            raise ValueError("MCP serverInfo version must be a non-empty string")
+        # ``serverInfo.version`` names the implementation build. Callers that
+        # predate this argument keep the historical negotiated contract label.
+        self._server_info_version = server_info_version
         self._negotiation: McpNegotiation | None = None
         self._write_lock = threading.Lock()
         self._catalog = self._build_catalog(tool_catalog)
@@ -319,9 +327,19 @@ class StdioMcpTransport:
                 f"MCP session negotiated version={self._negotiation.agreed_version!r}, "
                 f"capabilities={sorted(self._negotiation.capabilities)}"
             )
+            # Advertise what this server supports, not the intersection with
+            # the client's own capability keys: MCP capabilities are declared
+            # per side, and a client that sent ``{}`` would otherwise be told
+            # this server has no tools.
             return {"protocolVersion": self._negotiation.agreed_version,
-                    "capabilities": {name: {} for name in self._negotiation.capabilities},
-                    "serverInfo": {"name": "sonder-runtime", "version": self._negotiation.server_version}}
+                    "capabilities": {
+                        name: {} for name in self._negotiation.server_capabilities
+                    },
+                    "serverInfo": {
+                        "name": "sonder-runtime",
+                        "version": self._server_info_version
+                        or self._negotiation.server_version,
+                    }}
         if self._negotiation is None:
             raise McpTransportError("initialize is required")
         if method == "notifications/initialized":

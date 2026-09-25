@@ -46,8 +46,15 @@ class McpNegotiation:
     server_version: str
     client_version: str
     agreed_version: str
+    # Capabilities both sides advertised. Features that need the client's
+    # cooperation (for example MCP Tasks) are gated on this set.
     capabilities: tuple[str, ...] = ()
     legacy_contract: LegacyMcpContract | None = None
+    # Everything this server supports. MCP has each side declare its own
+    # capabilities, so this -- not the intersection -- is what an
+    # ``initialize`` result advertises; a client that sent ``{}`` must still
+    # learn that ``tools`` is served.
+    server_capabilities: tuple[str, ...] = ()
 
 
 class McpCompatibility:
@@ -120,6 +127,7 @@ class McpCompatibility:
             agreed_version=agreed,
             capabilities=capabilities,
             legacy_contract=selected_legacy,
+            server_capabilities=self._capabilities,
         )
 
 

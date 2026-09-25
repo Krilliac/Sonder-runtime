@@ -12,6 +12,9 @@ def test_negotiation_prefers_supported_v2_and_intersects_capabilities():
     result = compatibility.negotiate(("2.0", "1.0"), client_capabilities=("tools", "other"))
     assert result.agreed_version == "2.0"
     assert result.capabilities == ("tools",)
+    # What initialize advertises is the server's own set, never the overlap.
+    assert result.server_capabilities == ("notifications", "tools")
+    assert compatibility.negotiate(("2.0",)).server_capabilities == ("notifications", "tools")
 
 
 def test_default_compatibility_supports_standard_and_legacy_handshakes():
