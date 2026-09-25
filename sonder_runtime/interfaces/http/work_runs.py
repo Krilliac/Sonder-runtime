@@ -25,6 +25,7 @@ composition in ``serve.py``; this module stays free of adapter imports.
 """
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import hashlib
 import logging
@@ -88,11 +89,19 @@ class WorkRunner:
 
     def __init__(self, *, store, effects, wait_seconds=DEFAULT_WAIT_SECONDS,
                  budget_seconds=DEFAULT_BUDGET_SECONDS,
-                 max_running=DEFAULT_MAX_RUNNING, clock=time.monotonic):
+                 max_running=DEFAULT_MAX_RUNNING, clock=time.monotonic,
+                 stop_reason: Callable[[], str] | None = None,
+                 lifetime: Callable[[], object] | None = None):
         # ``store``: start/finish/get/recent/request_cancel/cancel_requested/
         # reconcile.  ``effects``: Fence, held(fence), reason_lost(fence).
+        # ``stop_reason()``: a process-wide reason every run must stop
+        # changing things (the runtime is draining), or "".  ``lifetime()``:
+        # a context manager held by the run's thread for its whole life, so a
+        # graceful drain can count a run that outlived its request.
         self._store = store
         self._effects = effects
+        self._stop_reason = stop_reason
+        self._lifetime = lifetime
         self.configure(wait_seconds=wait_seconds, budget_seconds=budget_seconds,
                        max_running=max_running)
         self._clock = clock
@@ -120,6 +129,10 @@ class WorkRunner:
         run_id = run.run_id
 
         def check() -> str:
+            if self._stop_reason is not None:
+                stopping = self._stop_reason()
+                if stopping:
+                    return "HTTP work run %s was interrupted: %s" % (run_id, stopping)
             if self._clock() >= run.deadline:
                 return "HTTP work run %s exceeded its wall-clock budget" % run_id
             if self._store.cancel_requested(run_id):
@@ -171,7 +184,9 @@ class WorkRunner:
             status, text = "failed", ""
             token = _CURRENT_RUN.set(run_id)
             try:
-                with self._effects.held(fence):
+                lifetime = (self._lifetime() if self._lifetime is not None
+                            else contextlib.nullcontext())
+                with lifetime, self._effects.held(fence):
                     run.result = call()
                 status, text = classify(run.result)
             except BaseException as error:  # recorded, then surfaced if attached
@@ -181,7 +196,11 @@ class WorkRunner:
                 _CURRENT_RUN.reset(token)
                 lost = self._effects.reason_lost(fence)
                 if status not in ("refused",) and lost:
-                    status = "cancelled" if "cancelled" in lost else "budget_exceeded"
+                    status = (
+                        "interrupted" if "interrupted" in lost
+                        else "cancelled" if "cancelled" in lost
+                        else "budget_exceeded"
+                    )
                 try:
                     self._store.finish(run_id, status, text)
                 except Exception:

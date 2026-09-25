@@ -3267,11 +3267,45 @@ def _work_project_for_request(project, storage_project):
     return server.served_work_project(project) or storage_project
 
 
+def _work_run_stop_reason():
+    """Stop every work run's effects once the runtime starts draining."""
+    try:
+        draining = sonder_lifecycle.get().coordinator.draining
+    except Exception:
+        # A lifecycle that cannot be read cannot vouch for further effects.
+        return "the runtime lifecycle could not be read"
+    return "the runtime is draining for shutdown" if draining else ""
+
+
+@contextlib.contextmanager
+def _work_run_lifetime():
+    """Count a work run as an in-flight mutation for the graceful drain.
+
+    A run can outlive the request that admitted it (and that request's
+    admission slot); counting it here lets a drain wait its bounded deadline
+    for the run's current effect to finish instead of exiting under it.
+    """
+    coordinator = None
+    counted = False
+    try:
+        coordinator = sonder_lifecycle.get().coordinator
+        counted = bool(coordinator.begin_mutation())
+    except Exception:
+        _serve_logger.warning("work run could not be counted for graceful drain", exc_info=True)
+    try:
+        yield
+    finally:
+        if counted:
+            coordinator.end_mutation()
+
+
 _WORK_RUNNER = WorkRunner(
     store=http_work_runs, effects=effect_fence,
     wait_seconds=_env_int("SONDER_HTTP_WORK_WAIT_SECONDS", 240),
     budget_seconds=_env_int("SONDER_HTTP_WORK_BUDGET_SECONDS", 1800),
     max_running=_env_int("SONDER_HTTP_WORK_MAX_RUNNING", 2),
+    stop_reason=_work_run_stop_reason,
+    lifetime=_work_run_lifetime,
 )
 
 

@@ -169,9 +169,15 @@ autopilot) runs as a **work run** with id `wr-…`:
   holds: the permission gate refuses every further file change, host program,
   or destructive tool, and the run ends as `budget_exceeded` or `cancelled`.
   A model step already in flight cannot be preempted from the HTTP layer; the
-  lane's remaining steps run to their step bound without effects. Fleet
-  workers and autopilot runs keep their own cancel surfaces (`/master_cancel`,
-  `/autopilot cancel`).
+  lane's remaining steps run to their step bound without effects. The fence
+  covers effects on the run's own thread (the workbench lane). Fleet workers
+  and autopilot runs execute on their own threads under their own fences, so
+  cancelling the work run does not stop them; use their cancel surfaces
+  (`/master_cancel`, `/autopilot cancel`).
+- A shutdown drain also fences every work run: once the runtime is draining,
+  further effects are refused and the run ends as `interrupted`. A run that
+  outlived its request still counts as an in-flight mutation, so the drain
+  waits its bounded deadline for the current effect to finish.
 - At most `[server].work_max_running` (default 2,
   `SONDER_HTTP_WORK_MAX_RUNNING`) runs execute at once; another routed turn
   is refused with `429 WORK_CAPACITY_EXHAUSTED` and `Retry-After`.

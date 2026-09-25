@@ -178,3 +178,39 @@ def test_work_run_http_routes(work_env, monkeypatch):
         handler, "POST", "/v1/work-runs/%s/cancel" % result.work_run_id, context=LOCAL)
     assert sent[-1][1] == 200 and sent[-1][0]["status"] == "returned"
     assert not serve.Handler._handle_work_run_request(handler, "GET", "/v1/fanout")
+
+
+def test_drain_fences_a_detached_run_and_counts_it_as_in_flight(work_env, monkeypatch):
+    """A run that outlived its request must not keep changing things through a
+    shutdown drain, and the drain must see it as an in-flight mutation."""
+    runner = work_runs.WorkRunner(
+        store=http_work_runs, effects=effect_fence, wait_seconds=1, budget_seconds=60,
+        max_running=1, stop_reason=serve._work_run_stop_reason,
+        lifetime=serve._work_run_lifetime,
+    )
+    monkeypatch.setattr(serve, "_WORK_RUNNER", runner)
+    started, drained, observed = threading.Event(), threading.Event(), {}
+
+    def lane(prompt, **_kwargs):
+        fence = effect_fence.current()
+        observed["before"] = effect_fence.reason_lost(fence)
+        started.set()
+        drained.wait(10)
+        observed["after"] = effect_fence.reason_lost(fence)
+        return "stopped by drain"
+
+    monkeypatch.setattr(server, "route_work_request", lane)
+    pending = _work()
+    assert pending.status == "running"
+    assert started.wait(5)
+    coordinator = sonder_lifecycle.get().coordinator
+    # The request has returned; only the detached run is still counted.
+    assert coordinator.active_mutations == 1
+    with coordinator._lock:
+        coordinator._draining.set()
+    drained.set()
+    record = _wait_finished(pending.work_run_id)
+    assert observed["before"] == ""
+    assert "draining" in observed["after"]
+    assert record["status"] == "interrupted"
+    assert coordinator.active_mutations == 0
