@@ -14,7 +14,10 @@ payloads from ``application.debugging.presenters``. Only paths, engine names
 and bounded numbers are caller-controlled; argv, environment and symbol
 servers are host-owned. Symbol-server egress needs an attended console, so an
 HTTP request asking for it is refused here, before the service is reached
-(the service refuses it again with the same code).
+(the service refuses it again with the same code). The two routes that
+launch a host debugger or profiler are graded by ``authorize`` first (the
+permission modes, as for a typed-gateway call from HTTP; serve.py wires
+``bootstrap.debug_tools.debug_http_authorizer``).
 
 Every method returns ``(status, payload)`` with a compact JSON payload of at
 most 48,000 bytes; failures carry ``{"ok": false, "error_code": ...}``.
@@ -28,6 +31,7 @@ from typing import Any, Callable
 from sonder_runtime.application.context import OperationContext
 from sonder_runtime.application.errors import (
     CapacityExceeded,
+    Forbidden,
     InvalidInput,
     NotFound,
     SonderError,
@@ -194,10 +198,41 @@ class DebugToolsHttpFacade:
     """``(status, payload)`` for each debug route; ``service_getter`` is lazy."""
 
     def __init__(self, service_getter: Callable[[], Any] | None,
-                 *, presenters: Any = None, ports: Any = None) -> None:
+                 *, presenters: Any = None, ports: Any = None,
+                 authorize: Callable[[str, dict, OperationContext], Any] | None = None) -> None:
         self._service_getter = service_getter
         self._presenters_override = presenters
         self._ports_override = ports
+        self._authorize = authorize
+
+    def _permission(self, tool: str, arguments: dict,
+                    context: OperationContext) -> tuple[int, dict] | None:
+        """The permission modes' decision for a host-launching route, or None to proceed.
+
+        ``crash_digest`` and ``profile_capture_digest`` start a host debugger
+        or profiler, so an admin HTTP call is graded exactly as the typed
+        gateway grades it (``authorize``: plan binding, operator deny rules,
+        ``plan`` mode, one-shot approval by ``call_id``). A refusal is a
+        typed 403 carrying the ``call_id`` an operator can approve; a plan the
+        host refuses keeps its own error code.
+        """
+        if self._authorize is None:
+            return None
+        try:
+            self._authorize(tool, {key: value for key, value in arguments.items()
+                                   if value is not None}, context)
+        except Forbidden as exc:
+            decision = getattr(exc, "decision", None)
+            decision = dict(decision) if isinstance(decision, dict) else {}
+            if decision.get("stage") == "plan":
+                code = str(decision.get("error_code") or "INVALID_DEBUG_REQUEST")
+                return _error(_STATUS_BY_CODE.get(code, 400), code)
+            status, body = _error(403, "PERMISSION_DENIED")
+            call_id = decision.get("call_id")
+            if isinstance(call_id, str) and call_id:
+                body["call_id"] = call_id[:128]
+            return status, body
+        return None
 
     # -- plumbing --------------------------------------------------------------
 
@@ -304,6 +339,13 @@ class DebugToolsHttpFacade:
             wait = _number(body, "wait_seconds", 0, 120, 0)
         except _BadRequest:
             return _error(400, "INVALID_DEBUG_REQUEST")
+        refused = self._permission("crash_digest", {
+            "path": request.path, "executable": request.executable,
+            "symbol_dirs": list(request.symbol_dirs), "engine": request.engine,
+            "symbol_server": False, "timeout_seconds": request.timeout_seconds,
+        }, context)
+        if refused is not None:
+            return refused
         try:
             outcome = service.crash(request, context, wait_seconds=wait, console_confirmed=False)
         except (SonderError, PermissionError) as exc:
@@ -353,6 +395,14 @@ class DebugToolsHttpFacade:
             wait = _number(body, "wait_seconds", 0, 120, 0)
         except _BadRequest:
             return _error(400, "INVALID_DEBUG_REQUEST")
+        refused = self._permission("profile_capture_digest", {
+            "path": request.path, "executable": request.executable, "engine": request.engine,
+            "symbol_dirs": list(request.symbol_dirs), "top_n": request.top_n,
+            "frame_budget_ms": request.frame_budget_ms, "thread": request.thread,
+            "timeout_seconds": request.timeout_seconds,
+        }, context)
+        if refused is not None:
+            return refused
         try:
             outcome = service.profile(request, context, wait_seconds=wait)
         except (SonderError, PermissionError) as exc:

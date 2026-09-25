@@ -328,3 +328,54 @@ def test_both_typed_facades_carry_the_debug_resolvers_next_to_the_build_ones():
     assert source.count("**debug_permission_resolvers(debug_tools)") == 2
     assert source.count("_debug_executor_chain(debug_tools, developer_tools)") == 2
     assert source.count("grant_authorities=(build_grants,)") == 2
+
+
+# -- the admin HTTP routes ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("mode", [pm.PLAN, pm.MANUAL, pm.ACCEPT_EDITS])
+def test_admin_http_crash_digest_is_graded_like_an_unattended_gateway_call(monkeypatch, ledger,
+                                                                            mode):
+    """An admin HTTP call launches no debugger that the permission modes refuse."""
+    from sonder_runtime.application.context import local_owner_context
+    from sonder_runtime.bootstrap.debug_tools import debug_http_authorizer
+    from sonder_runtime.interfaces.http.facades.debug_tools import DebugToolsHttpFacade
+
+    monkeypatch.setattr(pm, "current_mode", lambda: mode)
+    stack = debug_stack()
+    service = stack.service()
+    facade = DebugToolsHttpFacade(lambda: service, authorize=debug_http_authorizer(service))
+    context = local_owner_context(correlation_id="h1", source="http")
+    status, body = facade.crash_digest({"path": "/w/core.1"}, context, admin=True)
+    assert (status, body["error_code"]) == (403, "PERMISSION_DENIED")
+    assert body["call_id"]
+    assert stack.launcher.started == []
+
+
+def test_admin_http_crash_digest_runs_in_auto_on_the_host_plan(monkeypatch, ledger):
+    from sonder_runtime.application.context import local_owner_context
+    from sonder_runtime.bootstrap.debug_tools import debug_http_authorizer
+    from sonder_runtime.interfaces.http.facades.debug_tools import DebugToolsHttpFacade
+
+    monkeypatch.setattr(pm, "current_mode", lambda: pm.AUTO)
+    stack = debug_stack()
+    stack.launcher.auto_finish = None
+    service = stack.service()
+    facade = DebugToolsHttpFacade(lambda: service, authorize=debug_http_authorizer(service))
+    context = local_owner_context(correlation_id="h1", source="http")
+    status, body = facade.crash_digest({"path": "/w/core.1"}, context, admin=True)
+    assert status == 200 and body["status"] == "running", body
+    assert len(stack.launcher.started) == 1
+
+
+def test_the_http_authorizer_grades_only_the_host_launching_tools():
+    from sonder_runtime.application.context import local_owner_context
+    from sonder_runtime.bootstrap.debug_tools import debug_http_authorizer
+
+    authorize = debug_http_authorizer(debug_stack().service())
+    context = local_owner_context(correlation_id="h1", source="http")
+    with pytest.raises(Forbidden):
+        authorize("run_program", {"path": "/bin/sh"}, context)
+    with pytest.raises(Forbidden) as caught:
+        authorize("crash_digest", {"path": "/w/core.1", "symbol_server": True}, context)
+    assert caught.value.decision["error_code"] == "SYMBOL_SERVER_NEEDS_CONSOLE"

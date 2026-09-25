@@ -189,6 +189,49 @@ class DebugToolPermissionEvaluator(DeveloperToolPermissionEvaluator):
         self._debug_service = debug_service
 
 
+def debug_http_authorizer(debug_service):
+    """The permission decision for the admin HTTP debug routes that launch host tools.
+
+    ``POST /v1/tools/crash-digest`` and ``/v1/tools/profile-capture-digest``
+    call the service directly (``interfaces/http/facades/debug_tools.py``);
+    this grades each call first, as the typed gateway would for an HTTP
+    caller (``source="http"``, ``gate="gateway"``): the debug resolvers bind
+    the host-resolved plan, and the permission modes apply the operator's
+    rules, ``plan`` mode and one-shot approvals. Returns
+    ``authorize(tool, arguments, context)``, which raises ``Forbidden``.
+    """
+    import uuid
+
+    from ..application.tools.gateway_contract import (
+        ToolGatewayRequest,
+        ToolPermission,
+        ToolScope,
+    )
+    from .typed_tools import POLICY_NAMES
+
+    evaluator = DebugToolPermissionEvaluator(None, debug_service, policy_names=POLICY_NAMES)
+
+    def authorize(tool: str, arguments, context) -> str:
+        if tool not in PLANNED_DEBUG_TOOLS:
+            raise Forbidden("%s is not a host-launching debug tool" % tool)
+        request = ToolGatewayRequest(
+            request_id="http-debug-" + uuid.uuid4().hex,
+            tool_name=tool,
+            arguments=dict(arguments),
+            scope=ToolScope(
+                principal_id=str(context.principal_id),
+                workspace_roots=tuple(str(root) for root in context.workspace_roots),
+                source="http", auth_level=context.auth_level,
+            ),
+            permission=ToolPermission(),
+            deadline_monotonic=context.deadline_monotonic,
+            execution_world="local",
+        )
+        return evaluator.authorize_request(request)
+
+    return authorize
+
+
 def observe_crash_repro(trace, *, run_id: str, attempt_number: int, attempt_limit: int,
                         project_dir: str, signature: str, signature_basis: str,
                         repro_selector: str, reproduced_before: bool, reproduced_after: bool,
@@ -246,6 +289,6 @@ def observe_crash_repro(trace, *, run_id: str, attempt_number: int, attempt_limi
 
 __all__ = [
     "DEBUG_TYPED_TOOLS", "DebugToolPermissionEvaluator", "compose_debug_tools",
-    "debug_permission_resolvers",
+    "debug_http_authorizer", "debug_permission_resolvers",
     "debug_tool_executor", "observe_crash_repro",
 ]

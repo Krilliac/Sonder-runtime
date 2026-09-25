@@ -267,6 +267,62 @@ def test_serve_dispatches_debug_routes_on_get_and_post():
     assert source.count('self._handle_debug_tools_request("GET", path)') == 1
     assert source.count('self._handle_debug_tools_request("POST", _request_route(self.path))') == 1
     assert "_admin_authorized(auth)" in source
+    assert "authorize=debug_http_authorizer(service)" in source
+
+
+class _Refusing:
+    def __init__(self, decision):
+        self.decision = decision
+        self.calls = []
+
+    def __call__(self, tool, arguments, context):
+        from sonder_runtime.application.errors import Forbidden
+
+        self.calls.append((tool, dict(arguments)))
+        error = Forbidden("refused")
+        error.decision = dict(self.decision)
+        raise error
+
+
+@pytest.mark.parametrize("route, tool, payload", [
+    ("/v1/tools/crash-digest", "crash_digest", {"path": "x.dmp", "engine": "gdb"}),
+    ("/v1/tools/profile-capture-digest", "profile_capture_digest",
+     {"path": "perf.data", "engine": "auto", "top_n": 10}),
+])
+def test_host_launching_routes_are_refused_by_the_permission_decision(route, tool, payload):
+    service = Service()
+    refusing = _Refusing({"tool": tool, "action": "deny", "call_id": "b41e974681049b97"})
+    facade = DebugToolsHttpFacade(lambda: service, presenters=PRESENTERS, ports=PORTS,
+                                  authorize=refusing)
+    status, body = facade.dispatch("POST", route, payload, _ctx(), admin=True)
+    assert (status, body["error_code"]) == (403, "PERMISSION_DENIED")
+    assert body["call_id"] == "b41e974681049b97"
+    assert service.calls == []
+    assert [name for name, _ in refusing.calls] == [tool]
+    arguments = refusing.calls[0][1]
+    assert arguments["path"] == payload["path"] and arguments["engine"] == payload["engine"]
+    assert None not in arguments.values()
+
+
+def test_a_plan_refused_by_the_host_keeps_its_code():
+    service = Service()
+    refusing = _Refusing({"tool": "crash_digest", "stage": "plan",
+                          "error_code": "ENGINE_UNAVAILABLE"})
+    facade = DebugToolsHttpFacade(lambda: service, presenters=PRESENTERS, ports=PORTS,
+                                  authorize=refusing)
+    status, body = facade.crash_digest({"path": "x.dmp"}, _ctx(), admin=True)
+    assert (status, body["error_code"]) == (409, "ENGINE_UNAVAILABLE")
+    assert service.calls == []
+
+
+def test_pure_routes_are_not_graded_as_host_launches():
+    service = Service()
+    refusing = _Refusing({"tool": "x", "action": "deny"})
+    facade = DebugToolsHttpFacade(lambda: service, presenters=PRESENTERS, ports=PORTS,
+                                  authorize=refusing)
+    assert facade.crash_triage({"path": "x.dmp"}, _ctx(), admin=True)[0] == 200
+    assert facade.profile_digest({"path": "t.json"}, _ctx(), admin=True)[0] == 200
+    assert refusing.calls == []
 
 
 def _serve_as(monkeypatch, *, authorized, role, username="alice"):
@@ -278,9 +334,27 @@ def _serve_as(monkeypatch, *, authorized, role, username="alice"):
 
 
 def _serve_app(monkeypatch, service):
+    """Serve ``service``; the host-launch permission decision is recorded and allowed.
+
+    The real decision (``debug_http_authorizer``) is exercised against the
+    real service in tests/test_debug_permissions.py.
+    """
+    graded = []
+
+    def authorizer(bound):
+        assert bound is service
+
+        def authorize(tool, arguments, context):
+            graded.append((tool, dict(arguments), context.source, len(service.calls)))
+            return "permission:test"
+
+        return authorize
+
     monkeypatch.setattr(DebugToolsHttpFacade, "_modules", lambda self: (PRESENTERS, PORTS))
     monkeypatch.setattr("sonder_runtime.bootstrap.app.default_app",
                         lambda: SimpleNamespace(debug_tools=service))
+    monkeypatch.setattr("sonder_runtime.bootstrap.debug_tools.debug_http_authorizer", authorizer)
+    return graded
 
 
 def test_serve_non_admin_gets_403_before_the_app_is_built(http_server, monkeypatch):
@@ -295,15 +369,22 @@ def test_serve_non_admin_gets_403_before_the_app_is_built(http_server, monkeypat
 def test_serve_admin_symbol_server_is_403_and_foreign_runs_404(http_server, monkeypatch):
     service = Service()
     _serve_as(monkeypatch, authorized=True, role="admin")
-    _serve_app(monkeypatch, service)
+    graded = _serve_app(monkeypatch, service)
     status, body = _post(http_server, "/v1/tools/crash-digest",
                          {"path": "x.dmp", "symbol_server": True})
     assert (status, body["error_code"]) == (403, "SYMBOL_SERVER_NEEDS_CONSOLE")
+    assert graded == []
     status, body = _get(http_server, "/v1/tools/debug-runs/debug-run-owner")
     assert (status, body["error_code"]) == (404, "JOB_NOT_FOUND")
     status, body = _post(http_server, "/v1/tools/crash-digest", {"path": "x.dmp"})
     assert status == 200 and body["run_id"] == "debug-run-owner"
     assert service.calls[-1][-1] == "http"
+    # The permission decision ran first, on the typed arguments, as http.
+    assert len(graded) == 1
+    tool, arguments, source, calls_before = graded[0]
+    assert (tool, source) == ("crash_digest", "http")
+    assert arguments["path"] == "x.dmp" and arguments["symbol_server"] is False
+    assert calls_before == len(service.calls) - 1
     assert _post(http_server, "/v1/tools/crash-digest", {"path": "x", "argv": ["sh"]})[0] == 400
 
 

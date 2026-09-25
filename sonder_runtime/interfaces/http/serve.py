@@ -6509,7 +6509,13 @@ class Handler(BaseHTTPRequestHandler):
                     wait_seconds = int(raw)
             from sonder_runtime.bootstrap.app import default_app
 
-            facade = DebugToolsHttpFacade(lambda: getattr(default_app(), "debug_tools", None))
+            from sonder_runtime.bootstrap.debug_tools import debug_http_authorizer
+
+            service = getattr(default_app(), "debug_tools", None)
+            # Host-launching routes are graded by the permission modes first,
+            # exactly as the typed gateway grades an HTTP caller.
+            facade = DebugToolsHttpFacade(lambda: service,
+                                          authorize=debug_http_authorizer(service))
             status, body = facade.dispatch(
                 method, route, payload, self._debug_tools_context(auth),
                 admin=admin, wait_seconds=wait_seconds,

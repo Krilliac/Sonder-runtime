@@ -77,7 +77,11 @@ The routes use the same admin guard as `/v1/tools/inventory`:
 
 Non-admin callers get 403. `symbol_server=true` gets 403
 `SYMBOL_SERVER_NEEDS_CONSOLE`. Another principal's run gets 404
-`JOB_NOT_FOUND`. Payloads are compact JSON of at most 48,000 bytes; failures
+`JOB_NOT_FOUND`. `crash-digest` and `profile-capture-digest` launch host
+tools, so the permission modes grade each call first, as they grade an
+unattended typed-gateway call from HTTP (the same plan binding, deny rules and
+`plan` mode). A refusal is 403 `PERMISSION_DENIED` with the `call_id` an
+operator can approve once. Payloads are compact JSON of at most 48,000 bytes; failures
 carry `{"ok": false, "error_code": ...}`.
 
 ## Windows setup (MSVC)
