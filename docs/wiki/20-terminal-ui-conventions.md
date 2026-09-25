@@ -111,6 +111,12 @@ versioned and additive-only. Interactive terminals ignore the flag.
   words used to be dropped silently. A single free-text parameter still
   takes the whole remainder.
 
+- `/help <command>` shows a `policy:` line when a standing permission
+  rule refuses a tool the command reaches. For example, `/delete` is a
+  hard-coded dry run and is graded `risk: safe`, but the shipped
+  `file_delete` deny rule refuses it in every mode, and help now says so.
+  The rule is not relaxed for the dry run.
+
 ## Workspace scope for file commands
 
 - With a `/workspace` selected, `/files`, `/read`, `/write`, `/append`,

@@ -487,6 +487,43 @@ def _gate_tools(tools, label):
     return False, "skipped %s" % label
 
 
+def _help_policy_note(topic):
+    """The standing permission rules that refuse a command, for ``/help <cmd>``.
+
+    The catalog grades a command by what its branch can do (``/delete`` is a
+    hard-coded dry run, so ``safe``), while the gate also applies the rule
+    set, where the shipped ``file_delete`` deny refuses it in every mode.
+    ``/help`` used to show only the grade, so it advertised a command the
+    gate always refuses.  This names the refusing rule next to the grade.
+    The rule is deliberately not relaxed for the dry run: an explicit deny
+    outranks every call site.  Read-only; records no decision.
+    """
+    name = str(topic or "").strip().split(None, 1)
+    if not name:
+        return ""
+    cmd = "/" + name[0].lstrip("/").lower()
+    try:
+        tools = command_catalog.console_tools().get(cmd, ())
+    except command_catalog.CatalogUnavailable:
+        return ""
+    notes = []
+    for tool in tools:
+        try:
+            decision = permission_policy.decide_for_caller(
+                tool, interactive=_console_has_operator(),
+                gate_control_exempt=True, surface="repl", record=False,
+            )
+        except Exception:
+            continue
+        if (
+            decision is not None
+            and decision.action == permission_policy.deny_action()
+            and getattr(decision, "source", "") == "rule"
+        ):
+            notes.append("  policy:   refused -- %s" % decision.reason)
+    return ("\n" + "\n".join(dict.fromkeys(notes))) if notes else ""
+
+
 def _permission_gate(tool):
     """Gate one tool dispatched as ``/<tool_name>`` through _run_catalogued."""
     return _gate_tools((tool,), "/" + tool)
@@ -2904,7 +2941,7 @@ def main(*, machine_output=False):
                         # A bare slash is the "what can I type" gesture.
                         print(command_catalog.format_matches(""))
                     elif cmd == "/help":
-                        print(command_catalog.help_text(arg.strip()))
+                        print(command_catalog.help_text(arg.strip()) + _help_policy_note(arg))
                     elif cmd == "/why":
                         # A diagnostic read over the resolver's own trace: which stage
                         # claimed (or refused) a plain-language turn, and on what
