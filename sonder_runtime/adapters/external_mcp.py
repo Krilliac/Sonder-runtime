@@ -579,7 +579,9 @@ def _parse_endpoint(endpoint: str) -> urllib.parse.SplitResult:
         except ValueError as exc:
             raise ValueError("non-canonical numeric endpoint hosts are not allowed") from exc
     try:
-        parsed.port
+        # Accessing ``port`` is the validation: urllib raises on a
+        # non-numeric or out-of-range port.
+        _ = parsed.port
     except ValueError as exc:
         raise ValueError("external MCP endpoint port is invalid") from exc
     return parsed

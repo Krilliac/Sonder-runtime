@@ -86,7 +86,10 @@ from .jobs import (
     WorkflowStep,
 )
 from .execution_world import (
-    CleanupResult,
+    # specialized_lifecycle below owns the package-level ``CleanupResult``
+    # name; the execution-world result has a different shape, so it is
+    # exported under an unambiguous alias instead of being shadowed.
+    CleanupResult as ExecutionWorldCleanupResult,
     ExecutionHandle,
     ExecutionResult,
     ExecutionWorld,
@@ -209,7 +212,7 @@ __all__ = [
     "JobWorkflowRepository",
     "WorkflowResume",
     "WorkflowStep",
-    "CleanupResult",
+    "ExecutionWorldCleanupResult",
     "ExecutionHandle",
     "ExecutionResult",
     "ExecutionWorld",
