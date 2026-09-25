@@ -159,6 +159,31 @@ def test_malformed_frames_are_classified(frame, code, request_id):
     assert rejection[1] == code
 
 
+def test_frame_bound_admits_every_call_a_legacy_tool_accepts():
+    """A bound below a tool's own cap would refuse legitimate calls.
+
+    ``file_batch_write`` takes up to MAX_BATCH_JSON_BYTES of JSON text, which
+    grows by up to 3x when escaped into the JSON-RPC frame; a ``file_write``
+    at MAX_WRITE_BYTES grows by up to 6x.
+    """
+    from sonder_runtime.adapters.filesystem import file_ops
+
+    assert LEGACY_MCP_MAX_FRAME_BYTES > 3 * file_ops.MAX_BATCH_JSON_BYTES
+    assert LEGACY_MCP_MAX_FRAME_BYTES > 6 * file_ops.MAX_WRITE_BYTES
+    content = "\U0001F600" * (file_ops.MAX_BATCH_BYTES // 4 // 2)
+    operations = json.dumps([
+        {"path": "a.txt", "content": content, "mode": "create"},
+        {"path": "b.txt", "content": content, "mode": "create"},
+    ], ensure_ascii=False)
+    assert len(operations.encode("utf-8")) <= file_ops.MAX_BATCH_JSON_BYTES
+    frame = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+        "name": "file_batch_write", "arguments": {"operations_json": operations},
+    }}).encode("utf-8") + b"\n"
+    assert len(frame) > 2 * 1_000_000 + 64 * 1024  # the bound this replaced
+    assert len(frame) <= LEGACY_MCP_MAX_FRAME_BYTES
+    assert _frame_rejection(frame) is None
+
+
 def test_valid_frames_pass_through_unchanged():
     assert _frame_rejection(b'{"jsonrpc":"2.0","id":1,"method":"ping"}\n') is None
     assert _frame_rejection(b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n') is None

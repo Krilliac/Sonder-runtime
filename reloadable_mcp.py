@@ -273,12 +273,18 @@ def _sync_loop_tool_docstring(fn, action_types) -> None:
     fn.__doc__ = head + " " + ", ".join(action_types) + "." + doc[tail_at:]
 
 
-# The largest legitimate legacy frame is a ``file_write`` at the write cap
-# (``file_ops.MAX_WRITE_BYTES``, 1 MB) whose content JSON-escapes to at most
-# about twice its size, plus envelope headroom. The upstream stdio transport
-# reads a line of any length, so without this a single frame could hold
-# arbitrary memory and be echoed back whole.
-LEGACY_MCP_MAX_FRAME_BYTES = 2 * 1_000_000 + 64 * 1024
+# The bound must admit every call a legacy tool itself accepts. The largest is
+# ``file_batch_write``, whose ``operations_json`` string may be up to
+# ``file_ops.MAX_BATCH_JSON_BYTES`` (4,128,000) UTF-8 bytes. Re-encoded as a
+# JSON-RPC string value it grows by at most 3x (an astral character is 4 UTF-8
+# bytes but 12 bytes as an escaped surrogate pair under ``ensure_ascii``; the
+# already-escaped inner JSON has no raw control characters, and ``"``/``\``
+# only double). A single ``file_write`` at ``MAX_WRITE_BYTES`` (1 MB) is at
+# most 6x (every byte a ``\u00XX`` control escape), which also fits. Plus
+# envelope headroom. The upstream stdio transport reads a line of any length,
+# so without this a single frame could hold arbitrary memory and be echoed back
+# whole. tests/test_legacy_mcp_protocol.py pins it against the file_ops caps.
+LEGACY_MCP_MAX_FRAME_BYTES = 3 * 4_128_000 + 64 * 1024
 
 _PARSE_ERROR = -32700
 _INVALID_REQUEST = -32600

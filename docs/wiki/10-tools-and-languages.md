@@ -21,7 +21,8 @@ Both MCP surfaces (`python -m sonder_runtime mcp`, the default, and
   accepted arguments) before the permission gate and before anything runs.
   A misspelt option no longer silently falls back to its default.
 - **Frames are bounded and always answered.** The default surface refuses a
-  stdio frame over 2,065,536 bytes (room for a `file_write` at its 1 MB cap)
+  stdio frame over 12,449,536 bytes (room for the largest call a tool accepts, a
+  4 MB `file_batch_write`, however the client escapes it)
   and answers every malformed frame (invalid JSON or UTF-8, a batch array,
   `"jsonrpc": "1.0"`, an `id` that is not a string or integer, an unpaired
   surrogate escape) with a JSON-RPC `-32700`/`-32600` error, echoing the
