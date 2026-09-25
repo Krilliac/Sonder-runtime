@@ -1677,6 +1677,18 @@ class SonderApi implements SonderApiPort {
         httpStatus: resp.statusCode,
       );
     }
+    if (resp.statusCode == 403 &&
+        obj?['message']?.toString().trim() == 'registration is disabled') {
+      // Not a role problem: the server has additional registration off
+      // (SONDER_ALLOW_REGISTRATION), so "Only an administrator can …" would
+      // send the person looking for an admin who cannot help either.
+      throw SonderException(
+        'Registration is disabled on this server.',
+        httpStatus: 403,
+        code: 'REGISTRATION_DISABLED',
+        remedy: 'An administrator can enable registration on the PC.',
+      );
+    }
     throw _failure(resp, action: 'create accounts');
   }
 

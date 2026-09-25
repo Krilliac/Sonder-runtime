@@ -84,4 +84,42 @@ void main() {
               headers: {...jsonHeaders, 'retry-after': '2'}));
     });
   });
+
+  test('403 registration is disabled is not reported as a role problem',
+      () async {
+    await expectLater(
+      http.runWithClient(
+          () => SonderApi(baseUrl: 'http://127.0.0.1:11435')
+              .register('second', 'pw'),
+          () => MockClient((r) async => http.Response(
+              '{"ok": false, "message": "registration is disabled"}', 403))),
+      throwsA(isA<SonderException>()
+          .having((e) => e.code, 'code', 'REGISTRATION_DISABLED')
+          .having((e) => e.message, 'message',
+              'Registration is disabled on this server.')),
+    );
+  });
+
+  test('a failed register never echoes the password or the secret', () async {
+    for (final status in [400, 403, 500]) {
+      Object? caught;
+      try {
+        await http.runWithClient(
+            () => SonderApi(baseUrl: 'http://127.0.0.1:11435').register(
+                'u', 'hunter2-pw',
+                bootstrapSecret: 'boot-s3cret-value'),
+            () => MockClient((r) async => http.Response(
+                '{"ok": false, "message": "first-admin bootstrap is not '
+                'authorized"}',
+                status)));
+      } catch (e) {
+        caught = e;
+      }
+      final e = caught as SonderException;
+      for (final text in [e.toString(), e.diagnosticText, e.remedy]) {
+        expect(text, isNot(contains('hunter2-pw')));
+        expect(text, isNot(contains('boot-s3cret-value')));
+      }
+    }
+  });
 }

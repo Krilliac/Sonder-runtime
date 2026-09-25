@@ -266,4 +266,97 @@ void main() {
     expect(done.reply.text, startsWith('Warning: hosted server'));
     expect(done.reply.text, endsWith('PELICAN'));
   });
+
+  group('bounds', () {
+    ChatStreamRequest req({
+      Duration maxDuration = const Duration(minutes: 30),
+      int maxLineChars = 64,
+      int maxAnswerChars = 1 << 20,
+    }) =>
+        ChatStreamRequest(
+          uri: Uri.parse('http://127.0.0.1:11435/v1/chat/completions'),
+          headers: const {},
+          body: '{}',
+          stallTimeout: const Duration(milliseconds: 150),
+          maxDuration: maxDuration,
+          maxLineChars: maxLineChars,
+          maxAnswerChars: maxAnswerChars,
+        );
+
+    Future<(List<ChatStreamEvent>, Object?, List<RecordingClient>)> run(
+        ChatStreamRequest request,
+        http.StreamedResponse Function() respond) async {
+      late (List<ChatStreamEvent>, Object?) result;
+      final clients = await recordStreamingClients(() async {
+        result = await _collect(openChatStream(request));
+      }, (_, __) async => respond());
+      return (result.$1, result.$2, clients);
+    }
+
+    Matcher tooLarge = isA<SonderException>()
+        .having((e) => e.code, 'code', streamTooLargeCode);
+
+    test('a huge line with no newline fails instead of buffering', () async {
+      // 10 chunks of 20 chars, never a line break, connection kept open.
+      final (_, error, clients) = await run(
+          req(), () => _streamed(List.filled(10, 'x' * 20), hang: true));
+      expect(error, tooLarge);
+      expect(clients.single.closes, 1);
+    });
+
+    test('a frame of many short data lines is bounded too', () async {
+      final (_, error, _) = await run(
+          req(), () => _streamed(List.filled(10, 'data: 0123456789\n')));
+      expect(error, tooLarge);
+    });
+
+    test('an answer over the cap fails', () async {
+      String chunk(String t) => 'data: ${jsonEncode({
+                'choices': [
+                  {
+                    'delta': {'content': t}
+                  }
+                ]
+              })}\n\n';
+      final (events, error, _) = await run(
+          req(maxLineChars: 1024, maxAnswerChars: 8),
+          () => _streamed([chunk('12345'), chunk('67890')]));
+      expect(events.whereType<ChatStreamDelta>(), hasLength(1));
+      expect(error, tooLarge);
+    });
+
+    test('never-ending keep-alives end at maxDuration', () async {
+      // A keep-alive every 30 ms keeps the stall timer (150 ms) happy
+      // forever; the hard cap still ends the turn.
+      final controller = StreamController<List<int>>();
+      final ticker = Timer.periodic(const Duration(milliseconds: 30), (_) {
+        if (!controller.isClosed) controller.add(utf8.encode(': ka\n\n'));
+      });
+      final (events, error, clients) = await run(
+          req(maxDuration: const Duration(milliseconds: 400)),
+          () => http.StreamedResponse(controller.stream, 200, headers: _sse));
+      ticker.cancel();
+      await controller.close();
+      expect(events.whereType<ChatStreamKeepAlive>().length, greaterThan(5));
+      expect(
+          error,
+          isA<SonderException>()
+              .having((e) => e.code, 'code', SonderException.timeoutCode));
+      expect(clients.single.closes, 1);
+    });
+
+    test('malformed JSON frames are skipped, the answer still completes',
+        () async {
+      final (events, error, _) = await run(
+          req(maxLineChars: 4096),
+          () => _streamed([
+                'data: {not json\n\n',
+                'data: [1,2]\n\n',
+                serverFixture('stream_ok.sse'),
+              ]));
+      expect(error, isNull);
+      expect(events.whereType<ChatStreamDone>().single.reply.text,
+          endsWith('PELICAN'));
+    });
+  });
 }

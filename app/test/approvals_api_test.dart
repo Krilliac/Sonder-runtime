@@ -157,6 +157,10 @@ void main() {
       expect(colon!.callId, isEmpty);
       expect(ChatRefusal.fromText('The refused call was retried.'), isNull);
       expect(ChatRefusal.fromText('ok'), isNull);
+      expect(
+          ChatRefusal.fromText('Refused connections usually mean the port '
+              'is closed.'),
+          isNull);
     });
   });
 }

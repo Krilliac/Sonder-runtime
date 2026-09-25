@@ -206,8 +206,10 @@ class ChatRefusal {
   });
 
   static final RegExp _callId = RegExp(r'/approve ([0-9a-f]{8,64})\b');
-  static final RegExp _refusedPrefix =
-      RegExp(r'^\s*refused(?:[:\s]|$)', caseSensitive: false);
+  // Case-sensitive: the server's gates always write lowercase `refused`,
+  // while a model answer that merely opens with "Refused connections …"
+  // must not lose its rating chips.
+  static final RegExp _refusedPrefix = RegExp(r'^\s*refused(?:[:\s]|$)');
 
   factory ChatRefusal.fromJson(Map<String, dynamic> json) {
     final id = json['call_id']?.toString().trim() ?? '';

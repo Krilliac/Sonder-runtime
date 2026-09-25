@@ -18,15 +18,75 @@
 /// So time-to-headers is bounded by [ChatStreamRequest.headerTimeout], and
 /// after the headers any gap longer than [ChatStreamRequest.stallTimeout]
 /// (keep-alives reset it) fails with [SonderException.stalledCode].
+///
+/// The stream is bounded against a broken or hostile peer: one line longer
+/// than [ChatStreamRequest.maxLineChars], one frame longer than that, or an
+/// answer longer than [ChatStreamRequest.maxAnswerChars] ends the turn with
+/// [streamTooLargeCode]; and a turn that is still open after
+/// [ChatStreamRequest.maxDuration] (for example a server that sends nothing
+/// but keep-alives forever) ends with [SonderException.timeoutCode].
 library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
 import 'chat.dart';
 import 'transport.dart';
+
+/// Default bound on one SSE line and on one event's data (1 Mi chars).
+const defaultMaxStreamLineChars = 1 << 20;
+
+/// Default bound on the streamed answer text (4 Mi chars).
+const defaultMaxStreamAnswerChars = 4 << 20;
+
+/// Error code for a stream line, frame or answer over its bound.
+const streamTooLargeCode = 'STREAM_TOO_LARGE';
+
+SonderException _tooLarge(String what) => SonderException(
+      'The server sent $what larger than this app accepts, so the answer '
+      'was abandoned.',
+      code: streamTooLargeCode,
+    );
+
+/// Passes decoded text through unchanged, but fails once more than [max]
+/// characters arrive without a line break, so the [LineSplitter] behind it
+/// never buffers an unbounded line.
+class _LineLengthGuard extends StreamTransformerBase<String, String> {
+  final int max;
+  const _LineLengthGuard(this.max);
+
+  @override
+  Stream<String> bind(Stream<String> stream) {
+    var run = 0; // Characters since the last line break, across chunks.
+    return stream.map((chunk) {
+      for (var i = 0; i < chunk.length; i++) {
+        final c = chunk.codeUnitAt(i);
+        if (c == 0x0A || c == 0x0D) {
+          run = 0;
+        } else if (++run > max) {
+          throw _tooLarge('a line');
+        }
+      }
+      return chunk;
+    });
+  }
+}
+
+/// Bound on a non-streamed body read on the stream path (error envelope,
+/// or a JSON completion from a server that ignored `stream`).
+const _maxBodyBytes = 16 << 20;
+
+Future<List<int>> _readAtMost(Stream<List<int>> stream, int max) async {
+  final out = BytesBuilder(copy: false);
+  await for (final chunk in stream) {
+    if (out.length + chunk.length > max) throw _tooLarge('a response');
+    out.add(chunk);
+  }
+  return out.takeBytes();
+}
 
 /// One event of a streamed chat turn.
 sealed class ChatStreamEvent {
@@ -71,20 +131,34 @@ class SseFrame {
 
 /// Incremental SSE line parser. Feed it lines (without terminators); it
 /// returns the frames each line completes. Pure, so it is unit-tested alone.
+///
+/// A frame whose data grows past [maxFrameChars] throws a [SonderException]
+/// with [streamTooLargeCode] instead of buffering without limit.
 class SseFrameParser {
+  final int maxFrameChars;
   final List<String> _data = [];
+  var _size = 0;
+
+  SseFrameParser({this.maxFrameChars = defaultMaxStreamLineChars});
 
   List<SseFrame> addLine(String line) {
     if (line.isEmpty) {
       if (_data.isEmpty) return const [];
       final frame = SseFrame.data(_data.join('\n'));
       _data.clear();
+      _size = 0;
       return [frame];
     }
     if (line.startsWith(':')) return const [SseFrame.comment()];
     if (line.startsWith('data:')) {
       var value = line.substring(5);
       if (value.startsWith(' ')) value = value.substring(1);
+      _size += value.length + 1;
+      if (_size > maxFrameChars) {
+        _data.clear();
+        _size = 0;
+        throw _tooLarge('an event');
+      }
       _data.add(value);
     }
     // `event:`, `id:`, `retry:` and unknown fields are ignored.
@@ -97,7 +171,11 @@ class SseFrameParser {
 
 /// Folds chunk payloads into the answer text and the completion metadata.
 class ChatStreamAccumulator {
+  /// Longest answer accepted; more throws [streamTooLargeCode].
+  final int maxAnswerChars;
   final StringBuffer _text = StringBuffer();
+
+  ChatStreamAccumulator({this.maxAnswerChars = defaultMaxStreamAnswerChars});
   final Map<String, dynamic> completion = {};
   String finishReason = '';
 
@@ -140,6 +218,9 @@ class ChatStreamAccumulator {
       final delta = choice['delta'];
       if (delta is Map && delta['content'] is String) {
         fragment = delta['content'] as String;
+        if (_text.length + fragment.length > maxAnswerChars) {
+          throw _tooLarge('an answer');
+        }
         _text.write(fragment);
       }
       final finish = choice['finish_reason'];
@@ -165,6 +246,17 @@ class ChatStreamRequest {
   final Duration headerTimeout;
   final Duration stallTimeout;
 
+  /// Hard cap on the whole turn, headers included. Keep-alives do not reset
+  /// it, so a peer that only ever sends keep-alives cannot hold the turn
+  /// open forever.
+  final Duration maxDuration;
+
+  /// Longest single line, and longest single event, accepted.
+  final int maxLineChars;
+
+  /// Longest answer text accepted.
+  final int maxAnswerChars;
+
   const ChatStreamRequest({
     required this.uri,
     required this.headers,
@@ -172,6 +264,9 @@ class ChatStreamRequest {
     this.cancel,
     this.headerTimeout = const Duration(minutes: 5),
     this.stallTimeout = const Duration(seconds: 45),
+    this.maxDuration = const Duration(minutes: 30),
+    this.maxLineChars = defaultMaxStreamLineChars,
+    this.maxAnswerChars = defaultMaxStreamAnswerChars,
   });
 }
 
@@ -193,6 +288,7 @@ Stream<ChatStreamEvent> openChatStream(
   NoRedirectClient? client;
   StreamSubscription<String>? lines;
   Timer? timer;
+  Timer? deadline;
   void Function()? unregister;
   var finished = false;
 
@@ -200,6 +296,7 @@ Stream<ChatStreamEvent> openChatStream(
     if (finished) return;
     finished = true;
     timer?.cancel();
+    deadline?.cancel();
     unregister?.call();
     lines?.cancel();
     client?.close();
@@ -248,7 +345,7 @@ Stream<ChatStreamEvent> openChatStream(
     final headers = response.headers;
     if (response.statusCode < 200 || response.statusCode >= 300) {
       try {
-        final bytes = await response.stream.toBytes();
+        final bytes = await _readAtMost(response.stream, _maxBodyBytes);
         finish(responseException(
           response,
           httpStatusFallback(response.statusCode),
@@ -265,7 +362,7 @@ Stream<ChatStreamEvent> openChatStream(
       // The server answered without streaming (older build, or a route that
       // ignores `stream`): the body is one completion object.
       try {
-        final bytes = await response.stream.toBytes();
+        final bytes = await _readAtMost(response.stream, _maxBodyBytes);
         if (finished) return;
         final obj = jsonDecode(utf8.decode(bytes));
         if (obj is! Map) throw const FormatException('not an object');
@@ -296,8 +393,8 @@ Stream<ChatStreamEvent> openChatStream(
       return;
     }
 
-    final parser = SseFrameParser();
-    final acc = ChatStreamAccumulator();
+    final parser = SseFrameParser(maxFrameChars: current.maxLineChars);
+    final acc = ChatStreamAccumulator(maxAnswerChars: current.maxAnswerChars);
     SonderException stalled() => SonderException(
           'The server stopped sending for ${current.stallTimeout.inSeconds} s, '
           'so the answer was abandoned.',
@@ -336,16 +433,28 @@ Stream<ChatStreamEvent> openChatStream(
 
     lines = response.stream
         .transform(utf8.decoder)
+        .transform(_LineLengthGuard(current.maxLineChars))
         .transform(const LineSplitter())
         .listen(
       (line) {
         if (finished) return;
         arm(current.stallTimeout, stalled);
-        for (final frame in parser.addLine(line)) {
+        final List<SseFrame> frames;
+        try {
+          frames = parser.addLine(line);
+        } on SonderException catch (error) {
+          finish(error);
+          return;
+        }
+        for (final frame in frames) {
           handle(frame);
         }
       },
       onError: (Object error) {
+        if (error is SonderException) {
+          finish(error); // A bound was exceeded.
+          return;
+        }
         finish(SonderException(
           'The connection dropped before the answer finished.',
           cause: error,
@@ -373,6 +482,15 @@ Stream<ChatStreamEvent> openChatStream(
         finish(SonderException.cancelled());
         return;
       }
+      deadline = Timer(
+        request.maxDuration,
+        () => finish(SonderException(
+          'The answer took longer than ${request.maxDuration.inMinutes} min, '
+          'so it was abandoned. Long jobs belong in a work run.',
+          code: SonderException.timeoutCode,
+          retryable: true,
+        )),
+      );
       unawaited(start(request));
     },
     onCancel: () => finish(),
