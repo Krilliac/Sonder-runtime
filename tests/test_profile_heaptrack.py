@@ -35,7 +35,7 @@ def test_leak_site_and_allocator_hotspot():
 
 def test_footer_metadata():
     digest = _digest()
-    assert digest.metadata.process == "./leak"
+    assert digest.metadata.process == "leak"
     assert digest.metadata.sample_count == 2012
     assert digest.metadata.duration_ns == 90_000_000
     assert "total memory leaked: 45060 bytes" in digest.notes
@@ -59,3 +59,10 @@ def test_not_heaptrack_and_empty():
         parse_heaptrack_print("random text\n")
     with pytest.raises(ProfileParseError):
         parse_heaptrack_print("MOST CALLS TO ALLOCATION FUNCTIONS\n\n")
+
+
+def test_debuggee_command_line_is_reduced_to_the_program_name():
+    text = ('Debuggee command was: "C:\\Users\\alice\\bin\\game.exe" --key=s3cret\n'
+            "MEMORY LEAKS\n10B leaked over 1 calls from\nf()\n  at /x.cpp:1\n\n")
+    digest = parse_heaptrack_print(text)
+    assert digest.metadata.process == "game.exe"

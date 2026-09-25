@@ -38,6 +38,7 @@ from sonder_runtime.domain.profiling.model import (
     clip_name,
     finite_number,
     iter_bounded_lines,
+    program_name,
 )
 
 _SIZE = r"([0-9]{1,15}(?:\.[0-9]{1,6})?)\s?([KMGTPE]?)i?B?"
@@ -261,7 +262,7 @@ def parse_heaptrack_print(
             tool="heaptrack", event="allocations",
             sample_count=int(footer["calls"]) if "calls" in footer else None,
             duration_ns=int(runtime * 1e9) if isinstance(runtime, float) else None,
-            process=process,
+            process=program_name(process),
         ),
         allocations=allocations,
         notes=tuple(notes),

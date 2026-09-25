@@ -538,6 +538,26 @@ def clip_name(name: object) -> str:
     return text or "?"
 
 
+def program_name(command: object) -> str | None:
+    """Basename of the program in a recorded command line, arguments dropped.
+
+    Profilers record the full argv (callgrind ``cmd:``, heaptrack ``Debuggee
+    command was:``). Its directories carry user names and its arguments can
+    carry secrets, so only the program's file name reaches the digest.
+    """
+    text = "" if command is None else str(command)[:4096].strip()
+    if not text:
+        return None
+    if text[0] in "\"'":
+        quote = text[0]
+        end = text.find(quote, 1)
+        program = text[1:end] if end > 0 else text[1:]
+    else:
+        program = text.split(None, 1)[0]
+    name = program.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    return name[:MAX_RAW_NAME_CHARS] or None
+
+
 def finite_number(text: str, *, max_chars: int = 64) -> float | None:
     """A finite float from ``text`` or None; refuses giant digit strings cheaply."""
     value = text.strip()

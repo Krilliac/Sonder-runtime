@@ -39,6 +39,7 @@ from sonder_runtime.domain.profiling.model import (
     WorkBudget,
     clip_name,
     percent,
+    program_name,
 )
 
 _NAME_RE = re.compile(r"^\((\d{1,12})\)(?:\s(.*))?$")
@@ -359,7 +360,7 @@ def _digest(functions, headers, events, event_index, files, fns, objs, *, top_n,
         unit="events",
         metadata=CaptureMetadata(
             tool="callgrind", tool_version=version.group(1) if version else None,
-            event=events[event_index] if events else "", process=headers.get("cmd") or None,
+            event=events[event_index] if events else "", process=program_name(headers.get("cmd")),
             sample_count=None, threads=None, duration_ns=None,
         ),
         top_self=tuple(function(k) for k in by_self[:top_n]),

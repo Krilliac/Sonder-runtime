@@ -150,3 +150,28 @@ def test_callgrind_not_callgrind():
         parse_callgrind(["1 2 3"])
     with pytest.raises(ProfileParseError):
         parse_callgrind(["# callgrind format", "events: Ir"])
+
+
+def test_perf_entry_regex_is_not_backtracking_bound():
+    import time
+
+    header = "# Samples: 10K of event 'cpu-clock'\n"
+    hostile = "1.00% " + ("a [.] " * 10_000)[:60_000] + "\n"
+    started = time.perf_counter()
+    parse_perf_folded(header + hostile * 256)
+    with pytest.raises(ProfileFormatUnknown):
+        parse_perf_flat(("1.00% 2.00% " + ("a [x " * 20_000)[:60_000] + "\n") * 256)
+    assert time.perf_counter() - started < 1.5
+
+
+def test_recorded_command_line_is_reduced_to_the_program_name():
+    from sonder_runtime.domain.profiling.render import digest_to_wire
+    import json
+
+    text = ("# callgrind format\nversion: 1\ncreator: callgrind-3.22.0\n"
+            "cmd: /home/alice/private/build/app --token=s3cret /home/alice/data\n"
+            "events: Ir\nfl=(1) a.cpp\nfn=(1) main\n1 10\n")
+    digest = parse_callgrind(text.splitlines())
+    assert digest.metadata.process == "app"
+    wire = json.dumps(digest_to_wire(digest))
+    assert "alice" not in wire and "s3cret" not in wire

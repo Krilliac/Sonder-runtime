@@ -200,3 +200,25 @@ def test_wire_payload_is_bounded():
     digest = parse_chrome_trace([_fixture_text()], frame_budget_ms=16.6)
     payload = digest_to_wire(digest)
     assert len(json.dumps(payload, separators=(",", ":")).encode("utf-8")) <= 48_000
+
+
+def test_lane_a_bounds_error_outside_the_array_is_a_typed_parse_error():
+    # Lane A's JsonBoundsExceeded is an InvalidInput, not a ValueError: nesting
+    # deeper than 64 before traceEvents must still surface as ProfileParseError.
+    bomb = '{"meta":' + "[" * 200 + "]" * 200 + ',"traceEvents":[{"ph":"X","name":"a","ts":1,"dur":1}]}'
+    with pytest.raises(ProfileParseError):
+        parse_chrome_trace([bomb])
+
+
+def test_undecodable_events_are_counted_separately():
+    text = ('{"traceEvents":[{"ph":"X","name":"ok","ts":1,"dur":2},'
+            '{"ph":"X","name":"bad","ts":01,"dur":2},[1,2],{"ph":"X","name":"b2","ts":1,"dur":2,}]}')
+    digest = parse_chrome_trace([text])
+    assert [fn.name for fn in digest.top_self] == ["ok"]
+    assert any(note.startswith("3 undecodable") for note in digest.notes), digest.notes
+
+
+def test_utf8_bom_object_form_is_read():
+    body = json.dumps({"traceEvents": [{"ph": "X", "name": "a", "ts": 1, "dur": 3}]})
+    for chunks in (["\ufeff" + body], [b"\xef\xbb\xbf" + body.encode()], ["\ufeff", " \n", body]):
+        assert [fn.name for fn in parse_chrome_trace(chunks).top_self] == ["a"]

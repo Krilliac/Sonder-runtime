@@ -43,9 +43,9 @@ from sonder_runtime.domain.profiling.model import (
 _SAMPLES_RE = re.compile(r"^#\s*Samples:\s*([0-9.]{1,16})\s*([KMG]?)\s+of event\s+'([^']{0,128})'")
 _EVENT_COUNT_RE = re.compile(r"^#\s*Event count \(approx\.\):\s*(\d{1,20})")
 _LOST_RE = re.compile(r"^#\s*Total Lost Samples:\s*(\d{1,20})")
-_ENTRY_RE = re.compile(r"^\s*(\d{1,3}\.\d{1,4})%\s+(\S(?:.{0,1024}?\S)?)\s+\[([.a-zA-Z])\]\s+(\S.{0,4096})$")
+_ENTRY_RE = re.compile(r"^\s*(\d{1,3}\.\d{1,4})%\s+(\S(?:.{0,1024}?\S)?)\s+\[([.a-zA-Z])\]\s+(\S.*)$")
 _FLAT_RE = re.compile(
-    r"^\s*(\d{1,3}\.\d{1,4})%\s+(\d{1,3}\.\d{1,4})%\s+(\S(?:.{0,1024}?\S)?)\s+\[([.a-zA-Z])\]\s+(\S.{0,4096})$")
+    r"^\s*(\d{1,3}\.\d{1,4})%\s+(\d{1,3}\.\d{1,4})%\s+(\S(?:.{0,1024}?\S)?)\s+\[([.a-zA-Z])\]\s+(\S.*)$")
 _CHAIN_PCT_RE = re.compile(r"^\s*(\d{1,3}(?:\.\d{1,4})?)%\s+(\S.{0,65536})$")
 _CHAIN_COUNT_RE = re.compile(r"^\s*(\d{1,18})\s+(\S.{0,65536})$")
 

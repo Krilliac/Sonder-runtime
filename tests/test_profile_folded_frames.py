@@ -204,3 +204,22 @@ def test_limits_are_the_spec_values():
     assert (limits.max_stacks, limits.max_depth) == (200_000, 128)
     assert (limits.max_lines, limits.max_functions) == (2_000_000, 100_000)
     assert (limits.max_events, limits.max_event_bytes, limits.max_line_chars) == (2_000_000, 65_536, 65_536)
+
+
+def test_fold_zones_budgets_the_closing_pass():
+    # Fully nested zones fold nothing until the final unwinding, which costs
+    # O(zones * max_depth); that pass must honour the time budget too.
+    from sonder_runtime.domain.profiling.model import WorkBudget
+
+    calls = {"n": 0}
+
+    def clock() -> float:
+        calls["n"] += 1
+        return 0.0 if calls["n"] <= 21 else 1e9  # the push pass stays in budget
+
+    zones = [(i, 10_000_000 - 2 * i, "Z%d" % (i % 7)) for i in range(20_000)]
+    folded = FoldedProfile(max_depth=32)
+    fold_zones(folded, zones, budget=WorkBudget(5.0, clock, every=1000))
+    assert folded.truncated
+    assert "zone folding stopped at the time budget" in folded.notes
+    assert len(folded.stacks) <= 1000

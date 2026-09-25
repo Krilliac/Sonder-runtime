@@ -50,6 +50,12 @@ _MAX_OPEN_B = 4096
 _MAX_THREADS = 4096
 _MAX_TS_US = 1e15
 _INSTANT_PHASES = frozenset({"I", "i", "R"})
+# Lane A's scanner raises JsonBoundsExceeded, an InvalidInput that is NOT a
+# ValueError; it must still surface as a typed ProfileParseError.
+_JSON_ERRORS: tuple[type[BaseException], ...] = (
+    getattr(bounded_json, "JsonBoundsExceeded", ValueError), ValueError, TypeError,
+    RecursionError, OverflowError, KeyError, IndexError, UnicodeError,
+)
 
 
 def looks_like_perfetto_protobuf(head: bytes | str) -> bool:
@@ -65,6 +71,7 @@ def looks_like_perfetto_protobuf(head: bytes | str) -> bool:
 
 def _text_chunks(chunks: Iterable[str | bytes]) -> Iterator[str]:
     decoder = None
+    leading = True
     for chunk in chunks:
         if isinstance(chunk, (bytes, bytearray, memoryview)):
             if decoder is None:
@@ -72,6 +79,10 @@ def _text_chunks(chunks: Iterable[str | bytes]) -> Iterator[str]:
             text = decoder.decode(bytes(chunk))
         else:
             text = str(chunk)
+        if leading and text:
+            # A UTF-8 BOM is not JSON whitespace; the scanner would refuse it.
+            text = text.lstrip("\ufeff \t\r\n")
+            leading = not text
         if text:
             yield text
     if decoder is not None:
@@ -144,25 +155,31 @@ def _drain(source: Iterable[Any], box: dict) -> Iterator[Any]:
     box["result"] = yield from source
 
 
-def _skipped_from(result: Any, source: Any) -> tuple[int, bool]:
-    """Skipped-element count and truncation flag reported by the JSON scanner."""
-    skipped, truncated = 0, False
+def _counter(holder: Any, name: str) -> int:
+    value = holder.get(name, 0) if isinstance(holder, dict) else getattr(holder, name, 0)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _skipped_from(result: Any, source: Any) -> tuple[int, int, bool]:
+    """(oversize, invalid, truncated) as reported by the JSON scanner.
+
+    Lane A's ``ArrayObjectScan`` exposes ``skipped_oversize``,
+    ``skipped_invalid`` and ``truncated`` attributes; a plain ``skipped``
+    count (attribute, dict or generator return value) is read as oversize.
+    """
+    oversize = invalid = 0
+    truncated = False
     for holder in (result, source):
-        if holder is None:
-            continue
-        if isinstance(holder, bool):
+        if holder is None or isinstance(holder, bool):
             continue
         if isinstance(holder, int):
-            skipped = max(skipped, holder)
-        elif isinstance(holder, dict):
-            skipped = max(skipped, int(holder.get("skipped", 0) or 0))
-            truncated = truncated or bool(holder.get("truncated"))
-        else:
-            value = getattr(holder, "skipped", 0)
-            if isinstance(value, int) and not isinstance(value, bool):
-                skipped = max(skipped, value)
-            truncated = truncated or bool(getattr(holder, "truncated", False) is True)
-    return skipped, truncated
+            oversize = max(oversize, holder)
+            continue
+        oversize = max(oversize, _counter(holder, "skipped_oversize"), _counter(holder, "skipped"))
+        invalid = max(invalid, _counter(holder, "skipped_invalid"))
+        flag = holder.get("truncated") if isinstance(holder, dict) else getattr(holder, "truncated", False)
+        truncated = truncated or flag is True
+    return oversize, invalid, truncated
 
 
 def parse_chrome_trace(
@@ -201,8 +218,7 @@ def parse_chrome_trace(
                         top_n=top_n, path_n=path_n, project=project)
     except (ProfileFormatUnknown, ProfileParseError):
         raise
-    except (ValueError, TypeError, RecursionError, OverflowError, KeyError,
-            IndexError, UnicodeError) as exc:
+    except _JSON_ERRORS as exc:
         raise ProfileParseError("Chrome trace JSON could not be read: %s"
                                 % type(exc).__name__) from None
 
@@ -309,14 +325,15 @@ def _consume(events, box, scanner, limits: ProfileLimits, budget: WorkBudget, fr
             if len(marks) < limits.max_events:
                 marks.append(start)
                 span(start, start)
-    skipped, scanner_truncated = _skipped_from(box.get("result"), scanner)
+    skipped, invalid, scanner_truncated = _skipped_from(box.get("result"), scanner)
     truncated = truncated or scanner_truncated or count >= limits.max_events
-    if not count and not skipped:
+    if not count and not skipped and not invalid:
         raise ProfileParseError("Chrome trace has no events")
     notes = []
     if skipped:
-        notes.append("%d events over %d bytes (or too deeply nested) skipped"
-                     % (skipped, limits.max_event_bytes))
+        notes.append("%d events over %d bytes skipped" % (skipped, limits.max_event_bytes))
+    if invalid:
+        notes.append("%d undecodable or too deeply nested events skipped" % invalid)
     if non_objects or bad:
         notes.append("%d malformed events ignored" % (non_objects + bad))
     unterminated = sum(len(stack) for stack in open_b.values())

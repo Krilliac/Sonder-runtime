@@ -177,16 +177,27 @@ def fold_zones(folded: FoldedProfile, zones: Iterable[tuple[int, int, str]],
     stack: list[list] = []
     names: list[str] = []
     folded_count = 0
+    stopped = False
+
+    def within_budget() -> bool:
+        nonlocal stopped
+        if not stopped and budget is not None and not budget.tick():
+            stopped = True
+            folded.truncated = True
+            folded.note("zone folding stopped at the time budget")
+        return not stopped
 
     def close() -> None:
         end, name, child_ns, duration = stack.pop()
-        fold_add(folded, names, max(0, duration - child_ns))
+        # Each close folds a stack of up to max_depth frames, so closes are
+        # budgeted too: a hostile 2M-deep nesting would otherwise run
+        # O(zones * max_depth) after the last budget check.
+        if within_budget():
+            fold_add(folded, names, max(0, duration - child_ns))
         names.pop()
 
     for start, duration, name in ordered:
-        if budget is not None and not budget.tick():
-            folded.truncated = True
-            folded.note("zone folding stopped at the time budget")
+        if not within_budget():
             break
         while stack and stack[-1][0] <= start:
             close()
@@ -455,6 +466,8 @@ def digest_zones(
         spikes = detect_spikes(durations, starts_ns=starts, label=frame_zone or "frame",
                                thread=names.get(best_thread, best_thread) or None)
     if not folded.stacks and not durations:
+        if budget is not None and budget.exceeded:
+            raise ProfileParseError("time budget ran out before any zone was folded")
         raise ProfileParseError("no timed zones or frame markers found")
     return digest_folded(
         folded, metric="wall_time", unit="ns", source_kind=source_kind, metadata=metadata,
