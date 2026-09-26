@@ -371,3 +371,20 @@ def test_windows_focused_runs_the_devtools_suites_in_their_own_step():
     for suite in WINDOWS_DEVTOOLS_SUITES:
         assert suite in step, suite
         assert (WORKFLOWS.parents[1] / suite).is_file(), suite
+
+
+def test_linux_golden_failures_are_uploaded_and_other_desktops_skip_goldens():
+    apps = (WORKFLOWS / "build-apps.yml").read_text(encoding="utf-8")
+    analyze = _job_block(apps, "analyze")
+    assert "      - run: flutter test\n" in analyze
+    step = _step_block(analyze, "Upload golden failure images")
+    assert analyze.index("      - run: flutter test\n") < analyze.index("Upload golden failure images")
+    assert "if: failure()" in step
+    assert "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7" in step
+    # uses: steps ignore defaults.run.working-directory, so the path is from the repo root.
+    assert "path: app/test/goldens/failures/" in step
+    assert "if-no-files-found: ignore" in step
+    assert "/test/goldens/failures/" in (WORKFLOWS.parents[1] / "app" / ".gitignore").read_text(
+        encoding="utf-8")
+    for job in ("windows", "macos"):
+        assert "flutter test --exclude-tags golden" in _job_block(apps, job), job

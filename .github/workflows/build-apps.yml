@@ -65,6 +65,18 @@ jobs:
       - run: flutter analyze
       # Linux runs every test, including the pixel goldens (tag `golden`).
       - run: flutter test
+      # A golden mismatch writes the master, test and diff images under
+      # test/goldens/failures/ (gitignored). Keep them so the mismatch can be
+      # inspected. `uses:` steps ignore the job's working-directory default,
+      # so the path is relative to the workspace root.
+      - name: Upload golden failure images
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: flutter-golden-failures
+          path: app/test/goldens/failures/
+          if-no-files-found: ignore
+          retention-days: 7
 
   android:
     runs-on: ubuntu-latest

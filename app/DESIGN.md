@@ -39,7 +39,7 @@ A kind always shows its glyph and word; colour never carries status alone, and t
 
 Wording: name the effect before the mechanism; buttons say what they do ("Approve once", never "OK"); the app renders the server's refusal wording and never adds bypass hints for credential stores.
 
-Goldens for these primitives (`test/goldens/primitives/`, tag `golden`, Linux only) load the bundled Plex, Material Icons and SonderSymbols faces, so they are hermetic.
+Goldens for these primitives (`test/goldens/primitives/`, tag `golden`, Linux only) load the bundled Plex, Material Icons and SonderSymbols faces, so they are hermetic. When a golden fails in CI, the `analyze` job of `build-apps.yml` uploads the master, test and diff images from `test/goldens/failures/` as the `flutter-golden-failures` artifact.
 
 ## Layout and interaction
 Existing chat uses a 272px rail on desktop, a constrained readable transcript and bottom composer. Agent conversations retain that language with a parent/child list. Narrow layouts show list and transcript separately. Material controls own keyboard focus, tooltips and dialogs. Status always has text, not color alone.
