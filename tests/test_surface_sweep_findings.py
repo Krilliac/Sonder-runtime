@@ -262,3 +262,22 @@ def test_a_typed_unavailable_refusal_is_not_a_crash_but_other_exceptions_are():
     assert sweep.classify("", exception=AttributeError(
         "'NoneType' object has no attribute 'state'")) == "crash"
     assert sweep.classify("", exception=RuntimeError("feature not configured")) == "crash"
+
+
+def test_a_bug_raised_while_handling_a_typed_refusal_is_still_a_crash():
+    # Only explicit ``raise ... from`` chaining carries a typed refusal out of
+    # the crash class. An AttributeError that merely happened inside an
+    # ``except DependencyUnavailable`` block is implicitly chained through
+    # ``__context__``; it is a handler defect and must stay a crash.
+    from sonder_runtime.domain.common.errors import DependencyUnavailable
+
+    sweep = _load_sweep()
+    try:
+        try:
+            raise DependencyUnavailable("ollama down")
+        except DependencyUnavailable:
+            None.state  # noqa: B018 - the handler bug under test
+    except AttributeError as bug:
+        assert isinstance(bug.__context__, DependencyUnavailable)
+        assert bug.__cause__ is None
+        assert sweep.classify("", exception=bug) == "crash"

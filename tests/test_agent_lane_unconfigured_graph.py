@@ -30,10 +30,11 @@ def server_owned_graph(monkeypatch):
 
 
 def _assert_typed_refusal(exc):
-    # FastMCP may wrap the tool's exception; the typed cause must survive.
+    # FastMCP may wrap the tool's exception (``raise ... from``); the typed
+    # cause must survive on the explicit chain the surface sweep follows.
     seen = exc
     while seen is not None and not isinstance(seen, DependencyUnavailable):
-        seen = seen.__cause__ or seen.__context__
+        seen = seen.__cause__
     assert isinstance(seen, DependencyUnavailable), repr(exc)
     assert "python -m sonder_runtime mcp" in str(seen)
     assert not isinstance(exc, AttributeError)

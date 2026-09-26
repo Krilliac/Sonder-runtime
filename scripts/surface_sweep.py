@@ -264,11 +264,14 @@ _UNAVAILABLE = re.compile(r"(disabled|are off|is off|not enabled|opt[- ]in|conse
 
 
 def _typed_unavailable(exception: BaseException) -> bool:
-    """Whether ``exception`` is, or was raised from, a typed
+    """Whether ``exception`` is, or was explicitly raised from, a typed
     ``DependencyUnavailable`` refusal (an MCP adapter may wrap it).
 
     Only that exact typed error qualifies: any other exception, whatever its
-    message says, is still a crash.
+    message says, is still a crash. Only explicit ``raise ... from`` chaining
+    (``__cause__``) is followed -- FastMCP wraps tool errors that way. An
+    exception that merely occurred while a refusal was being handled
+    (implicit ``__context__``) is a handler bug and stays a crash.
     """
     from sonder_runtime.domain.common.errors import DependencyUnavailable
 
@@ -278,7 +281,7 @@ def _typed_unavailable(exception: BaseException) -> bool:
         if isinstance(current, DependencyUnavailable):
             return True
         seen.add(id(current))
-        current = current.__cause__ or current.__context__
+        current = current.__cause__
     return False
 
 
