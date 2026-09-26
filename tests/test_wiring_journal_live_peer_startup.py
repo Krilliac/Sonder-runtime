@@ -20,6 +20,7 @@ routes the dead owner's orphan through verifier reconciliation.
 from __future__ import annotations
 
 import os
+from contextlib import nullcontext
 import sqlite3
 import subprocess
 import sys
@@ -329,7 +330,7 @@ def test_startup_pass_claims_a_node_shared_run_only_through_its_guard(tmp_path):
     # A guard that grants the lease lets the same pass claim and reconcile.
     report = reconcile_unresolved_effects(
         journal, owner_epoch=2, owns_worker={worker}.__contains__,
-        claim_guard=lambda _run, _worker: None,
+        claim_guard=lambda _run, _worker: nullcontext(),
     )
     assert [item.intent_id for item in report.fenced] == [intent.intent_id]
     assert [row[2] for row in _owner_rows(database)] == [2]
@@ -358,7 +359,217 @@ def test_run_lease_is_shared_in_process_and_refused_to_a_live_peer(tmp_path):
     assert result.stdout.split() == ["False", "True"]
 
 
+def _seed_shared_orphan(root: Path, run_id: str, family: str, scope: str) -> str:
+    """A dead predecessor's unresolved intent in one node-shared run."""
+    from sonder_runtime.adapters.persistence.sqlite.effect_journal import SQLiteEffectJournal
+    from sonder_runtime.application.execution.worker_bindings import AuthenticatedWorkerBinding
+
+    (root / "state").mkdir(parents=True, exist_ok=True)
+    journal = SQLiteEffectJournal(root / "state" / "worker-effects.db")
+    worker = f"{family}:{_config(root).compute.node_id}"
+    binding = AuthenticatedWorkerBinding(journal, run_id, worker, 1, scope)
+    binding.recover_before_restart()
+    intent = binding.binding().begin_request(
+        operation_id="orphan:shared", idempotency_key="orphan-shared",
+        request_digest="c" * 64, reconciliation="manual",
+    )
+    return intent.intent_id
+
+
+def _startup_event(application) -> dict:
+    """Fields of the composed startup pass's ``worker.effects.reconciled`` event."""
+    events = [
+        row for row in application.events.recent_events(limit=256)
+        if row.get("event_code") == "worker.effects.reconciled"
+    ]
+    assert len(events) == 1, events
+    return events[0]["fields"]
+
+
+def _run_lease_holder(root: Path) -> None:
+    """Hold the process-jobs run lease without composing any worker."""
+    from sonder_runtime.adapters.persistence.worker_effect_hosts import acquire_run_lease
+
+    held = acquire_run_lease(
+        root / "state" / "worker-effects.db", "runtime:process-jobs",
+        f"process:{_config(root).compute.node_id}",
+    )
+    print(f"held {held}", flush=True)
+    sys.stdin.readline()
+    os._exit(0)
+
+
+def _compose_shared_workers(root: Path) -> None:
+    """Compose the process provider, then the compute worker, and report."""
+    from sonder_runtime.bootstrap.app import build_application
+
+    application = build_application(config=_config(root))
+    print(f"deferred {_startup_event(application)['deferred']}", flush=True)
+    for name in ("process_job_provider", "compute_job_worker"):
+        try:
+            getattr(application, name)()
+        except Exception as exc:  # noqa: BLE001 - reported to the parent test
+            run_id = getattr(exc, "run_id", "") or getattr(getattr(exc, "report", None), "run_id", "")
+            print(f"{name} {type(exc).__name__} {run_id}", flush=True)
+        else:
+            print(f"{name} OK", flush=True)
+    sys.stdin.readline()
+    os._exit(0)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="real peer process")
+def test_startup_pass_refuses_a_shared_run_whose_lease_a_live_peer_holds(tmp_path):
+    """The composed startup pass claims a node-shared run only under its lease.
+
+    The peer holds the process-jobs run lease but no host lease, so the host
+    probe finds no live peer and only the run-lease guard can protect it.
+    """
+    from sonder_runtime.adapters.persistence.sqlite.effect_journal import SQLiteEffectJournal
+    from sonder_runtime.application.execution.effect_journal import EffectState
+    from sonder_runtime.bootstrap.app import build_application
+
+    (tmp_path / "workspace").mkdir()
+    intent_id = _seed_shared_orphan(
+        tmp_path, "runtime:process-jobs", "process", "process-jobs",
+    )
+    database = tmp_path / "state" / "worker-effects.db"
+    owners_before = _owner_rows(database)
+    peer = _spawn("--run-lease-holder", tmp_path)
+    try:
+        line = peer.stdout.readline()
+        assert line.strip() == "held True", (line, peer.poll(), peer.stderr.read())
+        application = build_application(config=_config(tmp_path))
+        startup = _startup_event(application)
+        assert startup["deferred"] == "" and startup["failed_runs"] == 1
+        assert startup["runs"] == 0 and startup["fenced"] == 0
+        # The startup pass claimed nothing: owner epoch and intent unchanged.
+        assert _owner_rows(database) == owners_before
+        assert SQLiteEffectJournal(database).get(intent_id).state is EffectState.INTENT
+        # The operator entry point runs the same guarded pass.
+        report = application.worker_effect_reconciliation()
+        assert report.deferred == ""
+        assert report.failed_runs == (("runtime:process-jobs", "PeerWorkerLive"),)
+        assert report.runs == ()
+        assert _owner_rows(database) == owners_before
+        events = [
+            row for row in application.events.recent_events(limit=256)
+            if "worker.effects.peer_owned" in str(row)
+        ]
+        assert events and "runtime:process-jobs" in str(events[-1])
+    finally:
+        if peer.poll() is None:
+            peer.communicate("go\n", timeout=60)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="real peer process")
+def test_startup_pass_does_not_keep_a_shared_run_from_a_later_peer(tmp_path):
+    """Reconciling a compute-only orphan must not split the shared leases.
+
+    This process starts first and its startup pass reconciles the orphan in
+    runtime:compute-jobs.  A peer that starts later must still compose the
+    process provider and then the compute worker: the pass released the
+    compute run lease, so the compute run is refused only by its own fence
+    (the manual orphan no verifier can prove), never by a lease.
+    """
+    from sonder_runtime.adapters.persistence.worker_effect_hosts import acquire_run_lease
+    from sonder_runtime.application.execution.worker_bindings import PeerWorkerLive
+    from sonder_runtime.bootstrap.app import build_application
+
+    (tmp_path / "workspace").mkdir()
+    intent_id = _seed_shared_orphan(
+        tmp_path, "runtime:compute-jobs", "compute", "compute-jobs",
+    )
+    database = tmp_path / "state" / "worker-effects.db"
+    node = _config(tmp_path).compute.node_id
+    application = build_application(config=_config(tmp_path))
+    startup = _startup_event(application)
+    assert startup["deferred"] == "" and startup["failed_runs"] == 0
+    assert startup["runs"] == 1 and startup["fenced_intents"] == [intent_id]
+    rows = {row[0]: row for row in _owner_rows(database)}
+    assert list(rows) == ["runtime:compute-jobs"] and rows["runtime:compute-jobs"][2] > 1
+
+    peer = _spawn("--compose-shared", tmp_path)
+    try:
+        lines = [peer.stdout.readline().strip() for _ in range(3)]
+        assert lines[0] == "deferred live-peer-host-process", (lines, peer.stderr.read())
+        assert lines[1] == "process_job_provider OK", lines
+        assert lines[2] == "compute_job_worker EffectRecoveryRequired runtime:compute-jobs", lines
+        # The peer now owns both shared runs; this process is refused on
+        # the first one it needs, and holds neither lease.
+        with pytest.raises(PeerWorkerLive) as refused:
+            application.process_job_provider()
+        assert refused.value.run_id == "runtime:process-jobs"
+        probe = (
+            "import sys; from sonder_runtime.adapters.persistence.worker_effect_hosts "
+            "import acquire_run_lease as a; "
+            "print(a(sys.argv[1], 'runtime:process-jobs', 'process:' + sys.argv[2]), "
+            "a(sys.argv[1], 'runtime:compute-jobs', 'compute:' + sys.argv[2]))"
+        )
+        repo_root = Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+            [sys.executable, "-c", probe, str(database), node],
+            cwd=repo_root, capture_output=True, text=True, timeout=60,
+            env={**os.environ, "PYTHONPATH": os.pathsep.join(
+                filter(None, (str(repo_root), os.environ.get("PYTHONPATH"))))},
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == ["False", "False"]
+    finally:
+        if peer.poll() is None:
+            peer.communicate("go\n", timeout=60)
+    # With the peer gone this process can take both leases again.
+    assert acquire_run_lease(database, "runtime:compute-jobs", f"compute:{node}") is True
+
+
+def test_transient_run_lease_is_released_unless_a_worker_took_it(tmp_path):
+    from sonder_runtime.adapters.persistence.worker_effect_hosts import (
+        acquire_run_lease,
+        transient_run_lease,
+    )
+
+    journal = tmp_path / "worker-effects.db"
+    repo_root = Path(__file__).resolve().parents[1]
+
+    def peer_takes(run_id: str) -> bool:
+        probe = (
+            "import sys; from sonder_runtime.adapters.persistence.worker_effect_hosts "
+            "import acquire_run_lease as a; print(a(sys.argv[1], sys.argv[2], 'process:n1'))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe, str(journal), run_id],
+            cwd=repo_root, capture_output=True, text=True, timeout=60,
+            env={**os.environ, "PYTHONPATH": os.pathsep.join(
+                filter(None, (str(repo_root), os.environ.get("PYTHONPATH"))))},
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip() == "True"
+
+    run_a, run_b = SHARED_RUNS
+    with transient_run_lease(journal, run_a, "process:n1") as held:
+        assert held is True
+        with transient_run_lease(journal, run_a, "process:n1") as nested:
+            assert nested is True
+        # The outer scope still holds it.
+        assert peer_takes(run_a) is False
+    # Released once the last scope exits: a peer can take it now.
+    assert peer_takes(run_a) is True
+
+    # A worker composition during the scope keeps the lease past it.
+    with transient_run_lease(journal, run_b, "process:n1") as held:
+        assert held is True
+        assert acquire_run_lease(journal, run_b, "process:n1") is True
+    assert peer_takes(run_b) is False
+    # Held permanently already: a later transient scope does not release it.
+    with transient_run_lease(journal, run_b, "process:n1") as held:
+        assert held is True
+    assert peer_takes(run_b) is False
+
+
 if __name__ == "__main__" and len(sys.argv) == 3 and sys.argv[1] == "--live-peer":
     _live_peer(Path(sys.argv[2]))
 if __name__ == "__main__" and len(sys.argv) == 3 and sys.argv[1] == "--shared-run-owner":
     _shared_run_owner(Path(sys.argv[2]))
+if __name__ == "__main__" and len(sys.argv) == 3 and sys.argv[1] == "--run-lease-holder":
+    _run_lease_holder(Path(sys.argv[2]))
+if __name__ == "__main__" and len(sys.argv) == 3 and sys.argv[1] == "--compose-shared":
+    _compose_shared_workers(Path(sys.argv[2]))

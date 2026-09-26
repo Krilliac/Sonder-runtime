@@ -30,15 +30,18 @@ Guarantees:
   whole pass is deferred before any owner is claimed; each worker's own
   pre-restart path still reconciles its runs.
 * Node-shared runs: a run every process on the node shares (the process and
-  compute job runs) is claimed only after the caller's ``claim_guard`` takes
-  its per-run lease, so a peer that composed that worker between the probe
-  and the claim is never fenced; a refused guard leaves the run in
-  ``failed_runs`` with every fence in place.
+  compute job runs) is claimed only inside the caller's ``claim_guard``
+  scope, which holds its per-run lease for that run's reconciliation only, so
+  a peer that composed that worker between the probe and the claim is never
+  fenced, and a run this pass merely reconciled stays composable by a peer
+  afterwards.  A refused guard leaves the run in ``failed_runs`` with every
+  fence in place.
 """
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from time import monotonic
 from typing import Any
@@ -125,9 +128,15 @@ def reconcile_unresolved_effects(
     verifier_timeout_seconds: float = DEFAULT_VERIFIER_TIMEOUT_SECONDS,
     emit: Callable[[str, dict[str, object]], None] | None = None,
     peer_hosts_live: Callable[[], bool] | None = None,
-    claim_guard: Callable[[str, str], None] | None = None,
+    claim_guard: Callable[[str, str], AbstractContextManager[object]] | None = None,
 ) -> StartupReconciliationReport:
-    """Reconcile unresolved intents owned by this host, within fixed bounds."""
+    """Reconcile unresolved intents owned by this host, within fixed bounds.
+
+    ``claim_guard(run_id, worker_id)`` returns a context manager entered
+    before the run's owner is claimed and exited once its reconciliation
+    ends; entering raises (an ``EffectJournalError``) when a live peer owns
+    the run.
+    """
     if type(owner_epoch) is not int or owner_epoch < 1:
         raise ValueError("owner_epoch must be positive")
     if not callable(owns_worker):
@@ -181,15 +190,17 @@ def reconcile_unresolved_effects(
                 auto_reconcile=True,
             )
             try:
-                if claim_guard is not None:
-                    # Raises (an EffectJournalError) when a live peer owns
-                    # the run; nothing has been claimed at that point.
-                    claim_guard(run_id, worker_id)
-                report = binding.reconcile_before_restart(
-                    max_records=page_limit,
-                    verifier_timeout_seconds=verifier_timeout_seconds,
-                    deadline_monotonic=deadline,
-                )
+                # Entering raises (an EffectJournalError) when a live peer
+                # owns the run; nothing has been claimed at that point.
+                with (
+                    nullcontext() if claim_guard is None
+                    else claim_guard(run_id, worker_id)
+                ):
+                    report = binding.reconcile_before_restart(
+                        max_records=page_limit,
+                        verifier_timeout_seconds=verifier_timeout_seconds,
+                        deadline_monotonic=deadline,
+                    )
             except (EffectJournalError, ValueError) as exc:
                 # Storage or bound failures leave every fence in place.
                 failed.append((run_id, type(exc).__name__))

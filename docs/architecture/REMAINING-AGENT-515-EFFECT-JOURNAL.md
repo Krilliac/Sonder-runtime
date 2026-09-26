@@ -1335,13 +1335,27 @@ What is wired now (caller -> callee):
   dead owner's unresolved intents to the trusted verifiers through the
   existing `auto_reconcile` path. Unprovable intents stay fenced
   (`EffectRecoveryRequired`).
-- `reconcile_unresolved_effects` takes an optional `claim_guard`, and the
-  composition passes `claim_node_shared_run`. The startup pass only runs
-  when no peer lease is live, but a peer may still compose a shared worker
-  between that probe and the claim. With the guard, a run the pass cannot
-  lease is reported under `failed_runs` (`PeerWorkerLive`) with every fence
-  in place. A run it can lease stays held by this process, so a peer that
-  starts later is refused, not fenced.
+- `reconcile_unresolved_effects` takes an optional `claim_guard`: a callable
+  returning a context manager that is entered before a run's owner is
+  claimed and exited when that run's reconciliation ends. The composition
+  passes `reconcile_node_shared_run`, which holds the run lease through
+  `worker_effect_hosts.transient_run_lease` for that one run only. The
+  startup pass only runs when no peer lease is live, but a peer may still
+  compose a shared worker between that probe and the claim. With the guard,
+  a run the pass cannot lease is reported under `failed_runs`
+  (`PeerWorkerLive`) with every fence in place.
+- The pass releases the lease afterwards, unless a worker composition in
+  this process took it in the meantime. The pass binding is transient and
+  leaves no in-flight intent. An earlier revision kept the lease until
+  process exit. A process that had only reconciled a shared run then kept
+  every peer from composing that worker for its whole lifetime. It could
+  also split ownership: after a crash that left orphans only in
+  `runtime:compute-jobs`, the first process kept the compute lease and a
+  later peer took the process lease. The compute worker needs both leases
+  (it composes the process provider first), so neither process could compose
+  it or the compute service until one exited. Now only a worker composition
+  holds a run lease for the process lifetime, and it always takes the
+  process lease before the compute lease, so ownership cannot split.
 - The subagent, selfmod and build-fix bindings keep per-run ids and take no
   run lease.
 
@@ -1363,6 +1377,25 @@ Qualification (`tests/test_wiring_journal_live_peer_startup.py`):
 - `claim_guard` refusal leaves the owner row and intent untouched, and a
   granting guard lets the same pass claim. A child interpreter is refused a
   held run lease but granted an unrelated one.
+- The composed guard: a child interpreter holds the `runtime:process-jobs`
+  run lease through `acquire_run_lease` alone, with no host lease, so the
+  host probe finds no live peer. The parent's `build_application` startup
+  pass then reports one failed run, the owner row and the orphan intent are
+  unchanged, `worker.effects.peer_owned` names the run, and
+  `worker_effect_reconciliation()` reports
+  `(("runtime:process-jobs", "PeerWorkerLive"),)`. Without the guard wired
+  into `build_application` this test fails.
+- The compute-only orphan ordering: the parent starts first and its startup
+  pass fences a manual orphan in `runtime:compute-jobs`. A child interpreter
+  started afterwards composes the process provider and then reaches the
+  compute run, where it is refused by the orphan's own fence
+  (`EffectRecoveryRequired`) and not by a lease. The parent is then refused
+  `runtime:process-jobs` (`PeerWorkerLive`), and a third interpreter cannot
+  take either lease while the child lives. With the startup-pass lease kept
+  until exit, this test fails.
+- `transient_run_lease` releases the lock once its last scope exits, keeps
+  it when `acquire_run_lease` took it during or before the scope, and a
+  child interpreter observes both outcomes.
 - With `claim_node_shared_run` disabled, the two cross-process tests fail
   (`EffectRecoveryRequired` raised by the peer's composition), so they
   detect the defect.
@@ -1382,6 +1415,13 @@ Limits:
   coordinate hosts that share a journal over a network filesystem.
 - Compositions inside one process share the lease. As before, a later
   composition in the same process claims a newer epoch over an earlier one.
+- Owner epochs are per-process `time_ns()` values. If a process that started
+  later composed a shared worker and then exited, an older process that
+  composes that worker afterwards takes the free lease but is refused by
+  `claim_owner` with `stale worker owner epoch`, until it restarts. The
+  refusal is fail-closed (no owner row or intent changes), but it is not
+  recovered automatically. This predates the run lease; no test in this
+  change asserts on it.
 - No master-spec checkbox changes. LOOP-008 stays unverified.
 
 ## PostgreSQL child store: stamped checkpoints and resume on a live pair (2026-09-26)

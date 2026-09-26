@@ -12,13 +12,15 @@ import atexit
 import importlib
 import logging
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 from threading import RLock
 from time import monotonic, time_ns
+from typing import NoReturn
 
 logger = logging.getLogger(__name__)
 
@@ -714,13 +716,48 @@ def build_application(
             # The lease cannot be proven free: fail closed.
             raise PeerWorkerLive(run_id, worker_id) from exc
         if not held:
-            events.emit(
-                "worker.effects.peer_owned",
-                summary="worker run is owned by a live peer runtime process",
-                detail={"run_id": run_id, "worker_id": worker_id},
-                severity="WARNING",
-            )
-            raise PeerWorkerLive(run_id, worker_id)
+            refuse_peer_owned_run(run_id, worker_id)
+
+    def refuse_peer_owned_run(run_id: str, worker_id: str) -> NoReturn:
+        from ..application.execution.worker_bindings import PeerWorkerLive
+
+        events.emit(
+            "worker.effects.peer_owned",
+            summary="worker run is owned by a live peer runtime process",
+            detail={"run_id": run_id, "worker_id": worker_id},
+            severity="WARNING",
+        )
+        raise PeerWorkerLive(run_id, worker_id)
+
+    @contextmanager
+    def reconcile_node_shared_run(run_id: str, worker_id: str) -> Iterator[None]:
+        """Hold a shared run's lease only while the startup pass reconciles it.
+
+        The pass binds the run transiently and leaves no in-flight intent, so
+        the lease is released afterwards (unless a worker composition in this
+        process took it meanwhile).  Holding it for the process lifetime would
+        keep every peer from composing that worker, and could split the
+        process and compute leases between two processes so that neither can
+        compose the compute worker.  Refused like ``claim_node_shared_run``.
+        """
+        if run_id not in node_shared_runs:
+            yield
+            return
+        from ..adapters.persistence.worker_effect_hosts import transient_run_lease
+        from ..application.execution.worker_bindings import PeerWorkerLive
+        from ..platform.paths import state_path
+
+        journal_path = state_path("worker-effects.db", "SONDER_WORKER_EFFECTS_DB")
+        with ExitStack() as stack:
+            try:
+                held = stack.enter_context(
+                    transient_run_lease(journal_path, run_id, worker_id)
+                )
+            except OSError as exc:
+                raise PeerWorkerLive(run_id, worker_id) from exc
+            if not held:
+                refuse_peer_owned_run(run_id, worker_id)
+            yield
 
     def worker_binding(*, family: str, scope: str, run_id: str):
         """Compose an authenticated binding from host-owned worker metadata.
@@ -797,7 +834,7 @@ def build_application(
         worker_effect_reconciliation_report = reconcile_unresolved_effects(
             journal, owner_epoch=worker_owner_epoch, owns_worker=owned.__contains__,
             emit=emit, peer_hosts_live=peer_hosts_live,
-            claim_guard=claim_node_shared_run, **limits,
+            claim_guard=reconcile_node_shared_run, **limits,
         )
         return worker_effect_reconciliation_report
 

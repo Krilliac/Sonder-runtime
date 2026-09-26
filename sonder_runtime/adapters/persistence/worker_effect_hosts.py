@@ -17,8 +17,12 @@ Some worker runs are shared by every process on the node
 (``runtime:process-jobs`` and ``runtime:compute-jobs``): their durable owner
 row has one epoch, so whichever process claims it last fences the others.
 ``acquire_run_lease`` gives such a run its own lock file in the sibling
-``worker-effect-runs`` directory.  A process holds it from the moment it first claims the run until
-it exits; a peer that cannot take it must not claim the run.
+``worker-effect-runs`` directory.  A process that binds the run to a worker
+holds it from the moment it first claims the run until it exits; a peer that
+cannot take it must not claim the run.  ``transient_run_lease`` holds the same
+lock only for one bounded step (the startup reconciliation pass) and releases
+it afterwards unless a worker composition in this process took it meanwhile,
+so reconciling a run never keeps a peer from composing that worker.
 """
 from __future__ import annotations
 
@@ -26,6 +30,9 @@ import hashlib
 import os
 import re
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import BinaryIO
@@ -44,6 +51,18 @@ def _lock(handle: BinaryIO) -> None:
         import fcntl
 
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock(handle: BinaryIO) -> None:
+    handle.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 class WorkerEffectHostLease:
@@ -127,7 +146,63 @@ def _lease_directory(journal_path: str | os.PathLike[str]) -> Path:
     return Path(journal_path).absolute().parent / "worker-effect-hosts"
 
 
-_RUN_LEASES: dict[Path, tuple[int, BinaryIO]] = {}
+@dataclass(slots=True)
+class _RunLease:
+    pid: int
+    handle: BinaryIO
+    # True once a worker composition bound the run: held until process exit.
+    permanent: bool = False
+    # Open ``transient_run_lease`` scopes in this process.
+    transient: int = 0
+
+
+_RUN_LEASES: dict[Path, _RunLease] = {}
+
+
+def _run_lease_path(
+    journal_path: str | os.PathLike[str], run_id: str, worker_id: str,
+) -> Path:
+    if not all(isinstance(value, str) and value.strip() for value in (run_id, worker_id)):
+        raise ValueError("run lease identity is required")
+    digest = hashlib.sha256(f"{run_id}\0{worker_id}".encode("utf-8")).hexdigest()
+    directory = Path(journal_path).absolute().parent / "worker-effect-runs"
+    return directory / f"run-{digest[:32]}.lock"
+
+
+def _held_run_lease(path: Path) -> _RunLease | None:
+    """This process's lease on ``path``, locking the file when not yet held.
+
+    Returns ``None`` when another live process holds the lock.  Callers hold
+    ``_LEASES_LOCK``.
+    """
+    lease = _RUN_LEASES.get(path)
+    if lease is not None and lease.pid == os.getpid():
+        return lease
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        handle = path.open("x+b")
+    except FileExistsError:
+        handle = path.open("r+b")
+    else:
+        try:
+            handle.write(b"0")
+            handle.flush()
+        except BaseException:
+            handle.close()
+            raise
+    try:
+        _lock(handle)
+    except OSError:
+        # A live process holds the run.  The file stays: it names a fixed
+        # run, not a process, so there is nothing to reap.
+        handle.close()
+        return None
+    except BaseException:
+        handle.close()
+        raise
+    lease = _RunLease(os.getpid(), handle)
+    _RUN_LEASES[path] = lease
+    return lease
 
 
 def acquire_run_lease(
@@ -141,39 +216,52 @@ def acquire_run_lease(
     lock, and a forked child must acquire its own.  ``OSError`` from creating
     or opening the lock file propagates; callers refuse the claim.
     """
-    if not all(isinstance(value, str) and value.strip() for value in (run_id, worker_id)):
-        raise ValueError("run lease identity is required")
-    digest = hashlib.sha256(f"{run_id}\0{worker_id}".encode("utf-8")).hexdigest()
-    directory = Path(journal_path).absolute().parent / "worker-effect-runs"
-    path = directory / f"run-{digest[:32]}.lock"
+    path = _run_lease_path(journal_path, run_id, worker_id)
     with _LEASES_LOCK:
-        held = _RUN_LEASES.get(path)
-        if held is not None and held[0] == os.getpid():
-            return True
-        directory.mkdir(parents=True, exist_ok=True)
-        try:
-            handle = path.open("x+b")
-        except FileExistsError:
-            handle = path.open("r+b")
-        else:
-            try:
-                handle.write(b"0")
-                handle.flush()
-            except BaseException:
-                handle.close()
-                raise
-        try:
-            _lock(handle)
-        except OSError:
-            # A live process holds the run.  The file stays: it names a
-            # fixed run, not a process, so there is nothing to reap.
-            handle.close()
+        lease = _held_run_lease(path)
+        if lease is None:
             return False
-        except BaseException:
-            handle.close()
-            raise
-        _RUN_LEASES[path] = (os.getpid(), handle)
+        lease.permanent = True
         return True
 
 
-__all__ = ["WorkerEffectHostLease", "acquire_run_lease", "host_lease"]
+@contextmanager
+def transient_run_lease(
+    journal_path: str | os.PathLike[str], run_id: str, worker_id: str,
+) -> Iterator[bool]:
+    """Hold the run's lock for one bounded step, yielding whether it is held.
+
+    Yields ``False`` (and holds nothing) while another live process holds the
+    lock.  On exit the lock is released unless ``acquire_run_lease`` took it
+    in this process before or during the step, or another transient scope is
+    still open; a later worker composition then takes it again.  ``OSError``
+    from creating or opening the lock file propagates on entry.
+    """
+    path = _run_lease_path(journal_path, run_id, worker_id)
+    with _LEASES_LOCK:
+        lease = _held_run_lease(path)
+        if lease is not None:
+            lease.transient += 1
+    if lease is None:
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        with _LEASES_LOCK:
+            lease.transient -= 1
+            if (
+                lease.transient == 0 and not lease.permanent
+                and _RUN_LEASES.get(path) is lease
+            ):
+                del _RUN_LEASES[path]
+                try:
+                    _unlock(lease.handle)
+                finally:
+                    # Closing the only descriptor also drops the lock.
+                    lease.handle.close()
+
+
+__all__ = [
+    "WorkerEffectHostLease", "acquire_run_lease", "host_lease", "transient_run_lease",
+]
