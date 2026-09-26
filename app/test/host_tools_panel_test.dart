@@ -42,6 +42,17 @@ Future<void> _pumpPanel(WidgetTester tester, FakeRuntimeData data,
   await tester.pumpAndSettle();
 }
 
+SonderException _tooLarge() =>
+    SonderException('Too many tools to list at once. Pick a category.',
+        httpStatus: 413, code: 'TOOL_INVENTORY_TOO_LARGE');
+
+Future<void> _pickCompilers(WidgetTester tester) async {
+  await tester.tap(find.byKey(const Key('host-tools-category')));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Compilers (2)').last);
+  await tester.pumpAndSettle();
+}
+
 void main() {
   testWidgets('loads only when opened, then groups tools by category',
       (tester) async {
@@ -192,6 +203,36 @@ void main() {
     expect(find.text('This server has no host tool inventory right now.'),
         findsOneWidget);
     expect(find.text('Retry'), findsOneWidget);
+  });
+
+  testWidgets(
+      'Rediscover with a category on an oversized host still re-reads it',
+      (tester) async {
+    // The server saves the rediscovered snapshot, then answers 413 because
+    // the unfiltered view is over its size cap.
+    final data = FakeRuntimeData(
+        toolInventoryFor: _byCategory, rediscoverError: _tooLarge());
+    await _pumpPanel(tester, data);
+    await _pickCompilers(tester);
+    await tester.tap(find.text('Rediscover'));
+    await tester.pumpAndSettle();
+    expect(data.rediscoveries, 1);
+    expect(data.toolInventoryReads, [null, 'compiler', 'compiler']);
+    expect(find.text('Compilers · 2'), findsOneWidget);
+    expect(find.textContaining('Pick a category'), findsNothing);
+  });
+
+  testWidgets('Rediscover with no category on an oversized host asks for one',
+      (tester) async {
+    final data = FakeRuntimeData(
+        toolInventoryFor: _byCategory, rediscoverError: _tooLarge());
+    await _pumpPanel(tester, data);
+    await tester.tap(find.text('Rediscover'));
+    await tester.pumpAndSettle();
+    expect(data.rediscoveries, 1);
+    expect(data.toolInventoryReads, [null]);
+    expect(find.text('Too many tools to list at once. Pick a category.'),
+        findsOneWidget);
   });
 
   testWidgets('Runtime screen: rail items reach unbuilt sections both ways',

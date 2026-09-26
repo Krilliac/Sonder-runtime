@@ -96,12 +96,22 @@ class _HostToolsPanelState extends State<HostToolsPanel> {
       _run(() => widget.source.toolInventory(category: _category));
 
   Future<void> _rediscover() => _run(() async {
-        final fresh = await widget.source.refreshToolInventory();
+        final source = widget.source;
         final category = _category;
+        final ToolInventory fresh;
+        try {
+          fresh = await source.refreshToolInventory();
+        } on SonderException catch (error) {
+          // The server saves the rediscovered snapshot before it sizes the
+          // unfiltered answer, so "too large" still means it rediscovered;
+          // with a category picked, the filtered read below is the answer.
+          if (category == null || !_isTooLarge(error)) rethrow;
+          return source.toolInventory(category: category);
+        }
         // The refresh answers with the whole snapshot; re-read the filter.
         return category == null
             ? fresh
-            : await widget.source.toolInventory(category: category);
+            : await source.toolInventory(category: category);
       }, rediscover: true);
 
   void _pickCategory(String? category) {
@@ -121,11 +131,11 @@ class _HostToolsPanelState extends State<HostToolsPanel> {
     return error is SonderException && error.httpStatus == 404;
   }
 
-  bool get _tooLarge {
-    final error = _error;
-    return error is SonderException &&
-        (error.httpStatus == 413 || error.code == 'TOOL_INVENTORY_TOO_LARGE');
-  }
+  static bool _isTooLarge(Object? error) =>
+      error is SonderException &&
+      (error.httpStatus == 413 || error.code == 'TOOL_INVENTORY_TOO_LARGE');
+
+  bool get _tooLarge => _isTooLarge(_error);
 
   Widget _errorNote(Object error) {
     if (_forbidden) {
