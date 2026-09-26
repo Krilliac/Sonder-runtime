@@ -131,7 +131,14 @@ variables; every other F/B/PLE finding count per file and rule, and the line
 count of the listed legacy modules (`server.py`, `serve.py` and others), may
 only shrink against `scripts/lint_baseline.json`. After fixing findings or
 shrinking a module, `python scripts/check_lint_ratchet.py --update` records the
-lower counts; it refuses to raise any of them. `check_architecture.py` is the
+lower counts; it refuses to raise any of them. Branches measured against the
+same older base can each pass and still exceed the baseline once merged
+together; after such an integration merge, run
+`python scripts/check_lint_ratchet.py --rebaseline` on the merged tree. It
+records the higher counts, prints every bucket and module limit it raised so
+the rise is reviewed with the merge, and still refuses while any blocking
+finding exists. Prefer shrinking the growth instead (move new `server.py` code
+into `sonder_runtime/`, fix the new findings). `check_architecture.py` is the
 one most contributors hit first — it
 rejects, for example, a new `sqlite3.connect` or `subprocess` call outside
 `sonder_runtime/adapters/`, or a domain module importing anything outside

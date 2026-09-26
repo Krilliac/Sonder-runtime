@@ -72,6 +72,48 @@ def test_new_ratcheted_finding_fails_and_update_refuses_to_raise(gate, tmp_path,
     assert baseline["lint"] == {"legacy.py::B904": 1}
 
 
+def test_rebaseline_records_growth_from_integrated_branches(gate, tmp_path, capsys):
+    gate.findings["ratchet"] = [_finding(tmp_path / "legacy.py", "B904")]
+    assert gate.main(["--update"]) == 0
+
+    # Two branches measured against the same older base each stayed inside it;
+    # merged together the tree has more findings and a longer legacy module.
+    gate.findings["ratchet"] += [
+        _finding(tmp_path / "legacy.py", "B904", row=2),
+        _finding(tmp_path / "other.py", "F841"),
+    ]
+    (tmp_path / "legacy.py").write_text("a = 1\nb = 2\nc = 3\n", encoding="utf-8")
+    assert gate.main(["--update"]) == 1
+    capsys.readouterr()
+
+    assert gate.main(["--rebaseline"]) == 0
+    out = capsys.readouterr().out
+    assert "legacy.py::B904: 2 findings, baseline allows 1" in out
+    assert "other.py::F841: 1 findings, baseline allows 0" in out
+    assert "module size legacy.py: 3 lines, limit 2" in out
+    baseline = json.loads((tmp_path / "lint_baseline.json").read_text(encoding="utf-8"))
+    assert baseline["lint"] == {"legacy.py::B904": 2, "other.py::F841": 1}
+    assert baseline["module_lines"] == {"legacy.py": 3}
+    assert gate.main([]) == 0
+
+
+def test_rebaseline_and_bootstrap_refuse_blocking_findings(gate, tmp_path, capsys):
+    gate.findings["blocking"] = [_finding(tmp_path / "legacy.py", "F821", row=2)]
+
+    # No baseline yet: the bootstrap write must not launder a blocking finding.
+    assert gate.main(["--update"]) == 1
+    assert not (tmp_path / "lint_baseline.json").exists()
+    assert gate.main(["--rebaseline"]) == 1
+    assert "blocking F821 legacy.py:2" in capsys.readouterr().err
+    assert not (tmp_path / "lint_baseline.json").exists()
+
+
+def test_update_and_rebaseline_are_exclusive(gate):
+    with pytest.raises(SystemExit) as excinfo:
+        gate.main(["--update", "--rebaseline"])
+    assert excinfo.value.code == 2
+
+
 def test_fixed_findings_shrink_the_baseline(gate, tmp_path):
     gate.findings["ratchet"] = [
         _finding(tmp_path / "legacy.py", "B904"),

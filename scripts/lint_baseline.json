@@ -1,5 +1,5 @@
 {
- "_comment": "Shrink-only. Regenerate with `python scripts/check_lint_ratchet.py --update` after fixing findings or shrinking a module.",
+ "_comment": "Shrink-only. Regenerate with `python scripts/check_lint_ratchet.py --update` after fixing findings or shrinking a module; raising a count takes an explicit, reviewed `--rebaseline`.",
  "rules": [
   "F",
   "B",

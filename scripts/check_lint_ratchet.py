@@ -16,6 +16,13 @@ Three checks, one baseline file (``lint_baseline.json`` beside this script):
    new behaviour belongs in ``sonder_runtime/``.  ``--update`` only ever
    lowers a limit.
 
+``--rebaseline`` is the one explicit way to raise counts: it records the
+current tree as the new baseline and lists every bucket and limit it raised,
+so the rise is visible in review.  It is meant for integrating branches that
+were each measured against an older base (their growth adds up only once they
+are merged); it still refuses while any blocking finding exists.  CI never
+passes it.
+
 Ruff is invoked with explicit arguments so the gate cannot drift with a
 local configuration file.  Exit status: 0 ok, 1 violations, 2 tool failure.
 """
@@ -107,15 +114,19 @@ def _load_baseline() -> dict:
     return data
 
 
-def _write_baseline(lint: dict[str, int], sizes: dict[str, int], previous: dict) -> None:
+def _write_baseline(
+    lint: dict[str, int], sizes: dict[str, int], previous: dict, *, allow_raise: bool = False,
+) -> None:
     old_sizes = previous.get("module_lines", {})
     module_lines = {
-        name: min(count, old_sizes.get(name, count)) for name, count in sizes.items()
+        name: count if allow_raise else min(count, old_sizes.get(name, count))
+        for name, count in sizes.items()
     }
     payload = {
         "_comment": (
             "Shrink-only. Regenerate with `python scripts/check_lint_ratchet.py "
-            "--update` after fixing findings or shrinking a module."
+            "--update` after fixing findings or shrinking a module; raising a "
+            "count takes an explicit, reviewed `--rebaseline`."
         ),
         "rules": list(RATCHET_RULES),
         "lint": lint,
@@ -130,7 +141,17 @@ def main(argv: list[str] | None = None) -> int:
         "--update", action="store_true",
         help="record current counts; refuses to raise any lint count or module limit",
     )
+    parser.add_argument(
+        "--rebaseline", action="store_true",
+        help=(
+            "record the current tree as the baseline even where counts rose "
+            "(integration merges only); lists every raised bucket and still "
+            "refuses while blocking findings exist"
+        ),
+    )
     args = parser.parse_args(argv)
+    if args.update and args.rebaseline:
+        parser.error("--update and --rebaseline are mutually exclusive")
     try:
         blocking = _ruff(BLOCKING_RULES, exclude_tests=True)
         current = _counts(_ruff(RATCHET_RULES, exclude_tests=False))
@@ -139,31 +160,44 @@ def main(argv: list[str] | None = None) -> int:
         print("lint ratchet: %s" % exc, file=sys.stderr)
         return 2
     sizes = _module_sizes()
-    violations = []
+    blocking_violations = []
     for item in blocking:
         location = item.get("location") or {}
-        violations.append(
+        blocking_violations.append(
             "blocking %s %s:%s: %s" % (
                 item.get("code"), _relative(item["filename"]),
                 location.get("row", "?"), item.get("message", ""),
             )
         )
+    violations = list(blocking_violations)
+    raised = []
     allowed = baseline["lint"]
     for key, count in current.items():
         if count > allowed.get(key, 0):
-            violations.append(
-                "lint ratchet %s: %d findings, baseline allows %d"
-                % (key, count, allowed.get(key, 0))
-            )
+            message = "lint ratchet %s: %d findings, baseline allows %d" % (
+                key, count, allowed.get(key, 0))
+            violations.append(message)
+            raised.append(message)
     limits = baseline["module_lines"]
     for name, lines in sizes.items():
         if name in limits and lines > limits[name]:
-            violations.append(
-                "module size %s: %d lines, limit %d (move new code into sonder_runtime/)"
-                % (name, lines, limits[name])
-            )
+            message = "module size %s: %d lines, limit %d" % (name, lines, limits[name])
+            violations.append(message + " (move new code into sonder_runtime/)")
+            raised.append(message)
+    if args.rebaseline:
+        if blocking_violations:
+            print("refusing --rebaseline while blocking findings exist:", file=sys.stderr)
+            for line in blocking_violations:
+                print("  " + line, file=sys.stderr)
+            return 1
+        _write_baseline(current, sizes, baseline, allow_raise=True)
+        print("lint baseline rebaselined: %d findings in %d buckets; raised %d:" % (
+            sum(current.values()), len(current), len(raised)))
+        for line in raised:
+            print("  " + line)
+        return 0
     if args.update:
-        if violations and baseline["lint"]:
+        if blocking_violations or (violations and baseline["lint"]):
             print("refusing --update while the tree regresses:", file=sys.stderr)
             for line in violations:
                 print("  " + line, file=sys.stderr)
