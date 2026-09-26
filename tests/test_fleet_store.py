@@ -453,6 +453,18 @@ def test_heartbeat_clears_stale_suspicion(monkeypatch, tmp_path):
     assert result["suspect_owners"] == 0
     assert fleet_store.get_agent("agent-live")["status"] == "running"
 
+    # Let the heartbeat itself go stale (cutoff 210 > 205). Had the heartbeat
+    # left the first suspicion (seen at 200) in place, it would be past the
+    # grace (200 <= 240 - 10) and this pass would interrupt the agent; a
+    # cleared suspicion makes this only the first sighting again.
+    clock["now"] = 240.0
+    again = fleet_store.reconcile_stale_owners(
+        now=240.0, stale_seconds=30, grace_seconds=10,
+    )
+    assert again["suspect_owners"] == 1
+    assert again["interrupted"] == 0
+    assert fleet_store.get_agent("agent-live")["status"] == "running"
+
 
 def test_a_live_owner_process_is_never_suspected_however_stale(monkeypatch, tmp_path):
     _isolated_store(monkeypatch, tmp_path)
