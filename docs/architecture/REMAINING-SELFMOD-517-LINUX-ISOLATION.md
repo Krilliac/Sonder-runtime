@@ -30,22 +30,27 @@ run under these controls:
 | --- | --- |
 | Distinct identity | A dedicated unprivileged uid/gid. In the pre-exec step: `setgroups([])`, `setresgid`, `setresuid`. The code checks that `getresuid`/`getresgid` report the new ids and that `setresuid(0, 0, 0)` fails. |
 | No privilege regain | `prctl(PR_SET_NO_NEW_PRIVS)`, set on the reaper before it launches anything and again in the candidate's pre-exec step before the uid drop, each verified with `PR_GET_NO_NEW_PRIVS`. The flag is inherited and cannot be cleared, so a setuid-root binary run by the candidate keeps the candidate's euid. The supervisor reads `NoNewPrivs: 1` from `/proc/<reaper>/status` before it allows the launch. |
-| No network | While still root and before launching anything, the reaper calls `unshare(CLONE_NEWNET)` and checks that the new namespace has a different inode, contains only `lo`, and has `lo` down (`SIOCGIFFLAGS`). Loopback is deliberately not brought up, so the candidate has no route at all, including to `127.0.0.1`. The reaper reports the namespace and then blocks on a go pipe. The supervisor does not trust that report. It reads `/proc/<reaper>/ns/net`, which must differ from its own namespace and match the report, and `/proc/<reaper>/net/dev`, which must list only `lo`. Only after these checks does it release the reaper. The candidate's pre-exec step also checks that it is still in the confirmed namespace. The candidate cannot rejoin the host namespace, because that needs `CAP_SYS_ADMIN` over it. A namespace that cannot be created (for example `EPERM` without `CAP_SYS_ADMIN`) or that does not match these checks raises `LinuxIsolationUnavailable` and nothing launches. The run never falls back to the host network. |
+| No IP network | While still root and before launching anything, the reaper calls `unshare(CLONE_NEWNET)` and checks that the new namespace has a different inode, contains only `lo`, and has `lo` down (`SIOCGIFFLAGS`). Loopback is deliberately not brought up, so the candidate has no IP route at all, including to `127.0.0.1`. The reaper reports the namespace and then blocks on a go pipe. The supervisor does not trust that report. It reads `/proc/<reaper>/ns/net`, which must differ from its own namespace and match the report; `/proc/<reaper>/net/dev`, which must list only `lo`; and `/proc/<reaper>/net/fib_trie` and `if_inet6`, which must hold no IPv4 route and no IPv6 address. Bringing `lo` up adds both, so the supervisor observes that `lo` is down instead of trusting the report's `loopback_up`. Only after these checks does it release the reaper. The candidate's pre-exec step also checks that it is still in the confirmed namespace. The candidate cannot rejoin the host namespace, because that needs `CAP_SYS_ADMIN` over it. A namespace that cannot be created (for example `EPERM` without `CAP_SYS_ADMIN`) or that does not match these checks raises `LinuxIsolationUnavailable` and nothing launches. The run never falls back to the host network. A namespace that holds kernel fallback tunnel devices (`tunl0`, `sit0`, `gre0`, ...) is refused like any other interface, and the refusal names the sysctl to set (see "Operator requirements"). |
+| Socket families | A network namespace scopes `AF_INET`, `AF_INET6`, `AF_NETLINK`, `AF_PACKET` and abstract `AF_UNIX`, but not every family. `AF_VSOCK` in particular reaches the hypervisor host of a VM guest (Firecracker, QEMU virtio-vsock, Hyper-V, Kata, Nitro) from any namespace. After entering the namespace, the reaper therefore installs a seccomp filter (`prctl(PR_SET_SECCOMP)`, allowed by `no_new_privs`). `socket` and `socketpair` succeed only for `AF_UNIX`, `AF_INET`, `AF_INET6` and `AF_NETLINK`; every other family, `AF_VSOCK` included, fails with `EAFNOSUPPORT`. `io_uring_setup`/`enter`/`register` fail with `ENOSYS`, because an io_uring socket opcode would bypass the `socket` check. A syscall made through a foreign ABI (i386 `int 0x80`, x32 numbers, arm32 compat) kills the process, because the filter cannot inspect it. Filters exist for x86_64, aarch64 and riscv64; on another machine the supervisor refuses before launch. The supervisor confirms from `/proc/<reaper>/status` that the reaper is in `Seccomp: 2` with exactly one filter more than its own (`Seccomp_filters`, kernel 5.9+). The candidate's pre-exec step checks again that it is still under a filter. Seccomp filters are inherited and cannot be removed. |
 | Process tree | A new session (`setsid`). Teardown goes by uid, not process group: the supervisor sends SIGKILL to every live process whose real uid is the candidate uid until none remain, so a descendant that called `setsid()` cannot escape. Teardown runs on timeout, on a job-memory breach, and as soon as the main candidate process exits. The reaper reaps orphans, so no zombies are left counting against RLIMIT_NPROC. |
 | Bounds | `RLIMIT_AS` = `process_memory_mb`, `RLIMIT_NPROC` = `active_processes` (per real uid), `RLIMIT_CPU` = timeout + 5 s, `RLIMIT_FSIZE` = 1 GiB, `RLIMIT_CORE` = 0. `job_memory_mb` limits the summed RSS of all candidate processes. The supervisor enforces it by sampling every 100 ms, reported as `job_memory_enforcement: sampled-rss`. This is not atomic like a cgroup. |
 | Exclusive uid claim | Before the spare-uid check, the supervisor takes an exclusive, non-blocking `flock` on `/run/sonder-selfmod-candidate/<uid>.lock` (directory root-owned, not group/other-writable) and holds it for the whole run. A second supervisor on the same uid fails closed instead of launching a candidate that could `ptrace` or signal the first run's candidate, or whose teardown would kill it. |
 | Environment | The environment is replaced, not filtered. It contains a fixed `PATH`; locale/`TZ`; a private `HOME` and `TMPDIR`/`TMP`/`TEMP` (created by the supervisor, owned by the candidate uid, mode 0700, removed after the run); `PYTHONNOUSERSITE`; `PYTHONDONTWRITEBYTECODE`; and `PYTHONPYCACHEPREFIX`. `umask` is 077. |
 | Evaluator truth | Before launch, each protected path must pass these checks, on both its literal and resolved ancestor chains: it is not a symlink; no ancestor directory is candidate-owned or candidate-writable (a sticky directory like `/tmp` is accepted only when the next entry is not candidate-owned); no POSIX ACL is present; and for a protected directory, no entry inside it is writable or a symlink. Any failure raises `ProtectedPathExposed` and nothing launches. After the run, the supervisor digests the bytes, ownership, mode and inode of each path and its ancestors again. Any change gives `integrity_failed: true` (exit code 2, not a pass). |
-| Attestation | The supervisor builds the `job` report from the kernel wait status and its own observations: `integrity: "linux-uid"`, `uid`, `gid`, `supervisor_uid`, `limits`, `network` (`isolation: "netns"`, `netns_inode`, `supervisor_netns_inode`, `interfaces: ["lo"]`, `loopback_up: false`), `no_new_privs: true`, `exit`, `timed_out`, `limit_hit`, `peak_process_memory_mb` (VmHWM samples plus the reaper's `RUSAGE_CHILDREN` maxrss), `peak_job_memory_mb`, `peak_processes`, `lingering_processes_killed`. Candidate stdout never contributes to it. |
+| Attestation | The supervisor builds the `job` report from the kernel wait status and its own observations: `integrity: "linux-uid"`, `uid`, `gid`, `supervisor_uid`, `limits`, `network` (`isolation: "netns"`, `netns_inode`, `supervisor_netns_inode`, `interfaces: ["lo"]`, `loopback_up: false`), `no_new_privs: true`, `socket_filter` (`mechanism: "seccomp"`, `socket_families: [1, 2, 10, 16]`, `io_uring: "denied"`), `exit`, `timed_out`, `limit_hit`, `peak_process_memory_mb` (VmHWM samples plus the reaper's `RUSAGE_CHILDREN` maxrss), `peak_job_memory_mb`, `peak_processes`, `lingering_processes_killed`. Candidate stdout never contributes to it. |
 
 The following cases raise `LinuxIsolationUnavailable` before the candidate
 launches: a non-Linux host; a non-root supervisor; no configured uid; a
 uid/gid of 0 or equal to the supervisor's; a uid that already has live
 processes (not spare); a kernel without `no_new_privs` or without `/proc`; a
-kernel or Python without network namespaces; a reaper that cannot set
-`no_new_privs`, create or verify its network namespace, become a subreaper or
-launch the candidate; and a boundary the supervisor cannot confirm from
-`/proc` within 10 seconds.
+kernel or Python without network namespaces; a kernel without seccomp
+filtering, or a machine (other than x86_64, aarch64 and riscv64) with no
+socket filter; a host where `net.core.fb_tunnels_only_for_init_net` is `0` and
+fallback tunnel devices exist, since every new namespace would then hold them;
+a reaper that cannot set `no_new_privs`, create or verify its network
+namespace, install the socket filter, become a subreaper or launch the
+candidate; and a boundary the supervisor cannot confirm from `/proc` within 10
+seconds.
 `ProtectedPathExposed` is a subclass of `LinuxIsolationUnavailable`.
 
 ### Selection and wiring
@@ -66,14 +71,17 @@ launch the candidate; and a boundary the supervisor cannot confirm from
   candidate uid/gid and the supervisor uid. A `linux-uid` attestation cannot
   be constructed without a positive candidate uid that differs from the
   supervisor uid, and its pass flag must match the exit status. It also
-  cannot be constructed without `network_isolated=True` and
-  `no_new_privs=True`. `from_supervisor_result` sets these only from a report
-  whose `network` names a `netns` inode different from the supervisor's,
-  lists exactly `["lo"]` with `loopback_up: false`, and carries
-  `no_new_privs: true`. Every consumer of a `linux-uid` attestation
+  cannot be constructed without `network_isolated=True`,
+  `no_new_privs=True` and `socket_families_filtered=True`.
+  `from_supervisor_result` sets these only from a report whose `network` names
+  a `netns` inode different from the supervisor's, lists exactly `["lo"]` with
+  `loopback_up: false`, carries `no_new_privs: true`, and carries a
+  `socket_filter` equal to the exact allow-list above
+  (`ATTESTED_SOCKET_FAMILIES`). Every consumer of a `linux-uid` attestation
   (`selfmod._record_command`, the host grader's clean replay and the nightly
   parent-scored gate) goes through this constructor, so a report without the
-  network boundary is recorded as `unverified` (exit code 125).
+  network boundary or the socket filter is recorded as `unverified` (exit
+  code 125).
 - `selfmod._record_command` re-derives the attestation from the selected
   supervisor's report with `IsolationAttestation.from_supervisor_result`. It
   does not trust a supplied object; a supplied one must be equal. A report
@@ -282,6 +290,14 @@ it. The next run then refuses to start ("not spare") until an operator
 removes those processes. The next run does not kill processes of a uid it
 did not launch.
 
+On a host that loads tunnel modules (`ipip`, `sit`, `ip_gre`, `ip6_tunnel`,
+`ip_vti` and similar, as with Calico or flannel IPIP), the kernel default
+`net.core.fb_tunnels_only_for_init_net = 0` adds a fallback tunnel device to
+every new network namespace. The candidate namespace must hold only `lo`, so
+such a host must set `net.core.fb_tunnels_only_for_init_net=1` (for example in
+`/etc/sysctl.d/`), which keeps the fallback devices in the initial namespace
+only. Until it does, the preflight and every run refuse and name that sysctl.
+
 ## Evidence
 
 The Linux boundary tests skip, with an explicit reason, unless the platform
@@ -341,9 +357,31 @@ passes there.
       honours setuid. Under the supervisor it returns the candidate uid.
     - With `CAP_SYS_ADMIN` dropped from the bounding set, a root supervisor
       raises `LinuxIsolationUnavailable` ("network namespace unavailable")
-      and the candidate never runs.
-    - A reported namespace that is the supervisor's own, or that does not
-      match what `/proc` shows, is refused.
+      and the candidate never runs. A control run first shows that the
+      candidate can write the marker directory (mode 1777), so the missing
+      marker proves the candidate never ran.
+    - `_confirm_boundary` is driven against a real child in its own
+      namespace that enters the boundary the way the reaper does. It confirms
+      the clean boundary. With a clean report, it refuses from `/proc` alone
+      a child with an extra (tun) interface, with `lo` brought up, without
+      `no_new_privs`, and without the socket filter. With the child
+      unchanged, it refuses a report whose inode, interfaces, `loopback_up`
+      or socket filter disagree with `/proc`. A report naming the
+      supervisor's own namespace is refused.
+    - Socket families: a control run as the candidate uid in its own
+      namespace under `no_new_privs`, but without the filter, gets `EPERM`
+      (not `EAFNOSUPPORT`) for `AF_PACKET` and a working io_uring. On a VM
+      guest with `/dev/vsock` it also gets a working `AF_VSOCK` socket.
+      Under the supervisor, `AF_VSOCK`, `AF_PACKET`, `AF_BLUETOOTH`,
+      `AF_ALG`, `AF_TIPC` and `AF_CAN` fail with `EAFNOSUPPORT`,
+      `io_uring_setup` fails with `ENOSYS`, and `AF_UNIX` (socketpair),
+      `AF_INET` and `AF_NETLINK` still work. The report and attestation carry
+      the filter.
+    - On x86_64, an x32 syscall kills the candidate with `SIGSYS`. The
+      assembled program's first check sends any foreign audit arch to kill.
+    - A namespace holding fallback tunnels is refused with the sysctl named.
+      The supervisor and the nightly preflight refuse before launch when the
+      sysctl is `0` and fallback tunnels exist.
 - `tests/test_wiring_selfmod_linux_nightly.py` drives the real entry point,
   `scripts.nightly_selfmod.run`. It uses a real Git checkout, the real selfmod
   ledger, the real Linux supervisor and the bootstrap-composed stage journal.
@@ -396,7 +434,7 @@ passes there.
 - `tests/test_wiring_selfmod_attestation.py` (any host) covers:
   - the typed attestation rules, including refusal of a `linux-uid` report or
     hand-built attestation without the network namespace boundary or
-    `no_new_privs`;
+    `no_new_privs`, or without the exact socket filter;
   - cross-supervisor refusal;
   - the gate's binding to the selected supervisor kind;
   - the preflight message.
@@ -508,11 +546,17 @@ passes there.
    - **Nightly promotion.** The nightly driver still does not promote
      unattended, because `regression_medium` is never evaluated.
 2. **Network isolation: limits of the namespace boundary.** Candidates now
-   run with no network at all (see "No network" above). Two limits remain.
-   The candidate can still reach host services through filesystem-path
-   `AF_UNIX` sockets whose permissions admit its uid. Abstract `AF_UNIX`
-   sockets belong to the network namespace, so those are cut off, but no
-   Landlock or seccomp rule restricts path sockets. Also, a candidate test
+   run with no IP network (see "No IP network" above), and the socket filter
+   closes the address families the namespace does not scope, `AF_VSOCK`
+   included (see "Socket families"). Limits remain. The candidate can still
+   reach host services through filesystem-path `AF_UNIX` sockets whose
+   permissions admit its uid. Abstract `AF_UNIX` sockets belong to the
+   network namespace, so those are cut off. No Landlock rule restricts path
+   sockets, and the seccomp filter cannot see the path. The candidate can
+   also use any device node whose permissions admit its uid. `AF_NETLINK`
+   stays allowed: its routing and generic families are scoped by the
+   namespace, but a few netlink families (kernel uevents, for example) are
+   global and readable. Also, a candidate test
    that needs loopback fails rather than being given a partial network. How
    many repository tests that affects is part of item 6.
 3. **Confidentiality.** World-readable files, including held-out suites that
@@ -544,15 +588,18 @@ passes there.
    their sources are one example.
 7. **Kernel attack surface (partially addressed).** `no_new_privs` now blocks
    privilege gain through setuid/setgid binaries and file capabilities, and
-   it is attested. The network namespace removes the host's network stack
-   from reach. Still missing: no seccomp filter is applied, and unprivileged
-   user namespaces stay available to the candidate if the host kernel allows
-   them. A candidate could create its own user and network namespaces there.
-   These do not change its host uid, so file permissions and uid-based
-   teardown still apply, and they give it no route to the host network. They
-   do widen the kernel surface it can reach. A seccomp filter would have to
-   cover every syscall used by the Python test stack under evaluation, so it
-   is not a small change and is not attempted here.
+   it is attested. The network namespace removes the host's IP network from
+   reach. The attested seccomp filter narrows socket creation to four
+   namespace-scoped families, denies io_uring, and kills foreign-ABI
+   syscalls. That filter is not a general syscall allow-list: every other
+   syscall stays reachable. Unprivileged user namespaces also stay available
+   to the candidate if the host kernel allows them, so a candidate could
+   create its own user and network namespaces there. These do not change its
+   host uid, so file permissions and uid-based teardown still apply, and the
+   socket filter still applies inside them. They do widen the kernel surface
+   it can reach. A full allow-list would have to cover every syscall used by
+   the Python test stack under evaluation, so it is not a small change and
+   is not attempted here.
 8. **CI qualification (wired; hosted run pending).** The
    `linux-selfmod-isolation` job in `.github/workflows/ci.yml` runs both root
    suites under `sudo` and refuses skips, and the required `tests` context
