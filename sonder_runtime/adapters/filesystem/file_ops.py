@@ -24,6 +24,15 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import sonder_runtime.adapters.git_discovery as git_discovery
 from sonder_runtime.platform import paths as runtime_paths
 from sonder_runtime.adapters.security.control_plane_paths import live_control_plane_inventory
+from sonder_runtime.adapters.filesystem.intent_executor import (
+    execute_delete as _execute_delete_intent,
+    same_identity as _same_identity,
+)
+from sonder_runtime.application.security.race_resistant_paths import (
+    PlatformCapabilityError,
+    RaceResistanceError,
+    build_open_intent,
+)
 
 # Preserve the packaged filesystem adapter's historical attribute shape while
 # callers migrate from the old root ``sonder_paths`` name.  This is an alias
@@ -781,8 +790,21 @@ def _require_safe_recursive_delete(
                 ) from exc
 
 
+def _guard_delete_entry(child: Path) -> None:
+    """Veto removal of a descendant that the recursive preflight would refuse."""
+    if _is_reparse_point(child):
+        raise PermissionError("refusing to traverse symlink or junction: %s" % child)
+    if _is_sensitive_control_path(child) or _is_protected_mutation_path(child):
+        raise PermissionError("refusing to delete protected control state: %s" % child)
+
+
 def _delete_tree_guarded(path: Path) -> None:
-    """Delete a preflighted tree without traversing reparse points."""
+    """Pathname tree delete for Windows, which has no stdlib dir_fd primitives.
+
+    POSIX deletes use ``_delete_through_intent``.  This walk re-checks each
+    entry for reparse points and protected state immediately before removing
+    it, which narrows but does not close the check/use window.
+    """
     if _is_reparse_point(path):
         raise PermissionError("refusing to traverse symlink or junction: %s" % path)
     try:
@@ -792,10 +814,9 @@ def _delete_tree_guarded(path: Path) -> None:
     for entry in entries:
         child = Path(entry.path)
         try:
-            if entry.is_symlink() or _is_reparse_point(child):
+            if entry.is_symlink():
                 raise PermissionError("refusing to traverse symlink or junction: %s" % child)
-            if _is_sensitive_control_path(child) or _is_protected_mutation_path(child):
-                raise PermissionError("refusing to delete protected control state: %s" % child)
+            _guard_delete_entry(child)
             if entry.is_dir(follow_symlinks=False):
                 _delete_tree_guarded(child)
                 child.rmdir()
@@ -805,6 +826,58 @@ def _delete_tree_guarded(path: Path) -> None:
             raise
         except OSError as exc:
             raise PermissionError("could not safely delete tree entry: %s" % child) from exc
+
+
+def _delete_intent_roots(target: Path, *, extra_roots: str, bypass: bool) -> list[Path]:
+    """Authorized roots a descriptor-relative delete may walk from.
+
+    These mirror ``resolve_path``: the configured roots, plus the filesystem
+    anchor only when an explicit bypass without managed roots already let the
+    target resolve outside them.  The walk from the anchor still opens every
+    component with ``O_NOFOLLOW``.
+    """
+    roots = [_resolve_best_effort(root) for root in allowed_roots(extra_roots if bypass else "")]
+    if bypass and not _MANAGED_ROOTS.get():
+        roots.append(Path(target.anchor))
+    return roots
+
+
+def _delete_through_intent(
+    target: Path,
+    *,
+    recursive: bool,
+    extra_roots: str,
+    bypass: bool,
+) -> None:
+    """Delete a preflighted target through the race-resistant POSIX executor.
+
+    The pathname checks in ``delete_path`` decide *what* may be deleted; this
+    step performs the removal from an authorized-root descriptor, one
+    ``O_NOFOLLOW`` component at a time, so a symlink swapped into any
+    component after those checks is refused rather than followed.
+    """
+    try:
+        expected = os.lstat(target)
+        intent = build_open_intent(
+            target,
+            _delete_intent_roots(target, extra_roots=extra_roots, bypass=bypass),
+            "delete",
+        )
+        _execute_delete_intent(
+            intent,
+            recursive=recursive,
+            expected=expected,
+            entry_guard=_guard_delete_entry,
+        )
+    except PlatformCapabilityError:
+        raise
+    except PermissionError:
+        raise
+    except (RaceResistanceError, OSError) as exc:
+        raise PermissionError(
+            "refusing delete: target could not be removed race-safely (%s): %s"
+            % (exc, target)
+        ) from exc
 
 
 def resolve_path(path: str, *, extra_roots: str = "", bypass: bool = False) -> Path:
@@ -1034,14 +1107,6 @@ def _resolve_transfer_path(
     if _is_sensitive_control_path(resolved):
         raise PermissionError("%s is sensitive Sonder control state" % label)
     return resolved
-
-
-def _stat_identity(value: os.stat_result) -> tuple[int, int, int]:
-    return (int(value.st_dev), int(value.st_ino), stat.S_IFMT(value.st_mode))
-
-
-def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
-    return _stat_identity(left) == _stat_identity(right)
 
 
 class _DirectoryAnchor:
@@ -2105,9 +2170,20 @@ def delete_path(
             "deleted": False,
             "lines_deleted": 0,
         }
-    if p.is_dir():
-        if not recursive:
-            raise ValueError("directory delete requires recursive=True")
+    is_directory = p.is_dir()
+    if is_directory and not recursive:
+        raise ValueError("directory delete requires recursive=True")
+    if not developer_authorized and os.name != "nt":
+        # POSIX: remove through the descriptor-relative executor. A host that
+        # lacks the dir_fd/O_NOFOLLOW primitives raises PlatformCapabilityError
+        # instead of falling back to the pathname operations below.
+        _delete_through_intent(
+            p, recursive=recursive, extra_roots=extra_roots, bypass=bypass,
+        )
+    elif is_directory:
+        # Developer-authorized deletes and Windows keep the pathname walk.
+        # Windows has no stdlib dir_fd primitives; its guarantee is the
+        # reparse-point checks, not check/use race resistance.
         if developer_authorized:
             for child in sorted(p.rglob("*"), reverse=True):
                 if child.is_file() or child.is_symlink():

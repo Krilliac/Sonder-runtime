@@ -94,7 +94,9 @@ total over attacker-controlled headers. Tests:
 
 - `sonder_runtime/application/security/path_archive_safety.py` and
   `race_resistant_paths.py` have tests and are cited as SEC-003
-  evidence, but nothing in production imports them; the live containment
+  evidence. Only `file_ops.delete_path` consumes `race_resistant_paths`
+  today (through the POSIX `intent_executor`, see
+  [REMAINING-SEC-003](../architecture/REMAINING-SEC-003.md)); the live containment
   engine is `adapters/filesystem/file_ops.py`, whose private helpers are
   re-implemented by several inspection tools. Wiring one shared
   containment API through those callers is the highest-value follow-up,
