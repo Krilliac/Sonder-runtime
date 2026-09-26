@@ -102,13 +102,19 @@ Enforced by `scripts/check_architecture.py`.
 | Crash-injection matrix      | PASS     | Deadline enforcement, error pickling  |
 | Backup/restore             | PASS     | Service contract verified             |
 | Signed update/rollback     | PASS     | Phase transitions, can_activate gate  |
-| Container isolation        | SKIPPED  | Requires SONDER_CONTAINER_TEST=1      |
+| Container isolation        | NOT HERE | Not asserted by this suite; see the isolation suites below |
 | Capability matrix          | PASS     | Auth level coverage                   |
 | Selfmod recovery           | PASS     | Phase lifecycle verified              |
 | Training smoke             | PASS     | Phase lifecycle, identity immutability|
 | MCP v2 clients             | PASS     | Handler classes exist and importable  |
 | Static arch mutations      | PASS     | 3 mutation tests (domain/interface/app)|
 | Clean install + bridge     | PASS     | Both composition roots build          |
+
+The container-isolation row used to be a test that always skipped and
+asserted nothing, so it was removed rather than counted. Isolation is
+checked by `tests/test_linux_candidate_isolation.py` (root Linux),
+`tests/test_build_network_isolation.py`, `tests/test_selfmod_isolation_scope.py`
+and `tests/test_sandbox.py`.
 
 ### Verification commands
 

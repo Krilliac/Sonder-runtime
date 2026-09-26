@@ -1,14 +1,13 @@
 """SPEC-5 WP12 — Release hardening acceptance tests.
 
 These tests verify the end-state architecture is fully wired and
-operational. Items that require live infrastructure (Ollama, NPU,
-container isolation) are marked with appropriate skip conditions.
+operational. Container isolation is not checked in this suite; section 6
+below names the suites that do check it.
 """
 from __future__ import annotations
 
 import ast
 import importlib
-import os
 import shutil
 import subprocess
 import sys
@@ -185,13 +184,11 @@ def test_update_run_can_activate_only_when_verified():
 
 
 # --- 6. Container isolation acceptance ---
-
-@pytest.mark.skipif(
-    os.environ.get("SONDER_CONTAINER_TEST") != "1",
-    reason="requires SONDER_CONTAINER_TEST=1 and container runtime",
-)
-def test_container_isolation():
-    pytest.skip("Container isolation requires live runtime")
+#
+# Not asserted here: this suite has no container or namespace runtime. The
+# isolation behaviour is checked by tests/test_linux_candidate_isolation.py
+# (root Linux), tests/test_build_network_isolation.py,
+# tests/test_selfmod_isolation_scope.py and tests/test_sandbox.py.
 
 
 # --- 7. Guarded/unrestricted capability matrix ---
