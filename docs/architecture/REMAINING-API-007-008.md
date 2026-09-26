@@ -52,8 +52,11 @@ The served runtime exposes the contract over HTTP (see
 - `interfaces/http/facades/client_protocol.py` is the hosting interface. It
   supplies the authorization decisions: a request-scoped view may reconnect
   only when the HTTP layer authenticated the request, and only the host may
-  open a stream. It owns one stream, `control`, whose events are
-  `control.snapshot` records of the process-global permission mode. The host
+  open a stream. It owns one stream, `control.<instance>`, whose events are
+  `control.snapshot` records of the process-global permission mode.
+  `<instance>` is a random id minted each time the host is built (process
+  start, or a replaced application graph), and the schema route lists the
+  current id under `streams`. The host
   publishes when it observes the mode differ from the last published value:
   on a mode change or read through the API and before every reconnect. A
   change made in another process is therefore recorded when a client next
@@ -64,9 +67,12 @@ The served runtime exposes the contract over HTTP (see
   facade's authorized `reconnect()`, and `encode_reconnect_response()`.
   Both require an authorized caller; a malformed body is a 400.
 
-Limits: the stream is in memory and single-process, so a watermark from
-before a restart is rejected as out of range and the client must refetch
-state. Session, job, and work-run events are not published into protocol
+Limits: the stream is in memory and single-process, and its sequence starts
+again at 1 whenever the host is built. A cursor kept from an earlier host
+names a stream id that no longer exists, so it is `rejected` as an unknown
+stream and the client must refetch the schema, take the new stream id and
+resume from watermark 0; it is never resumed silently against the new
+stream's numbering. Session, job, and work-run events are not published into protocol
 streams, and the Flutter app does not call these routes yet.
 `tests/test_client_protocol_http.py` covers the routes end to end.
 

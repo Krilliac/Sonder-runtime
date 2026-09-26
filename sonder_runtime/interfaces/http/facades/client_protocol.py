@@ -8,15 +8,22 @@ catalog.  This module is the hosting interface the protocol port expects:
 * it supplies the authorization decisions, since only the HTTP adapter knows
   whether a request authenticated.  A request-scoped view may reconnect only
   when its request was authorized; only this host may open a stream.
-* it owns one real stream, ``control``, and is its only producer.  Each event
+* it owns one real stream, ``control.<instance>``, and is its only producer.
+  ``<instance>`` is a random identifier minted when the host is built, and
+  the schema route advertises the full stream id.  Each event
   is a ``control.snapshot`` carrying the runtime's process-global permission
   mode.  The host publishes when it observes the mode differ from the last
   published value -- on a mode change through the API, on a mode read, and
   before every reconnect -- so a change made elsewhere (for example in the
   REPL) is recorded the next time any client looks, not at the instant it
-  happened.  The stream is in memory: after a restart it starts again at
-  sequence 1, and a watermark from the previous process is rejected as
-  outside the stream's range, which tells the client to refetch state.
+  happened.  The stream is in memory and its sequence starts again at 1
+  whenever a host is built (a process restart, or a new application graph).
+  Because each host's stream has a fresh id, a cursor kept from an earlier
+  host names a stream that no longer exists and is ``rejected`` as unknown,
+  which tells the client to refetch the schema, learn the current stream id
+  and resume from watermark 0.  Without the fresh id, an old watermark at or
+  below the new stream's watermark would resume silently with no events and
+  leave the client holding a stale mode.
 
 Sockets, authentication, CORS and response writing stay in ``serve.py``.
 """
@@ -37,7 +44,7 @@ from sonder_runtime.application.protocol.mobile_parity import (
 
 logger = logging.getLogger(__name__)
 
-CONTROL_STREAM_ID = "control"
+CONTROL_STREAM_PREFIX = "control"
 HOST_CLIENT_ID = "sonder-http-host"
 SCHEMA_ROUTE = "/v1/client/schema"
 RECONNECT_ROUTE = "/v1/client/reconnect"
@@ -81,8 +88,9 @@ class ClientProtocolHost:
         self._publisher = ProtocolApplicationFacade(
             self._graph, authorization=_HostAuthorization(),
         )
+        self._stream_id = "%s.%s" % (CONTROL_STREAM_PREFIX, uuid.uuid4().hex)
         self._stream = self._publisher.open_stream(
-            CONTROL_STREAM_ID, client_id=HOST_CLIENT_ID, capacity=capacity,
+            self._stream_id, client_id=HOST_CLIENT_ID, capacity=capacity,
         )
         self._lock = threading.Lock()
         self._last: dict[str, Any] | None = None
@@ -92,9 +100,25 @@ class ClientProtocolHost:
     def protocol(self) -> ProtocolApplicationFacade:
         return self._protocol
 
+    @property
+    def stream_id(self) -> str:
+        """This host's control stream id; a new host never reuses one."""
+        return self._stream_id
+
     def schema_payload(self) -> dict[str, Any]:
-        """The exact envelope a client caches and advertises on reconnect."""
-        return encode_client_schema(self._graph.schema)
+        """The schema envelope plus the streams this host currently serves.
+
+        ``schema`` is the exact envelope a client caches and whose digest it
+        advertises on reconnect; it depends only on the catalog.  ``streams``
+        names the live stream ids, which change whenever the host is rebuilt,
+        so they sit beside the schema and never enter its digest.
+        """
+        payload = encode_client_schema(self._graph.schema)
+        payload["streams"] = [{
+            "stream_id": self._stream_id,
+            "event_types": [ProtocolEventType.CONTROL_SNAPSHOT.value],
+        }]
+        return payload
 
     def observe(self) -> bool:
         """Publish the current control state if it differs from the last one.
@@ -113,7 +137,7 @@ class ClientProtocolHost:
             ):
                 self._stream.publish_snapshot(dict(self._last))
             self._publisher.publish(
-                CONTROL_STREAM_ID, ProtocolEventType.CONTROL_SNAPSHOT, state,
+                self._stream_id, ProtocolEventType.CONTROL_SNAPSHOT, state,
                 event_id=uuid.uuid4().hex,
             )
             self._last = state
@@ -134,6 +158,6 @@ class ClientProtocolHost:
 
 
 __all__ = [
-    "CONTROL_STREAM_ID", "ClientProtocolHost", "HOST_CLIENT_ID",
+    "CONTROL_STREAM_PREFIX", "ClientProtocolHost", "HOST_CLIENT_ID",
     "RECONNECT_ROUTE", "SCHEMA_ROUTE",
 ]

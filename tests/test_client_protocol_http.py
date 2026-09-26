@@ -4,8 +4,8 @@ The application already owned the portable client schema, the resumable
 stream semantics and the reconnect planner, but no route served them, and the
 composed protocol facade had no stream, so a reconnect could only ever be
 rejected.  The HTTP host now serves ``GET /v1/client/schema`` and
-``POST /v1/client/reconnect`` and owns one real stream, ``control``, that
-records permission-mode changes.
+``POST /v1/client/reconnect`` and owns one real stream, ``control.<instance>``,
+that records permission-mode changes; the schema route advertises its id.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ from sonder_runtime.application.protocol.mobile_parity import (
 )
 from sonder_runtime.application.tools.generated_catalogs import GeneratedCatalogs
 from sonder_runtime.interfaces.http.facades.client_protocol import (
-    CONTROL_STREAM_ID,
+    CONTROL_STREAM_PREFIX,
     ClientProtocolHost,
 )
 
@@ -109,6 +109,13 @@ def _request(base, path, body=None):
         return error.code, json.loads(error.read() or b"{}")
 
 
+def _schema_and_stream(base):
+    status, schema = _request(base, "/v1/client/schema")
+    assert status == 200
+    (stream,) = schema["streams"]
+    return schema["schema"]["digest"], stream["stream_id"]
+
+
 def _reconnect(digest, cursors, batch_limit=256, client_id="flutter-1"):
     return {
         "type": "reconnect", "version": 1, "client_id": client_id,
@@ -140,14 +147,18 @@ def test_the_served_schema_is_the_one_built_from_the_catalog(
     expected = build_client_schema(application.catalogs)
     assert body["schema"]["digest"] == expected.digest
     assert body["schema"] == expected.as_dict()
+    (stream,) = body["streams"]
+    assert stream["stream_id"].startswith(CONTROL_STREAM_PREFIX + ".")
+    assert stream["event_types"] == ["control.snapshot"]
 
 
 def test_a_stale_digest_is_told_to_refresh_the_schema(
     http_server, authorized, application, mode,
 ):
     stale = "0" * 64
+    _, stream_id = _schema_and_stream(http_server)
     status, body = _request(
-        http_server, "/v1/client/reconnect", _reconnect(stale, [(CONTROL_STREAM_ID, 0)]),
+        http_server, "/v1/client/reconnect", _reconnect(stale, [(stream_id, 0)]),
     )
     assert status == 200
     assert body["type"] == "reconnect_response"
@@ -159,8 +170,7 @@ def test_a_stale_digest_is_told_to_refresh_the_schema(
 def test_a_watermark_resumes_the_control_stream_in_bounded_batches(
     http_server, authorized, application, mode,
 ):
-    _, schema = _request(http_server, "/v1/client/schema")
-    digest = schema["schema"]["digest"]
+    digest, stream_id = _schema_and_stream(http_server)
     # The host published the starting mode when it was composed; two more
     # changes are observed through the mode read the app already makes.
     for value in ("auto", "plan"):
@@ -170,7 +180,7 @@ def test_a_watermark_resumes_the_control_stream_in_bounded_batches(
 
     status, first = _request(
         http_server, "/v1/client/reconnect",
-        _reconnect(digest, [(CONTROL_STREAM_ID, 0)], batch_limit=2),
+        _reconnect(digest, [(stream_id, 0)], batch_limit=2),
     )
     assert status == 200
     assert first["freshness"]["state"] == "current"
@@ -184,7 +194,7 @@ def test_a_watermark_resumes_the_control_stream_in_bounded_batches(
 
     status, rest = _request(
         http_server, "/v1/client/reconnect",
-        _reconnect(digest, [(CONTROL_STREAM_ID, batch["next_watermark"])], batch_limit=2),
+        _reconnect(digest, [(stream_id, batch["next_watermark"])], batch_limit=2),
     )
     batch = rest["results"][0]["batch"]
     assert [e["payload"]["permission_mode"] for e in batch["events"]] == ["plan"]
@@ -195,11 +205,10 @@ def test_a_watermark_resumes_the_control_stream_in_bounded_batches(
 def test_a_change_made_elsewhere_is_recorded_before_the_reconnect_plan(
     http_server, authorized, application, mode,
 ):
-    _, schema = _request(http_server, "/v1/client/schema")
-    digest = schema["schema"]["digest"]
+    digest, stream_id = _schema_and_stream(http_server)
     mode.value = "acceptEdits"  # e.g. switched in the REPL, never seen by the API
     _, body = _request(
-        http_server, "/v1/client/reconnect", _reconnect(digest, [(CONTROL_STREAM_ID, 1)]),
+        http_server, "/v1/client/reconnect", _reconnect(digest, [(stream_id, 1)]),
     )
     events = body["results"][0]["batch"]["events"]
     assert [e["payload"]["permission_mode"] for e in events] == ["acceptEdits"]
@@ -208,11 +217,10 @@ def test_a_change_made_elsewhere_is_recorded_before_the_reconnect_plan(
 def test_unknown_streams_and_future_watermarks_are_rejected(
     http_server, authorized, application, mode,
 ):
-    _, schema = _request(http_server, "/v1/client/schema")
-    digest = schema["schema"]["digest"]
+    digest, stream_id = _schema_and_stream(http_server)
     _, body = _request(
         http_server, "/v1/client/reconnect",
-        _reconnect(digest, [("not-a-stream", 0), (CONTROL_STREAM_ID, 99)]),
+        _reconnect(digest, [("not-a-stream", 0), (stream_id, 99)]),
     )
     assert [r["disposition"] for r in body["results"]] == ["rejected", "rejected"]
 
@@ -264,12 +272,65 @@ def test_only_the_host_opens_streams_and_only_authenticated_views_reconnect():
     host = ClientProtocolHost(protocol, control_state=lambda: {"permission_mode": "manual"})
     with pytest.raises(ProtocolAuthorizationError):
         protocol.open_stream("other", client_id="flutter-1")
-    request = _reconnect(protocol.schema.digest, [(CONTROL_STREAM_ID, 0)])
+    request = _reconnect(protocol.schema.digest, [(host.stream_id, 0)])
     with pytest.raises(ProtocolAuthorizationError):
         host.reconnect(request, authenticated=False)
     assert host.reconnect(request, authenticated=True)["results"][0]["disposition"] == "resumed"
-    with pytest.raises(ValueError, match="already exists"):
-        ClientProtocolHost(protocol, control_state=lambda: {"permission_mode": "manual"})
+
+
+def _resume(host, digest, stream_id, watermark):
+    body = host.reconnect(_reconnect(digest, [(stream_id, watermark)]), authenticated=True)
+    (result,) = body["results"]
+    return result
+
+
+def test_a_cursor_from_an_earlier_host_is_rejected_not_silently_resumed():
+    # A restart builds a new host whose stream starts again at sequence 1.  A
+    # client that last saw sequence 1 of the old stream must not be told it
+    # is up to date with the new one while the mode has changed.
+    first_protocol = ProtocolApplicationFacade.compose(_catalogs())
+    first = ClientProtocolHost(first_protocol, control_state=lambda: {"permission_mode": "auto"})
+    digest = first_protocol.schema.digest
+    seen = _resume(first, digest, first.stream_id, 0)
+    assert [e["payload"]["permission_mode"] for e in seen["batch"]["events"]] == ["auto"]
+    watermark = seen["batch"]["next_watermark"]
+    assert watermark == 1
+
+    restarted_protocol = ProtocolApplicationFacade.compose(_catalogs())
+    restarted = ClientProtocolHost(
+        restarted_protocol, control_state=lambda: {"permission_mode": "manual"},
+    )
+    assert restarted_protocol.schema.digest == digest, "the schema itself did not change"
+    assert restarted.stream_id != first.stream_id
+    stale = _resume(restarted, digest, first.stream_id, watermark)
+    assert stale["disposition"] == "rejected"
+    assert stale["reason"] == "unknown stream"
+
+    advertised = [s["stream_id"] for s in restarted.schema_payload()["streams"]]
+    assert advertised == [restarted.stream_id]
+    fresh = _resume(restarted, digest, restarted.stream_id, 0)
+    assert [e["payload"]["permission_mode"] for e in fresh["batch"]["events"]] == ["manual"]
+
+
+def test_a_new_application_graph_rejects_the_previous_hosts_cursor(
+    http_server, authorized, application, mode, monkeypatch,
+):
+    digest, old_stream = _schema_and_stream(http_server)
+    _, body = _request(http_server, "/v1/client/reconnect", _reconnect(digest, [(old_stream, 0)]))
+    assert body["results"][0]["batch"]["next_watermark"] == 1
+
+    replacement = SimpleNamespace(protocol=ProtocolApplicationFacade.compose(_catalogs()))
+    monkeypatch.setattr("sonder_runtime.bootstrap.app.default_app", lambda: replacement)
+    mode.value = "plan"
+    _, body = _request(http_server, "/v1/client/reconnect", _reconnect(digest, [(old_stream, 1)]))
+    assert [(r["disposition"], r["reason"]) for r in body["results"]] == [
+        ("rejected", "unknown stream"),
+    ]
+    _, new_stream = _schema_and_stream(http_server)
+    assert new_stream != old_stream
+    _, body = _request(http_server, "/v1/client/reconnect", _reconnect(digest, [(new_stream, 0)]))
+    events = body["results"][0]["batch"]["events"]
+    assert [e["payload"]["permission_mode"] for e in events] == ["plan"]
 
 
 def test_a_full_stream_is_compacted_into_a_snapshot_not_refused():
@@ -281,7 +342,7 @@ def test_a_full_stream_is_compacted_into_a_snapshot_not_refused():
         assert host.observe() is True
     assert host.observe() is False, "an unchanged state publishes nothing"
     body = host.reconnect(
-        _reconnect(protocol.schema.digest, [(CONTROL_STREAM_ID, 0)]), authenticated=True,
+        _reconnect(protocol.schema.digest, [(host.stream_id, 0)]), authenticated=True,
     )
     batch = body["results"][0]["batch"]
     assert batch["snapshot"] is not None
