@@ -43,6 +43,8 @@ def installed(monkeypatch):
     services.model.view = fail_view
     inventory = SpyInventory()
     previous = environment_probe._capability_summary_provider
+    # A process-wide flag the HTTP host sets; each test starts as a local process.
+    monkeypatch.setattr(build_tools, "_BRIEF_DECLARATION_REQUIRED", False)
     install_build_brief(services, inventory)
     yield services, inventory
     uninstall_build_brief()
@@ -158,3 +160,79 @@ def test_the_build_line_is_the_owners_only_and_never_reaches_a_hosted_agent(inst
     hosted = _agent_turn_system(monkeypatch, cloud=True)
     assert "sparklite" not in hosted and "capabilities: " not in hosted
     assert len(services.model.summary_calls) == calls
+
+
+def _in_fresh_context(function, *args, **kwargs):
+    """Run in a new context, as a fresh request-handler or worker thread does."""
+    import contextvars
+
+    return contextvars.Context().run(function, *args, **kwargs)
+
+
+def test_a_served_account_turn_shows_its_own_build_line_never_the_owners(installed,
+                                                                         monkeypatch):
+    """A developer account's natural work reaches ``_agent_turn`` on the HTTP
+    handler (or a work thread that copied its context): the request declares
+    the account's own principal, so the owner's project model never appears."""
+    import hashlib
+
+    from sonder_runtime.interfaces.http import serve
+
+    services, _ = installed
+    principal = "account:" + hashlib.sha256(b"alice").hexdigest()
+    services.model.summaries = {"owner": "cmake/Ninja sparklite: 5 targets",
+                                principal: "cmake/Make alice-tool: 2 targets"}
+
+    def served_turn(context):
+        serve._bind_request_build_principal(context)
+        return _agent_turn_system(monkeypatch)
+
+    account = {"authorized": True, "account": {"username": "alice", "role": "developer"}}
+    system = _in_fresh_context(served_turn, account)
+    assert "alice-tool" in system and "sparklite" not in system
+    assert (principal, "") in services.model.summary_calls
+    assert ("owner", "") not in services.model.summary_calls
+
+    # The owner (API key or local-open) still sees the owner's line.
+    owner = _in_fresh_context(served_turn, {"authorized": True, "account": None})
+    assert "sparklite" in owner and "alice-tool" not in owner
+
+    # An unauthorized or malformed request declares nobody; in the HTTP host
+    # nobody means no build line at all.
+    monkeypatch.setattr(build_tools, "_BRIEF_DECLARATION_REQUIRED", True)
+    for context in ({"authorized": False, "account": None},
+                    {"authorized": True, "account": {"username": ""}}):
+        refused = _in_fresh_context(served_turn, context)
+        assert "| build: " not in refused
+
+
+def test_the_http_host_shows_no_build_line_for_an_undeclared_turn(installed, monkeypatch):
+    """A fleet worker or autopilot run in the HTTP host inherited no request
+    declaration: it cannot say whose turn it runs, so it gets no build line.
+    The same undeclared turn in a local process (REPL, stdio MCP) is the owner's."""
+    services, _ = installed
+    services.model.summaries = {"owner": "cmake/Ninja sparklite: 5 targets"}
+    local = _in_fresh_context(_agent_turn_system, monkeypatch)
+    assert "sparklite" in local
+    monkeypatch.setattr(build_tools, "_BRIEF_DECLARATION_REQUIRED", True)
+    calls = len(services.model.summary_calls)
+    hosted = _in_fresh_context(_agent_turn_system, monkeypatch)
+    assert "| build: " not in hosted and "sparklite" not in hosted
+    assert len(services.model.summary_calls) == calls
+
+
+def test_the_http_host_requires_a_declared_principal(monkeypatch):
+    from sonder_runtime.interfaces.http import serve
+
+    monkeypatch.setattr(build_tools, "_BRIEF_DECLARATION_REQUIRED", False)
+
+    class Stop(Exception):
+        pass
+
+    def configure(config):
+        raise Stop()
+
+    monkeypatch.setattr(serve, "configure_typed_config", configure)
+    with pytest.raises(Stop):
+        serve.main(config=object(), _close_default_resources=False)
+    assert build_tools._BRIEF_DECLARATION_REQUIRED is True

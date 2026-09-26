@@ -1156,6 +1156,34 @@ def _account_identity(account) -> str:
     return identity
 
 
+def _build_principal(context) -> str:
+    """The build tools' principal for an authenticated request, "" if malformed.
+
+    ``owner`` without an account; an account's own opaque
+    ``account:<sha256(identity)>`` otherwise. The build routes key their
+    model cache by it, and the agent brief shows that principal's build line.
+    """
+    account = (context or {}).get("account")
+    if account is None:
+        return "owner"
+    identity = _account_identity(account)
+    if not identity:
+        return ""
+    return "account:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def _bind_request_build_principal(context) -> None:
+    """Declare whose request this handler thread serves, for the agent brief.
+
+    An unauthorized request declares nobody. Work threads started with a copy
+    of this context (the HTTP work runner) inherit the declaration.
+    """
+    from sonder_runtime.bootstrap.build_tools import bind_build_brief_principal
+
+    authorized = bool((context or {}).get("authorized"))
+    bind_build_brief_principal(_build_principal(context) if authorized else "")
+
+
 def _request_idempotency_key(context, endpoint, supplied_key):
     """Return an opaque idempotency key bound to one HTTP principal.
 
@@ -4491,6 +4519,8 @@ class Handler(BaseHTTPRequestHandler):
         # requests. A correlation ID is a request receipt, never a socket
         # receipt, so discard the prior request's cached value first.
         self._correlation_id = ""
+        # Nor may the prior request's principal declaration survive it.
+        _bind_request_build_principal(None)
         self._operation_context = None
         self._request_started = time.monotonic()
         self._request_body_consumed = False
@@ -4582,10 +4612,14 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _request_auth_context(self):
-        return _auth_context(
+        context = _auth_context(
             self.headers.get("Authorization", ""),
             self.headers.get("X-Sonder-Account-Token", ""),
         )
+        # A served account's agent turn must never carry the owner's build
+        # model: the brief shows only the principal this request declares.
+        _bind_request_build_principal(context)
+        return context
 
     def _peer(self):
         return self.client_address[0] if self.client_address else ""
@@ -5019,15 +5053,10 @@ class Handler(BaseHTTPRequestHandler):
                                                "message": "build reads do not accept a body"}},
                                     status=400)
             return True
-        account = auth.get("account")
-        if account is not None:
-            identity = _account_identity(account)
-            if not identity:
-                self._send_json_payload({"error": {"code": "FORBIDDEN"}}, status=403)
-                return True
-            principal = "account:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
-        else:
-            principal = "owner"
+        principal = _build_principal(auth)
+        if not principal:
+            self._send_json_payload({"error": {"code": "FORBIDDEN"}}, status=403)
+            return True
         application = default_app()
         state = getattr(getattr(application, "config", None), "state", None)
         roots = tuple(str(Path(root).resolve()) for root in getattr(state, "workspace_roots", ())) \
@@ -5138,6 +5167,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         self._correlation_id = ""
+        _bind_request_build_principal(None)
         self._request_started = time.monotonic()
         self._request_body_consumed = False
         self._app_control_request = False
@@ -5181,6 +5211,7 @@ class Handler(BaseHTTPRequestHandler):
         # Keep-alive reuses Handler instances; see do_OPTIONS for why this is
         # reset before every externally visible request.
         self._correlation_id = ""
+        _bind_request_build_principal(None)
         self._request_started = time.monotonic()
         self._request_body_consumed = False
         self._app_control_request = False
@@ -6587,6 +6618,7 @@ class Handler(BaseHTTPRequestHandler):
         # Keep-alive reuses Handler instances; see do_OPTIONS for why this is
         # reset before every externally visible request.
         self._correlation_id = ""
+        _bind_request_build_principal(None)
         self._request_started = time.monotonic()
         # BaseHTTPRequestHandler reuses this instance for HTTP/1.1 keep-alive
         # requests. The terminal-metric latch is per request, never per socket,
@@ -8083,6 +8115,11 @@ def main(
 ):
     _serve_logger.info("HTTP server starting")
     _serve_logger.debug("main: starting HTTP server")
+    # This process serves several principals: an agent turn that inherited no
+    # request declaration shows no build line rather than the owner's.
+    from sonder_runtime.bootstrap.build_tools import require_declared_build_brief_principal
+
+    require_declared_build_brief_principal()
     global CONFIGURED_PORT, BOUND_PORT
     global _ARTIFACT_TRANSFER_BINDING, _ARTIFACT_TRANSFER_CONFIG
     global _APP_CONTROL_BINDING, _APP_CONTROL_CONFIG

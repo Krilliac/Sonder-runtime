@@ -55,7 +55,7 @@ it produces.
 | Network decision | Implemented | `allow_network=true` needs a separate `build_network` decision. |
 | HTTP routes `/v1/build/*` | Implemented | Developer authority is required. The call runs through the typed gateway as the caller, unattended. |
 | REPL `/build`, `/fix-build`, `/fix-build-restore` | Experimental | The facade module and command specs exist. The REPL lane wires `repl.py` and `command_catalog.py`. |
-| Model-context build line | Experimental | Keyed by principal and read from the model cache only. The local agent turn (`server._agent_turn` through `_local_agent_brief`) declares `LOCAL_OWNER` and the project's directory name; hosted agents never receive it. Other surfaces declare no principal and show no build line. |
+| Model-context build line | Experimental | Keyed by principal and read from the model cache only. A local agent turn (`server._agent_turn` through `_local_agent_brief` and `build_brief_turn`) shows the line of the principal its surface declared, with the project's directory name: a served HTTP request binds its own caller (`owner`, or the account's `account:<sha256>` principal, the key the build routes use), and a local operator process (REPL, stdio MCP) is `LOCAL_OWNER`. In the HTTP host a turn that inherited no request declaration (a fleet worker, an autopilot run) shows no build line. Hosted agents never receive it. |
 | clangd navigation (lane D) | Experimental | Composed only when the inventory has clangd. Tested on Linux with clangd 18. |
 | MSBuild and vcvars execution | Degraded | Linux can parse these models but not run them (`RUNNER_UNAVAILABLE`). Windows execution is validated only by fakes. |
 
@@ -259,7 +259,11 @@ back to the exact before-digest reads as not applied. The details are in
   most 220 characters onto the capability summary, whose total cap is 480. A
   surface declares the turn's principal with
   `build_brief_principal(principal_id, project_label=...)`. Without one there
-  is no build line (F22).
+  is no build line (F22). A request-handler thread instead rebinds its
+  request's principal with `bind_build_brief_principal` (the HTTP host does
+  so in `_request_auth_context` and clears it at the start of every request),
+  and `serve.main` calls `require_declared_build_brief_principal()`, so an
+  undeclared turn in that process never falls back to `LOCAL_OWNER`.
 
 ### Hook instructions for the REPL and server lanes
 
@@ -271,8 +275,10 @@ back to the exact before-digest reads as not applied. The details are in
 - `command_catalog.py`: add `BUILD_COMMAND_SPECS` as catalog entries. Each
   entry's `tools` names the typed tools that grade its risk.
 - `server.py` (server lane):
-  - done: the local agent prompt assembly declares `LOCAL_OWNER` through
-    `_local_agent_brief` (`tests/test_build_brief.py`);
+  - done: the local agent prompt assembly declares its caller through
+    `_local_agent_brief` (`build_brief_turn`): the served request's own
+    principal, `LOCAL_OWNER` in a local operator process, and nobody for an
+    undeclared turn in the HTTP host (`tests/test_build_brief.py`);
   - done: `build_job` and `build_job_result` are `grounded_outcomes`
     verifiers. `server._install_typed_build_feed` installs
     `_typed_receipt_outcome` as a receipt observer

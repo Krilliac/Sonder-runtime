@@ -798,6 +798,11 @@ _BRIEF_PROJECT: contextvars.ContextVar[str] = contextvars.ContextVar(
     "sonder_build_brief_project", default="")
 _BRIEF_LOCK = threading.Lock()
 _BRIEF_INSTALLED: tuple[Any, Any] | None = None
+# Set once a process serves requests for more than one principal (the HTTP
+# host). From then on an agent turn with no declared principal shows no build
+# line instead of the local owner's: a background thread that inherited no
+# request context cannot say whose turn it runs.
+_BRIEF_DECLARATION_REQUIRED = False
 
 
 @contextlib.contextmanager
@@ -815,6 +820,39 @@ def build_brief_principal(principal_id: str, *, project_label: str = "") -> Iter
     finally:
         _BRIEF_PROJECT.reset(project_token)
         _BRIEF_PRINCIPAL.reset(principal_token)
+
+
+def bind_build_brief_principal(principal_id: str) -> None:
+    """Bind the principal of the request this thread now serves ("" for none).
+
+    For a request-handler thread that serves one request after another: each
+    request rebinds (never nests), so a previous request's principal cannot
+    outlive it. Threads started with a copy of this context inherit it.
+    """
+    _BRIEF_PRINCIPAL.set(str(principal_id or "") or None)
+
+
+def require_declared_build_brief_principal() -> None:
+    """Mark this process as serving several principals (see ``build_brief_turn``)."""
+    global _BRIEF_DECLARATION_REQUIRED
+    _BRIEF_DECLARATION_REQUIRED = True
+
+
+@contextlib.contextmanager
+def build_brief_turn(*, project_label: str = "") -> Iterator[None]:
+    """Declare the principal of one local agent turn's brief.
+
+    The principal a surface already declared (a served request binds its own
+    caller: ``owner`` or ``account:<sha256>``) is kept. With none declared the
+    turn belongs to the local owner (the REPL, the stdio MCP), except in a
+    process that serves several principals, where the build line is left out
+    rather than guessed (F22).
+    """
+    principal = _BRIEF_PRINCIPAL.get()
+    if not principal and not _BRIEF_DECLARATION_REQUIRED:
+        principal = LOCAL_OWNER
+    with build_brief_principal(principal or "", project_label=project_label):
+        yield
 
 
 def build_brief_line(services) -> str:
@@ -885,7 +923,9 @@ def register_build_http_routes(tools_getter: Callable[[], Any]):
 
 __all__ = [
     "BUILD_TYPED_TOOLS", "BuildFixGrantRegistry", "GRANT_POLICY_PREFIX", "build_brief_line",
-    "build_brief_principal", "build_permission_resolvers", "build_tool_executor",
+    "bind_build_brief_principal", "build_brief_principal", "build_brief_turn",
+    "build_permission_resolvers", "build_tool_executor",
     "clangd_navigator_factory", "compose_build_tools", "install_build_brief",
-    "load_build_profiles", "register_build_http_routes", "uninstall_build_brief",
+    "load_build_profiles", "register_build_http_routes",
+    "require_declared_build_brief_principal", "uninstall_build_brief",
 ]

@@ -20273,22 +20273,24 @@ _CLOUD_AGENT_WRITE_CHUNK_HINT = 24000
 
 
 def _local_agent_brief(project_scope: str = "") -> str:
-    """The host brief for a local agent turn, carrying the owner's build line.
+    """The host brief for a local agent turn, carrying its caller's build line.
 
-    A local agent turn acts as the local owner: every typed tool it reaches
-    (``build_model`` included) runs under ``LOCAL_OWNER``, so the brief
-    declares that principal and shows the owner's cached build model of the
+    The build line is the declared principal's cached build model of the
     turn's project (the planner labels a project by its directory name), or
-    the owner's newest one when the turn names no project. The line is read
+    that principal's newest one when the turn names no project
+    (``build_brief_turn``): a served request declares its own caller (the
+    owner, or an account's own ``account:<sha256>`` principal); a local
+    operator surface (the REPL, the stdio MCP) declares ``LOCAL_OWNER``; and
+    a turn in the HTTP host that inherited no request (a fleet worker, an
+    autopilot run) declares nobody and shows no build line. The line is read
     from the cache only; hosted agents never receive this brief.
     """
     try:
-        from sonder_runtime.application.context import LOCAL_OWNER
-        from sonder_runtime.bootstrap.build_tools import build_brief_principal
+        from sonder_runtime.bootstrap.build_tools import build_brief_turn
     except ImportError:
         return environment_probe.agent_brief()
     label = os.path.basename(str(project_scope or "").rstrip("/\\")) if project_scope else ""
-    with build_brief_principal(LOCAL_OWNER, project_label=label):
+    with build_brief_turn(project_label=label):
         return environment_probe.agent_brief()
 
 
