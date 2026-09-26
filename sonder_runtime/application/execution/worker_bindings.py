@@ -279,6 +279,23 @@ class EffectRecoveryRequired(EffectJournalError):
         self.report = report
 
 
+class PeerWorkerLive(EffectJournalError):
+    """Another live local runtime process owns this node-shared worker run.
+
+    The run's durable owner row holds one epoch.  Claiming it here would
+    fence the peer's admitted work, so composition refuses instead; the
+    worker can be composed again once the peer has exited.
+    """
+
+    def __init__(self, run_id: str, worker_id: str) -> None:
+        super().__init__(
+            "another live runtime process on this node owns this worker run; "
+            "retry after it exits"
+        )
+        self.run_id = run_id
+        self.worker_id = worker_id
+
+
 def journaled_effect(
     context: AuthenticatedWorkerBinding,
     *,
@@ -384,6 +401,7 @@ def _publish_outcome(
 
 __all__ = [
     "AuthenticatedWorkerBinding", "EffectReconciliationReport",
-    "EffectRecoveryRequired", "ReconciledEffect", "effect_request_digest",
+    "EffectRecoveryRequired", "PeerWorkerLive", "ReconciledEffect",
+    "effect_request_digest",
     "journaled_effect",
 ]

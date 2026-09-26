@@ -736,13 +736,13 @@ What remains:
 - While any peer runtime process on the node is live, the startup pass is
   deferred as a whole, so a crashed third process's orphans stay fenced until
   their worker is recomposed (pre-restart path) or a later startup finds no
-  live peer. The lease is consulted only by the startup pass: a peer
-  process that lazily composes the process or compute provider still claims
-  the shared `runtime:process-jobs` / `runtime:compute-jobs` run in its
-  constructor (behaviour that predates this slice). Peers in one process
-  share one lease; the lease is local OS
-  evidence and does not coordinate hosts sharing a journal over a network
-  filesystem.
+  live peer. *Superseded in part (2026-09-26, "Node-shared worker runs"
+  below):* a peer process that lazily composes the process or compute
+  provider no longer claims the shared `runtime:process-jobs` /
+  `runtime:compute-jobs` run while another live process owns it; it is
+  refused with `PeerWorkerLive`. Peers in one process share one lease; the
+  lease is local OS evidence and does not coordinate hosts sharing a
+  journal over a network filesystem.
 - No master-spec checkbox changes. LOOP-008, AGENT-006 and SESSION-007 stay
   unverified.
 
@@ -1291,3 +1291,92 @@ intents stay `uncertain` and fenced.
 an unprovable `selfmod-deploy` intent.
 
 No master-spec checkbox changes. LOOP-008 stays unverified.
+
+## Node-shared worker runs and live peers (2026-09-26)
+
+*Supersedes* the limitation above that a peer process lazily composing the
+process or compute provider still claims the shared run in its constructor.
+
+The problem. The process provider binds run `runtime:process-jobs` and the
+compute worker binds `runtime:compute-jobs`, both under the per-node worker
+identity (`process:<node>`, `compute:<node>`) and the per-process
+`worker_owner_epoch`. Their constructors call `recover_before_restart`,
+which calls `claim_owner` and then `recover(live_workers={})`. A second
+runtime process on the node that composed either provider therefore advanced
+the run's single owner epoch and treated the first process's in-flight
+intents as orphans. The first process's next admission then failed with
+`stale worker owner epoch`, and its in-flight intents were fenced. The
+startup pass had been made peer-aware, but this constructor path had not.
+
+What is wired now (caller -> callee):
+
+- `build_application` defines `node_shared_runs` (the two run ids above) and
+  `claim_node_shared_run(run_id, worker_id)`. `worker_binding` calls it
+  after composing the journal and before it builds the
+  `AuthenticatedWorkerBinding`, so the lease is taken before the provider
+  constructor claims the owner.
+- `claim_node_shared_run` calls
+  `adapters/persistence/worker_effect_hosts.acquire_run_lease`. That takes a
+  non-blocking exclusive OS lock (`flock`, or `msvcrt.locking` on Windows)
+  on `worker-effect-runs/run-<sha256(run, worker)[:32]>.lock` beside the
+  journal and holds it until the process exits. Every composition in one
+  process shares it, and a forked child must take its own.
+- When another live process holds the lock, or the lock file cannot be
+  opened, composition raises `PeerWorkerLive` (an `EffectJournalError`, in
+  `application/execution/worker_bindings.py`) and emits a
+  `worker.effects.peer_owned` WARNING operations event with the run and
+  worker ids. No owner row or intent is touched. The provider getter stays
+  uncomposed, so a later call retries.
+- When the owner exits, however it exits, the kernel releases the lock. The
+  next lazy composition claims the run under its newer epoch and offers the
+  dead owner's unresolved intents to the trusted verifiers through the
+  existing `auto_reconcile` path. Unprovable intents stay fenced
+  (`EffectRecoveryRequired`).
+- `reconcile_unresolved_effects` takes an optional `claim_guard`, and the
+  composition passes `claim_node_shared_run`. The startup pass only runs
+  when no peer lease is live, but a peer may still compose a shared worker
+  between that probe and the claim. With the guard, a run the pass cannot
+  lease is reported under `failed_runs` (`PeerWorkerLive`) with every fence
+  in place. A run it can lease stays held by this process, so a peer that
+  starts later is refused, not fenced.
+- The subagent, selfmod and build-fix bindings keep per-run ids and take no
+  run lease.
+
+Qualification (`tests/test_wiring_journal_live_peer_startup.py`):
+
+- A real child interpreter composes the compute worker and the process
+  provider and keeps one manual intent in flight in each shared run. In the
+  parent, `build_application` followed by `process_job_provider()` and by
+  `compute_job_worker()` raises `PeerWorkerLive`. The owner rows (epochs,
+  `recovery_required`) and both intent states are byte-identical afterwards,
+  and the `worker.effects.peer_owned` event names the run.
+- The child then commits both receipts and admits and settles new work in
+  the shared run. After it exits, the parent's same lazy composition
+  succeeds, and both runs are owned by the parent's newer epoch.
+- A killed owner: the next lazy composition claims `runtime:process-jobs`
+  and routes the orphan through verifier reconciliation. No verifier proves
+  a manual effect, so `EffectRecoveryRequired` reports it fenced, the intent
+  becomes `uncertain` and the compute run stays unclaimed.
+- `claim_guard` refusal leaves the owner row and intent untouched, and a
+  granting guard lets the same pass claim. A child interpreter is refused a
+  held run lease but granted an unrelated one.
+- With `claim_node_shared_run` disabled, the two cross-process tests fail
+  (`EffectRecoveryRequired` raised by the peer's composition), so they
+  detect the defect.
+
+Limits:
+
+- This is exclusion, not concurrency. Only one runtime process per node can
+  own the process and compute job runs at a time: the first to compose that
+  worker. A second process (for example an IDE-launched `mcp` beside
+  `serve`) cannot start process or compute jobs until the owner exits. That
+  refusal is typed and fail-closed. Before this change the second process
+  silently took the run over and broke the first. Per-process run ids were
+  rejected: compute-cancel attempt numbering and cross-restart duplicate
+  refusal read the shared run's history, and per-process runs would lose that
+  history.
+- The run lease is local OS evidence, like the host lease. It does not
+  coordinate hosts that share a journal over a network filesystem.
+- Compositions inside one process share the lease. As before, a later
+  composition in the same process claims a newer epoch over an earlier one.
+- No master-spec checkbox changes. LOOP-008 stays unverified.

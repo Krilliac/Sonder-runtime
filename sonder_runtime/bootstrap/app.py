@@ -690,19 +690,56 @@ def build_application(
     def worker_id_for(family: str) -> str:
         return f"{family}:{effective_config.compute.node_id}"
 
+    # Runs every runtime process on this node shares.  Their owner row holds
+    # one epoch, so a process claims one only while holding its run lease.
+    node_shared_runs = frozenset({"runtime:process-jobs", "runtime:compute-jobs"})
+
+    def claim_node_shared_run(run_id: str, worker_id: str) -> None:
+        """Take the per-run lease before this process claims a shared run.
+
+        Raises ``PeerWorkerLive`` while another live local runtime process
+        holds it (it composed that worker first), so the peer's owner epoch
+        and in-flight intents are never touched.  Other runs need no lease.
+        """
+        if run_id not in node_shared_runs:
+            return
+        from ..adapters.persistence.worker_effect_hosts import acquire_run_lease
+        from ..application.execution.worker_bindings import PeerWorkerLive
+        from ..platform.paths import state_path
+
+        journal_path = state_path("worker-effects.db", "SONDER_WORKER_EFFECTS_DB")
+        try:
+            held = acquire_run_lease(journal_path, run_id, worker_id)
+        except OSError as exc:
+            # The lease cannot be proven free: fail closed.
+            raise PeerWorkerLive(run_id, worker_id) from exc
+        if not held:
+            events.emit(
+                "worker.effects.peer_owned",
+                summary="worker run is owned by a live peer runtime process",
+                detail={"run_id": run_id, "worker_id": worker_id},
+                severity="WARNING",
+            )
+            raise PeerWorkerLive(run_id, worker_id)
+
     def worker_binding(*, family: str, scope: str, run_id: str):
         """Compose an authenticated binding from host-owned worker metadata.
 
         ``auto_reconcile`` makes every restart of a production worker offer
         unresolved intents to the journal's trusted verifiers (bounded) before
-        refusing; unprovable intents stay fenced.
+        refusing; unprovable intents stay fenced.  A node-shared run is bound
+        only after this process holds its run lease (``PeerWorkerLive``
+        otherwise), because the provider claims the owner in its constructor.
         """
         from ..application.execution.worker_bindings import AuthenticatedWorkerBinding
 
         if family not in worker_families:
             raise ValueError(f"unknown worker family: {family!r}")
+        journal = get_worker_effect_journal()
+        worker_id = worker_id_for(family)
+        claim_node_shared_run(run_id, worker_id)
         return AuthenticatedWorkerBinding(
-            get_worker_effect_journal(), run_id, worker_id_for(family),
+            journal, run_id, worker_id,
             worker_owner_epoch, scope, auto_reconcile=True,
         )
 
@@ -759,7 +796,8 @@ def build_application(
 
         worker_effect_reconciliation_report = reconcile_unresolved_effects(
             journal, owner_epoch=worker_owner_epoch, owns_worker=owned.__contains__,
-            emit=emit, peer_hosts_live=peer_hosts_live, **limits,
+            emit=emit, peer_hosts_live=peer_hosts_live,
+            claim_guard=claim_node_shared_run, **limits,
         )
         return worker_effect_reconciliation_report
 

@@ -29,6 +29,11 @@ Guarantees:
   ``peer_hosts_live`` probe reports (or cannot rule out) such a peer, the
   whole pass is deferred before any owner is claimed; each worker's own
   pre-restart path still reconciles its runs.
+* Node-shared runs: a run every process on the node shares (the process and
+  compute job runs) is claimed only after the caller's ``claim_guard`` takes
+  its per-run lease, so a peer that composed that worker between the probe
+  and the claim is never fenced; a refused guard leaves the run in
+  ``failed_runs`` with every fence in place.
 """
 from __future__ import annotations
 
@@ -120,12 +125,15 @@ def reconcile_unresolved_effects(
     verifier_timeout_seconds: float = DEFAULT_VERIFIER_TIMEOUT_SECONDS,
     emit: Callable[[str, dict[str, object]], None] | None = None,
     peer_hosts_live: Callable[[], bool] | None = None,
+    claim_guard: Callable[[str, str], None] | None = None,
 ) -> StartupReconciliationReport:
     """Reconcile unresolved intents owned by this host, within fixed bounds."""
     if type(owner_epoch) is not int or owner_epoch < 1:
         raise ValueError("owner_epoch must be positive")
     if not callable(owns_worker):
         raise TypeError("owns_worker must be callable")
+    if claim_guard is not None and not callable(claim_guard):
+        raise TypeError("claim_guard must be callable")
     for name, value, ceiling in (
         ("page_limit", page_limit, 10_000), ("max_pages", max_pages, 10_000),
         ("max_runs", max_runs, 10_000),
@@ -173,6 +181,10 @@ def reconcile_unresolved_effects(
                 auto_reconcile=True,
             )
             try:
+                if claim_guard is not None:
+                    # Raises (an EffectJournalError) when a live peer owns
+                    # the run; nothing has been claimed at that point.
+                    claim_guard(run_id, worker_id)
                 report = binding.reconcile_before_restart(
                     max_records=page_limit,
                     verifier_timeout_seconds=verifier_timeout_seconds,

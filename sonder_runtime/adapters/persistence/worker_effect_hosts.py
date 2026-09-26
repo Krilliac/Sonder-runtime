@@ -12,9 +12,17 @@ the process exits, however it exits.  A peer is proven dead only when this
 process acquires that peer's lock; missing files are ignored, and a held lock
 or any I/O error counts as live (fail closed).  The lease is local evidence
 only: it is never a remote lease or a takeover policy.
+
+Some worker runs are shared by every process on the node
+(``runtime:process-jobs`` and ``runtime:compute-jobs``): their durable owner
+row has one epoch, so whichever process claims it last fences the others.
+``acquire_run_lease`` gives such a run its own lock file in the sibling
+``worker-effect-runs`` directory.  A process holds it from the moment it first claims the run until
+it exits; a peer that cannot take it must not claim the run.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import uuid
@@ -106,7 +114,7 @@ def host_lease(journal_path: str | os.PathLike[str]) -> WorkerEffectHostLease:
     shares it, and it is held until the process exits.  A forked child
     acquires its own lease.
     """
-    directory = Path(journal_path).absolute().parent / "worker-effect-hosts"
+    directory = _lease_directory(journal_path)
     with _LEASES_LOCK:
         lease = _LEASES.get(directory)
         if lease is None or lease.pid != os.getpid():
@@ -115,4 +123,57 @@ def host_lease(journal_path: str | os.PathLike[str]) -> WorkerEffectHostLease:
         return lease
 
 
-__all__ = ["WorkerEffectHostLease", "host_lease"]
+def _lease_directory(journal_path: str | os.PathLike[str]) -> Path:
+    return Path(journal_path).absolute().parent / "worker-effect-hosts"
+
+
+_RUN_LEASES: dict[Path, tuple[int, BinaryIO]] = {}
+
+
+def acquire_run_lease(
+    journal_path: str | os.PathLike[str], run_id: str, worker_id: str,
+) -> bool:
+    """Hold this process's exclusive lock on one node-shared worker run.
+
+    Returns ``True`` when this process holds the lock (acquired now or
+    earlier; it is kept until the process exits) and ``False`` when another
+    live process holds it.  Every composition in one process shares the
+    lock, and a forked child must acquire its own.  ``OSError`` from creating
+    or opening the lock file propagates; callers refuse the claim.
+    """
+    if not all(isinstance(value, str) and value.strip() for value in (run_id, worker_id)):
+        raise ValueError("run lease identity is required")
+    digest = hashlib.sha256(f"{run_id}\0{worker_id}".encode("utf-8")).hexdigest()
+    directory = Path(journal_path).absolute().parent / "worker-effect-runs"
+    path = directory / f"run-{digest[:32]}.lock"
+    with _LEASES_LOCK:
+        held = _RUN_LEASES.get(path)
+        if held is not None and held[0] == os.getpid():
+            return True
+        directory.mkdir(parents=True, exist_ok=True)
+        try:
+            handle = path.open("x+b")
+        except FileExistsError:
+            handle = path.open("r+b")
+        else:
+            try:
+                handle.write(b"0")
+                handle.flush()
+            except BaseException:
+                handle.close()
+                raise
+        try:
+            _lock(handle)
+        except OSError:
+            # A live process holds the run.  The file stays: it names a
+            # fixed run, not a process, so there is nothing to reap.
+            handle.close()
+            return False
+        except BaseException:
+            handle.close()
+            raise
+        _RUN_LEASES[path] = (os.getpid(), handle)
+        return True
+
+
+__all__ = ["WorkerEffectHostLease", "acquire_run_lease", "host_lease"]
