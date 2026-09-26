@@ -1000,24 +1000,36 @@ def test_running_process_publishes_incremental_output_before_wait(tmp_path):
         SQLiteDurableJobRegistry(tmp_path / "jobs.db"),
         process_cleanup=cleanup,
     )
+    # The child blocks after "first" until the test has observed that line in
+    # the registry, so "second" can never race into the first page (the child
+    # gives up after 30s so a broken provider cannot hang the suite).
+    release = tmp_path / "release"
+    child = (
+        "import os,sys,time\n"
+        "print('first', flush=True)\n"
+        "deadline = time.monotonic() + 30\n"
+        "while not os.path.exists(sys.argv[1]) and time.monotonic() < deadline:\n"
+        "    time.sleep(.01)\n"
+        "print('second', flush=True)\n"
+    )
     request = ProcessJobRequest(
         JobIdentity("job-live-output", "process", "execute", "idem-live-output"),
-        (
-            sys.executable, "-u", "-c",
-            "import sys,time; print('first', flush=True); time.sleep(.25); print('second', flush=True)",
-        ),
+        (sys.executable, "-u", "-c", child, str(release)),
         max_descendants=4,
     )
 
     started = provider.start(request)
-    deadline = time.monotonic() + 5
-    page = provider._registry.stream(started.record.identity.job_id)
-    while not page.events and time.monotonic() < deadline:
-        time.sleep(.02)
+    try:
+        deadline = time.monotonic() + 5
         page = provider._registry.stream(started.record.identity.job_id)
+        while not page.events and time.monotonic() < deadline:
+            time.sleep(.02)
+            page = provider._registry.stream(started.record.identity.job_id)
 
-    assert [event.data for event in page.events] == ["first\n"]
-    assert provider._registry.poll("job-live-output").is_terminal is False
+        assert [event.data for event in page.events] == ["first\n"]
+        assert provider._registry.poll("job-live-output").is_terminal is False
+    finally:
+        release.write_text("go", encoding="utf-8")
 
     waited = provider.wait("job-live-output", timeout=5)
     assert waited.record.status is JobStatus.SUCCEEDED
