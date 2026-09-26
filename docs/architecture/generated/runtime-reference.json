@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "4c0324dcda57ad4aee1a182a7eb3ff95a2477907ced7d1a43b10827271ced723",
+    "catalog_digest": "c20e4b1dd5362f9c675f0a0caebf92abe8ef736ddd1a2a85974ba4a8a7e1028c",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "4c0324dcda57ad4aee1a182a7eb3ff95a2477907ced7d1a43b10827271ced723",
+      "catalog_digest": "c20e4b1dd5362f9c675f0a0caebf92abe8ef736ddd1a2a85974ba4a8a7e1028c",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -14349,7 +14349,7 @@
       "name": "/runtime_policy_status",
       "native": false,
       "params": [],
-      "risk": "ask",
+      "risk": "safe",
       "summary": "Show shared local model mappings, execution-lane tiers and cached model readiness.",
       "tool": "runtime_policy_status"
     },
@@ -18079,7 +18079,7 @@
     "schemas": 4,
     "tools": 216
   },
-  "digest": "47ca143e89dd8d2fc358660fa06dee0c8bd8db16d2f0741f143960a91d7b0fe8",
+  "digest": "56ee66952b825556dfdd8e5892adb8147fb7c8d851cb4031a92e87faa950c5ad",
   "events": [
     {
       "name": "session.started",
@@ -20690,9 +20690,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "4c0324dcda57ad4aee1a182a7eb3ff95a2477907ced7d1a43b10827271ced723",
+    "catalog_digest": "c20e4b1dd5362f9c675f0a0caebf92abe8ef736ddd1a2a85974ba4a8a7e1028c",
     "client": {
-      "digest": "4c0324dcda57ad4aee1a182a7eb3ff95a2477907ced7d1a43b10827271ced723",
+      "digest": "c20e4b1dd5362f9c675f0a0caebf92abe8ef736ddd1a2a85974ba4a8a7e1028c",
       "events": [
         {
           "name": "approval.denied",

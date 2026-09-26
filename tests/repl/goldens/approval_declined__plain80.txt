@@ -1,9 +1,8 @@
-/runtime status
-? approve  /runtime status                                               [asks]
-  Inspect or guarded-edit shared local model mappings and execution-lane tiers;
-  cloud remains separate.
+/debug
+? approve  /debug                                                        [asks]
+  Show safe debug state without private chain-of-thought.
   manual mode asks before commands that contact services or touch the workspace
   run it? [y/N] /env
-- skipped  /runtime status
+- skipped  /debug
   your /env was not run; press Up to recall it
 >

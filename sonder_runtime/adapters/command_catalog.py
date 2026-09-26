@@ -400,6 +400,10 @@ _READ_ONLY = frozenset({
     "live_reload_status", "mcp_runtime_status", "reasoning_show",
     "sonder_sessions", "sonder_stats", "turn_inspect", "workflow_list",
     "memory_export", "policy_explain",
+    # Renders cached model readiness only; the live probe is the separate
+    # ``/runtime status refresh``. Verified by execution, not by reading:
+    # tests/test_runtime_policy_status_trap_check.py.
+    "runtime_policy_status",
     "runtime_source_update_status",
     "runtime_source_stash_status",
     "permission_approvals",
@@ -1097,8 +1101,11 @@ _MCP_READ_ACTIONS = frozenset({"", "status", "show", "audit", "list", "help", "?
 _GOAL_READ_ACTIONS = frozenset({
     "", "show", "status", "history", "proposals", "help", "?",
 })
-# ``server._runtime_command`` renders the policy for the bare form and these
-# and static usage for ``help``/``?``; ``set`` and ``reset`` update it.
+# ``server._runtime_command`` renders the policy with cached model readiness
+# for the bare form and these and static usage for ``help``/``?``; ``set`` and
+# ``reset`` update it. Only the one-word form is the read: ``status refresh``
+# probes the model endpoint (an outbound socket ``runtime_policy_status`` was
+# verified never to open), so it keeps the branch's strictest grade.
 _RUNTIME_READ_ACTIONS = frozenset({"", "status", "show", "list", "help", "?"})
 # ``server._training_command`` renders the plan for the bare form and a plan
 # or a status for these; anything else (``start``, ``deploy``, ``rollback``)
@@ -1148,7 +1155,11 @@ def narrow_branch_tools(cmd, argument, tools):
         return ("preferences_status",)
     if command in ("/contextsize", "/ctxsize") and action == "":
         return ("context_policy_status",)
-    if command in ("/runtime", "/models") and action in _RUNTIME_READ_ACTIONS:
+    if (
+        command in ("/runtime", "/models")
+        and action in _RUNTIME_READ_ACTIONS
+        and len(words) < 2
+    ):
         return ("runtime_policy_status",)
     if command in ("/stash", "/runtime-stash") and action in ("", "status", "list"):
         return ("runtime_source_stash_status",)

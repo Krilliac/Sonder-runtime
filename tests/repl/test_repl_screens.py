@@ -89,7 +89,7 @@ def _run_scenario(fake, cols, env):
         step("error_panel", "explode now")
 
         mark = session.mark()
-        session.send_line("/runtime status")
+        session.send_line("/debug")
         session.wait_for(b"run it?", mark)
         session.settle(0.3)
         session.send_line("/env")
@@ -206,7 +206,7 @@ def test_unknown_command_is_one_line_with_the_suggestion_first(variant):
 def test_declined_approval_names_the_diverted_command(variant):
     _name, _cols, screens, _log, _inj = variant
     text = "\n".join(screens["approval_declined"])
-    assert "skipped" in text and "/runtime status" in text
+    assert "skipped" in text and "/debug" in text
     assert "/env was not run" in text
     assert "[asks]" in text
 
@@ -226,14 +226,14 @@ def session(fake, tmp_path):
 def test_type_ahead_never_answers_an_approval(session):
     mark = session.mark()
     # "y" typed ahead of the prompt it would answer must be discarded.
-    session.send(b"/runtime status\ry\r")
+    session.send(b"/debug\ry\r")
     session.wait_for(b"run it?", mark)
     session.settle(0.5)
     session.send(b"\r")
     session.wait_prompt(mark)
     text = "\n".join(session.screen(mark))
     assert "skipped" in text, text
-    assert "runtime policy" not in text.lower() or "skipped" in text
+    assert "debug state" not in text.lower() or "skipped" in text
 
 
 def test_arrow_and_shift_tab_never_start_a_turn(session):
