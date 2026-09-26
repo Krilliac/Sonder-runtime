@@ -1,6 +1,12 @@
 """Freshness and gap tests for generated runtime catalog artifacts."""
 from __future__ import annotations
 
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+from scripts import generate_documentation_catalogs as docs_catalogs
 from sonder_runtime.application.ports.tool_registry import InMemoryToolRegistry, ToolDescriptor
 from sonder_runtime.application.tools.catalog_artifacts import (
     check_catalog_artifacts,
@@ -51,3 +57,47 @@ def test_catalog_source_change_invalidates_artifacts(tmp_path):
         commands=("help",), event_kinds=(EventKind.TOOL_COMPLETED,),
     )
     assert check_catalog_artifacts(tmp_path, changed)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts" / "generate_runtime_catalogs.py"
+
+
+def _runtime_check(output):
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), "--runtime", "--output", str(output), "--check"],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+    )
+
+
+def test_committed_runtime_catalogs_are_fresh_against_the_live_registry():
+    committed = docs_catalogs.RUNTIME_CATALOGS
+    bundle = docs_catalogs.runtime_catalog_bundle()
+    assert check_catalog_artifacts(committed, bundle) == ()
+    # The documentation freshness gate CI runs covers every catalog file.
+    expected = docs_catalogs.expected()
+    for name in (*("mcp.json", "openai.json", "cli.json", "client.json",
+                   "permissions.json", "conformance.json"), "manifest.json"):
+        assert committed / name in expected, name
+    # The permissions projection is built from descriptors that carry effects.
+    assert '"write_files"' in (committed / "permissions.json").read_text(encoding="utf-8")
+
+
+def test_runtime_catalog_check_fails_when_a_descriptor_drifts(tmp_path):
+    copy = tmp_path / "runtime-catalogs"
+    shutil.copytree(docs_catalogs.RUNTIME_CATALOGS, copy)
+    fresh = _runtime_check(copy)
+    assert fresh.returncode == 0, fresh.stderr
+    assert "runtime catalogs current" in fresh.stdout
+
+    mcp = copy / "mcp.json"
+    text = mcp.read_text(encoding="utf-8")
+    first = text.index('"description": "') + len('"description": "')
+    mcp.write_text(text[:first] + "drifted " + text[first:], encoding="utf-8")
+    stale = _runtime_check(copy)
+    assert stale.returncode == 1
+    assert "mcp.json" in stale.stderr
+
+    (copy / "manifest.json").unlink()
+    missing = _runtime_check(copy)
+    assert missing.returncode == 1 and "manifest.json" in missing.stderr

@@ -1,0 +1,13 @@
+{
+  "artifact_digest": "724b0f8df6293f210e9d8b01358efce637cbe684d4bf442f05a8f350f4aa2e33",
+  "catalog_digest": "78d3e0a5c4d10ee977c6722d00eab68b13d491028e8b7d0ed32e830311a89af1",
+  "files": {
+    "cli.json": "4a756b2f97febfc6e216b882241509b1484fa7806d68ed53615203f2295ce113",
+    "client.json": "b318a94fa3274c81a8de296577f98ee2fc33d72541e81555461727fa7ee1205e",
+    "conformance.json": "2747f05bdc8ff978e3328637f78124553df41d55182e81f3a2b2467180061f41",
+    "mcp.json": "cf60180116106d59fad2dfde88af5caeabfbfeb0f321290f1466d9410fb23838",
+    "openai.json": "77fc621c7883d59662c7fd1fa5033dd5980661c1e65e274ef7a7d8acd06b509e",
+    "permissions.json": "df565a2bd7e8e786579bd29b5caa465c1a9662ecf08a71f7ccc6f52520565978"
+  },
+  "schema": "sonder-runtime-catalog-manifest-v1"
+}

@@ -1,0 +1,2142 @@
+{
+  "tools": [
+    {
+      "description": "Open a fresh parent with open_parent; retain its scoped capability to control independent agent conversations. Never place the capability in task text or files.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "open_parent",
+              "rotate_parent",
+              "revoke_parent",
+              "spawn",
+              "list",
+              "inspect",
+              "send_message",
+              "wait",
+              "interrupt",
+              "resume",
+              "cancel",
+              "reports",
+              "ack",
+              "retrieve_archive"
+            ],
+            "type": "string"
+          },
+          "parent_session_id": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "parent_token": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "payload": {
+            "maxProperties": 32,
+            "type": "object"
+          }
+        },
+        "required": [
+          "action",
+          "payload"
+        ],
+        "type": "object"
+      },
+      "name": "agent_lane"
+    },
+    {
+      "description": "Resolve approximate location after explicit consent",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "consent": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "consent"
+        ],
+        "type": "object"
+      },
+      "name": "approximate_location_lookup"
+    },
+    {
+      "description": "Create a bounded deterministic ZIP or TAR without overwriting",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "archive_format": {
+            "enum": [
+              "zip",
+              "tar"
+            ],
+            "type": "string"
+          },
+          "destination": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "deterministic": {
+            "type": "boolean"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "inputs_json": {
+            "maxLength": 1000000,
+            "minLength": 2,
+            "type": "string"
+          },
+          "max_depth": {
+            "maximum": 64,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_entries": {
+            "maximum": 20000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_file_bytes": {
+            "maximum": 256000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_files": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_results": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_total_bytes": {
+            "maximum": 1000000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "root": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "root",
+          "inputs_json",
+          "destination"
+        ],
+        "type": "object"
+      },
+      "name": "archive_create"
+    },
+    {
+      "description": "Extract a bounded archive transactionally without replacing a destination",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "destination": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_entries": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_file_bytes": {
+            "maximum": 256000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_path_depth": {
+            "maximum": 128,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_ratio": {
+            "maximum": 1000.0,
+            "minimum": 1,
+            "type": "number"
+          },
+          "max_results": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_seconds": {
+            "maximum": 60.0,
+            "minimum": 1,
+            "type": "number"
+          },
+          "max_total_bytes": {
+            "maximum": 1000000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "source": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "destination"
+        ],
+        "type": "object"
+      },
+      "name": "archive_extract"
+    },
+    {
+      "description": "Inspect a bounded archive without extracting it",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_entries": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_file_bytes": {
+            "maximum": 256000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_path_depth": {
+            "maximum": 128,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_ratio": {
+            "maximum": 1000.0,
+            "minimum": 1,
+            "type": "number"
+          },
+          "max_results": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_seconds": {
+            "maximum": 60.0,
+            "minimum": 1,
+            "type": "number"
+          },
+          "max_total_bytes": {
+            "maximum": 1000000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "archive_list"
+    },
+    {
+      "description": "Statically inspect a guarded artifact for risk",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_scan_bytes": {
+            "type": "integer"
+          },
+          "max_seconds": {
+            "type": "number"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "artifact_risk_inspect"
+    },
+    {
+      "description": "Repair a failing C/C++ build target with a bounded loop: compile the focus file, propose a patch confined to editable project sources (never build scripts or build-time-tool sources), verify with compile_one then a target build, keep the best candidate and revert regressions. Returns a job id for build_fix_result.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_network": {
+            "type": "boolean"
+          },
+          "apply": {
+            "type": "boolean"
+          },
+          "attempts": {
+            "maximum": 8,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "build_dir": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "config": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "editable_globs": {
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 16,
+            "type": "array"
+          },
+          "focus_file": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "platform": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "project": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "revert_after": {
+            "type": "boolean"
+          },
+          "target": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "maximum": 14400,
+            "minimum": 60,
+            "type": "integer"
+          },
+          "verify_dependents": {
+            "type": "boolean"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "type": "object"
+      },
+      "name": "build_fix"
+    },
+    {
+      "description": "Write a build_fix job's stored original files back (all, or the named ones) when each file still has the content the fix left; refuses a file changed since.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "files": {
+            "items": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 6,
+            "type": "array"
+          },
+          "job_id": {
+            "pattern": "^build-fix-[0-9a-f]{16,32}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      },
+      "name": "build_fix_restore"
+    },
+    {
+      "description": "Wait (bounded) for a build_fix job you started and return its report: status, stop reason, attempts, per-file digests and diffs, and the final build; cancel=true stops your own fix and its child build instead.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "cancel": {
+            "type": "boolean"
+          },
+          "job_id": {
+            "pattern": "^build-fix-[0-9a-f]{16,32}$",
+            "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      },
+      "name": "build_fix_result"
+    },
+    {
+      "description": "Configure, build, compile one file, or trace one file's includes, with a host-owned command rendered from closed templates for the project's build system; every value must name a member of build_model. Runs as a background job and returns typed, attributed diagnostics or a job id for build_job_result.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "configure",
+              "build",
+              "compile_one",
+              "include_trace"
+            ],
+            "type": "string"
+          },
+          "allow_network": {
+            "type": "boolean"
+          },
+          "build_dir": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "build_preset": {
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$",
+            "type": "string"
+          },
+          "config": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "file": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "generator": {
+            "enum": [
+              "Ninja",
+              "Ninja Multi-Config",
+              "Unix Makefiles",
+              "NMake Makefiles",
+              "Visual Studio 17 2022",
+              "Visual Studio 16 2019"
+            ],
+            "type": "string"
+          },
+          "jobs": {
+            "maximum": 256,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "platform": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "preset": {
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$",
+            "type": "string"
+          },
+          "profile": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "project": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "target": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "maximum": 7200,
+            "minimum": 30,
+            "type": "integer"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "build_job"
+    },
+    {
+      "description": "Wait (bounded) for a build_job you started and return its report, or its status while it is still running; cancel=true stops your own job instead.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "cancel": {
+            "type": "boolean"
+          },
+          "job_id": {
+            "pattern": "^build-job-[0-9a-f]{16,32}$",
+            "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      },
+      "name": "build_job_result"
+    },
+    {
+      "description": "Describe a C/C++ project's build without running anything: build system, generator, configs, platforms, targets (utility and build-time-tool flags), toolchains, compile units, PCH and presets, read from the CMake File API reply, compile_commands.json or .sln/.vcxproj. Labels only, no host paths.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "build_dir": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "detail": {
+            "enum": [
+              "summary",
+              "targets",
+              "compile_units",
+              "toolchain",
+              "presets"
+            ],
+            "type": "string"
+          },
+          "max_items": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "preset": {
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$",
+            "type": "string"
+          },
+          "project": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "refresh": {
+            "type": "boolean"
+          },
+          "target": {
+            "maxLength": 128,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "build_model"
+    },
+    {
+      "description": "Fetch one small digest-verified compute artifact through the authenticated transport",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "controller_job_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "max_bytes": {
+            "maximum": 98304,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "name": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "controller_job_id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "compute_artifact_fetch"
+    },
+    {
+      "description": "Cancel one previously placed compute job and prove cleanup",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "controller_job_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "controller_job_id",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "name": "compute_cancel"
+    },
+    {
+      "description": "Read one previously placed compute job",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "controller_job_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "controller_job_id"
+        ],
+        "type": "object"
+      },
+      "name": "compute_status"
+    },
+    {
+      "description": "Place one bounded catalog job locally or on an explicitly authorized private node",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_local_fallback": {
+            "type": "boolean"
+          },
+          "allow_remote": {
+            "type": "boolean"
+          },
+          "arguments": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64,
+            "type": "array"
+          },
+          "catalog_entry_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "deadline_seconds": {
+            "maximum": 86400,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "environment": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "maxProperties": 32,
+            "type": "object"
+          },
+          "idempotency_key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "idempotent": {
+            "type": "boolean"
+          },
+          "input_artifacts": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "maxLength": 4096,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "sha256": {
+                  "maxLength": 64,
+                  "minLength": 64,
+                  "type": "string"
+                },
+                "size_bytes": {
+                  "maximum": 1099511627776,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "name",
+                "size_bytes",
+                "sha256"
+              ],
+              "type": "object"
+            },
+            "maxItems": 64,
+            "type": "array"
+          },
+          "placement_policy": {
+            "enum": [
+              "local-only",
+              "prefer-remote",
+              "rank-all"
+            ],
+            "type": "string"
+          },
+          "relative_cwd": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "workload": {
+            "enum": [
+              "analysis",
+              "build",
+              "container",
+              "embedding",
+              "encode",
+              "fuzz",
+              "index",
+              "render",
+              "service",
+              "storage",
+              "test",
+              "training"
+            ],
+            "type": "string"
+          },
+          "workspace_mapping": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "workload",
+          "catalog_entry_id",
+          "workspace_mapping",
+          "allow_remote"
+        ],
+        "type": "object"
+      },
+      "name": "compute_submit"
+    },
+    {
+      "description": "Symbolize and walk a crash capture with a host debugger (cdb, gdb, lldb, eu-stack, minidump-stackwalk or llvm-symbolizer on verified PE+PDB/ELF pairs) as a background job over the pure reader's result; returns the merged crash report or a run id to poll with debug_run_result. symbol_dirs must be local directories inside the allowed roots. symbol_server=true is refused from a tool call: the operator runs /crash <dump> --symbols-online at the console.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "engine": {
+            "enum": [
+              "auto",
+              "cdb",
+              "gdb",
+              "lldb",
+              "eu_stack",
+              "minidump_stackwalk",
+              "llvm_symbolizer",
+              "pure"
+            ],
+            "type": "string"
+          },
+          "executable": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "symbol_dirs": {
+            "items": {
+              "maxLength": 1024,
+              "type": "string"
+            },
+            "maxItems": 8,
+            "type": "array"
+          },
+          "symbol_server": {
+            "type": "boolean"
+          },
+          "timeout_seconds": {
+            "maximum": 900,
+            "minimum": 10,
+            "type": "integer"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "crash_digest"
+    },
+    {
+      "description": "Read a crash capture without running anything: a Windows/Breakpad/Crashpad minidump, an ELF core, a sanitizer (ASan/UBSan/TSan/MSVC-ASan) log, valgrind memcheck XML or a macOS .ips; returns a typed crash report (exception, crashing thread frames, modules with PDB/build ids, cause hints, signature). With a directory path, reads up to 64 captures in it (non-recursive) and returns buckets grouped by crash signature.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_threads": {
+            "maximum": 16,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "crash_triage"
+    },
+    {
+      "description": "Inspect a bounded data file",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "data_inspect"
+    },
+    {
+      "description": "Run a bounded read-only data query",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "sql": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "data_query"
+    },
+    {
+      "description": "Wait (bounded) for a crash_digest or profile_capture_digest run you started and return its result, or its status while it is still running.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "run_id": {
+            "maxLength": 80,
+            "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 60,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "type": "object"
+      },
+      "name": "debug_run_result"
+    },
+    {
+      "description": "Inventory bounded project dependencies",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "dependency_inventory"
+    },
+    {
+      "description": "Create a guarded directory and optional parents",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "parents": {
+            "type": "boolean"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "directory_create"
+    },
+    {
+      "description": "Digest a bounded directory manifest",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "directory_digest"
+    },
+    {
+      "description": "List a bounded guarded directory tree",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "depth": {
+            "type": "integer"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "include_hidden": {
+            "type": "boolean"
+          },
+          "include_ignored": {
+            "type": "boolean"
+          },
+          "max_entries": {
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "directory_tree"
+    },
+    {
+      "description": "Apply a bounded text edit",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "type": "integer"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "new": {
+            "type": "string"
+          },
+          "old": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "old",
+          "new"
+        ],
+        "type": "object"
+      },
+      "name": "edit_file"
+    },
+    {
+      "description": "Fetch and atomically verify a binary artifact",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "dest": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "expect_publisher": {
+            "type": "string"
+          },
+          "expect_type": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_mb": {
+            "type": "number"
+          },
+          "overwrite": {
+            "type": "boolean"
+          },
+          "resume": {
+            "type": "boolean"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "number"
+          },
+          "url": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "dest"
+        ],
+        "type": "object"
+      },
+      "name": "fetch_artifact"
+    },
+    {
+      "description": "Transactionally create or overwrite bounded files",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "operations": {
+            "type": "array"
+          },
+          "operations_json": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "file_batch_write"
+    },
+    {
+      "description": "Copy one bounded binary-safe file",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "destination": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "overwrite": {
+            "type": "boolean"
+          },
+          "source": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "destination"
+        ],
+        "type": "object"
+      },
+      "name": "file_copy"
+    },
+    {
+      "description": "Delete a guarded path only after explicit confirmation",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "confirm": {
+            "type": "string"
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "recursive": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "file_delete"
+    },
+    {
+      "description": "Digest a bounded file",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "file_digest"
+    },
+    {
+      "description": "Legacy alias for a bounded text edit",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "type": "integer"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "new": {
+            "type": "string"
+          },
+          "old": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "old",
+          "new"
+        ],
+        "type": "object"
+      },
+      "name": "file_edit"
+    },
+    {
+      "description": "Find files under allowed roots",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "include_ignored": {
+            "type": "boolean"
+          },
+          "max_results": {
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "file_find"
+    },
+    {
+      "description": "Move one bounded binary-safe file",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "destination": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "overwrite": {
+            "type": "boolean"
+          },
+          "source": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "destination"
+        ],
+        "type": "object"
+      },
+      "name": "file_move"
+    },
+    {
+      "description": "Read a UTF-8-ish text file inside allowed roots",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_bytes": {
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "file_read"
+    },
+    {
+      "description": "Read a bounded line range from a text file",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "end_line": {
+            "type": "integer"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "start_line": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "file_read_range"
+    },
+    {
+      "description": "Create, overwrite, or append a text file inside allowed roots",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "create",
+              "overwrite",
+              "append"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "type": "object"
+      },
+      "name": "file_write"
+    },
+    {
+      "description": "Inspect bounded image metadata and hash",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "image_inspect"
+    },
+    {
+      "description": "Preview or atomically apply a bounded JSON patch",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "preview",
+              "apply"
+            ],
+            "type": "string"
+          },
+          "operations": {
+            "type": "array"
+          },
+          "operations_json": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "json_patch"
+    },
+    {
+      "description": "Inspect a bounded log file",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "log_inspect"
+    },
+    {
+      "description": "Create a directory under an allowed root",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "parents": {
+            "type": "boolean"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "make_directory"
+    },
+    {
+      "description": "Summarize a test-run job's output or a guarded log file: final summary line, counts, FAILED/ERROR lines, first unique errors (file:line), grouped diagnostics and the tail. Give exactly one of job_id or path.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "maxLength": 80,
+            "type": "string"
+          },
+          "max_failure_lines": {
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "tail_lines": {
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "output_digest"
+    },
+    {
+      "description": "List bounded process metadata after explicit opt-in",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_processes": {
+            "type": "integer"
+          },
+          "max_seconds": {
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "name": "process_list"
+    },
+    {
+      "description": "Inspect bounded process memory risk indicators",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_bytes": {
+            "type": "integer"
+          },
+          "max_regions": {
+            "type": "integer"
+          },
+          "max_seconds": {
+            "type": "number"
+          },
+          "pid": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pid"
+        ],
+        "type": "object"
+      },
+      "name": "process_memory_risk_inspect"
+    },
+    {
+      "description": "Digest a binary profiler capture with a host tool (perf report, heaptrack_print, tracy-csvexport, xperf) as a background job; returns the profile digest or a run id to poll with debug_run_result.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "engine": {
+            "enum": [
+              "auto",
+              "perf",
+              "heaptrack_print",
+              "tracy_csvexport",
+              "xperf",
+              "wpaexporter"
+            ],
+            "type": "string"
+          },
+          "executable": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "frame_budget_ms": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "frame_zone": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "symbol_dirs": {
+            "items": {
+              "maxLength": 1024,
+              "type": "string"
+            },
+            "maxItems": 8,
+            "type": "array"
+          },
+          "thread": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "maximum": 900,
+            "minimum": 10,
+            "type": "integer"
+          },
+          "top_n": {
+            "maximum": 50,
+            "minimum": 5,
+            "type": "integer"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "profile_capture_digest"
+    },
+    {
+      "description": "Digest a profiler capture in a pure format without running anything: callgrind, Chrome trace JSON, Tracy csvexport CSV, WPA/PIX/Superluminal CSV, heaptrack_print text or perf report text; returns hot functions (self/total), hot paths, frame-time percentiles and spikes against a frame budget. Binary captures (perf.data, .etl, .tracy, heaptrack .zst) give CAPTURE_NEEDS_HOST_TOOL: use profile_capture_digest.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "frame_budget_ms": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "frame_zone": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "thread": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "top_n": {
+            "maximum": 50,
+            "minimum": 5,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "profile_digest"
+    },
+    {
+      "description": "Search the executable path for programs",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_results": {
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "program_search"
+    },
+    {
+      "description": "Detect project manifests and commands",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "project_detect"
+    },
+    {
+      "description": "Read a bounded file",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_bytes": {
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "read_file"
+    },
+    {
+      "description": "Run an argv-based program",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "args_json": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_output": {
+            "type": "integer"
+          },
+          "program": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "stdin": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "program"
+        ],
+        "type": "object"
+      },
+      "name": "run_program"
+    },
+    {
+      "description": "Run a bounded script",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "args_json": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_output": {
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "stdin": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "run_script"
+    },
+    {
+      "description": "Find scripts under allowed roots",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "include_hidden": {
+            "type": "boolean"
+          },
+          "include_ignored": {
+            "type": "boolean"
+          },
+          "max_entries": {
+            "type": "integer"
+          },
+          "max_results": {
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "name": "script_search"
+    },
+    {
+      "description": "Scan an authorized tree for redacted credential findings",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "name": "secret_scan"
+    },
+    {
+      "description": "Run a project's test suite with a host-owned command for the detected runner (or the one named), optionally narrowed by a selector (pytest node id or k:<expr>, ctest name, cargo filter, ./go/pkg or run:TestName, dotnet filter, js path, jvm pattern), as a background job; returns a structured report (totals, failures with file:line) or a job id to poll with test_run_result.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "project": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "runner": {
+            "enum": [
+              "auto",
+              "pytest",
+              "unittest",
+              "ctest",
+              "cargo",
+              "go",
+              "dotnet",
+              "npm",
+              "pnpm",
+              "yarn",
+              "gradle",
+              "maven",
+              "make"
+            ],
+            "type": "string"
+          },
+          "selector": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "maximum": 1800,
+            "minimum": 10,
+            "type": "integer"
+          },
+          "wait_seconds": {
+            "maximum": 120,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "workers": {
+            "maximum": 8,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "test_run"
+    },
+    {
+      "description": "Wait (bounded) for a test_run job you started and return its structured report, or its status while it is still running.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "maxLength": 80,
+            "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 60,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      },
+      "name": "test_run_result"
+    },
+    {
+      "description": "Preview or transactionally apply a bounded unified diff",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "apply": {
+            "type": "boolean"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "patch": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "root": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "root",
+          "patch"
+        ],
+        "type": "object"
+      },
+      "name": "text_patch"
+    },
+    {
+      "description": "Search bounded text files under allowed roots",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "case_sensitive": {
+            "type": "boolean"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "glob": {
+            "type": "string"
+          },
+          "include_hidden": {
+            "type": "boolean"
+          },
+          "include_ignored": {
+            "type": "boolean"
+          },
+          "max_entries": {
+            "type": "integer"
+          },
+          "max_file_bytes": {
+            "type": "integer"
+          },
+          "max_results": {
+            "type": "integer"
+          },
+          "query": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "regex": {
+            "type": "boolean"
+          },
+          "root": {
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "text_search"
+    },
+    {
+      "description": "List developer tools installed on this host (compilers, build systems, test runners, linters, debuggers, package managers, runtimes, containers, VCS, DB clients, media/doc tools, cloud CLIs, editors, shells) with versions; filter by category or name; refresh re-probes with fixed read-only version switches.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "enum": [
+              "compiler",
+              "build_system",
+              "test_runner",
+              "linter_formatter",
+              "debugger_profiler",
+              "package_manager",
+              "runtime",
+              "container_vm",
+              "vcs",
+              "db_client",
+              "media_doc",
+              "cloud_cli",
+              "editor_ide",
+              "shell"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "refresh": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "name": "tool_inventory"
+    },
+    {
+      "description": "Verify a guarded artifact already on disk",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "expect_publisher": {
+            "type": "string"
+          },
+          "expect_type": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "verify_artifact"
+    },
+    {
+      "description": "Analyze one guarded local raster image",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "prompt": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "prompt"
+        ],
+        "type": "object"
+      },
+      "name": "vision_analyze"
+    },
+    {
+      "description": "Get bounded weather with explicit consent",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "consent": {
+            "type": "boolean"
+          },
+          "forecast_days": {
+            "type": "integer"
+          },
+          "location": {
+            "minLength": 2,
+            "type": "string"
+          },
+          "units": {
+            "enum": [
+              "auto",
+              "metric",
+              "imperial"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "location",
+          "consent"
+        ],
+        "type": "object"
+      },
+      "name": "weather_lookup"
+    },
+    {
+      "description": "Fetch bounded public web text with explicit consent",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "consent": {
+            "type": "boolean"
+          },
+          "max_chars": {
+            "type": "integer"
+          },
+          "url": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "consent"
+        ],
+        "type": "object"
+      },
+      "name": "web_fetch"
+    },
+    {
+      "description": "Search public web with explicit consent",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "consent": {
+            "type": "boolean"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "query": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "consent"
+        ],
+        "type": "object"
+      },
+      "name": "web_search"
+    },
+    {
+      "description": "Compare two bounded workspaces",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "left": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "right": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "left",
+          "right"
+        ],
+        "type": "object"
+      },
+      "name": "workspace_compare"
+    },
+    {
+      "description": "Run a program as a bounded argv list",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "args_json": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_output": {
+            "type": "integer"
+          },
+          "program": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "stdin": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "program"
+        ],
+        "type": "object"
+      },
+      "name": "workspace_run"
+    },
+    {
+      "description": "Write a file under an allowed root",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "create",
+              "overwrite",
+              "append"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "type": "object"
+      },
+      "name": "write_file"
+    }
+  ]
+}

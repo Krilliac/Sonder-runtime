@@ -1,0 +1,396 @@
+{
+  "schema": "sonder-tool-permissions-v1",
+  "tools": [
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "agent_lane"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "approximate_location_lookup"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "archive_create"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "archive_extract"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "archive_list"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "artifact_risk_inspect"
+    },
+    {
+      "effects": [
+        "execute",
+        "read_files",
+        "write_files"
+      ],
+      "execution_class": "host",
+      "name": "build_fix"
+    },
+    {
+      "effects": [
+        "read_files",
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "name": "build_fix_restore"
+    },
+    {
+      "effects": [
+        "read_files"
+      ],
+      "execution_class": "pure",
+      "name": "build_fix_result"
+    },
+    {
+      "effects": [
+        "execute",
+        "read_files",
+        "write_files"
+      ],
+      "execution_class": "host",
+      "name": "build_job"
+    },
+    {
+      "effects": [
+        "read_files"
+      ],
+      "execution_class": "pure",
+      "name": "build_job_result"
+    },
+    {
+      "effects": [
+        "read_files"
+      ],
+      "execution_class": "pure",
+      "name": "build_model"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "compute_artifact_fetch"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "compute_cancel"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "compute_status"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "compute_submit"
+    },
+    {
+      "effects": [
+        "execute",
+        "network",
+        "read_files",
+        "write_files"
+      ],
+      "execution_class": "host",
+      "name": "crash_digest"
+    },
+    {
+      "effects": [
+        "read_files"
+      ],
+      "execution_class": "pure",
+      "name": "crash_triage"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "data_inspect"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "data_query"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "debug_run_result"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "dependency_inventory"
+    },
+    {
+      "effects": [
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "name": "directory_create"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "directory_digest"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "directory_tree"
+    },
+    {
+      "effects": [
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "name": "edit_file"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "fetch_artifact"
+    },
+    {
+      "effects": [
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "name": "file_batch_write"
+    },
+    {
+      "effects": [
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "name": "file_copy"
+    },
+    {
+      "effects": [
+        "delete_files"
+      ],
+      "execution_class": "pure",
+      "name": "file_delete"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "file_digest"
+    },
+    {
+      "effects": [
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "name": "file_edit"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "file_find"
+    },
+    {
+      "effects": [
+        "delete_files",
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "name": "file_move"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "file_read"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "file_read_range"
+    },
+    {
+      "effects": [
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "name": "file_write"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "image_inspect"
+    },
+    {
+      "effects": [
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "name": "json_patch"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "log_inspect"
+    },
+    {
+      "effects": [
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "name": "make_directory"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "output_digest"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "process_list"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "process_memory_risk_inspect"
+    },
+    {
+      "effects": [
+        "execute",
+        "read_files",
+        "write_files"
+      ],
+      "execution_class": "host",
+      "name": "profile_capture_digest"
+    },
+    {
+      "effects": [
+        "read_files"
+      ],
+      "execution_class": "pure",
+      "name": "profile_digest"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "program_search"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "project_detect"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "read_file"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "run_program"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "run_script"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "script_search"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "secret_scan"
+    },
+    {
+      "effects": [
+        "execute",
+        "read_files",
+        "write_files"
+      ],
+      "execution_class": "host",
+      "name": "test_run"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "test_run_result"
+    },
+    {
+      "effects": [
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "name": "text_patch"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "text_search"
+    },
+    {
+      "effects": [
+        "execute"
+      ],
+      "execution_class": "host",
+      "name": "tool_inventory"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "verify_artifact"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "vision_analyze"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "weather_lookup"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "web_fetch"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "web_search"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "workspace_compare"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "workspace_run"
+    },
+    {
+      "effects": [
+        "write_files"
+      ],
+      "execution_class": "pure",
+      "name": "write_file"
+    }
+  ]
+}

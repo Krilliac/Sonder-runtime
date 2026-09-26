@@ -12,6 +12,9 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 GENERATED = ROOT / "docs" / "architecture" / "generated"
+# The six GeneratedCatalogs projections plus their SHA-256 manifest, rendered
+# by application.tools.catalog_artifacts from the native typed tool registry.
+RUNTIME_CATALOGS = GENERATED / "runtime-catalogs"
 PACKAGE = ROOT / "sonder_runtime"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -330,9 +333,52 @@ def _inventory_markdown(value: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def runtime_catalog_bundle() -> Any:
+    """The catalog bundle of the live typed sources.
+
+    Tools come from the native typed registry (``mcp --native``), the only
+    registry whose descriptors carry effects and an execution class, so the
+    permissions projection is real. Commands come from the slash-command
+    catalog and events from ``EventKind``.
+    """
+    from sonder_runtime.application.tools.generated_catalogs import CatalogLimits, GeneratedCatalogs
+
+    native_mcp = importlib.import_module("sonder_runtime.bootstrap.native_mcp")
+    command_catalog = importlib.import_module(
+        "sonder_runtime.adapters.command_catalog"
+    ).command_catalog
+    events = importlib.import_module("sonder_runtime.domain.common.events")
+    registry = native_mcp.native_tool_registry()
+    commands = tuple(command_catalog.catalog())
+    return GeneratedCatalogs.generate(
+        registry,
+        commands=commands,
+        event_kinds=events.EventKind,
+        limits=CatalogLimits(
+            max_tools=max(256, len(registry.list_all())),
+            max_events=max(128, len(events.EventKind)),
+            max_commands=max(512, len(commands)),
+            max_bytes=2_000_000,
+        ),
+    )
+
+
+def _runtime_catalog_files() -> dict[Path, str]:
+    from sonder_runtime.application.tools.catalog_artifacts import (
+        render_catalog_artifacts, render_manifest,
+    )
+
+    bundle = runtime_catalog_bundle()
+    artifacts = render_catalog_artifacts(bundle)
+    files = {RUNTIME_CATALOGS / name: content for name, content in artifacts.items()}
+    files[RUNTIME_CATALOGS / "manifest.json"] = render_manifest(bundle, artifacts)
+    return files
+
+
 def expected() -> dict[Path, str]:
     reference, architecture, inventory = _runtime_reference(), _architecture_map(), _inventory()
     return {
+        **_runtime_catalog_files(),
         GENERATED / "runtime-reference.json": _dump(reference),
         GENERATED / "runtime-reference.md": _markdown_reference(reference),
         GENERATED / "architecture-map.json": _dump(architecture),

@@ -1,0 +1,2256 @@
+{
+  "commands": [
+    {
+      "category": "diagnostics",
+      "name": "/about",
+      "risk": "safe",
+      "summary": "show source provenance, endpoint, session and mode details"
+    },
+    {
+      "category": "memory",
+      "name": "/accept",
+      "risk": "ask",
+      "summary": "record the last answer as accepted/used"
+    },
+    {
+      "category": "admin",
+      "name": "/access_request_preview",
+      "risk": "ask",
+      "summary": "Preview a scoped filesystem access request without changing any authority."
+    },
+    {
+      "category": "security",
+      "name": "/accounts",
+      "risk": "ask",
+      "summary": "list accounts (admin)"
+    },
+    {
+      "category": "diagnostics",
+      "name": "/activity",
+      "risk": "safe",
+      "summary": "Show active/latest tool calls, file changes, and response activity."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/activity_status",
+      "risk": "safe",
+      "summary": "Show active and most recent observable response activity."
+    },
+    {
+      "category": "security",
+      "name": "/admin",
+      "risk": "safe",
+      "summary": "show admin status"
+    },
+    {
+      "category": "security",
+      "name": "/admin_accounts",
+      "risk": "ask",
+      "summary": "List hosted accounts."
+    },
+    {
+      "category": "security",
+      "name": "/admin_login",
+      "risk": "dangerous",
+      "summary": "Login and return a bearer token for admin/debug commands and hosted API use."
+    },
+    {
+      "category": "security",
+      "name": "/admin_private_chain_of_thought",
+      "risk": "ask",
+      "summary": "Refuse private chain-of-thought exposure unless the operator opted in twice."
+    },
+    {
+      "category": "security",
+      "name": "/admin_register",
+      "risk": "dangerous",
+      "summary": "Register a local hosted account."
+    },
+    {
+      "category": "security",
+      "name": "/admin_set_account",
+      "risk": "dangerous",
+      "summary": "Update role/tier/dev flags/ban state."
+    },
+    {
+      "category": "security",
+      "name": "/admin_status",
+      "risk": "safe",
+      "summary": "Show hosted/admin safety state."
+    },
+    {
+      "category": "security",
+      "name": "/admin_whoami",
+      "risk": "safe",
+      "summary": "Show the account attached to a session token."
+    },
+    {
+      "category": "runtime",
+      "name": "/agent_lane",
+      "risk": "execution",
+      "summary": "Control independent agent conversations with scoped parent authority."
+    },
+    {
+      "category": "agents",
+      "name": "/agentcancel",
+      "risk": "ask",
+      "summary": "Cooperatively cancel an active agent/master prefix or all active agents."
+    },
+    {
+      "category": "agents",
+      "name": "/agentretry",
+      "risk": "ask",
+      "summary": "Explicitly rerun an interrupted, failed, or cancelled persisted master task."
+    },
+    {
+      "category": "agents",
+      "name": "/agents",
+      "risk": "safe",
+      "summary": "Inspect live and recent agent activity."
+    },
+    {
+      "category": "memory",
+      "name": "/apply_learned",
+      "risk": "ask",
+      "summary": "Show which learned lessons would be applied to a task."
+    },
+    {
+      "category": "dev",
+      "name": "/apply_patch",
+      "risk": "mutation",
+      "summary": "Apply a unified diff patch to the workspace."
+    },
+    {
+      "category": "security",
+      "name": "/approvals",
+      "risk": "safe",
+      "summary": "list calls refused unattended and the one-shot approvals issued"
+    },
+    {
+      "category": "security",
+      "name": "/approve",
+      "risk": "dangerous",
+      "summary": "approve exactly one refused call once (/approve revoke <nonce>)"
+    },
+    {
+      "category": "web",
+      "name": "/approximate_location_lookup",
+      "risk": "safe",
+      "summary": "Resolve this machine's public IP to a place after explicit consent."
+    },
+    {
+      "category": "filesystem",
+      "name": "/archive_create",
+      "risk": "mutation",
+      "summary": "Create a guarded transactional ZIP/TAR from explicit workspace inputs."
+    },
+    {
+      "category": "filesystem",
+      "name": "/archive_extract",
+      "risk": "mutation",
+      "summary": "Transactionally extract a prevalidated ZIP/TAR to a new directory."
+    },
+    {
+      "category": "filesystem",
+      "name": "/archive_list",
+      "risk": "safe",
+      "summary": "Prevalidate and list a bounded ZIP/TAR without extracting it."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/artifact-mobility",
+      "risk": "safe",
+      "summary": "Inspect local outbound artifact receipts with list or status; dispatch is unavailable here."
+    },
+    {
+      "category": "creative",
+      "name": "/artifact_generate",
+      "risk": "mutation",
+      "summary": "Generate a deterministic in-house artifact set from a free-form brief."
+    },
+    {
+      "category": "creative",
+      "name": "/artifact_ground",
+      "risk": "safe",
+      "summary": "Ground an artifact path with deterministic format-specific recipes."
+    },
+    {
+      "category": "security",
+      "name": "/artifact_risk_inspect",
+      "risk": "safe",
+      "summary": "Statically inspect a guarded document, executable, script, or binary."
+    },
+    {
+      "category": "creative",
+      "name": "/artifact_verify",
+      "risk": "ask",
+      "summary": "Verify every generated file against its manifest and format contract."
+    },
+    {
+      "category": "creative",
+      "name": "/artifactcheck",
+      "risk": "safe",
+      "summary": "Ground an artifact path with inferred or explicit format-specific validation recipes."
+    },
+    {
+      "category": "creative",
+      "name": "/asset",
+      "risk": "mutation",
+      "summary": "Generate icons, media, textured morphing multi-clip GLB models, scenes, and packs from a brief."
+    },
+    {
+      "category": "agents",
+      "name": "/autopilot",
+      "risk": "ask",
+      "summary": "Run a persistent local goal with evidence-aware checkpoints, bounded replans, host gates, pause, resume, and cancel."
+    },
+    {
+      "category": "agents",
+      "name": "/autopilot_cancel",
+      "risk": "ask",
+      "summary": "Request cancellation; an active task result is discarded."
+    },
+    {
+      "category": "agents",
+      "name": "/autopilot_pause",
+      "risk": "ask",
+      "summary": "Request a cooperative pause at the next host checkpoint."
+    },
+    {
+      "category": "agents",
+      "name": "/autopilot_resume",
+      "risk": "ask",
+      "summary": "Explicitly resume a paused, blocked, ready, or interrupted run."
+    },
+    {
+      "category": "agents",
+      "name": "/autopilot_start",
+      "risk": "ask",
+      "summary": "Create and start a persistent, locally planned autonomous goal run."
+    },
+    {
+      "category": "agents",
+      "name": "/autopilot_status",
+      "risk": "safe",
+      "summary": "Inspect one persistent autonomous run or the controller ledger."
+    },
+    {
+      "category": "dev",
+      "name": "/build",
+      "risk": "execution",
+      "summary": "describe, configure, build or compile a C/C++ project"
+    },
+    {
+      "category": "dev",
+      "name": "/build_clean",
+      "risk": "execution",
+      "summary": "Clean build artifacts (auto-detects Make, Cargo, Go)."
+    },
+    {
+      "category": "dev",
+      "name": "/build_run",
+      "risk": "execution",
+      "summary": "Run the project build system (auto-detects Make, Cargo, CMake, Go, npm, Gradle, Maven)."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/calibration_status",
+      "risk": "safe",
+      "summary": "Measured reliability, split by population and never averaged."
+    },
+    {
+      "category": "agents",
+      "name": "/campaign_generate_compile_execute_record",
+      "risk": "execution",
+      "summary": "Run a bounded self-improvement campaign across multiple languages."
+    },
+    {
+      "category": "agents",
+      "name": "/campaign_repo_repair",
+      "risk": "execution",
+      "summary": "Repair planted bugs in scratch projects, verified by their own tests."
+    },
+    {
+      "category": "agents",
+      "name": "/capacity",
+      "risk": "safe",
+      "summary": "Show queued fleet ceiling and current RAM/CPU-bounded worker slots."
+    },
+    {
+      "category": "planning",
+      "name": "/checklist",
+      "risk": "safe",
+      "summary": "Show the current or selected persistent work checklist."
+    },
+    {
+      "category": "planning",
+      "name": "/checklist_create",
+      "risk": "ask",
+      "summary": "Create a persistent parent task with ordered checklist items."
+    },
+    {
+      "category": "planning",
+      "name": "/checklist_show",
+      "risk": "safe",
+      "summary": "Show a checklist with Codex-style pending/active/done markers."
+    },
+    {
+      "category": "planning",
+      "name": "/checklist_update",
+      "risk": "ask",
+      "summary": "Update one checklist item by 1-based index or id prefix."
+    },
+    {
+      "category": "basic",
+      "name": "/clear",
+      "risk": "safe",
+      "summary": "clear terminal scrollback; keep chat/session state"
+    },
+    {
+      "category": "runtime",
+      "name": "/cloud",
+      "risk": "dangerous",
+      "summary": "change process-local hosted/cloud consent"
+    },
+    {
+      "category": "security",
+      "name": "/cloud_opt_in",
+      "risk": "dangerous",
+      "summary": "Show, enable, or revoke process-local hosted/cloud model consent."
+    },
+    {
+      "category": "dev",
+      "name": "/codegen_build_loop",
+      "risk": "execution",
+      "summary": "Write code, compile it, and repair it against the real compiler."
+    },
+    {
+      "category": "basic",
+      "name": "/command_registry_list",
+      "risk": "safe",
+      "summary": "List slash commands/tools by name, category, risk, or summary text."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/commands",
+      "risk": "safe",
+      "summary": "List commands by category, name, or risk."
+    },
+    {
+      "category": "context",
+      "name": "/compact",
+      "risk": "safe",
+      "summary": "Preview context compaction and rollover recommendations."
+    },
+    {
+      "category": "runtime",
+      "name": "/compiler_cache_status",
+      "risk": "execution",
+      "summary": "Return bounded local sccache health metrics without paths or raw diagnostics."
+    },
+    {
+      "category": "agents",
+      "name": "/composition_bindings",
+      "risk": "ask",
+      "summary": "Show active cross-subsystem composition bindings."
+    },
+    {
+      "category": "chat",
+      "name": "/consult",
+      "risk": "ask",
+      "summary": "Ask several tiers independently and expose agreement as a confidence signal."
+    },
+    {
+      "category": "context",
+      "name": "/context",
+      "risk": "safe",
+      "summary": "Show context, summary, memory, and session health."
+    },
+    {
+      "category": "context",
+      "name": "/context_compaction_plan",
+      "risk": "safe",
+      "summary": "Preview when/how Sonder should summarize or split context."
+    },
+    {
+      "category": "context",
+      "name": "/context_health",
+      "risk": "safe",
+      "summary": "Show context budget, live turns, summaries, and memory as text meters."
+    },
+    {
+      "category": "context",
+      "name": "/context_pack",
+      "risk": "safe",
+      "summary": "Read several guarded text files into one deterministic bounded pack."
+    },
+    {
+      "category": "context",
+      "name": "/context_policy_status",
+      "risk": "safe",
+      "summary": "Show requested virtual context and actual Ollama native num_ctx."
+    },
+    {
+      "category": "context",
+      "name": "/contextsize",
+      "risk": "ask",
+      "summary": "Select requested virtual context up to the configured max."
+    },
+    {
+      "category": "admin",
+      "name": "/cot",
+      "risk": "ask",
+      "summary": "model reasoning; refused without opt-in (flag + allow rule)"
+    },
+    {
+      "category": "dev",
+      "name": "/crash",
+      "risk": "execution",
+      "summary": "digest a crash (minidump, core, sanitizer/valgrind log)"
+    },
+    {
+      "category": "data",
+      "name": "/data_convert",
+      "risk": "mutation",
+      "summary": "Preview or atomically create a deterministic structured-data conversion."
+    },
+    {
+      "category": "data",
+      "name": "/data_inspect",
+      "risk": "safe",
+      "summary": "Structured, read-only preview of a data file inside allowed roots."
+    },
+    {
+      "category": "data",
+      "name": "/data_query",
+      "risk": "safe",
+      "summary": "Run a bounded read-only SQLite or structured text data query."
+    },
+    {
+      "category": "admin",
+      "name": "/debug",
+      "risk": "ask",
+      "summary": "Show safe debug state without private chain-of-thought."
+    },
+    {
+      "category": "admin",
+      "name": "/debug_inspect",
+      "risk": "ask",
+      "summary": "Developer/admin inspection bundle without hidden chain-of-thought."
+    },
+    {
+      "category": "filesystem",
+      "name": "/delete",
+      "risk": "safe",
+      "summary": "Dry-run delete and show the required confirmation token."
+    },
+    {
+      "category": "dev",
+      "name": "/dependency_add",
+      "risk": "execution",
+      "summary": "Install packages (pip, npm, pnpm, yarn, cargo, go) with auto-detected package manager."
+    },
+    {
+      "category": "dev",
+      "name": "/dependency_audit",
+      "risk": "execution",
+      "summary": "Audit installed dependencies for known vulnerabilities (pip check, npm audit, cargo audit)."
+    },
+    {
+      "category": "dev",
+      "name": "/dependency_inventory",
+      "risk": "safe",
+      "summary": "Parse bounded dependency manifests and lockfiles without execution/network."
+    },
+    {
+      "category": "dev",
+      "name": "/dependency_remove",
+      "risk": "execution",
+      "summary": "Uninstall packages with auto-detected package manager."
+    },
+    {
+      "category": "dev",
+      "name": "/dependency_update",
+      "risk": "execution",
+      "summary": "Update packages (or all if empty array) with auto-detected package manager."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/diagnostics",
+      "risk": "safe",
+      "summary": "Run lightweight health checks for the local Sonder Runtime installation."
+    },
+    {
+      "category": "dev",
+      "name": "/diff_files",
+      "risk": "ask",
+      "summary": "Compute a unified diff between two files in the workspace."
+    },
+    {
+      "category": "dev",
+      "name": "/digest",
+      "risk": "safe",
+      "summary": "summarize job output or a log: final line, failures, errors"
+    },
+    {
+      "category": "filesystem",
+      "name": "/directory_create",
+      "risk": "mutation",
+      "summary": "Create a guarded directory and optional parent directories."
+    },
+    {
+      "category": "filesystem",
+      "name": "/directory_digest",
+      "risk": "safe",
+      "summary": "Build a guarded deterministic SHA-256 file manifest and tree Merkle."
+    },
+    {
+      "category": "filesystem",
+      "name": "/directory_tree",
+      "risk": "safe",
+      "summary": "List a bounded guarded tree; ignored paths require developer authentication."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/dump",
+      "risk": "safe",
+      "summary": "Write the current chat and debug state to a text file."
+    },
+    {
+      "category": "filesystem",
+      "name": "/edit",
+      "risk": "mutation",
+      "summary": "Replace text in a guarded file."
+    },
+    {
+      "category": "security",
+      "name": "/elevate",
+      "risk": "dangerous",
+      "summary": "Turn Sonder's privilege axis on or off for this session, or show it."
+    },
+    {
+      "category": "memory",
+      "name": "/embeddings",
+      "risk": "mutation",
+      "summary": "Dry-run or locally refresh missing, legacy, or incompatible lesson embeddings."
+    },
+    {
+      "category": "persona",
+      "name": "/emotion",
+      "risk": "ask",
+      "summary": "Show, set, reset, or live-tune emotion/tone vectors."
+    },
+    {
+      "category": "persona",
+      "name": "/emotion_vector_status",
+      "risk": "safe",
+      "summary": "Show the current live emotion/tone steering vectors."
+    },
+    {
+      "category": "agents",
+      "name": "/ensemble",
+      "risk": "ask",
+      "summary": "Ask several local models the same question, then compound their answers into one, naming any disagreement."
+    },
+    {
+      "category": "chat",
+      "name": "/ensemble_answer",
+      "risk": "ask",
+      "summary": "Ask several local models the same question, then compound one answer."
+    },
+    {
+      "category": "runtime",
+      "name": "/ensemble_codegen_build_loop",
+      "risk": "mutation",
+      "summary": "Use local code + reasoning candidates and compiler-feedback retries."
+    },
+    {
+      "category": "runtime",
+      "name": "/env",
+      "risk": "safe",
+      "summary": "show the host OS, shells, and installed toolchains"
+    },
+    {
+      "category": "runtime",
+      "name": "/environment_status",
+      "risk": "safe",
+      "summary": "Report the host environment: OS, shells, and installed toolchains."
+    },
+    {
+      "category": "training",
+      "name": "/evaluation_history_status",
+      "risk": "safe",
+      "summary": "Read identity-separated evaluation trends; never runs or promotes a model."
+    },
+    {
+      "category": "basic",
+      "name": "/exit",
+      "risk": "safe",
+      "summary": "leave"
+    },
+    {
+      "category": "chat",
+      "name": "/extract_grounded",
+      "risk": "ask",
+      "summary": "Extract fields from text you supply, with each one citing its source span."
+    },
+    {
+      "category": "memory",
+      "name": "/fact",
+      "risk": "dangerous",
+      "summary": "remember a durable fact for the active project"
+    },
+    {
+      "category": "memory",
+      "name": "/facts",
+      "risk": "safe",
+      "summary": "list facts and IDs for the active project"
+    },
+    {
+      "category": "memory",
+      "name": "/fail",
+      "risk": "ask",
+      "summary": "record the last answer as failed"
+    },
+    {
+      "category": "agents",
+      "name": "/fanouts",
+      "risk": "ask",
+      "summary": "List safe recent durable model-fanout summaries for restart recovery."
+    },
+    {
+      "category": "updates",
+      "name": "/fetch_artifact",
+      "risk": "mutation",
+      "summary": "Download a binary artifact to a guarded path and verify it atomically."
+    },
+    {
+      "category": "filesystem",
+      "name": "/file_batch_write",
+      "risk": "mutation",
+      "summary": "Transactionally create/overwrite a bounded JSON list of project files."
+    },
+    {
+      "category": "filesystem",
+      "name": "/file_copy",
+      "risk": "mutation",
+      "summary": "Copy one bounded binary-safe file inside allowed roots."
+    },
+    {
+      "category": "filesystem",
+      "name": "/file_delete",
+      "risk": "dangerous",
+      "summary": "Delete a file or directory."
+    },
+    {
+      "category": "filesystem",
+      "name": "/file_digest",
+      "risk": "safe",
+      "summary": "Stream a guarded regular file into a fixed SHA-256 content digest."
+    },
+    {
+      "category": "filesystem",
+      "name": "/file_edit",
+      "risk": "mutation",
+      "summary": "Replace text in a file inside allowed roots."
+    },
+    {
+      "category": "filesystem",
+      "name": "/file_find",
+      "risk": "safe",
+      "summary": "Find files under allowed roots; ignored paths require developer authentication."
+    },
+    {
+      "category": "filesystem",
+      "name": "/file_move",
+      "risk": "mutation",
+      "summary": "Move one bounded binary-safe file inside allowed roots."
+    },
+    {
+      "category": "filesystem",
+      "name": "/file_policy",
+      "risk": "safe",
+      "summary": "Show guarded filesystem roots and bypass state."
+    },
+    {
+      "category": "filesystem",
+      "name": "/file_read",
+      "risk": "safe",
+      "summary": "Read a UTF-8-ish text file inside allowed roots."
+    },
+    {
+      "category": "filesystem",
+      "name": "/file_read_range",
+      "risk": "safe",
+      "summary": "Read a bounded 1-based line range from a guarded text file."
+    },
+    {
+      "category": "filesystem",
+      "name": "/file_write",
+      "risk": "mutation",
+      "summary": "Create, overwrite, or append a text file inside allowed roots."
+    },
+    {
+      "category": "filesystem",
+      "name": "/filepolicy",
+      "risk": "safe",
+      "summary": "show file access roots and bypass controls"
+    },
+    {
+      "category": "filesystem",
+      "name": "/files",
+      "risk": "ask",
+      "summary": "Find files under guarded roots."
+    },
+    {
+      "category": "dev",
+      "name": "/find_references",
+      "risk": "ask",
+      "summary": "Find all references to a symbol across files matching a glob."
+    },
+    {
+      "category": "dev",
+      "name": "/fix-build",
+      "risk": "execution",
+      "summary": "repair a failing C/C++ build target; approving lets the fix edit only its in-scope sources while it runs"
+    },
+    {
+      "category": "creative",
+      "name": "/forge",
+      "risk": "execution",
+      "summary": "Build and run the dependency-free cross-language reference game suite."
+    },
+    {
+      "category": "dev",
+      "name": "/format_code",
+      "risk": "execution",
+      "summary": "Format code (ruff, black, prettier, rustfmt, gofmt, clang-format) with auto-detection."
+    },
+    {
+      "category": "creative",
+      "name": "/game",
+      "risk": "execution",
+      "summary": "Generate, execute, repair, and ground a persistent 2D/2.5D/3D game."
+    },
+    {
+      "category": "creative",
+      "name": "/game_generate_and_test",
+      "risk": "execution",
+      "summary": "Have Sonder create, execute, repair, and ground a persistent game."
+    },
+    {
+      "category": "creative",
+      "name": "/game_generation_campaign",
+      "risk": "execution",
+      "summary": "Run a bounded parallel game campaign with optional target constraints."
+    },
+    {
+      "category": "creative",
+      "name": "/game_reference_suite",
+      "risk": "execution",
+      "summary": "Build and run known-good 2D/2.5D/3D games across four languages."
+    },
+    {
+      "category": "creative",
+      "name": "/gamefleet",
+      "risk": "execution",
+      "summary": "Run a bounded parallel game campaign with optional language/dimension targets."
+    },
+    {
+      "category": "repo",
+      "name": "/git_branch",
+      "risk": "mutation",
+      "summary": "Create a git branch, optionally checking it out and basing it on a ref."
+    },
+    {
+      "category": "repo",
+      "name": "/git_checkout",
+      "risk": "mutation",
+      "summary": "Switch to a branch, tag, or commit."
+    },
+    {
+      "category": "repo",
+      "name": "/git_cherry_pick",
+      "risk": "dangerous",
+      "summary": "Cherry-pick one or more commits onto the current branch."
+    },
+    {
+      "category": "repo",
+      "name": "/git_commit",
+      "risk": "mutation",
+      "summary": "Create a git commit."
+    },
+    {
+      "category": "repo",
+      "name": "/git_merge",
+      "risk": "dangerous",
+      "summary": "Merge a branch into the current branch."
+    },
+    {
+      "category": "repo",
+      "name": "/git_stash",
+      "risk": "mutation",
+      "summary": "Manage the git stash: push (save changes), pop (restore), list, or drop."
+    },
+    {
+      "category": "repo",
+      "name": "/git_tag",
+      "risk": "mutation",
+      "summary": "Create or delete a git tag."
+    },
+    {
+      "category": "runtime",
+      "name": "/goal",
+      "risk": "mutation",
+      "summary": "Set, inspect, note, or close the persistent goal; review and adopt self-proposed goals."
+    },
+    {
+      "category": "creative",
+      "name": "/ground_artifact",
+      "risk": "ask",
+      "summary": "Validate non-code artifacts with deterministic checks."
+    },
+    {
+      "category": "runtime",
+      "name": "/hardware",
+      "risk": "safe",
+      "summary": "Detect live system RAM, GPU runtime, VRAM, and offload support."
+    },
+    {
+      "category": "runtime",
+      "name": "/hardware_profile",
+      "risk": "safe",
+      "summary": "Report accelerator inventory and conservative local-model fit."
+    },
+    {
+      "category": "basic",
+      "name": "/help",
+      "risk": "safe",
+      "summary": "Show console commands."
+    },
+    {
+      "category": "runtime",
+      "name": "/image",
+      "risk": "ask",
+      "summary": "Inspect a guarded image's format, dimensions, size, and digest."
+    },
+    {
+      "category": "creative",
+      "name": "/image_inspect",
+      "risk": "safe",
+      "summary": "Inspect guarded image headers, dimensions, size, and hash."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/improve",
+      "risk": "safe",
+      "summary": "show the next system improvement checklist"
+    },
+    {
+      "category": "dev",
+      "name": "/improve_function",
+      "risk": "execution",
+      "summary": "Propose a guarded improvement to ONE function, shown as a diff."
+    },
+    {
+      "category": "filesystem",
+      "name": "/inventory",
+      "risk": "ask",
+      "summary": "Summarize a guarded workspace with bounded traversal, manifests, sizes, and exclusions."
+    },
+    {
+      "category": "execution",
+      "name": "/isolated_run",
+      "risk": "execution",
+      "summary": "Run an installed Linux container image under a fixed isolation policy."
+    },
+    {
+      "category": "filesystem",
+      "name": "/json_patch",
+      "risk": "mutation",
+      "summary": "Preview or atomically apply a bounded RFC 6902 subset to one JSON file."
+    },
+    {
+      "category": "runtime",
+      "name": "/lanes",
+      "risk": "execution",
+      "summary": "inspect and control durable agent conversations"
+    },
+    {
+      "category": "memory",
+      "name": "/learn_from_example",
+      "risk": "ask",
+      "summary": "Distill a reusable lesson from a known-good example."
+    },
+    {
+      "category": "memory",
+      "name": "/learn_preference",
+      "risk": "ask",
+      "summary": "Teach Sonder a durable user preference immediately."
+    },
+    {
+      "category": "memory",
+      "name": "/learn_tiers",
+      "risk": "safe",
+      "summary": "Show which tiers currently feed the learning loop."
+    },
+    {
+      "category": "memory",
+      "name": "/learning",
+      "risk": "safe",
+      "summary": "Show grounded outcome coverage, lesson provenance, distillation yield, and memory hygiene."
+    },
+    {
+      "category": "memory",
+      "name": "/learning_health_status",
+      "risk": "safe",
+      "summary": "Show outcome coverage, positive signals, lesson provenance, and memory hygiene."
+    },
+    {
+      "category": "memory",
+      "name": "/lessons",
+      "risk": "safe",
+      "summary": "show the 10 most recent distilled lessons"
+    },
+    {
+      "category": "dev",
+      "name": "/lint_run",
+      "risk": "execution",
+      "summary": "Run a linter (ruff, flake8, pylint, eslint, clippy) with auto-detection."
+    },
+    {
+      "category": "updates",
+      "name": "/live_reload_status",
+      "risk": "safe",
+      "summary": "Show helper-module and atomic MCP tool-registry live reload state."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/local_service_probe",
+      "risk": "ask",
+      "summary": "Probe an unauthenticated HTTP service that resolves only to loopback."
+    },
+    {
+      "category": "runtime",
+      "name": "/location",
+      "risk": "ask",
+      "summary": "Show, grant, or revoke approximate IP-location consent for this session."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/log_inspect",
+      "risk": "safe",
+      "summary": "Inspect one guarded text log without execution or caller expressions."
+    },
+    {
+      "category": "security",
+      "name": "/login",
+      "risk": "dangerous",
+      "summary": "login for admin/debug commands"
+    },
+    {
+      "category": "diagnostics",
+      "name": "/logs",
+      "risk": "safe",
+      "summary": "show the last n records of this session's REPL log"
+    },
+    {
+      "category": "agents",
+      "name": "/loop",
+      "risk": "ask",
+      "summary": "Run a bounded loop of code/model/system actions."
+    },
+    {
+      "category": "agents",
+      "name": "/master",
+      "risk": "ask",
+      "summary": "Run inline or delegated master/subagent orchestration."
+    },
+    {
+      "category": "agents",
+      "name": "/master_cancel",
+      "risk": "ask",
+      "summary": "Cooperatively cancel one active agent/master prefix or all active agents."
+    },
+    {
+      "category": "agents",
+      "name": "/master_capacity",
+      "risk": "safe",
+      "summary": "Show default or explicit per-run bounded orchestration capacity."
+    },
+    {
+      "category": "agents",
+      "name": "/master_orchestrate",
+      "risk": "ask",
+      "summary": "Run a master pass inline or with hardware-scheduled delegated agents."
+    },
+    {
+      "category": "agents",
+      "name": "/master_retry",
+      "risk": "ask",
+      "summary": "Explicitly rerun one interrupted/failed/cancelled persisted master task."
+    },
+    {
+      "category": "agents",
+      "name": "/master_status",
+      "risk": "safe",
+      "summary": "Show live master/subagent activity, token estimates, and recent actions."
+    },
+    {
+      "category": "updates",
+      "name": "/mcp",
+      "risk": "dangerous",
+      "summary": "Audit or refresh the atomic live MCP source and tool registry."
+    },
+    {
+      "category": "updates",
+      "name": "/mcp_runtime_status",
+      "risk": "safe",
+      "summary": "Show live MCP source/tool convergence and fail-closed refresh state."
+    },
+    {
+      "category": "memory",
+      "name": "/memory_embedding_backfill",
+      "risk": "mutation",
+      "summary": "Refresh missing, legacy, or incompatible vectors with the local model."
+    },
+    {
+      "category": "memory",
+      "name": "/memory_export",
+      "risk": "safe",
+      "summary": "Export a compact JSON snapshot of local memory."
+    },
+    {
+      "category": "memory",
+      "name": "/memory_interaction_embedding_backfill",
+      "risk": "mutation",
+      "summary": "Refresh raw interaction task vectors with the local embedding model."
+    },
+    {
+      "category": "memory",
+      "name": "/memory_privacy_repair",
+      "risk": "dangerous",
+      "summary": "Delete only explicitly selected, currently privacy-flagged lessons; dry-run by default."
+    },
+    {
+      "category": "memory",
+      "name": "/memory_privacy_review",
+      "risk": "safe",
+      "summary": "List redacted path/credential-like lessons without revealing raw values."
+    },
+    {
+      "category": "memory",
+      "name": "/memory_quality_repair",
+      "risk": "dangerous",
+      "summary": "Prune exact duplicate lessons; dry-run unless apply=True."
+    },
+    {
+      "category": "memory",
+      "name": "/memory_quality_report",
+      "risk": "safe",
+      "summary": "Audit lesson quality: duplicates, long/vague rows, embeddings, and FTS health."
+    },
+    {
+      "category": "memory",
+      "name": "/memory_search",
+      "risk": "safe",
+      "summary": "Search local lessons, facts, sessions, and recent interactions."
+    },
+    {
+      "category": "agents",
+      "name": "/mission",
+      "risk": "ask",
+      "summary": "one goal + optional task plan + autopilot (status|start|done|abandon)"
+    },
+    {
+      "category": "agents",
+      "name": "/mission_start",
+      "risk": "ask",
+      "summary": "Start a composed mission: set a goal, optionally decompose into tasks, optionally launch autopilot."
+    },
+    {
+      "category": "agents",
+      "name": "/mission_status",
+      "risk": "ask",
+      "summary": "Show unified mission status: active goal + bound autopilot + linked tasks."
+    },
+    {
+      "category": "filesystem",
+      "name": "/mkdir",
+      "risk": "mutation",
+      "summary": "Create a directory inside a guarded root."
+    },
+    {
+      "category": "runtime",
+      "name": "/mode",
+      "risk": "ask",
+      "summary": "show or set how much runs without asking (plan/manual/acceptEdits/auto)"
+    },
+    {
+      "category": "chat",
+      "name": "/model",
+      "risk": "safe",
+      "summary": "list installed models and tiers; switch either one"
+    },
+    {
+      "category": "runtime",
+      "name": "/model_fanout",
+      "risk": "ask",
+      "summary": "Ask every discovered local, cloud, or all model the same prompt."
+    },
+    {
+      "category": "runtime",
+      "name": "/model_fanout_cancel",
+      "risk": "ask",
+      "summary": "Cancel a durable model fanout; late provider results are discarded."
+    },
+    {
+      "category": "runtime",
+      "name": "/model_fanout_recent",
+      "risk": "ask",
+      "summary": "List recent durable fanout run summaries available to this caller."
+    },
+    {
+      "category": "runtime",
+      "name": "/model_fanout_resume",
+      "risk": "ask",
+      "summary": "Explicitly resume selected durable fanout results."
+    },
+    {
+      "category": "runtime",
+      "name": "/model_fanout_status",
+      "risk": "ask",
+      "summary": "Return the durable receipt for a model fanout run."
+    },
+    {
+      "category": "runtime",
+      "name": "/model_fanout_synthesize",
+      "risk": "ask",
+      "summary": "Locally synthesize one completed fanout's exact, complete answer previews."
+    },
+    {
+      "category": "basic",
+      "name": "/new",
+      "risk": "safe",
+      "summary": "start a fresh conversation thread (forget this chat's history)"
+    },
+    {
+      "category": "runtime",
+      "name": "/npu_status",
+      "risk": "ask",
+      "summary": "Show the NPU utility accelerator: detected vs runtime-ready vs enabled vs healthy, provider capability, model bundle hashes, latency, fallback counters, and circuit state."
+    },
+    {
+      "category": "chat",
+      "name": "/offload",
+      "risk": "ask",
+      "summary": "Offload a self-contained subtask to a local or Ollama-cloud model."
+    },
+    {
+      "category": "admin",
+      "name": "/ollama_pool_admin_status",
+      "risk": "ask",
+      "summary": "Read an administrator-only cached worker page; optionally refresh one bounded stale batch."
+    },
+    {
+      "category": "dev",
+      "name": "/output_digest",
+      "risk": "safe",
+      "summary": "Summarize a guarded log file or your own test-run job output."
+    },
+    {
+      "category": "execution",
+      "name": "/parallel_generate_run",
+      "risk": "execution",
+      "summary": "Generate several Python code candidates in parallel, then compile/run each."
+    },
+    {
+      "category": "execution",
+      "name": "/parallel_generate_run_languages",
+      "risk": "execution",
+      "summary": "Generate, compile, and execute many candidates across multiple languages."
+    },
+    {
+      "category": "execution",
+      "name": "/parallel_run_code",
+      "risk": "execution",
+      "summary": "Compile and execute many snippets concurrently."
+    },
+    {
+      "category": "memory",
+      "name": "/pass",
+      "risk": "ask",
+      "summary": "record the last answer as tests_passed"
+    },
+    {
+      "category": "security",
+      "name": "/permission_approvals",
+      "risk": "safe",
+      "summary": "List calls refused unattended (approvable by call id) and the one-shot approvals issued."
+    },
+    {
+      "category": "security",
+      "name": "/permission_approve",
+      "risk": "dangerous",
+      "summary": "Approve exactly one refused call once (by call id, or tool + arguments JSON), or revoke one."
+    },
+    {
+      "category": "security",
+      "name": "/permission_mode",
+      "risk": "ask",
+      "summary": "Show or set how much Sonder does without asking."
+    },
+    {
+      "category": "security",
+      "name": "/permission_policy",
+      "risk": "safe",
+      "summary": "Show the effective permission decision: the rule, the mode, and which wins."
+    },
+    {
+      "category": "security",
+      "name": "/permission_rule_set",
+      "risk": "dangerous",
+      "summary": "Set a local permission rule."
+    },
+    {
+      "category": "security",
+      "name": "/permissions",
+      "risk": "safe",
+      "summary": "Show the effective permission decision: rule, active mode, and which governs."
+    },
+    {
+      "category": "persona",
+      "name": "/persona",
+      "risk": "safe",
+      "summary": "show/set active persona (coder/explainer/reviewer/teacher)"
+    },
+    {
+      "category": "diagnostics",
+      "name": "/policy_explain",
+      "risk": "safe",
+      "summary": "Preflight the direct-MCP permission gate for one registered tool without running it."
+    },
+    {
+      "category": "persona",
+      "name": "/prefer",
+      "risk": "ask",
+      "summary": "Show, teach, or forget learned user preferences."
+    },
+    {
+      "category": "persona",
+      "name": "/preferences_status",
+      "risk": "safe",
+      "summary": "List learned user preferences that shape future responses."
+    },
+    {
+      "category": "memory",
+      "name": "/privacy",
+      "risk": "safe",
+      "summary": "Review redacted path and credential-like lesson findings."
+    },
+    {
+      "category": "memory",
+      "name": "/privacyfix",
+      "risk": "dangerous",
+      "summary": "Dry-run or explicitly delete selected privacy-flagged lesson IDs."
+    },
+    {
+      "category": "admin",
+      "name": "/process_list",
+      "risk": "safe",
+      "summary": "List bounded process metadata when host inspection is explicitly enabled."
+    },
+    {
+      "category": "security",
+      "name": "/process_memory_risk_inspect",
+      "risk": "safe",
+      "summary": "Inspect one PID for fixed memory-risk indicators without returning content."
+    },
+    {
+      "category": "dev",
+      "name": "/profile",
+      "risk": "execution",
+      "summary": "hot paths, frame spikes, allocations"
+    },
+    {
+      "category": "execution",
+      "name": "/program_search",
+      "risk": "safe",
+      "summary": "Search PATH and Windows App Paths for installed programs."
+    },
+    {
+      "category": "execution",
+      "name": "/programs",
+      "risk": "ask",
+      "summary": "Find executable programs available to the workbench."
+    },
+    {
+      "category": "basic",
+      "name": "/project",
+      "risk": "safe",
+      "summary": "show/set the active project (scopes facts)"
+    },
+    {
+      "category": "dev",
+      "name": "/project_detect",
+      "risk": "safe",
+      "summary": "Inventory guarded project manifests and evidence-backed command candidates."
+    },
+    {
+      "category": "memory",
+      "name": "/quality",
+      "risk": "safe",
+      "summary": "Audit lesson quality and duplicate rows."
+    },
+    {
+      "category": "memory",
+      "name": "/qualityfix",
+      "risk": "dangerous",
+      "summary": "Dry-run or apply exact duplicate lesson cleanup."
+    },
+    {
+      "category": "filesystem",
+      "name": "/read",
+      "risk": "ask",
+      "summary": "Read a guarded file."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/reasoning_show",
+      "risk": "safe",
+      "summary": "Show the reasoning the model emitted for the current/last turn, if enabled."
+    },
+    {
+      "category": "memory",
+      "name": "/record_outcome",
+      "risk": "ask",
+      "summary": "Feed a real-world outcome back into sonder's learning loop."
+    },
+    {
+      "category": "runtime",
+      "name": "/recovery",
+      "risk": "safe",
+      "summary": "show the configured control-state recovery posture (read-only)"
+    },
+    {
+      "category": "dev",
+      "name": "/refactor",
+      "risk": "execution",
+      "summary": "propose a guarded improvement to one function"
+    },
+    {
+      "category": "security",
+      "name": "/register",
+      "risk": "dangerous",
+      "summary": "create account (first account becomes admin)"
+    },
+    {
+      "category": "dev",
+      "name": "/rename_symbol",
+      "risk": "mutation",
+      "summary": "Rename a symbol across files matching a glob pattern."
+    },
+    {
+      "category": "basic",
+      "name": "/replay",
+      "risk": "safe",
+      "summary": "re-render the last N stored turns of a thread (default: this one)"
+    },
+    {
+      "category": "repo",
+      "name": "/repo_blame",
+      "risk": "safe",
+      "summary": "Read bounded structured blame records for one contained regular file."
+    },
+    {
+      "category": "repo",
+      "name": "/repo_diff",
+      "risk": "safe",
+      "summary": "Inspect a bounded read-only unstaged or staged Git diff at a repo root."
+    },
+    {
+      "category": "repo",
+      "name": "/repo_log",
+      "risk": "safe",
+      "summary": "Read bounded structured commit history from an exact repository root."
+    },
+    {
+      "category": "repo",
+      "name": "/repo_show",
+      "risk": "safe",
+      "summary": "Read one bounded commit patch for a required safe contained file."
+    },
+    {
+      "category": "repo",
+      "name": "/repo_status",
+      "risk": "safe",
+      "summary": "Inspect bounded read-only Git branch and worktree status at a repo root."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/report",
+      "risk": "safe",
+      "summary": "Show the latest grounded end report and replayable action transcript."
+    },
+    {
+      "category": "dev",
+      "name": "/repository_symbol_index",
+      "risk": "safe",
+      "summary": "Build a bounded read-only declaration index inside one guarded repository."
+    },
+    {
+      "category": "basic",
+      "name": "/resume",
+      "risk": "safe",
+      "summary": "continue a past thread by id or title prefix"
+    },
+    {
+      "category": "chat",
+      "name": "/route",
+      "risk": "safe",
+      "summary": "suggest the tier best suited to a request, and why"
+    },
+    {
+      "category": "chat",
+      "name": "/route_request",
+      "risk": "ask",
+      "summary": "Suggest the tier best suited to a request, and say why."
+    },
+    {
+      "category": "execution",
+      "name": "/run",
+      "risk": "execution",
+      "summary": "Run the previous fenced code block with a timeout."
+    },
+    {
+      "category": "execution",
+      "name": "/run_code",
+      "risk": "execution",
+      "summary": "Execute a short local code snippet and return stdout/stderr."
+    },
+    {
+      "category": "execution",
+      "name": "/run_project",
+      "risk": "execution",
+      "summary": "Run a temporary multi-file project and return build/run output."
+    },
+    {
+      "category": "execution",
+      "name": "/runprogram",
+      "risk": "execution",
+      "summary": "Run an approved executable with argv JSON, timeout, cwd, and bounded output."
+    },
+    {
+      "category": "execution",
+      "name": "/runproject",
+      "risk": "execution",
+      "summary": "Run a generated multi-file project in a temp workspace."
+    },
+    {
+      "category": "execution",
+      "name": "/runscript",
+      "risk": "execution",
+      "summary": "Run a known script type without shell interpolation and with bounded output."
+    },
+    {
+      "category": "runtime",
+      "name": "/runtime",
+      "risk": "dangerous",
+      "summary": "Inspect or guarded-edit shared local model mappings and execution-lane tiers; cloud remains separate."
+    },
+    {
+      "category": "runtime",
+      "name": "/runtime_policy_status",
+      "risk": "safe",
+      "summary": "Show shared local model mappings, execution-lane tiers and cached model readiness."
+    },
+    {
+      "category": "updates",
+      "name": "/runtime_policy_update",
+      "risk": "dangerous",
+      "summary": "Guarded-edit shared local mappings; cloud configuration is never accepted."
+    },
+    {
+      "category": "repo",
+      "name": "/runtime_source_stash",
+      "risk": "dangerous",
+      "summary": "Save or restore canonical runtime source edits through a fixed stash."
+    },
+    {
+      "category": "repo",
+      "name": "/runtime_source_stash_status",
+      "risk": "safe",
+      "summary": "Show whether canonical Sonder source edits can be stashed safely."
+    },
+    {
+      "category": "repo",
+      "name": "/runtime_source_update",
+      "risk": "dangerous",
+      "summary": "Safely fast-forward this clean canonical source checkout to origin/main."
+    },
+    {
+      "category": "repo",
+      "name": "/runtime_source_update_status",
+      "risk": "safe",
+      "summary": "Check whether this Git source installation is behind canonical main."
+    },
+    {
+      "category": "execution",
+      "name": "/runwindow",
+      "risk": "execution",
+      "summary": "Launch the previous fenced code block in a separate Windows console."
+    },
+    {
+      "category": "dev",
+      "name": "/scaffold",
+      "risk": "execution",
+      "summary": "write a full project skeleton (cpp-msvc, csharp, rust, ...)"
+    },
+    {
+      "category": "dev",
+      "name": "/scaffold_project",
+      "risk": "execution",
+      "summary": "Emit a complete, deterministic project skeleton for one language."
+    },
+    {
+      "category": "execution",
+      "name": "/script_run",
+      "risk": "execution",
+      "summary": "Run a guarded script with its known interpreter and bounded output."
+    },
+    {
+      "category": "filesystem",
+      "name": "/script_search",
+      "risk": "safe",
+      "summary": "Find guarded scripts; ignored paths require developer authentication."
+    },
+    {
+      "category": "execution",
+      "name": "/scripts",
+      "risk": "ask",
+      "summary": "Find runnable scripts under a guarded root."
+    },
+    {
+      "category": "filesystem",
+      "name": "/search",
+      "risk": "ask",
+      "summary": "Search text across bounded files under a guarded root."
+    },
+    {
+      "category": "security",
+      "name": "/secret_scan",
+      "risk": "ask",
+      "summary": "Scan workspace files for leaked secrets (API keys, passwords, private keys, tokens)."
+    },
+    {
+      "category": "updates",
+      "name": "/self_heal_check",
+      "risk": "safe",
+      "summary": "Check for common local breakage without changing anything."
+    },
+    {
+      "category": "updates",
+      "name": "/self_heal_repair",
+      "risk": "dangerous",
+      "summary": "Repair safe local issues, or dry-run by default."
+    },
+    {
+      "category": "updates",
+      "name": "/selfmod",
+      "risk": "dangerous",
+      "summary": "Inspect, isolate, test, approve, deploy, or roll back auditable self-improvements."
+    },
+    {
+      "category": "context",
+      "name": "/session_export",
+      "risk": "ask",
+      "summary": "Export a remembered conversation session as readable transcript text."
+    },
+    {
+      "category": "basic",
+      "name": "/sessions",
+      "risk": "safe",
+      "summary": "list past conversation threads"
+    },
+    {
+      "category": "context",
+      "name": "/set_context_size",
+      "risk": "ask",
+      "summary": "Select Sonder's requested virtual context size, up to 1m by default."
+    },
+    {
+      "category": "security",
+      "name": "/setaccount",
+      "risk": "dangerous",
+      "summary": "admin account edits: user role= tier= dev_flags= banned="
+    },
+    {
+      "category": "chat",
+      "name": "/sonder",
+      "risk": "ask",
+      "summary": "Ask through Sonder Runtime and show observable activity for the response."
+    },
+    {
+      "category": "admin",
+      "name": "/sonder_authoritative_indexes",
+      "risk": "ask",
+      "summary": "Retrieve committed, scoped explicit entity/decision fact indexes."
+    },
+    {
+      "category": "memory",
+      "name": "/sonder_forget_fact",
+      "risk": "dangerous",
+      "summary": "Forget one asserted project fact after an exact confirmation."
+    },
+    {
+      "category": "memory",
+      "name": "/sonder_remember_fact",
+      "risk": "ask",
+      "summary": "Store a durable fact sonder should ALWAYS know for a project."
+    },
+    {
+      "category": "context",
+      "name": "/sonder_sessions",
+      "risk": "safe",
+      "summary": "List sonder conversation threads, most recently used first."
+    },
+    {
+      "category": "memory",
+      "name": "/sonder_stats",
+      "risk": "safe",
+      "summary": "Report what sonder has learned so far."
+    },
+    {
+      "category": "data",
+      "name": "/sqlite_mutate",
+      "risk": "dangerous",
+      "summary": "Preview-rollback or atomically apply one parameterized SQLite DML statement."
+    },
+    {
+      "category": "repo",
+      "name": "/stash",
+      "risk": "dangerous",
+      "summary": "save/restore this install's source edits for a guarded update"
+    },
+    {
+      "category": "memory",
+      "name": "/stats",
+      "risk": "safe",
+      "summary": "Show learning counts and recent lessons."
+    },
+    {
+      "category": "runtime",
+      "name": "/status",
+      "risk": "safe",
+      "summary": "Report cached inference capacity without contacting Ollama workers."
+    },
+    {
+      "category": "runtime",
+      "name": "/strict",
+      "risk": "safe",
+      "summary": "toggle strict mode (bare = on); pins to the sonder alias"
+    },
+    {
+      "category": "diagnostics",
+      "name": "/system_improvement_report",
+      "risk": "safe",
+      "summary": "Suggest the next concrete improvements for learning quality and runtime health."
+    },
+    {
+      "category": "persona",
+      "name": "/system_profile_text",
+      "risk": "safe",
+      "summary": "Read the editable standing instructions injected into sonder."
+    },
+    {
+      "category": "planning",
+      "name": "/task_create",
+      "risk": "ask",
+      "summary": "Create a visible task/todo row the model, console, and app can inspect."
+    },
+    {
+      "category": "planning",
+      "name": "/task_delete",
+      "risk": "dangerous",
+      "summary": "Delete a task and all its children, events, and dependencies."
+    },
+    {
+      "category": "planning",
+      "name": "/task_depend",
+      "risk": "ask",
+      "summary": "Add or remove a dependency between tasks."
+    },
+    {
+      "category": "planning",
+      "name": "/task_ledger",
+      "risk": "safe",
+      "summary": "Show a deterministic, digest-bound task ledger for one work plan."
+    },
+    {
+      "category": "planning",
+      "name": "/task_list",
+      "risk": "safe",
+      "summary": "List visible task/todo rows, pending and active by default."
+    },
+    {
+      "category": "planning",
+      "name": "/task_plan",
+      "risk": "ask",
+      "summary": "Batch-create a work plan: a parent task with ordered steps."
+    },
+    {
+      "category": "planning",
+      "name": "/task_progress",
+      "risk": "safe",
+      "summary": "Show a compact progress summary of all tasks (or filtered by project)."
+    },
+    {
+      "category": "planning",
+      "name": "/task_show",
+      "risk": "safe",
+      "summary": "Show one task and its recent visible event history."
+    },
+    {
+      "category": "planning",
+      "name": "/task_update",
+      "risk": "ask",
+      "summary": "Update task status/details."
+    },
+    {
+      "category": "dev",
+      "name": "/test",
+      "risk": "execution",
+      "summary": "run the project's tests; /test status|result|cancel <job>"
+    },
+    {
+      "category": "dev",
+      "name": "/test_discover",
+      "risk": "safe",
+      "summary": "Discover tests in a project \u2014 detects the test framework (pytest, jest, vitest, cargo, go, dotnet) and lists test files and counts."
+    },
+    {
+      "category": "dev",
+      "name": "/test_run",
+      "risk": "execution",
+      "summary": "Run tests with auto-detected or specified framework (pytest, jest, vitest, cargo, go, mocha, dotnet)."
+    },
+    {
+      "category": "filesystem",
+      "name": "/text_patch",
+      "risk": "mutation",
+      "summary": "Strictly preview or transactionally apply a bounded unified text diff."
+    },
+    {
+      "category": "filesystem",
+      "name": "/text_search",
+      "risk": "safe",
+      "summary": "Search guarded files; ignored paths require developer authentication."
+    },
+    {
+      "category": "planning",
+      "name": "/todo",
+      "risk": "dangerous",
+      "summary": "List, add, update, and inspect visible task state."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/tool_capability_manifest",
+      "risk": "ask",
+      "summary": "Return the live tool schemas and a deterministic fingerprint of them."
+    },
+    {
+      "category": "runtime",
+      "name": "/tool_inventory",
+      "risk": "safe",
+      "summary": "Report the categorized host tool inventory (compilers, build systems, test runners, linters, debuggers, package managers, runtimes, containers, VCS, database clients, media/doc tools, cloud CLIs, editors, shells)."
+    },
+    {
+      "category": "basic",
+      "name": "/tool_manifest",
+      "risk": "safe",
+      "summary": "List the sonder-runtime MCP tools and what they are for."
+    },
+    {
+      "category": "runtime",
+      "name": "/toolchain_status",
+      "risk": "safe",
+      "summary": "Return a real bounded version/status result for one discovered host tool."
+    },
+    {
+      "category": "runtime",
+      "name": "/tools",
+      "risk": "safe",
+      "summary": "categorized host tool inventory with versions"
+    },
+    {
+      "category": "runtime",
+      "name": "/toolstatus",
+      "risk": "safe",
+      "summary": "run the fixed local version probe for a discovered tool"
+    },
+    {
+      "category": "runtime",
+      "name": "/trace",
+      "risk": "safe",
+      "summary": "toggle trace mode (bare = on); shows retrieval + prompt"
+    },
+    {
+      "category": "memory",
+      "name": "/train",
+      "risk": "execution",
+      "summary": "Run grounded practice tasks and record outcomes; no weights change."
+    },
+    {
+      "category": "memory",
+      "name": "/training",
+      "risk": "dangerous",
+      "summary": "Plan, explicitly start, inspect, deploy, or roll back adaptive weight training."
+    },
+    {
+      "category": "filesystem",
+      "name": "/tree",
+      "risk": "ask",
+      "summary": "List a bounded tree under a guarded folder."
+    },
+    {
+      "category": "persona",
+      "name": "/tune_emotion_vectors",
+      "risk": "ask",
+      "summary": "Live-tune emotion/tone vectors from plain-language feedback."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/turn_inspect",
+      "risk": "safe",
+      "summary": "Show what actually went into a recent turn: prompt, lessons, tier, model."
+    },
+    {
+      "category": "dev",
+      "name": "/typecheck_run",
+      "risk": "execution",
+      "summary": "Run a type checker (mypy, pyright, tsc) with auto-detection."
+    },
+    {
+      "category": "runtime",
+      "name": "/unload",
+      "risk": "dangerous",
+      "summary": "Immediately free GPU VRAM by unloading a model (or all of them)."
+    },
+    {
+      "category": "repo",
+      "name": "/update",
+      "risk": "dangerous",
+      "summary": "Safely fast-forward a clean canonical Sonder source checkout; never merges, rebases, or overwrites local work."
+    },
+    {
+      "category": "persona",
+      "name": "/update_emotion_vectors",
+      "risk": "ask",
+      "summary": "Merge, replace, or clear the live emotion/tone steering vectors."
+    },
+    {
+      "category": "persona",
+      "name": "/update_system_profile",
+      "risk": "ask",
+      "summary": "Append, replace, or clear sonder's editable standing instructions."
+    },
+    {
+      "category": "repo",
+      "name": "/updatecheck",
+      "risk": "safe",
+      "summary": "Fetch and report the installed Sonder Git commit, newest canonical commit, timestamps, and whether this source checkout is behind."
+    },
+    {
+      "category": "updates",
+      "name": "/verify_artifact",
+      "risk": "safe",
+      "summary": "Run fetch_artifact's verification battery against a file already on disk."
+    },
+    {
+      "category": "basic",
+      "name": "/version",
+      "risk": "safe",
+      "summary": "show the runtime version and release stamp"
+    },
+    {
+      "category": "runtime",
+      "name": "/vision",
+      "risk": "ask",
+      "summary": "ask the local vision tier about a guarded image"
+    },
+    {
+      "category": "runtime",
+      "name": "/vision_analyze",
+      "risk": "ask",
+      "summary": "Analyze one guarded local PNG/JPEG/BMP with the configured local vision model."
+    },
+    {
+      "category": "web",
+      "name": "/weather",
+      "risk": "ask",
+      "summary": "Get sourced live conditions and a short forecast for a city or ZIP."
+    },
+    {
+      "category": "web",
+      "name": "/weather_lookup",
+      "risk": "safe",
+      "summary": "Get current conditions and a short forecast for a city or postal code."
+    },
+    {
+      "category": "web",
+      "name": "/web_fetch",
+      "risk": "safe",
+      "summary": "Fetch a public HTTP/HTTPS URL as readable text."
+    },
+    {
+      "category": "web",
+      "name": "/web_search",
+      "risk": "safe",
+      "summary": "Search the public web and return compact result links."
+    },
+    {
+      "category": "security",
+      "name": "/whoami",
+      "risk": "safe",
+      "summary": "show current account"
+    },
+    {
+      "category": "diagnostics",
+      "name": "/why",
+      "risk": "safe",
+      "summary": "explain how the previous plain-language turn (or [text]) routed"
+    },
+    {
+      "category": "agents",
+      "name": "/work",
+      "risk": "ask",
+      "summary": "Run a visible local tool-using agent loop with checklist/reporting."
+    },
+    {
+      "category": "agents",
+      "name": "/workbench_agent",
+      "risk": "ask",
+      "summary": "Execute local work with guarded tools, checklist, validation, and report."
+    },
+    {
+      "category": "agents",
+      "name": "/workflow_delete",
+      "risk": "ask",
+      "summary": "Delete a saved workflow from workflows.json."
+    },
+    {
+      "category": "agents",
+      "name": "/workflow_list",
+      "risk": "safe",
+      "summary": "List reusable named workflows stored in workflows.json."
+    },
+    {
+      "category": "agents",
+      "name": "/workflow_run",
+      "risk": "ask",
+      "summary": "Run a saved workflow through the bounded loop engine."
+    },
+    {
+      "category": "agents",
+      "name": "/workflow_save",
+      "risk": "ask",
+      "summary": "Save a named workflow made of loop action objects."
+    },
+    {
+      "category": "filesystem",
+      "name": "/workspace-create",
+      "risk": "mutation",
+      "summary": "create a guarded directory, select it, and resume queued work"
+    },
+    {
+      "category": "filesystem",
+      "name": "/workspace_compare",
+      "risk": "safe",
+      "summary": "Compare two guarded files/directories by path, type, size, and SHA-256."
+    },
+    {
+      "category": "filesystem",
+      "name": "/workspace_inventory",
+      "risk": "safe",
+      "summary": "Summarize a guarded workspace; ignored paths require developer authentication."
+    },
+    {
+      "category": "filesystem",
+      "name": "/workspace_run",
+      "risk": "execution",
+      "summary": "Run a program as a bounded argv list; no shell command strings."
+    },
+    {
+      "category": "filesystem",
+      "name": "/write",
+      "risk": "mutation",
+      "summary": "Create a guarded text file."
+    }
+  ],
+  "tools": [
+    {
+      "name": "agent_lane",
+      "summary": "Open a fresh parent with open_parent; retain its scoped capability to control independent agent conversations. Never place the capability in task text or files."
+    },
+    {
+      "name": "approximate_location_lookup",
+      "summary": "Resolve approximate location after explicit consent"
+    },
+    {
+      "name": "archive_create",
+      "summary": "Create a bounded deterministic ZIP or TAR without overwriting"
+    },
+    {
+      "name": "archive_extract",
+      "summary": "Extract a bounded archive transactionally without replacing a destination"
+    },
+    {
+      "name": "archive_list",
+      "summary": "Inspect a bounded archive without extracting it"
+    },
+    {
+      "name": "artifact_risk_inspect",
+      "summary": "Statically inspect a guarded artifact for risk"
+    },
+    {
+      "name": "build_fix",
+      "summary": "Repair a failing C/C++ build target with a bounded loop: compile the focus file, propose a patch confined to editable project sources (never build scripts or build-time-tool sources), verify with compile_one then a target build, keep the best candidate and revert regressions. Returns a job id for build_fix_result."
+    },
+    {
+      "name": "build_fix_restore",
+      "summary": "Write a build_fix job's stored original files back (all, or the named ones) when each file still has the content the fix left; refuses a file changed since."
+    },
+    {
+      "name": "build_fix_result",
+      "summary": "Wait (bounded) for a build_fix job you started and return its report: status, stop reason, attempts, per-file digests and diffs, and the final build; cancel=true stops your own fix and its child build instead."
+    },
+    {
+      "name": "build_job",
+      "summary": "Configure, build, compile one file, or trace one file's includes, with a host-owned command rendered from closed templates for the project's build system; every value must name a member of build_model. Runs as a background job and returns typed, attributed diagnostics or a job id for build_job_result."
+    },
+    {
+      "name": "build_job_result",
+      "summary": "Wait (bounded) for a build_job you started and return its report, or its status while it is still running; cancel=true stops your own job instead."
+    },
+    {
+      "name": "build_model",
+      "summary": "Describe a C/C++ project's build without running anything: build system, generator, configs, platforms, targets (utility and build-time-tool flags), toolchains, compile units, PCH and presets, read from the CMake File API reply, compile_commands.json or .sln/.vcxproj. Labels only, no host paths."
+    },
+    {
+      "name": "compute_artifact_fetch",
+      "summary": "Fetch one small digest-verified compute artifact through the authenticated transport"
+    },
+    {
+      "name": "compute_cancel",
+      "summary": "Cancel one previously placed compute job and prove cleanup"
+    },
+    {
+      "name": "compute_status",
+      "summary": "Read one previously placed compute job"
+    },
+    {
+      "name": "compute_submit",
+      "summary": "Place one bounded catalog job locally or on an explicitly authorized private node"
+    },
+    {
+      "name": "crash_digest",
+      "summary": "Symbolize and walk a crash capture with a host debugger (cdb, gdb, lldb, eu-stack, minidump-stackwalk or llvm-symbolizer on verified PE+PDB/ELF pairs) as a background job over the pure reader's result; returns the merged crash report or a run id to poll with debug_run_result. symbol_dirs must be local directories inside the allowed roots. symbol_server=true is refused from a tool call: the operator runs /crash <dump> --symbols-online at the console."
+    },
+    {
+      "name": "crash_triage",
+      "summary": "Read a crash capture without running anything: a Windows/Breakpad/Crashpad minidump, an ELF core, a sanitizer (ASan/UBSan/TSan/MSVC-ASan) log, valgrind memcheck XML or a macOS .ips; returns a typed crash report (exception, crashing thread frames, modules with PDB/build ids, cause hints, signature). With a directory path, reads up to 64 captures in it (non-recursive) and returns buckets grouped by crash signature."
+    },
+    {
+      "name": "data_inspect",
+      "summary": "Inspect a bounded data file"
+    },
+    {
+      "name": "data_query",
+      "summary": "Run a bounded read-only data query"
+    },
+    {
+      "name": "debug_run_result",
+      "summary": "Wait (bounded) for a crash_digest or profile_capture_digest run you started and return its result, or its status while it is still running."
+    },
+    {
+      "name": "dependency_inventory",
+      "summary": "Inventory bounded project dependencies"
+    },
+    {
+      "name": "directory_create",
+      "summary": "Create a guarded directory and optional parents"
+    },
+    {
+      "name": "directory_digest",
+      "summary": "Digest a bounded directory manifest"
+    },
+    {
+      "name": "directory_tree",
+      "summary": "List a bounded guarded directory tree"
+    },
+    {
+      "name": "edit_file",
+      "summary": "Apply a bounded text edit"
+    },
+    {
+      "name": "fetch_artifact",
+      "summary": "Fetch and atomically verify a binary artifact"
+    },
+    {
+      "name": "file_batch_write",
+      "summary": "Transactionally create or overwrite bounded files"
+    },
+    {
+      "name": "file_copy",
+      "summary": "Copy one bounded binary-safe file"
+    },
+    {
+      "name": "file_delete",
+      "summary": "Delete a guarded path only after explicit confirmation"
+    },
+    {
+      "name": "file_digest",
+      "summary": "Digest a bounded file"
+    },
+    {
+      "name": "file_edit",
+      "summary": "Legacy alias for a bounded text edit"
+    },
+    {
+      "name": "file_find",
+      "summary": "Find files under allowed roots"
+    },
+    {
+      "name": "file_move",
+      "summary": "Move one bounded binary-safe file"
+    },
+    {
+      "name": "file_read",
+      "summary": "Read a UTF-8-ish text file inside allowed roots"
+    },
+    {
+      "name": "file_read_range",
+      "summary": "Read a bounded line range from a text file"
+    },
+    {
+      "name": "file_write",
+      "summary": "Create, overwrite, or append a text file inside allowed roots"
+    },
+    {
+      "name": "image_inspect",
+      "summary": "Inspect bounded image metadata and hash"
+    },
+    {
+      "name": "json_patch",
+      "summary": "Preview or atomically apply a bounded JSON patch"
+    },
+    {
+      "name": "log_inspect",
+      "summary": "Inspect a bounded log file"
+    },
+    {
+      "name": "make_directory",
+      "summary": "Create a directory under an allowed root"
+    },
+    {
+      "name": "output_digest",
+      "summary": "Summarize a test-run job's output or a guarded log file: final summary line, counts, FAILED/ERROR lines, first unique errors (file:line), grouped diagnostics and the tail. Give exactly one of job_id or path."
+    },
+    {
+      "name": "process_list",
+      "summary": "List bounded process metadata after explicit opt-in"
+    },
+    {
+      "name": "process_memory_risk_inspect",
+      "summary": "Inspect bounded process memory risk indicators"
+    },
+    {
+      "name": "profile_capture_digest",
+      "summary": "Digest a binary profiler capture with a host tool (perf report, heaptrack_print, tracy-csvexport, xperf) as a background job; returns the profile digest or a run id to poll with debug_run_result."
+    },
+    {
+      "name": "profile_digest",
+      "summary": "Digest a profiler capture in a pure format without running anything: callgrind, Chrome trace JSON, Tracy csvexport CSV, WPA/PIX/Superluminal CSV, heaptrack_print text or perf report text; returns hot functions (self/total), hot paths, frame-time percentiles and spikes against a frame budget. Binary captures (perf.data, .etl, .tracy, heaptrack .zst) give CAPTURE_NEEDS_HOST_TOOL: use profile_capture_digest."
+    },
+    {
+      "name": "program_search",
+      "summary": "Search the executable path for programs"
+    },
+    {
+      "name": "project_detect",
+      "summary": "Detect project manifests and commands"
+    },
+    {
+      "name": "read_file",
+      "summary": "Read a bounded file"
+    },
+    {
+      "name": "run_program",
+      "summary": "Run an argv-based program"
+    },
+    {
+      "name": "run_script",
+      "summary": "Run a bounded script"
+    },
+    {
+      "name": "script_search",
+      "summary": "Find scripts under allowed roots"
+    },
+    {
+      "name": "secret_scan",
+      "summary": "Scan an authorized tree for redacted credential findings"
+    },
+    {
+      "name": "test_run",
+      "summary": "Run a project's test suite with a host-owned command for the detected runner (or the one named), optionally narrowed by a selector (pytest node id or k:<expr>, ctest name, cargo filter, ./go/pkg or run:TestName, dotnet filter, js path, jvm pattern), as a background job; returns a structured report (totals, failures with file:line) or a job id to poll with test_run_result."
+    },
+    {
+      "name": "test_run_result",
+      "summary": "Wait (bounded) for a test_run job you started and return its structured report, or its status while it is still running."
+    },
+    {
+      "name": "text_patch",
+      "summary": "Preview or transactionally apply a bounded unified diff"
+    },
+    {
+      "name": "text_search",
+      "summary": "Search bounded text files under allowed roots"
+    },
+    {
+      "name": "tool_inventory",
+      "summary": "List developer tools installed on this host (compilers, build systems, test runners, linters, debuggers, package managers, runtimes, containers, VCS, DB clients, media/doc tools, cloud CLIs, editors, shells) with versions; filter by category or name; refresh re-probes with fixed read-only version switches."
+    },
+    {
+      "name": "verify_artifact",
+      "summary": "Verify a guarded artifact already on disk"
+    },
+    {
+      "name": "vision_analyze",
+      "summary": "Analyze one guarded local raster image"
+    },
+    {
+      "name": "weather_lookup",
+      "summary": "Get bounded weather with explicit consent"
+    },
+    {
+      "name": "web_fetch",
+      "summary": "Fetch bounded public web text with explicit consent"
+    },
+    {
+      "name": "web_search",
+      "summary": "Search public web with explicit consent"
+    },
+    {
+      "name": "workspace_compare",
+      "summary": "Compare two bounded workspaces"
+    },
+    {
+      "name": "workspace_run",
+      "summary": "Run a program as a bounded argv list"
+    },
+    {
+      "name": "write_file",
+      "summary": "Write a file under an allowed root"
+    }
+  ]
+}
