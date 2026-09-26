@@ -10,6 +10,7 @@ def test_root_context_policy_is_canonical_platform_module():
 def test_platform_policy_reads_live_kv_cache_environment(monkeypatch):
     monkeypatch.delenv("SONDER_CONTEXT_SIZE", raising=False)
     monkeypatch.delenv("SONDER_SESSION_NUM_CTX", raising=False)
+    monkeypatch.delenv("SONDER_KV_CACHE_TYPE", raising=False)
     monkeypatch.setenv("OLLAMA_KV_CACHE_TYPE", "q4_0")
 
     assert canonical.default_context() == 32768

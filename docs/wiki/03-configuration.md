@@ -276,8 +276,8 @@ Models/tiers: `SONDER_FAST`, `SONDER_CODE`, `SONDER_GENERAL`,
 `SONDER_REASONING`, `SONDER_VISION`, `SONDER_BASE_MODEL`,
 `SONDER_EMBED_MODEL`, `SONDER_CONTEXT_SIZE`, `SONDER_SESSION_NUM_CTX`,
 `SONDER_NATIVE_CONTEXT_MAX`, `SONDER_VIRTUAL_CONTEXT_MAX`, `SONDER_LEARN_TIERS`
-(see [Context sizing](#context-sizing) below; `OLLAMA_KV_CACHE_TYPE` also
-affects the default).
+(see [Context sizing](#context-sizing) below; `SONDER_KV_CACHE_TYPE`, or
+failing that `OLLAMA_KV_CACHE_TYPE`, also affects the default).
 `SONDER_REASONING` / `SONDER_VISION` also accept `none` (or `off`) to leave
 that specialist tier unbound, in which case reasoning/vision work falls back
 to a base tier.
@@ -296,8 +296,18 @@ live, per-session budget — a related but different thing from the sizing
 policy below).
 
 The baseline, before any per-model adjustment, is `default_context()`:
-`32768` if `OLLAMA_KV_CACHE_TYPE` names a quantized KV cache (`q8_0`, `q4_0`,
-`q4_1`, `q5_0`, `q5_1`), else `8192` for full-precision (fp16) KV. Set
+`32768` if the server's KV cache is quantized (`q8_0`, `q4_0`, `q4_1`,
+`q5_0`, `q5_1`), else `8192` for full-precision (fp16) KV.
+
+The KV cache type is a setting of the **Ollama server process**, which Sonder
+cannot query. Declare it with `SONDER_KV_CACHE_TYPE` (`f16`, `bf16`, `f32`, or
+a quantized type above). Without a declaration Sonder falls back to its own
+`OLLAMA_KV_CACHE_TYPE`, which is only correct when Sonder launched Ollama
+itself; a tray app, system service, or remote host has its own environment.
+An unknown or missing value is treated as `f16`. `/contextsize` (the
+`context_policy_status` tool) shows the type in use and where it came from
+(`declared`, `client-environment`, or `default`), and the auto-sizing plan
+records the same pair. Set
 `SONDER_CONTEXT_SIZE` or `SONDER_SESSION_NUM_CTX` (equivalent; the first wins
 if both are set) to override that baseline explicitly — either accepts a bare
 integer or a `k`/`m` suffix (`8192`, `32k`, `1m`).

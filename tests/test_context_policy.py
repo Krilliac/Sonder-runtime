@@ -1,4 +1,12 @@
+import pytest
+
 import context_policy
+
+
+@pytest.fixture(autouse=True)
+def _no_declared_kv_cache_type(monkeypatch):
+    """Keep an operator's ambient KV declaration out of the policy cases."""
+    monkeypatch.delenv("SONDER_KV_CACHE_TYPE", raising=False)
 
 
 def test_parse_size_accepts_suffixes():
@@ -147,3 +155,56 @@ def test_auto_context_plan_records_clamp_provenance(monkeypatch):
     assert plan["context"] == 6000
     assert plan["source"] == "environment"
     assert plan["clamps"] == ()
+
+
+def test_context_policy_prefers_declared_server_kv_type(monkeypatch):
+    # Ported from open PR #560.
+    monkeypatch.delenv("SONDER_CONTEXT_SIZE", raising=False)
+    monkeypatch.delenv("SONDER_SESSION_NUM_CTX", raising=False)
+    monkeypatch.setenv("OLLAMA_KV_CACHE_TYPE", "q8_0")
+    assert context_policy.kv_cache_type() == ("q8_0", "client-environment")
+    assert context_policy.default_context() == context_policy.DEFAULT_CONTEXT_QUANTISED_KV
+
+    monkeypatch.setenv("SONDER_KV_CACHE_TYPE", "f16")
+    assert context_policy.kv_cache_type() == ("f16", "declared")
+    assert context_policy.default_context() == context_policy.DEFAULT_CONTEXT_FP16_KV
+
+
+def test_declared_quantised_kv_type_wins_over_client_environment(monkeypatch):
+    monkeypatch.delenv("SONDER_CONTEXT_SIZE", raising=False)
+    monkeypatch.delenv("SONDER_SESSION_NUM_CTX", raising=False)
+    monkeypatch.delenv("OLLAMA_KV_CACHE_TYPE", raising=False)
+    monkeypatch.setenv("SONDER_KV_CACHE_TYPE", " Q4_0 ")
+
+    assert context_policy.kv_cache_type() == ("q4_0", "declared")
+    assert context_policy.default_context() == context_policy.DEFAULT_CONTEXT_QUANTISED_KV
+    # parse_size's default follows the live declaration, not an import snapshot.
+    assert context_policy.parse_size(None) == context_policy.DEFAULT_CONTEXT_QUANTISED_KV
+
+
+def test_unknown_kv_values_fall_back_without_trusting_them(monkeypatch):
+    monkeypatch.setenv("SONDER_KV_CACHE_TYPE", "q3_k_m")
+    monkeypatch.setenv("OLLAMA_KV_CACHE_TYPE", "q8_0")
+    # An unrecognised declaration is ignored, so the client variable applies.
+    assert context_policy.kv_cache_type() == ("q8_0", "client-environment")
+
+    monkeypatch.setenv("OLLAMA_KV_CACHE_TYPE", "turbo")
+    assert context_policy.kv_cache_type() == ("f16", "default")
+
+    monkeypatch.delenv("SONDER_KV_CACHE_TYPE")
+    monkeypatch.delenv("OLLAMA_KV_CACHE_TYPE")
+    assert context_policy.kv_cache_type() == ("f16", "default")
+
+
+def test_auto_context_plan_and_status_report_kv_provenance(monkeypatch):
+    monkeypatch.delenv("SONDER_CONTEXT_SIZE", raising=False)
+    monkeypatch.delenv("SONDER_SESSION_NUM_CTX", raising=False)
+    monkeypatch.setenv("OLLAMA_KV_CACHE_TYPE", "q8_0")
+    monkeypatch.setenv("SONDER_KV_CACHE_TYPE", "bf16")
+
+    plan = context_policy.auto_context_plan(262144, "7B")
+    assert plan["context"] == context_policy.DEFAULT_CONTEXT_FP16_KV
+    assert plan["source"] == "fp16-default"
+    assert plan["kv_cache_type"] == "bf16"
+    assert plan["kv_cache_source"] == "declared"
+    assert "  kv cache: bf16 (declared)" in context_policy.format_policy().splitlines()
