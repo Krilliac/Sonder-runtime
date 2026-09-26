@@ -246,3 +246,76 @@ def test_report_policy_keeps_path_launch(root, monkeypatch):
 
 def test_bootstrap_lives_beside_workbench():
     assert Path(workbench._SEALED_PYTHON_MAIN).is_file()
+
+
+# --- the native run_script tool goes through the same gate ---------------------
+
+
+def _native_run_script(root, **arguments):
+    from sonder_runtime.adapters.tool_executor import ToolExecutorAdapter
+    from sonder_runtime.application.context import local_owner_context
+    from sonder_runtime.application.ports.tool_executor import ToolCall
+
+    context = local_owner_context(correlation_id="native-run-script", workspace_roots=(root,))
+    return ToolExecutorAdapter().execute(ToolCall("run_script", arguments), context)
+
+
+def test_native_run_script_denies_high_risk_under_deny_high(root, tmp_path):
+    marker = tmp_path / "payload-ran"
+    script = root / "bad.py"
+    script.write_text(
+        "# powershell -EncodedCommand AAAA\n"
+        "open(%r, 'w').write('ran')\n" % str(marker),
+        encoding="utf-8",
+    )
+
+    result = _native_run_script(root, path=str(script))
+
+    assert result.ok is False
+    assert result.error_code == "ArtifactRiskDenied"
+    assert "execution denied by effective policy deny-high" in result.output
+    assert result.evidence["artifact_risk"]["risk"] == "high"
+    assert not marker.exists()
+
+
+def test_native_run_script_runs_the_sealed_copy_under_deny_high(root, monkeypatch):
+    script = root / "job.py"
+    script.write_text("print('inspected')\n", encoding="utf-8")
+    _swap_before_launch(
+        monkeypatch,
+        lambda: script.write_text("print('swapped')\n", encoding="utf-8"),
+    )
+
+    result = _native_run_script(root, path=str(script))
+
+    assert result.ok is True
+    assert result.output.strip() == "inspected"
+    assert result.evidence["returncode"] == 0
+    assert result.evidence["exact_handoff"]["mechanism"] == "linux-memfd-sealed"
+    assert result.evidence["artifact_risk"]["policy"] == "deny-high"
+
+
+def test_native_run_script_refuses_runner_without_exact_handoff(root):
+    script = root / "job.rb"
+    script.write_text("puts 'hi'\n", encoding="utf-8")
+
+    result = _native_run_script(root, path=str(script))
+
+    assert result.ok is False
+    assert result.error_code == "ArtifactRiskDenied"
+    assert result.evidence["artifact_risk"]["denial_reason"] == (
+        artifact_risk.EXACT_HANDOFF_UNAVAILABLE
+    )
+
+
+def test_native_run_script_reports_risk_under_report_policy(root, monkeypatch):
+    monkeypatch.setenv("SONDER_EXECUTION_RISK_POLICY", "report")
+    script = root / "job.py"
+    script.write_text("print('ran')\n", encoding="utf-8")
+
+    result = _native_run_script(root, path=str(script))
+
+    assert result.ok is True
+    assert result.output.strip() == "ran"
+    assert "exact_handoff" not in result.evidence
+    assert result.evidence["artifact_risk"]["policy"] == "report"

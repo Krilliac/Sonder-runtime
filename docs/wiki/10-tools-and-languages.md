@@ -68,7 +68,9 @@ block from the previous response.
 Related: `run_project` (bounded multi-file temp project with optional
 build), `parallel_run_code` (many snippets concurrently), `script_run` /
 `workspace_run` (argv-only execution of a real script/program). `script_run`
-first applies the operator's static artifact-risk policy to its exact file.
+(and the native MCP `run_script` tool) first applies the operator's static
+artifact-risk policy to its exact file; `workspace_run`/`run_program` launch an
+argv and are not gated by it.
 
 ## Formal proofs — Lean 4 / Mathlib
 
@@ -258,7 +260,8 @@ is explicit. A high-risk result means the file contains suspicious static
 evidence; it is not a proof of malware, and no-finding is not a guarantee of
 safety.
 
-For exact script execution, `SONDER_EXECUTION_RISK_POLICY` selects `off`,
+For exact script execution (`script_run`, and the native MCP `run_script`
+tool through the same gate), `SONDER_EXECUTION_RISK_POLICY` selects `off`,
 `report` (default), `deny-high`, `deny-medium`, or `deny-unknown`. Per-call
 `risk_policy` can make enforcement stricter but never weaker than the operator
 setting. Under a `deny-*` mode on Linux, `.py` and `.sh` scripts are copied

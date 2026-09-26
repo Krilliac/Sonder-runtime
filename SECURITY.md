@@ -98,8 +98,11 @@ Mitigations that are already in place and worth knowing about:
   raw file content. It reports bounded static indicators for PDFs, PE/ELF/Mach-O
   executables, scripts, and opaque binaries. Static findings are evidence, not
   a malware verdict; incomplete or unsupported scans are never labelled clean.
-- `script_run` applies `SONDER_EXECUTION_RISK_POLICY` before launching an exact
-  guarded script. The default is `report`; operators may choose `deny-high`,
+- `script_run` and the native MCP `run_script` tool (`ToolExecutorAdapter`)
+  apply `SONDER_EXECUTION_RISK_POLICY` through one gate
+  (`artifact_risk.run_script_under_policy`) before launching an exact guarded
+  script. `run_program`, which launches an argv rather than an inspectable
+  script file, is not covered by this gate. The default is `report`; operators may choose `deny-high`,
   `deny-medium`, or `deny-unknown`. A caller may strengthen but cannot weaken
   the configured policy. Under an enforcing `deny-*` mode on Linux, a `.py` or
   `.sh` script is read once through the guarded no-follow handle into a memfd
@@ -260,7 +263,7 @@ implementation work is tracked only in the
 |---|---|---|
 | Guarded file, archive, patch, data, and Git inspection tools | Implemented | Constrained to configured roots and the per-tool ceilings described above. |
 | `script_run` execution-risk policy in `report` mode | Implemented | Default mode; advisory, and not an OS sandbox. |
-| `script_run` enforcing `deny-high`, `deny-medium`, or `deny-unknown` modes | Degraded | Linux `.py`/`.sh` scripts run the sealed memfd copy that was inspected; every other runner, and every launch on Windows and macOS, fails closed because no exact inspected-bytes-to-interpreter handoff exists there. |
+| `script_run` / native `run_script` enforcing `deny-high`, `deny-medium`, or `deny-unknown` modes | Degraded | Linux `.py`/`.sh` scripts run the sealed memfd copy that was inspected; every other runner, and every launch on Windows and macOS, fails closed because no exact inspected-bytes-to-interpreter handoff exists there. |
 | Process inventory and memory-risk inspection | Implemented | Off unless `SONDER_PROCESS_INSPECTION=enabled:bounded-read-only`; Windows only. |
 | Process memory-risk inspection on non-Windows hosts | Unsupported | The bounded scanner is Windows-only. |
 | Unsafe lab mode | Experimental | Exact acknowledgement, loopback-only, and unprivileged; disposable isolated hosts only, and never an OS sandbox. |

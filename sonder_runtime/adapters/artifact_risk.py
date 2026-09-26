@@ -604,3 +604,26 @@ def sealed_script_execution(path, *, requested="", extra_roots=""):
         )
     finally:
         os.close(fd)
+
+
+def run_script_under_policy(path, run, *, requested="", extra_roots=""):
+    """Apply the effective execution-risk policy to one script launch.
+
+    Every surface that runs a guarded script goes through this gate, so the
+    configured ``SONDER_EXECUTION_RISK_POLICY`` cannot be skipped by choosing
+    a different tool name.  ``run`` launches the script and receives the
+    ``SealedScript`` to execute, or ``None`` for a pathname launch.
+
+    Enforcing (``deny-*``) policies run only the sealed copy that was
+    inspected (see ``sealed_script_execution``), and refuse where no exact
+    handoff exists; ``off`` and ``report`` inspect (``report`` only) and
+    launch by pathname.  Returns ``(risk_result, run_result)``; a denial
+    raises ``ArtifactRiskDenied`` before ``run`` is called.
+    """
+    if effective_policy(requested).startswith("deny-"):
+        with sealed_script_execution(
+            path, requested=requested, extra_roots=extra_roots,
+        ) as (risk, sealed):
+            return risk, run(sealed)
+    risk = enforce_execution_policy(path, requested=requested, extra_roots=extra_roots)
+    return risk, run(None)

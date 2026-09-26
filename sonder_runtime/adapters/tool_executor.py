@@ -231,9 +231,36 @@ class ToolExecutorAdapter:
                     evidence=res,
                 )
             if call.tool == "run_script":
+                import sonder_runtime.adapters.artifact_risk as artifact_risk
                 import sonder_runtime.adapters.filesystem.workbench as workbench
 
-                res = workbench.run_script(**args)
+                # The same execution-risk gate as the script_run tool: the
+                # configured policy applies to every script launch surface.
+                path = args.pop("path")
+                risk_policy = args.pop("risk_policy", "")
+                trusted_roots = args.get("extra_roots", "") if args.get("bypass") else ""
+                try:
+                    risk, res = artifact_risk.run_script_under_policy(
+                        path,
+                        lambda sealed: workbench.run_script(
+                            path, sealed_script=sealed, **args
+                        ),
+                        requested=risk_policy,
+                        extra_roots=trusted_roots,
+                    )
+                except artifact_risk.ArtifactRiskDenied as exc:
+                    return ToolResult(
+                        ok=False,
+                        error_code="ArtifactRiskDenied",
+                        output="execution denied by effective policy %s: %s"
+                        % (
+                            exc.result.get("policy", "unknown"),
+                            artifact_risk.format_result(exc.result),
+                        ),
+                        evidence={"artifact_risk": exc.result},
+                    )
+                res = dict(res)
+                res["artifact_risk"] = risk
                 return ToolResult(
                     ok=bool(res.get("ok")),
                     output=str(res.get("stdout", "")),
