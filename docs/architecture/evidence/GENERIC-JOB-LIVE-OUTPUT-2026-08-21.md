@@ -35,3 +35,12 @@ matrix, a cross-process provider-handle reconstruction, or formal checklist
 promotion. Reader threads are intentionally process-local and daemonized;
 restart recovery continues to rely on the durable registry and cleanup
 contract rather than silently resuming an orphan process.
+
+## Follow-up (2026-09-26)
+
+Readers no longer commit each line on their own. They hand lines to one
+persister per job, which publishes bounded batches through `append_outputs`
+(1024 lines, 256 KiB or 50 ms, whichever comes first, and at once on end of
+file or cancellation). Events, sequence numbers and retention are unchanged.
+Live output stays incremental within the time bound. See
+[PROCESS-OUTPUT-BATCHING-2026-09-26.md](PROCESS-OUTPUT-BATCHING-2026-09-26.md).

@@ -19,7 +19,10 @@ Added for hostile captures:
   ``principal_id``, ``command_digest`` and ``input_sha256``;
 - an output watchdog: the job registry keeps only a bounded tail of output,
   so the launcher counts what each step printed (0.5 s polls) and cancels
-  the step past 16 MiB (``OUTPUT_LIMIT``, partial result);
+  the step past 16 MiB (``OUTPUT_LIMIT``, partial result). The provider
+  publishes output in bounded batches (one registry transaction per window,
+  see ``execution.output_batching``), so a flood reaches the limit long
+  before a step deadline even where a commit is slow;
 - after the chain, a capture that was not copied is re-checked
   (``INPUT_CHANGED`` when it changed), then staged inputs, symbol staging,
   tool caches, HOME and TMP are deleted. The run directory keeps only its

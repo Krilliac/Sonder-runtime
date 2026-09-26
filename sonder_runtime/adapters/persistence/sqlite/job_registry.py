@@ -11,15 +11,16 @@ import json
 from pathlib import Path
 import sqlite3
 from threading import Lock
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping
 from uuid import uuid4
 
 from sonder_runtime.application.execution.world_control import (
     BoundedOutputBuffer, OutputPage, OutputStream, OutputWatermark, SpillReference,
 )
 from sonder_runtime.application.jobs.durable_registry import (
-    DurableJobView, JobRecoveryReport, ProcessTreeCleanupContract, ProcessTreeCleanupReceipt,
-    ProcessTreeCleanupRequest, _bind_cancel_request_metadata,
+    DurableJobView, JobRecoveryReport, OutputAppend, ProcessTreeCleanupContract,
+    ProcessTreeCleanupReceipt, ProcessTreeCleanupRequest, _bind_cancel_request_metadata,
+    validated_output_batch,
 )
 from sonder_runtime.application.operations.startup_reconciliation import (
     DrainAction, DrainPlan, RecordKind, StartupObservation, build_drain_plan,
@@ -450,30 +451,73 @@ class SQLiteDurableJobRegistry(SQLiteWorkerCapacity):
 
     def append_output(self, job_id: str, stream: OutputStream, data: str,
                       *, spill: SpillReference | None = None) -> None:
-        if not isinstance(stream, OutputStream) or not isinstance(data, str):
-            raise TypeError("stream and data are required")
+        self.append_outputs(job_id, (OutputAppend(stream, data, spill),))
+
+    def append_outputs(self, job_id: str, entries: Iterable[OutputAppend]) -> None:
+        """Publish several output lines in one transaction, in order.
+
+        Every entry is validated before anything is written.  Each entry
+        keeps its own sequence number, exactly as consecutive
+        ``append_output`` calls would assign them, and retention is applied
+        once to the combined tail.  Retention only ever drops a prefix of the
+        combined rows, so the retained tail, ``output_next`` and
+        ``output_dropped_before`` equal those of the line-at-a-time path;
+        entries that would be dropped within the same batch are not written.
+        """
+        batch = validated_output_batch(entries)
+        encoded = [len(entry.data.encode("utf-8")) for entry in batch]
         with self._lock, self._connect() as connection:
             row = self._row(connection, job_id)
             if row is None:
                 raise KeyError(f"unknown job {job_id!r}")
-            sequence = row[14]
-            connection.execute(
+            if not batch:
+                return
+            sequence = int(row[14])
+            retained = [
+                (int(item[0]), int(item[1]))
+                for item in connection.execute(
+                    "SELECT sequence,length(CAST(data AS BLOB)) FROM durable_job_output "
+                    "WHERE job_id=? ORDER BY sequence",
+                    (job_id,),
+                ).fetchall()
+            ]
+            combined = retained + [
+                (sequence + offset, size) for offset, size in enumerate(encoded)
+            ]
+            total = sum(size for _, size in combined)
+            start = 0
+            while start < len(combined) and (
+                len(combined) - start > self._max_events or total > self._max_bytes
+            ):
+                total -= combined[start][1]
+                start += 1
+            dropped_through = combined[start - 1][0] if start else None
+            connection.executemany(
                 "INSERT INTO durable_job_output(job_id,sequence,stream,data,spill_json) VALUES (?,?,?,?,?)",
-                (job_id, sequence, stream.value, data, None if spill is None else _json({
-                    "digest": spill.digest, "preview": spill.preview, "size": spill.size,
-                    "mime_type": spill.mime_type, "owner_id": spill.owner_id,
-                })),
+                [
+                    (job_id, sequence + offset, entry.stream.value, entry.data,
+                     None if entry.spill is None else _json({
+                         "digest": entry.spill.digest, "preview": entry.spill.preview,
+                         "size": entry.spill.size, "mime_type": entry.spill.mime_type,
+                         "owner_id": entry.spill.owner_id,
+                     }))
+                    for offset, entry in enumerate(batch)
+                    if dropped_through is None or sequence + offset > dropped_through
+                ],
             )
-            connection.execute("UPDATE durable_job SET output_next=? WHERE job_id=?", (sequence + 1, job_id))
-            rows = connection.execute(
-                "SELECT sequence,data FROM durable_job_output WHERE job_id=? ORDER BY sequence", (job_id,)
-            ).fetchall()
-            total = sum(len(item[1].encode("utf-8")) for item in rows)
-            while len(rows) > self._max_events or total > self._max_bytes:
-                old = rows.pop(0)
-                total -= len(old[1].encode("utf-8"))
-                connection.execute("DELETE FROM durable_job_output WHERE job_id=? AND sequence=?", (job_id, old[0]))
-                connection.execute("UPDATE durable_job SET output_dropped_before=? WHERE job_id=?", (old[0], job_id))
+            connection.execute(
+                "UPDATE durable_job SET output_next=? WHERE job_id=?",
+                (sequence + len(batch), job_id),
+            )
+            if dropped_through is not None:
+                connection.execute(
+                    "DELETE FROM durable_job_output WHERE job_id=? AND sequence<=?",
+                    (job_id, dropped_through),
+                )
+                connection.execute(
+                    "UPDATE durable_job SET output_dropped_before=? WHERE job_id=?",
+                    (dropped_through, job_id),
+                )
 
     def stream(self, job_id: str, *, after: OutputWatermark | None = None,
                max_events: int = 64, max_bytes: int = 16 * 1024) -> OutputPage:

@@ -232,29 +232,40 @@ def test_cancel_mid_chain_stops_the_step_and_the_rest(env, tmp_path):
 
 
 def test_a_flooding_step_is_stopped_at_the_output_limit_with_a_bounded_registry(env):
-    # The limit counts what reached the registry. Each line is one durable
-    # SQLite commit, which on a hosted Windows runner is ~50x slower than on
-    # Linux (4 MiB did not arrive inside the 60 s step deadline there), so the
-    # limit is sized to be crossed in seconds on either host. It is still far
-    # above the registry's 64 KiB retained tail, so dropped-event accounting
-    # is what trips it.
-    launcher = env.make_launcher(output_limit_bytes=512 << 10, watchdog_seconds=0.2)
+    # The limit counts what reached the registry. The provider publishes
+    # output in bounded batches (one transaction per window, not per line),
+    # so a multi-MiB flood reaches the registry in about a second even where
+    # a commit costs ~60 ms (hosted Windows). The limit, not the 60 s step
+    # deadline, must stop it. It is far above the registry's 64 KiB retained
+    # tail, so dropped-event accounting is what trips it.
+    launcher = env.make_launcher(output_limit_bytes=4 << 20, watchdog_seconds=0.2)
     ident = env.capture()
     rid = run_id()
     started = time.monotonic()
     launcher.start(env.plan(ident, [env.step("flood"), env.step("echo")]), context(), rid)
     state, running = launcher.wait(rid, 90)
+    elapsed = time.monotonic() - started
     assert not running and state.output_limit and state.status == "partial", state
-    assert time.monotonic() - started < 60
+    assert state.step_status == ("output_limit",), state
+    # Well inside the step deadline (60 s): the limit stopped the flood.
+    assert elapsed < 20, elapsed
+    record = env.registry.get(rid + "-s0")
+    assert record is not None and record.status.value == "cancelled"
+    assert "OUTPUT_LIMIT" in record.error and "deadline" not in record.error.lower()
     retained = 0
     after = None
+    last_sequence = 0
     while True:
         page = env.registry.stream(rid + "-s0", after=after, max_events=256, max_bytes=1 << 20)
         retained += sum(len(event.data) for event in page.events)
+        last_sequence = max([last_sequence] + [e.watermark.sequence for e in page.events])
         if not page.has_more or not page.events:
             break
         after = page.next_watermark
     assert retained <= 64 * 1024 + 8192  # the registry keeps a bounded tail
+    # Every flood line (4000 x's and a newline) is its own event, so the
+    # sequence proves the limit was crossed by persisted output.
+    assert last_sequence * 4001 > 4 << 20
     assert env.registry.get(rid + "-s1") is None
 
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from threading import RLock
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Iterable, Mapping, Protocol
 
 from ..execution.world_control import (
     BoundedOutputBuffer,
@@ -36,6 +36,38 @@ from ..ports.jobs import (
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# Upper bound on the entries one ``append_outputs`` call may carry, so one
+# registry transaction stays bounded whatever a producer hands it.
+MAX_OUTPUT_APPEND_BATCH = 4096
+
+
+@dataclass(frozen=True, slots=True)
+class OutputAppend:
+    """One output line for ``append_outputs``, validated like ``append_output``."""
+
+    stream: OutputStream
+    data: str
+    spill: SpillReference | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.stream, OutputStream) or not isinstance(self.data, str):
+            raise TypeError("stream and data are required")
+        if self.spill is not None and not isinstance(self.spill, SpillReference):
+            raise TypeError("spill must be a SpillReference")
+
+
+def validated_output_batch(entries: Iterable[OutputAppend]) -> tuple[OutputAppend, ...]:
+    """Validate a whole batch before any of it is published."""
+    if isinstance(entries, (str, bytes)):
+        raise TypeError("output entries must be OutputAppend values")
+    batch = tuple(entries)
+    if len(batch) > MAX_OUTPUT_APPEND_BATCH:
+        raise ValueError(f"output batch exceeds {MAX_OUTPUT_APPEND_BATCH} entries")
+    if not all(isinstance(entry, OutputAppend) for entry in batch):
+        raise TypeError("output entries must be OutputAppend values")
+    return batch
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,6 +370,21 @@ class DurableJobRegistry:
             self.poll(job_id)
             self._outputs[job_id].append(stream, data, spill=spill)
 
+    def append_outputs(self, job_id: str, entries: Iterable[OutputAppend]) -> None:
+        """Publish several output lines atomically, in order.
+
+        Every entry is validated before the first is appended, and the
+        registry lock is held for the whole batch, so a reader observes
+        either none or all of it.  Each entry goes through ``append_output``:
+        sequence numbers, retention and any per-line override behave exactly
+        as if the lines had been appended one at a time.
+        """
+        batch = validated_output_batch(entries)
+        with self._lock:
+            self.poll(job_id)
+            for entry in batch:
+                self.append_output(job_id, entry.stream, entry.data, spill=entry.spill)
+
     def transition(
         self,
         job_id: str,
@@ -510,8 +557,9 @@ class DurableJobRegistry:
 
 __all__ = [
     "CANCEL_REQUEST_BOUND_STATES", "CANCEL_REQUEST_DIGESTS", "DurableJobRegistry", "DurableJobView", "JobRecoveryReport",
-    "MAX_CANCEL_REQUEST_BINDINGS", "ProcessTreeCleanupContract",
-    "ProcessTreeCleanupReceipt", "ProcessTreeCleanupRequest",
+    "MAX_CANCEL_REQUEST_BINDINGS", "MAX_OUTPUT_APPEND_BATCH", "OutputAppend",
+    "ProcessTreeCleanupContract",
+    "ProcessTreeCleanupReceipt", "ProcessTreeCleanupRequest", "validated_output_batch",
 ]
 
 
