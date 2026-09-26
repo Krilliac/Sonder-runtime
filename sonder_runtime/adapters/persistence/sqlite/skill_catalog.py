@@ -1,12 +1,16 @@
 """SQLite store for the procedural skill publication catalog snapshot.
 
 The catalog is kept as one generation-counted row holding the canonical JSON
-of a ``CatalogSnapshot`` and its integrity digest.  ``save`` verifies the
-snapshot before writing and replaces the row inside one ``BEGIN IMMEDIATE``
-transaction; ``load`` rebuilds the snapshot and verifies it through
-``DurableLastGoodCatalog.from_snapshot`` so a tampered or malformed row fails
-closed.  The digest detects corruption and uncoordinated edits; it is not an
-authenticity signature against a writer who can recompute SHA-256.
+of a ``CatalogSnapshot``, its integrity digest, and an HMAC-SHA256 seal under
+a host-held private key.  ``save`` verifies the snapshot before writing and
+replaces the row inside one ``BEGIN IMMEDIATE`` transaction; ``load`` checks
+the seal before decoding and then rebuilds the snapshot through
+``DurableLastGoodCatalog.from_snapshot``, so a tampered, re-digested, or
+malformed row fails closed.  Procedural skill content becomes model
+instructions once activated, which is why an unkeyed digest is not enough.
+The seal binds the schema version, generation, digest, and payload, but it
+cannot detect a whole earlier row that was sealed with the same key being
+written back; that rollback is outside what this store can prove.
 
 Writers are serialized by the stored generation: an instance remembers the
 generation it last loaded or saved, and ``save`` refuses, inside the same
@@ -17,6 +21,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime
+import hashlib
+import hmac
 import json
 from pathlib import Path
 from threading import Lock
@@ -42,7 +48,8 @@ CREATE TABLE IF NOT EXISTS procedural_skill_catalog (
     schema_version INTEGER NOT NULL,
     generation INTEGER NOT NULL CHECK(generation >= 1),
     snapshot_digest TEXT NOT NULL,
-    payload_json TEXT NOT NULL
+    payload_json TEXT NOT NULL,
+    seal TEXT NOT NULL
 );
 """
 
@@ -101,6 +108,15 @@ def _encode(snapshot: CatalogSnapshot) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
+def _seal(key: bytes, schema_version: int, generation: int, digest: str,
+          payload_json: str) -> str:
+    message = json.dumps(
+        [schema_version, generation, digest, payload_json],
+        separators=(",", ":"), ensure_ascii=True,
+    ).encode("ascii")
+    return hmac.new(key, message, hashlib.sha256).hexdigest()
+
+
 def _decode(payload_json: str, digest: str) -> CatalogSnapshot:
     try:
         payload = json.loads(payload_json)
@@ -139,9 +155,19 @@ def _verify(snapshot: CatalogSnapshot, failure: str) -> None:
 
 
 class SQLiteCatalogSnapshotStore:
-    """Single-row, generation-counted ``CatalogStorePort`` over SQLite."""
+    """Single-row, generation-counted, sealed ``CatalogStorePort`` over SQLite.
 
-    def __init__(self, db_path: str | Path) -> None:
+    ``seal_key`` is a host-held private key (32 to 4096 bytes) kept outside
+    the database; anyone able to write the database but not read the key
+    cannot produce a row that ``load`` accepts.
+    """
+
+    def __init__(self, db_path: str | Path, *, seal_key: bytes | str) -> None:
+        if isinstance(seal_key, str):
+            seal_key = seal_key.encode("utf-8")
+        if not isinstance(seal_key, bytes) or not 32 <= len(seal_key) <= 4096:
+            raise ValueError("catalog seal key must be between 32 and 4096 bytes")
+        self._seal_key = seal_key
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = Lock()
@@ -169,18 +195,22 @@ class SQLiteCatalogSnapshotStore:
         with self._lock:
             with self._connect() as connection:
                 row = connection.execute(
-                    "SELECT schema_version,generation,snapshot_digest,payload_json "
+                    "SELECT schema_version,generation,snapshot_digest,payload_json,seal "
                     "FROM procedural_skill_catalog WHERE singleton=1"
                 ).fetchone()
             if row is None:
                 self._generation = 0
                 return None
-            schema_version, generation, digest, payload_json = row
+            schema_version, generation, digest, payload_json, seal = row
             if schema_version != SCHEMA_VERSION:
                 raise CatalogStoreError("stored catalog schema version is not supported")
             if (type(generation) is not int or generation < 1
-                    or not isinstance(digest, str) or not isinstance(payload_json, str)):
+                    or not isinstance(digest, str) or not isinstance(payload_json, str)
+                    or not isinstance(seal, str)):
                 raise CatalogStoreError("stored procedural skill catalog failed verification")
+            expected = _seal(self._seal_key, schema_version, generation, digest, payload_json)
+            if not hmac.compare_digest(expected, seal):
+                raise CatalogStoreError("stored procedural skill catalog seal mismatch")
             snapshot = _decode(payload_json, digest)
             self._generation = generation
             return snapshot
@@ -201,13 +231,16 @@ class SQLiteCatalogSnapshotStore:
                         "procedural skill catalog changed since it was loaded"
                     )
                 generation = stored + 1
+                seal = _seal(self._seal_key, SCHEMA_VERSION, generation,
+                             snapshot.snapshot_digest, payload_json)
                 connection.execute(
                     "INSERT INTO procedural_skill_catalog"
-                    "(singleton,schema_version,generation,snapshot_digest,payload_json) "
-                    "VALUES (1,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET "
+                    "(singleton,schema_version,generation,snapshot_digest,payload_json,seal) "
+                    "VALUES (1,?,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET "
                     "schema_version=excluded.schema_version,generation=excluded.generation,"
-                    "snapshot_digest=excluded.snapshot_digest,payload_json=excluded.payload_json",
-                    (SCHEMA_VERSION, generation, snapshot.snapshot_digest, payload_json),
+                    "snapshot_digest=excluded.snapshot_digest,payload_json=excluded.payload_json,"
+                    "seal=excluded.seal",
+                    (SCHEMA_VERSION, generation, snapshot.snapshot_digest, payload_json, seal),
                 )
             self._generation = generation
 

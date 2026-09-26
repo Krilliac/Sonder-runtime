@@ -31,7 +31,9 @@ second database or claiming that process memory alone is durable storage.
 `CatalogStorePort` names that seam, and
 `sonder_runtime.adapters.persistence.sqlite.skill_catalog.SQLiteCatalogSnapshotStore`
 implements it as one generation-counted SQLite row holding the snapshot's
-canonical JSON and digest.  `save` refuses a snapshot that does not verify and
+canonical JSON, its digest, and an HMAC-SHA256 seal over schema version,
+generation, digest, and payload under a host-held private `seal_key` (32 to
+4096 bytes, kept outside the database).  `save` refuses a snapshot that does not verify and
 replaces the row in one `BEGIN IMMEDIATE` transaction; `load` returns `None`
 for an empty store and otherwise rebuilds the snapshot through
 `DurableLastGoodCatalog.from_snapshot`, so a tampered payload, a wrong digest,
@@ -40,9 +42,13 @@ store instance remembers the generation it last loaded or saved, and `save`
 refuses with `CatalogStoreError` inside the same `BEGIN IMMEDIATE`
 transaction when another instance or process wrote the row since, so two
 compositions over one file cannot silently overwrite each other; the refused
-service rolls back and the host must reopen the composition to continue.  The
-digest detects corruption and uncoordinated edits; it is not an authenticity
-signature against a writer able to recompute SHA-256.
+service rolls back and the host must reopen the composition to continue.
+`load` checks the seal before decoding, so a row whose content was rewritten
+and re-digested by someone without the key (procedural skill content becomes
+model instructions once activated) is refused before any port is touched.
+The seal cannot detect an entire earlier row sealed with the same key being
+written back, and no bootstrap path provisions the key yet: a host composing
+the store must supply and protect it.
 
 `build_procedural_publication_composition(store=..., active=...)` restores the
 catalog from the store, re-activates each catalog-active revision in the
@@ -64,7 +70,8 @@ Evidence:
 - `tests/test_remaining_procedural_publication.py`
 - `tests/test_mem008_procedural_composition.py`
 - `tests/test_mem008_procedural_catalog_sqlite.py` (publish, reopen, and
-  rollback over a real SQLite file; tampered and malformed rows fail closed;
+  rollback over a real SQLite file; tampered, re-digested, wrongly keyed, and
+  malformed rows fail closed;
   an injected save failure leaves catalog and active port unchanged; a second
   writer on the same file is refused and rolled back; the committed event
   follows the durable save and a post-save failure is compensated)
