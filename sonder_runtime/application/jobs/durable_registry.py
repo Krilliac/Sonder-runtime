@@ -237,6 +237,23 @@ class DurableJobRegistry:
             self._records[job_id] = updated
             return updated
 
+    def bind_cancel_request(
+        self, job_id: str, *, idempotency_key: str, request_digest: str,
+    ) -> None:
+        """Durably bind one journaled cancellation request to this job.
+
+        The record revision is unchanged: revision-bound cleanup evidence
+        published earlier must stay valid, and the binding is not a lifecycle
+        transition.
+        """
+        with self._lock:
+            self.poll(job_id)
+            updated = _bind_cancel_request_metadata(
+                self._metadata.get(job_id), idempotency_key, request_digest,
+            )
+            if updated is not None:
+                self._metadata[job_id] = updated
+
     def list(
         self,
         *,
@@ -485,7 +502,8 @@ class DurableJobRegistry:
 
 
 __all__ = [
-    "DurableJobRegistry", "DurableJobView", "JobRecoveryReport", "ProcessTreeCleanupContract",
+    "CANCEL_REQUEST_DIGESTS", "DurableJobRegistry", "DurableJobView", "JobRecoveryReport",
+    "MAX_CANCEL_REQUEST_BINDINGS", "ProcessTreeCleanupContract",
     "ProcessTreeCleanupReceipt", "ProcessTreeCleanupRequest",
 ]
 
@@ -505,3 +523,54 @@ def _validate_cleanup_evidence(record, proof):
         raise ValueError(
             "process cleanup evidence does not match terminal job identity"
         )
+
+
+# Metadata key holding durable cancellation-request bindings for one job:
+# ``{idempotency_key: request_sha256}``.  A worker writes the binding after its
+# cancel intent is journaled and before it asks the provider to cancel, so a
+# host verifier can later tie a terminal ``cancelled`` record to the exact
+# journaled request.  The key names no worker family; bindings are write-once.
+CANCEL_REQUEST_DIGESTS = "cancel_request_digests"
+MAX_CANCEL_REQUEST_BINDINGS = 32
+_CANCEL_KEY_MAX = 256
+
+
+def _bind_cancel_request_metadata(
+    metadata: Mapping[str, Any] | None,
+    idempotency_key: str,
+    request_digest: str,
+) -> dict[str, Any] | None:
+    """Return metadata with one new cancel binding, or ``None`` if unchanged.
+
+    Rebinding a key to the same digest is an idempotent no-op.  Rebinding it
+    to another digest, malformed stored bindings, or exceeding the bound are
+    refused, so the durable evidence can only ever name one request per key.
+    """
+    if (
+        not isinstance(idempotency_key, str)
+        or not idempotency_key.strip()
+        or len(idempotency_key) > _CANCEL_KEY_MAX
+    ):
+        raise ValueError("cancel binding idempotency key must be non-empty and bounded")
+    if (
+        not isinstance(request_digest, str)
+        or len(request_digest) != 64
+        or any(char not in "0123456789abcdef" for char in request_digest)
+    ):
+        raise ValueError("cancel binding request digest must be lowercase SHA-256 hex")
+    current = dict(metadata or {})
+    bindings = current.get(CANCEL_REQUEST_DIGESTS, {})
+    if not isinstance(bindings, dict) or not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in bindings.items()
+    ):
+        raise ValueError("stored cancel request bindings are malformed")
+    prior = bindings.get(idempotency_key)
+    if prior is not None:
+        if prior != request_digest:
+            raise ValueError("cancel request binding conflicts with a prior request")
+        return None
+    if len(bindings) >= MAX_CANCEL_REQUEST_BINDINGS:
+        raise ValueError("cancel request bindings are exhausted for this job")
+    current[CANCEL_REQUEST_DIGESTS] = {**bindings, idempotency_key: request_digest}
+    return current

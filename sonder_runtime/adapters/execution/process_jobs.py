@@ -593,6 +593,21 @@ class SubprocessJobProvider:
                 raise
         return ProcessJobWait(record, exit_code)
 
+    def bind_cancel_request(
+        self, job_id: str, *, idempotency_key: str, request_digest: str,
+    ) -> None:
+        """Durably bind a journaled cancellation request before cancelling.
+
+        This is reconciliation evidence only: it changes no lifecycle state
+        and does not itself cancel anything.  A registry without the binding
+        refuses, so a caller that asked for durable evidence never proceeds
+        believing it exists.
+        """
+        bind = getattr(self._registry, "bind_cancel_request", None)
+        if not callable(bind):
+            raise RuntimeError("durable job registry cannot bind cancellation requests")
+        bind(job_id, idempotency_key=idempotency_key, request_digest=request_digest)
+
     def cancel(self, job_id: str, reason: str = "cancelled") -> JobCancellationResult:
         with self._timer_lock:
             launch_lock = self._launch_locks.get(job_id)

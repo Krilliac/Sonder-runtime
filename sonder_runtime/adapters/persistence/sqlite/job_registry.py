@@ -19,7 +19,7 @@ from sonder_runtime.application.execution.world_control import (
 )
 from sonder_runtime.application.jobs.durable_registry import (
     DurableJobView, JobRecoveryReport, ProcessTreeCleanupContract, ProcessTreeCleanupReceipt,
-    ProcessTreeCleanupRequest,
+    ProcessTreeCleanupRequest, _bind_cancel_request_metadata,
 )
 from sonder_runtime.application.operations.startup_reconciliation import (
     DrainAction, DrainPlan, RecordKind, StartupObservation, build_drain_plan,
@@ -310,6 +310,33 @@ class SQLiteDurableJobRegistry(SQLiteWorkerCapacity):
             record = self._record(self._row(connection, job_id))
             assert record is not None
             return record
+
+    def bind_cancel_request(
+        self, job_id: str, *, idempotency_key: str, request_digest: str,
+    ) -> None:
+        """Durably bind one journaled cancellation request to this job.
+
+        The binding is written in its own ``BEGIN IMMEDIATE`` transaction and
+        leaves the record revision unchanged, so revision-bound cleanup
+        evidence stays valid.  Rebinding a key to another digest is refused.
+        """
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._row(connection, job_id)
+            if row is None:
+                raise KeyError(f"unknown job {job_id!r}")
+            updated = _bind_cancel_request_metadata(
+                {} if row[21] is None else json.loads(row[21]),
+                idempotency_key, request_digest,
+            )
+            if updated is None:
+                return
+            changed = connection.execute(
+                "UPDATE durable_job SET metadata_json=? WHERE job_id=?",
+                (_json(updated), job_id),
+            ).rowcount
+            if changed != 1:
+                raise ValueError("cancel request binding conflicted")
 
     def create(self, identity: JobIdentity, *, metadata: dict[str, Any] | None = None) -> JobRecord:
         """Satisfy the persistence-neutral JobRegistry creation port."""

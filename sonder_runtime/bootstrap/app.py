@@ -586,6 +586,7 @@ def build_application(
         nonlocal worker_effect_journal
         if worker_effect_journal is None:
             from ..adapters.execution.compute_effect_verifier import (
+                DurableComputeCancelVerifier,
                 DurableComputeSubmitVerifier,
                 DurableLocalProcessStartVerifier,
             )
@@ -600,6 +601,9 @@ def build_application(
             verifiers = {
                 "process-start": DurableLocalProcessStartVerifier(get_job_registry),
                 "compute-submit": DurableComputeSubmitVerifier(get_job_registry),
+                # A cancel is proven only by a terminal cancelled, cleaned
+                # record carrying the exact journaled cancel-request binding.
+                "compute-cancel": DurableComputeCancelVerifier(get_job_registry),
                 "subagent-dispatch": DurableSubagentDispatchVerifier(
                     get_continuation_repository
                 ),

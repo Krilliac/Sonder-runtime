@@ -1417,12 +1417,16 @@ class ComputeJobWorker:
             operation_id, idempotency_key = self._cancel_attempt_identity(
                 remote_job_id, attempt,
             )
+            request = {"remote_job_id": remote_job_id, "reason": reason}
             return journaled_effect(
                 self._effect_binding,
                 operation_id=operation_id,
                 idempotency_key=idempotency_key,
-                request={"remote_job_id": remote_job_id, "reason": reason},
-                invoke=lambda: self._cancel_unjournaled(remote_job_id, reason),
+                request=request,
+                invoke=lambda: self._cancel_bound(
+                    remote_job_id, reason, idempotency_key,
+                    _effect_request_digest(request),
+                ),
                 receipt_key=lambda result: f"{result.remote_job_id}:{result.state}",
                 reconciliation="idempotent",
             )
@@ -1480,6 +1484,28 @@ class ComputeJobWorker:
             if prior.state is EffectState.COMPLETED and prior.receipt_key == cancelled_receipt:
                 raise EffectJournalError("compute job cancellation already completed")
         raise EffectJournalError("compute job cancellation attempts are exhausted")
+
+    def _cancel_bound(
+        self, remote_job_id: str, reason: str, idempotency_key: str, request_digest: str,
+    ) -> RemoteJobReceipt:
+        """Record durable cancel-request evidence, then cancel.
+
+        Runs inside the journaled effect, after the intent committed.  A
+        provider that owns a durable job registry binds the exact journaled
+        request digest to the job before any cancellation is requested; the
+        host ``compute-cancel`` verifier accepts only a terminal cancelled,
+        cleaned record carrying that binding.  A provider without durable
+        bindings still cancels, and a crash before its receipt then stays
+        fenced because no verifier proof can exist.
+        """
+        bind = getattr(self._provider, "bind_cancel_request", None)
+        if callable(bind):
+            bind(
+                remote_job_id,
+                idempotency_key=idempotency_key,
+                request_digest=request_digest,
+            )
+        return self._cancel_unjournaled(remote_job_id, reason)
 
     def _cancel_unjournaled(self, remote_job_id: str, reason: str = "cancelled") -> RemoteJobReceipt:
         logger.debug(f"ComputeJobWorker.cancel: remote_job_id={remote_job_id!r}, reason={reason!r}")
