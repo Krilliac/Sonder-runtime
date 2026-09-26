@@ -97,3 +97,64 @@ def test_install_is_idempotent_and_survives_a_failing_summary(installed, monkeyp
     with build_brief_principal("owner"):
         summary = environment_probe._capability_summary()
     assert summary.startswith("compilers:") and "| build: " not in summary
+
+
+def _agent_turn_system(monkeypatch, *, project="", cloud=False):
+    """Run one ``server._agent_turn`` over a scripted model; return its system text."""
+    import types
+
+    import server
+
+    seen = {}
+    monkeypatch.setattr(server, "_application", lambda: types.SimpleNamespace())
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server, "_serve_target",
+                        lambda *args, **kwargs: ("fixture", cloud, False, "code"))
+    monkeypatch.setattr(server, "_build_system",
+                        lambda text, *args, **kwargs: seen.setdefault("system", text))
+    monkeypatch.setattr(server.web_tools, "enabled", lambda: False)
+    monkeypatch.setattr(server.unsafe_lab, "active", lambda: False)
+    monkeypatch.setenv("SONDER_SPECULATION", "0")
+
+    def make_generate(model, system, *args, **kwargs):
+        seen.setdefault("system", system)
+        return lambda prompt, history=None: '{"final":"done"}'
+
+    monkeypatch.setattr(server, "_make_generate", make_generate)
+    assert server._agent_turn("inspect", max_steps=2, read_only=True, project=project) == "done"
+    return seen["system"]
+
+
+def test_a_local_agent_turn_declares_the_owner_and_shows_the_build_line(installed, monkeypatch,
+                                                                         tmp_path):
+    services, _ = installed
+    system = _agent_turn_system(monkeypatch)
+    capabilities = system.split("capabilities: ", 1)[1]
+    assert "| build: cmake/Ninja sparklite" in capabilities
+    assert len(capabilities.split(" | build: ", 1)[1].split("\n", 1)[0]) \
+        <= build_tools.BUILD_BRIEF_MAX_CHARS
+    assert "secret-engine" not in system
+    assert ("owner", "") in services.model.summary_calls
+    assert services.model.views == []
+
+    # A turn scoped to a project asks for that project's model by its label.
+    project = tmp_path / "sparklite"
+    project.mkdir()
+    _agent_turn_system(monkeypatch, project=str(project))
+    assert ("owner", "sparklite") in services.model.summary_calls
+    # The declaration ends with the turn: the next reader sees no principal.
+    assert build_brief_line(services) == ""
+
+
+def test_the_build_line_is_the_owners_only_and_never_reaches_a_hosted_agent(installed,
+                                                                           monkeypatch):
+    services, _ = installed
+    services.model.summaries = {"account:a": "cmake/Ninja secret-engine: 900 targets"}
+    system = _agent_turn_system(monkeypatch)
+    assert "| build: " not in system and "secret-engine" not in system
+
+    services.model.summaries = {"owner": "cmake/Ninja sparklite: 5 targets"}
+    calls = len(services.model.summary_calls)
+    hosted = _agent_turn_system(monkeypatch, cloud=True)
+    assert "sparklite" not in hosted and "capabilities: " not in hosted
+    assert len(services.model.summary_calls) == calls

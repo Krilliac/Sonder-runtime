@@ -55,7 +55,7 @@ it produces.
 | Network decision | Implemented | `allow_network=true` needs a separate `build_network` decision. |
 | HTTP routes `/v1/build/*` | Implemented | Developer authority is required. The call runs through the typed gateway as the caller, unattended. |
 | REPL `/build`, `/fix-build`, `/fix-build-restore` | Experimental | The facade module and command specs exist. The REPL lane wires `repl.py` and `command_catalog.py`. |
-| Model-context build line | Experimental | Keyed by principal. It is emitted only when a surface declares the turn's principal. |
+| Model-context build line | Experimental | Keyed by principal and read from the model cache only. The local agent turn (`server._agent_turn` through `_local_agent_brief`) declares `LOCAL_OWNER` and the project's directory name; hosted agents never receive it. Other surfaces declare no principal and show no build line. |
 | clangd navigation (lane D) | Experimental | Composed only when the inventory has clangd. Tested on Linux with clangd 18. |
 | MSBuild and vcvars execution | Degraded | Linux can parse these models but not run them (`RUNNER_UNAVAILABLE`). Windows execution is validated only by fakes. |
 
@@ -259,8 +259,8 @@ back to the exact before-digest reads as not applied. The details are in
 - `command_catalog.py`: add `BUILD_COMMAND_SPECS` as catalog entries. Each
   entry's `tools` names the typed tools that grade its risk.
 - `server.py` (server lane):
-  - wrap the agent prompt assembly in
-    `build_brief_principal(principal, project_label=...)`;
+  - done: the local agent prompt assembly declares `LOCAL_OWNER` through
+    `_local_agent_brief` (`tests/test_build_brief.py`);
   - add `grounded_outcomes.VERIFIERS` and `verification_reach` entries for
     `build_job` and `build_fix`;
   - point the legacy `build_run` help text at `build_job`.

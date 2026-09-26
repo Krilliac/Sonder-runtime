@@ -20174,6 +20174,26 @@ _CLOUD_AGENT_WRITE_CHUNK_HINT = 24000
 
 
 
+def _local_agent_brief(project_scope: str = "") -> str:
+    """The host brief for a local agent turn, carrying the owner's build line.
+
+    A local agent turn acts as the local owner: every typed tool it reaches
+    (``build_model`` included) runs under ``LOCAL_OWNER``, so the brief
+    declares that principal and shows the owner's cached build model of the
+    turn's project (the planner labels a project by its directory name), or
+    the owner's newest one when the turn names no project. The line is read
+    from the cache only; hosted agents never receive this brief.
+    """
+    try:
+        from sonder_runtime.application.context import LOCAL_OWNER
+        from sonder_runtime.bootstrap.build_tools import build_brief_principal
+    except ImportError:
+        return environment_probe.agent_brief()
+    label = os.path.basename(str(project_scope or "").rstrip("/\\")) if project_scope else ""
+    with build_brief_principal(LOCAL_OWNER, project_label=label):
+        return environment_probe.agent_brief()
+
+
 def _agent_project_scope(project):
     """Resolve a project directory while preserving bare checklist namespaces."""
     text = str(project or "").strip()
@@ -20444,7 +20464,7 @@ def _agent_turn(
             # One deterministic line about the host, so a local model picks the
             # right command shape instead of guessing. Never send this private
             # machine inventory to a hosted agent.
-            + environment_probe.agent_brief()
+            + _local_agent_brief(project_scope)
         )
     # Hosted agents receive only the explicitly supplied/default hosted
     # system text. _build_system also appends mutable local profile, emotion,
