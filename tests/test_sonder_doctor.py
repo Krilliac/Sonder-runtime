@@ -241,6 +241,8 @@ def test_default_checks_registry_is_read_only_pairs_and_stable():
         "ollama",
         "ollama_workers",
         "ollama_residency",
+        "sonder_inference",
+        "sonder_inference_scope",
     ]
     assert all(callable(fn) for _, fn in first)
     first.append(("extra", lambda: "ok"))

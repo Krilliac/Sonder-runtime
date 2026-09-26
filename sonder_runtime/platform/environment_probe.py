@@ -22,6 +22,7 @@ _TOOLCHAINS = (
 )
 _SPECIALIST_TOOLS = (
     "sccache", "clcache", "doxygen", "xperf", "wpaexporter", "nssm",
+    "sonder-infer",
 )
 _cache = None
 _CAPABILITY_SUMMARY_MAX_CHARS = 480

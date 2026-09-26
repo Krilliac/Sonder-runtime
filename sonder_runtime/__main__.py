@@ -413,6 +413,7 @@ def cmd_doctor(args) -> int:
         discover_models=not args.skip_ollama,
     ))
     replacements.update(sonder_doctor.ollama_checks(config))
+    replacements.update(sonder_doctor.sonder_inference_checks())
     replacements["schemas"] = sonder_doctor.schema_check(config)
     replacements["schema_epoch"] = sonder_doctor.schema_epoch_check(config)
     replacements.update(sonder_doctor.memory_checks(config))
@@ -428,6 +429,11 @@ def cmd_doctor(args) -> int:
     ]
     if args.skip_ollama:
         skipped_names = {"ollama", "ollama_workers", "ollama_residency"}
+        checks = [
+            (name, check) for name, check in checks if name not in skipped_names
+        ]
+    if args.skip_inference:
+        skipped_names = {"sonder_inference", "sonder_inference_scope"}
         checks = [
             (name, check) for name, check in checks if name not in skipped_names
         ]
@@ -1774,6 +1780,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--skip-ollama", action="store_true",
         help="do not probe the Ollama endpoint",
+    )
+    p.add_argument(
+        "--skip-inference", action="store_true",
+        help="do not probe the Sonder Inference endpoint",
     )
     p.add_argument(
         "--storage-probe", action="store_true",

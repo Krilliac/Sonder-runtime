@@ -631,6 +631,104 @@ def _check_ollama_residency(*, timeout: float = 5.0, config=None) -> dict:
     }
 
 
+def _inference_binding(env=None):
+    """Return ``(bindings, None)`` or ``(None, fail entry)``; never raises."""
+    from sonder_runtime.adapters.provider_bindings import provider_bindings_from_env
+
+    try:
+        return provider_bindings_from_env(env), None
+    except ValueError as exc:
+        return None, {
+            "status": STATUS_FAIL,
+            "detail": "invalid provider bindings: %s" % exc,
+        }
+
+
+def _check_sonder_inference(*, env=None, gateway=None) -> dict:
+    """Probe the Sonder Inference provider when any binding uses it.
+
+    Read-only: one cached, 2-second-bounded GET of ``/v1/sonder/health`` (and
+    ``/v1/sonder/identity`` when ready).  It never generates.
+
+    * skipped -- no tier, default or embedding binding names sonder_inference;
+    * ok      -- the server is ready and speaks API version 1;
+    * warn    -- the mock backend is served (synthetic output), or the server
+                 is unreachable but ``SONDER_INFERENCE_FALLBACK=ollama`` will
+                 carry requests it never received;
+    * fail    -- bound and unreachable without a fallback, an API version
+                 mismatch, or refused credentials.
+    """
+    bindings, failure = _inference_binding(env)
+    if failure is not None:
+        return failure
+    if "sonder_inference" not in bindings.bound_providers:
+        return _skip("not configured (no provider binding uses sonder_inference)")
+    try:
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import (
+            SonderInferenceGateway,
+        )
+    except Exception as exc:  # pragma: no cover - import guard
+        return _skip("Sonder Inference adapter unavailable (%s)" % exc)
+    gateway = gateway if gateway is not None else SonderInferenceGateway(env=env)
+    entry = gateway.provider_status()["sonder_inference"]
+    fallback = bindings.fallbacks.get("sonder_inference")
+    where = entry.get("base_url") or "unconfigured endpoint"
+    detail = "%s: %s" % (where, entry.get("detail") or entry.get("state"))
+    api_version = entry.get("api_version")
+    if api_version is not None and api_version != 1:
+        return {"status": STATUS_FAIL, "detail": detail}
+    if entry.get("state") == "ready":
+        if entry.get("synthetic") is True:
+            return {
+                "status": STATUS_WARN,
+                "detail": detail + " -- MOCK backend: synthetic output, not a "
+                "quality or performance signal",
+            }
+        return {"status": STATUS_OK, "detail": detail}
+    if fallback is not None:
+        return {
+            "status": STATUS_WARN,
+            "detail": detail + " -- requests it never receives fall back to %s"
+            % fallback,
+        }
+    return {
+        "status": STATUS_FAIL,
+        "detail": detail + " -- start `sonder-infer serve` or set "
+        "SONDER_INFERENCE_FALLBACK=ollama",
+    }
+
+
+def _check_sonder_inference_scope(*, env=None) -> dict:
+    """Say plainly which surfaces a sonder_inference binding does not reach.
+
+    Provider bindings are honoured by ModelGateway consumers only.  The REPL,
+    MCP, autopilot and fleet still generate through the legacy Ollama path, so
+    an operator who bound every tier to Sonder Inference must not assume
+    those surfaces stopped using Ollama.
+    """
+    bindings, failure = _inference_binding(env)
+    if failure is not None:
+        return failure
+    if "sonder_inference" not in bindings.bound_providers:
+        return _skip("not configured (no provider binding uses sonder_inference)")
+    return {
+        "status": STATUS_WARN,
+        "detail": (
+            "REPL, MCP, autopilot and fleet generate through the legacy "
+            "Ollama path regardless of provider bindings; only ModelGateway "
+            "consumers use sonder_inference"
+        ),
+    }
+
+
+def sonder_inference_checks(env=None) -> list[tuple[str, CheckCallable]]:
+    """Bind the Sonder Inference checks to one environment snapshot."""
+    return [
+        ("sonder_inference", lambda: _check_sonder_inference(env=env)),
+        ("sonder_inference_scope", lambda: _check_sonder_inference_scope(env=env)),
+    ]
+
+
 def storage_checks(
     config=None, *, throughput: bool = False, discover_models: bool = True,
 ):
@@ -763,6 +861,8 @@ def default_checks() -> list[tuple[str, CheckCallable]]:
         ("ollama", _check_ollama),
         ("ollama_workers", _check_ollama_workers),
         ("ollama_residency", _check_ollama_residency),
+        ("sonder_inference", _check_sonder_inference),
+        ("sonder_inference_scope", _check_sonder_inference_scope),
     ]
 
 

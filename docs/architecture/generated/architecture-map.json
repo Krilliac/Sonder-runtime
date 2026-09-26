@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 352,
+      "file_count": 353,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -195,6 +195,7 @@
         "sonder_runtime/adapters/inference/openai_compat_gateway.py",
         "sonder_runtime/adapters/inference/openai_protocol_probe.py",
         "sonder_runtime/adapters/inference/sonder_inference_gateway.py",
+        "sonder_runtime/adapters/inference/sonder_inference_probe.py",
         "sonder_runtime/adapters/inference/static_membership.py",
         "sonder_runtime/adapters/inference/telemetry.py",
         "sonder_runtime/adapters/inference/vision.py",

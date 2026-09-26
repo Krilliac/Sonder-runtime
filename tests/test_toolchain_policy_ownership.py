@@ -17,3 +17,10 @@ def test_toolchain_policy_resolves_only_canonical_discovery(monkeypatch):
     monkeypatch.setattr(packaged_environment_probe, "probe", lambda refresh=False: profile)
     assert toolchain_policy.discovered_path(" CARGO ") == "C:\\tools\\cargo.exe"
     assert environment_probe.probe() is profile
+
+
+def test_sonder_infer_is_discovered_as_a_specialist_tool(monkeypatch):
+    assert toolchain_policy.allowed_arguments("sonder-infer") == ("version",)
+    profile = {"toolchains": {}, "specialist_tools": {"sonder-infer": "/opt/bin/sonder-infer"}}
+    monkeypatch.setattr(packaged_environment_probe, "probe", lambda refresh=False: profile)
+    assert toolchain_policy.discovered_path("Sonder-Infer") == "/opt/bin/sonder-infer"

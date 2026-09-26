@@ -172,6 +172,37 @@ def _check_ollama_workers(
         return list(executor.map(check, entries))
 
 
+def _check_sonder_inference() -> CheckResult | None:
+    """Non-required readiness note for a bound Sonder Inference provider.
+
+    Startup never blocks on Inference: the server may legitimately start
+    after the runtime, and a request that finds it down fails closed (or
+    falls back) at call time.  This only makes the state visible.
+    """
+    from sonder_runtime.adapters.provider_bindings import provider_bindings_from_env
+
+    try:
+        bindings = provider_bindings_from_env()
+    except ValueError as exc:
+        return CheckResult("sonder_inference", False, False, f"invalid provider bindings: {exc}")
+    if "sonder_inference" not in bindings.bound_providers:
+        return None
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import (
+        SonderInferenceGateway,
+    )
+
+    entry = SonderInferenceGateway().provider_status()["sonder_inference"]
+    where = entry.get("base_url") or "unconfigured endpoint"
+    ready = entry.get("state") == "ready"
+    detail = f"{where}: {entry.get('detail') or entry.get('state')}"
+    if ready and entry.get("synthetic") is True:
+        detail += " (MOCK backend: synthetic output)"
+    fallback = bindings.fallbacks.get("sonder_inference")
+    if not ready and fallback:
+        detail += f"; requests it never receives fall back to {fallback}"
+    return CheckResult("sonder_inference", ready, False, detail)
+
+
 def run_preflight(
     config: SonderConfig,
     *,
@@ -186,4 +217,7 @@ def run_preflight(
     if check_ollama:
         checks.append(_check_ollama(config, timeout=ollama_timeout))
         checks.extend(_check_ollama_workers(config, timeout=ollama_timeout))
+    inference = _check_sonder_inference()
+    if inference is not None:
+        checks.append(inference)
     return PreflightReport(checks=tuple(checks))
