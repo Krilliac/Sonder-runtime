@@ -112,9 +112,21 @@ Enforced by `scripts/check_architecture.py`.
 
 The container-isolation row used to be a test that always skipped and
 asserted nothing, so it was removed rather than counted. Isolation is
-checked by `tests/test_linux_candidate_isolation.py` (root Linux),
-`tests/test_build_network_isolation.py`, `tests/test_selfmod_isolation_scope.py`
-and `tests/test_sandbox.py`.
+checked by:
+
+- `tests/test_codegen_container_native_linux.py`: real Docker boundary
+  probes, run with zero skips allowed by the `container-qualification` job
+  (`.github/workflows/codegen-container-qualification.yml`) that the required
+  `tests` gate depends on.
+- `tests/test_codegen_container_build.py`: input grants and fail-closed host
+  result checks, without a container engine.
+- `tests/test_linux_candidate_isolation.py`: the OS uid boundary for selfmod
+  candidates. It needs Linux and euid 0, so ordinary non-root CI skips it.
+- `tests/test_build_network_isolation.py`: build-job network policy,
+  including a real namespace probe where `unshare` works.
+
+`tests/test_codegen_isolation_probes_native_windows.py` records native
+Windows feasibility on the `windows-focused` job but is diagnostic only.
 
 ### Verification commands
 

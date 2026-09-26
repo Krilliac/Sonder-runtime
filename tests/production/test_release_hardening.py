@@ -186,9 +186,11 @@ def test_update_run_can_activate_only_when_verified():
 # --- 6. Container isolation acceptance ---
 #
 # Not asserted here: this suite has no container or namespace runtime. The
-# isolation behaviour is checked by tests/test_linux_candidate_isolation.py
-# (root Linux), tests/test_build_network_isolation.py,
-# tests/test_selfmod_isolation_scope.py and tests/test_sandbox.py.
+# isolation behaviour is checked by tests/test_codegen_container_native_linux.py
+# (real Docker probes, zero skips, in the container-qualification job),
+# tests/test_codegen_container_build.py (input grants and fail-closed host
+# checks), tests/test_linux_candidate_isolation.py (uid boundary, root Linux
+# only) and tests/test_build_network_isolation.py (build network namespace).
 
 
 # --- 7. Guarded/unrestricted capability matrix ---
