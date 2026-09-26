@@ -135,10 +135,16 @@ versioned and additive-only. Interactive terminals ignore the flag.
   question as a natural-language work request, hold the task, and run
   it once `/workspace` or `/workspace-create` selects a directory. The
   memory project name is never used as a directory.
-- When managed work refuses a request before it starts (no selected
-  project, an incomplete workspace inventory or provenance, a malformed
-  recovery identity), the console prints `ERROR: work refused: <reason>`
-  and keeps running. Other failures are not caught here.
+- When managed work raises a `PermissionError` or `ValueError`, the
+  console prints `ERROR: work refused: <reason>` and keeps running. The
+  reason is the exception's own message. Managed work uses these types for
+  its refusals, both before it starts (no selected project, an incomplete
+  workspace inventory or provenance, a malformed recovery identity) and
+  during the run (a grant, selection or inventory that changed under it).
+  The catch covers the whole managed call, though, so any exception of
+  those two types escaping the run is reported the same way. That includes
+  an `OSError` with `EACCES` and a `JSONDecodeError`, which may be faults
+  rather than refusals. Exceptions of any other type are not caught here.
 
 ## Interrupting a turn
 

@@ -3027,9 +3027,14 @@ _WORKSPACE_ASK = (
     "Guarded project work and runs stay inside the selected directory."
 )
 
-# Typed refusals managed work raises before any step runs (no selected
-# project, incomplete workspace inventory or provenance, malformed recovery
-# identity). They are answers to this one request, not faults of the console.
+# Exception types reported as a refused request instead of ending the console.
+# Managed work raises them for its policy refusals: before any step runs (no
+# selected project, incomplete workspace inventory or provenance, malformed
+# recovery identity) and mid-run (a grant, selection or inventory that changed
+# under the run). The catch wraps the whole managed call, so any
+# PermissionError or ValueError that escapes it, including an OSError EACCES
+# or a JSONDecodeError from inside the agent loop, is reported the same way,
+# with the exception's own message as the reason. Other types propagate.
 _WORK_REFUSALS = (PermissionError, ValueError)
 
 
