@@ -261,9 +261,14 @@ safety.
 For exact script execution, `SONDER_EXECUTION_RISK_POLICY` selects `off`,
 `report` (default), `deny-high`, `deny-medium`, or `deny-unknown`. Per-call
 `risk_policy` can make enforcement stricter but never weaker than the operator
-setting. Current `deny-*` modes conservatively refuse every launch, including a
-below-threshold file, because the runner cannot portably guarantee that an
-interpreter opens the same file handle that was inspected. `report` is advisory.
+setting. Under a `deny-*` mode on Linux, `.py` and `.sh` scripts are copied
+into a sealed memfd, inspected from that copy, and executed from the same
+descriptor, so a file swapped after the scan cannot change what runs (bash
+sees `$0` as `/proc/self/fd/N`; Python keeps its usual `__file__`, `argv[0]`
+and `sys.path[0]`). Other runners, and every launch on Windows and macOS,
+still refuse enforcing modes, including a below-threshold file, because the
+runner cannot guarantee that the interpreter reads the inspected bytes.
+`report` is advisory.
 Program execution without an exact inspectable file remains outside this static
 gate and should be isolated separately.
 

@@ -101,11 +101,19 @@ Mitigations that are already in place and worth knowing about:
 - `script_run` applies `SONDER_EXECUTION_RISK_POLICY` before launching an exact
   guarded script. The default is `report`; operators may choose `deny-high`,
   `deny-medium`, or `deny-unknown`. A caller may strengthen but cannot weaken
-  the configured policy. Enforcing `deny-*` modes are degraded: they fail
-  closed for every launch (`exact_execution_handoff_unavailable`) because the
-  runner cannot hand the already-inspected file handle to the interpreter
-  portably; `report` remains advisory. This avoids a pathname-swap bypass and
-  is defense in depth, not an OS sandbox.
+  the configured policy. Under an enforcing `deny-*` mode on Linux, a `.py` or
+  `.sh` script is read once through the guarded no-follow handle into a memfd
+  sealed against writes, growth and shrinking; the sealed copy is what is
+  inspected and what the interpreter runs (Python through a bootstrap that
+  reads the inherited descriptor and restores `__file__`, `sys.argv[0]` and
+  `sys.path[0]`; bash through `/proc/self/fd/N`, so `$0` is that path).
+  Replacing the file after the scan does not change what runs. Scripts over
+  the 32 MiB scan budget are refused (`exact_handoff_exceeds_scan_budget`).
+  Every other suffix, and every launch on Windows and macOS, still fails closed
+  (`exact_execution_handoff_unavailable`). `report` remains advisory. This
+  avoids a pathname-swap bypass and is defense in depth, not an OS sandbox:
+  the exact handoff covers the entry script's bytes, not files it imports or
+  sources.
 - Process inventory and memory-risk inspection are disabled unless the operator
   sets `SONDER_PROCESS_INSPECTION=enabled:bounded-read-only`. The Windows-only
   scanner requests read/query rights for one exact PID and returns only fixed
@@ -252,7 +260,7 @@ implementation work is tracked only in the
 |---|---|---|
 | Guarded file, archive, patch, data, and Git inspection tools | Implemented | Constrained to configured roots and the per-tool ceilings described above. |
 | `script_run` execution-risk policy in `report` mode | Implemented | Default mode; advisory, and not an OS sandbox. |
-| `script_run` enforcing `deny-high`, `deny-medium`, or `deny-unknown` modes | Degraded | Every launch fails closed because no portable exact inspected-handle-to-interpreter handoff exists. |
+| `script_run` enforcing `deny-high`, `deny-medium`, or `deny-unknown` modes | Degraded | Linux `.py`/`.sh` scripts run the sealed memfd copy that was inspected; every other runner, and every launch on Windows and macOS, fails closed because no exact inspected-bytes-to-interpreter handoff exists there. |
 | Process inventory and memory-risk inspection | Implemented | Off unless `SONDER_PROCESS_INSPECTION=enabled:bounded-read-only`; Windows only. |
 | Process memory-risk inspection on non-Windows hosts | Unsupported | The bounded scanner is Windows-only. |
 | Unsafe lab mode | Experimental | Exact acknowledgement, loopback-only, and unprivileged; disposable isolated hosts only, and never an OS sandbox. |

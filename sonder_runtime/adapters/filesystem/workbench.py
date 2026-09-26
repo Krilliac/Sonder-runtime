@@ -854,7 +854,7 @@ def _is_inline_powershell_arg(arg):
 def run_program(
     program, *, args_json="[]", cwd=".", stdin="", timeout=30,
     max_output=MAX_EXEC_OUTPUT, extra_roots="", bypass=False,
-    _allow_cmd_script=False,
+    _allow_cmd_script=False, _pass_fds=(),
 ):
     if str(program).strip().casefold() in {"bash", "sh"}:
         executable = runtime_paths.bash_executable()
@@ -907,6 +907,8 @@ def run_program(
         shell=False,
         creationflags=creationflags,
         start_new_session=os.name != "nt",
+        # Only run_script's sealed exact-handoff descriptor is ever passed.
+        pass_fds=tuple(_pass_fds),
         # Strip control-plane secrets before handing the environment to a
         # model-directed child. Without this, a .py run through script_run or
         # workspace_run could base64-dump os.environ and read back
@@ -964,15 +966,71 @@ def run_program(
     }
 
 
+_SEALED_PYTHON_MAIN = Path(__file__).with_name("sealed_python_main.py")
+
+
+def _sealed_script_command(script, sealed, args):
+    """Build the argv that executes ``sealed``'s memfd instead of ``script``.
+
+    ``sealed`` is an ``artifact_risk.SealedScript`` produced for exactly this
+    script.  Python runs through ``sealed_python_main.py``, which reads the
+    code from the inherited descriptor and restores ``__file__``,
+    ``sys.argv[0]`` and ``sys.path[0]`` from the script path.  Bash reads
+    ``/proc/self/fd/N`` (the same sealed memfd); ``$0`` and ``BASH_SOURCE``
+    are therefore that ``/proc`` path, not the script path.
+    """
+    if not isinstance(sealed.fd, int) or sealed.fd < 0:
+        raise PermissionError("sealed script descriptor is invalid")
+    if Path(sealed.path) != script or sealed.suffix != script.suffix.lower():
+        raise PermissionError("sealed script does not match the requested script")
+    if sealed.suffix == ".py":
+        return sys.executable, [
+            "-P", str(_SEALED_PYTHON_MAIN), str(sealed.fd), str(script), *args,
+        ]
+    if sealed.suffix == ".sh":
+        executable = runtime_paths.bash_executable()
+        if not executable:
+            raise FileNotFoundError("runner is not installed for .sh")
+        return executable, ["/proc/self/fd/%d" % sealed.fd, *args]
+    raise PermissionError("no exact-handoff runner for %s" % sealed.suffix)
+
+
 def run_script(
     path, *, args_json="[]", cwd="", stdin="", timeout=30,
     max_output=MAX_EXEC_OUTPUT, extra_roots="", bypass=False,
+    sealed_script=None,
 ):
+    """Run ``path`` with its known interpreter.
+
+    ``sealed_script`` (an ``artifact_risk.SealedScript``) makes the child
+    execute the sealed, already-inspected bytes rather than reopening the
+    path; the path still decides cwd and the script's visible identity.
+    """
     script = _resolve(path, extra_roots=extra_roots, bypass=bypass)
     if not script.is_file():
         raise FileNotFoundError(str(script))
     suffix = script.suffix.lower()
     args = _json_args(args_json)
+    if sealed_script is not None:
+        executable, argv = _sealed_script_command(script, sealed_script, args)
+        result = run_program(
+            executable,
+            args_json=argv,
+            cwd=cwd or str(script.parent),
+            stdin=stdin,
+            timeout=timeout,
+            max_output=max_output,
+            extra_roots=extra_roots,
+            bypass=bypass,
+            _pass_fds=(sealed_script.fd,),
+        )
+        result["exact_handoff"] = {
+            "mechanism": sealed_script.mechanism,
+            "script": str(script),
+            "bytes": sealed_script.size,
+            "sha256": sealed_script.sha256,
+        }
+        return result
     if suffix == ".py":
         executable, prefix = sys.executable, [str(script)]
     elif suffix == ".ps1":

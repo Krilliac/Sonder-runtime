@@ -13972,26 +13972,32 @@ def script_run(
     }
     try:
         trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
-        risk = artifact_risk_module.enforce_execution_policy(
-            path, requested=risk_policy, extra_roots=trusted_roots,
-        )
-        if str(risk.get("policy", "")).startswith("deny-"):
+        if artifact_risk_module.effective_policy(risk_policy).startswith("deny-"):
             # A scan followed by a pathname-based interpreter launch is not an
             # exact-file handoff: another same-user process could replace the
-            # path between those operations. Until the runner can execute the
-            # already-inspected handle cross-platform, enforcing policies fail
-            # closed even when the static result itself is below the threshold.
-            refused = dict(risk)
-            refused.update({
-                "denied": True,
-                "denial_reason": "exact_execution_handoff_unavailable",
-            })
-            raise artifact_risk_module.ArtifactRiskDenied(refused)
-        data = workbench.run_script(
-            path, args_json=args_json, cwd=cwd, stdin=stdin, timeout=timeout,
-            max_output=max_output, extra_roots=extra_roots,
-            bypass=_file_bypass_allowed(token, approval),
-        )
+            # path between those operations. Enforcing policies therefore run
+            # only the sealed copy that was inspected (Linux memfd, .py/.sh);
+            # everywhere else sealed_script_execution refuses with
+            # exact_execution_handoff_unavailable, even below the threshold.
+            with artifact_risk_module.sealed_script_execution(
+                path, requested=risk_policy, extra_roots=trusted_roots,
+            ) as (risk, sealed):
+                data = workbench.run_script(
+                    path, args_json=args_json, cwd=cwd, stdin=stdin,
+                    timeout=timeout, max_output=max_output,
+                    extra_roots=extra_roots,
+                    bypass=_file_bypass_allowed(token, approval),
+                    sealed_script=sealed,
+                )
+        else:
+            risk = artifact_risk_module.enforce_execution_policy(
+                path, requested=risk_policy, extra_roots=trusted_roots,
+            )
+            data = workbench.run_script(
+                path, args_json=args_json, cwd=cwd, stdin=stdin, timeout=timeout,
+                max_output=max_output, extra_roots=extra_roots,
+                bypass=_file_bypass_allowed(token, approval),
+            )
     except artifact_risk_module.ArtifactRiskDenied as exc:
         output = (
             "artifact risk: %s\nexecution denied by effective policy %s"

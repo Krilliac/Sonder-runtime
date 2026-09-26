@@ -372,13 +372,34 @@ def test_unsafe_mode_preserves_artifact_and_process_operator_gates(
     monkeypatch.delenv(server.process_risk_module.OPT_IN_ENV, raising=False)
     assert json.loads(server.process_list())["status"] == "opt_in_required"
 
-    script = tmp_path / "harmless.py"
-    script.write_text("print('not launched')\n", encoding="utf-8")
+    marker = tmp_path / "payload-ran"
+    risky = tmp_path / "risky.py"
+    risky.write_text(
+        "# powershell -EncodedCommand AAAA\n"
+        "open(%r, 'w').write('ran')\n" % str(marker),
+        encoding="utf-8",
+    )
     output = server.script_run(
-        str(script), risk_policy="deny-high", extra_roots=str(tmp_path),
+        str(risky), risk_policy="deny-high", extra_roots=str(tmp_path),
     )
     assert "execution denied by effective policy deny-high" in output
-    assert "not launched" not in output
+    assert '"risk":"high"' in output
+    assert not marker.exists()
+
+    # A below-threshold script still passes through the enforcing gate: on
+    # Linux it runs only as the sealed inspected copy, elsewhere the missing
+    # exact handoff refuses it.
+    harmless = tmp_path / "harmless.py"
+    harmless.write_text("print('launched')\n", encoding="utf-8")
+    output = server.script_run(
+        str(harmless), risk_policy="deny-high", extra_roots=str(tmp_path),
+    )
+    if sys.platform.startswith("linux"):
+        assert '"exact_handoff":"linux-memfd-sealed"' in output
+        assert "execution allowed by effective policy deny-high" in output
+    else:
+        assert "exact_execution_handoff_unavailable" in output
+        assert "launched" not in output
 
 
 def test_unsafe_child_environment_scrubs_secret_and_control_names(monkeypatch):

@@ -1,12 +1,15 @@
 """Bounded static risk inspection for documents, executables, and scripts."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import math
 import os
 import re
 import struct
+import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import sonder_runtime.adapters.pdf_risk as pdf_risk
@@ -335,32 +338,48 @@ def inspect_artifact(path, *, max_scan_bytes=DEFAULT_MAX_SCAN_BYTES,
     scan_cap = _clamp_int(max_scan_bytes, 1024, MAX_SCAN_BYTES)
     deadline = time.monotonic() + _clamp_seconds(max_seconds)
     with pdf_risk._open_guarded(str(path), extra_roots) as (actual, handle, opened):
-        size = opened.st_size
-        if size <= 0:
-            raise ArtifactRiskError("artifact is empty")
-        if size > MAX_SOURCE_BYTES:
-            raise ArtifactRiskError("artifact exceeds the 256 MiB source ceiling")
-        prefix = handle.read(min(size, scan_cap // 2 if size > scan_cap else size))
-        kind = _kind(prefix, actual.suffix)
-        if kind == "pdf":
-            return pdf_risk.inspect_pdf(
-                actual, max_scan_bytes=scan_cap,
-                max_seconds=max(0.001, deadline - time.monotonic()), extra_roots=extra_roots,
-            ) | {"kind": "pdf"}
-        complete = size <= scan_cap
-        if complete:
-            data = prefix + handle.read(size - len(prefix))
-            scan_regions = [data]
-            ranges = [[0, size]]
-        else:
-            suffix_size = scan_cap - len(prefix)
-            handle.seek(size - suffix_size)
-            suffix_start = handle.tell()
-            data = prefix + handle.read(suffix_size)
-            scan_regions = [prefix, data[len(prefix):]]
-            ranges = [[0, len(prefix)], [suffix_start, size]]
-        _check(deadline)
-        digest = hashlib.sha256(data).hexdigest() if complete else None
+        return _inspect_handle(
+            actual, handle, opened.st_size, scan_cap=scan_cap, deadline=deadline,
+            extra_roots=extra_roots, allow_pdf_reopen=True,
+        )
+
+
+def _inspect_handle(actual, handle, size, *, scan_cap, deadline, extra_roots,
+                    allow_pdf_reopen):
+    """Inspect ``size`` bytes readable from ``handle`` (positioned at 0).
+
+    ``actual`` names the artifact in the report.  PDF structure inspection
+    reopens the path, so a caller inspecting bytes that are not the path's
+    current contents (a sealed execution copy) passes
+    ``allow_pdf_reopen=False`` and receives an ``ArtifactRiskError`` instead.
+    """
+    if size <= 0:
+        raise ArtifactRiskError("artifact is empty")
+    if size > MAX_SOURCE_BYTES:
+        raise ArtifactRiskError("artifact exceeds the 256 MiB source ceiling")
+    prefix = handle.read(min(size, scan_cap // 2 if size > scan_cap else size))
+    kind = _kind(prefix, actual.suffix)
+    if kind == "pdf":
+        if not allow_pdf_reopen:
+            raise ArtifactRiskError("PDF structure cannot be inspected from a sealed copy")
+        return pdf_risk.inspect_pdf(
+            actual, max_scan_bytes=scan_cap,
+            max_seconds=max(0.001, deadline - time.monotonic()), extra_roots=extra_roots,
+        ) | {"kind": "pdf"}
+    complete = size <= scan_cap
+    if complete:
+        data = prefix + handle.read(size - len(prefix))
+        scan_regions = [data]
+        ranges = [[0, size]]
+    else:
+        suffix_size = scan_cap - len(prefix)
+        handle.seek(size - suffix_size)
+        suffix_start = handle.tell()
+        data = prefix + handle.read(suffix_size)
+        scan_regions = [prefix, data[len(prefix):]]
+        ranges = [[0, len(prefix)], [suffix_start, size]]
+    _check(deadline)
+    digest = hashlib.sha256(data).hexdigest() if complete else None
     indicators = {}
     for region in scan_regions:
         _scan_patterns(region, indicators)
@@ -433,3 +452,155 @@ def enforce_execution_policy(path, *, requested="", extra_roots=""):
     if denied:
         raise ArtifactRiskDenied(result)
     return result
+
+
+# Script suffixes whose interpreter can be pointed at the sealed copy while
+# keeping the script's ordinary semantics (see workbench.run_script).  Other
+# runners either require a real path with a specific extension (pwsh -File,
+# dart, cmd) or are native executables, so enforcing policies keep refusing
+# them rather than launching by pathname.
+EXACT_HANDOFF_SUFFIXES = frozenset({".py", ".sh"})
+EXACT_HANDOFF_UNAVAILABLE = "exact_execution_handoff_unavailable"
+EXACT_HANDOFF_MECHANISM = "linux-memfd-sealed"
+
+
+@dataclass(frozen=True)
+class SealedScript:
+    """A script's inspected bytes held in a sealed, immutable memfd.
+
+    ``fd`` stays open (close-on-exec) for the lifetime of the
+    ``sealed_script_execution`` context; the runner passes it to exactly one
+    child with ``pass_fds``.  ``path`` is the validated on-disk script the
+    bytes were copied from; it is used for cwd, ``sys.path`` and reporting,
+    never reopened for execution.
+    """
+
+    fd: int
+    path: Path
+    suffix: str
+    size: int
+    sha256: str
+    mechanism: str = EXACT_HANDOFF_MECHANISM
+
+
+def exact_handoff_available(suffix):
+    """Whether this host can execute the inspected bytes of ``suffix`` exactly."""
+    if not sys.platform.startswith("linux"):
+        return False
+    if str(suffix).lower() not in EXACT_HANDOFF_SUFFIXES:
+        return False
+    if not hasattr(os, "memfd_create"):
+        return False
+    try:
+        import fcntl
+    except ImportError:
+        return False
+    return all(
+        hasattr(fcntl, name)
+        for name in ("F_ADD_SEALS", "F_SEAL_SEAL", "F_SEAL_SHRINK", "F_SEAL_GROW", "F_SEAL_WRITE")
+    )
+
+
+def _refuse_path_handoff(path, requested, extra_roots):
+    result = enforce_execution_policy(path, requested=requested, extra_roots=extra_roots)
+    refused = dict(result)
+    refused.update({"denied": True, "denial_reason": EXACT_HANDOFF_UNAVAILABLE})
+    raise ArtifactRiskDenied(refused)
+
+
+def _seal_copy(source_bytes):
+    import fcntl
+
+    fd = os.memfd_create(
+        "sonder-sealed-script", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING,
+    )
+    try:
+        view = memoryview(source_bytes)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+        fcntl.fcntl(
+            fd, fcntl.F_ADD_SEALS,
+            fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE | fcntl.F_SEAL_SEAL,
+        )
+        os.lseek(fd, 0, os.SEEK_SET)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+@contextlib.contextmanager
+def sealed_script_execution(path, *, requested="", extra_roots=""):
+    """Inspect a script and yield ``(risk_result, SealedScript)`` for execution.
+
+    Enforcing (``deny-*``) policies require that the bytes inspected are the
+    bytes run.  On Linux, for ``EXACT_HANDOFF_SUFFIXES``, the script is read
+    once through the guarded no-follow handle, copied into a memfd that is then
+    sealed against every write, grow and shrink, and inspected *from that
+    sealed copy*.  The same descriptor is what the runner executes, so a
+    replacement of the on-disk file after the scan cannot change what runs.
+
+    Everywhere else this raises ``ArtifactRiskDenied`` with ``denial_reason``
+    ``exact_execution_handoff_unavailable`` (after the ordinary path
+    inspection, so a risk denial still reports its own result).
+    """
+    policy = effective_policy(requested)
+    if not policy.startswith("deny-"):
+        raise ArtifactRiskError("sealed execution is only used by enforcing policies")
+    if not exact_handoff_available(Path(str(path)).suffix):
+        _refuse_path_handoff(path, requested, extra_roots)
+    deadline = time.monotonic() + DEFAULT_MAX_SECONDS
+    with pdf_risk._open_guarded(str(path), extra_roots) as (actual, handle, opened):
+        size = opened.st_size
+        if size <= 0:
+            raise ArtifactRiskError("artifact is empty")
+        if actual.suffix.lower() not in EXACT_HANDOFF_SUFFIXES:
+            raise ArtifactRiskDenied({
+                "schema_version": 1, "path": str(actual), "risk": "not_inspected",
+                "policy": policy, "denied": True,
+                "denial_reason": EXACT_HANDOFF_UNAVAILABLE, "execution": "none",
+            })
+        if size > MAX_SCAN_BYTES:
+            raise ArtifactRiskDenied({
+                "schema_version": 1, "path": str(actual), "source_bytes": size,
+                "risk": "unknown", "policy": policy, "denied": True,
+                "denial_reason": "exact_handoff_exceeds_scan_budget",
+                "execution": "none",
+            })
+        source_bytes = handle.read(size + 1)
+        if len(source_bytes) != size:
+            raise PermissionError("script size changed while it was being read")
+    # Leaving _open_guarded re-verified the path's identity, size and mtime
+    # against the handle the bytes came from.
+    fd = _seal_copy(source_bytes)
+    try:
+        with os.fdopen(os.dup(fd), "rb") as sealed_handle:
+            try:
+                result = _inspect_handle(
+                    actual, sealed_handle, size, scan_cap=MAX_SCAN_BYTES,
+                    deadline=deadline, extra_roots=extra_roots, allow_pdf_reopen=False,
+                )
+            except ArtifactRiskError as exc:
+                raise ArtifactRiskDenied({
+                    "schema_version": 1, "path": str(actual), "risk": "unknown",
+                    "policy": policy, "denied": True,
+                    "denial_reason": EXACT_HANDOFF_UNAVAILABLE,
+                    "detail": str(exc), "execution": "none",
+                }) from exc
+        # The dup shared the file offset; rewind for the child's reader.
+        os.lseek(fd, 0, os.SEEK_SET)
+        result = dict(result)
+        denied = policy_denies(policy, result["risk"])
+        result.update({
+            "policy": policy, "denied": denied,
+            "exact_handoff": EXACT_HANDOFF_MECHANISM,
+        })
+        if denied:
+            raise ArtifactRiskDenied(result)
+        yield result, SealedScript(
+            fd=fd, path=actual, suffix=actual.suffix.lower(), size=size,
+            sha256=hashlib.sha256(source_bytes).hexdigest(),
+        )
+    finally:
+        os.close(fd)
