@@ -202,11 +202,14 @@ def test_a_watermark_resumes_the_control_stream_in_bounded_batches(
     assert batch["next_watermark"] == 3
 
 
-def test_a_change_made_elsewhere_is_recorded_before_the_reconnect_plan(
+def test_an_in_process_change_outside_the_api_is_recorded_before_the_reconnect_plan(
     http_server, authorized, application, mode,
 ):
     digest, stream_id = _schema_and_stream(http_server)
-    mode.value = "acceptEdits"  # e.g. switched in the REPL, never seen by the API
+    # Switched in this process by a path other than the API (for example the
+    # permission_mode tool during a served chat).  A change made in another
+    # process is not visible here: permission_modes loads its file once.
+    mode.value = "acceptEdits"
     _, body = _request(
         http_server, "/v1/client/reconnect", _reconnect(digest, [(stream_id, 1)]),
     )

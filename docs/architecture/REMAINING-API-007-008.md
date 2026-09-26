@@ -56,12 +56,15 @@ The served runtime exposes the contract over HTTP (see
   `control.snapshot` records of the process-global permission mode.
   `<instance>` is a random id minted each time the host is built (process
   start, or a replaced application graph), and the schema route lists the
-  current id under `streams`. The host
-  publishes when it observes the mode differ from the last published value:
-  on a mode change or read through the API and before every reconnect. A
-  change made in another process is therefore recorded when a client next
-  looks, not when it happened. A full stream is folded into a snapshot
-  instead of refusing the event.
+  current id under `streams`. The host publishes when it observes the mode
+  differ from the last published value: on a mode change or read through
+  the API and before every reconnect. A change made inside the server
+  process by another path (for example the `permission_mode` tool during a
+  served chat) is therefore recorded when a client next looks, not when it
+  happened. A change made in another process, such as a separately running
+  REPL, is not seen until the server restarts, because `permission_modes`
+  reads the persisted mode file once per process. A full stream is folded
+  into a snapshot instead of refusing the event.
 - `GET /v1/client/schema` returns `encode_client_schema()`;
   `POST /v1/client/reconnect` runs `decode_reconnect_request()`, the
   facade's authorized `reconnect()`, and `encode_reconnect_response()`.

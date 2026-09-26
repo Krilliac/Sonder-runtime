@@ -14,9 +14,12 @@ catalog.  This module is the hosting interface the protocol port expects:
   is a ``control.snapshot`` carrying the runtime's process-global permission
   mode.  The host publishes when it observes the mode differ from the last
   published value -- on a mode change through the API, on a mode read, and
-  before every reconnect -- so a change made elsewhere (for example in the
-  REPL) is recorded the next time any client looks, not at the instant it
-  happened.  The stream is in memory and its sequence starts again at 1
+  before every reconnect -- so a change made in this server process by a
+  path other than the API (for example the ``permission_mode`` tool run
+  during a served chat) is recorded the next time any client looks, not at
+  the instant it happened.  A change made in another process, such as a
+  separately running REPL, is not seen at all until the server restarts:
+  ``permission_modes`` reads its persisted mode once per process.  The stream is in memory and its sequence starts again at 1
   whenever a host is built (a process restart, or a new application graph).
   Because each host's stream has a fresh id, a cursor kept from an earlier
   host names a stream that no longer exists and is ``rejected`` as unknown,
