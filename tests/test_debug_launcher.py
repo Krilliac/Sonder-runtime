@@ -55,6 +55,10 @@ SHIM = textwrap.dedent('''
         os.makedirs(os.path.join(rundir, "out"), exist_ok=True)
         with open(os.path.join(rundir, "out", "cpu.txt"), "w") as handle:
             handle.write("Function,Weight\\nmain,10\\n")
+    elif mode == "crlf":
+        os.makedirs(os.path.join(rundir, "out"), exist_ok=True)
+        with open(os.path.join(rundir, "out", "cpu.txt"), "wb") as handle:
+            handle.write(b"Function,Weight\\r\\nmain,10\\r\\nidle,3\\r")
     elif mode == "fail":
         sys.exit(3)
     print("SONDER_%s_END" % nonce, flush=True)
@@ -96,7 +100,10 @@ class Env:
 
     def step(self, mode, *extra, timeout=60, via="argv", env=()):
         argv = (sys.executable, str(self.shim), mode, "{nonce}", "{input}", "{rundir}", *extra)
-        environment = (("PATH", "/usr/bin:/bin"), ("HOME", "{rundir}/home"), ("TMPDIR", "{rundir}/tmp")) + env
+        # Host-shaped like domain.debugging.templates: POSIX engines join with
+        # '/', the Windows environment template with '\\'.
+        environment = (("PATH", "/usr/bin:/bin"), ("HOME", "{rundir}" + os.sep + "home"),
+                       ("TMPDIR", "{rundir}" + os.sep + "tmp")) + env
         return DebugStep(engine="gdb", template_argv=argv, display_argv=argv, environment=environment,
                          timeout_seconds=timeout, max_output_bytes=16 << 20,
                          memory_limit_bytes=4 << 30, parser="gdb", reads_output_via=via)
@@ -225,7 +232,13 @@ def test_cancel_mid_chain_stops_the_step_and_the_rest(env, tmp_path):
 
 
 def test_a_flooding_step_is_stopped_at_the_output_limit_with_a_bounded_registry(env):
-    launcher = env.make_launcher(output_limit_bytes=4 << 20, watchdog_seconds=0.2)
+    # The limit counts what reached the registry. Each line is one durable
+    # SQLite commit, which on a hosted Windows runner is ~50x slower than on
+    # Linux (4 MiB did not arrive inside the 60 s step deadline there), so the
+    # limit is sized to be crossed in seconds on either host. It is still far
+    # above the registry's 64 KiB retained tail, so dropped-event accounting
+    # is what trips it.
+    launcher = env.make_launcher(output_limit_bytes=512 << 10, watchdog_seconds=0.2)
     ident = env.capture()
     rid = run_id()
     started = time.monotonic()
@@ -245,12 +258,29 @@ def test_a_flooding_step_is_stopped_at_the_output_limit_with_a_bounded_registry(
     assert env.registry.get(rid + "-s1") is None
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows holds a share-deny handle on a path-staged "
+                    "capture for the run, so a debugger cannot change it (see the test below)")
 def test_a_changed_input_is_detected_after_the_run(env):
     ident = env.capture()
     rid = run_id()
     env.launcher.start(env.plan(ident, [env.step("touch")], staging="path"), context(), rid)
     state, _ = env.launcher.wait(rid, 60)
     assert state.input_changed is True
+
+
+@pytest.mark.skipif(os.name != "nt", reason="POSIX has no share-deny open; the change is "
+                    "detected after the run instead (see the test above)")
+def test_a_path_staged_input_cannot_be_written_during_a_windows_run(env):
+    ident = env.capture()
+    before = (env.allowed / "core.1").read_bytes()
+    rid = run_id()
+    env.launcher.start(env.plan(ident, [env.step("touch")], staging="path"), context(), rid)
+    state, _ = env.launcher.wait(rid, 60)
+    # The shim's append is refused by the launcher's FILE_SHARE_READ-only
+    # handle, so the step fails and the capture is byte-for-byte unchanged.
+    assert state.step_status == ("failed",) and state.step_exit_codes[0] not in (0, None)
+    assert state.input_changed is False
+    assert (env.allowed / "core.1").read_bytes() == before
 
 
 def test_a_copied_input_is_immune_to_the_debugger_writing_it(env):
@@ -308,6 +338,18 @@ def test_file_outputs_are_kept_for_assembly_until_the_result_is_stored(env):
         fresh.store_json(rid, "../escape.json", {})
     with pytest.raises(KeyError):
         fresh.load_json("../../etc", "plan.json")
+
+
+def test_crlf_file_outputs_read_as_text_lines_like_argv_output(env):
+    ident = env.capture()
+    rid = run_id()
+    env.launcher.start(env.plan(ident, [env.step("crlf", via="file:{rundir}\\out\\cpu.txt")]),
+                       context(), rid)
+    state, _ = env.launcher.wait(rid, 60)
+    assert state.status == "complete"
+    expected = "Function,Weight\nmain,10\nidle,3\n"
+    assert env.launcher.step_output(rid, 0) == expected
+    assert env.make_launcher().step_output(rid, 0) == expected
 
 
 def test_ownership_and_state_survive_a_new_launcher(env):

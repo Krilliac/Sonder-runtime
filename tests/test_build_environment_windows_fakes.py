@@ -211,16 +211,35 @@ def test_msbuild_and_gnu_families_do_not_capture(tmp_path):
     assert "relative" not in dict(env.pairs)["PATH"] and "%EVIL%" not in dict(env.pairs)["PATH"]
 
 
-def test_posix_base_is_scrubbed(tmp_path):
-    source = {"PATH": "/usr/bin:relative:/nonexistent-dir:" + str(tmp_path), "HOME": "/root",
+def test_posix_base_is_scrubbed(monkeypatch):
+    # The POSIX-host filter stats each PATH entry. Fake that stat so this runs
+    # identically on a Windows interpreter host, where /usr/bin does not exist.
+    import stat as stat_module
+
+    from sonder_runtime.adapters.build import environment as environment_module
+
+    directories = {"/usr/bin": 0o755, "/opt/project": 0o755, "/world-writable": 0o777,
+                   "/sticky-tmp": 0o1777}
+
+    def fake_stat(path):
+        if path not in directories:
+            raise FileNotFoundError(path)
+        return SimpleNamespace(st_mode=stat_module.S_IFDIR | directories[path])
+
+    monkeypatch.setattr(environment_module, "_path_stat", fake_stat)
+    source = {"PATH": "/usr/bin:relative:/nonexistent-dir:/opt/project:/world-writable:"
+                      "/usr/bin/../bin:/sticky-tmp",
+              "HOME": "/root",
               "LD_PRELOAD": "/tmp/x.so", "AWS_SECRET_ACCESS_KEY": FAKE_SECRET, "CCACHE_DIR": "/c",
               "http_proxy": "http://p"}
     provider = ScrubbedEnvironmentProvider(
         host="posix", source=lambda: source,
         passthrough=("CCACHE_DIR", "LD_PRELOAD", "http_proxy", "AWS_SECRET_ACCESS_KEY"),
-        project_local=lambda path: path == str(tmp_path))
+        project_local=lambda path: path == "/opt/project")
     values = dict(provider.environment(system="cmake", family="gnu").pairs)
-    assert values["PATH"] == "/usr/bin"
+    # Relative, missing, project-local and world-writable (non-sticky) entries
+    # are dropped; duplicates collapse after '/'-shaped normalisation.
+    assert values["PATH"] == "/usr/bin:/sticky-tmp"
     assert values["LC_ALL"] == "C.UTF-8" and values["CCACHE_DIR"] == "/c"
     for key in ("LD_PRELOAD", "http_proxy", "AWS_SECRET_ACCESS_KEY"):
         assert key not in values

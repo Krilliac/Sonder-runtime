@@ -470,7 +470,7 @@ class ProcessDebugLauncher:
             data = os.read(fd, FILE_OUTPUT_MAX_BYTES)
         finally:
             os.close(fd)
-        return data.decode("utf-8", "replace")
+        return _text_lines(data)
 
     def _finish(self, run: _Run) -> None:
         plan = run.plan
@@ -657,6 +657,17 @@ class ProcessDebugLauncher:
         except (ValueError, RecursionError):
             return None
         return value if isinstance(value, dict) else None
+
+
+def _text_lines(data: bytes) -> str:
+    """Decode a tool's output file with universal newlines.
+
+    Argv output reaches the registry through a text-mode pipe, which already
+    turns ``\\r\\n`` (and a lone ``\\r``) into ``\\n``. Windows tools such as
+    xperf and wpaexporter write CRLF files; normalising here keeps the text a
+    parser sees independent of the channel the step reported through.
+    """
+    return data.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
 
 
 class _OutputCounter:

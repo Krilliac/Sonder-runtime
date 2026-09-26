@@ -33,6 +33,7 @@ import hashlib
 import json
 import ntpath
 import os
+import posixpath
 import re
 import stat
 import threading
@@ -426,14 +427,21 @@ class VcvarsCapture:
 # Provider
 
 
+# The stat used on POSIX PATH entries; a seam so the POSIX-host filter can be
+# exercised hermetically on any interpreter host.
+_path_stat = os.stat
+
+
 def _posix_path_entries(value: str, *, project_local: Callable[[str], bool]) -> list[str]:
     kept: list[str] = []
     for entry in (value or "").split(":"):
         if not entry or not entry.startswith("/") or "\x00" in entry:
             continue
-        normal = os.path.normpath(entry)
+        # A POSIX PATH is '/'-shaped whatever the interpreter host: normalise
+        # it with posixpath so '/usr/bin' never becomes '\\usr\\bin'.
+        normal = posixpath.normpath(entry)
         try:
-            info = os.stat(normal)
+            info = _path_stat(normal)
         except OSError:
             continue
         if not stat.S_ISDIR(info.st_mode):
