@@ -18,7 +18,7 @@ compatibility surfaces and delegate here.
 | `config` | Print the effective, redacted configuration. |
 | `migrate` | Apply pending schema migrations (all stores or `--store`). `--adopt-epoch2` runs the crash-safe SPEC-5 epoch-2 adoption that `serve` requires; it backs the databases up to `backups/pre-epoch2-*` first, is a verified no-op (no new copy) when the home is already adopted, and rejects `--store` (exit 2) because adoption always covers every domain database. |
 | `backup` | `create` / `verify` / `list` / `prune`. |
-| `restore` | `verify` / `smoke` / `apply` a backup. |
+| `restore` | `verify` / `smoke` / `apply` a backup, or `rehearse` the offline recovery rehearsal against one in a disposable workspace. |
 | `smoke` | Minimal end-to-end check (config, migrate, ops roundtrip). |
 | `drain` | Request graceful drain of a running server. |
 | `rotate-key` | Rotate `SONDER_API_KEY` with an overlap window. The secrets file is `--secrets`, else `SONDER_SECRETS`, else `sonder.env` in the state home. `--config`/`--set` choose the state home that receives `secrets/rotation.json` and the `API_KEY_ROTATED` audit event; the configuration is validated as `serve` validates it, and an invalid one exits 2 before anything is rotated. |

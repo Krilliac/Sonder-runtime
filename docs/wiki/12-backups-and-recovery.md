@@ -64,6 +64,13 @@ full `PRAGMA integrity_check` against the copied result.
 Swapping the restored directory into place is a stopped-service operator
 step ([backup-restore](../runbooks/backup-restore.md)).
 
+`python -m sonder_runtime restore rehearse <backup-dir>` runs the offline
+recovery rehearsal against a verified backup in a disposable workspace. It
+never opens the live state home, stops the service or switches `current`;
+flags, exit codes and output are in the runbook's
+[offline recovery rehearsal](../runbooks/backup-restore.md#offline-recovery-rehearsal)
+section.
+
 ## Automation (server profile)
 
 `packaging/systemd/` ships timers: `sonder-backup.timer` (daily create +
