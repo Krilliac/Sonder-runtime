@@ -351,6 +351,43 @@ def test_a_full_stream_is_compacted_into_a_snapshot_not_refused():
     assert batch["next_watermark"] == 5
 
 
+def test_concurrent_observers_never_leave_a_stale_state_newest():
+    # A mode POST racing a reconnect: observer A reads the mode, stalls, the
+    # mode changes and observer B runs.  A must not then publish its stale
+    # read after B's newer one.
+    protocol = ProtocolApplicationFacade.compose(_catalogs())
+    current = {"permission_mode": "manual"}
+    stalled, release = threading.Event(), threading.Event()
+
+    def control_state():
+        value = dict(current)
+        if threading.current_thread().name == "observer-a" and not release.is_set():
+            stalled.set()
+            assert release.wait(10)
+        return value
+
+    host = ClientProtocolHost(protocol, control_state=control_state)
+    current["permission_mode"] = "auto"
+    a = threading.Thread(target=host.observe, name="observer-a")
+    a.start()
+    assert stalled.wait(10)
+    current["permission_mode"] = "plan"
+    b = threading.Thread(target=host.observe, name="observer-b")
+    b.start()
+    b.join(0.5)  # finished (unserialized) or blocked behind A (serialized)
+    release.set()
+    a.join(10)
+    b.join(10)
+    assert not a.is_alive() and not b.is_alive()
+
+    body = host.reconnect(
+        _reconnect(protocol.schema.digest, [(host.stream_id, 0)]), authenticated=True,
+    )
+    modes = [e["payload"]["permission_mode"] for e in body["results"][0]["batch"]["events"]]
+    assert modes == ["manual", "auto", "plan"]
+    assert modes[-1] == current["permission_mode"]
+
+
 def test_the_wire_decoder_refuses_a_non_string_client_id():
     with pytest.raises(MobileWireError, match="client_id"):
         decode_reconnect_request({"type": "reconnect", "version": 1, "client_id": ["x"]})

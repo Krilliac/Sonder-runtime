@@ -126,10 +126,12 @@ class ClientProtocolHost:
         Returns whether an event was published.  When the stream's retained
         history is full, the last published state is folded into a snapshot
         first, so a client far behind receives the snapshot plus the tail
-        instead of a gap.
+        instead of a gap.  The state is read under the lock, so concurrent
+        observers publish in the order they read and the newest event always
+        names the state the last observer saw.
         """
-        state = dict(self._control_state())
         with self._lock:
+            state = dict(self._control_state())
             if state == self._last:
                 return False
             if self._last is not None and (
