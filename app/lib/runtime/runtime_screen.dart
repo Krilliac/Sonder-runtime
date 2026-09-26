@@ -12,6 +12,7 @@ import '../local_manager.dart';
 import '../models.dart';
 import '../settings.dart';
 import '../theme.dart';
+import '../ui/status_row.dart';
 import '../workspace_ui.dart';
 import 'approvals_panel.dart';
 import 'host_tools_panel.dart';
@@ -35,6 +36,7 @@ part 'panels/activity_panels.dart';
 part 'widgets.dart';
 part 'navigation.dart';
 part 'panels/updates_panels.dart';
+part 'panels/ecosystem_panel.dart';
 
 /// Former name, kept for existing call sites (`chat_screen.dart`, tests).
 typedef SystemScreen = RuntimeScreen;
@@ -52,6 +54,10 @@ class RuntimeScreen extends StatefulWidget {
   /// Fixed clock for goldens; live screens use [DateTime.now].
   final DateTime? now;
 
+  /// Opens the Observatory. Defaults to [LocalManager.launchObservatory]
+  /// with [settings]' Observatory executable and web URL; tests pass a fake.
+  final ObservatoryLauncher? observatoryLauncher;
+
   const RuntimeScreen({
     super.key,
     required this.settings,
@@ -60,6 +66,7 @@ class RuntimeScreen extends StatefulWidget {
     this.onNavigate,
     this.dataSource,
     this.now,
+    this.observatoryLauncher,
   });
 
   @override
@@ -123,6 +130,8 @@ class _RuntimeScreenState extends State<RuntimeScreen>
   Object? _workRunsError;
   ApprovalsPage? _approvals;
   Object? _approvalsError;
+  EcosystemReading? _ecosystem;
+  Object? _ecosystemError;
   bool _loadingExtras = false;
 
   static const _sectionSpecs = <(String, String, IconData)>[
@@ -131,6 +140,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     ('approvals', 'Approvals', Icons.fact_check_outlined),
     ('agents', 'Agents', Icons.hub_outlined),
     ('models', 'Models', Icons.memory_outlined),
+    ('inference', 'Inference', Icons.insights_outlined),
     ('learning', 'Learning', Icons.school_outlined),
     ('updates', 'Updates', Icons.extension_outlined),
     ('deployment', 'Deployment', Icons.lan_outlined),
@@ -172,6 +182,8 @@ class _RuntimeScreenState extends State<RuntimeScreen>
       _workRunsError = null;
       _approvals = null;
       _approvalsError = null;
+      _ecosystem = null;
+      _ecosystemError = null;
       unawaited(_loadExtras());
     }
   }
@@ -249,7 +261,8 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     return parts.isEmpty ? 'idle' : parts.join(' · ');
   }
 
-  /// Work runs and approvals: the overview's two extra reads.
+  /// Work runs, approvals and the ecosystem status: the reads beyond
+  /// `/v1/sonder/status` on each refresh cycle.
   Future<void> _loadExtras() async {
     if (_loadingExtras) return;
     setState(() => _loadingExtras = true);
@@ -257,6 +270,8 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     Object? runsError;
     ApprovalsPage? approvals;
     Object? approvalsError;
+    EcosystemReading? ecosystem;
+    Object? ecosystemError;
     Future<void> readRuns() async {
       try {
         runs = await _data.workRuns();
@@ -273,7 +288,15 @@ class _RuntimeScreenState extends State<RuntimeScreen>
       }
     }
 
-    await Future.wait([readRuns(), readApprovals()]);
+    Future<void> readEcosystem() async {
+      try {
+        ecosystem = await _data.ecosystem();
+      } catch (error) {
+        ecosystemError = error;
+      }
+    }
+
+    await Future.wait([readRuns(), readApprovals(), readEcosystem()]);
     if (!mounted) return;
     setState(() {
       _loadingExtras = false;
@@ -285,6 +308,13 @@ class _RuntimeScreenState extends State<RuntimeScreen>
       _workRunsError = runsError;
       _approvals = approvals ?? _approvals;
       _approvalsError = approvalsError;
+      // A refused read drops what an earlier key could see; a transport
+      // failure keeps the last reading beside the error.
+      final refused = ecosystemError is SonderException &&
+          const {401, 403}
+              .contains((ecosystemError as SonderException).httpStatus);
+      _ecosystem = ecosystem ?? (refused ? null : _ecosystem);
+      _ecosystemError = ecosystemError;
     });
   }
 
@@ -904,6 +934,26 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     );
   }
 
+  Future<ObservatoryLaunchResult> _launchObservatory(List<String> urls) {
+    final custom = widget.observatoryLauncher;
+    if (custom != null) return custom(urls);
+    return LocalManager.launchObservatory(
+      urls,
+      runtimeUrl: widget.settings.serverUrl,
+      executable: widget.settings.observatoryExecutable,
+      webUrl: widget.settings.observatoryWebUrl,
+    );
+  }
+
+  String? _ecosystemSummary() {
+    final status = _ecosystem?.status;
+    if (status == null) return null;
+    final inference = 'Inference ${status.inferenceState.word}';
+    final export =
+        status.observatory?.exportEnabled == true ? 'export on' : 'export off';
+    return '$inference · $export';
+  }
+
   Future<void> _copy(String text) async {
     await Clipboard.setData(ClipboardData(text: text));
     if (!mounted) return;
@@ -1274,6 +1324,21 @@ class _RuntimeScreenState extends State<RuntimeScreen>
                     ],
                   ],
                   if (info == null) const _OutputText('No status loaded yet.'),
+                ],
+              ),
+              _group(
+                'inference',
+                'Inference & Observatory',
+                summary: _ecosystemSummary(),
+                children: [
+                  EcosystemPanel(
+                    reading: _ecosystem,
+                    error: _ecosystemError,
+                    loading: _loadingExtras,
+                    runtimeUrl: widget.settings.serverUrl,
+                    canStartProcesses: LocalManager.canRunLocalTools,
+                    onLaunch: _launchObservatory,
+                  ),
                 ],
               ),
               _group(

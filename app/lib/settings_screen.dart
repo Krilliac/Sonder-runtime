@@ -215,6 +215,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late final TextEditingController _password;
   late final TextEditingController _launcherUrl;
   late final TextEditingController _launcherToken;
+  late final TextEditingController _observatoryExecutable;
+  late final TextEditingController _observatoryWebUrl;
 
   /// First-admin bootstrap secret: memory only, never in [Settings], cleared
   /// after each use and when this screen goes away (plan P0-9).
@@ -248,6 +250,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _password = TextEditingController();
     _launcherUrl = TextEditingController(text: widget.settings.launcherUrl);
     _launcherToken = TextEditingController(text: widget.settings.launcherToken);
+    _observatoryExecutable =
+        TextEditingController(text: widget.settings.observatoryExecutable);
+    _observatoryWebUrl =
+        TextEditingController(text: widget.settings.observatoryWebUrl);
     _themeMode = widget.settings.themeMode;
     _allowHosted = widget.settings.allowHosted;
     _keepServerRunning = widget.settings.keepServerRunning;
@@ -261,6 +267,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _password,
       _launcherUrl,
       _launcherToken,
+      _observatoryExecutable,
+      _observatoryWebUrl,
     ];
     for (final controller in _trackedControllers) {
       controller.addListener(_markDirty);
@@ -296,6 +304,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _password.dispose();
     _launcherUrl.dispose();
     _launcherToken.dispose();
+    _observatoryExecutable.dispose();
+    _observatoryWebUrl.dispose();
     _bootstrapSecret.clear();
     _bootstrapSecret.dispose();
     super.dispose();
@@ -368,6 +378,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         allowApproximateLocation: _allowApproximateLocation,
         launcherUrl: _launcherUrl.text,
         launcherToken: _launcherToken.text,
+        observatoryExecutable: _observatoryExecutable.text.trim(),
+        observatoryWebUrl: _observatoryWebUrl.text.trim(),
         model: _model.text.trim().isEmpty
             ? Settings.defaultModel
             : _model.text.trim(),
@@ -627,6 +639,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
       );
       return;
     }
+    final observatoryError = s.observatoryConfigurationError;
+    if (observatoryError != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(observatoryError)),
+      );
+      return;
+    }
     // A blank field explicitly replaces a credential that was present when
     // this screen opened. Do not leave an old keychain value usable.
     SettingsSaveResult result;
@@ -681,6 +700,52 @@ class _SettingsScreenState extends State<SettingsScreen> {
         icon: Icon(obscured ? Icons.visibility : Icons.visibility_off),
         onPressed: onPressed,
       );
+
+  /// Where "Open Observatory" on the Runtime page looks (contract 10):
+  /// the executable (desktop only) and the web URL used when none is found.
+  List<Widget> _observatoryGroup(BuildContext context) {
+    final webUrl = _observatoryWebUrl.text.trim();
+    final webError = observatoryWebUrlError(webUrl);
+    final remote =
+        webUrl.isNotEmpty && webError == null && !isLoopbackUrl(webUrl);
+    return [
+      const _GroupLabel('Observatory'),
+      if (LocalManager.canRunLocalTools) ...[
+        TextField(
+          key: const Key('settings-observatory-executable'),
+          controller: _observatoryExecutable,
+          autocorrect: false,
+          decoration: _field(
+            'Observatory executable (optional)',
+            hint: '/usr/local/bin/sonder-observatory',
+            helper: 'Empty uses $observatoryBinEnv, then '
+                '$observatoryExecutableName on PATH.',
+            icon: Icons.insights_outlined,
+          ),
+        ),
+        const SizedBox(height: 16),
+      ],
+      TextField(
+        key: const Key('settings-observatory-web-url'),
+        controller: _observatoryWebUrl,
+        keyboardType: TextInputType.url,
+        autocorrect: false,
+        decoration: _field(
+          'Observatory web URL (optional)',
+          helper: remote
+              ? 'This Observatory is on another host. It can reach only '
+                  'producers on its own loopback, so connect it to a runtime '
+                  'on that host.'
+              : LocalManager.canRunLocalTools
+                  ? 'Opened when no Observatory executable is found. HTTPS off '
+                      'this device; a local preview build is on loopback port 4173.'
+                  : 'Used to build a link to copy; the browser cannot start '
+                      'the Observatory.',
+          icon: Icons.open_in_browser_outlined,
+        ).copyWith(errorText: webError, errorMaxLines: 3),
+      ),
+    ];
+  }
 
   Widget _connectCard(BuildContext context) {
     final tokens = SonderTokens.of(context);
@@ -1098,6 +1163,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ],
                         ),
                       ),
+                      ..._observatoryGroup(context),
                     ],
                   ),
                 ),

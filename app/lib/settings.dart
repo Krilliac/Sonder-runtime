@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'account_session.dart';
+import 'local_manager_models.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -79,6 +80,8 @@ class Settings {
   static const _kAllowApproximateLocation = 'sonder_allow_approximate_location';
   static const _kLauncherUrl = 'sonder_launcher_url';
   static const _kLauncherToken = 'sonder_launcher_token';
+  static const _kObservatoryExecutable = 'sonder_observatory_executable';
+  static const _kObservatoryWebUrl = 'sonder_observatory_web_url';
   static const _credentials = PlatformCredentialStore();
 
   /// Test-only override: widget tests do not load desktop/mobile plugins, and
@@ -112,6 +115,16 @@ class Settings {
   String launcherUrl;
   String launcherToken;
 
+  /// Path of the Sonder Observatory executable (desktop). Empty means
+  /// "use SONDER_OBSERVATORY_BIN, then sonder-observatory on PATH". Not a
+  /// secret: kept in shared preferences.
+  String observatoryExecutable;
+
+  /// Observatory web URL opened when no executable is found. Empty by
+  /// default: the Vite dev port is shared by every Vite project, so the app
+  /// never guesses one.
+  String observatoryWebUrl;
+
   Settings({
     this.serverUrl = 'http://127.0.0.1:11435',
     this.apiKey = '',
@@ -124,6 +137,8 @@ class Settings {
     this.allowApproximateLocation = false,
     this.launcherUrl = '',
     this.launcherToken = '',
+    this.observatoryExecutable = '',
+    this.observatoryWebUrl = '',
   });
 
   bool get isConfigured => serverUrl.trim().isNotEmpty;
@@ -162,6 +177,10 @@ class Settings {
     }
     return null;
   }
+
+  /// Why [observatoryWebUrl] cannot be used, or null.
+  String? get observatoryConfigurationError =>
+      observatoryWebUrlError(observatoryWebUrl);
 
   bool get usesHostLauncher =>
       hasHostLauncher && launcherConfigurationError == null;
@@ -208,6 +227,8 @@ class Settings {
       allowApproximateLocation: p.getBool(_kAllowApproximateLocation) ?? false,
       launcherUrl: p.getString(_kLauncherUrl) ?? '',
       launcherToken: launcherToken,
+      observatoryExecutable: p.getString(_kObservatoryExecutable) ?? '',
+      observatoryWebUrl: p.getString(_kObservatoryWebUrl) ?? '',
     );
   }
 
@@ -307,6 +328,8 @@ class Settings {
     await p.setBool(_kKeepServerRunning, keepServerRunning);
     await p.setBool(_kAllowApproximateLocation, allowApproximateLocation);
     await p.setString(_kLauncherUrl, launcherUrl.trim());
+    await p.setString(_kObservatoryExecutable, observatoryExecutable.trim());
+    await p.setString(_kObservatoryWebUrl, observatoryWebUrl.trim());
     return SettingsSaveResult(
       credentialsStored: stored || !needed,
       memoryOnly: memoryOnly && needed,

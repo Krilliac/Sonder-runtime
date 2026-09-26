@@ -14,6 +14,7 @@ import 'api/stream.dart';
 import 'api/transport.dart';
 import 'api/work_runs.dart';
 import 'models.dart';
+import 'runtime/ecosystem.dart';
 
 // The API layer is split by domain under lib/api/; this file stays the
 // barrel so every `import 'api.dart'` keeps working.
@@ -33,6 +34,7 @@ export 'api/transport.dart'
         newIdempotencyKey;
 export 'api/tools_inventory.dart';
 export 'api/work_runs.dart';
+export 'runtime/ecosystem.dart';
 
 /// Return the catalog spelling of a saved model selector when it still exists.
 ///
@@ -1074,6 +1076,39 @@ class SonderApi implements SonderApiPort {
     } catch (_) {
       throw SonderException('Could not parse system status.');
     }
+  }
+
+  /// The message a 401/403 on an admin-only read shows.
+  static const adminRequiredMessage =
+      'Administrator authorization is required.';
+
+  /// Upper bound on an ecosystem status body; the real one is a few KiB.
+  static const _ecosystemBodyLimit = 256 * 1024;
+
+  /// Sonder Inference and Observatory status (`GET /v1/sonder/ecosystem`,
+  /// `sonder.runtime.ecosystem/1`), bound to the configured host.
+  ///
+  /// Admin-only on the server: 401/403 throw [adminRequiredMessage]. A 404
+  /// (an older runtime, or neither live export nor provider status
+  /// available) is [EcosystemReading.unsupportedRuntime], not an error. A
+  /// payload with another schema is an unsupported-schema reading.
+  Future<EcosystemReading> ecosystemStatus() async {
+    final resp =
+        await _get(_uri('/v1/sonder/ecosystem'), const Duration(seconds: 15));
+    if (resp.statusCode == 401 || resp.statusCode == 403) {
+      throw responseException(resp, adminRequiredMessage)
+          .copyWith(message: adminRequiredMessage);
+    }
+    if (resp.statusCode == 404) {
+      return const EcosystemReading.unsupportedRuntime();
+    }
+    if (resp.statusCode != 200) {
+      throw _failure(resp, action: 'read ecosystem status');
+    }
+    if (resp.bodyBytes.length > _ecosystemBodyLimit) {
+      throw SonderException('Ecosystem status exceeds the response limit.');
+    }
+    return EcosystemReading.parse(decodeJsonObject(resp, 'ecosystem status'));
   }
 
   Future<OllamaPoolPage> ollamaPoolAdminStatus({

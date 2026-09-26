@@ -124,6 +124,57 @@ through Sonder Runtime's bounded authenticated launcher. See
   local server at `http://127.0.0.1:11435` and the assistant response starts
   with a warning that local fallback was used.
 
+## Sonder Inference and Observatory
+
+**Runtime → Inference & Observatory** (rail item **Inference**) reads the
+runtime's admin-only `GET /v1/sonder/ecosystem` (`sonder.runtime.ecosystem/1`)
+on each Runtime refresh and shows:
+
+- the provider bindings: the default generation provider, one chip per tier,
+  and the embedding provider;
+- Sonder Inference's state as a word: **ready**, **degraded**, **unavailable**,
+  **unknown** or **not configured**, with its version, base URL, models and
+  measured identity (backend, model, quantization, context; digests shortened,
+  each with a copy button). A mock backend carries a **SYNTHETIC** chip: its
+  output is not a quality or performance signal;
+- the fallback: without one, requests fail while Sonder Inference is down;
+  with `SONDER_INFERENCE_FALLBACK=ollama`, Ollama serves only requests that
+  never reached Sonder Inference;
+- the runtime's Observatory live export: on or off, subscribers, emitted,
+  dropped and retained events, allowed origins and any warnings (such as a
+  missing CORS origin).
+
+A 401/403 reads "Administrator authorization is required."; a 404 means the
+runtime does not report this status (an older build, or neither live export
+nor provider status is available); a payload with another schema is shown as
+unsupported instead of failing the page. Every state is spoken as text, never
+by colour alone.
+
+To bind Sonder Inference, set `SONDER_MODEL_BACKEND=sonder-inference` (or a
+per-tier `SONDER_<TIER>_PROVIDER`) and `SONDER_INFERENCE_BASE_URL` on the
+runtime host, then restart Sonder Runtime.
+
+**Open Observatory** (desktop) starts Sonder Observatory with one
+`--connect <url>` per URL the runtime published. The executable is, in order:
+**Settings → Observatory executable**, then `SONDER_OBSERVATORY_BIN`, then
+`sonder-observatory` on `PATH`. A configured path that does not exist is
+reported, never skipped. Without an executable, a configured **Observatory web
+URL** opens as `<url>?fixture=0&connect=<url>&connect=<url>` (URL-encoded)
+with `xdg-open`, `open` or `cmd start`; the web URL is unset by default
+(`http://127.0.0.1:4173/` is the Observatory's `npm run preview` address).
+Browser, Android and iOS builds show that link to copy instead. **Copy connect
+URLs** copies the list either way.
+
+The app never passes a token or API key to the Observatory: not in its
+arguments, not in the URL, and credential-like variables (`*TOKEN*`,
+`*API_KEY*`, `*SECRET*`, `*PASSWORD*`, `*CREDENTIAL*`) are removed from the
+environment it starts with. Connect URLs with credentials, a query or a
+fragment are dropped. Launching is disabled while the app talks to a
+non-loopback runtime, because producer telemetry is served on loopback on the
+runtime host. Because no credential is passed, a launched Observatory reads
+the runtime's admin-gated telemetry only in local-open mode on loopback;
+otherwise it asks for a token itself.
+
 ## Download a pre-built app (no toolchain needed)
 
 Every push to `main`, every pull request, and every manual `build-apps` run

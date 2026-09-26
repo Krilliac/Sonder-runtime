@@ -105,6 +105,12 @@ class FakeRuntimeData implements RuntimeDataSource {
 
   /// When set, inventory reads wait on it (a server still discovering).
   Future<void>? toolInventoryGate;
+
+  /// The ecosystem read. The default is what a runtime without the route
+  /// answers (404): the panel's unsupported state.
+  EcosystemReading ecosystemReading;
+  Object? ecosystemError;
+  int ecosystemReads = 0;
   final List<String> cancelled = [];
 
   /// When set, cancel requests wait on it (a slow server).
@@ -126,6 +132,8 @@ class FakeRuntimeData implements RuntimeDataSource {
     this.toolInventoryError,
     this.rediscovered,
     this.rediscoverError,
+    this.ecosystemReading = const EcosystemReading.unsupportedRuntime(),
+    this.ecosystemError,
   }) : runs = runs ?? [];
 
   @override
@@ -178,4 +186,165 @@ class FakeRuntimeData implements RuntimeDataSource {
     if (rediscoverError != null) throw rediscoverError!;
     return rediscovered ?? const ToolInventory();
   }
+
+  @override
+  Future<EcosystemReading> ecosystem() async {
+    ecosystemReads++;
+    if (ecosystemError != null) throw ecosystemError!;
+    return ecosystemReading;
+  }
 }
+
+// Ecosystem payloads built from the integration contract, section 9 (the
+// route) and section 3.6 (each provider's status). They are not captured
+// from a server: the route lands in another lane. The ecosystem e2e parses a
+// real captured payload through SONDER_ECOSYSTEM_JSON instead.
+
+const _digest =
+    '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08';
+
+/// The nine BackendIdentity keys of the mock backend.
+Map<String, dynamic> mockIdentityJson() => {
+      'backend': 'mock',
+      'model': 'mock:tiny',
+      'model_digest': _digest,
+      'quantization': 'none',
+      'backend_version': '0.1.0',
+      'tokenizer_digest': _digest.replaceAll('9', 'a'),
+      'template_digest': _digest.replaceAll('f', 'e'),
+      'context_tokens': 4096,
+      'hardware': 'cpu',
+    };
+
+/// A `provider_status()` entry for Sonder Inference.
+Map<String, dynamic> inferenceStatusJson({
+  String state = 'ready',
+  bool? synthetic = true,
+  bool identity = true,
+  String? fallback,
+  int fallbackCount = 0,
+  String? detail,
+}) =>
+    {
+      'provider': 'sonder_inference',
+      'state': state,
+      'healthy': state == 'ready',
+      'checked_at': '2026-09-25T12:41:25Z',
+      'detail': detail ??
+          (state == 'ready'
+              ? 'ready · mock backend'
+              : 'connection refused: http://127.0.0.1:11437. Start '
+                  'sonder-infer serve, or set SONDER_INFERENCE_BASE_URL.'),
+      'capabilities': ['chat', 'fixed-endpoint'],
+      'base_url': 'http://127.0.0.1:11437',
+      'version': state == 'ready' ? '0.4.0' : null,
+      'api_version': state == 'ready' ? 1 : null,
+      'models': state == 'ready' ? ['mock:tiny'] : <String>[],
+      'synthetic': state == 'ready' ? synthetic : null,
+      'identity': state == 'ready' && identity ? mockIdentityJson() : null,
+      'telemetry': state == 'ready'
+          ? {
+              'discovery_url':
+                  'http://127.0.0.1:11437/.well-known/sonder-telemetry',
+              'sse_url': 'http://127.0.0.1:11437/v1/telemetry/sse',
+              'ndjson_url': 'http://127.0.0.1:11437/v1/telemetry/ndjson',
+            }
+          : null,
+      'fallback': fallback,
+      'fallback_count': fallbackCount,
+    };
+
+/// A `sonder.runtime.ecosystem/1` body. [inference] null leaves Sonder
+/// Inference out of the status map.
+Map<String, dynamic> ecosystemJson({
+  String schema = 'sonder.runtime.ecosystem/1',
+  String provider = 'sonder_inference',
+  Map<String, dynamic>? inference,
+  Map<String, String> fallbacks = const {},
+  bool exportEnabled = true,
+  List<String> warnings = const [],
+  List<String>? connectUrls,
+  List<String> corsOrigins = const ['http://127.0.0.1:4173'],
+  int dropped = 0,
+}) =>
+    {
+      'schema': schema,
+      'generated_at': '2026-09-25T12:41:30Z',
+      'runtime': {
+        'version': '2026.09.25',
+        'instance_id': 'rt-3f9a12c0',
+        'node_id': 'mypc',
+        'base_url': 'http://127.0.0.1:11435',
+      },
+      'providers': {
+        'default_generation_provider': provider,
+        'tier_providers': {
+          for (final tier in ['fast', 'general', 'code', 'reasoning', 'vision'])
+            tier: provider,
+        },
+        'embedding_provider': 'ollama',
+        'fallbacks': fallbacks,
+        'status': {
+          if (inference != null) 'sonder_inference': inference,
+          'ollama': {
+            'provider': 'ollama',
+            'state': 'unknown',
+          },
+        },
+      },
+      'observatory': {
+        'export_enabled': exportEnabled,
+        'runtime_stream': exportEnabled
+            ? {
+                'discovery_url':
+                    'http://127.0.0.1:11435/.well-known/sonder-telemetry',
+                'sse_url': 'http://127.0.0.1:11435/v1/observability/events',
+                'ndjson_url':
+                    'http://127.0.0.1:11435/v1/observability/events?format=ndjson',
+              }
+            : null,
+        'stats': {
+          'subscribers': exportEnabled ? 1 : 0,
+          'emitted_events': exportEnabled ? 1204 : 0,
+          'dropped_events': dropped,
+          'retained_events': exportEnabled ? 512 : 0,
+          'buffer_capacity': 4096,
+        },
+        'cors_origins': corsOrigins,
+        'connect_urls': connectUrls ??
+            [
+              if (exportEnabled) 'http://127.0.0.1:11435',
+              if (inference != null && inference['telemetry'] != null)
+                'http://127.0.0.1:11437',
+            ],
+        'warnings': warnings,
+      },
+      // An unknown field: clients must ignore it.
+      'future_field': {'nested': true},
+    };
+
+/// Sonder Inference ready on the mock backend (synthetic).
+Map<String, dynamic> ecosystemReadySynthetic() =>
+    ecosystemJson(inference: inferenceStatusJson());
+
+/// Sonder Inference bound but down, no fallback.
+Map<String, dynamic> ecosystemUnavailable() =>
+    ecosystemJson(inference: inferenceStatusJson(state: 'unavailable'));
+
+/// Every tier on Ollama: Sonder Inference not configured.
+Map<String, dynamic> ecosystemAllOllama() => ecosystemJson(provider: 'ollama');
+
+/// Sonder Inference down with SONDER_INFERENCE_FALLBACK=ollama.
+Map<String, dynamic> ecosystemFallback() => ecosystemJson(
+      inference: inferenceStatusJson(
+          state: 'unavailable', fallback: 'ollama', fallbackCount: 2),
+      fallbacks: const {'sonder_inference': 'ollama'},
+    );
+
+/// Live export off (SONDER_OBSERVATORY_EXPORT=0), Inference ready.
+Map<String, dynamic> ecosystemExportDisabled() => ecosystemJson(
+    inference: inferenceStatusJson(synthetic: false), exportEnabled: false);
+
+/// A payload from a future major version.
+Map<String, dynamic> ecosystemUnknownSchema() =>
+    ecosystemJson(schema: 'sonder.runtime.ecosystem/2');

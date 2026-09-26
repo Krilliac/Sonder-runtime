@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:sonder_runtime/api.dart';
+import 'package:sonder_runtime/local_manager_models.dart';
 import 'package:sonder_runtime/runtime/overview.dart';
 import 'package:sonder_runtime/runtime/runtime_data.dart';
 import 'package:sonder_runtime/runtime/runtime_screen.dart';
@@ -307,6 +308,68 @@ void main() {
     await tester.tap(find.text('Compute nodes · Details'));
     await tester.pumpAndSettle();
     expect(find.text('Needs an administrator account.'), findsOneWidget);
+  });
+
+  testWidgets('Inference destination opens the ecosystem panel',
+      (tester) async {
+    final data = FakeRuntimeData(
+        ecosystemReading: EcosystemReading.parse(ecosystemReadySynthetic()));
+    final launched = <List<String>>[];
+    tester.view.physicalSize = const Size(1280, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(MaterialApp(
+      theme: SonderTheme.dark,
+      home: RuntimeScreen(
+        settings: Settings(serverUrl: 'http://127.0.0.1:11435'),
+        initialInfo: healthySystemInfo(),
+        liveUpdates: false,
+        dataSource: data,
+        now: runtimeNow,
+        observatoryLauncher: (urls) async {
+          launched.add(urls);
+          return const ObservatoryLaunchResult(
+            ok: true,
+            mode: ObservatoryLaunchMode.executable,
+            message: 'Opened the Observatory with 2 producers.',
+          );
+        },
+      ),
+    ));
+    await tester.pumpAndSettle();
+    expect(data.ecosystemReads, 1);
+    await tester.tap(find.text('Inference').first);
+    await tester.pumpAndSettle();
+    expect(find.text('Inference ready · export on'), findsOneWidget);
+    expect(find.byKey(const Key('ecosystem-panel')), findsOneWidget);
+    expect(find.text('SYNTHETIC'), findsOneWidget);
+    await tester
+        .ensureVisible(find.byKey(const Key('ecosystem-open-observatory')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('ecosystem-open-observatory')));
+    await tester.pumpAndSettle();
+    expect(
+        launched.single, ['http://127.0.0.1:11435', 'http://127.0.0.1:11437']);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('ecosystem 403 keeps the rest of Runtime working',
+      (tester) async {
+    await pumpRuntime(tester,
+        info: healthySystemInfo(),
+        data: FakeRuntimeData(
+            ecosystemError: SonderException(
+                'Administrator authorization is required.',
+                httpStatus: 403)));
+    expect(find.text('Work runs (0)'), findsOneWidget);
+    await tester.scrollUntilVisible(
+        find.byKey(const Key('ecosystem-admin-required')), 300,
+        scrollable: find.byType(Scrollable).first);
+    expect(
+        find.text('Administrator authorization is required.'), findsOneWidget);
   });
 
   testWidgets('Cancel active with nothing running is an info notice',
@@ -624,6 +687,7 @@ void main() {
             '/v1/extensions',
             '/v1/work-runs',
             '/v1/approvals',
+            '/v1/sonder/ecosystem',
           ]));
       expect(find.text('Work runs (1)'), findsOneWidget);
       expect(find.textContaining('none waiting · 1 open'), findsOneWidget);

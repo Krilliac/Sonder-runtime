@@ -1,6 +1,7 @@
 /// Read models and a small HTTP source for the Runtime detail views: work
-/// runs (P1-4), jobs, fanout and compute (P1-10), pending approvals and the
-/// host tool inventory ([ToolInventoryApi]).
+/// runs (P1-4), jobs, fanout and compute (P1-10), pending approvals, the
+/// host tool inventory ([ToolInventoryApi]) and the Sonder Inference /
+/// Observatory ecosystem status.
 ///
 /// Work runs and approvals use lane A's DTOs and clients ([WorkRun],
 /// [WorkRunsApi], [PendingApproval], [IssuedApproval], [ApprovalsApi]); this
@@ -155,6 +156,10 @@ abstract interface class RuntimeDataSource {
 
   /// `POST /v1/tools/inventory/refresh`: rediscover host tools (admin).
   Future<ToolInventory> refreshToolInventory();
+
+  /// `GET /v1/sonder/ecosystem` (admin). A 404 is an unsupported-runtime
+  /// reading; 401/403 throw [SonderApi.adminRequiredMessage].
+  Future<EcosystemReading> ecosystem();
 }
 
 /// Direct HTTP reads bound to the configured server only (no fallback).
@@ -301,4 +306,11 @@ class HttpRuntimeDataSource implements RuntimeDataSource {
   @override
   Future<ToolInventory> refreshToolInventory() =>
       ToolInventoryApi(_endpoint, timeout: toolInventoryTimeout).refresh();
+
+  @override
+  Future<EcosystemReading> ecosystem() => SonderApi(
+        baseUrl: baseUrl,
+        apiKey: apiKey,
+        accountSession: accountSession,
+      ).ecosystemStatus();
 }

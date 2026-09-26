@@ -60,4 +60,31 @@ class LocalManager {
       const LocalActionResult(false, unavailableMessage);
   static Future<LocalActionResult> updateFromGit() async =>
       const LocalActionResult(false, unavailableMessage);
+
+  /// A browser cannot start processes: this returns the unavailable result
+  /// with the Observatory web URL to copy, when one is configured (contract
+  /// section 10). [executable] is accepted so callers compile on both
+  /// platforms; a browser never uses it.
+  static Future<ObservatoryLaunchResult> launchObservatory(
+    List<String> connectUrls, {
+    String runtimeUrl = '',
+    String executable = '',
+    String webUrl = '',
+  }) async {
+    final urls = observatoryConnectUrls(connectUrls);
+    final blocked =
+        observatoryLaunchBlocked(runtimeUrl: runtimeUrl, connectUrls: urls);
+    if (blocked != null) return blocked;
+    final url = observatoryWebLaunchUrl(webUrl, urls) ?? '';
+    return ObservatoryLaunchResult(
+      ok: false,
+      mode: ObservatoryLaunchMode.unavailable,
+      message: url.isEmpty
+          ? 'The browser cannot start the Observatory. Set an Observatory web '
+              'URL in Settings to get a link, or copy the connect URLs.'
+          : 'The browser cannot start the Observatory. Copy this link and '
+              'open it in a new tab.',
+      url: url,
+    );
+  }
 }
