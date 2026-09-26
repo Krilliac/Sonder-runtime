@@ -7,7 +7,9 @@ It never touches the filesystem.  This adapter is the native half: it performs
 the operation without trusting any pathname below the authorized root.
 
 The walk opens the authorized root, then every intermediate component with
-``O_DIRECTORY | O_NOFOLLOW`` relative to the previous directory descriptor,
+``O_DIRECTORY | O_NOFOLLOW`` (plus ``O_PATH`` on Linux, so a parent needs only
+search permission, as for a pathname delete) relative to the previous
+directory descriptor,
 so a symlink swapped into a parent component after the caller's preflight is
 refused by the kernel (``ELOOP``/``ENOTDIR``) instead of being followed.  The
 final component is inspected with ``fstatat(..., AT_SYMLINK_NOFOLLOW)`` and
@@ -94,6 +96,31 @@ def _directory_flags() -> int:
     )
 
 
+def _anchor_flags() -> int:
+    """Flags for the root and intermediate components of the walk.
+
+    Those descriptors are only ever used as ``dir_fd`` anchors (``openat``,
+    ``fstatat``, ``unlinkat``, ``rmdir``) and for ``fstat``, never listed, so
+    on Linux they are opened with ``O_PATH``: like a pathname delete, the walk
+    then needs only search permission on each parent, not read permission.
+    ``O_DIRECTORY | O_NOFOLLOW`` still makes the kernel refuse a symlink
+    component (``ENOTDIR``).  Hosts without ``O_PATH`` fall back to
+    ``O_RDONLY``, which additionally requires read permission on every
+    component.  Directories that a recursive delete lists with ``scandir``
+    always need ``O_RDONLY``.
+    """
+
+    o_path = getattr(os, "O_PATH", 0)
+    if not o_path:
+        return _directory_flags()
+    return (
+        o_path
+        | os.O_DIRECTORY
+        | os.O_NOFOLLOW
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+
+
 def _require_component(name: str) -> None:
     if not name or name in {".", ".."} or "/" in name or "\0" in name:
         raise RaceResistanceError("unsafe path component in destructive intent")
@@ -112,7 +139,7 @@ def _target_anchor(target: OpenIntent | DestructiveTarget) -> tuple[Path, tuple[
 def _open_parent(root: Path, parents: tuple[str, ...]) -> int:
     """Open ``root/parents...`` one no-follow component at a time."""
 
-    flags = _directory_flags()
+    flags = _anchor_flags()
     fd = os.open(str(root), flags)
     try:
         for part in parents:

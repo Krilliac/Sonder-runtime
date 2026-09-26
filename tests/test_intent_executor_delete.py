@@ -352,3 +352,65 @@ def test_executor_refuses_a_nested_symlink_without_partial_removal(tmp_path):
 
     assert first.read_text(encoding="utf-8") == "keep"
     assert outside.is_dir()
+
+
+_UNPRIVILEGED_UID = 65534
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_DELETE_AS_CHILD = """
+import os, sys
+from pathlib import Path
+from sonder_runtime.adapters.filesystem import intent_executor
+from sonder_runtime.application.security.race_resistant_paths import build_open_intent
+root, target = Path(sys.argv[1]), Path(sys.argv[2])
+intent_executor.execute_delete(
+    build_open_intent(target, [root], "delete"), expected=os.lstat(target)
+)
+"""
+
+
+@pytest.mark.skipif(not hasattr(os, "O_PATH"), reason="O_PATH anchors are Linux-only")
+def test_delete_needs_only_search_permission_on_intermediate_directories():
+    import shutil
+    import subprocess
+    import tempfile
+
+    # World-traversable so an unprivileged child can reach the tree; as root
+    # the delete runs as an unprivileged uid, because root bypasses the
+    # directory read check under test.
+    base = Path(tempfile.mkdtemp(prefix="sonder-opath-"))
+    as_root = os.geteuid() == 0
+    root = base / "root"
+    dropbox = root / "dropbox"
+    try:
+        os.chmod(base, 0o755)
+        dropbox.mkdir(parents=True)
+        os.chmod(root, 0o755)
+        target = dropbox / "f.txt"
+        target.write_text("x", encoding="utf-8")
+        if as_root:
+            os.chown(dropbox, _UNPRIVILEGED_UID, _UNPRIVILEGED_UID)
+            os.chown(target, _UNPRIVILEGED_UID, _UNPRIVILEGED_UID)
+        # Write and search, but no read: the directory cannot be listed.
+        os.chmod(dropbox, 0o300)
+        drop = (
+            {"user": _UNPRIVILEGED_UID, "group": _UNPRIVILEGED_UID, "extra_groups": []}
+            if as_root
+            else {}
+        )
+
+        completed = subprocess.run(
+            [sys.executable, "-c", _DELETE_AS_CHILD, str(root), str(target)],
+            cwd=str(base),
+            env={**os.environ, "PYTHONPATH": str(_REPO_ROOT)},
+            capture_output=True,
+            text=True,
+            timeout=60,
+            **drop,
+        )
+
+        assert completed.returncode == 0, completed.stderr
+        assert not os.path.lexists(target)
+    finally:
+        if dropbox.exists():
+            os.chmod(dropbox, 0o700)
+        shutil.rmtree(base)

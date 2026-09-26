@@ -28,7 +28,12 @@ opens the authorized root with `O_DIRECTORY | O_NOFOLLOW`, walks every
 intermediate component with `os.open(part, O_DIRECTORY | O_NOFOLLOW,
 dir_fd=parent)`, inspects the final component with
 `os.stat(..., dir_fd=..., follow_symlinks=False)`, and removes it with
-`os.unlink(..., dir_fd=...)`. A directory is emptied through descriptors
+`os.unlink(..., dir_fd=...)`. On Linux the root and intermediate descriptors
+add `O_PATH`, so, as with a pathname delete, each parent needs only search and
+(for the final parent) write permission; a write-only drop-box directory still
+works. Hosts without `O_PATH` open them `O_RDONLY`, which additionally needs
+read permission on every component; directories a recursive delete must list
+always need it. A directory is emptied through descriptors
 opened the same way (`os.scandir(fd)`, `os.rmdir(..., dir_fd=...)`), with each
 child directory's descriptor identity compared with the `lstat` taken just
 before it was opened. A symlink appearing in any component, at the final
@@ -67,5 +72,5 @@ Evidence: `tests/test_remaining_race_resistance.py` (contract) and
 `tests/test_intent_executor_delete.py` (Linux: symlink swapped into an
 intermediate component after preflight, symlink and directory rebinding during
 a recursive walk, target replacement, in-root-only deletion, over-deep and
-symlinked trees refused with nothing removed, and fail-closed capability
-checks).
+symlinked trees refused with nothing removed, deletion under a search-only
+parent run as an unprivileged uid, and fail-closed capability checks).
