@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import platform
 import shutil
 import subprocess
@@ -31,6 +32,23 @@ MCPSERVER_IMPORT_PROBE = (
     "from mcp.server.mcpserver.tools import ToolManager; "
     "print(MCPServer.__name__, ToolManager.__name__)"
 )
+
+
+def _planner_size_for(requested: str) -> str:
+    """Map a requested model tag to a planner size bucket.
+
+    Matches the parameter token exactly (``:7b``, ``-7b``), never as a
+    substring, so ``27b`` is not planned as ``7b`` and the ``a3b`` active
+    parameter suffix of an MoE tag is not planned as ``3b``. Sizes outside
+    the planner's buckets fall back to ``auto``. An explicit tag takes
+    precedence over size tokens in the repository name.
+    """
+    candidate = requested.rsplit(":", 1)[-1].strip().lower()
+    match = re.search(r"(?:^|[:\-_/])(\d+(?:\.\d+)?)b(?![a-z0-9])", candidate)
+    if not match:
+        return "auto"
+    size = match.group(1) + "b"
+    return size if size in ("1.5b", "3b", "7b") else "auto"
 
 
 def _run(cmd, check=False, env=None, cwd=None, **kwargs):
@@ -298,11 +316,7 @@ def main(argv=None):
     requested = args.model.strip() or os.environ.get("SONDER_BASE_MODEL", "").strip()
     if requested.lower() == "auto":
         requested = ""
-    requested_size = "auto"
-    for size in ("1.5b", "3b", "7b"):
-        if size in requested.lower():
-            requested_size = size
-            break
+    requested_size = _planner_size_for(requested)
     plan = adaptive_training.build_plan(
         hardware,
         adaptive_training.PlanOptions(

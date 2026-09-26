@@ -3082,7 +3082,7 @@ def _goal_command(arg: str, request_owner: str = "") -> str:
                 "/goal decline <id>)"
             )
         if action == "adopt":
-            return "adopted\n" + _fmt(goal_store.adopt(rest, actor="user"))
+            return "adopted\n" + _format_goal(goal_store.adopt(rest, actor="user"))
         if action == "decline":
             goal = goal_store.decline(rest, actor="user")
             return "declined proposal %s" % goal["id"]
