@@ -266,9 +266,12 @@ tool through the same gate), `SONDER_EXECUTION_RISK_POLICY` selects `off`,
 `risk_policy` can make enforcement stricter but never weaker than the operator
 setting. Under a `deny-*` mode on Linux, `.py` and `.sh` scripts are copied
 into a sealed memfd, inspected from that copy, and executed from the same
-descriptor, so a file swapped after the scan cannot change what runs (bash
-sees `$0` as `/proc/self/fd/N`; Python keeps its usual `__file__`, `argv[0]`
-and `sys.path[0]`). Other runners, and every launch on Windows and macOS,
+descriptor, so swapping the entry script after the scan cannot change the
+entry script's bytes that run (Python keeps its usual `__file__`, `argv[0]`
+and `sys.path[0]`; bash sees `$0` as `/proc/self/fd/N`). Only the entry
+script is covered: modules it imports and files it sources are neither
+inspected nor sealed, and a shell script that finds siblings through `$0` or
+`BASH_SOURCE` will not find them under `/proc/self/fd/`. Other runners, and every launch on Windows and macOS,
 still refuse enforcing modes, including a below-threshold file, because the
 runner cannot guarantee that the interpreter reads the inspected bytes.
 `report` is advisory.

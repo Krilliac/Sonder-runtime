@@ -148,14 +148,21 @@ tier-3 in change control). Sources: `SECURITY.md` mitigation list,
 
 ### Execution surface
 
-- `script_run` applies `SONDER_EXECUTION_RISK_POLICY` (default `report`;
-  operators may set `deny-high` / `deny-medium` / `deny-unknown`). A caller may
-  **strengthen but never weaken** the configured policy. Enforcing `deny-*`
-  modes currently **fail closed for every launch** because a portable exact
-  inspected-handle-to-interpreter handoff is not yet available — this is
-  deliberate (avoids a pathname-swap TOCTOU bypass) and labelled defense in
-  depth, **not an OS sandbox**. Do not "fix" deny modes by launching from the
-  inspected pathname.
+- `script_run` and the native MCP `run_script` tool apply
+  `SONDER_EXECUTION_RISK_POLICY` through one gate,
+  `artifact_risk.run_script_under_policy` (default `report`; operators may set
+  `deny-high` / `deny-medium` / `deny-unknown`). A caller may **strengthen but
+  never weaken** the configured policy. Under enforcing `deny-*` modes on
+  Linux, `.py` and `.sh` scripts are copied through the guarded no-follow
+  handle into a sealed memfd, inspected from that copy, and executed from the
+  same descriptor; every other runner, and every launch on Windows and macOS,
+  **fails closed** (`exact_execution_handoff_unavailable`) because no exact
+  inspected-bytes-to-interpreter handoff exists there. Only the entry script's
+  bytes are sealed, not files it imports or sources. This is defense in depth,
+  **not an OS sandbox**. Do not "fix" deny modes by launching from the
+  inspected pathname, and do not add a script launch surface that bypasses
+  `run_script_under_policy`. `run_program`/`workspace_run` (argv launches) are
+  outside this gate.
 - Process inspection (Windows-only): one exact PID, read/query rights only,
   returns fixed indicator names/counts and aggregate accounting — never command
   lines, module paths, addresses, strings, or memory bytes. No debug
@@ -306,7 +313,7 @@ is a blocker:
 3. Does it **silence a redaction failure** or log/store the original value
    when redaction returns `[REDACTION_FAILED]`?
 4. Does it convert **fail-closed to fail-open** — e.g. make `deny-*` execution
-   modes launch, label an incomplete artifact scan clean, let unsafe-lab
+   modes launch by pathname or without the sealed-copy handoff, label an incomplete artifact scan clean, let unsafe-lab
    activation proceed on a validation exception, or accept a near-miss
    acknowledgement string?
 5. Does it raise a ceiling (`MAX_*` in `file_ops.py` / `web_tools.py`) or

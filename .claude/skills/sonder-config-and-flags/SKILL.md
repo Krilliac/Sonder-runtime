@@ -227,7 +227,7 @@ its own clamp or fallback).
 |---|---|---|
 | `SONDER_UNSAFE_LAB_ACK` | Must **exactly** equal the 132-character sentence in `SECURITY.md` ("I UNDERSTAND SONDER UNSAFE LAB MODE GIVES MODELS UNRESTRICTED HOST TOOL ACCESS AND I AM RUNNING IN A DISPOSABLE ISOLATED ENVIRONMENT"). Truthy/abbreviated/whitespace-modified values are refused. Even with the exact string, activation is refused when `SONDER_HOST` is non-loopback, when the process is elevated/root, when `SONDER_ALLOW_CLOUD` is on, or when `OLLAMA_HOST` is non-loopback. The typed loader validates this against the final effective host including `--set` overrides. | `platform/unsafe_lab_policy.py:12-16`, `87-111`; `config.py:669-674`; `SECURITY.md:121-132` |
 | `SONDER_UNSAFE_LAB_AUDIT_PATH` | Overrides the durable activation audit trail, default `$SONDER_HOME/audit/unsafe-lab.jsonl` | `adapters/security/unsafe_lab.py:21`, `SECURITY.md:130-132` |
-| `SONDER_EXECUTION_RISK_POLICY` | `report` (default) \| `deny-high` \| `deny-medium` \| `deny-unknown`. Per `SECURITY.md:79-85`, the `deny-*` modes currently fail closed for **every** launch because a portable exact inspected-handle-to-interpreter handoff is not yet available — this is deliberate, avoiding a pathname-swap bypass; `report` remains advisory. | `adapters/artifact_risk.py:415-418` |
+| `SONDER_EXECUTION_RISK_POLICY` | `report` (default) \| `deny-high` \| `deny-medium` \| `deny-unknown`; applies to `script_run` and the native `run_script` tool. Per `SECURITY.md:101-120`, under `deny-*` on Linux `.py`/`.sh` scripts run from a sealed memfd copy of the inspected bytes (entry script only, not imported/sourced files); every other runner, and every launch on Windows and macOS, fails closed (`exact_execution_handoff_unavailable`) to avoid a pathname-swap bypass. `report` remains advisory. | `adapters/artifact_risk.py:433-441`, `609-629` |
 | `SONDER_PROCESS_INSPECTION` | Must equal `enabled:bounded-read-only` to allow the bounded read-only process/memory scanner; anything else keeps it disabled | `adapters/process_risk.py:17-18`, `SECURITY.md:86-91` |
 | `SONDER_UPDATE_ALLOW_UNSIGNED` | `=1` plus the `--allow-unverified` CLI flag are both required to apply an unsigned update; never production | `adapters/updates/service.py:758-776`, `__main__.py:955-957` |
 
@@ -347,5 +347,6 @@ python -m sonder_runtime config --json                          # live effective
 
 Volatile facts most likely to drift: the default port (11435), the tier
 defaults (`sonder:latest`, `nomic-embed-text`), the `deny-*` execution-risk
-fail-closed behavior (explicitly temporary per `SECURITY.md:82-85`), and the
+behavior (Linux sealed-memfd `.py`/`.sh` handoff, fail-closed elsewhere, per
+`SECURITY.md:101-120`), and the
 ADR-003 plan to replace `SONDER_UNSAFE_LAB_ACK` with startup flags.

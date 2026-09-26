@@ -102,8 +102,8 @@ Mitigations that are already in place and worth knowing about:
   apply `SONDER_EXECUTION_RISK_POLICY` through one gate
   (`artifact_risk.run_script_under_policy`) before launching an exact guarded
   script. `run_program`, which launches an argv rather than an inspectable
-  script file, is not covered by this gate. The default is `report`; operators may choose `deny-high`,
-  `deny-medium`, or `deny-unknown`. A caller may strengthen but cannot weaken
+  script file, is not covered by this gate. The default is `report`;
+  operators may choose `deny-high`, `deny-medium`, or `deny-unknown`. A caller may strengthen but cannot weaken
   the configured policy. Under an enforcing `deny-*` mode on Linux, a `.py` or
   `.sh` script is read once through the guarded no-follow handle into a memfd
   sealed against writes, growth and shrinking; the sealed copy is what is
@@ -116,7 +116,8 @@ Mitigations that are already in place and worth knowing about:
   (`exact_execution_handoff_unavailable`). `report` remains advisory. This
   avoids a pathname-swap bypass and is defense in depth, not an OS sandbox:
   the exact handoff covers the entry script's bytes, not files it imports or
-  sources.
+  sources, and a shell script that locates siblings through `$0` or
+  `BASH_SOURCE` resolves them under `/proc/self/fd/` and will not find them.
 - Process inventory and memory-risk inspection are disabled unless the operator
   sets `SONDER_PROCESS_INSPECTION=enabled:bounded-read-only`. The Windows-only
   scanner requests read/query rights for one exact PID and returns only fixed
