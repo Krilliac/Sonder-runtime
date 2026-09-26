@@ -118,8 +118,12 @@ def _web_search_action(match):
 
 
 def _weather_action(match):
-    """Keep a follow-on request in the normal agent path."""
-    arg = (match.group("arg") or "").strip()
+    """Keep a follow-on request in the normal agent path.
+
+    The bare ``weather``/``forecast`` rule has no ``arg`` group; it routes to
+    ``/weather`` so the command's own usage line asks for a place.
+    """
+    arg = (match.groupdict().get("arg") or "").strip()
     if re.search(
         r"\b(?:and|then)\s+(?:tell|show|explain|describe|recommend|"
         r"suggest|say|summarize|search|fetch|open|run|check)\b",
@@ -127,7 +131,7 @@ def _weather_action(match):
         re.I,
     ):
         return None
-    return ("/weather %s" % arg).strip() if arg else None
+    return ("/weather %s" % arg).strip()
 
 
 _TEST_RUNNER_WORDS = {

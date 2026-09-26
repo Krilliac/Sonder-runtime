@@ -61,6 +61,7 @@ These complete turns each map to a single safe, read-only command:
 | `show installed tools` / `tool inventory` | `/tools` | categorized host tool inventory |
 | `show permissions` | `/permissions` | active policy |
 | `what can you do` | `/help` | command help |
+| `weather` / `forecast` | `/weather` | usage line asking for a city or ZIP |
 | `what version are you` / `sonder version` | `/version` | runtime version and release stamp |
 | `help with the todo command` / `what does /compact do` | `/help <name>` | one command's contract |
 
