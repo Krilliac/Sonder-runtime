@@ -21,7 +21,7 @@ import types
 import pytest
 
 from tests.repl.fake_ollama import FakeOllama
-from tests.repl.pty_harness import ROOT, base_env
+from tests.repl.repl_env import ROOT, base_env
 
 import server
 import sonder_runtime.interfaces.repl.repl as sonder_repl
@@ -288,3 +288,29 @@ def test_skip_notice_never_offers_to_recall_a_credential_answer(monkeypatch, rep
     secret = S.strip_ansi(sonder_repl._refusal_notice("/runtime status", "skipped /runtime"))
     assert "hunter2" not in secret and "recall" not in secret
     assert "your /login was not run" in secret
+
+
+def test_pty_screen_dependencies_are_pinned_and_kept_out_of_the_piped_contracts():
+    """CI installs only requirements-dev.txt, so the pty stack must be in it.
+
+    The piped contracts import their environment from ``repl_env``, which
+    must stay free of pexpect/pyte so it collects on Windows too.
+    """
+    import ast
+
+    lines = [
+        line.strip()
+        for line in (ROOT / "requirements-dev.txt").read_text(encoding="utf-8").splitlines()
+    ]
+    assert 'pexpect==4.9.0; sys_platform != "win32"' in lines
+    assert 'pyte==0.8.2; sys_platform != "win32"' in lines
+
+    for name in ("repl_env.py", "test_repl_contracts.py"):
+        tree = ast.parse((ROOT / "tests" / "repl" / name).read_text(encoding="utf-8"))
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module)
+        assert not imported & {"pexpect", "pyte", "tests.repl.pty_harness"}, name

@@ -56,6 +56,11 @@ python scripts/check_history_privacy.py --json
 python -m pytest -q -n auto --dist load --durations=25
 ```
 
+`requirements-dev.txt` also pins `pexpect` and `pyte` on every non-Windows
+platform: the REPL screen tests under `tests/repl` drive the real REPL in a
+pseudo-terminal and fail (rather than skip) if either is missing. On Windows
+they skip as a platform decision; the piped REPL contracts still run there.
+
 `-n auto` picks worker count from local CPU count, same as `pytest-xdist` does
 on the runner; it will differ from CI's if your machine doesn't have 4 cores,
 but the tests themselves don't depend on the exact count. A run that fails in

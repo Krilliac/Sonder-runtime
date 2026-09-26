@@ -11,13 +11,19 @@ components. Each step's screen is compared with
 
 from __future__ import annotations
 
+import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 
-pexpect = pytest.importorskip("pexpect")
-pytest.importorskip("pyte")
+if sys.platform == "win32":
+    pytest.skip("needs a POSIX pty", allow_module_level=True)
+
+# requirements-dev.txt pins pexpect and pyte on every non-Windows platform, so
+# a missing module here is an environment regression and must fail loudly.
+import pexpect  # noqa: E402,F401
+import pyte  # noqa: E402,F401
 
 from tests.repl import pty_harness  # noqa: E402
 from tests.repl.fake_ollama import FakeOllama  # noqa: E402
@@ -27,7 +33,6 @@ from tests.repl.pty_harness import (  # noqa: E402
 
 pytestmark = [
     pytest.mark.integration,
-    pytest.mark.skipif(not hasattr(pexpect, "spawn"), reason="needs a POSIX pty"),
 ]
 
 LAUNCH = Path(__file__).resolve().parent / "_repl_launch_build.py"
