@@ -164,11 +164,16 @@ class HttpRuntimeDataSource implements RuntimeDataSource {
   final AccountSession? accountSession;
   final Duration timeout;
 
+  /// Host tool inventory reads and Rediscover: either may run a full server
+  /// discovery, so they get the longer [defaultToolInventoryTimeout].
+  final Duration toolInventoryTimeout;
+
   const HttpRuntimeDataSource({
     required this.baseUrl,
     this.apiKey = '',
     this.accountSession,
     this.timeout = const Duration(seconds: 20),
+    this.toolInventoryTimeout = defaultToolInventoryTimeout,
   });
 
   Uri _uri(String path, [Map<String, String>? query]) {
@@ -290,9 +295,10 @@ class HttpRuntimeDataSource implements RuntimeDataSource {
 
   @override
   Future<ToolInventory> toolInventory({String? category}) =>
-      ToolInventoryApi(_endpoint, timeout: timeout).get(category: category);
+      ToolInventoryApi(_endpoint, timeout: toolInventoryTimeout)
+          .get(category: category);
 
   @override
   Future<ToolInventory> refreshToolInventory() =>
-      ToolInventoryApi(_endpoint, timeout: timeout).refresh();
+      ToolInventoryApi(_endpoint, timeout: toolInventoryTimeout).refresh();
 }

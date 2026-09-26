@@ -206,7 +206,9 @@ The Flutter app reads these routes in Runtime > Host tools
 (`app/lib/api/tools_inventory.dart`, `app/lib/runtime/host_tools_panel.dart`).
 It loads the list only when the section's Details disclosure opens, shows 401
 and 403 as "Needs an administrator account", shows 429 as a warning with
-Retry, and on 413 asks for a category. The app's test fixtures
+Retry, and on 413 asks for a category. Both routes get a 90 s client timeout,
+because a GET also runs a full discovery on first use and after the refresh
+window. The app's test fixtures
 (`app/test/fixtures/server/tool_inventory_*.json`) come from this facade and
 `serve.py`, and `tests/test_app_tool_inventory_fixtures.py` fails when they
 drift from the wire format.

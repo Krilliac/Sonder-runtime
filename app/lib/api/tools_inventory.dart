@@ -287,17 +287,23 @@ class ToolInventory {
 }
 
 /// Client for the inventory routes.
+/// Default [ToolInventoryApi.timeout]: comfortably above the server's
+/// discovery bound, since a GET can discover as well as a refresh.
+const defaultToolInventoryTimeout = Duration(seconds: 90);
+
 class ToolInventoryApi {
   final SonderEndpoint endpoint;
-  final Duration timeout;
 
-  /// Rediscovery runs every version probe, so it gets a longer budget.
-  final Duration refreshTimeout;
+  /// Budget for either route. Both may run a full discovery (every version
+  /// probe): Rediscover always does, and the server's GET discovers on first
+  /// use and whenever its snapshot is older than the refresh window. Server
+  /// discovery is bounded at about 35 s (30 s budget, 3 s probe timeout, 2 s
+  /// backstop), so a short read timeout would fail while it is still working.
+  final Duration timeout;
 
   const ToolInventoryApi(
     this.endpoint, {
-    this.timeout = const Duration(seconds: 20),
-    this.refreshTimeout = const Duration(seconds: 90),
+    this.timeout = defaultToolInventoryTimeout,
   });
 
   SonderException _error(SonderException error) {
@@ -330,10 +336,7 @@ class ToolInventoryApi {
             ? await requestGet(uri,
                 headers: headers, timeout: timeout, cancel: cancel)
             : await requestPost(uri,
-                headers: headers,
-                body: '{}',
-                timeout: refreshTimeout,
-                cancel: cancel);
+                headers: headers, body: '{}', timeout: timeout, cancel: cancel);
       } on SonderException {
         rethrow;
       } catch (error) {

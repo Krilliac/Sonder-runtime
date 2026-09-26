@@ -1,6 +1,8 @@
 // ToolInventoryApi against the server's own tool inventory bodies
 // (test/fixtures/server/tool_inventory_*.json, produced by
 // tests/test_app_tool_inventory_fixtures.py from the real facade).
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:sonder_runtime/api.dart';
@@ -172,5 +174,50 @@ void main() {
     expect(inventory.byCategory.single.$1, 'quantum');
     expect(hostToolCategoryLabel('quantum'), 'quantum');
     expect(hostToolCategoryLabel('vcs'), 'Version control');
+  });
+  // GET discovers on first use and after the refresh window, which the
+  // server bounds at about 35 s; the read must outlast that, not fail at 20 s.
+  // testWidgets runs on fake time, so the waits cost nothing.
+  testWidgets('a GET that discovers gets the discovery budget', (tester) async {
+    Future<http.Response> slow(http.BaseRequest _) async {
+      await Future<void>.delayed(const Duration(seconds: 35));
+      return fixtureResponse('tool_inventory_compiler_200.json', 200);
+    }
+
+    for (final read in <Future<ToolInventory> Function()>[
+      () => const ToolInventoryApi(_endpoint).get(),
+      () => const HttpRuntimeDataSource(baseUrl: _base)
+          .toolInventory(category: 'compiler'),
+      () => const HttpRuntimeDataSource(baseUrl: _base).refreshToolInventory(),
+    ]) {
+      ToolInventory? inventory;
+      Object? failure;
+      unawaited(recordClients(() async {
+        try {
+          inventory = await read();
+        } catch (error) {
+          failure = error;
+        }
+      }, slow));
+      await tester.pump(const Duration(seconds: 36));
+      expect(failure, isNull);
+      expect(inventory?.tools, hasLength(2));
+    }
+  });
+
+  testWidgets('the discovery budget still ends a read that never answers',
+      (tester) async {
+    Object? failure;
+    unawaited(recordClients(() async {
+      try {
+        await const ToolInventoryApi(_endpoint).get();
+      } catch (error) {
+        failure = error;
+      }
+    }, (_) => Completer<http.Response>().future));
+    await tester.pump(defaultToolInventoryTimeout - const Duration(seconds: 1));
+    expect(failure, isNull);
+    await tester.pump(const Duration(seconds: 2));
+    expect(failure, isA<SonderException>());
   });
 }
