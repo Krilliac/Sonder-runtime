@@ -11012,7 +11012,7 @@ def _record_outcome_signal(interaction_id: str, signal: str) -> None:
 
 
 def _feed_grounded_outcome(name, ok, output, args=None, project=None, run_id="",
-                           evidence=None) -> None:
+                           evidence=None):
     """Attribute execution evidence to the work it judges.
 
     `evidence` is the verifier's own result dict, when the caller has one.
@@ -11046,6 +11046,9 @@ def _feed_grounded_outcome(name, ok, output, args=None, project=None, run_id="",
     both unscoped -- can otherwise have a verification from one run match the
     newest pending generation from the OTHER run. Direct MCP calls pass
     nothing here, which is unchanged from before this parameter existed.
+
+    Returns ``grounded_outcomes.attribute``'s report when ``name`` is a
+    verifier, and None otherwise (or when the bookkeeping itself failed).
     """
     if project is None:
         project = ""
@@ -11082,7 +11085,7 @@ def _feed_grounded_outcome(name, ok, output, args=None, project=None, run_id="",
                 rendered = grounded_outcomes.rendered_verdict(output)
                 if rendered is not None:
                     verdict = rendered
-            grounded_outcomes.attribute(
+            return grounded_outcomes.attribute(
                 name, verdict, project, record_fn=_record_outcome_signal,
                 run_id=run_id,
                 evidence=evidence if evidence is not None else output,
@@ -11090,14 +11093,18 @@ def _feed_grounded_outcome(name, ok, output, args=None, project=None, run_id="",
     except Exception:
         # Bookkeeping must never break the run it is observing.
         pass
+    return None
 
 
-# job id -> resolved project root of the typed ``build_job`` that started it,
-# so a later ``build_job_result`` (which names only the job) is attributed
-# within the same project. Bounded; an unknown job attributes unscoped.
-_TYPED_BUILD_JOB_PROJECTS: dict[str, str] = {}
-_TYPED_BUILD_JOB_PROJECTS_MAX = 256
-_TYPED_BUILD_JOB_PROJECTS_LOCK = threading.Lock()
+# job id -> [resolved project root of the typed ``build_job`` that started it,
+# whether that job's terminal report was already attributed]. A later
+# ``build_job_result`` (which names only the job) is attributed within the
+# same project, and one job's verdict is attributed once whichever tool
+# returned it: re-reading a finished job is not new execution evidence.
+# Bounded; a job id this process never saw start attributes nothing.
+_TYPED_BUILD_JOBS: dict[str, list] = {}
+_TYPED_BUILD_JOBS_MAX = 256
+_TYPED_BUILD_JOBS_LOCK = threading.Lock()
 
 
 def _typed_build_project(arguments) -> str:
@@ -11122,6 +11129,10 @@ def _typed_receipt_outcome(request, receipt) -> None:
     verdict comes from the report's terminal status
     (``grounded_outcomes.typed_build_verdict``); a running job, a
     cancellation or a refused call is not evidence and records nothing.
+    Each build job's verdict is attributed at most once (``build_job`` may
+    already return the finished report that a later ``build_job_result``
+    re-reads), and a ``build_job_result`` for a job this process did not see
+    start is not attributed, since nothing scopes it to a project.
     """
     name = str(getattr(request, "tool_name", "") or "")
     if name not in grounded_outcomes.TYPED_BUILD_VERIFIERS or not getattr(receipt, "success", False):
@@ -11133,19 +11144,34 @@ def _typed_receipt_outcome(request, receipt) -> None:
     if not isinstance(payload, dict):
         return
     arguments = dict(getattr(request, "arguments", None) or {})
-    with _TYPED_BUILD_JOB_PROJECTS_LOCK:
+    verdict, _reason = grounded_outcomes.typed_build_verdict(payload)
+    with _TYPED_BUILD_JOBS_LOCK:
         if name == "build_job":
-            project = _typed_build_project(arguments)
             job_id = str(payload.get("job_id") or "")
+            project = _typed_build_project(arguments)
+            entry = [project, False]
             if job_id:
-                _TYPED_BUILD_JOB_PROJECTS.pop(job_id, None)
-                _TYPED_BUILD_JOB_PROJECTS[job_id] = project
-                while len(_TYPED_BUILD_JOB_PROJECTS) > _TYPED_BUILD_JOB_PROJECTS_MAX:
-                    _TYPED_BUILD_JOB_PROJECTS.pop(next(iter(_TYPED_BUILD_JOB_PROJECTS)))
+                _TYPED_BUILD_JOBS.pop(job_id, None)
+                _TYPED_BUILD_JOBS[job_id] = entry
+                while len(_TYPED_BUILD_JOBS) > _TYPED_BUILD_JOBS_MAX:
+                    _TYPED_BUILD_JOBS.pop(next(iter(_TYPED_BUILD_JOBS)))
         else:
-            project = _TYPED_BUILD_JOB_PROJECTS.get(str(arguments.get("job_id") or ""), "")
-    _feed_grounded_outcome(name, True, receipt.output, arguments, project=project,
-                           evidence=payload)
+            entry = _TYPED_BUILD_JOBS.get(str(arguments.get("job_id") or ""))
+            if entry is None:
+                return
+            project = entry[0]
+        if verdict is not None:
+            if entry[1]:
+                return
+            entry[1] = True
+    report = _feed_grounded_outcome(name, True, receipt.output, arguments, project=project,
+                                    evidence=payload)
+    if verdict is not None and isinstance(report, dict) and report.get("recorded") is False:
+        # The ledger write failed, so grounded_outcomes released the
+        # generation again and the verdict is not spent: a later read of the
+        # same job may still file it.
+        with _TYPED_BUILD_JOBS_LOCK:
+            entry[1] = False
 
 
 def _record_direct_tool(

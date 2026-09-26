@@ -276,3 +276,87 @@ def test_a_handed_over_graph_feeds_the_ledger_from_a_repl_build(tmp_path, monkey
         build_tools.uninstall_build_brief()
         environment_probe.set_capability_summary_provider(previous_provider)
         application.close_delegation(timeout=10)
+
+
+# --- one build job, one verdict --------------------------------------------------------------
+
+
+class FinishedJobs(ReportingJobs):
+    """``build_job`` itself waited the job out and returns the finished report."""
+
+    def run(self, request, context, *, wait_seconds, **kwargs):
+        started = super().run(request, context, wait_seconds=wait_seconds, **kwargs)
+        status, exit_code = self.final
+        return report(status, exit_code=exit_code, job_id=started["job_id"])
+
+
+def test_one_build_job_verdict_is_attributed_once_whichever_tool_returned_it(tmp_path,
+                                                                             monkeypatch):
+    import server
+
+    written = []
+    monkeypatch.setattr(server, "_record_outcome_signal",
+                        lambda ident, signal: written.append((ident, signal)))
+    services = fake_services(str(tmp_path))
+    services.jobs = FinishedJobs("failed", 2)
+    tools, _audit, _grants = compose_facade(tmp_path, services)
+    tools.add_receipt_observer(server._typed_receipt_outcome)
+    project = str(tmp_path.resolve())
+    go.note_generation("gen-old", "sonder", project)
+    go.note_generation("gen-new", "sonder", project)
+    started = gateway_call(tools, "build_job", {"project": project, "target": "core"},
+                           source="repl", gate="surface")
+    job_id = json.loads(started.output)["job_id"]
+    assert written == [("gen-new", "failed")]
+    # /build status and /build result re-read the same finished job: no new evidence.
+    for _ in range(2):
+        again = gateway_call(tools, "build_job_result", {"job_id": job_id},
+                             source="repl", gate="surface")
+        assert again.success and json.loads(again.output)["status"] == "failed"
+    assert written == [("gen-new", "failed")]
+    assert go.pending_count() == 2
+
+
+def test_a_failed_ledger_write_leaves_the_job_verdict_unspent(tmp_path, monkeypatch):
+    import server
+
+    written, attempts = [], []
+
+    def flaky(ident, signal):
+        attempts.append(ident)
+        if len(attempts) == 1:
+            raise RuntimeError("database is locked")
+        written.append((ident, signal))
+
+    monkeypatch.setattr(server, "_record_outcome_signal", flaky)
+    services = fake_services(str(tmp_path))
+    services.jobs = FinishedJobs("succeeded", 0)
+    tools, _audit, _grants = compose_facade(tmp_path, services)
+    tools.add_receipt_observer(server._typed_receipt_outcome)
+    project = str(tmp_path.resolve())
+    go.note_generation("gen-1", "sonder", project)
+    started = gateway_call(tools, "build_job", {"project": project, "target": "core"},
+                           source="repl", gate="surface")
+    assert written == []
+    job_id = json.loads(started.output)["job_id"]
+    gateway_call(tools, "build_job_result", {"job_id": job_id}, source="repl", gate="surface")
+    assert written == [("gen-1", "compiled")]
+
+
+def test_a_result_for_a_job_this_process_never_started_attributes_nothing(monkeypatch):
+    """No recorded project scopes an unknown job, so its report is not filed
+    unscoped (which would let it judge any project's generation)."""
+    from types import SimpleNamespace
+
+    import server
+
+    written = []
+    monkeypatch.setattr(server, "_record_outcome_signal",
+                        lambda ident, signal: written.append((ident, signal)))
+    go.note_generation("gen-1", "sonder", "/some/project")
+    job_id = "build-job-" + uuid.uuid4().hex
+    request = SimpleNamespace(tool_name="build_job_result", arguments={"job_id": job_id})
+    receipt = SimpleNamespace(success=True,
+                              output=json.dumps(report("failed", exit_code=1, job_id=job_id)))
+    server._typed_receipt_outcome(request, receipt)
+    assert written == [] and go.pending_count() == 1

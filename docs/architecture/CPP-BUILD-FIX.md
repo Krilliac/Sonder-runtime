@@ -277,7 +277,12 @@ back to the exact before-digest reads as not applied. The details are in
     `succeeded` or `failed` with an exit code is `compiled`/`failed`; a
     running job, a cancellation, a timeout, a job that never ran and a
     `configure`/`include_trace` job record nothing and leave the generation
-    pending. A graph that is never bound to the legacy runtime has no
+    pending. One build job's verdict is attributed once, whichever tool
+    returned it: `build_job` may already return the finished report (it waits
+    up to 60 s), and a later `/build status` or `/build result` of the same
+    job re-reads it without new evidence. A `build_job_result` for a job id
+    this process did not see start is not attributed, because nothing scopes
+    it to a project. A graph that is never bound to the legacy runtime has no
     generation ledger in its process and is not observed;
   - not done, on purpose: `build_fix`/`build_fix_result` are not verifiers
     (a fix report grades the fix's own edits, not an earlier generation), and
