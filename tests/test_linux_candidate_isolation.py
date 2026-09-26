@@ -679,14 +679,26 @@ def test_supervisor_fails_closed_when_network_namespace_is_unavailable(area):
     import ctypes
     import subprocess
 
-    marker = area / "candidate-ran"
+    # The marker directory is writable by the candidate uid, so a missing
+    # marker proves the candidate never ran rather than that it was denied.
+    drop = area / "drop"
+    drop.mkdir()
+    drop.chmod(0o1777)
+    control_marker = drop / "control-ran"
+    marker = drop / "candidate-ran"
+
+    def writes(path: Path) -> list[str]:
+        return [sys.executable, "-I", "-c", f"open({str(path)!r}, 'w').write('ran')"]
+
+    control = _run(writes(control_marker), area)
+    assert control["passed"] is True, control
+    assert control_marker.read_text(encoding="utf-8") == "ran"
+
     repo = Path(__file__).resolve().parents[1]
     driver = (
-        "import sys\n"
         "from scripts import selfmod_linux_isolation as linux\n"
-        f"command = [sys.executable, '-I', '-c', \"open({str(marker)!r}, 'w').write('ran')\"]\n"
         "try:\n"
-        f"    linux.run_isolated(command, cwd={str(area)!r}, timeout=20,\n"
+        f"    linux.run_isolated({writes(marker)!r}, cwd={str(area)!r}, timeout=20,\n"
         f"                       candidate_uid={CANDIDATE_UID}, candidate_gid={CANDIDATE_UID})\n"
         "except linux.LinuxIsolationUnavailable as exc:\n"
         "    print('refused:', exc)\n"
@@ -712,13 +724,288 @@ def test_supervisor_fails_closed_when_network_namespace_is_unavailable(area):
     assert _no_candidate_processes()
 
 
+# A stand-in for the reaper: it enters the boundary exactly as the reaper does
+# (``no_new_privs``, a fresh network namespace, the socket filter), reports it
+# on stdout like the reaper's boundary event, then applies one deviation and
+# blocks.  ``_confirm_boundary`` must refuse every deviation from what it
+# observes in /proc, whatever the report says.
+_BOUNDARY_CHILD = r"""
+import ctypes, fcntl, json, os, socket, struct, sys
+from scripts import selfmod_linux_isolation as linux
+
+deviation = sys.argv[1]
+libc = ctypes.CDLL(None, use_errno=True)
+if deviation != "no-no-new-privs":
+    assert libc.prctl(38, 1, 0, 0, 0) == 0
+boundary = linux._enter_network_namespace()
+keep = []
+if deviation == "extra-interface":
+    # A tun device (no module needed beyond tun) in the child's namespace.
+    tun = os.open("/dev/net/tun", os.O_RDWR)
+    fcntl.ioctl(tun, 0x400454CA, struct.pack("16sH22x", b"sondertun0", 0x0001 | 0x1000))
+    keep.append(tun)
+if deviation == "loopback-up":
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        request = struct.pack("16sH22x", b"lo", 0)
+        flags = struct.unpack("16sH22x", fcntl.ioctl(probe.fileno(), 0x8913, request))[1]
+        fcntl.ioctl(probe.fileno(), 0x8914, struct.pack("16sH22x", b"lo", flags | 0x1))
+if deviation != "no-socket-filter":
+    boundary["socket_filter"] = linux._install_socket_filter()
+else:
+    boundary["socket_filter"] = linux._socket_filter_report()
+print(json.dumps(boundary), flush=True)
+sys.stdin.read()
+"""
+
+
+def _boundary_child(deviation: str):
+    import json
+    import subprocess
+
+    repo = Path(__file__).resolve().parents[1]
+    child = subprocess.Popen(
+        [sys.executable, "-c", _BOUNDARY_CHILD, deviation], cwd=repo,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
+    assert child.stdout is not None
+    line = child.stdout.readline()
+    assert line, f"boundary child ({deviation}) exited: {child.wait(timeout=10)}"
+    return child, json.loads(line)
+
+
+def _stop(child) -> None:
+    child.stdin.close()
+    child.wait(timeout=10)
+
+
+def test_supervisor_confirms_a_real_reaper_shaped_boundary():
+    from scripts import selfmod_linux_isolation as linux
+
+    child, event = _boundary_child("none")
+    try:
+        network = linux._confirm_boundary(child.pid, event)
+    finally:
+        _stop(child)
+    assert network["netns_inode"] == event["netns_inode"]
+    assert network["netns_inode"] != network["supervisor_netns_inode"]
+    assert network["interfaces"] == ["lo"] and network["loopback_up"] is False
+
+
+@pytest.mark.parametrize("deviation, match", [
+    ("extra-interface", "has interfaces"),
+    ("loopback-up", "loopback up"),
+    ("no-no-new-privs", "no_new_privs"),
+    ("no-socket-filter", "socket filter"),
+])
+def test_supervisor_refuses_what_proc_contradicts_even_when_the_report_is_clean(deviation, match):
+    """Each deviation is observed from /proc; the (clean) report is not trusted."""
+    from scripts import selfmod_linux_isolation as linux
+
+    child, event = _boundary_child(deviation)
+    try:
+        # The report claims the clean boundary in every case.
+        assert event["interfaces"] == ["lo"] and event["loopback_up"] is False
+        with pytest.raises(linux.LinuxIsolationUnavailable, match=match):
+            linux._confirm_boundary(child.pid, event)
+    finally:
+        _stop(child)
+
+
+@pytest.mark.parametrize("forged, match", [
+    ({"netns_inode": "other"}, "does not match"),
+    ({"interfaces": ["eth0", "lo"]}, "has interfaces"),
+    ({"loopback_up": True}, "loopback up"),
+    ({"socket_filter": {"mechanism": "seccomp", "socket_families": [1, 2, 10, 16, 40],
+                        "io_uring": "denied"}}, "socket filter"),
+])
+def test_supervisor_refuses_a_report_that_disagrees_with_proc(forged, match):
+    """The child really is in its own namespace, so only the mismatch can refuse."""
+    from scripts import selfmod_linux_isolation as linux
+
+    child, event = _boundary_child("none")
+    try:
+        if forged.get("netns_inode") == "other":
+            forged = {"netns_inode": event["netns_inode"] + 1}
+        with pytest.raises(linux.LinuxIsolationUnavailable, match=match):
+            linux._confirm_boundary(child.pid, {**event, **forged})
+        # The unforged report of the same child is confirmed.
+        linux._confirm_boundary(child.pid, event)
+    finally:
+        _stop(child)
+
+
 def test_boundary_sharing_the_supervisor_network_namespace_is_refused():
     from scripts import selfmod_linux_isolation as linux
 
-    # This process is in the supervisor's own namespace: a reaper report of
-    # it (or of any inode other than the observed one) is never confirmed.
+    # This process is in the supervisor's own namespace, so a report naming
+    # it is refused on the shared inode before anything else is compared.
     own = os.stat("/proc/self/ns/net").st_ino
-    for event in ({"netns_inode": own, "interfaces": ["lo"], "loopback_up": False},
-                  {"netns_inode": own + 1, "interfaces": ["lo"], "loopback_up": False}):
-        with pytest.raises(linux.LinuxIsolationUnavailable):
-            linux._confirm_boundary(os.getpid(), event)
+    event = {"netns_inode": own, "interfaces": ["lo"], "loopback_up": False,
+             "socket_filter": linux._socket_filter_report()}
+    with pytest.raises(linux.LinuxIsolationUnavailable, match="shares the supervisor"):
+        linux._confirm_boundary(os.getpid(), event)
+
+
+# Families a network namespace does not scope (AF_VSOCK reaches a VM's
+# hypervisor host from any namespace) or that only widen kernel surface.
+_FOREIGN_FAMILIES = {"AF_VSOCK": (40, 1), "AF_PACKET": (17, 3), "AF_BLUETOOTH": (31, 3),
+                     "AF_ALG": (38, 5), "AF_TIPC": (30, 5), "AF_CAN": (29, 3)}
+_FAMILY_PROBE = r"""
+import ctypes, errno, json, socket, sys
+families = json.loads(sys.argv[1])
+report = {}
+for name, (family, kind) in families.items():
+    try:
+        socket.socket(family, kind).close()
+    except OSError as exc:
+        report[name] = exc.errno
+    else:
+        report[name] = 0
+libc = ctypes.CDLL(None, use_errno=True)
+params = ctypes.create_string_buffer(120)
+fd = libc.syscall(425, 1, params)
+report["io_uring"] = 0 if fd >= 0 else ctypes.get_errno()
+a, b = socket.socketpair()
+a.close(); b.close()
+for family, kind in ((socket.AF_INET, socket.SOCK_STREAM), (socket.AF_INET6, socket.SOCK_STREAM),
+                     (socket.AF_NETLINK, socket.SOCK_RAW)):
+    try:
+        socket.socket(family, kind).close()
+    except OSError as exc:
+        report["allowed %d" % family] = exc.errno
+    else:
+        report["allowed %d" % family] = 0
+print(json.dumps(report))
+"""
+
+
+def test_candidate_cannot_open_address_families_the_namespace_does_not_scope(area):
+    import ctypes
+    import errno
+    import json
+    import subprocess
+
+    families = json.dumps(_FOREIGN_FAMILIES)
+    libc = ctypes.CDLL(None, use_errno=True)
+
+    def as_candidate_in_netns_without_filter():
+        os.unshare(os.CLONE_NEWNET)
+        if libc.prctl(38, 1, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "no_new_privs")
+        os.setgroups([])
+        os.setresgid(CANDIDATE_UID, CANDIDATE_UID, CANDIDATE_UID)
+        os.setresuid(CANDIDATE_UID, CANDIDATE_UID, CANDIDATE_UID)
+
+    # Control: the same uid in its own network namespace under no_new_privs,
+    # but without the socket filter.  Every family the kernel offers gives
+    # something other than EAFNOSUPPORT here, so the canary discriminates.
+    control_run = subprocess.run(
+        [sys.executable, "-I", "-c", _FAMILY_PROBE, families], cwd=area,
+        capture_output=True, text=True, timeout=20, check=False,
+        preexec_fn=as_candidate_in_netns_without_filter,
+    )
+    assert control_run.returncode == 0, control_run.stderr
+    control = json.loads(control_run.stdout)
+    # AF_PACKET is built into every mainstream kernel: without the filter it
+    # is refused for want of CAP_NET_RAW, never as an unsupported family.
+    assert control["AF_PACKET"] == errno.EPERM, control
+    assert control["io_uring"] != errno.ENOSYS, control
+    offered = sorted(name for name in _FOREIGN_FAMILIES if control[name] != errno.EAFNOSUPPORT)
+    if os.path.exists("/dev/vsock"):
+        # A VM guest with a vsock transport: the namespace alone leaves the
+        # hypervisor host reachable, which is what the filter closes.
+        assert control["AF_VSOCK"] == 0, control
+
+    result = _run([sys.executable, "-I", "-c", _FAMILY_PROBE, families], area)
+
+    assert result["passed"] is True, result
+    candidate = json.loads(result["output"].strip().splitlines()[-1])
+    for name in _FOREIGN_FAMILIES:
+        assert candidate[name] == errno.EAFNOSUPPORT, (name, candidate, offered)
+    assert candidate["io_uring"] == errno.ENOSYS, candidate
+    # The namespace-scoped families stay usable (IPv6 may be absent).
+    assert candidate["allowed 2"] == 0 and candidate["allowed 16"] == 0, candidate
+    assert candidate["allowed 10"] in {0, errno.EAFNOSUPPORT}, candidate
+    assert candidate["allowed 10"] == control["allowed 10"], (candidate, control)
+    assert result["job"]["socket_filter"] == {
+        "mechanism": "seccomp", "socket_families": [1, 2, 10, 16], "io_uring": "denied",
+    }
+    assert result["attestation"].socket_families_filtered is True
+    assert _no_candidate_processes()
+
+
+def test_candidate_entering_the_kernel_through_a_foreign_abi_is_killed(area):
+    import platform
+    import signal
+
+    from scripts import selfmod_linux_isolation as linux
+
+    program = linux._socket_filter_program()
+    audit_arch = linux._SECCOMP_ABIS[platform.machine()][0]
+    # The first check of every program: a foreign audit arch jumps to kill.
+    assert program[0] == (linux._BPF_LD_W_ABS, 0, 0, linux._SECCOMP_ARCH)
+    assert program[1][0] == linux._BPF_JEQ_K and program[1][3] == audit_arch
+    assert program[1 + 1 + program[1][2]] == (linux._BPF_RET_K, 0, 0,
+                                              linux._SECCOMP_RET_KILL_PROCESS)
+    if platform.machine() != "x86_64":
+        return
+    # x86_64 also accepts x32 syscall numbers under the native audit arch;
+    # getpid through the x32 table must kill the process, not run.
+    source = (
+        "import ctypes\n"
+        "libc = ctypes.CDLL(None, use_errno=True)\n"
+        "print('native getpid', libc.syscall(39) > 0, flush=True)\n"
+        "libc.syscall(0x40000000 | 39)\n"
+        "print('x32 syscall ran', flush=True)\n"
+    )
+    result = _run(_python(source), area)
+
+    assert "native getpid True" in result["output"], result
+    assert "x32 syscall ran" not in result["output"], result
+    assert result["job"]["exit"]["signal"] == signal.SIGSYS, result["job"]
+    assert result["passed"] is False
+    assert _no_candidate_processes()
+
+
+def test_fallback_tunnel_interfaces_are_refused_with_the_sysctl_to_change():
+    """A kernel that adds fallback tunnels to new namespaces is named, not guessed at."""
+    import subprocess
+
+    repo = Path(__file__).resolve().parents[1]
+    source = (
+        "import socket\n"
+        "from scripts import selfmod_linux_isolation as linux\n"
+        "socket.if_nameindex = lambda: [(1, 'lo'), (2, 'tunl0'), (3, 'sit0')]\n"
+        "try:\n"
+        "    linux._enter_network_namespace()\n"
+        "except OSError as exc:\n"
+        "    print('refused:', exc)\n"
+        "    raise SystemExit(0)\n"
+        "raise SystemExit(3)\n"
+    )
+    completed = subprocess.run([sys.executable, "-c", source], cwd=repo, capture_output=True,
+                               text=True, timeout=30, check=False)
+    assert completed.returncode == 0, (completed.stdout, completed.stderr)
+    assert "['lo', 'sit0', 'tunl0']" in completed.stdout
+    assert "net.core.fb_tunnels_only_for_init_net=1" in completed.stdout
+
+
+def test_supervisor_refuses_before_launch_when_fallback_tunnels_are_expected(area, monkeypatch):
+    from scripts import selfmod_linux_isolation as linux
+
+    sysctl = area / "fb_tunnels_only_for_init_net"
+    sysctl.write_text("0\n", encoding="utf-8")
+    monkeypatch.setattr(linux, "_FB_TUNNELS_SYSCTL", sysctl)
+    monkeypatch.setattr(linux.socket, "if_nameindex", lambda: [(1, "lo"), (7, "tunl0")])
+    monkeypatch.setattr(linux.subprocess, "Popen", lambda *a, **k: pytest.fail("launched"))
+    with pytest.raises(linux.LinuxIsolationUnavailable, match="fb_tunnels_only_for_init_net=1"):
+        _run(_python("pass"), area)
+    # The nightly preflight refuses on the same grounds before any run exists.
+    monkeypatch.setenv(linux.CANDIDATE_UID_ENV, str(CANDIDATE_UID))
+    assert "fb_tunnels_only_for_init_net=1" in (linux.candidate_isolation_preflight() or "")
+    # With the sysctl set the host is not refused on this account.
+    sysctl.write_text("1\n", encoding="utf-8")
+    assert linux._fallback_tunnels_expected() is False
+    sysctl.write_text("0\n", encoding="utf-8")
+    monkeypatch.setattr(linux.socket, "if_nameindex", lambda: [(1, "lo"), (2, "eth0")])
+    assert linux._fallback_tunnels_expected() is False

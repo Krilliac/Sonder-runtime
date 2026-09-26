@@ -20,14 +20,18 @@ from sonder_runtime.application.selfmod.candidate_isolation import (
 _NETWORK = {"isolation": "netns", "netns_inode": 4026532262,
             "supervisor_netns_inode": 4026531833, "interfaces": ["lo"],
             "loopback_up": False}
+_SOCKET_FILTER = {"mechanism": "seccomp", "socket_families": [1, 2, 10, 16],
+                  "io_uring": "denied"}
 # The boundary fields a hand-built linux-uid attestation must carry.
-_BOUNDARY = {"network_isolated": True, "no_new_privs": True}
+_BOUNDARY = {"network_isolated": True, "no_new_privs": True,
+             "socket_families_filtered": True}
 
 
 def _linux_result(**job):
     return {"exit_code": 0, "passed": True, "output": "ok",
             "job": {"integrity": "linux-uid", "uid": 210_000, "gid": 210_000,
-                    "network": dict(_NETWORK), "no_new_privs": True, **job}}
+                    "network": dict(_NETWORK), "no_new_privs": True,
+                    "socket_filter": dict(_SOCKET_FILTER), **job}}
 
 
 def test_linux_uid_attestation_requires_distinct_unprivileged_uid():
@@ -36,6 +40,8 @@ def test_linux_uid_attestation_requires_distinct_unprivileged_uid():
     )
     assert typed.kind == "linux-uid" and typed.candidate_uid == 210_000 and typed.passed
     assert typed.network_isolated is True and typed.no_new_privs is True
+    assert typed.socket_families_filtered is True
+    assert typed.as_record()["socket_families_filtered"] is True
     for bad in ({"uid": 0}, {"uid": None}, {"uid": "210000"}, {"supervisor_uid": 5},
                 {"gid": 0}):
         with pytest.raises(IsolationAttestationError):
@@ -61,6 +67,13 @@ def test_linux_uid_attestation_requires_distinct_unprivileged_uid():
     {"no_new_privs": False},
     {"no_new_privs": 1},
     {"no_new_privs": None},
+    # The namespace does not scope AF_VSOCK and friends; only the exact
+    # allow-list of namespace-scoped families counts.
+    {"socket_filter": None},
+    {"socket_filter": {**_SOCKET_FILTER, "mechanism": "none"}},
+    {"socket_filter": {**_SOCKET_FILTER, "socket_families": [1, 2, 10, 16, 40]}},
+    {"socket_filter": {**_SOCKET_FILTER, "socket_families": [2, 1, 10, 16]}},
+    {"socket_filter": {**_SOCKET_FILTER, "io_uring": "allowed"}},
 ])
 def test_linux_uid_attestation_requires_network_namespace_and_no_new_privs(job):
     with pytest.raises(IsolationAttestationError):
@@ -72,11 +85,22 @@ def test_linux_uid_attestation_requires_network_namespace_and_no_new_privs(job):
 def test_hand_built_linux_uid_attestation_requires_both_boundaries():
     identity = {"supervisor_uid": 0, "candidate_uid": 210_000}
     assert IsolationAttestation("linux-uid", 0, True, **identity, **_BOUNDARY).passed
-    for missing in ({"network_isolated": False, "no_new_privs": True},
-                    {"network_isolated": True, "no_new_privs": False},
-                    {"network_isolated": 1, "no_new_privs": True}):
+    for missing in ({**_BOUNDARY, "network_isolated": False},
+                    {**_BOUNDARY, "no_new_privs": False},
+                    {**_BOUNDARY, "network_isolated": 1},
+                    {**_BOUNDARY, "socket_families_filtered": False},
+                    {**_BOUNDARY, "socket_families_filtered": 1}):
         with pytest.raises(IsolationAttestationError):
             IsolationAttestation("linux-uid", 0, True, **identity, **missing)
+
+
+def test_attested_socket_families_match_the_filter_the_supervisor_installs():
+    from scripts import selfmod_linux_isolation as linux
+    from sonder_runtime.application.selfmod import candidate_isolation
+
+    assert linux._socket_filter_report() == _SOCKET_FILTER
+    assert tuple(_SOCKET_FILTER["socket_families"]) == candidate_isolation.ATTESTED_SOCKET_FAMILIES
+    assert linux.SOCKET_FILTER == candidate_isolation.SOCKET_FILTER
 
 
 def test_neither_supervisor_can_vouch_for_the_other():

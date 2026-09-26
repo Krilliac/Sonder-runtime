@@ -21,8 +21,11 @@ AUTO_RUN = {"id": "auto-517", "mode": "auto-low-risk", "risk": "low",
 LINUX_NETWORK = {"isolation": "netns", "netns_inode": 4026532262,
                  "supervisor_netns_inode": 4026531833, "interfaces": ["lo"],
                  "loopback_up": False}
+LINUX_SOCKET_FILTER = {"mechanism": "seccomp", "socket_families": [1, 2, 10, 16],
+                       "io_uring": "denied"}
 LINUX_JOB = {"integrity": "linux-uid", "uid": 210_000, "gid": 210_000,
-             "network": LINUX_NETWORK, "no_new_privs": True}
+             "network": LINUX_NETWORK, "no_new_privs": True,
+             "socket_filter": LINUX_SOCKET_FILTER}
 
 
 def _no_launch(*_args, **_kwargs):
@@ -193,7 +196,7 @@ def test_selfmod_accepts_supervisor_built_linux_uid_attestation(monkeypatch, tmp
 @pytest.mark.parametrize("job", [
     None, {"integrity": "low"}, {"integrity": "LINUX-UID", "uid": 210_000},
     {"integrity": "linux-uid"}, {"integrity": "linux-uid", "uid": 0},
-    # A report without the confirmed network/no_new_privs boundary.
+    # A report without the confirmed network/no_new_privs/socket filter boundary.
     {**LINUX_JOB, "network": None},
     {**LINUX_JOB, "no_new_privs": False},
     {key: value for key, value in LINUX_JOB.items() if key != "no_new_privs"},
@@ -201,6 +204,9 @@ def test_selfmod_accepts_supervisor_built_linux_uid_attestation(monkeypatch, tmp
     {**LINUX_JOB, "network": {**LINUX_NETWORK, "netns_inode": 4026531833}},
     {**LINUX_JOB, "network": {**LINUX_NETWORK, "interfaces": ["eth0", "lo"]}},
     {**LINUX_JOB, "network": {**LINUX_NETWORK, "loopback_up": True}},
+    # A report without the socket filter that closes AF_VSOCK and friends.
+    {key: value for key, value in LINUX_JOB.items() if key != "socket_filter"},
+    {**LINUX_JOB, "socket_filter": {**LINUX_SOCKET_FILTER, "socket_families": [1, 2, 10, 16, 40]}},
 ])
 def test_selfmod_rejects_linux_supervisor_report_without_its_attestation(
     monkeypatch, tmp_path, job,

@@ -5,8 +5,9 @@ returns the same result schema.  The supervisor stays root and owns the
 evaluator truth.  Candidate code runs as a distinct, dedicated, unprivileged
 uid/gid with no supplementary groups and ``no_new_privs``, in its own session
 and a fresh network namespace that holds only a loopback interface left down,
-below per-process rlimits, with a scrubbed environment and a private
-HOME/TMPDIR.  Protected evaluator truth must not be writable by that uid: the
+under a seccomp filter that confines socket creation to the namespace-scoped
+address families, below per-process rlimits, with a scrubbed environment and
+a private HOME/TMPDIR.  Protected evaluator truth must not be writable by that uid: the
 supervisor proves this before launch (failing closed otherwise) and re-digests
 it after the candidate is gone.
 
@@ -17,14 +18,26 @@ Process topology::
             |     own network namespace, ``no_new_privs``)
             '-- candidate (candidate uid, new session) and every descendant
 
-The reaper sets ``no_new_privs`` on itself and enters a new network namespace
-before it launches anything, reports that boundary, and then waits.  The
-supervisor confirms the boundary itself from ``/proc/<reaper>`` (a namespace
-inode distinct from its own, no interface but ``lo``, ``NoNewPrivs: 1``) and
-only then lets the reaper launch the candidate.  The candidate inherits both
-and cannot leave them: joining the host namespace needs ``CAP_SYS_ADMIN`` over
-it, and ``no_new_privs`` cannot be cleared.  If the namespace cannot be
-created the run fails closed; it never falls back to the host network.
+The reaper sets ``no_new_privs`` on itself, enters a new network namespace and
+installs the socket filter before it launches anything, reports that
+boundary, and then waits.  The supervisor confirms the boundary itself from
+``/proc/<reaper>`` (a namespace inode distinct from its own, no interface but
+``lo``, no IPv4 route and no IPv6 address, ``NoNewPrivs: 1``, one seccomp
+filter more than its own) and only then lets the reaper launch the candidate.
+The candidate inherits all of it and cannot leave it: joining the host
+namespace needs ``CAP_SYS_ADMIN`` over it, and neither ``no_new_privs`` nor a
+seccomp filter can be removed.  If any part cannot be established the run
+fails closed; it never falls back to the host network.
+
+The network namespace does not scope every address family: ``AF_VSOCK``
+reaches the hypervisor host of a VM guest from any namespace, and others
+(Bluetooth, CAN, TIPC, ...) are not namespace-aware either.  The filter
+therefore allows ``socket``/``socketpair`` only for ``AF_UNIX``, ``AF_INET``,
+``AF_INET6`` and ``AF_NETLINK`` (all namespace-scoped), fails every other
+family with ``EAFNOSUPPORT``, fails the io_uring syscalls (whose socket
+opcode would bypass the ``socket`` check) with ``ENOSYS``, and kills a process
+that enters the kernel through a foreign syscall ABI (i386/x32/arm32), whose
+socket calls the filter could not inspect.
 
 The reaper exists so that orphaned candidate descendants are reaped instead of
 lingering as zombies that count against the candidate uid's RLIMIT_NPROC.  The
@@ -39,8 +52,9 @@ still produces the output the parent grades, so result independence comes
 from the evaluator-held oracle (``scripts/selfmod_oracle.py``), which uses
 this boundary and ``require_not_candidate_readable`` to keep held expected
 values from the candidate uid; confidentiality of world-readable files is not
-provided, job memory is enforced by sampling rather than a cgroup, and no
-seccomp filter narrows the kernel surface the candidate can reach.
+provided, job memory is enforced by sampling rather than a cgroup, and the
+seccomp filter narrows socket families only, not the rest of the kernel
+surface the candidate can reach.
 """
 
 from __future__ import annotations
@@ -49,6 +63,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import select
 import shutil
 import signal
@@ -105,9 +120,24 @@ _CLAIM_DIR = Path("/run/sonder-selfmod-candidate")
 # The network boundary the supervisor attests (see
 # ``candidate_isolation.NETWORK_NAMESPACE``): a namespace distinct from the
 # supervisor's whose only interface is a loopback left down, so the candidate
-# has no route at all, not even to 127.0.0.1.
+# has no IP route at all, not even to 127.0.0.1.  Address families the
+# namespace does not scope are closed by the socket filter below.
 NETWORK_ISOLATION = "netns"
 _ISOLATED_INTERFACES = ["lo"]
+# Fallback tunnel devices the kernel adds to every new network namespace
+# while ``net.core.fb_tunnels_only_for_init_net`` is 0 (the default) and the
+# matching module is loaded.  They are refused like any other interface; the
+# refusal names the sysctl that stops the kernel creating them.
+_FALLBACK_TUNNELS = frozenset({
+    "erspan0", "gre0", "gretap0", "ip6_vti0", "ip6gre0", "ip6tnl0", "ip_vti0",
+    "sit0", "tunl0",
+})
+_FB_TUNNELS_SYSCTL = Path("/proc/sys/net/core/fb_tunnels_only_for_init_net")
+FALLBACK_TUNNEL_GUIDANCE = (
+    "the kernel creates fallback tunnel devices in every new network namespace; "
+    "set the sysctl net.core.fb_tunnels_only_for_init_net=1 on this host "
+    f"(see {ISOLATION_DOC})"
+)
 _BOUNDARY_SECONDS = 10.0
 # ioctl(2) request and interface flag (linux/sockios.h, linux/if.h).
 _SIOCGIFFLAGS = 0x8913
@@ -118,6 +148,38 @@ _PR_SET_PDEATHSIG = 1
 _PR_SET_CHILD_SUBREAPER = 36
 _PR_SET_NO_NEW_PRIVS = 38
 _PR_GET_NO_NEW_PRIVS = 39
+_PR_SET_SECCOMP = 22
+_SECCOMP_MODE_FILTER = 2
+
+# The socket filter the supervisor attests (see
+# ``candidate_isolation.SOCKET_FILTER``).  Only these families, each scoped by
+# the candidate's network namespace, may be created: AF_UNIX, AF_INET,
+# AF_INET6, AF_NETLINK.  Every other family (AF_VSOCK above all) fails with
+# EAFNOSUPPORT, and the io_uring syscalls fail with ENOSYS.
+SOCKET_FILTER = "seccomp"
+_ALLOWED_SOCKET_FAMILIES = (1, 2, 10, 16)
+_IO_URING_SYSCALLS = (425, 426, 427)  # setup, enter, register: one table on all three ABIs
+# Native syscall ABI per machine: (AUDIT_ARCH_*, socket, socketpair, x32).
+# ``x32`` marks x86_64, whose kernel also accepts x32 numbers (bit 30 set)
+# under the same audit arch; the filter kills those rather than map them.
+_SECCOMP_ABIS = {
+    "x86_64": (0xC000003E, 41, 53, True),
+    "aarch64": (0xC00000B7, 198, 199, False),
+    "riscv64": (0xC00000F3, 198, 199, False),
+}
+_X32_SYSCALL_BIT = 0x40000000
+# Classic BPF opcodes and seccomp return actions (linux/filter.h, linux/seccomp.h).
+_BPF_LD_W_ABS = 0x20
+_BPF_JEQ_K = 0x15
+_BPF_JGE_K = 0x35
+_BPF_RET_K = 0x06
+_SECCOMP_RET_KILL_PROCESS = 0x80000000
+_SECCOMP_RET_ERRNO = 0x00050000
+_SECCOMP_RET_ALLOW = 0x7FFF0000
+# struct seccomp_data offsets: nr, arch, then args[0] (low word, little endian).
+_SECCOMP_NR = 0
+_SECCOMP_ARCH = 4
+_SECCOMP_ARG0 = 16
 
 # Non-secret locale facts only.  Credentials, tokens, SSH agents, proxies and
 # the supervisor's real HOME are never forwarded.
@@ -477,6 +539,32 @@ def _require_host() -> None:
         raise LinuxIsolationUnavailable("kernel lacks no_new_privs or /proc is unavailable")
     if not hasattr(os, "unshare") or not os.path.exists("/proc/self/ns/net"):
         raise LinuxIsolationUnavailable("kernel or Python lacks network namespaces")
+    if "Seccomp" not in _proc_status(os.getpid()):
+        raise LinuxIsolationUnavailable("kernel lacks seccomp filtering")
+    if _seccomp_abi() is None:
+        raise LinuxIsolationUnavailable(
+            f"no candidate socket filter exists for the {platform.machine()!r} syscall ABI"
+        )
+    if _fallback_tunnels_expected():
+        raise LinuxIsolationUnavailable(FALLBACK_TUNNEL_GUIDANCE)
+
+
+def _fallback_tunnels_expected() -> bool:
+    """True when a new network namespace will receive fallback tunnel devices.
+
+    With the sysctl at 0, the kernel creates each loaded tunnel module's
+    fallback device in every namespace, this one included, so seeing one here
+    means the candidate's namespace would hold it too.
+    """
+    try:
+        setting = _FB_TUNNELS_SYSCTL.read_text(encoding="utf-8").strip()
+    except OSError:
+        # Kernels without the sysctl (before 5.7) always create them; the
+        # namespace check in the reaper still refuses such an interface.
+        setting = "0"
+    if setting != "0":
+        return False
+    return any(name in _FALLBACK_TUNNELS for _index, name in socket.if_nameindex())
 
 
 def _require_spare_identity(uid: int, gid: int) -> None:
@@ -705,6 +793,7 @@ def _supervise(
         # Any raise leaves ``go_write`` closed unwritten, and the reaper then
         # exits without launching.
         network = _confirm_boundary(reaper.pid, _await_boundary(read_fd, buffer, events, reaper))
+        socket_filter = _socket_filter_report()
         os.write(go_write, b"1")
         os.close(go_write)
         go_write = -1
@@ -764,7 +853,7 @@ def _supervise(
         job_report: dict[str, object] = {
             "integrity": ATTESTATION, "uid": uid, "gid": gid,
             "supervisor_uid": os.geteuid(), "limits": dict(limits),
-            "network": network, "no_new_privs": True,
+            "network": network, "no_new_privs": True, "socket_filter": socket_filter,
             "exit": {"returncode": returncode, "signal": signal_number},
             "timed_out": timed_out, "limit_hit": limit_hit,
             "peak_process_memory_mb": peak_process_kib // 1024,
@@ -809,21 +898,52 @@ def _proc_interfaces(pid: int | str) -> list[str]:
     return sorted(line.split(":", 1)[0].strip() for line in lines[2:] if ":" in line)
 
 
+def _proc_has_route(pid: int | str) -> bool:
+    """Whether the network namespace of ``pid`` has any IPv4 route or IPv6 address.
+
+    A fresh namespace has neither while ``lo`` is down: bringing ``lo`` up
+    adds the 127.0.0.0/8 local routes to ``fib_trie`` and ``::1`` to
+    ``if_inet6``.  ``if_inet6`` is absent on a kernel without IPv6.
+    """
+    if Path(f"/proc/{pid}/net/fib_trie").read_text(encoding="utf-8").strip():
+        return True
+    try:
+        return bool(Path(f"/proc/{pid}/net/if_inet6").read_text(encoding="utf-8").strip())
+    except FileNotFoundError:
+        return False
+
+
+def _seccomp_filters(pid: int | str) -> tuple[str, int | None]:
+    """``Seccomp`` mode and ``Seccomp_filters`` count (``None`` before 5.9) of ``pid``."""
+    fields = _proc_status(pid) if isinstance(pid, int) else _proc_status(os.getpid())
+    count = fields.get("Seccomp_filters")
+    return fields.get("Seccomp", ""), int(count) if count and count.isdigit() else None
+
+
+def _socket_filter_report() -> dict[str, object]:
+    """The socket filter this module installs, as the attestation records it."""
+    return {"mechanism": SOCKET_FILTER,
+            "socket_families": list(_ALLOWED_SOCKET_FAMILIES), "io_uring": "denied"}
+
+
 def _confirm_boundary(reaper_pid: int, event: dict[str, Any]) -> dict[str, object]:
     """Confirm, from outside, the boundary the reaper says it entered.
 
     The reaper (still root, nothing launched yet) reported its network
-    namespace.  This process re-reads the facts from ``/proc/<reaper>``
-    instead of trusting the report: the namespace inode must differ from the
-    supervisor's own and equal the reported one, the namespace may hold no
-    interface but ``lo``, and ``NoNewPrivs`` must be set.  The candidate
-    inherits all three from the reaper.  Any mismatch raises
-    ``LinuxIsolationUnavailable`` and the candidate is never launched.
+    namespace and socket filter.  This process re-reads the facts from
+    ``/proc/<reaper>`` instead of trusting the report: the namespace inode
+    must differ from the supervisor's own and equal the reported one, the
+    namespace may hold no interface but ``lo`` and no IPv4 route or IPv6
+    address (so ``lo`` is down), ``NoNewPrivs`` must be set, and the reaper
+    must be in seccomp filter mode with exactly one filter more than this
+    process.  The candidate inherits all of it from the reaper.  Any mismatch
+    raises ``LinuxIsolationUnavailable`` and the candidate is never launched.
     """
     try:
         supervisor_netns = _netns_inode("self")
         observed = _netns_inode(reaper_pid)
         interfaces = _proc_interfaces(reaper_pid)
+        routed = _proc_has_route(reaper_pid)
     except OSError as exc:
         raise LinuxIsolationUnavailable(
             f"cannot observe the candidate network namespace: {type(exc).__name__}"
@@ -834,10 +954,15 @@ def _confirm_boundary(reaper_pid: int, event: dict[str, Any]) -> dict[str, objec
         raise LinuxIsolationUnavailable("reported network namespace does not match the observed one")
     if interfaces != _ISOLATED_INTERFACES or event.get("interfaces") != _ISOLATED_INTERFACES:
         raise LinuxIsolationUnavailable(f"candidate network namespace has interfaces {interfaces!r}")
-    if event.get("loopback_up") is not False:
+    if routed or event.get("loopback_up") is not False:
         raise LinuxIsolationUnavailable("candidate network namespace has loopback up")
     if _proc_status(reaper_pid).get("NoNewPrivs") != "1":
         raise LinuxIsolationUnavailable("candidate parent lacks no_new_privs")
+    own_mode, own_filters = _seccomp_filters("self")
+    mode, filters = _seccomp_filters(reaper_pid)
+    if (mode != str(_SECCOMP_MODE_FILTER) or event.get("socket_filter") != _socket_filter_report()
+            or (filters is not None and filters != (own_filters or 0) + 1)):
+        raise LinuxIsolationUnavailable("candidate parent lacks the socket filter")
     return {
         "isolation": NETWORK_ISOLATION, "netns_inode": observed,
         "supervisor_netns_inode": supervisor_netns,
@@ -918,10 +1043,112 @@ def _enter_network_namespace() -> dict[str, object]:
         raise OSError("network namespace did not change")
     interfaces = sorted(name for _index, name in socket.if_nameindex())
     if interfaces != _ISOLATED_INTERFACES:
-        raise OSError(f"new network namespace has interfaces {interfaces!r}")
+        guidance = ""
+        if any(name in _FALLBACK_TUNNELS for name in interfaces):
+            guidance = "; " + FALLBACK_TUNNEL_GUIDANCE
+        raise OSError(f"new network namespace has interfaces {interfaces!r}{guidance}")
     if _loopback_up():
         raise OSError("new network namespace has loopback up")
     return {"netns_inode": inode, "interfaces": interfaces, "loopback_up": False}
+
+
+def _seccomp_abi() -> tuple[int, int, int, bool] | None:
+    return _SECCOMP_ABIS.get(platform.machine())
+
+
+def _socket_filter_program() -> list[tuple[int, int, int, int]]:
+    """Assemble the classic-BPF socket filter for this machine's syscall ABI.
+
+    Returns ``(code, jt, jf, k)`` instructions.  Raises ``OSError`` on an ABI
+    without a filter, so the caller fails closed instead of running
+    unfiltered.
+    """
+    abi = _seccomp_abi()
+    if abi is None:
+        raise OSError(f"no socket filter for the {platform.machine()!r} syscall ABI")
+    audit_arch, socket_nr, socketpair_nr, x32 = abi
+    # Symbolic program: ("ld", offset) | ("jeq"/"jge", k, true, false) |
+    # ("ret", action) | ("label", name).  A jump target of None is the next
+    # instruction.
+    source: list[tuple[Any, ...]] = [
+        ("ld", _SECCOMP_ARCH),
+        # A foreign ABI (i386 via int 0x80, arm32 compat) has other syscall
+        # numbers and, for i386, socketcall(2) with arguments in memory.
+        ("jeq", audit_arch, None, "kill"),
+        ("ld", _SECCOMP_NR),
+    ]
+    if x32:
+        source.append(("jge", _X32_SYSCALL_BIT, "kill", None))
+    source += [
+        ("jeq", socket_nr, "family", None),
+        ("jeq", socketpair_nr, "family", None),
+        *(("jeq", number, "nosys", None) for number in _IO_URING_SYSCALLS),
+        ("ret", _SECCOMP_RET_ALLOW),
+        ("label", "family"),
+        ("ld", _SECCOMP_ARG0),
+        *(("jeq", family, "allow", None) for family in _ALLOWED_SOCKET_FAMILIES),
+        ("ret", _SECCOMP_RET_ERRNO | 97),  # EAFNOSUPPORT
+        ("label", "allow"),
+        ("ret", _SECCOMP_RET_ALLOW),
+        ("label", "nosys"),
+        ("ret", _SECCOMP_RET_ERRNO | 38),  # ENOSYS
+        ("label", "kill"),
+        ("ret", _SECCOMP_RET_KILL_PROCESS),
+    ]
+    labels: dict[str, int] = {}
+    body: list[tuple[Any, ...]] = []
+    for item in source:
+        if item[0] == "label":
+            labels[item[1]] = len(body)
+        else:
+            body.append(item)
+
+    def offset(index: int, target: str | None) -> int:
+        if target is None:
+            return 0
+        distance = labels[target] - index - 1
+        if not 0 <= distance <= 255:
+            raise OSError("socket filter jump out of range")
+        return distance
+
+    program = []
+    for index, item in enumerate(body):
+        if item[0] == "ld":
+            program.append((_BPF_LD_W_ABS, 0, 0, item[1]))
+        elif item[0] == "ret":
+            program.append((_BPF_RET_K, 0, 0, item[1]))
+        else:
+            code = _BPF_JEQ_K if item[0] == "jeq" else _BPF_JGE_K
+            program.append((code, offset(index, item[2]), offset(index, item[3]), item[1]))
+    return program
+
+
+def _install_socket_filter() -> dict[str, object]:
+    """Install the socket filter on this (single-threaded) process and its future children.
+
+    Needs ``no_new_privs`` or ``CAP_SYS_ADMIN``.  Raises ``OSError`` when the
+    filter cannot be installed; there is no unfiltered fallback.
+    """
+    import ctypes
+
+    class SockFilter(ctypes.Structure):
+        _fields_ = [("code", ctypes.c_ushort), ("jt", ctypes.c_ubyte),
+                    ("jf", ctypes.c_ubyte), ("k", ctypes.c_uint32)]
+
+    class SockFprog(ctypes.Structure):
+        _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.POINTER(SockFilter))]
+
+    program = _socket_filter_program()
+    instructions = (SockFilter * len(program))(*(SockFilter(*item) for item in program))
+    fprog = SockFprog(len(program), instructions)
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl.restype = ctypes.c_int
+    if libc.prctl(_PR_SET_SECCOMP, _SECCOMP_MODE_FILTER, ctypes.byref(fprog), 0, 0) != 0:
+        errno = ctypes.get_errno()
+        raise OSError(errno, f"cannot install the socket filter: {os.strerror(errno)}")
+    if _seccomp_filters("self")[0] != str(_SECCOMP_MODE_FILTER):
+        raise OSError("socket filter is not in force")
+    return _socket_filter_report()
 
 
 def _reaper(spec_path: Path, event_fd: int, supervisor_pid: int, go_fd: int) -> int:
@@ -953,6 +1180,11 @@ def _reaper(spec_path: Path, event_fd: int, supervisor_pid: int, go_fd: int) -> 
     except OSError as exc:
         emit(event="launch_error", error=f"network namespace unavailable: {type(exc).__name__}: {exc}")
         return 125
+    try:
+        boundary["socket_filter"] = _install_socket_filter()
+    except OSError as exc:
+        emit(event="launch_error", error=f"socket filter unavailable: {type(exc).__name__}: {exc}")
+        return 125
     emit(event="boundary", **boundary)
     with os.fdopen(go_fd, "rb", buffering=0) as go:
         if go.read(1) != b"1":
@@ -973,6 +1205,8 @@ def _reaper(spec_path: Path, event_fd: int, supervisor_pid: int, go_fd: int) -> 
             raise OSError(ctypes.get_errno(), "no_new_privs unavailable")
         if _netns_inode("self") != isolated_netns:
             raise OSError("candidate is outside the confirmed network namespace")
+        if _seccomp_filters("self")[0] != str(_SECCOMP_MODE_FILTER):
+            raise OSError("candidate is outside the socket filter")
         os.setgroups([])
         os.setresgid(gid, gid, gid)
         os.setresuid(uid, uid, uid)

@@ -57,10 +57,12 @@ WHAT THE GATES DO AND DO NOT PROVE
     supervisor (scripts/selfmod_linux_isolation.py) once an operator sets
     SONDER_SELFMOD_CANDIDATE_UID to a dedicated unprivileged uid and runs
     this stage as root. The candidate runs as that uid with no_new_privs and
-    rlimits; it cannot write the held-out snapshot, the backup bundle (the
-    rollback point), the selfmod database (baseline, tested digests,
-    decisions) or the live checkout, and the supervisor re-digests that truth
-    after every check. Like low integrity it does not bound reads or network.
+    rlimits, in a fresh network namespace without an IP route, under a
+    seccomp filter that allows only namespace-scoped socket families; it
+    cannot write the held-out snapshot, the backup bundle (the rollback
+    point), the selfmod database (baseline, tested digests, decisions) or the
+    live checkout, and the supervisor re-digests that truth after every
+    check. Like low integrity it does not bound reads.
   - The parent-scored gate accepts only the typed isolation attestation of
     the supervisor this host selected ("low" on Windows, "linux-uid" on a
     configured Linux host); neither can vouch for the other.

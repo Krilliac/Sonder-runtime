@@ -6,9 +6,11 @@ Two supervisors can run unattended selfmod candidate checks:
   a Job object.  Its report carries ``integrity: "low"``.
 * ``scripts/selfmod_linux_isolation.py`` (Linux): a dedicated unprivileged
   uid with ``no_new_privs`` and uid-scoped teardown, inside a fresh network
-  namespace with no configured interface.  Its report carries
-  ``integrity: "linux-uid"``, the candidate and supervisor uids, the
-  ``network`` boundary it observed and ``no_new_privs: true``.
+  namespace with no configured interface and under a seccomp filter that
+  confines socket creation to namespace-scoped address families.  Its report
+  carries ``integrity: "linux-uid"``, the candidate and supervisor uids, the
+  ``network`` boundary it observed, ``no_new_privs: true`` and the
+  ``socket_filter`` in force.
 
 Both reports are plain dictionaries built by the supervising process from
 the kernel's view of the candidate, never from candidate stdout.  This module
@@ -17,9 +19,10 @@ turns such a report into one immutable, validated value so every consumer
 same rules instead of re-implementing string checks.
 
 The attestation says which OS boundary bounded the candidate's *writes* and,
-for ``linux-uid``, its network reach and privilege gain. It does not claim
-result independence: the candidate still produces the output the parent
-grades.  Independence is the separate oracle receipt in
+for ``linux-uid``, its network reach (including address families such as
+``AF_VSOCK`` that a network namespace does not scope) and privilege gain. It
+does not claim result independence: the candidate still produces the output
+the parent grades.  Independence is the separate oracle receipt in
 ``independent_oracle.py`` (see REMAINING-SELFMOD-517-LINUX-ISOLATION.md).
 """
 
@@ -62,6 +65,22 @@ def _network_isolated(network: object) -> bool:
             and network.get("interfaces") == ["lo"] and network.get("loopback_up") is False)
 
 
+# The only socket filter a ``linux-uid`` report may claim: seccomp allows
+# ``socket``/``socketpair`` only for AF_UNIX (1), AF_INET (2), AF_INET6 (10)
+# and AF_NETLINK (16), which the network namespace scopes, and denies the
+# io_uring syscalls.  AF_VSOCK and every other family are refused.
+SOCKET_FILTER = "seccomp"
+ATTESTED_SOCKET_FAMILIES = (1, 2, 10, 16)
+
+
+def _socket_families_filtered(socket_filter: object) -> bool:
+    """True only for the exact supervisor-confirmed socket-family allow-list."""
+    return (isinstance(socket_filter, Mapping)
+            and socket_filter.get("mechanism") == SOCKET_FILTER
+            and socket_filter.get("socket_families") == list(ATTESTED_SOCKET_FAMILIES)
+            and socket_filter.get("io_uring") == "denied")
+
+
 @dataclass(frozen=True, slots=True)
 class IsolationAttestation:
     """A verified statement that one candidate check ran under an OS boundary.
@@ -82,6 +101,7 @@ class IsolationAttestation:
     integrity_failed: bool = False
     network_isolated: bool = False
     no_new_privs: bool = False
+    socket_families_filtered: bool = False
 
     def __post_init__(self) -> None:
         if self.kind not in ISOLATION_KINDS:
@@ -103,6 +123,8 @@ class IsolationAttestation:
                 raise IsolationAttestationError("linux-uid attestation lacks the network namespace boundary")
             if self.no_new_privs is not True:
                 raise IsolationAttestationError("linux-uid attestation lacks no_new_privs")
+            if self.socket_families_filtered is not True:
+                raise IsolationAttestationError("linux-uid attestation lacks the socket filter")
 
     @classmethod
     def from_supervisor_result(
@@ -138,16 +160,18 @@ class IsolationAttestation:
         if integrity_failed and passed is not False:
             raise IsolationAttestationError("integrity failure reported as a pass")
         candidate_uid = candidate_gid = None
-        network_isolated = no_new_privs = False
+        network_isolated = no_new_privs = socket_families_filtered = False
         if expected_kind == LINUX_UID:
-            # Both boundaries are facts the supervisor verified on the
+            # These boundaries are facts the supervisor verified on the
             # candidate's parent before letting it launch; a report without
             # them is not a linux-uid attestation at all.
             if not _network_isolated(job.get("network")):
                 raise IsolationAttestationError("supervisor report lacks the network namespace boundary")
             if job.get("no_new_privs") is not True:
                 raise IsolationAttestationError("supervisor report lacks no_new_privs")
-            network_isolated = no_new_privs = True
+            if not _socket_families_filtered(job.get("socket_filter")):
+                raise IsolationAttestationError("supervisor report lacks the socket filter")
+            network_isolated = no_new_privs = socket_families_filtered = True
             candidate_uid = job.get("uid")
             candidate_gid = job.get("gid")
             reported_supervisor = job.get("supervisor_uid")
@@ -166,6 +190,7 @@ class IsolationAttestation:
             integrity_failed=integrity_failed,
             network_isolated=network_isolated,
             no_new_privs=no_new_privs,
+            socket_families_filtered=socket_families_filtered,
         )
 
     def as_record(self) -> dict[str, object]:
@@ -182,6 +207,7 @@ class IsolationAttestation:
             "integrity_failed": self.integrity_failed,
             "network_isolated": self.network_isolated,
             "no_new_privs": self.no_new_privs,
+            "socket_families_filtered": self.socket_families_filtered,
         }
 
 
@@ -206,11 +232,13 @@ def accepted_probe_attestation(
 
 
 __all__ = [
+    "ATTESTED_SOCKET_FAMILIES",
     "ISOLATION_KINDS",
     "IsolationAttestation",
     "IsolationAttestationError",
     "LINUX_UID",
     "LOW_INTEGRITY",
     "NETWORK_NAMESPACE",
+    "SOCKET_FILTER",
     "accepted_probe_attestation",
 ]
