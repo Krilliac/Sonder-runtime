@@ -147,7 +147,7 @@ def format_weather(result):
              "Updated: %s (%s)" % (current.get("time", "unknown"), forecast.get("timezone", "local time")),
              "Now: %s, %s%s (feels like %s%s); humidity %s%%; wind %s; precipitation %s %s." % (_weather_condition(current.get("weather_code")), current.get("temperature_2m", "?"), temp_unit, current.get("apparent_temperature", "?"), temp_unit, current.get("relative_humidity_2m", "?"), wind, current.get("precipitation", "?"), precip_unit), "", "Forecast:"]
     for index, date in enumerate(daily.get("time") or []):
-        def value(key, fallback="?"):
+        def value(key, fallback="?", index=index):
             values = daily.get(key) or []
             return values[index] if index < len(values) else fallback
         lines.append("- %s: %s; high %s%s, low %s%s; precipitation %s%% (%s %s); wind up to %s %s." % (date, _weather_condition(value("weather_code", None)), value("temperature_2m_max"), daily_units.get("temperature_2m_max", ""), value("temperature_2m_min"), daily_units.get("temperature_2m_min", ""), value("precipitation_probability_max"), value("precipitation_sum"), daily_units.get("precipitation_sum", ""), value("wind_speed_10m_max"), daily_units.get("wind_speed_10m_max", "")))

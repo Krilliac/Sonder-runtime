@@ -67,6 +67,11 @@ jobs:
           --base-ref "$REQUIREMENT_EVIDENCE_BASE_REF"
       - name: Enforce legacy error-signal ratchet
         run: python scripts/check_error_signals.py
+      # Blocking rules (undefined names, shadowed definitions, loop-variable
+      # closures) are zero-tolerance outside tests; all other findings and
+      # legacy module sizes are shrink-only against scripts/lint_baseline.json.
+      - name: Enforce lint gate and shrink-only ratchets
+        run: python scripts/check_lint_ratchet.py
       - name: Prevent new Git-history privacy debt
         run: python scripts/check_history_privacy.py --json
       - name: Check operator/developer doc links
@@ -153,6 +158,14 @@ jobs:
           tests/test_control_plane_inventory.py
           tests/test_control_plane_deleted_paths.py
           tests/test_process_wait_hardening.py
+          tests/test_job004_process_provider.py
+          tests/test_process_cancellation_reaping.py
+          tests/test_process_completion_race.py
+          tests/test_process_group_absence.py
+          tests/test_process_tree_supervisor.py
+          tests/test_api003_subprocess_provider.py
+          tests/test_api003_restart_recovery.py
+          tests/test_runtime_owner_windows_containment.py
           tests/test_start_selfmod_launcher.py
           tests/test_command_recovery.py
           tests/test_curriculum_store_durability.py

@@ -1027,9 +1027,9 @@
     },
     {
       "checked": false,
-      "claim": "The shared graceful-drain contract now rejects non-finite, non-numeric, boolean and non-positive deadline values before starting shutdown barriers, preserving finite timeout semantics. Existing lifecycle admission and receipt-backed cleanup contracts remain unchanged.",
+      "claim": "Graceful drain rejects invalid or non-finite deadlines. Process wait preserves an already recorded cancellation through cleanup instead of ordinary exit classification, retaining owned resources while cleanup is incomplete. A reaped POSIX root can complete cancellation only when its recorded root-owned group is observed absent without sending termination signals. Raw Windows taskkill success no longer asserts tree cleanup; native Job Object proof remains authoritative. Deadline retries preserve pending cancellation after root exit, including restored owners.",
       "requirement_id": "OPS-005",
-      "revision": 3,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "6d62c6acb23d426748dd6071c1119f7877948c7829e588b62a0a7a1b8e99586e",
+    "ledger_sha256": "b711e7b3ef01cf0ad85cd771a611f78fa92c11963b79bcf7643b15cc98207e64",
     "spec_sha256": "1d7da49c5910bcf0bd5099ef1858312a8491a0429a4df33895d8088942278e33"
   }
 }

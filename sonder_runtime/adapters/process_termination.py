@@ -5,7 +5,7 @@ import os
 import signal
 import subprocess
 
-from .process_liveness import PROCESS_ALIVE, probe_process
+from .process_liveness import PROCESS_ALIVE, PROCESS_DEAD, probe_process
 
 from ..application.jobs.durable_registry import (
     ProcessTreeCleanupReceipt,
@@ -52,6 +52,12 @@ class ProcessTreeSupervisor:
                 request.process_id,
                 request.process_identity,
             )
+            if (
+                state == PROCESS_DEAD
+                and observed_identity in (None, request.process_identity)
+                and self._platform == "posix"
+            ):
+                return self._confirm_exited_group(request)
             if state != PROCESS_ALIVE or observed_identity != request.process_identity:
                 return ProcessTreeCleanupReceipt(
                     request.job_id,
@@ -66,6 +72,27 @@ class ProcessTreeSupervisor:
         return ProcessTreeCleanupReceipt(
             request.job_id, False, complete=False,
             detail="unsupported platform; full process-tree cleanup is unproven",
+        )
+
+    def _confirm_exited_group(self, request):
+        """Observe absence after root reaping without authorizing any signal."""
+        if request.process_group_id != request.process_id:
+            return ProcessTreeCleanupReceipt(
+                request.job_id, False, complete=False,
+                detail="recorded root-owned process group is unavailable",
+            )
+        try:
+            self._os.killpg(request.process_group_id, 0)
+        except ProcessLookupError:
+            return ProcessTreeCleanupReceipt(
+                request.job_id, True, complete=True,
+                detail="recorded process group is absent after root exit",
+            )
+        except OSError:
+            pass
+        return ProcessTreeCleanupReceipt(
+            request.job_id, False, complete=False,
+            detail="root exited but process-group absence is unproven",
         )
 
     def _windows_cleanup(self, request: ProcessTreeCleanupRequest) -> ProcessTreeCleanupReceipt:
@@ -84,10 +111,15 @@ class ProcessTreeSupervisor:
                 request.job_id, True, complete=False,
                 detail=f"taskkill failed: {type(exc).__name__}",
             )
-        complete = getattr(result, "returncode", 1) == 0
+        # taskkill has no retained containment handle or descendant census.
+        # Native Job Object owners provide their proof outside this fallback.
         return ProcessTreeCleanupReceipt(
-            request.job_id, True, complete=complete,
-            detail="taskkill tree completed" if complete else "taskkill did not confirm tree termination",
+            request.job_id, True, complete=False,
+            detail=(
+                "taskkill returned success; Windows tree absence remains unproven"
+                if getattr(result, "returncode", 1) == 0
+                else "taskkill did not confirm tree termination"
+            ),
         )
 
     def _posix_cleanup(self, request: ProcessTreeCleanupRequest) -> ProcessTreeCleanupReceipt:

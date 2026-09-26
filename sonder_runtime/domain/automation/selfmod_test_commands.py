@@ -9,7 +9,6 @@ from pathlib import Path
 
 
 def selfmod_test_commands(run, explicit_tests):
-    import shlex
     workspace = Path(run["workspace_path"])
     declared_python = sorted(path for path in run["files"] if path.lower().endswith(".py"))
     present_python = [path for path in declared_python if (workspace / path).is_file()]

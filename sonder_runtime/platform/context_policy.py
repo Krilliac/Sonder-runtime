@@ -5,13 +5,37 @@ import re
 
 
 _QUANTISED_KV = ("q8_0", "q4_0", "q4_1", "q5_0", "q5_1")
+_KNOWN_KV = _QUANTISED_KV + ("f16", "bf16", "f32")
 DEFAULT_CONTEXT_QUANTISED_KV = 32768
 DEFAULT_CONTEXT_FP16_KV = 8192
+# Provenance labels for the cache type the *server* is believed to use.
+KV_SOURCE_DECLARED = "declared"
+KV_SOURCE_CLIENT_ENVIRONMENT = "client-environment"
+KV_SOURCE_DEFAULT = "default"
+
+
+def kv_cache_type() -> tuple[str, str]:
+    """Return ``(cache_type, source)`` for the Ollama server's KV cache.
+
+    ``OLLAMA_KV_CACHE_TYPE`` configures the Ollama *server* process, and
+    Sonder's environment is only the server's environment when Sonder itself
+    launched it.  ``SONDER_KV_CACHE_TYPE`` is the operator's declaration of
+    what the server actually runs, and wins.  The client-side variable is
+    still honoured for compatibility but reported as ``client-environment``
+    so diagnostics show it is an inference.  Unknown values fall back to
+    ``f16``, the largest common cache and therefore the safe assumption.
+    """
+    declared = str(os.environ.get("SONDER_KV_CACHE_TYPE", "")).strip().lower()
+    if declared in _KNOWN_KV:
+        return declared, KV_SOURCE_DECLARED
+    inherited = str(os.environ.get("OLLAMA_KV_CACHE_TYPE", "")).strip().lower()
+    if inherited in _KNOWN_KV:
+        return inherited, KV_SOURCE_CLIENT_ENVIRONMENT
+    return "f16", KV_SOURCE_DEFAULT
 
 
 def _kv_cache_is_quantised() -> bool:
-    kind = str(os.environ.get("OLLAMA_KV_CACHE_TYPE", "")).strip().lower()
-    return kind in _QUANTISED_KV
+    return kv_cache_type()[0] in _QUANTISED_KV
 
 
 def default_context() -> int:
@@ -20,6 +44,9 @@ def default_context() -> int:
     return DEFAULT_CONTEXT_FP16_KV
 
 
+# Import-time snapshot kept for callers of the historical constant.  Policy
+# code calls default_context() so a live environment change (hot reload, an
+# operator's /context command) is honoured instead of this frozen value.
 DEFAULT_CONTEXT = default_context()
 DEFAULT_NATIVE_MAX = 262144
 DEFAULT_VIRTUAL_MAX = 1_000_000
@@ -51,13 +78,16 @@ _PARAMETER_CONTEXT_BANDS = (
 )
 
 
-def auto_context_plan(model_context=None, parameter_size=None) -> dict:
+def auto_context_plan(model_context=None, parameter_size=None, residency_ceiling=None) -> dict:
     """Explain a model-aware native context choice with clamp provenance.
 
     Returns a dict with the selected ``context`` plus the intermediate facts
     that produced it: the starting ``base`` and its ``source``, the parsed
     ``parameter_billions`` and ``advertised`` maximum, and the ordered list of
-    ``clamps`` that actually reduced (or raised) the value.  The physical
+    ``clamps`` that actually reduced (or raised) the value.  A
+    ``residency_ceiling`` is a window measured to fit (the model spilled to
+    system RAM at a larger one); like the parameter bands it bounds only
+    automatic selection, never an operator pin.  The physical
     limits — the model's advertised maximum, the native ceiling, and the
     minimum window — always apply.  The parameter-band ladder applies only
     when the operator has *not* pinned a size: an explicit
@@ -84,6 +114,10 @@ def auto_context_plan(model_context=None, parameter_size=None) -> dict:
                     chosen = ceiling
                     clamps.append(reason)
                 break
+    measured = parse_strict(residency_ceiling)
+    if measured is not None and not has_explicit_environment and measured < chosen:
+        chosen = measured
+        clamps.append("observed-spill")
     advertised = parse_strict(model_context)
     if advertised is not None and advertised < chosen:
         chosen = advertised
@@ -95,17 +129,21 @@ def auto_context_plan(model_context=None, parameter_size=None) -> dict:
     if chosen < MIN_CONTEXT:
         chosen = MIN_CONTEXT
         clamps.append("minimum-window")
+    kv_type, kv_source = kv_cache_type()
     return {
         "context": chosen,
         "base": base,
         "source": source,
+        "kv_cache_type": kv_type,
+        "kv_cache_source": kv_source,
+        "residency_ceiling": measured,
         "parameter_billions": parameters,
         "advertised": advertised,
         "clamps": tuple(clamps),
     }
 
 
-def auto_context(model_context=None, parameter_size=None) -> int:
+def auto_context(model_context=None, parameter_size=None, residency_ceiling=None) -> int:
     """Choose a model-aware native context when the caller did not pin one.
 
     Ollama's server default is process-wide, but model weights and KV-cache
@@ -114,7 +152,7 @@ def auto_context(model_context=None, parameter_size=None) -> int:
     the selected model's advertised maximum. Operators can still override the
     result with ``SONDER_CONTEXT_SIZE`` or an explicit request value.
     """
-    return auto_context_plan(model_context, parameter_size)["context"]
+    return auto_context_plan(model_context, parameter_size, residency_ceiling)["context"]
 
 
 def parse_strict(value):
@@ -138,7 +176,9 @@ def parse_strict(value):
     return parsed if parsed > 0 else None
 
 
-def parse_size(value, default=DEFAULT_CONTEXT):
+def parse_size(value, default=None):
+    if default is None:
+        default = default_context()
     if value is None:
         return int(default)
     if isinstance(value, (int, float)):
@@ -204,6 +244,7 @@ def format_policy(value=None):
         "  mode: %(mode)s" % values,
         "  native max: %(native_max)s" % values,
         "  virtual max: %(virtual_max)s" % values,
+        "  kv cache: %s (%s)" % kv_cache_type(),
     ]
     if values["virtual"]:
         lines.append(
