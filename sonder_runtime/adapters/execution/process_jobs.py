@@ -537,8 +537,14 @@ class SubprocessJobProvider:
         if containment is not None and (
             containment.forced or current.status is JobStatus.CANCELLATION_REQUESTED
         ):
+            # A recorded cancellation (a deadline or an operator cancel) is the
+            # decision that ended this process; its forced cleanup is only the
+            # mechanism.  Keep the recorded reason so a deadline kill whose
+            # exit this waiter observed first still reads as the deadline.
             reason = (
-                containment.detail
+                current.error
+                if current.status is JobStatus.CANCELLATION_REQUESTED and current.error
+                else containment.detail
                 or "job scope required forced descendant cleanup after process exit"
             )
             if current.status is not JobStatus.CANCELLATION_REQUESTED:
@@ -660,6 +666,18 @@ class SubprocessJobProvider:
                 self._jobs._lifecycle.record_many(result.records)
             self._schedule_deadline(job_id, self._cleanup_retry_seconds)
             return result
+        if job_id in self._memory_tokens:
+            # Record the decision before the containment kill.  Terminating a
+            # job object (Windows) makes the root exit nonzero at once, and a
+            # concurrent ``wait`` that observes that exit before the intent is
+            # durable would publish it as an ordinary FAILED run -- losing the
+            # deadline or cancellation that caused it.
+            current = self._registry.poll(job_id)
+            if (
+                not current.is_terminal
+                and current.status is not JobStatus.CANCELLATION_REQUESTED
+            ):
+                self._jobs.request_cancellation(job_id, reason, max_descendants=limit)
         containment = self._quiesce_containment(job_id, force=True)
         if not process_exited or (containment is not None and not containment.complete):
             records = self._jobs.request_cancellation(

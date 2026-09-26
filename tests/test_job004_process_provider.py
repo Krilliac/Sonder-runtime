@@ -1205,6 +1205,108 @@ def test_deadline_reaps_an_already_completed_process_instead_of_cancelling(tmp_p
     assert registry.poll(job_id).status is JobStatus.SUCCEEDED
 
 
+class _KilledOnTerminateProcess(_Process):
+    """A root that blocks until its job object is terminated, then exits 1."""
+
+    def __init__(self) -> None:
+        super().__init__(exit_code=1)
+        import threading
+
+        self.exited = threading.Event()
+
+    def poll(self):
+        return self.exit_code if self.exited.is_set() else None
+
+    def wait(self, timeout=None):
+        self.wait_calls.append(timeout)
+        if not self.exited.wait(timeout):
+            raise subprocess.TimeoutExpired("fixture", timeout)
+        return self.exit_code
+
+
+class _TerminateJobToken(_ScopedToken):
+    """Model Windows TerminateJobObject: the kill makes the root exit nonzero,
+    and the controller's blocked ``wait`` publishes that exit before the
+    cancelling thread gets to record anything after the kill."""
+
+    def __init__(self, process: _KilledOnTerminateProcess) -> None:
+        super().__init__()
+        self.process = process
+        self.waiter = None
+
+    def quiesce(self, *, force: bool) -> ProcessContainmentResult:
+        self.calls.append(force)
+        if force and not self.process.exited.is_set():
+            self.process.exited.set()
+            assert self.waiter is not None
+            self.waiter.join(timeout=10)
+            assert not self.waiter.is_alive()
+            return ProcessContainmentResult(True, forced=True)
+        return ProcessContainmentResult(True)
+
+
+@pytest.mark.parametrize("durable", [False, True])
+def test_deadline_kill_is_cancelled_even_when_the_waiter_sees_the_exit_first(
+    tmp_path, durable,
+):
+    """Regression (windows-latest): a deadline tree kill was published FAILED.
+
+    On Windows terminating the job object makes the root exit 1 at once; the
+    controller's ``wait`` observed that exit and published an ordinary
+    non-zero FAILED before the deadline's cancellation was recorded, so the
+    debug launcher reported ``failed`` instead of ``timed_out``.  The ordering
+    is forced here so the race is deterministic on any host.
+    """
+    import threading
+    from dataclasses import replace
+
+    class Timer:
+        def __init__(self, delay, callback, args=()):
+            self.daemon = False
+
+        def start(self):
+            return None
+
+        def cancel(self):
+            return None
+
+    registry = (
+        SQLiteDurableJobRegistry(tmp_path / "deadline-kill.db")
+        if durable
+        else DurableJobRegistry()
+    )
+    process = _KilledOnTerminateProcess()
+    token = _TerminateJobToken(process)
+    provider = SubprocessJobProvider(
+        registry,
+        process_cleanup=_Cleanup(complete=True),
+        launcher=lambda *a, **k: process,
+        platform_name="posix",
+        memory_limiter=_ScopedLimiter(token),
+        timer_factory=Timer,
+        process_identity_resolver=lambda _pid: "deadline-kill-instance",
+    )
+    job_id = "deadline-kill"
+    provider.start(replace(
+        _request(job_id), require_job_scope=True, deadline_seconds=2,
+    ))
+    waited = []
+    token.waiter = threading.Thread(
+        target=lambda: waited.append(provider.wait(job_id, timeout=10)),
+        daemon=True,
+    )
+    token.waiter.start()
+
+    provider._expire_deadline(job_id)
+
+    record = registry.poll(job_id)
+    assert record.status is JobStatus.CANCELLED, record
+    assert "deadline" in record.error
+    assert waited and waited[0].exit_code == 1
+    assert waited[0].record.status is JobStatus.CANCELLED
+    assert token.closed and job_id not in provider._processes
+
+
 def test_restarted_deadline_never_signals_a_reused_process_identity(tmp_path):
     database = tmp_path / "pid-reuse.db"
     registry = SQLiteDurableJobRegistry(database)
