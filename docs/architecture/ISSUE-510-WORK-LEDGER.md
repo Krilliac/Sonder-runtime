@@ -1,8 +1,8 @@
 # Issue 510 execution ledger
 
-Updated 2026-09-24. This is an implementation and verification work ledger for
+Updated 2026-09-25. This is an implementation and verification work ledger for
 [#510](https://github.com/Krilliac/Sonder-runtime/issues/510), including the
-2026-09-24 strategy/recovery program and the associated ten-item defect audit.
+2026-09-24 strategy/recovery program, the associated ten-item defect audit, and the 2026-09-25 cross-provider agent/connector delta.
 Original baseline: `a6a082859d4d3d4ec80cf6497bd37d6052bba5e9`.
 Continuation baseline: `65f64a6ba4ce8e6ea22fcc335f10b803633c4454`; see the
 [continuation qualification](evidence/ISSUE-510-CONTINUATION-2026-09-24.md).
@@ -106,6 +106,208 @@ remains part of #510 and is being integrated in this continuation.
 | Typed Chat-to-work handoff | Owner-scoped HTTP admission retains typed objective/mode/project/provenance and a verified prior model-response reference; canonical admission/return events and JSON/SSE receipts survive restart. One classification and existing authorization/idempotency gates remain. | `returned` is a handler outcome, not task success. The source reference is provenance only; legacy lanes still need authorized prior-context consumption and separately enforced constraints/success criteria. |
 
 Generic agent-lane tests do not establish these Chat-specific acceptance criteria.
+
+## Cross-provider agent and connector delta
+
+The 2026-09-25 cross-provider design extends the existing SEAM-009
+`SubagentProvider`, durable worker registry, AGENT-009 structured delegation,
+AGENT-010 independently routed roles, and MODEL-004/005/007/008/009 routing
+requirements. It is a convergence slice, not a second orchestration stack.
+The invariant is:
+
+> Models may propose what should happen next; Sonder remains the authority that
+> decides what is admitted, which provider executes it, what context leaves the
+> host, what budget is reserved, what effects are allowed, and whether the
+> result is accepted.
+
+Provider identity is routing policy, not authority. The preferred deployment may
+use Astra/OpenAI as the orchestrator and Claude as a specialist/reviewer, but
+that preference must remain runtime policy rather than a hard-coded hierarchy.
+
+### Control and communication contract
+
+- External agents never receive another provider's credential and do not directly
+  invoke one another. Logical peer consultation is physically
+  `worker -> Sonder -> worker`.
+- Child models may return typed handoff, consultation, specialist or descendant
+  proposals. The canonical host admission path validates authority, inherited
+  budgets, workspace ownership, provider capability, cloud/egress consent,
+  credential availability, context policy and duplicate/replay state before
+  dispatch.
+- Use the existing `WorkerExecutionContract`, `WorkerContextPolicy`,
+  `DelegationService`, worker registry, adaptive concurrency and artifact
+  readiness barrier. Do not introduce a provider-specific worker store, retry
+  engine, context archive, checkpoint database or permission system.
+- Reviewer/critic calls default to scoped context: task/spec, accepted
+  constraints, relevant source/diff/artifacts and verifier evidence. Do not
+  automatically inherit implementer rationale, confidence, irrelevant chat
+  history or previous critic conclusions.
+- Mutating external workers use isolated worktrees/workspaces and explicit
+  `owned_files`/`task_scope`. Provider success does not imply integration;
+  deterministic verification and the existing integration/acceptance authority
+  remain separate.
+- A provider transport failure never silently invokes a second provider. A
+  provider/model switch is a new durable Strategy Controller decision with its
+  own route, budget and reason.
+- If an external run may have started and Sonder loses the completion receipt,
+  restart recovery must reconcile the provider-native run/session identity when
+  possible. Otherwise classify the worker `RECOVERY_REQUIRED`; never blindly
+  redispatch a potentially mutating task.
+
+### Connector classes
+
+Keep two execution surfaces distinct:
+
+1. **ModelGateway connector** — Sonder owns the loop, tool exposure, context,
+   permissions and continuation around direct model inference.
+2. **Managed-agent SubagentProvider connector** — the external service owns a
+   bounded multi-step agent loop, while Sonder owns admission, workspace,
+   budgets, context/credential release, reconciliation and result acceptance.
+
+One vendor may expose both surfaces and should therefore have two adapters rather
+than one ambiguous connector.
+
+### Connector target matrix
+
+| Service / surface | Intended Sonder seam | Status / transport requirement | Important constraints |
+|---|---|---|---|
+| OpenAI Responses / direct models | `ModelGateway` | First-class target through the existing OpenAI-compatible/provider-dispatch path, with native adapter when required for provider-specific features. | Preserve exact model/tier pins, route receipts and no implicit provider failover. |
+| OpenAI Agents API / Codex SDK | managed-agent `SubagentProvider` | First-class managed-agent target. Agents API exposes managed Codex harness sessions; Codex SDK is the self-hosted harness option. | Treat provider session/sandbox IDs as opaque durable external identities; Sonder still owns root budget and acceptance. Source: https://developers.openai.com/api/docs/guides/agents |
+| Anthropic Messages API | `ModelGateway` | First-class direct-model target. | Tool loop may remain Sonder-owned; credential/egress and prompt/context release stay under existing policy. |
+| Claude Managed Agents / Claude Agent SDK | managed-agent `SubagentProvider` | First-class managed-agent target. Managed Agents provide stateful hosted agents; Agent SDK exposes the Claude Code harness for custom integrations. | Scoped reviewer context, explicit workspace grants, no direct child-provider invocation. Sources: https://platform.claude.com/docs/en/agents-and-tools/agent-skills/claude-api-skill and https://www.anthropic.com/news/enabling-claude-code-to-work-more-autonomously |
+| xAI Grok REST/gRPC API | `ModelGateway` | First-class direct-model target. xAI exposes OpenAI-compatible REST plus gRPC and tool/function calling. | Prefer a dedicated conformance profile rather than assuming all OpenAI-compatible semantics. Preserve xAI cache/conversation identity only as provider metadata, not Sonder authority. Sources: https://docs.x.ai/developers/rest-api-reference/inference and https://docs.x.ai/developers/grpc-api-reference |
+| Grok Bot | managed-agent `SubagentProvider` bridge | **Planned/experimental until xAI publishes a stable programmatic Bot-control surface suitable for host orchestration.** Current official docs center on persistent cloud-computer Bots controlled through Grok Bot clients, conversations, routines and connectors. | Do not automate the desktop/web UI as a production connector. If a supported API/SDK appears, bind each Bot as an opaque managed child. Provider-internal Bot-to-Bot chats/group orchestration must not bypass Sonder budgets/authority. Sources: https://docs.x.ai/grok-bot/overview and https://docs.x.ai/grok-bot/bots |
+| Google Gemini direct API | `ModelGateway` | First-class direct-model target. | Conformance-gate tools, structured output, multimodal behavior and cancellation before capability advertisement. |
+| Google Gemini managed Agents / Antigravity | managed-agent `SubagentProvider` | First-class managed-agent target. Google documents managed agents with hosted Linux sandboxes and an Antigravity agent. | Treat the Google sandbox as the provider execution world; reconcile artifacts/results into Sonder rather than granting it integration authority. Source: https://ai.google.dev/gemini-api/docs/agents |
+| GitHub Copilot SDK / CLI | managed-agent `SubagentProvider` | First-class local/managed-agent target. GitHub documents a Copilot SDK over CLI/JSON-RPC with custom agents, MCP, lifecycle hooks and session management. | Run inside an isolated workspace; retain normal Git/tool permissions; provider-generated commits/PRs are artifacts awaiting Sonder verification. Source: https://docs.github.com/en/copilot/responsible-use/agents |
+| GitHub Copilot cloud agent | managed-agent `SubagentProvider` | First-class repository-oriented target where account/repository policy permits. GitHub exposes issue assignment through REST/GraphQL and session/PR tracking surfaces. | Treat branch/PR/session identity as the external durable result; never equate PR creation with task success. Sources: https://docs.github.com/en/enterprise-cloud@latest/copilot/how-tos/use-copilot-agents/cloud-agent/use-cloud-agent-via-the-api and https://docs.github.com/en/copilot/how-tos/copilot-on-github/use-copilot-agents/manage-and-track-agents |
+| Cursor Agent CLI / ACP | managed-agent `SubagentProvider` | First-class local agent target. Cursor Agent supports headless automation and ACP over stdio/JSON-RPC. | Prefer ACP for structured lifecycle/control when sufficient; otherwise wrap headless CLI behind the same durable adapter and parser bounds. Source: https://prod.cursor.com/docs/cli/using |
+| Mistral direct API | `ModelGateway` | First-class model target. | Conformance-gate structured output/tool use rather than inheriting assumptions from another provider. |
+| Mistral Agents / Conversations | managed-agent `SubagentProvider` | First-class managed-agent target. Agents support persistent conversations, built-in/custom tools, connectors and handoffs. | Sonder remains the outer authority; provider-native handoffs are disabled or treated as one opaque child unless their descendant/resource behavior can be bounded and evidenced. Source: https://docs.mistral.ai/studio/agents/agents-api |
+| DeepSeek API / Harness-compatible surfaces | `ModelGateway` first; managed-agent only after harness conformance | Direct model target through its OpenAI/Anthropic-compatible APIs; future harness integration is separately qualified. | Compatibility claims are insufficient for agent eligibility; pass the same cancellation/tool/result/identity battery. Source: https://api-docs.deepseek.com/guides/harness |
+| OpenRouter | `ModelGateway` aggregator, optional agent SDK | Supported only behind an explicit aggregator profile. OpenRouter standardizes many providers/models and offers an agent SDK. | **Disable or fully surface automatic provider fallback/routing** when exact provider identity matters. Hidden fallback conflicts with Sonder's explicit SWITCH_MODEL/SWITCH_PROVIDER and replay/attribution contracts. Sources: https://openrouter.ai/developers and https://openrouter.ai/blog/tutorials/build-tool-calling-agent-loop/ |
+| Generic OpenAI-compatible providers (for example Groq, Together, Fireworks, Cerebras and similar services) | `ModelGateway` | Connector family, not automatic eligibility. | Each endpoint/model must pass provider identity, tool-call, structured-output, timeout/cancellation, context and usage conformance before routing can advertise those capabilities. |
+| Other coding-agent products without a stable documented headless/API/ACP/MCP control surface | bridge candidate only | Discovery/research target, not production support. | Do not ship GUI-driving adapters merely to claim coverage. Promote only after a stable programmable contract and lifecycle/recovery semantics are documented and tested. |
+
+The matrix is intentionally capability-based. Adding a provider to configuration
+does not make it eligible for orchestration.
+
+### Required provider profile
+
+Extend the measured provider/model profile so agent routing can bind at least:
+
+- provider/model/revision and agent/client/harness version;
+- direct-model versus managed-agent execution kind;
+- supported roles (orchestrator, planner, architect, designer, editor, verifier,
+  reviewer, researcher, debugger, utility);
+- chat, structured output, native/fallback tool use, parallel tools,
+  continuation, resume, steering, cancellation and artifact-result support;
+- context/output limits and multimodal support;
+- measured planning, coding, architecture, UI/visual reasoning, C++, C#,
+  debugging, repository editing, reverse engineering and summarization
+  capabilities where relevant;
+- provider health, rate/capacity state and evidence freshness;
+- cost/resource class and permitted concurrent top-tier lanes;
+- trust/egress zone and whether prompts/files leave the operator-controlled host.
+
+Capability states are `declared -> tested -> passing/degraded/failed -> stale`.
+The route planner may use only evidence sufficient for the requested role. A
+vendor/model name or marketing capability is not routing evidence.
+
+### Provider-independent handoff/result protocol
+
+Add/extend typed contracts rather than free-form cross-provider chat:
+
+```text
+HandoffProposal
+  source_worker_id
+  objective
+  requested_role
+  required_capabilities
+  context_policy/context_inputs
+  constraints/success_criteria
+  evidence_refs/artifact_refs
+  suggested_provider (advisory only)
+  inherited budget
+
+ConsultationRequest / ConsultationResult
+  bounded question
+  accepted constraints
+  selected source/artifact/verifier refs
+  no mutation authority by default
+
+AgentExecutionRoute
+  provider/model/effort
+  execution kind
+  role/authority
+  required capabilities
+  capability-profile revision
+  selection reason
+  operator pin
+
+StructuredChildResult
+  status/conclusion
+  evidence/artifact/verifier refs
+  mutations/assumptions/unresolved questions
+  usage
+  provider/model/effort
+  suggested next actions / delegation proposals
+```
+
+Provider-native text transcripts are not authoritative results and must not be
+fanned into parent context by default.
+
+### Implementation slices
+
+| Slice | Work | Exit gate |
+|---|---|---|
+| P1 Contracts | Add provider-neutral agent authority/execution-kind/profile/route/handoff/consultation contracts around existing worker/delegation types. | Pure validation/serialization tests; no live provider calls. |
+| P2 Dispatcher | Put the existing local provider behind a dispatching `SubagentProvider` registry with only `local` registered. | Existing local behavior byte/receipt compatible where required; no second registry. |
+| P3 Capability routing | Extend MODEL-004/005/007/008/009 profiles and route explanation for managed-agent providers; observe-only recommendations first. | Recorded route eligibility/ineligibility reasons and stale-evidence canaries. |
+| P4 First external advisor | Integrate one provider in read-only/scoped `ADVISOR` mode for architecture/review/consultation. | Credentials absent from prompts/results; no workspace mutation; restart-safe result binding. |
+| P5 First external worker | Admit one mutating managed-agent connector only in an isolated worktree with owned scope and deterministic verification. | Crash/reconcile, cancellation, artifact digest/source revision and integration-gate canaries pass. |
+| P6 Major provider set | Add OpenAI/Codex, Anthropic/Claude, xAI Grok model API, Google Gemini/Antigravity, GitHub Copilot, Cursor, Mistral and generic compatible direct-model adapters as their programmable surfaces qualify. | Each connector has a versioned conformance/evidence profile; unsupported capabilities remain false/unknown. |
+| P7 Grok Bot bridge | Implement only if xAI exposes a stable supported programmatic Bot lifecycle suitable for host control. | No GUI automation; spawn/steer/status/cancel/result or equivalent lifecycle, durable identity and recovery semantics proven. |
+| P8 Orchestrator role | Make the top-level orchestrator a configurable measured role (default deployment may prefer Astra Ultra) rather than a provider-specific authority. | Swapping eligible orchestrator providers changes policy only, not architecture or permissions. |
+| P9 Operator surfaces | Expose provider inventory, agent tree, route reason, health, capability evidence, budgets, usage and handoffs through the shared control plane. | No endpoint/secret leakage; snapshots/events are resumable and reconstructable. |
+
+### Connector acceptance canaries
+
+Before any connector is considered production-capable, prove:
+
+1. one provider cannot directly launch another provider;
+2. a child may request a handoff but only Sonder can admit it;
+3. user/model/provider pins never silently move;
+4. provider failure never causes hidden cross-provider retry;
+5. cloud/egress consent and credential scope cannot be widened by a child;
+6. root worker/token/time/concurrency budgets remain conserved across providers;
+7. provider-native descendants cannot mint unbounded Sonder resources;
+8. duplicate resume/idempotency keys do not start duplicate external work;
+9. scoped critics do not receive implementer rationale or full parent history by
+   default;
+10. provider credentials never enter prompts, worker metadata, returned artifacts
+    or exported telemetry;
+11. two workers cannot concurrently own overlapping production files;
+12. stale source revisions/artifacts are refused at integration;
+13. successful provider completion is not accepted when required deterministic
+    verification is missing or failed;
+14. crash after remote dispatch reconciles the original external run when
+    possible and never blindly repeats an uncertain mutation;
+15. cancellation distinguishes "request accepted" from proven quiescence/effect
+    reversal;
+16. provider degradation/rate limits do not corrupt unrelated provider state;
+17. stale/synthetic/mismatched capability evidence makes a route ineligible;
+18. an installation with only local models still satisfies the same role
+    contracts without requiring any cloud connector;
+19. an aggregator such as OpenRouter cannot hide an unrecorded provider switch;
+20. Grok Bot or another provider-owned multi-agent service cannot use internal
+    peer delegation to escape the single Sonder root budget/authority.
+
+This work advances SEAM-009/015, AGENT-001/002/003/005/006/007/008/009/010,
+MODEL-001/002/004/005/007/008/009, CTX-001/010, TOOL-001/003/007, OPS-001/004,
+SEC-001/002 and API-001/006. This ledger entry does not mark any of those master
+requirements complete. Live connectors remain disabled until their focused
+implementation and provider-specific qualification evidence land.
 
 ## Admission and recovery policy
 
