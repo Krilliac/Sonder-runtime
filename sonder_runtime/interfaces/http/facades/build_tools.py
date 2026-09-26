@@ -23,21 +23,22 @@ derives the principal and roots, and sends the response.
 """
 from __future__ import annotations
 
-import json
 import re
-import uuid
 from typing import Any, Callable, Mapping
 
-from ....application.errors import Cancelled, DeadlineExceeded, Forbidden, InvalidInput
-from ....application.tools.gateway_contract import (
-    ToolGatewayRequest,
-    ToolPermission,
-    ToolScope,
+from ....application.errors import InvalidInput
+from .typed_gateway import (
+    GatewayErrorCodes,
+    MethodNotAllowed as _MethodNotAllowed,
+    UnknownRoute as _UnknownRoute,
+    error_response as _error,
+    execute_typed_call,
+    parse_body as _body,
+    parse_query as _one,
 )
 
 BUILD_ROUTE_PREFIX = "/v1/build/"
 MAX_RESPONSE_BYTES = 64 * 1024
-MAX_BODY_KEYS = 32
 
 _JOB_ROUTE = re.compile(r"^/v1/build/jobs/(build-job-[0-9a-f]{16,32})(/cancel)?$")
 _FIX_ROUTE = re.compile(r"^/v1/build/fix/(build-fix-[0-9a-f]{16,32})(/cancel|/restore)?$")
@@ -82,51 +83,17 @@ PERMISSION_REMEDIES = (
     "approve this exact call once with its call_id (permission_approve)",
 )
 
-
-def _error(status: int, code: str, message: str = "", **extra) -> tuple[int, dict]:
-    body: dict[str, Any] = {"error": {"code": code}}
-    if message:
-        body["error"]["message"] = str(message)[:400]
-    body["error"].update(extra)
-    return status, body
-
-
-def _one(query: Mapping[str, list[str]], allowed: Mapping[str, type]) -> dict:
-    if not isinstance(query, Mapping):
-        raise InvalidInput("query must be a mapping")
-    unknown = set(query) - set(allowed)
-    if unknown:
-        raise InvalidInput("unknown query parameter: %s" % sorted(unknown)[0][:40])
-    out: dict[str, Any] = {}
-    for key, values in query.items():
-        if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], str):
-            raise InvalidInput("each query parameter may appear once")
-        raw = values[0]
-        kind = allowed[key]
-        if kind is int:
-            if not re.fullmatch(r"\d{1,6}", raw):
-                raise InvalidInput("%s must be a non-negative integer" % key)
-            out[key] = int(raw)
-        elif kind is bool:
-            if raw not in ("true", "false", "1", "0"):
-                raise InvalidInput("%s must be true or false" % key)
-            out[key] = raw in ("true", "1")
-        else:
-            if len(raw) > 1024 or "\x00" in raw:
-                raise InvalidInput("%s is too long" % key)
-            out[key] = raw
-    return out
-
-
-def _body(payload: Any, allowed: frozenset[str]) -> dict:
-    if payload is None:
-        return {}
-    if not isinstance(payload, dict) or len(payload) > MAX_BODY_KEYS:
-        raise InvalidInput("request body must be a JSON object")
-    unknown = set(payload) - allowed
-    if unknown:
-        raise InvalidInput("unknown field: %s" % sorted(unknown)[0][:40])
-    return dict(payload)
+GATEWAY_CODES = GatewayErrorCodes(
+    request_prefix="http-build-",
+    unavailable="BUILD_TOOLS_UNAVAILABLE",
+    invalid="INVALID_BUILD_REQUEST",
+    abandoned="BUILD_REQUEST_ABANDONED",
+    too_large="BUILD_RESPONSE_TOO_LARGE",
+    failed="BUILD_FAILED",
+    status_by_code=_STATUS_BY_CODE,
+    remedies=PERMISSION_REMEDIES,
+    max_response_bytes=MAX_RESPONSE_BYTES,
+)
 
 
 def route_call(method: str, path: str, query: Mapping[str, list[str]],
@@ -186,24 +153,6 @@ def route_call(method: str, path: str, query: Mapping[str, list[str]],
     raise _UnknownRoute()
 
 
-class _MethodNotAllowed(Exception):
-    pass
-
-
-class _UnknownRoute(Exception):
-    pass
-
-
-def _parse_output(output: Any) -> dict:
-    if isinstance(output, Mapping):
-        return dict(output)
-    try:
-        value = json.loads(output) if isinstance(output, str) and output else {}
-    except ValueError:
-        return {"output": str(output)[:2000]}
-    return value if isinstance(value, dict) else {"output": value}
-
-
 def _status_for_success(tool: str, body: Mapping[str, Any]) -> int:
     if tool in ("build_job", "build_fix") and body.get("status") in ("running", "pending", None) \
             and "job_id" in body and str(body.get("object") or "").endswith("status"):
@@ -235,48 +184,16 @@ class BuildHttpRoutes:
         if call is None:
             return _error(404, "NOT_FOUND")
         tool, arguments = call
-        tools = self._tools_getter() if callable(self._tools_getter) else None
-        if tools is None:
-            return _error(503, "BUILD_TOOLS_UNAVAILABLE", "the typed tool gateway is not composed")
-        descriptor = tools.graph.registry.get(tool)
-        if descriptor is None:
-            return _error(503, "BUILD_TOOLS_UNAVAILABLE", "the build tools are not registered")
-        effects = frozenset(effect.name.lower() for effect in descriptor.effects)
-        try:
-            request = ToolGatewayRequest(
-                request_id="http-build-" + uuid.uuid4().hex,
-                tool_name=tool,
-                arguments=arguments,
-                scope=ToolScope(principal_id=str(principal_id), workspace_roots=tuple(
-                    str(root) for root in workspace_roots), allowed_effects=effects,
-                    source="http", auth_level=auth_level),
-                permission=ToolPermission(effects),
-                deadline_monotonic=deadline_monotonic,
-                execution_world="local",
-            )
-            receipt = tools.execute(request)
-        except Forbidden as exc:
-            decision = getattr(exc, "decision", None)
-            decision = dict(decision) if isinstance(decision, Mapping) else {}
-            if decision.get("stage") == "plan":
-                code = str(decision.get("error_code") or "INVALID_BUILD_REQUEST")
-                return _error(_STATUS_BY_CODE.get(code, 400), code, str(exc))
-            return _error(403, "PERMISSION_DENIED", str(exc), decision=decision,
-                          remedies=list(PERMISSION_REMEDIES))
-        except (Cancelled, DeadlineExceeded) as exc:
-            return _error(503, "BUILD_REQUEST_ABANDONED", type(exc).__name__)
-        except (InvalidInput, ValueError, TypeError) as exc:
-            return _error(400, "INVALID_BUILD_REQUEST", str(exc))
-        body = _parse_output(receipt.output)
-        if not receipt.success:
-            code = str(receipt.error_code or body.get("error_code") or "BUILD_FAILED")
-            return _error(_STATUS_BY_CODE.get(code, 400), code,
-                          str(body.get("message") or receipt.error or ""))
-        body.setdefault("ok", True)
-        body["receipt"] = {"request_id": receipt.request_id, "policy_match": receipt.policy_match}
-        if len(json.dumps(body, ensure_ascii=True).encode("utf-8")) > MAX_RESPONSE_BYTES:
-            return _error(413, "BUILD_RESPONSE_TOO_LARGE", "narrow the request")
+        status, body = execute_typed_call(
+            self._tools_getter, tool, arguments, GATEWAY_CODES, principal_id=principal_id,
+            workspace_roots=workspace_roots, auth_level=auth_level,
+            deadline_monotonic=deadline_monotonic,
+        )
+        if status != 200:
+            return status, body
         return _status_for_success(tool, body), body
 
 
-__all__ = ["BUILD_ROUTE_PREFIX", "BuildHttpRoutes", "PERMISSION_REMEDIES", "route_call"]
+__all__ = [
+    "BUILD_ROUTE_PREFIX", "BuildHttpRoutes", "GATEWAY_CODES", "PERMISSION_REMEDIES", "route_call",
+]

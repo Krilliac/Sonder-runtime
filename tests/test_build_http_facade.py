@@ -172,8 +172,10 @@ def test_serve_registers_the_build_routes_behind_developer_authority():
     from sonder_runtime.interfaces.http import serve
 
     source = inspect.getsource(serve.Handler._handle_build_request)
-    assert "_developer_authorized(auth)" in source
     assert "BuildHttpRoutes" in source
+    assert "_dispatch_developer_gateway_route(" in source
+    shared = inspect.getsource(serve.Handler._dispatch_developer_gateway_route)
+    assert "_developer_authorized(auth)" in shared
     get_source = inspect.getsource(serve.Handler.do_GET)
     post_source = inspect.getsource(serve.Handler.do_POST)
     assert '_handle_build_request("GET", path)' in get_source

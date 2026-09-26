@@ -5030,6 +5030,41 @@ class Handler(BaseHTTPRequestHandler):
         """
         if not isinstance(path, str) or not path.startswith("/v1/build/"):
             return False
+        from sonder_runtime.interfaces.http.facades.build_tools import BuildHttpRoutes
+
+        return self._dispatch_developer_gateway_route(
+            method, path, payload, BuildHttpRoutes, invalid_code="INVALID_BUILD_REQUEST",
+            read_noun="build reads",
+        )
+
+    def _handle_test_tools_request(self, method, path, payload=None):
+        """``/v1/tools/test-run`` and ``/v1/tools/output-digest``.
+
+        The same gating as ``/v1/build/*``: developer authority, then one
+        typed gateway call as the authenticated principal with
+        ``source="http"`` (graded unattended; ``test_run`` is execution). See
+        ``interfaces/http/facades/testing_tools.py``.
+        """
+        from sonder_runtime.interfaces.http.facades.testing_tools import (
+            TestRunHttpRoutes,
+            owns,
+        )
+
+        if not owns(path):
+            return False
+        return self._dispatch_developer_gateway_route(
+            method, path, payload, TestRunHttpRoutes, invalid_code="INVALID_TEST_REQUEST",
+            read_noun="test run reads",
+        )
+
+    def _dispatch_developer_gateway_route(self, method, path, payload, routes_type, *,
+                                          invalid_code, read_noun):
+        """Authenticate, bind the principal, and send one typed gateway route.
+
+        Developer or admin authority is required. Workspace roots are passed
+        only for admin callers; the permission modes grade every call as an
+        unattended HTTP caller.
+        """
         auth = self._request_auth_context()
         if not auth.get("authorized"):
             self._send_auth_error()
@@ -5040,17 +5075,16 @@ class Handler(BaseHTTPRequestHandler):
                                     status=403)
             return True
         from sonder_runtime.bootstrap.app import default_app
-        from sonder_runtime.interfaces.http.facades.build_tools import BuildHttpRoutes
 
         try:
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query,
                                           keep_blank_values=True, max_num_fields=16)
         except ValueError:
-            self._send_json_payload({"error": {"code": "INVALID_BUILD_REQUEST"}}, status=400)
+            self._send_json_payload({"error": {"code": invalid_code}}, status=400)
             return True
         if method == "GET" and self._unread_request_body_bytes() != 0:
-            self._send_json_payload({"error": {"code": "INVALID_BUILD_REQUEST",
-                                               "message": "build reads do not accept a body"}},
+            self._send_json_payload({"error": {"code": invalid_code,
+                                               "message": "%s do not accept a body" % read_noun}},
                                     status=400)
             return True
         principal = _build_principal(auth)
@@ -5061,7 +5095,7 @@ class Handler(BaseHTTPRequestHandler):
         state = getattr(getattr(application, "config", None), "state", None)
         roots = tuple(str(Path(root).resolve()) for root in getattr(state, "workspace_roots", ())) \
             if _admin_authorized(auth) else ()
-        routes = BuildHttpRoutes(lambda: getattr(application, "tools", None))
+        routes = routes_type(lambda: getattr(application, "tools", None))
         status, body = routes.dispatch(
             method, path, query, payload, principal_id=principal, workspace_roots=roots,
             auth_level="admin" if _admin_authorized(auth) else "developer",
@@ -5272,6 +5306,8 @@ class Handler(BaseHTTPRequestHandler):
         if self._handle_agent_lane_request("GET", path):
             return
         if self._handle_build_request("GET", path):
+            return
+        if self._handle_test_tools_request("GET", path):
             return
         if path == "/v1/compute/nodes":
             self._with_compute_inventory_admission(self._handle_compute_inventory_read)
@@ -6710,6 +6746,8 @@ class Handler(BaseHTTPRequestHandler):
         if self._handle_agent_lane_request("POST", path, req):
             return
         if self._handle_build_request("POST", path, req):
+            return
+        if self._handle_test_tools_request("POST", path, req):
             return
         compute_route = _compute_job_route(path)
         if compute_route is not None and compute_route[0] in ("submit", "cancel"):

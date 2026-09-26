@@ -247,6 +247,50 @@ cancels with:
 The existing job endpoints also read the run: `GET /v1/jobs/{id}`,
 `/v1/jobs/{id}/result` and `/v1/jobs/{id}/stream`.
 
+### Over HTTP
+
+HTTP callers start and read runs through the same typed tools. The gating is
+the same as for `/v1/build/*`:
+
+- the caller needs developer or admin authority
+- every route is one typed gateway call, made as the authenticated principal
+  with `source="http"`
+- the permission modes grade that call unattended, because nobody is at a
+  console
+
+| Route | Typed call | Answers |
+|---|---|---|
+| `POST /v1/tools/test-run` with body `{project, runner, selector, timeout_seconds, workers, wait_seconds}` | `test_run` | `202` with the status view (`job_id`) while the run is going, `200` with the report once it is done. |
+| `GET /v1/tools/test-run/{id}?wait_seconds=` | `test_run_result` | `202` with the status view while running, `200` with the report once done. Another principal's run is `404 JOB_NOT_FOUND`. |
+| `POST /v1/tools/output-digest` with body exactly one of `job_id` or `path`, plus optional `tail_lines` and `max_failure_lines` | `output_digest` | `200` with the digest. The job must be a run the same principal owns. A path must be inside the guarded digest surface. |
+
+Refusals and failures:
+
+- Under `plan`, `manual` and `acceptEdits`, `test_run` is refused with
+  `403 PERMISSION_DENIED`. The response carries the decision with its
+  `call_id`, and the remedies. `POST /v1/approvals/<call_id>` can approve that
+  exact call once.
+- A plan the host refuses keeps its own code. For example, a bad selector is
+  `400 INVALID_SELECTOR`.
+- Other typed failures map to HTTP statuses:
+
+  | Code | Status |
+  |---|---|
+  | `JOB_NOT_FOUND` | 404 |
+  | `PROJECT_OUTSIDE_ROOTS`, `SELECTOR_ESCAPES_PROJECT`, `DIGEST_SOURCE_REJECTED` | 403 |
+  | `TEST_RUN_BUSY` | 429 |
+  | `DEVELOPER_TOOLS_UNAVAILABLE`, `RUNNER_UNAVAILABLE` | 503 |
+
+- A malformed request never reaches the gateway. Examples are an unknown body
+  field (there is no argv field of any kind), `job_id` and `path` together, or
+  a repeated query parameter. These are answered with
+  `400 INVALID_TEST_REQUEST`.
+
+There is no HTTP cancel route in this family. Cancel with
+`POST /v1/jobs/{id}/cancel` as above. The facade is
+`sonder_runtime/interfaces/http/facades/testing_tools.py`. It shares its one
+gateway call with the build routes, through `facades/typed_gateway.py`.
+
 ## Error codes
 
 Failures are JSON of the form `{"ok": false, "error_code": ..., "message": ...}`.
