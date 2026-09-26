@@ -24,6 +24,7 @@ from sonder_runtime.application.build.grants import (
     restore_plan_digest,
     sha256_hex,
 )
+from sonder_runtime.domain.build.repair import EditScope
 
 pytestmark = pytest.mark.unit
 
@@ -41,11 +42,7 @@ class Clock:
 
 
 def edit_scope():
-    """The real domain scope when lane A is present; a file set otherwise."""
-    try:
-        from sonder_runtime.domain.build.repair import EditScope
-    except ImportError:
-        return FileSetScope(("src/core/math.cpp", "src/core/math.h", "src/core/entity.cpp"))
+    """The domain edit scope a production grant carries."""
     return EditScope(roots=(ROOT,), excluded_rel=frozenset({"tools/shadergen.cpp"}),
                      excluded_dirs=("build",))
 
