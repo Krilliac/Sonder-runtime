@@ -1533,3 +1533,93 @@ def test_embedded_windows_path_selects_workspace_without_ask(monkeypatch, tmp_pa
     assert 'which folder should I use' not in output.lower()
     assert 'workspace:' in output
     assert 'unknown command' not in output.lower()
+
+
+def test_explicit_work_without_a_workspace_asks_for_one_then_resumes(monkeypatch, tmp_path, capsys):
+    # ``/work`` used to hand the memory project name ("default") to managed
+    # work as a directory, which raised PermissionError out of main().
+    seen = []
+    lines = iter(("/work say hi", "/workspace %s" % tmp_path, "/exit"))
+
+    def session_work(session_id, *, host_project, **arguments):
+        seen.append(arguments)
+        return "work done"
+
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
+    monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_run_session_work", session_work)
+    monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_a, **_k: pytest.fail("chat must not run"))
+
+    sonder_repl.main()
+
+    output = capsys.readouterr().out
+    assert "which folder should I use?" in output
+    assert "/workspace <path>" in output
+    assert "workspace selected; resuming requested work" in output
+    assert [call["prompt"] for call in seen] == ["say hi"]
+    assert seen[0]["project"] == str(tmp_path.resolve())
+
+
+@pytest.mark.parametrize("refusal", [
+    PermissionError("select an existing project before managed work"),
+    ValueError("bounded recovery cursor required"),
+])
+def test_refused_explicit_work_reports_an_error_and_keeps_the_loop(monkeypatch, tmp_path, capsys, refusal):
+    lines = iter(("/workspace %s" % tmp_path, "/work say hi", "/cloud status", "/exit"))
+    calls = []
+
+    def refused(session_id, *, host_project, **arguments):
+        raise refusal
+
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
+    monkeypatch.setattr(sonder_repl, "_run_session_work", refused)
+    monkeypatch.setattr(
+        sonder_repl.server, "cloud_opt_in",
+        lambda action="status": calls.append(action) or ("cloud " + action),
+    )
+    monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_a, **_k: pytest.fail("chat must not run"))
+
+    sonder_repl.main()
+
+    output = capsys.readouterr().out
+    assert "ERROR: work refused: %s" % refusal in output
+    assert calls == ["status"]
+
+
+def test_refused_workspace_work_reports_an_error_and_keeps_the_loop(monkeypatch, tmp_path, capsys):
+    lines = iter(("/workspace %s" % tmp_path, "create a script and run it", "/cloud status", "/exit"))
+    calls = []
+
+    def refused(session_id, *, host_project, **arguments):
+        raise PermissionError("complete live model workspace inventory unavailable")
+
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
+    monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl.command_router, "resolve", lambda _line: None)
+    monkeypatch.setattr(sonder_repl.intents, "classify", lambda _line: None)
+    monkeypatch.setattr(sonder_repl.intents, "containment_egress_refusal", lambda _line: None)
+    monkeypatch.setattr(sonder_repl.intents, "classify_work", lambda line: line.startswith("create "))
+    monkeypatch.setattr(sonder_repl.web_intents, "explicit_search", lambda _line: False)
+    monkeypatch.setattr(sonder_repl, "_run_session_work", refused)
+    monkeypatch.setattr(
+        sonder_repl.server, "cloud_opt_in",
+        lambda action="status": calls.append(action) or ("cloud " + action),
+    )
+    monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_a, **_k: pytest.fail("chat must not run"))
+
+    sonder_repl.main()
+
+    output = capsys.readouterr().out
+    assert "ERROR: work refused: complete live model workspace inventory unavailable" in output
+    assert calls == ["status"]

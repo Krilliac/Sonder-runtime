@@ -3017,6 +3017,22 @@ def _recovery_posture_command():
     ).format()
 
 
+# Asked whenever work is requested before a directory is selected: the
+# natural-language work route and ``/work``/``/agent`` share it.
+_WORKSPACE_ASK = (
+    "That looks like project work — which folder should I use?\n"
+    "  Existing: /workspace <path>\n"
+    "  Create:   /workspace-create <path>\n"
+    "Or say more about what you meant and I will clarify before touching files.\n"
+    "Guarded project work and runs stay inside the selected directory."
+)
+
+# Typed refusals managed work raises before any step runs (no selected
+# project, incomplete workspace inventory or provenance, malformed recovery
+# identity). They are answers to this one request, not faults of the console.
+_WORK_REFUSALS = (PermissionError, ValueError)
+
+
 def _run_session_work(session_id, *, host_project, **arguments):
     """Persist the exact REPL-selected conversation before standalone work.
 
@@ -3457,6 +3473,26 @@ def main(*, machine_output=False):
                 return "/workspace " + path
         return ("/workspace-create " if create else "/workspace ") + text
 
+    def ask_for_workspace(task):
+        """Hold ``task`` until ``/workspace`` selects a directory, and ask."""
+        nonlocal pending_workspace_work
+        nonlocal last_iid, last_response, last_run_source, last_turn_metrics
+        pending_workspace_work = task
+        last_iid = None
+        last_response = None
+        last_run_source = None
+        last_turn_metrics = None
+        print(_WORKSPACE_ASK)
+
+    def report_work_refusal(exc):
+        nonlocal last_iid, last_response, last_run_source, last_turn_metrics
+        refusal = "ERROR: work refused: %s" % exc
+        last_iid = None
+        last_response = refusal
+        last_run_source = refusal
+        last_turn_metrics = None
+        _emit(refusal)
+
     def run_workspace_work(task):
         nonlocal last_iid, last_response, last_run_source, last_turn_metrics
         # "use N workers ..." that the worker-count cue refused (a "why", a
@@ -3475,6 +3511,11 @@ def main(*, machine_output=False):
                 prompt=task, tier=active_model or active_tier or "auto",
                 max_steps=12, project=workspace_root,
             )
+        except _WORK_REFUSALS as exc:
+            if indicator is not None:
+                indicator.stop()
+            report_work_refusal(exc)
+            return
         except BaseException:
             if indicator is not None:
                 indicator.stop()
@@ -4283,16 +4324,24 @@ def main(*, machine_output=False):
                     elif cmd in ("/work", "/agent"):
                         if not arg.strip():
                             _emit("usage: /work <task>")
+                        elif not workspace_root:
+                            # The memory project name is not a directory; ask
+                            # for one and resume this task once it is chosen.
+                            ask_for_workspace(arg.strip())
                         else:
-                            out = _run_session_work(session_id, host_project=project,
-                                prompt=arg.strip(), tier=active_model or active_tier or "auto",
-                                project=workspace_root or project, max_steps=12,
-                            )
-                            last_response = out
-                            last_run_source = _answer_only(out)
-                            last_iid = None
-                            last_turn_metrics = _latest_repl_turn_metrics(surfaces=("agent",))
-                            _emit(out)
+                            try:
+                                out = _run_session_work(session_id, host_project=project,
+                                    prompt=arg.strip(), tier=active_model or active_tier or "auto",
+                                    project=workspace_root, max_steps=12,
+                                )
+                            except _WORK_REFUSALS as exc:
+                                report_work_refusal(exc)
+                            else:
+                                last_response = out
+                                last_run_source = _answer_only(out)
+                                last_iid = None
+                                last_turn_metrics = _latest_repl_turn_metrics(surfaces=("agent",))
+                                _emit(out)
                     elif cmd in (
                         "/report", "/endreport", "/checklist", "/plan",
                         "/inventory", "/workspace",
@@ -4647,18 +4696,7 @@ def main(*, machine_output=False):
                                 print(_paint("(using folder from your message; working on: %s)" % remainder, "muted"))
                             run_workspace_work(task)
                             continue
-                        pending_workspace_work = line
-                        last_iid = None
-                        last_response = None
-                        last_run_source = None
-                        last_turn_metrics = None
-                        print(
-                            "That looks like project work — which folder should I use?\n"
-                            "  Existing: /workspace <path>\n"
-                            "  Create:   /workspace-create <path>\n"
-                            "Or say more about what you meant and I will clarify before touching files.\n"
-                            "Guarded project work and runs stay inside the selected directory."
-                        )
+                        ask_for_workspace(line)
                         continue
                     run_workspace_work(line)
                     continue
