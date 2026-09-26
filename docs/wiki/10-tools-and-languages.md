@@ -39,8 +39,11 @@ Both MCP surfaces (`python -m sonder_runtime mcp`, the default, and
   graph with no typed configuration, so it has no configured workspace
   grants to scope a lane to. There `agent_lane` refuses every action with a
   typed `DependencyUnavailable` ("agent conversations require a configured
-  runtime") before the permission gate. Use `python -m sonder_runtime mcp`
-  for agent conversations.
+  runtime") before the permission gate. The same graph also backs the
+  `agent` and `workbench_agent` tools there, so when the model itself calls
+  `agent_lane` inside that run it gets an `ERROR: HOST POLICY: standalone
+  lane control requires a configured runtime` answer rather than a crash.
+  Use `python -m sonder_runtime mcp` for agent conversations.
 
 ## Code execution — `run_code` / `/run`
 

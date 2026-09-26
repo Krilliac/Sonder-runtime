@@ -362,6 +362,14 @@ class StandaloneLaneController:
                         )
                 raise
         application = self._factory()
+        if getattr(application, "config", None) is None:
+            # The graph bare loopback ``python server.py`` composes lazily
+            # carries no typed configuration, hence no configured workspace
+            # grants to scope a lane to. Refuse instead of inventing roots.
+            raise PermissionError(
+                "standalone lane control requires a configured runtime; "
+                "start the MCP server with python -m sonder_runtime mcp"
+            )
         roots = tuple(
             Path(root).resolve() for root in application.config.state.workspace_roots
         )
