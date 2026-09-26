@@ -908,10 +908,11 @@ What is wired now (caller -> callee):
   `CheckpointResumeDecision.gateway_call_ordinal`, and a child that never
   checkpointed resumes from 0.
 - `ToolGateway.execute` -> `_begin_journaled`. For a mutating call under a
-  journal binding, when a sequence is bound, `GatewayCallSequence.allocate`
-  checks that the sequence belongs to the bound journal run and worker (a
-  mismatch raises `EffectJournalError` before an ordinal is used). It then
-  allocates the next ordinal `K` and derives:
+  journal binding, when a sequence is bound, `GatewayCallSequence.admit`
+  checks that the sequence belongs to the bound journal run and worker and
+  that the request is well formed (either refusal raises
+  `EffectJournalError` before an ordinal is addressed). Under the sequence
+  lock it then takes the next ordinal `K` and derives:
   - `operation_id` `gateway-call:<child>#dispatch-attempt-<N>#call-<K>`, so
     the intent id `<run>:<operation_id>` depends only on the call's
     position;
@@ -920,7 +921,8 @@ What is wired now (caller -> callee):
   - `idempotency_key`, the JSON tuple `["gateway-call", run, worker, child,
     N, K, request_digest]`.
 
-  `JournalBinding.begin_request` then handles three cases, in this order:
+  Still under the lock, `JournalBinding.begin_request` handles three cases,
+  in this order:
   1. A key in the resumed runner's settled receipts raises
      `SettledEffectReplay` with the recorded receipt key (the original
      `request_id`, which is also the tool audit row's id). This is the
@@ -930,9 +932,24 @@ What is wired now (caller -> callee):
      before any journal write. The invoker is not called.
   3. Otherwise the intent commits as before.
 
-  An ordinal is used even when the journal refuses the call. A runner that
-  re-issues its calls in order therefore meets each call at its original
-  ordinal. Pure (effect-free) calls are not journaled and use no ordinal.
+  The sequence consumes ordinal `K` only in case 3 (the intent is durably
+  admitted) or case 1 (the call is the one that settled at `K`). Any other
+  failure, including `DivergentEffectReplay` and a transient journal error
+  such as SQLite `database is locked`, halts the sequence without consuming
+  `K`:
+  - every later call of that runner incarnation raises
+    `GatewayCallSequenceHalted` before it reaches the journal;
+  - `JournalProvenanceStamp` refuses to stamp a checkpoint from a halted
+    sequence, so the child keeps its previous checkpoint;
+  - when the runner returns anyway (a model tool loop that reports a tool
+    error and carries on), the provider raises `GatewayCallSequenceHalted`,
+    and the child fails as `recovery_required`.
+
+  Consumed ordinals therefore match admitted or settled calls one for one.
+  A runner that swallows a refusal cannot re-run a settled effect at a fresh
+  ordinal. A call retried after a failed admission cannot settle at an
+  ordinal that a resumed runner would address with a different request.
+  Pure (effect-free) calls are not journaled and use no ordinal.
   The receipt, audit row and `receipt_key` still carry the caller's
   `request_id`.
 - Without a bound sequence, the gateway journals exactly as before, under
@@ -942,7 +959,7 @@ What is wired now (caller -> callee):
 - `JournalProvenanceStamp` (the production checkpoint hook composed in
   `get_delegation_service`) records the sequence's issued count as
   `CheckpointProvenance.gateway_call_ordinal`. It refuses a sequence that is
-  bound for another child run. With no sequence bound it records 0, which
+  bound for another child run, and a halted sequence. With no sequence bound it records 0, which
   is exact, because the gateway then journals no deterministic call.
   - Provenance is now version 2, and its record digest covers the ordinal.
   - A version-1 record is digest-valid only with an ordinal of 0.
@@ -952,14 +969,24 @@ What is wired now (caller -> callee):
   - The codec and PostgreSQL snapshots carry the field. Snapshots without
     it decode as version 1.
 - `validate_checkpoint_resume` returns the ordinal in the decision. It adds
-  two typed refusals:
+  three typed refusals:
   - `gateway_ordinal_behind_journal`: a gateway call at or below the
     stamped position has an ordinal above the recorded one.
-  - `legacy_gateway_call_after_position`: a version-1 checkpoint is
-    followed by an intent keyed the old way, where the operation id equals
-    the idempotency key. A resumed runner could not match such an intent,
-    so the resume fails closed. Any other journaled effect that uses the
-    same key for both fields is refused after a version-1 checkpoint too.
+  - `gateway_ordinal_gap`: the gateway calls after the stamped position do
+    not continue the recorded ordinal without a gap (per child and
+    dispatch attempt, in journal order). Ordinals are consumed only by
+    admitted or settled calls, so a gap means a call landed at an ordinal
+    the resumed runner would address with another request.
+  - `request_id_keyed_call_after_position`: an intent after the stamped
+    position is keyed the old way, where the operation id equals the
+    idempotency key. This applies to every provenance version. After a
+    version-1 checkpoint such an intent predates deterministic identities.
+    After a version-2 checkpoint it means something bound the child's
+    journal without its call sequence. Either way a resumed runner could
+    not match it, so the resume fails closed. Any other journaled effect
+    in the child run that uses the same key for both fields is refused
+    too; the child's dispatch receipt does not (its operation id is
+    `subagent-dispatch:<child>`).
 
 Crash evidence (`tests/test_wiring_journal_child_gateway_calls.py`): a real
 child interpreter composes `build_application`, dispatches through
@@ -974,6 +1001,7 @@ new composition.
 | append `a`, checkpoint (ordinal 1), append `b`, receipt committed | calls 1 and 2 `completed` | resumes at ordinal 1, `b` is consumed at ordinal 2; file `ab`; journal unchanged |
 | checkpoint, append `x` on disk, no receipt | call 1 bare `intent` | startup reconciliation has no gateway verifier, so it stays `uncertain` and the run fenced; the repeat raises `EffectJournalError`, no runner starts; file `x` |
 | checkpoint, append `x`, receipt committed; the resumed runner asks for `z` | call 1 `completed` | `DivergentEffectReplay`; child `FAILED`, `recovery_required`; file `x`; journal unchanged |
+| same cut; the resumed runner handles the `z` refusal, asks for `x`, then checkpoints (or returns without one) | call 1 `completed` | `x` raises `GatewayCallSequenceHalted` and does not run; the stamp (or the provider) fails the child, `recovery_required`; checkpoint still `{"step": 1}`; file `x`; journal unchanged |
 
 Mutation checks:
 
@@ -983,8 +1011,16 @@ Mutation checks:
   case fail.
 - Stamping ordinal 0 made two cases fail.
 
+- Letting a failed admission consume its ordinal instead of halting the
+  sequence made six tests fail, including both swallowing-runner crash
+  cuts and the transient-failure retry test.
+- Removing the provider's halted check made the swallowing runner that
+  returns without a checkpoint succeed; its crash-cut test failed.
+- Against the previous commit the validator's gap and version-2
+  request-id refusals failed.
+
 The sources were restored after each check.
-`tests/test_gateway_call_identity.py` (10 tests) covers:
+`tests/test_gateway_call_identity.py` (14 tests) covers:
 
 - identity derivation and parsing;
 - refusal of a foreign binding and a foreign sequence;
@@ -994,28 +1030,49 @@ The sources were restored after each check.
 - version-1 compatibility in the codec and in a SQLite table rebuilt
   without the column (which the repository upgrades; the triggers still
   refuse updates);
-- both validator refusals.
+- a failed admission halting the sequence without consuming the ordinal;
+- a runner that swallows `DivergentEffectReplay` and asks for the settled
+  call: it is refused, and the invoker ran once;
+- a transient `database is locked` admission failure followed by a retry
+  before the crash: the retry is refused, and after the resume the call
+  runs once, at ordinal 1;
+- the stamp refusing a halted sequence;
+- the validator's ordinal, gap and request-id refusals.
 
 Limits:
 
 - The identity is positional. A resumed runner avoids a repeat only when it
   re-issues its calls in the same order with the same requests. A
   model-driven runner that takes a different path gets
-  `DivergentEffectReplay`. That is fail-closed, not continuation: the child
-  stays `recovery_required` and needs a new child or operator action.
+  `DivergentEffectReplay`, and the sequence halts. That is fail-closed, not
+  continuation: even when the runner handles the refusal and keeps going,
+  none of its later calls run, and the child fails `recovery_required`. It
+  needs a new child or operator action.
 - The gateway does not reconstruct the recorded output. The runner receives
   `SettledEffectReplay` with the receipt key (the original request id) and
   must consume it itself, for example by reading the durable tool audit.
   That reading is not wired. A refused replay publishes no gateway receipt,
   which is the existing behaviour for journal refusals.
-- The sequence is bound in the runner thread through a context variable.
-  Gateway calls made from threads the runner starts itself do not inherit it
-  and fall back to `request_id` keys. The production conversational runner
-  makes no gateway calls.
+- The sequence and the child's journal binding are both context variables
+  bound in the runner thread. A thread the runner starts itself inherits
+  neither, so its gateway calls are not journaled at all: no intent, no
+  fence and no idempotency. They do not fall back to `request_id` keys. A
+  runner that copies its context into such threads shares one sequence, and
+  concurrent calls then get ordinals in nondeterministic order, which a
+  resumed runner cannot reproduce.
+- No production child runner issues typed gateway calls yet. The runner
+  that `get_delegation_service` composes (`conversational_runner_factory`)
+  only calls the model gateway (`gateway.generate`). The deterministic
+  identity is proven only with a test-substituted runner that calls
+  `application.tools`.
 - Gateway-call intents have no reconciliation verifier. An in-flight call
   therefore stays `uncertain`, and its child run stays fenced until future
   trusted composition can prove it.
-- Resume from a version-1 checkpoint (stamped before this slice) is refused
-  whenever an intent keyed the old way follows it. It is not upgraded.
+- Resume from any checkpoint is refused whenever an intent keyed the old
+  way follows it. A version-1 checkpoint is not upgraded.
+- A halted sequence is not recovered in place. The runner incarnation
+  ends, and the child resumes from its last checkpoint. A failed admission
+  that did commit its intent leaves it unresolved, and the run stays fenced
+  as for any in-flight call.
 - No master-spec checkbox changes. LOOP-008, AGENT-006 and SESSION-007 stay
   unverified.
