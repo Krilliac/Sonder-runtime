@@ -212,6 +212,14 @@ a file whose digest is the after-digest of a completed edit of the job. That
 is the case when a crash came after the write but before the pre-image
 record.
 
+Once that reconciliation has run, `build_application` calls
+`BuildFixService.recover()` once. A fix a crash left `running` or `planned`
+then reads `interrupted` in its pre-image manifest, in `build_fix_status`
+and `build_fix_result`, and its registry job is `INTERRUPTED` unless it was
+already terminal. Nothing is retried or reverted; `build_fix_restore` still
+restores the originals. A failing `recover()` is logged by exception type
+and does not block startup.
+
 The proof describes the file's current state only. An edit undone by hand
 back to the exact before-digest reads as not applied. The details are in
 [Issue 515](REMAINING-AGENT-515-EFFECT-JOURNAL.md), in the section on the

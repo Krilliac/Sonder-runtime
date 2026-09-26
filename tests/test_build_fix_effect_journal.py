@@ -55,6 +55,7 @@ from sonder_runtime.application.execution.worker_bindings import (  # noqa: E402
     effect_request_digest,
 )
 from sonder_runtime.domain.build.repair import FixStopReason  # noqa: E402
+from sonder_runtime.application.ports.jobs import JobStatus  # noqa: E402
 from sonder_runtime.domain.common.errors import (  # noqa: E402
     Cancelled,
     DeadlineExceeded,
@@ -639,6 +640,97 @@ def test_build_application_proves_a_crashed_fix_edit_at_startup(tmp_path, monkey
         assert Path(binding.journal.database_path) == database
     finally:
         application.close_delegation(timeout=10)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="real POSIX process crash cut")
+def test_build_application_marks_a_crashed_fix_interrupted(tmp_path, monkeypatch):
+    """Production composition calls ``BuildFixService.recover()`` after the
+    journal proof: the crashed fix reads ``interrupted`` instead of ``running``,
+    the proven edit is neither retried nor reverted, the restore still works,
+    and a second composition finds nothing left to recover."""
+    from sonder_runtime.bootstrap import app as app_module
+    from sonder_runtime.bootstrap import build_tools
+    from sonder_runtime.bootstrap.app import build_application
+
+    (tmp_path / "workspace").mkdir()
+    job = crash("write_after_edit", tmp_path, composed=True)
+    manifest = tmp_path / "state" / "build-fix" / job / "manifest.json"
+    assert json.loads(manifest.read_text())["status"] == "running"
+
+    composed = {}
+    original = build_tools.compose_build_tools
+
+    def capture(**kwargs):
+        services = original(**kwargs)
+        composed["services"] = services
+        composed["job_registry"] = kwargs["job_registry"]
+        return services
+
+    recovered = []
+    real_recover = app_module._recover_interrupted_build_fixes
+
+    def observe(services):
+        result = real_recover(services)
+        recovered.append(result)
+        return result
+
+    monkeypatch.setattr(build_tools, "compose_build_tools", capture)
+    monkeypatch.setattr(app_module, "_recover_interrupted_build_fixes", observe)
+    application = build_application(config=_config(tmp_path))
+    try:
+        assert recovered == [(job,)]
+        fix = composed["services"].fix
+        assert json.loads(manifest.read_text())["status"] == "interrupted"
+        assert fix.status(job, ctx()).status == "interrupted"
+        shown = fix.result(job, ctx())
+        assert shown["status"] == "interrupted"
+        # The crashed child ran over an in-process registry, so the durable
+        # registry either never saw the job or now holds it interrupted.
+        registry = composed["job_registry"]()
+        try:
+            record = registry.poll(job)
+        except KeyError:
+            pass
+        else:
+            assert record.status is JobStatus.INTERRUPTED
+        # Recovery rewrote status only: the proven edit is still on disk, once.
+        assert (tmp_path / "proj" / REL).read_text() == IMPROVED
+        assert len(writes(tmp_path)) == 1
+        # Idempotent: nothing is left to recover.
+        assert fix.recover() == ()
+    finally:
+        application.close_delegation(timeout=10)
+
+    second = build_application(config=_config(tmp_path))
+    try:
+        assert recovered[-1] == ()
+    finally:
+        second.close_delegation(timeout=10)
+
+    # The restore still returns the originals from the interrupted fix. A
+    # later runtime owns a newer epoch (the host epoch is ``time_ns()``).
+    journal = journal_at(tmp_path, verifier=True, db=tmp_path / "state" / "worker-effects.db")
+    worker = "build-fix:" + _config(tmp_path).compute.node_id
+    restarted = fix_service(tmp_path, journal, time.time_ns(), worker=worker)
+    restored = restarted.service.restore(job, ctx())
+    assert restored["restored"] == [REL]
+    assert (tmp_path / "proj" / REL).read_text() == ORIGINAL
+
+
+def test_a_failing_build_fix_recovery_never_blocks_startup(caplog):
+    from types import SimpleNamespace
+
+    from sonder_runtime.bootstrap.app import _recover_interrupted_build_fixes
+
+    class Broken:
+        def recover(self):
+            raise OSError("/private/state/path unreadable")
+
+    with caplog.at_level("WARNING", logger="sonder_runtime.bootstrap.app"):
+        assert _recover_interrupted_build_fixes(SimpleNamespace(fix=Broken())) == ()
+    assert "OSError" in caplog.text and "/private/state/path" not in caplog.text
+    assert _recover_interrupted_build_fixes(None) == ()
+    assert _recover_interrupted_build_fixes(SimpleNamespace(fix=None)) == ()
 
 
 if __name__ == "__main__" and len(sys.argv) == 4 and sys.argv[1] in ALL_CUTS:

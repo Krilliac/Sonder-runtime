@@ -879,10 +879,14 @@ Limits:
   then undone by hand to the exact before-digest is recorded as not
   applied. That is the state that a resumed fix and `build_fix_restore` act
   on.
-- A fix job is still never retried (`max_attempts=1`), and
-  `BuildFixService.recover()` (which marks unfinished fixes interrupted) is
-  not called by production composition. The journal proof and the restore
-  path do not depend on it.
+- A fix job is still never retried (`max_attempts=1`). Production
+  composition (`build_application`) calls `BuildFixService.recover()` once
+  at startup, after the worker-effect reconciliation, so a fix a crash left
+  `running` or `planned` reads `interrupted` (manifest and registry job);
+  it is never retried or reverted. A failing `recover()` is logged by
+  exception type and does not block startup. The journal proof and the
+  restore path do not depend on it
+  (`tests/test_build_fix_effect_journal.py::test_build_application_marks_a_crashed_fix_interrupted`).
 - No master-spec checkbox changes. LOOP-008 stays unverified.
 
 ## Deterministic gateway call identities for child runners (2026-09-26)

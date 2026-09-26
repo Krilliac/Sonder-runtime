@@ -287,6 +287,31 @@ def _compose_build_tools(config, runtime_redactor, developer_tools, get_job_regi
         return None
 
 
+def _recover_interrupted_build_fixes(build_tools) -> tuple[str, ...]:
+    """Mark build fixes a crash left unfinished as interrupted, once, at startup.
+
+    Runs after the worker effect journal's startup reconciliation, so every
+    journaled fix edit is already proven or fenced; ``recover()`` only
+    rewrites the stale pre-image manifest status and the registry job, and
+    never retries or reverts an edit. A failure is logged by exception type
+    and never blocks composition: the fix then keeps reporting its stored
+    status until the next start, and ``build_fix_restore`` still works.
+    """
+    fix = getattr(build_tools, "fix", None)
+    if fix is None:
+        return ()
+    try:
+        interrupted = tuple(fix.recover())
+    except Exception as exc:  # noqa: BLE001 - startup continues; restore still works
+        logger.warning("startup build-fix recovery failed; unfinished fixes keep their stored "
+                       "status: %s", type(exc).__name__)
+        return ()
+    if interrupted:
+        logger.info("startup build-fix recovery marked %d unfinished fix(es) interrupted",
+                    len(interrupted))
+    return interrupted
+
+
 def _compose_debug_tools(config, runtime_redactor, developer_tools, get_job_registry,
                          get_process_job_provider):
     """Compose the crash/profile digest tools, or None when this build lacks them.
@@ -1883,6 +1908,9 @@ def build_application(
             "startup worker effect reconciliation failed; unresolved effects stay fenced: %s",
             type(exc).__name__,
         )
+    # After the journal proof: mark build fixes a crashed predecessor left
+    # "running"/"planned" as interrupted (never retried, never reverted).
+    _recover_interrupted_build_fixes(build_tools)
     if inference_pool is not None:
         ollama_pool.configure_typed_pool(inference_pool)
     return application
