@@ -230,7 +230,17 @@ def test_the_fleet_fence_holds_for_the_owner_and_breaks_on_reassignment_or_cance
     assert "cancelled" in effect_fence.reason_lost(fence)
 
 
-def test_the_fleet_fence_breaks_when_the_owner_heartbeat_expires(fleet_db):
+def test_the_fleet_fence_breaks_when_the_owner_heartbeat_expires(fleet_db, monkeypatch):
+    # Reconcile only reclaims an owner whose process probe reads dead. PID 101
+    # may be a live process on the runner, so pin the synthetic owner as dead.
+    real_probe = fleet_db.probe_process
+    monkeypatch.setattr(
+        fleet_db, "probe_process",
+        lambda pid, identity=None: (
+            (fleet_db.PROCESS_DEAD, None) if int(pid) == 101
+            else real_probe(pid, identity)
+        ),
+    )
     fleet_db.register_owner("owner-a", 101, 100.0)
     fleet_db.create_agent(_fleet_row("agent-2"), "owner-a", 101)
     fleet_db.start_agent("agent-2", "owner-a", "running", in_model_call=False, tool_calls=0)

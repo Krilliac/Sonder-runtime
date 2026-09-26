@@ -9,6 +9,7 @@ import threading
 import pytest
 
 import sonder_runtime.adapters.persistence.fleet_store as fleet_store
+from sonder_runtime.adapters.process_liveness import PROCESS_ALIVE
 
 
 def test_fleet_paths_use_packaged_platform_seam(monkeypatch):
@@ -57,6 +58,24 @@ def _isolated_store(monkeypatch, tmp_path):
     monkeypatch.setenv("SONDER_FLEET_DB", str(tmp_path / "fleet.db"))
     fleet_store.reset_schema_cache_for_tests()
     fleet_store.clear_all()
+
+
+def _pin_owner_pids_dead(monkeypatch, *pids):
+    """Make the synthetic owner PIDs read as dead, whatever the host runs.
+
+    Reconcile only suspects an owner whose process probe says PROCESS_DEAD.
+    A hard-coded PID can belong to a live process on a CI runner, which would
+    silently skip the owner. Every other PID still goes through the real probe.
+    """
+    pinned = {int(pid) for pid in pids}
+    real_probe = fleet_store.probe_process
+
+    def probe(pid, identity=None):
+        if int(pid) in pinned:
+            return fleet_store.PROCESS_DEAD, None
+        return real_probe(pid, identity)
+
+    monkeypatch.setattr(fleet_store, "probe_process", probe)
 
 
 def test_agent_lifecycle_is_durable_and_queryable(monkeypatch, tmp_path):
@@ -383,6 +402,7 @@ def test_stale_owner_requires_two_observations_before_interrupting(
     _isolated_store(monkeypatch, tmp_path)
     clock = {"now": 100.0}
     monkeypatch.setattr(fleet_store.time, "time", lambda: clock["now"])
+    _pin_owner_pids_dead(monkeypatch, 202)
     fleet_store.register_owner("owner-stale", 202, 100.0)
     fleet_store.create_agent(
         _row("master-stale", role="master"), "owner-stale", 202,
@@ -411,14 +431,17 @@ def test_heartbeat_clears_stale_suspicion(monkeypatch, tmp_path):
     _isolated_store(monkeypatch, tmp_path)
     clock = {"now": 100.0}
     monkeypatch.setattr(fleet_store.time, "time", lambda: clock["now"])
+    _pin_owner_pids_dead(monkeypatch, 303)
     fleet_store.register_owner("owner-live", 303, 100.0)
     fleet_store.create_agent(_row("agent-live"), "owner-live", 303)
     fleet_store.start_agent("agent-live", "owner-live", "running")
 
     clock["now"] = 200.0
-    fleet_store.reconcile_stale_owners(
+    first = fleet_store.reconcile_stale_owners(
         now=200.0, stale_seconds=30, grace_seconds=10,
     )
+    # The owner must really be suspected, or the heartbeat below clears nothing.
+    assert first["suspect_owners"] == 1
     clock["now"] = 205.0
     assert fleet_store.heartbeat_owner("owner-live") is True
     clock["now"] = 211.0
@@ -427,7 +450,30 @@ def test_heartbeat_clears_stale_suspicion(monkeypatch, tmp_path):
     )
 
     assert result["interrupted"] == 0
+    assert result["suspect_owners"] == 0
     assert fleet_store.get_agent("agent-live")["status"] == "running"
+
+
+def test_a_live_owner_process_is_never_suspected_however_stale(monkeypatch, tmp_path):
+    _isolated_store(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        fleet_store, "probe_process",
+        lambda pid, identity=None: (PROCESS_ALIVE, identity),
+    )
+    fleet_store.register_owner("owner-busy", 404, 100.0)
+    fleet_store.create_agent(_row("agent-busy"), "owner-busy", 404)
+    fleet_store.start_agent("agent-busy", "owner-busy", "running")
+
+    first = fleet_store.reconcile_stale_owners(
+        now=200.0, stale_seconds=30, grace_seconds=10,
+    )
+    second = fleet_store.reconcile_stale_owners(
+        now=500.0, stale_seconds=30, grace_seconds=10,
+    )
+
+    assert first == {"suspect_owners": 0, "interrupted": 0, "owners": []}
+    assert second == {"suspect_owners": 0, "interrupted": 0, "owners": []}
+    assert fleet_store.get_agent("agent-busy")["status"] == "running"
 
 
 def test_pruning_keeps_active_rows(monkeypatch, tmp_path):
