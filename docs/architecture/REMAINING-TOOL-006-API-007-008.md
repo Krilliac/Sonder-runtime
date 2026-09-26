@@ -20,9 +20,13 @@ The `--runtime` projection is committed under
 `check_documentation_authority.py` step fails when it is stale. Tools come
 from the native registry because its descriptors carry effects and an
 execution class; `permissions.json` lists exactly what each descriptor
-declares, so a descriptor that declares no effects shows an empty list there.
-The permission modes do not read this file; it is a published projection,
-not the enforcement point.
+declares. A descriptor that declares nothing takes the `ToolDescriptor`
+defaults, execution class `pure` and no effects, and many native descriptors
+do: process-launching and network tools such as `run_program`,
+`run_script`, `workspace_run`, `web_fetch` and `compute_submit` read as
+`pure` with `[]`. Those entries are not authoritative about what the tool
+does, and the file carries a `note` field saying so. The permission modes do
+not read this file; it is a published projection, not the enforcement point.
 
 `mobile_parity.py` defines a strict versioned JSON envelope for client schema
 advertisement and reconnect requests/responses. It carries schema digests,

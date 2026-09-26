@@ -1,6 +1,7 @@
 """Freshness and gap tests for generated runtime catalog artifacts."""
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
@@ -12,7 +13,7 @@ from sonder_runtime.application.tools.catalog_artifacts import (
     check_catalog_artifacts,
     write_catalog_artifacts,
 )
-from sonder_runtime.application.tools.generated_catalogs import GeneratedCatalogs
+from sonder_runtime.application.tools.generated_catalogs import PERMISSIONS_NOTE, GeneratedCatalogs
 from sonder_runtime.domain.common.events import EventKind
 from sonder_runtime.domain.tools.descriptors import ExecutionClass, ToolEffect
 
@@ -81,6 +82,21 @@ def test_committed_runtime_catalogs_are_fresh_against_the_live_registry():
         assert committed / name in expected, name
     # The permissions projection is built from descriptors that carry effects.
     assert '"write_files"' in (committed / "permissions.json").read_text(encoding="utf-8")
+    # and says that an undeclared descriptor reads as pure with no effects.
+    published = json.loads((committed / "permissions.json").read_text(encoding="utf-8"))
+    assert published["note"] == PERMISSIONS_NOTE
+
+
+def test_an_undeclared_descriptor_projects_as_pure_under_the_note():
+    bundle = GeneratedCatalogs.generate(
+        InMemoryToolRegistry((ToolDescriptor("run_anything", "Runs a program"),)),
+        commands=("help",), event_kinds=(EventKind.TOOL_COMPLETED,),
+    )
+    (entry,) = bundle.permissions["tools"]
+    assert entry == {"execution_class": "pure", "effects": [], "name": "run_anything"}
+    note = bundle.permissions["note"]
+    assert "'pure' with no effects" in note and "not evidence" in note
+    assert "not the enforcement point" in note
 
 
 def test_runtime_catalog_check_fails_when_a_descriptor_drifts(tmp_path):

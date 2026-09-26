@@ -1,4 +1,5 @@
 {
+  "note": "execution_class and effects are what each tool descriptor declares. A descriptor that declares neither reads as execution_class 'pure' with no effects, so an entry of that shape is not evidence that the tool is side-effect free (process-launching and network tools can appear that way). This projection is published for inspection and is not the enforcement point.",
   "schema": "sonder-tool-permissions-v1",
   "tools": [
     {

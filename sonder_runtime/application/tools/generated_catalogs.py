@@ -19,6 +19,18 @@ from ...domain.tools.descriptors import ExecutionClass, ToolEffect
 from ..ports.tool_registry import ToolDescriptor, ToolSchemaSelection
 
 
+# ToolDescriptor defaults to ExecutionClass.PURE with no effects, so an
+# undeclared descriptor and a genuinely pure one project identically.
+PERMISSIONS_NOTE = (
+    "execution_class and effects are what each tool descriptor declares. A "
+    "descriptor that declares neither reads as execution_class 'pure' with no "
+    "effects, so an entry of that shape is not evidence that the tool is "
+    "side-effect free (process-launching and network tools can appear that "
+    "way). This projection is published for inspection and is not the "
+    "enforcement point."
+)
+
+
 class CatalogLimitError(ValueError):
     """Raised when a catalog would exceed its explicit transport budget."""
 
@@ -213,6 +225,7 @@ class GeneratedCatalogs:
         client["summary"] = summary
         client["schema_selection"] = selection_marker
         permissions = {
+            "note": PERMISSIONS_NOTE,
             "schema": "sonder-tool-permissions-v1",
             "tools": tuple({
                 "execution_class": t["execution_class"],
