@@ -1924,11 +1924,23 @@ def _application():
                 preference_module_provider=lambda: preference_learning,
             )
             _APP_GRAPH_OWNED_BY_SERVER = True
-            # Typed build reports judge recent generations like build_run does.
-            observe = getattr(getattr(_APP_GRAPH, "tools", None), "add_receipt_observer", None)
-            if callable(observe):
-                observe(_typed_receipt_outcome)
+        # Every graph this runtime serves feeds the ledger, whether it built
+        # the graph itself or an entrypoint handed one over (the handoff also
+        # installs it; adding the same observer again is a no-op).
+        _install_typed_build_feed(_APP_GRAPH)
         return _APP_GRAPH
+
+
+def _install_typed_build_feed(application) -> None:
+    """Observe typed build reports on ``application``'s gateway (idempotent).
+
+    Typed ``build_job``/``build_job_result`` reports then judge recent
+    generations in this process's grounded-outcome ledger, as ``build_run``
+    does. A graph without a typed tool facade is left alone.
+    """
+    observe = getattr(getattr(application, "tools", None), "add_receipt_observer", None)
+    if callable(observe):
+        observe(_typed_receipt_outcome)
 
 
 def _close_server_owned_application(*, timeout=5) -> None:
@@ -11102,9 +11114,11 @@ def _typed_build_project(arguments) -> str:
 def _typed_receipt_outcome(request, receipt) -> None:
     """Feed a finished typed build report to the grounded-outcome ledger.
 
-    Installed on this process's typed tool gateway, so every surface that
-    runs ``build_job``/``build_job_result`` through it (the console, the
-    legacy bridges) feeds the same ledger the generators note into. The
+    Installed on the typed tool gateway of every graph bound to this
+    runtime (``_install_typed_build_feed``), so every surface that runs
+    ``build_job``/``build_job_result`` through that gateway (the REPL
+    ``/build`` console, the HTTP build routes) feeds the same ledger the
+    generators note into. No legacy tool alias reaches ``build_job``. The
     verdict comes from the report's terminal status
     (``grounded_outcomes.typed_build_verdict``); a running job, a
     cancellation or a refused call is not evidence and records nothing.

@@ -218,3 +218,61 @@ def test_an_unfinished_typed_build_records_nothing(feed, tmp_path):
     _run_and_collect(tools, str(tmp_path))
     assert written == [] and go.pending_count() == 1
     assert go.stats()["unmeasured"] == 2
+
+
+# --- the production handoff: default_app -> configure_application -> REPL /build -----------
+
+
+def test_a_handed_over_graph_feeds_the_ledger_from_a_repl_build(tmp_path, monkeypatch):
+    """``repl``/``serve``/``mcp`` compose the graph themselves and hand it over
+    through ``legacy_root.configure_application``; ``server._application()``
+    then returns it without building one. That graph must feed the ledger too,
+    so a REPL ``/build`` result judges the pending generation of its project."""
+    from dataclasses import replace
+
+    import server
+    import sonder_runtime.platform.environment_probe as environment_probe
+    from sonder_runtime.bootstrap import app as bootstrap_app
+    from sonder_runtime.bootstrap import build_tools, legacy_root
+    from sonder_runtime.interfaces.repl import repl
+    from sonder_runtime.platform.config import SonderConfig
+
+    workspace = tmp_path / "workspace"
+    project = workspace / "game"
+    project.mkdir(parents=True)
+    services = fake_services(str(project))
+    services.jobs = ReportingJobs("failed", 1)
+    monkeypatch.setattr(build_tools, "compose_build_tools", lambda **kwargs: services)
+    written = []
+    monkeypatch.setattr(server, "_record_outcome_signal",
+                        lambda ident, signal: written.append((ident, signal)))
+    monkeypatch.setattr(server, "_APP_GRAPH", None)
+    monkeypatch.setattr(server, "_APP_GRAPH_OWNED_BY_SERVER", False)
+    monkeypatch.setattr(legacy_root, "_owned_application", None)
+    config = SonderConfig()
+    config = replace(config, state=replace(config.state, home=str(tmp_path / "state"),
+                                           workspace_roots=(str(workspace),)))
+    previous_provider = environment_probe._capability_summary_provider
+    application = bootstrap_app.build_application(config=config)
+    try:
+        monkeypatch.setattr(server, "OLLAMA_POOL",
+                            legacy_root.require_inference_application(application))
+        legacy_root.configure_application(application)
+        assert server._typed_receipt_outcome in application.tools._observers
+        # The REPL reaches that same graph and never builds its own.
+        assert repl._typed_tools() is application.tools
+        assert server._APP_GRAPH_OWNED_BY_SERVER is False
+
+        go.note_generation("gen-" + uuid.uuid4().hex[:8], "sonder", str(project.resolve()))
+        ident = go._PENDING[-1].interaction_id
+        monkeypatch.setattr(repl, "_stdout_is_interactive", lambda: False)
+        monkeypatch.setattr(repl, "_emit", lambda text: None)
+        repl._build_command("/build", "run core --project %s" % project, str(workspace))
+        (job_id,) = services.jobs.owners
+        assert written == []  # a running job judges nothing
+        repl._build_command("/build", "result %s" % job_id, str(workspace))
+        assert written == [(ident, "failed")]
+    finally:
+        build_tools.uninstall_build_brief()
+        environment_probe.set_capability_summary_provider(previous_provider)
+        application.close_delegation(timeout=10)
