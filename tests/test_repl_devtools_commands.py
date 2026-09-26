@@ -307,7 +307,7 @@ def test_activity_still_works_and_tools_is_no_longer_its_alias():
 def test_console_catalog_grades_the_new_commands():
     tools = command_catalog.console_tools()
     assert "test_run" in tools["/test"]
-    assert tools["/tools"] == ("toolchain_status",)
+    assert tools["/tools"] == ("tool_inventory",)
     assert tools["/digest"] == ("log_inspect",)
     assert command_catalog.by_name("/test").risk == "execution"
     assert command_catalog.by_name("/tools").risk == "safe"

@@ -521,12 +521,15 @@ _UNREGISTERED_BRANCH_WORK = {
     # The developer-tool console commands front the composed application
     # services, not a registered MCP tool, so static discovery sees no work
     # below them. ``/test`` launches the project's test runner and is graded
-    # by the execution-class ``test_run`` (ask in manual, refused in plan);
-    # ``/tools`` runs only fixed host version probes and ``/digest`` reads a
-    # guarded file or job output, so both are graded by the safe tools that
-    # do the same kind of work.
+    # by the execution-class ``test_run`` (ask in manual, refused in plan).
+    # ``/tools`` renders the composed host tool inventory (``refresh`` re-runs
+    # its fixed, bounded version probes), so it is graded by -- and fronts --
+    # ``tool_inventory``, the registered tool over that same inventory service
+    # (``/tools`` shows the operator the unredacted view, the tool returns the
+    # redacted one). ``/digest`` reads a guarded file or job output and is
+    # graded by the safe tool that does the same kind of work.
     "/test": "test_run",
-    "/tools": "toolchain_status",
+    "/tools": "tool_inventory",
     "/digest": "log_inspect",
     # ``/crash`` and ``/profile`` front the composed debug digest service. Both
     # can launch a host debugger or profiler (a durable ProcessJob), so each

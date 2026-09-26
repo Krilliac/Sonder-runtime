@@ -60,3 +60,16 @@ def test_longer_work_requests_are_not_hijacked(phrase):
     resolved = cr.resolve(phrase)
     assert resolved is None or not resolved.startswith(("/test ", "/digest", "/tools"))
     assert resolved != "/test"
+
+
+def test_tool_inventory_phrase_resolves_to_the_command_that_fronts_the_tool():
+    # ``/tools`` renders the same host inventory service the registered
+    # ``tool_inventory`` tool reads, so the catalog must record that the
+    # routed slash fronts that tool rather than the single-probe
+    # ``toolchain_status``.
+    from sonder_runtime.adapters import command_catalog
+
+    resolved = cr.resolve("tool inventory")
+    assert resolved == "/tools"
+    assert command_catalog.console_tools()[resolved] == ("tool_inventory",)
+    assert command_catalog.by_name("/tool_inventory").tool == "tool_inventory"

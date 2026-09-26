@@ -227,7 +227,7 @@ The console permission gate grades the new commands by these stand-ins:
 | Command | Stand-in | Grade |
 |---|---|---|
 | `/test` | `test_run` | execution: it asks in `manual` and is refused in `plan` |
-| `/tools` | `toolchain_status` | safe |
+| `/tools` | `tool_inventory` (same inventory service; `/tools` shows the unredacted view) | safe |
 | `/digest` | `log_inspect` | safe |
 
 Plain-language routes:
