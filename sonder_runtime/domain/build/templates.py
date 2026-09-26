@@ -44,6 +44,7 @@ from .tool_targets import BUILD_ALIASES, UTILITY_TARGET_NAMES, TargetSafety
 PLACEHOLDERS = frozenset({
     "source_dir", "build_dir", "generator", "config", "target", "jobs", "preset",
     "build_preset", "file_target", "solution", "project_file", "platform", "log_file", "binlog",
+    "make_program",
 })
 LIST_PLACEHOLDERS = frozenset({"net", "defines"})
 GENERATOR_VALUES = (
@@ -116,11 +117,13 @@ TEMPLATES: Mapping[str, BuildTemplate] = {
         (_seg("-S", "{source_dir}", "-B", "{build_dir}", "-G", "{generator}",
               "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"),
          _seg("-DCMAKE_BUILD_TYPE={config}", optional=True),
+         _seg("-DCMAKE_MAKE_PROGRAM={make_program}", optional=True),
          _seg("{defines}"), _seg("{net}")),
         cwd="source_dir", default_timeout_seconds=600),
     "cmake.configure.preset": BuildTemplate(
         "cmake.configure.preset", BuildSystem.CMAKE, BuildAction.CONFIGURE, "cmake",
-        (_seg("--preset", "{preset}"), _seg("{net}")),
+        (_seg("--preset", "{preset}"),
+         _seg("-DCMAKE_MAKE_PROGRAM={make_program}", optional=True), _seg("{net}")),
         cwd="source_dir", default_timeout_seconds=600),
     "cmake.build": BuildTemplate(
         "cmake.build", BuildSystem.CMAKE, BuildAction.BUILD, "cmake",
@@ -250,7 +253,7 @@ def _file_target(value: str, *, template_id: str) -> str:
 def validate_placeholder(name: str, value: str, *, template: BuildTemplate) -> str:
     if name not in PLACEHOLDERS:
         raise TemplateRejected("unknown placeholder %r" % name[:40], rule="unknown_placeholder")
-    if name in ("source_dir", "build_dir"):
+    if name in ("source_dir", "build_dir", "make_program"):
         return _host_path(value, name)
     if name == "log_file":
         return _host_path(value, name, suffixes=(".log",))

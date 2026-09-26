@@ -89,6 +89,9 @@ TRACE_COMPILERS = ("g++", "gcc", "clang++", "clang", "clang-cl", "cl", "c++", "c
 KNOWN_LAUNCHER_TOOLS = ("ccache", "sccache", "buildcache")
 _BUILD_DIR_NAME_RE = re.compile(r"^(?:build|build-[A-Za-z0-9_.-]{1,64}|cmake-build-[A-Za-z0-9_.-]{1,64}|out)$")
 _LAUNCHER_KEYS = ("CMAKE_C_COMPILER_LAUNCHER", "CMAKE_CXX_COMPILER_LAUNCHER", "CMAKE_CUDA_COMPILER_LAUNCHER")
+# The build program CMake records as CMAKE_MAKE_PROGRAM for each generator it can
+# name one for on this host (NMake and Visual Studio come from the vcvars PATH).
+_GENERATOR_PROGRAMS = {"Ninja": "ninja", "Ninja Multi-Config": "ninja", "Unix Makefiles": "make"}
 # Build-preset fields a checkout can use to widen what ``cmake --build --preset``
 # runs: ``targets`` selects targets (a utility target such as ``deploy`` would
 # bypass TargetSafety) and ``nativeToolOptions`` appends arbitrary arguments to
@@ -537,6 +540,10 @@ class ProjectBuildPlanner:
                 ctx.notes.append("config is chosen at build time for multi-config generators")
         if str(ctx.generator).startswith("Visual Studio") and self._host != "windows":
             raise _error(RUNNER_UNAVAILABLE, "Visual Studio generators require Windows")
+        make_program = self._make_program(str(ctx.generator or ""))
+        if make_program:
+            values["make_program"] = make_program
+            ctx.checked_extra = ctx.checked_extra + (make_program,)
         ctx.template = template
         ctx.values = values
         ctx.build_dir = str(build_dir)
@@ -551,6 +558,25 @@ class ProjectBuildPlanner:
         if self._lookup.lookup("ninja") is not None:
             return "Ninja"
         return "Visual Studio 17 2022" if self._host == "windows" else "Unix Makefiles"
+
+    def _make_program(self, generator: str) -> str:
+        """The generator's build program, resolved and guarded like the cmake executable.
+
+        Configure runs under the scrubbed environment, whose ``PATH`` drops
+        world-writable and project-local directories. A host that keeps its
+        build program in such a directory (GitHub's Ubuntu runners make
+        ``/usr/local/bin`` mode 0777, and install ninja there) would otherwise
+        fail with CMake's "unable to find a build program" after the host
+        lookup had already found and accepted that same program. Pinning
+        ``CMAKE_MAKE_PROGRAM`` to the looked-up path makes configure use the
+        program the plan checked instead of whatever a ``PATH`` search finds.
+        With no host record CMake keeps its own search (``ninja-build``,
+        ``samu``, or vcvars' ``PATH`` on Windows).
+        """
+        name = _GENERATOR_PROGRAMS.get(generator, "")
+        if not name or self._lookup.lookup(name) is None:
+            return ""
+        return self._tool(name)
 
     def _configure_family(self, generator: str) -> str:
         if self._host != "windows" or generator.startswith("Visual Studio"):
@@ -951,7 +977,7 @@ class ProjectBuildPlanner:
             template_id = ctx.template.template_id
             timeout = tpl.clamp_timeout(request.timeout_seconds, ctx.template, self._operator_max)
             max_descendants = ctx.template.max_descendants
-            checked = (executable,)
+            checked = (executable,) + tuple(ctx.checked_extra)
         launchers = [value for key, value in self._reader.read_cache(ctx.build_dir or location.build_dir)
                      if key in _LAUNCHER_KEYS]
         if getattr(ctx, "profile_daemon", False):

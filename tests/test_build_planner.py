@@ -373,6 +373,49 @@ def test_configure_presets_resolve_the_binary_dir(tmp_path, allowed):
         assert excinfo.value.code == "UNKNOWN_PRESET", name
 
 
+def test_configure_pins_the_looked_up_build_program(tmp_path, allowed):
+    # The scrubbed PATH drops world-writable directories (GitHub's Ubuntu
+    # runners keep ninja in a 0777 /usr/local/bin), so configure must name the
+    # build program the host lookup found and the guard accepted.
+    root = allowed / "pinned"
+    write(root / "CMakeLists.txt", "project(x)\n")
+    write(root / "CMakePresets.json", {"version": 6, "configurePresets": [
+        {"name": "dbg", "generator": "Ninja", "binaryDir": "${sourceDir}/build/dbg"}]})
+    tools = {"cmake": "/usr/local/bin/cmake", "ninja": "/usr/local/bin/ninja", "make": "/usr/bin/make"}
+    guarded = []
+    p = ProjectBuildPlanner(Lookup(tools), GuardedBuildTreeReader(), Env(), Net(),
+                            run_root=str(tmp_path / "state" / "build-runs"), host="linux",
+                            executable_guard=lambda path: guarded.append(path) or path)
+    for generator, program in (("Ninja", "/usr/local/bin/ninja"), ("Ninja Multi-Config", "/usr/local/bin/ninja"),
+                               ("Unix Makefiles", "/usr/bin/make")):
+        guarded.clear()
+        result = p.plan_run(BuildJobRequest(project=str(root), action="configure", generator=generator,
+                                            build_dir="build/" + generator[:5].strip().lower()), None, ctx())
+        assert "-DCMAKE_MAKE_PROGRAM=" + program in result.argv, generator
+        assert program in result.checked_executables and program in guarded
+    preset = p.plan_run(BuildJobRequest(project=str(root), action="configure", preset="dbg"), None, ctx())
+    assert "-DCMAKE_MAKE_PROGRAM=/usr/local/bin/ninja" in preset.argv
+    # Without a host record CMake keeps its own search (ninja-build, samu).
+    bare = planner(tmp_path, tools={"cmake": "/usr/bin/cmake"}).plan_run(
+        BuildJobRequest(project=str(root), action="configure", generator="Ninja", build_dir="build/bare"),
+        None, ctx())
+    assert not any(item.startswith("-DCMAKE_MAKE_PROGRAM") for item in bare.argv)
+    # A program the guard refuses is refused, not silently left to a PATH search.
+    refusing = ProjectBuildPlanner(Lookup(tools), GuardedBuildTreeReader(), Env(), Net(),
+                                   run_root=str(tmp_path / "state" / "build-runs"), host="linux",
+                                   executable_guard=lambda path: _refuse(path, "/usr/local/bin/ninja"))
+    with pytest.raises(SonderError) as excinfo:
+        refusing.plan_run(BuildJobRequest(project=str(root), action="configure", generator="Ninja",
+                                          build_dir="build/refused"), None, ctx())
+    assert excinfo.value.code == "RUNNER_UNAVAILABLE" and "ninja" in str(excinfo.value)
+
+
+def _refuse(path, refused):
+    if path == refused:
+        raise PermissionError("host executable rejected")
+    return path
+
+
 def test_windows_ninja_with_msvc_needs_vcvars(tmp_path, allowed):
     root = allowed / "win"
     write(root / "CMakeLists.txt", "project(x)\n")
