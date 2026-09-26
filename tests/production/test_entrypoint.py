@@ -756,6 +756,53 @@ def test_backup_verify_json_flag_emits_json(isolated_home, tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["ok"] is True
 
 
+def test_backup_latest_prints_newest_dated_backup_path(
+    isolated_home, tmp_path, capsys
+):
+    assert main(["migrate", "--store", "operations"]) == 0
+    capsys.readouterr()
+    target = tmp_path / "backups"
+    assert main(["backup", "create", "--target", str(target), "--json"]) == 0
+    backup_dir = json.loads(capsys.readouterr().out)["path"]
+
+    assert main(["backup", "latest", "--target", str(target)]) == 0
+    assert capsys.readouterr().out == backup_dir + "\n"
+
+    assert main(["backup", "latest", "--target", str(target), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["backup"]["path"] == backup_dir
+    assert payload["backup"]["created_at_valid"] is True
+
+
+def test_backup_latest_skips_newer_raw_pre_epoch2_copy(
+    isolated_home, tmp_path, capsys
+):
+    assert main(["migrate", "--store", "operations"]) == 0
+    capsys.readouterr()
+    target = tmp_path / "backups"
+    assert main(["backup", "create", "--target", str(target), "--json"]) == 0
+    backup_dir = json.loads(capsys.readouterr().out)["path"]
+    raw = target / "pre-epoch2-9000-01-01T00-00-00.000000+00-00"
+    raw.mkdir()
+    (raw / "memory.db").write_bytes(b"")
+
+    # The raw copy is dated and newest but has no manifest to restore.
+    assert main(["backup", "latest", "--target", str(target)]) == 0
+    assert capsys.readouterr().out == backup_dir + "\n"
+
+
+def test_backup_latest_fails_when_no_backup_is_dated(
+    isolated_home, tmp_path, capsys
+):
+    target = tmp_path / "empty-backups"
+    target.mkdir()
+
+    assert main(["backup", "latest", "--target", str(target)]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "no backup with a valid created_at_utc" in captured.err
+
+
 def test_backup_and_restore_via_cli(isolated_home, tmp_path, capsys):
     assert main(["migrate", "--store", "operations"]) == 0
     capsys.readouterr()

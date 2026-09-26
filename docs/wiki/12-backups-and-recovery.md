@@ -27,6 +27,7 @@ with mode `0700`) or on an encrypted volume.
 python -m sonder_runtime backup create --json     # -> backup_id, path, files, bytes
 python -m sonder_runtime backup verify <dir>      # hashes + SQLite/schema/policy integrity
 python -m sonder_runtime backup list --json
+python -m sonder_runtime backup latest            # path of the newest dated backup
 python -m sonder_runtime backup prune             # tiered retention (default)
 python -m sonder_runtime backup prune --keep 7    # simple keep-N
 ```
@@ -78,9 +79,10 @@ section.
 `packaging/systemd/` ships timers: `sonder-backup.timer` (daily create +
 prune) and `sonder-restore-smoke.timer` (weekly restore-smoke on a
 disposable directory) — so backups are proven restorable, not just taken.
-The smoke targets the newest backup with a valid `created_at_utc`; if that
-backup no longer verifies, the smoke fails rather than silently picking an
-older one.
+The smoke targets the newest backup with a valid `created_at_utc`, selected
+by `backup latest` (raw pre-epoch2 copies are skipped; the run fails when no
+standard backup is dated); if that backup no longer verifies, the smoke fails
+rather than silently picking an older one.
 
 ## Recovery scenarios
 

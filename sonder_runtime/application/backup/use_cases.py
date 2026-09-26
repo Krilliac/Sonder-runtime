@@ -17,6 +17,20 @@ class BackupService:
     def list(self, target: BackupPath) -> list[dict]:
         return self._gateway.list(target)
 
+    def latest_dated(self, target: BackupPath) -> dict | None:
+        """Return the newest listed standard backup with a valid ``created_at_utc``.
+
+        The gateway lists newest first and ranks undated entries last, so the
+        first entry flagged ``created_at_valid`` is the newest dated backup.
+        Entries carrying a ``kind`` (such as raw ``pre-epoch2`` safety copies)
+        have no manifest and cannot be restored, so they are skipped.
+        ``None`` means the target holds no dated standard backup at all.
+        """
+        for entry in self._gateway.list(target):
+            if entry.get("created_at_valid") is True and "kind" not in entry:
+                return entry
+        return None
+
     def prune(self, target: BackupPath, *, keep: int) -> list[str]:
         return self._gateway.prune(target, keep=keep)
 

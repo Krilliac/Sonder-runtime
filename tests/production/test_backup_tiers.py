@@ -203,43 +203,137 @@ def test_prune_keeps_undated_backup_when_it_is_the_only_verified_one(
     assert undated.is_dir()
 
 
-def _restore_smoke_unit_selector():
-    unit = (
-        Path(__file__).resolve().parents[2]
-        / "packaging" / "systemd" / "sonder-restore-smoke.service"
-    ).read_text(encoding="utf-8")
-    match = re.search(r'python -c "(.*?)"\); \\', unit)
-    assert match, "restore-smoke unit no longer selects via python -c"
-    return match.group(1).replace('\\"', '"')
+_UNIT_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "packaging" / "systemd" / "sonder-restore-smoke.service"
+)
+_UNIT_PYTHON = "/opt/sonder/current/venv/bin/python"
+_UNIT_CONFIG = "/etc/sonder/sonder.toml"
+_C_ESCAPES = {
+    "a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t",
+    "v": "\v", "\\": "\\", '"': '"', "'": "'", "s": " ",
+}
 
 
-def _run_unit_selector(target):
-    listing = json.dumps({"backups": sonder_backup.list_backups(target)})
-    return subprocess.run(
-        [sys.executable, "-c", _restore_smoke_unit_selector()],
-        input=listing, capture_output=True, text=True, check=True,
-    ).stdout.strip()
+def _systemd_exec_argv(unit_text):
+    """Split ``ExecStart=`` the way systemd does before exec'ing it.
+
+    Continuation lines are joined with a space, words are split on
+    whitespace, single and double quotes group a word, and backslash
+    escapes are C-unescaped both inside and outside quotes (systemd.syntax).
+    ``${VAR}`` substitution is rejected rather than emulated so the test
+    cannot silently diverge from what systemd would run.
+    """
+    joined = re.sub(r"\\\n", " ", unit_text)
+    match = re.search(r"^ExecStart=(.*)$", joined, re.MULTILINE)
+    assert match, "restore-smoke unit has no ExecStart="
+    line = match.group(1)
+    assert "${" not in line and "$$" not in line
+    argv, word, quote, in_word, i = [], [], None, False, 0
+    while i < len(line):
+        ch = line[i]
+        if ch == "\\":
+            nxt = line[i + 1]
+            assert nxt in _C_ESCAPES, f"unsupported escape \\{nxt}"
+            word.append(_C_ESCAPES[nxt])
+            in_word, i = True, i + 2
+            continue
+        if quote:
+            if ch == quote:
+                quote = None
+            else:
+                word.append(ch)
+        elif ch in "'\"":
+            quote, in_word = ch, True
+        elif ch.isspace():
+            if in_word:
+                argv.append("".join(word))
+                word, in_word = [], False
+        else:
+            word.append(ch)
+            in_word = True
+        i += 1
+    assert quote is None, "unterminated quote in ExecStart="
+    if in_word:
+        argv.append("".join(word))
+    return argv
 
 
-def test_restore_smoke_unit_selects_the_newest_dated_backup(isolated_state):
+def _unit_shell_script():
+    argv = _systemd_exec_argv(_UNIT_PATH.read_text(encoding="utf-8"))
+    assert argv[:2] == ["/bin/sh", "-c"] and len(argv) == 3, argv
+    return argv[2]
+
+
+def test_restore_smoke_unit_parses_to_one_sh_script_without_nested_quotes():
+    script = _unit_shell_script()
+
+    # The selector used to embed python -c "...[\"backups\"]...": systemd
+    # turns \" into ", which leaves bare quotes inside sh's double-quoted
+    # string. The unit now delegates selection to `backup latest`.
+    assert "backup latest --config " + _UNIT_CONFIG in " ".join(script.split())
+    assert "python -c" not in script
+
+
+_needs_posix_sh = pytest.mark.skipif(
+    not Path("/bin/sh").exists(), reason="systemd units run under /bin/sh"
+)
+
+
+def _run_unit_script(isolated_state, target):
+    """Run the unit's ExecStart script with stubbed venv python and config."""
+    config = isolated_state / "sonder.toml"
+    config.write_text(
+        "[backup]\nenabled = true\ntarget = %s\n" % json.dumps(str(target)),
+        encoding="utf-8",
+    )
+    calls = isolated_state / "python-calls.log"
+    stub = isolated_state / "venv-python"
+    stub.write_text(
+        "#!/bin/sh\n"
+        "printf '%%s\\n' \"$*\" >> %s\n"
+        "exec %s \"$@\"\n" % (json.dumps(str(calls)), json.dumps(sys.executable)),
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    script = (
+        _unit_shell_script()
+        .replace(_UNIT_PYTHON, str(stub))
+        .replace(_UNIT_CONFIG, str(config))
+    )
+    result = subprocess.run(
+        ["/bin/sh", "-c", script],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True, text=True, timeout=300,
+    )
+    invoked = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+    return result, invoked
+
+
+@_needs_posix_sh
+def test_restore_smoke_unit_smokes_the_newest_dated_backup(isolated_state):
     target = isolated_state / "backups"
     good, _undated, _garbled = _dated_undated_and_garbled(target)
 
-    selected = _run_unit_selector(target)
+    result, invoked = _run_unit_script(isolated_state, target)
 
-    assert selected == str(good)
-    assert sonder_backup.restore_smoke(selected) == []
+    assert result.returncode == 0, result.stderr
+    assert "restore smoke passed" in result.stdout
+    assert invoked[-1] == f"-m sonder_runtime restore smoke {good}"
 
 
-def test_restore_smoke_unit_selects_nothing_without_a_dated_backup(
-    isolated_state,
-):
+@_needs_posix_sh
+def test_restore_smoke_unit_fails_without_a_dated_backup(isolated_state):
     target = isolated_state / "backups"
     undated = sonder_backup.create_backup(target).path
     _strip_created_at(undated)
 
-    # The unit's `test -n "$latest"` then fails the run loudly.
-    assert _run_unit_selector(target) == ""
+    result, invoked = _run_unit_script(isolated_state, target)
+
+    assert result.returncode != 0
+    assert "no backup with a valid created_at_utc" in result.stderr
+    assert not any("restore smoke" in call for call in invoked)
+
 
 
 def _raw_pre_epoch2(target, stamp):

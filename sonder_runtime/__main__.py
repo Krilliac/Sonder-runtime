@@ -740,6 +740,18 @@ def _cmd_backup(args) -> int:
         _emit({"backups": backups.list(_backup_target(args, config))},
               as_json=args.json)
         return 0
+    if args.backup_command == "latest":
+        latest = backups.latest_dated(_backup_target(args, config))
+        if latest is None:
+            print("no backup with a valid created_at_utc in the target",
+                  file=sys.stderr)
+            return 1
+        if args.json:
+            _emit({"backup": latest}, as_json=True)
+        else:
+            # A bare path, so shell callers can use it without parsing JSON.
+            print(latest["path"])
+        return 0
     if args.backup_command == "prune":
         if args.keep is not None:
             removed = backups.prune(
@@ -1662,8 +1674,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("backup", help="backup management")
     backup_sub = p.add_subparsers(dest="backup_command", required=True)
-    for name in ("create", "list", "prune"):
-        bp = backup_sub.add_parser(name)
+    for name in ("create", "list", "latest", "prune"):
+        bp = backup_sub.add_parser(
+            name,
+            help=(
+                "print the path of the newest backup with a valid "
+                "created_at_utc (exit 1 when there is none)"
+                if name == "latest" else None
+            ),
+        )
         common(bp)
         bp.add_argument("--target", help="backup repository directory")
         if name == "prune":

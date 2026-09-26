@@ -85,6 +85,33 @@ def test_service_forwards_every_operation_and_result_without_reformatting():
     ]
 
 
+def test_latest_dated_skips_undated_entries_the_gateway_ranked_last():
+    gateway = CapturingGateway()
+    gateway.list = lambda _target: [
+        {"path": "undated-newer-name", "created_at_valid": False},
+        {"path": "dated", "created_at_valid": True},
+        {"path": "older-dated", "created_at_valid": True},
+    ]
+    assert BackupService(gateway).latest_dated("target")["path"] == "dated"
+
+    gateway.list = lambda _target: [{"path": "undated", "created_at_valid": False}]
+    assert BackupService(gateway).latest_dated("target") is None
+
+
+def test_latest_dated_skips_raw_pre_epoch2_copies():
+    gateway = CapturingGateway()
+    gateway.list = lambda _target: [
+        {"path": "raw", "created_at_valid": True, "kind": "pre-epoch2"},
+        {"path": "standard", "created_at_valid": True},
+    ]
+    assert BackupService(gateway).latest_dated("target")["path"] == "standard"
+
+    gateway.list = lambda _target: [
+        {"path": "raw", "created_at_valid": True, "kind": "pre-epoch2"},
+    ]
+    assert BackupService(gateway).latest_dated("target") is None
+
+
 def test_service_does_not_translate_gateway_errors():
     expected = backup_adapter.BackupError("private path must remain adapter-owned")
     gateway = CapturingGateway()

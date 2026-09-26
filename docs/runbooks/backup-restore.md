@@ -43,6 +43,16 @@ pre-epoch2 copies included, so both prune modes treat it as the oldest: it
 never takes a retention slot from a dated backup, and it is removed unless it
 is the newest verified backup.
 
+```bash
+python -m sonder_runtime backup latest          # bare path of the newest dated backup
+python -m sonder_runtime backup latest --json   # {"backup": {...list entry...}}
+```
+
+`backup latest` selects the first `created_at_valid` standard entry of that
+listing (raw pre-epoch2 copies, described below, have no manifest to restore
+and are skipped) and exits 1 when the target holds no dated standard backup.
+The weekly `sonder-restore-smoke` unit passes its output to `restore smoke`.
+
 The raw safety copies that `migrate --adopt-epoch2` writes to
 `<state home>/backups/pre-epoch2-<UTC time>/` have no manifest, so they never
 verify as restorable backups. They are listed with `"kind": "pre-epoch2"` and
