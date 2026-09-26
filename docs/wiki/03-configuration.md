@@ -286,6 +286,36 @@ route step up to the next distinct bound local model when its first model
 fails or answers nothing, at most twice per turn; explicit tiers and model
 pins never move ([Tiers & Gateway](08-model-tiers-and-gateway.md)).
 
+### Sonder ecosystem (Inference provider and Observatory)
+
+Sonder Inference provider (read lazily per call; reference:
+[sonder-inference-provider.md](../architecture/sonder-inference-provider.md),
+procedure: [runbook](../runbooks/sonder-inference.md)):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SONDER_MODEL_BACKEND`, `SONDER_<TIER>_PROVIDER` | `ollama` | `sonder-inference` (also `sonder_inference`, `sonder-infer`, `inference`) selects the provider; `sonder` is refused |
+| `SONDER_INFERENCE_BASE_URL` | `http://127.0.0.1:11437` | `sonder-infer serve` origin |
+| `SONDER_INFERENCE_READY_FILE` | unset | `url` of a `serve --ready-file`, used only without a base URL |
+| `SONDER_INFERENCE_MODEL` | `default` | model id when no tier mapping applies |
+| `SONDER_INFERENCE_TIER_MODELS` | unset | e.g. `fast=a,general=b` |
+| `SONDER_INFERENCE_API_KEY` | unset | bearer token; redacted from logs |
+| `SONDER_ALLOW_REMOTE_INFERENCE` | `0` | `1` permits a non-loopback URL, which also needs `https://`, a key, and a cloud-allowed context |
+| `SONDER_INFERENCE_TIMEOUT_SECONDS` | `300` | per-call ceiling, never beyond the operation deadline |
+| `SONDER_INFERENCE_HEALTH_TTL_SECONDS` | `5` | health-cache lifetime |
+| `SONDER_INFERENCE_FALLBACK` | `none` | `ollama` sends requests Inference never received to local Ollama once |
+
+Observatory live export (contract section 11; served by the runtime telemetry
+routes, which the chat-telemetry change adds): `SONDER_OBSERVATORY_EXPORT`
+(default `1`; `0` makes the telemetry routes answer 404),
+`SONDER_OBSERVATORY_BUFFER` (default `4096`, clamped to 256..65536),
+`SONDER_OBSERVATORY_MAX_SUBSCRIBERS` (default `8`); typed equivalents under
+`[observability]` are `live_export`, `live_export_buffer` and
+`live_export_max_subscribers`. `SONDER_CORS_ORIGINS` keeps no default. The
+Flutter app reads `SONDER_OBSERVATORY_BIN` to find the Observatory
+executable. Inference's own flags (`--port`, `--cors-origin`,
+`--token-file`, ...) are documented by `sonder-infer serve --help`.
+
 ### Context sizing
 
 Sonder distinguishes the **requested** (virtual) context you ask for from the

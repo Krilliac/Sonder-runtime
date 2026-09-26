@@ -238,6 +238,21 @@ listener that answers without credentials. `X-Forwarded-For` is trusted only wit
 `tls_terminated_by_proxy = true` and a peer inside `trusted_proxy_cidrs`.
 See [HTTP API & lifecycle](docs/wiki/05-http-api-and-lifecycle.md).
 
+### Sonder Inference provider
+
+A provider binding to `sonder-inference` sends prompts to a `sonder-infer
+serve` process over HTTP. A loopback base URL (`127.0.0.1`, `localhost`,
+`::1`; `0.0.0.0` and `::` are rewritten to loopback) needs no consent. Any
+other base URL is refused before a byte is sent unless all of these hold:
+`SONDER_ALLOW_REMOTE_INFERENCE=1`, an `https://` URL, a
+`SONDER_INFERENCE_API_KEY`, and an operation context that allows prompts to
+leave the machine. Status probes (health, identity) apply the same URL,
+TLS and key checks because they carry the key. The key is in the log redaction
+set, is never logged, and is sent only as `Authorization: Bearer`. `SONDER_INFERENCE_FALLBACK=ollama` sends a request
+to local Ollama only when Inference provably never received it, and Ollama's
+own consent rules still apply, so the fallback cannot widen where a prompt
+goes. See [the provider reference](docs/architecture/sonder-inference-provider.md).
+
 ## Supported versions
 
 This is a single-maintainer project. Fixes land on `main`; there are no
@@ -268,5 +283,7 @@ implementation work is tracked only in the
 | Process inventory and memory-risk inspection | Implemented | Off unless `SONDER_PROCESS_INSPECTION=enabled:bounded-read-only`; Windows only. |
 | Process memory-risk inspection on non-Windows hosts | Unsupported | The bounded scanner is Windows-only. |
 | Unsafe lab mode | Experimental | Exact acknowledgement, loopback-only, and unprivileged; disposable isolated hosts only, and never an OS sandbox. |
+| Sonder Inference provider on a loopback endpoint | Implemented | No consent needed; `sonder-inference` bindings only, see the Sonder Inference provider section. |
+| Remote Sonder Inference endpoint | Experimental | Refused unless `SONDER_ALLOW_REMOTE_INFERENCE=1`, `https://`, an API key and a cloud-allowed operation context all hold; Inference itself serves no TLS, so a TLS-terminating proxy is required. |
 | Exposing the runtime port directly to a network | Unsupported | Remote access requires the server-private profile behind a TLS reverse proxy. |
 | Scoped credential handles for every tool instead of injected raw secrets | Proposed | SEC-001; an opaque-handle provider boundary exists but is not yet the end-to-end tool contract. |

@@ -18,6 +18,14 @@ of the model — an uncensored or "abliterated" model changes what it will
   `allow_remote`), approximate location, model reasoning
   (`SONDER_EXPOSE_REASONING`), and private chain-of-thought
   (`SONDER_ALLOW_PRIVATE_COT`). Runtime policy can never turn any of these on.
+- **Remote Sonder Inference needs four things at once.** A provider binding
+  to `sonder-inference` on a loopback base URL needs no consent. Any other
+  host is refused before a byte is sent unless `SONDER_ALLOW_REMOTE_INFERENCE=1`,
+  the URL is `https://`, `SONDER_INFERENCE_API_KEY` is set (it is redacted
+  from logs), and the operation context allows cloud. The optional
+  `SONDER_INFERENCE_FALLBACK=ollama` reaches only local Ollama under Ollama's
+  own consent rules, so it cannot widen where a prompt goes
+  ([provider reference](../architecture/sonder-inference-provider.md)).
 - **`SONDER_ALLOW_PRIVATE_COT` takes a second, separate act.** It is the one
   consent gate an environment variable cannot open by itself:
   `admin_private_chain_of_thought` also requires an explicit `allow` rule for

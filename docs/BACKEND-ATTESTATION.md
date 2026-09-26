@@ -50,6 +50,30 @@ probe prompts contain no project data. If the endpoint needs an API key, set
 `SONDER_OPENAI_API_KEY` in the process environment and keep it out of command
 arguments and logs.
 
+## Sonder Inference
+
+`--backend sonder-inference` probes a `sonder-infer serve` endpoint instead.
+The base URL, model and key default to `SONDER_INFERENCE_BASE_URL` (or the
+ready file), `SONDER_INFERENCE_MODEL` and `SONDER_INFERENCE_API_KEY`; the
+model alias `default` is resolved to the served id through the health
+document before probing. `--identity-file` is refused: the identity is the
+server's own measurement from `/v1/sonder/identity`.
+
+```powershell
+python scripts/backend_attest.py --backend sonder-inference --dry-run
+python scripts/backend_attest.py --backend sonder-inference --protocol-probes
+```
+
+A synthetic identity (the mock backend) is never recorded: the plain run
+stores the record without an identity and reports `identity_synthetic: true`,
+and `--protocol-probes` exits 2. An identity Inference reports as `null`
+is recorded as absent with `identity_reason`. When an identity is recorded,
+the record is keyed by the identity's `backend` (for example `ollama`), as
+the record and identity backends must match. Records stay `synthetic: true`
+diagnostics, exactly as for OpenAI-compatible endpoints.
+
+## Identity-bound routing
+
 For production identity-bound routing, an independent host observer must bind
 the full concrete deployment identity to the actual serving endpoint and
 measure each required capability through the supported runtime path. Only

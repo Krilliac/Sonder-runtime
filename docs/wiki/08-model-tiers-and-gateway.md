@@ -161,10 +161,24 @@ must consume.
 `SONDER_MODEL_BACKEND` (default `ollama`) picks the transport constructed by
 `adapters/model_gateway_factory.py`: unset/`ollama` builds `OllamaGateway`;
 `openai`, `openai-compatible`, `llamacpp`, or `vllm` build
-`OpenAICompatibleGateway`. An unrecognized value raises `InvalidInput`
-instead of silently falling back to Ollama — a typo in the operator's
-configuration must not route requests through a different transport than
-intended.
+`OpenAICompatibleGateway`; `sonder-inference` (also `sonder_inference`,
+`sonder-infer`, `inference`) builds `SonderInferenceGateway`, which talks to a
+local `sonder-infer serve` over its OpenAI-compatible HTTP API v1. An
+unrecognized value raises `InvalidInput` instead of silently falling back to
+Ollama — a typo in the operator's configuration must not route requests
+through a different transport than intended. `sonder` is refused for the same
+reason: it names the chat tier, not a provider.
+
+Per-tier bindings (`SONDER_FAST_PROVIDER` and friends) mix providers; the
+dispatcher makes exactly one provider call per request. The single exception
+is opt-in: `SONDER_INFERENCE_FALLBACK=ollama` wraps the Inference provider so
+that a request Inference provably never received (refused connection,
+unresolvable host, health not ready, HTTP 503 `not_ready`) is sent once to
+local Ollama, logged at WARNING and counted. Timeouts and server errors never
+fall back, because the request may already have run. Only ModelGateway
+consumers (A2A chat, session summarize/title) follow provider bindings; see
+[the provider reference](../architecture/sonder-inference-provider.md) for
+which surfaces still use Ollama directly.
 
 The read-only hardware profile also inventories local provider presence for
 Ollama, llama.cpp, vLLM, and TensorRT-LLM using bounded executable/package
@@ -181,7 +195,11 @@ never a live probe result, only a fact about the adapter's own shape:
 `OllamaGateway` advertises `tiered-routing` because it resolves model
 identity per request (a tier may select a different local or hosted model
 each call); `OpenAICompatibleGateway` advertises `fixed-endpoint` because one
-configured endpoint and model serve every request.
+configured endpoint and model serve every request. `SonderInferenceGateway`
+advertises `chat` and `fixed-endpoint` only (Inference v1 serves no
+embeddings), and additionally reports live `capability_health()`,
+`backend_identity()` and `provider_status()` from a cached, 2-second-bounded
+health probe that never generates.
 
 ### Measured inference telemetry
 
