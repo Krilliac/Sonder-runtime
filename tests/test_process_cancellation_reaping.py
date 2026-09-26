@@ -157,6 +157,70 @@ def test_incomplete_cleanup_retries_and_releases_capacity_after_proof():
     provider.start(_request("after-retry"))
 
 
+def test_deadline_retry_keeps_pending_cancellation_after_root_exit():
+    process = _ExitedProcess(exit_code=1)
+    cleanup = _Cleanup(complete=False)
+    provider = _provider(process, cleanup, max_concurrent_processes=1)
+    started = provider.start(_request("deadline-retry-exited"))
+    job_id = started.record.identity.job_id
+    provider._registry.request_cancellation(job_id, reason="operator cancellation")
+    provider._discard_deadline(job_id)
+    timers_before = len(provider._test_timers)
+
+    provider._expire_deadline_owned(job_id)
+
+    assert provider._registry.poll(job_id).status is JobStatus.CANCELLATION_REQUESTED
+    assert len(cleanup.requests) == 1
+    assert job_id in provider._processes
+    assert len(provider._test_timers) > timers_before
+    assert provider._test_timers[-1].started
+    assert provider._test_timers[-1].args == (job_id,)
+    with pytest.raises(RuntimeError, match="capacity exhausted"):
+        provider.start(_request("blocked-by-pending-cancellation"))
+
+
+def test_restarted_deadline_retry_keeps_pending_cancellation_after_root_exit():
+    from sonder_runtime.adapters.process_liveness import PROCESS_DEAD
+
+    registry = DurableJobRegistry()
+    cleanup = _Cleanup(complete=False)
+    first = SubprocessJobProvider(
+        registry,
+        process_cleanup=cleanup,
+        launcher=lambda *args, **kwargs: _ExitedProcess(exit_code=1),
+        memory_limiter=_MemoryLimiter(),
+        process_identity_resolver=lambda _pid: "owned-process",
+        platform_name="posix",
+        timer_factory=lambda delay, callback, args=(): _Timer(delay, callback, args),
+    )
+    job_id = first.start(_request("restarted-retry")).record.identity.job_id
+    registry.request_cancellation(job_id, reason="operator cancellation")
+    first._discard_deadline(job_id)
+
+    # A restarted owner has no process handle; the recorded root has exited.
+    timers = []
+    second = SubprocessJobProvider(
+        registry,
+        process_cleanup=cleanup,
+        memory_limiter=_MemoryLimiter(),
+        process_identity_resolver=lambda _pid: "owned-process",
+        process_probe=lambda _pid, _expected: (PROCESS_DEAD, None),
+        platform_name="posix",
+        timer_factory=lambda delay, callback, args=(): timers.append(
+            _Timer(delay, callback, args)) or timers[-1],
+    )
+    second._discard_deadline(job_id)
+    timers.clear()
+
+    second._expire_deadline_owned(job_id)
+
+    record = registry.poll(job_id)
+    assert record.status is JobStatus.CANCELLATION_REQUESTED
+    assert cleanup.requests
+    assert cleanup.requests[-1].process_identity == "owned-process"
+    assert timers and timers[-1].started and timers[-1].args == (job_id,)
+
+
 def test_windows_taskkill_success_does_not_release_unproven_job_capacity():
     from types import SimpleNamespace
 
