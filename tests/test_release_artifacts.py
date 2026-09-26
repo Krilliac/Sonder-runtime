@@ -366,7 +366,10 @@ def test_windows_focused_runs_the_devtools_suites_in_their_own_step():
     step = _step_block(job, "Exercise the build, debug and host-tool Windows branches")
     assert "if: ${{ !cancelled() && steps.install-focused-venv.outcome == 'success' }}" in step
     assert "timeout-minutes: 8" in step
-    assert "continue-on-error" not in step, "the devtools step gates the job"
+    # The suites have not yet run on a hosted windows-latest image, so the
+    # step is observed rather than gating; it must say why.
+    assert "continue-on-error: true" in step
+    assert "Observed, not gating" in step
     assert "-m pytest -q -rs" in step
     for suite in WINDOWS_DEVTOOLS_SUITES:
         assert suite in step, suite
