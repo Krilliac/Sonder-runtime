@@ -27,7 +27,10 @@ from ..ports.subagents import (
 )
 
 
-PROVENANCE_VERSION = 1
+# Version 2 adds ``gateway_call_ordinal``; version 1 records (written before
+# it existed) stay readable and digest-valid only with an ordinal of zero.
+PROVENANCE_VERSION = 2
+_GATEWAY_ORDINAL_VERSION = 2
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _MAX_PROVENANCE_TEXT = 512
 
@@ -60,8 +63,11 @@ class CheckpointProvenance:
 
     It binds the checkpoint subject (child id, sequence, canonical state digest
     and cursor) to the journal identity, run, worker, owner epoch and settled
-    journal position observed before the child compare-and-set.  Construction
-    checks only shape: a row read back from storage must stay readable even
+    journal position observed before the child compare-and-set.  From version
+    2 it also records ``gateway_call_ordinal``: how many deterministic gateway
+    call ordinals the child runner had issued when the checkpoint was saved,
+    so a runner resumed from it re-issues later calls at the same ordinals.
+    Construction checks only shape: a row read back from storage must stay readable even
     when tampered, so that the resume validator can refuse it with a typed
     reason instead of failing every read of the child.  ``record_digest``
     covers every other field; ``digest_valid`` recomputes it.
@@ -78,6 +84,7 @@ class CheckpointProvenance:
     settled_position: int
     record_digest: str
     version: int = PROVENANCE_VERSION
+    gateway_call_ordinal: int = 0
 
     def __post_init__(self) -> None:
         for name in ("child_id", "journal_identity", "run_id", "worker_id"):
@@ -88,7 +95,7 @@ class CheckpointProvenance:
         if self.cursor is not None and not isinstance(self.cursor, str):
             raise InvalidSubagentRequest("checkpoint provenance cursor must be text")
         for name, minimum in (("sequence", 0), ("owner_epoch", 1), ("settled_position", 0),
-                              ("version", 1)):
+                              ("version", 1), ("gateway_call_ordinal", 0)):
             value = getattr(self, name)
             if type(value) is not int or value < minimum:
                 raise InvalidSubagentRequest(f"checkpoint provenance {name} is invalid")
@@ -101,34 +108,45 @@ class CheckpointProvenance:
     def compute_digest(*, child_id: str, sequence: int, state_digest: str,
                        cursor: str | None, journal_identity: str, run_id: str,
                        worker_id: str, owner_epoch: int, settled_position: int,
-                       version: int = PROVENANCE_VERSION) -> str:
-        return hashlib.sha256(_canonical_bytes({
+                       version: int = PROVENANCE_VERSION,
+                       gateway_call_ordinal: int = 0) -> str:
+        fields: dict[str, object] = {
             "child_id": child_id, "sequence": sequence, "state_digest": state_digest,
             "cursor": cursor, "journal_identity": journal_identity, "run_id": run_id,
             "worker_id": worker_id, "owner_epoch": owner_epoch,
             "settled_position": settled_position, "version": version,
-        })).hexdigest()
+        }
+        if version >= _GATEWAY_ORDINAL_VERSION:
+            fields["gateway_call_ordinal"] = gateway_call_ordinal
+        return hashlib.sha256(_canonical_bytes(fields)).hexdigest()
 
     @classmethod
     def stamp(cls, *, child_id: str, sequence: int, state_digest: str,
               cursor: str | None, journal_identity: str, run_id: str,
-              worker_id: str, owner_epoch: int, settled_position: int) -> CheckpointProvenance:
+              worker_id: str, owner_epoch: int, settled_position: int,
+              gateway_call_ordinal: int = 0) -> CheckpointProvenance:
         fields = {
             "child_id": child_id, "sequence": sequence, "state_digest": state_digest,
             "cursor": cursor, "journal_identity": journal_identity, "run_id": run_id,
             "worker_id": worker_id, "owner_epoch": owner_epoch,
             "settled_position": settled_position,
+            "gateway_call_ordinal": gateway_call_ordinal,
         }
         return cls(**fields, record_digest=cls.compute_digest(**fields))
 
     @property
     def digest_valid(self) -> bool:
+        if self.version < _GATEWAY_ORDINAL_VERSION and self.gateway_call_ordinal != 0:
+            # A version-1 digest does not cover the ordinal, so a nonzero
+            # ordinal on such a record cannot have been stamped.
+            return False
         return self.record_digest == self.compute_digest(
             child_id=self.child_id, sequence=self.sequence,
             state_digest=self.state_digest, cursor=self.cursor,
             journal_identity=self.journal_identity, run_id=self.run_id,
             worker_id=self.worker_id, owner_epoch=self.owner_epoch,
             settled_position=self.settled_position, version=self.version,
+            gateway_call_ordinal=self.gateway_call_ordinal,
         )
 
 

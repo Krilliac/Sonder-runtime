@@ -39,6 +39,24 @@ class SettledEffectReplay(EffectJournalError):
         self.receipt_key = receipt_key
 
 
+class DivergentEffectReplay(EffectJournalError):
+    """A different request was issued at an intent identity already admitted.
+
+    Deterministic call identities (for example a resumed child runner's
+    gateway call ordinals) fix the intent id by position.  When the request
+    at that position differs from the admitted one, nothing may run: the
+    runner diverged from the history the journal recorded.  Raised before
+    the journal is written.
+    """
+
+    def __init__(self, intent_id: str) -> None:
+        super().__init__(
+            "a different request was already admitted at this effect identity; "
+            "refusing a divergent replay"
+        )
+        self.intent_id = intent_id
+
+
 class EffectState(str, Enum):
     INTENT = "intent"
     COMPLETED = "completed"
@@ -238,6 +256,8 @@ class JournalBinding:
             # is refused before any journal write.
             raise SettledEffectReplay(idempotency_key, settled[idempotency_key])
         existing = getattr(self.journal, "get", lambda _intent_id: None)(intent.intent_id)
+        if existing is not None and existing.idempotency_key != idempotency_key:
+            raise DivergentEffectReplay(intent.intent_id)
         stored = self.journal.begin(intent)
         if existing is not None or stored.replayed:
             raise EffectJournalError(
@@ -321,7 +341,8 @@ def bound(binding: JournalBinding) -> Iterator[JournalBinding]:
         _CURRENT.reset(token)
 
 
-__all__ = ["EffectIntent", "EffectJournal", "EffectJournalError", "EffectJournalPage",
+__all__ = ["DivergentEffectReplay", "EffectIntent", "EffectJournal", "EffectJournalError",
+           "EffectJournalPage",
            "EffectJournalReader", "EffectOutcome",
            "EffectReconciliationVerifier", "EffectState", "JournalBinding",
            "ReconciliationProof", "RecoveryDecision", "SettledEffectReplay", "bound",

@@ -32,6 +32,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any, Protocol
 
+from ..execution import gateway_calls
 from ..execution.effect_journal import (
     EffectIntent,
     EffectJournalError,
@@ -115,7 +116,15 @@ CheckpointProvenanceHook = Callable[[ProvenanceSubject], CheckpointProvenance]
 
 
 class JournalProvenanceStamp:
-    """Host hook: stamp a checkpoint with the journal position it relies on."""
+    """Host hook: stamp a checkpoint with the journal position it relies on.
+
+    It also records how many deterministic gateway call ordinals the child
+    runner had issued (the ``GatewayCallSequence`` the provider binds for
+    the runner thread), so a runner resumed from this checkpoint re-issues
+    its later calls at the same ordinals.  A sequence bound for another
+    child run refuses the stamp; no bound sequence records zero, which is
+    exact because the gateway then journals no deterministic call.
+    """
 
     def __init__(self, journal: ProvenanceJournal,
                  resolve: Callable[[ProvenanceSubject], ProvenanceBinding]) -> None:
@@ -138,6 +147,12 @@ class JournalProvenanceStamp:
             # A superseded (or never-claimed) owner cannot vouch for the
             # journal; the child keeps its previous checkpoint.
             raise CheckpointProvenanceError("checkpoint writer is not the current journal owner")
+        calls = gateway_calls.current()
+        if calls is not None and (calls.run_id, calls.worker_id, calls.child_id) != (
+                binding.run_id, binding.worker_id, subject.child_id):
+            raise CheckpointProvenanceError(
+                "gateway call sequence belongs to a different child run"
+            )
         try:
             return CheckpointProvenance.stamp(
                 child_id=subject.child_id, sequence=subject.sequence,
@@ -145,6 +160,7 @@ class JournalProvenanceStamp:
                 journal_identity=position.journal_identity, run_id=binding.run_id,
                 worker_id=binding.worker_id, owner_epoch=binding.owner_epoch,
                 settled_position=position.settled_high_water,
+                gateway_call_ordinal=0 if calls is None else calls.issued,
             )
         except InvalidSubagentRequest as exc:
             raise CheckpointProvenanceError(str(exc)) from exc
@@ -171,6 +187,8 @@ class CheckpointResumeRefusal(str, Enum):
     INCOMPLETE_JOURNAL_PAGE = "incomplete_journal_page"
     JOURNAL_PAGE_BUDGET_EXHAUSTED = "journal_page_budget_exhausted"
     JOURNAL_CHANGED = "journal_changed_during_validation"
+    GATEWAY_ORDINAL_BEHIND_JOURNAL = "gateway_ordinal_behind_journal"
+    LEGACY_GATEWAY_CALL_AFTER_POSITION = "legacy_gateway_call_after_position"
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +218,9 @@ class CheckpointResumeDecision:
     position, keyed by idempotency key in sequence order.  ``later_receipts``
     are settled outcomes after it.  A runner resuming from ``resume_state``
     must consume both instead of re-invoking those effects.
+    ``gateway_call_ordinal`` is the number of gateway call ordinals the
+    runner had issued at the checkpoint; the resumed runner's call sequence
+    continues from it.
     """
 
     allowed: bool
@@ -211,6 +232,7 @@ class CheckpointResumeDecision:
     resume_state: Mapping[str, Any] | None = None
     receipts: Mapping[str, SettledReceipt] = field(default_factory=_frozen)
     later_receipts: Mapping[str, SettledReceipt] = field(default_factory=_frozen)
+    gateway_call_ordinal: int = 0
 
 
 def _refuse(reason: CheckpointResumeRefusal, detail: str,
@@ -362,6 +384,22 @@ def validate_checkpoint_resume(
         if record.worker_id == provenance.worker_id and record.owner_epoch > provenance.owner_epoch:
             return _refuse(R.OWNER_SUPERSEDED,
                            "a newer owner settled effects the checkpoint claims", checkpoint)
+        call = gateway_calls.parse_gateway_call_operation(record.operation_id)
+        if call is not None and call.ordinal > provenance.gateway_call_ordinal:
+            # The checkpoint relies on a gateway call it says was never
+            # issued; resuming from its ordinal would re-address that call.
+            return _refuse(R.GATEWAY_ORDINAL_BEHIND_JOURNAL,
+                           f"journal sequence {record.sequence} is a gateway call beyond "
+                           "the checkpoint's recorded ordinal", checkpoint)
+    if provenance.version < 2:
+        for record in later:
+            if record.operation_id == record.idempotency_key:
+                # Before deterministic gateway call identities, a gateway
+                # call was journaled under its fresh request id.  A resumed
+                # runner re-issuing it would get a new id and repeat it.
+                return _refuse(R.LEGACY_GATEWAY_CALL_AFTER_POSITION,
+                               f"journal sequence {record.sequence} was keyed by a per-call "
+                               "request id after a version-1 checkpoint", checkpoint)
     settled_keys: dict[str, SettledReceipt] = {}
     for record in covered:
         settled_keys[record.idempotency_key] = _receipt(record)
@@ -392,6 +430,7 @@ def validate_checkpoint_resume(
         child_id=checkpoint.child_id, sequence=checkpoint.sequence,
         settled_position=stamped, resume_state=MappingProxyType(dict(checkpoint.state)),
         receipts=_frozen(settled_keys), later_receipts=_frozen(later_receipts),
+        gateway_call_ordinal=provenance.gateway_call_ordinal,
     )
 
 

@@ -25,7 +25,7 @@ from enum import Enum
 from typing import Any, Mapping, Protocol
 
 from ...domain.common.errors import Cancelled, DeadlineExceeded, Forbidden, InvalidInput
-from ..execution import effect_journal
+from ..execution import effect_journal, gateway_calls
 from ..ports.tool_registry import ToolSchemaSelection
 
 _LOG = logging.getLogger(__name__)
@@ -338,12 +338,7 @@ class ToolGateway:
                     raise Forbidden("tool approval is required")
             self._check_control(request)
             if journal_binding is not None and request.permission.effects:
-                journal_intent = journal_binding.begin_request(
-                    operation_id=request.request_id,
-                    idempotency_key=request.request_id,
-                    request_digest=_digest(dict(request.arguments)),
-                    reconciliation=request.permission.reconciliation,
-                )
+                journal_intent = self._begin_journaled(journal_binding, request)
             try:
                 result = self._invoker.invoke(request)
             except BaseException as exc:
@@ -435,6 +430,38 @@ class ToolGateway:
                                type(recovery_error).__name__)
             raise
         return receipt
+
+    @staticmethod
+    def _begin_journaled(journal_binding: effect_journal.JournalBinding,
+                         request: ToolGatewayRequest) -> effect_journal.EffectIntent:
+        """Commit the intent of a mutating call before it is invoked.
+
+        A child runner bound by ``LocalSubagentProvider`` carries a gateway
+        call sequence: the call is journaled under a deterministic identity
+        (child run, worker, dispatch attempt, call ordinal and the canonical
+        request digest), so a resumed runner that re-issues it meets the
+        settled receipt (``SettledEffectReplay``) or, for a different
+        request at that ordinal, ``DivergentEffectReplay``.  Every other
+        caller keeps its own ``request_id`` as the key.
+        """
+        calls = gateway_calls.current()
+        if calls is None:
+            return journal_binding.begin_request(
+                operation_id=request.request_id,
+                idempotency_key=request.request_id,
+                request_digest=_digest(dict(request.arguments)),
+                reconciliation=request.permission.reconciliation,
+            )
+        call = calls.allocate(
+            journal_binding, tool_name=request.tool_name,
+            arguments=request.arguments, effects=request.permission.effects,
+        )
+        return journal_binding.begin_request(
+            operation_id=call.operation_id,
+            idempotency_key=call.idempotency_key,
+            request_digest=call.request_digest,
+            reconciliation=request.permission.reconciliation,
+        )
 
     def _early_receipt(self, request: ToolGatewayRequest, exc: BaseException,
                        started: float, policy_match: str) -> ToolReceipt:

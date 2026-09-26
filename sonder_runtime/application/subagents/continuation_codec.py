@@ -12,6 +12,10 @@ from ..ports.subagents import (
 from .continuable import CheckpointProvenance, ContinuableCheckpoint
 
 _PROVENANCE_FIELDS = frozenset(CheckpointProvenance.__dataclass_fields__)
+# Snapshots written before provenance version 2 carry no gateway call
+# ordinal; they decode with an ordinal of zero, which only a version-1 digest
+# accepts.
+_LEGACY_PROVENANCE_FIELDS = _PROVENANCE_FIELDS - {"gateway_call_ordinal"}
 _CHECKPOINT_FIELDS = frozenset(ContinuableCheckpoint.__dataclass_fields__)
 
 
@@ -19,7 +23,8 @@ def provenance_from_data(value):
     """Decode host-stamped provenance; ``None`` marks a provenance-absent row."""
     if value is None:
         return None
-    if not isinstance(value, dict) or set(value) != _PROVENANCE_FIELDS:
+    if not isinstance(value, dict) or set(value) not in (
+            _PROVENANCE_FIELDS, _LEGACY_PROVENANCE_FIELDS):
         raise InvalidSubagentRequest("checkpoint provenance snapshot is malformed")
     return CheckpointProvenance(**value)
 

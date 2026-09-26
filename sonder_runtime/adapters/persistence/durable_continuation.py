@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS child_checkpoint_provenance (
     state_digest TEXT NOT NULL, cursor TEXT, journal_identity TEXT NOT NULL,
     run_id TEXT NOT NULL, worker_id TEXT NOT NULL, owner_epoch INTEGER NOT NULL,
     settled_position INTEGER NOT NULL, record_digest TEXT NOT NULL,
+    gateway_call_ordinal INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (child_id, sequence)
 );
 """
@@ -102,7 +103,7 @@ _SESSION_COLUMNS = (
     "c.result_json,c.recovery_required,c.cancellation_requested,c.cancellation_reason,"
     "c.resume_key,c.idempotency_key,c.terminal_verification_json,"
     "p.version,p.state_digest,p.cursor,p.journal_identity,p.run_id,p.worker_id,"
-    "p.owner_epoch,p.settled_position,p.record_digest"
+    "p.owner_epoch,p.settled_position,p.record_digest,p.gateway_call_ordinal"
 )
 _SESSION_FROM = (
     " FROM durable_child_session c LEFT JOIN child_checkpoint_provenance p"
@@ -240,6 +241,18 @@ class SQLiteDurableContinuationRepository:
                 connection.execute("ALTER TABLE durable_child_session ADD COLUMN terminal_verification_json TEXT NOT NULL DEFAULT '{}'")
             connection.execute("CREATE INDEX IF NOT EXISTS ix_child_resume_key ON durable_child_session(parent_id,resume_key,status)")
             connection.execute("CREATE INDEX IF NOT EXISTS ix_child_idempotency_key ON durable_child_session(parent_id,idempotency_key,status)")
+            provenance_columns = {
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(child_checkpoint_provenance)"
+                )
+            }
+            if "gateway_call_ordinal" not in provenance_columns:
+                # Additive: rows stamped before provenance version 2 read
+                # back with ordinal 0, which their version-1 digest requires.
+                connection.execute(
+                    "ALTER TABLE child_checkpoint_provenance "
+                    "ADD COLUMN gateway_call_ordinal INTEGER NOT NULL DEFAULT 0"
+                )
             for trigger in _PROVENANCE_TRIGGERS:
                 connection.execute(trigger)
 
@@ -334,11 +347,12 @@ class SQLiteDurableContinuationRepository:
         provenance = None
         if sequence is not None and stamp and stamp[0] is not None:
             (version, state_digest, stamped_cursor, journal_identity, run_id,
-             worker_id, owner_epoch, settled_position, record_digest) = stamp
+             worker_id, owner_epoch, settled_position, record_digest,
+             gateway_call_ordinal) = stamp
             provenance = CheckpointProvenance(
                 child_id, sequence, state_digest, stamped_cursor, journal_identity,
                 run_id, worker_id, owner_epoch, settled_position, record_digest,
-                version,
+                version, gateway_call_ordinal,
             )
         checkpoint = (
             None
@@ -799,13 +813,15 @@ class SQLiteDurableContinuationRepository:
             connection.execute(
                 "INSERT INTO child_checkpoint_provenance(child_id,sequence,version,"
                 "state_digest,cursor,journal_identity,run_id,worker_id,owner_epoch,"
-                "settled_position,record_digest) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "settled_position,record_digest,gateway_call_ordinal)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     provenance.child_id, provenance.sequence, provenance.version,
                     provenance.state_digest, provenance.cursor,
                     provenance.journal_identity, provenance.run_id,
                     provenance.worker_id, provenance.owner_epoch,
                     provenance.settled_position, provenance.record_digest,
+                    provenance.gateway_call_ordinal,
                 ),
             )
         except sqlite3.IntegrityError as exc:

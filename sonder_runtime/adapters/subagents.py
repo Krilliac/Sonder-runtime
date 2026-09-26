@@ -19,6 +19,12 @@ from ..application.execution.effect_journal import (
 from ..application.execution.effect_journal import (
     bound as bound_effect_journal,
 )
+from ..application.execution.gateway_calls import (
+    GatewayCallSequence,
+)
+from ..application.execution.gateway_calls import (
+    bound as bound_gateway_calls,
+)
 from ..application.execution.worker_bindings import (
     AuthenticatedWorkerBinding,
     journaled_effect,
@@ -162,6 +168,13 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
     it, and runs the runner with the settled receipts bound so completed inner
     effects are consumed rather than re-invoked.  A refused validation raises
     ``ChildResumeRefused`` and the child stays ``recovery_required``.
+
+    A journaled runner also runs under a ``GatewayCallSequence``: its typed
+    gateway calls are journaled under deterministic identities (run, worker,
+    child, dispatch attempt, call ordinal and request digest) instead of a
+    fresh request id.  The checkpoint provenance records the ordinal, and a
+    resumed runner continues from it, so a re-issued call meets its settled
+    receipt and a divergent one is refused.
     """
 
     def __init__(
@@ -398,6 +411,13 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
                     # Inner tool effects join the same run, above the settled
                     # dispatch receipt.
                     scope.enter_context(bound_effect_journal(binding.binding()))
+                    # Typed gateway calls get deterministic journal
+                    # identities: this child's run, worker and settled
+                    # dispatch attempt plus a call ordinal that a resumed
+                    # runner continues from its validated checkpoint.
+                    scope.enter_context(bound_gateway_calls(
+                        self._gateway_call_sequence(binding, child_id, resume),
+                    ))
                     if resume is not None:
                         # A resumed runner consumes receipts settled before
                         # the crash; re-admitting one of them is refused.
@@ -421,6 +441,22 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
             return output
 
         return bounded_runner
+
+    def _gateway_call_sequence(
+        self, binding: AuthenticatedWorkerBinding, child_id: str | None,
+        resume: CheckpointResumeDecision | None,
+    ) -> GatewayCallSequence:
+        """The runner's call sequence, anchored to its settled dispatch attempt."""
+        if child_id is None:
+            raise EffectJournalError("a journaled child runner requires a child id")
+        attempts = self._dispatch_attempts(binding, child_id)
+        if not attempts or attempts[-1].state is not EffectState.COMPLETED:
+            raise EffectJournalError("child runner has no settled dispatch attempt")
+        return GatewayCallSequence(
+            run_id=binding.run_id, worker_id=binding.worker_id, child_id=child_id,
+            dispatch_attempt=len(attempts),
+            issued=0 if resume is None else resume.gateway_call_ordinal,
+        )
 
     @staticmethod
     def _dispatch_identity(request: SubagentRequest, attempt: int) -> dict[str, str]:
