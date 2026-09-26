@@ -24,9 +24,12 @@ called ``setsid()`` cannot escape.
 
 What this boundary does NOT provide (see
 ``docs/architecture/REMAINING-SELFMOD-517-LINUX-ISOLATION.md``): the candidate
-still produces the output the parent grades (result-frame forgery), network
-access is not isolated, confidentiality of world-readable files is not
-provided, and job memory is enforced by sampling rather than a cgroup.
+still produces the output the parent grades, so result independence comes
+from the evaluator-held oracle (``scripts/selfmod_oracle.py``), which uses
+this boundary and ``require_not_candidate_readable`` to keep held expected
+values from the candidate uid; network access is not isolated,
+confidentiality of world-readable files is not provided, and job memory is
+enforced by sampling rather than a cgroup.
 """
 
 from __future__ import annotations
@@ -174,6 +177,42 @@ def require_not_candidate_writable(paths: Sequence[str | os.PathLike[str]]) -> N
     _require_host()
     uid, gid = candidate_identity(None, None)
     _verify_protected([Path(item) for item in paths], uid, gid)
+
+
+def require_not_candidate_readable(paths: Sequence[str | os.PathLike[str]]) -> None:
+    """Refuse when the configured candidate uid could read any of ``paths``.
+
+    This is the confidentiality counterpart of
+    ``require_not_candidate_writable`` for evaluator secrets such as the
+    independent oracle's held expected values.  Each path must be a regular
+    file (not a symlink) that the candidate credentials cannot read, inside
+    a directory the candidate can neither list nor traverse; neither may
+    carry a POSIX ACL.  Candidate ownership of either is refused outright,
+    since an owner can always chmod its way back in.  Raises
+    ``ProtectedPathExposed``.
+    """
+    _require_host()
+    uid, gid = candidate_identity(None, None)
+    for raw in paths:
+        path = Path(os.path.abspath(os.fspath(raw)))
+        for entry, expect_dir in ((path.parent, True), (path, False)):
+            try:
+                info = entry.lstat()
+            except FileNotFoundError:
+                raise ProtectedPathExposed(f"confidential path is missing: {entry}") from None
+            if stat.S_ISLNK(info.st_mode):
+                raise ProtectedPathExposed(f"confidential path is a symlink: {entry}")
+            if stat.S_ISDIR(info.st_mode) is not expect_dir or not (
+                    expect_dir or stat.S_ISREG(info.st_mode)):
+                raise ProtectedPathExposed(f"confidential path has the wrong type: {entry}")
+            if _has_acl(entry):
+                raise ProtectedPathExposed(f"confidential path carries a POSIX ACL: {entry}")
+            if info.st_uid == uid:
+                raise ProtectedPathExposed(f"candidate uid owns confidential path: {entry}")
+            bits = (stat.S_IRGRP | stat.S_IXGRP, stat.S_IROTH | stat.S_IXOTH) if expect_dir \
+                else (stat.S_IRGRP, stat.S_IROTH)
+            if info.st_mode & (bits[0] if info.st_gid == gid else bits[1]):
+                raise ProtectedPathExposed(f"confidential path is candidate-readable: {entry}")
 
 
 def _attested(result: dict[str, object]) -> dict[str, object]:

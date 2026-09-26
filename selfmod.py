@@ -32,6 +32,12 @@ from sonder_runtime.application.selfmod.candidate_isolation import (
     IsolationAttestation,
     IsolationAttestationError,
 )
+from sonder_runtime.application.selfmod.independent_oracle import (
+    OracleError,
+    OracleReceipt,
+    grade_frame,
+    payload_nonce,
+)
 
 
 MODES = ("observe", "propose", "auto-low-risk")
@@ -71,6 +77,9 @@ SENSITIVE_PREFIXES = (
     "scripts/selfmod_low_integrity.py",
     "scripts/selfmod_linux_isolation.py", "tests/test_linux_candidate_isolation",
     "tests/test_517_linux_uid_separated_candidate_evaluator",
+    # The independent oracle: its channel, store and comparison rules.
+    "scripts/selfmod_oracle.py", "scripts/selfmod_host_grader.py",
+    "sonder_runtime/application/selfmod/", "tests/test_selfmod_independent_oracle",
 )
 SENSITIVE_PARTS = (
     ".env", "credential", "secret", "token", "account", "migration",
@@ -93,11 +102,15 @@ DEFAULT_BUDGETS = {
 DEFAULT_RETENTION_DAYS = 30
 DEFAULT_RETENTION_GB = 5.0
 LEASE_SECONDS = 180
-# Candidate functions execute in the same Python process as the current
-# challenge wrapper and can inspect its arguments/frame. Host comparison and
-# clean replay catch concrete cheats, but are not an independent hidden oracle.
-# Unattended promotion must remain disabled until that boundary is real.
-_UNATTENDED_ORACLE_INDEPENDENT = False
+# Candidate functions execute in the same Python process as every challenge
+# wrapper and write the stdout the parent grades, so a public-assertion host
+# grade and its clean replay catch concrete cheats but can be forged by a
+# candidate that reads the public tests.  Unattended promotion therefore also
+# requires an independent-oracle receipt (``record_oracle_grade``): raw
+# outputs for per-run, nonce-bound inputs compared by this process with
+# expected values the candidate uid was proven unable to read, bound to the
+# exact tested candidate bytes and baseline.  See ``_oracle_admission_refusal``
+# and docs/architecture/REMAINING-SELFMOD-517-LINUX-ISOLATION.md.
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS selfmod_settings (
@@ -150,6 +163,11 @@ CREATE TABLE IF NOT EXISTS selfmod_deployment_lock (
   owner_host TEXT, lease_until REAL, run_id TEXT
 );
 INSERT OR IGNORE INTO selfmod_deployment_lock(id) VALUES (1);
+CREATE TABLE IF NOT EXISTS selfmod_oracle_receipts (
+  run_id TEXT PRIMARY KEY, probe_id INTEGER NOT NULL, passed INTEGER NOT NULL,
+  independent INTEGER NOT NULL, receipt_json TEXT NOT NULL,
+  receipt_sha256 TEXT NOT NULL, created_ts REAL NOT NULL
+);
 """
 
 
@@ -999,6 +1017,8 @@ def record_test(
         raise RuntimeError("tests may run only in testing phase")
     if kind == "host_grade":
         raise PermissionError("host grade can only be recorded by the parent scorer")
+    if kind == "oracle_grade":
+        raise PermissionError("oracle grade can only be recorded by the parent scorer")
     workspace = candidate_path(run_id)
     cwd_path = workspace if cwd is None else (workspace / _rel(workspace, cwd)).parent
     seconds = min(int(timeout or run["budgets"]["max_test_seconds"]), run["budgets"]["max_test_seconds"])
@@ -1014,8 +1034,9 @@ def record_host_grade(run_id, probe_id, *, passed: bool, detail: str) -> dict:
 
     The host owns this comparison and the row it is linked to, rather than
     trusting a pytest exit status. The candidate still controls its reported
-    function output and can read public tests, so a passing grade needs human
-    review and cannot authorize unattended promotion.
+    function output and can read public tests, so a passing grade alone
+    cannot authorize unattended promotion; that also needs an independent
+    oracle receipt (``record_oracle_grade``).
     """
     run = get_run(run_id)
     if run["phase"] != "testing":
@@ -1040,6 +1061,120 @@ def record_host_grade(run_id, probe_id, *, passed: bool, detail: str) -> dict:
         )
         _event(conn, run_id, "host_grade", "parent-scored challenge %s" % ("passed" if passed else "failed"))
     return {"kind": "host_grade", "passed": bool(passed), "detail": str(detail)[:100_000]}
+
+
+def _baseline_binding(run):
+    """The baseline a verdict is about: starting commit and sealed manifest."""
+    manifest = _load_manifest(run["id"])
+    if manifest.get("starting_commit") != run["starting_commit"]:
+        raise RuntimeError("backup manifest names a different starting commit")
+    return {"starting_commit": run["starting_commit"] or "",
+            "manifest_sha256": _sha(_backup_dir(run["id"]) / "manifest.json")}
+
+
+def record_oracle_grade(run_id, probe_id, *, challenge, loaded, attestation,
+                        confidential: bool, read_denied: bool) -> dict:
+    """Grade an oracle probe in this (evaluator) process and seal the receipt.
+
+    ``challenge`` is the parent-held per-run challenge and ``loaded`` the
+    evaluator-held case set (``scripts.selfmod_oracle.LoadedCaseSet``).  The
+    probe's raw output is re-read from its own ledger row, the row's command
+    must carry this challenge's nonce, the case file must still have the
+    digest it was loaded with, and the tested candidate bytes must be
+    unchanged.  The durable receipt binds the verdict to those candidate
+    digests, the baseline and the probe's supervisor attestation.  Only a
+    ``linux-uid`` probe with a proven read denial yields an independent
+    receipt; that is what ``review`` requires for unattended promotion.
+    """
+    from scripts import selfmod_oracle
+
+    run = get_run(run_id)
+    if run["phase"] != "testing":
+        raise RuntimeError("oracle grade requires testing phase")
+    candidate = _candidate_snapshot(run_id)
+    if tested_digests(run_id) != candidate:
+        raise RuntimeError("oracle grade requires the tested candidate bytes")
+    baseline = _baseline_binding(run)
+    if selfmod_oracle.current_digest(loaded.path) != loaded.sha256:
+        raise RuntimeError("held oracle case set changed after it was loaded")
+    typed = attestation if isinstance(attestation, IsolationAttestation) else None
+    with _tx() as conn:
+        probe = conn.execute(
+            "SELECT kind,passed,isolation,output,command_json FROM selfmod_tests WHERE run_id=? AND id=?",
+            (run_id, probe_id),
+        ).fetchone()
+        if (probe is None or probe["kind"] != "oracle_probe"
+                or probe["isolation"] not in _ISOLATED_ATTESTATIONS
+                or typed is None or typed.kind != probe["isolation"]):
+            raise PermissionError("oracle grade requires an attested oracle probe")
+        if payload_nonce(json.loads(probe["command_json"])) != challenge.nonce:
+            raise PermissionError("oracle probe row was not issued for this challenge")
+        if conn.execute(
+            "SELECT 1 FROM selfmod_oracle_receipts WHERE run_id=?", (run_id,),
+        ).fetchone() is not None:
+            raise RuntimeError("oracle grade was already recorded")
+        verdict = grade_frame(probe["output"] if probe["passed"] else "", challenge, loaded.case_set)
+        detail = verdict.detail if probe["passed"] else "oracle probe did not exit cleanly"
+        receipt = OracleReceipt(
+            run_id=run_id, probe_id=int(probe_id), attestation=typed.kind,
+            candidate_uid=typed.candidate_uid, supervisor_uid=typed.supervisor_uid,
+            case_set_sha256=loaded.sha256, case_count=verdict.case_count,
+            matched=verdict.matched, nonce=challenge.nonce,
+            outputs_sha256=verdict.outputs_sha256 if probe["passed"] else None,
+            confidential=bool(confidential), read_denied=bool(confidential and read_denied),
+            passed=bool(verdict.passed and probe["passed"]),
+            candidate=candidate, baseline=baseline,
+        )
+        text = receipt.to_json()
+        conn.execute(
+            "INSERT INTO selfmod_oracle_receipts VALUES(?,?,?,?,?,?,?)",
+            (run_id, int(probe_id), int(receipt.passed), int(receipt.independent), text,
+             receipt.digest(), time.time()),
+        )
+        summary = "%s; independent=%s; receipt sha256=%s" % (
+            detail, "yes" if receipt.independent else "no", receipt.digest())
+        conn.execute(
+            "INSERT INTO selfmod_tests(run_id,kind,command_json,exit_code,duration_ms,output,passed,created_ts,isolation) VALUES(?,?,?,?,?,?,?,?,?)",
+            (run_id, "oracle_grade", _json({"probe_id": int(probe_id)}),
+             0 if receipt.passed else 1, 0, summary, int(receipt.passed), time.time(),
+             probe["isolation"]),
+        )
+        _event(conn, run_id, "oracle_grade", "independent oracle %s (independent=%s)" % (
+            "passed" if receipt.passed else "failed", receipt.independent))
+    return {"kind": "oracle_grade", "passed": receipt.passed,
+            "independent": receipt.independent, "detail": detail,
+            "receipt_sha256": receipt.digest()}
+
+
+def oracle_receipt(run_id):
+    """The run's sealed oracle receipt, or ``None``; a tampered row raises."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT passed,independent,receipt_json,receipt_sha256 FROM selfmod_oracle_receipts WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    receipt = OracleReceipt.from_json(row["receipt_json"])
+    if (receipt.digest() != row["receipt_sha256"] or receipt.run_id != run_id
+            or bool(row["passed"]) is not receipt.passed
+            or bool(row["independent"]) is not receipt.independent):
+        raise OracleError("oracle receipt does not match its seal")
+    return receipt
+
+
+def _oracle_admission_refusal(run_id, run):
+    """Why the independent oracle does not authorize unattended promotion, else ``None``."""
+    try:
+        receipt = oracle_receipt(run_id)
+        if receipt is None:
+            return "no independent oracle receipt"
+        tested = tested_digests(run_id)
+        if tested is None or tested != _candidate_snapshot(run_id):
+            return "candidate bytes changed after testing began"
+        return receipt.admission_refusal(candidate=tested, baseline=_baseline_binding(run))
+    except (OracleError, RuntimeError, OSError, ValueError) as exc:
+        return "oracle receipt could not be verified (%s)" % type(exc).__name__
 
 
 SMOKE_RECEIPT_PREFIX = "SELFMOD-SMOKE-RECEIPT"
@@ -1297,8 +1432,14 @@ def review(run_id, *, require_kinds=None, unevaluated=()):
         failures.append("rollback rehearsal failed")
     candidate_results = [row for row in results if row["kind"] != "reproducer_before"]
     host_grades = [row for row in candidate_results if row["kind"] == "host_grade"]
+    oracle_grades = [row for row in candidate_results if row["kind"] == "oracle_grade"]
+    if any(not row["passed"] for row in oracle_grades):
+        failures.append("independent oracle failed")
+    # Unattended promotion needs every existing gate AND an independent
+    # oracle receipt bound to these tested bytes and this baseline.
+    oracle_refusal = _oracle_admission_refusal(run_id, run)
     auto_eligible = bool(
-        _UNATTENDED_ORACLE_INDEPENDENT
+        oracle_refusal is None and len(oracle_grades) == 1
         and not failures and not unevaluated and candidate_results
         and run["mode"] == "auto-low-risk" and run["risk"] == "low"
         and not run["approval_required"]
@@ -1310,7 +1451,8 @@ def review(run_id, *, require_kinds=None, unevaluated=()):
     if unevaluated:
         passed_note += "; NOT EVALUATED (human review required): " + "; ".join(unevaluated)
     elif run["mode"] == "auto-low-risk" and not auto_eligible and not failures:
-        passed_note += "; independent evaluator authority unverified (human review required)"
+        passed_note += "; independent evaluator authority unverified (%s; human review required)" % (
+            oracle_refusal or "an existing unattended gate is unmet")
     _phase(
         run_id, {"testing"}, target, "review",
         "; ".join(failures) if failures else passed_note[:1000],
@@ -1336,6 +1478,10 @@ def approve(run_id, approver="user"):
         or run["approval_required"]
     ):
         raise PermissionError("host approval requires qualified low-integrity candidate checks")
+    if str(approver).startswith("host:"):
+        refusal = _oracle_admission_refusal(run_id, run)
+        if refusal:
+            raise PermissionError("host approval requires an independent oracle receipt: %s" % refusal)
     return _phase(run_id, {"reviewing"}, "approved", "approval", "approved by %s" % approver, approved_by=str(approver)[:200], approved_ts=time.time())
 
 

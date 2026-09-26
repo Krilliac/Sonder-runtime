@@ -71,6 +71,15 @@ WHAT THE GATES DO AND DO NOT PROVE
   - Each mutating stage (backup, workspace, begin_testing, every gate,
     review, approve, deploy) is admitted through the bootstrap-composed
     selfmod stage journal, with per-attempt identities for repeatable stages.
+  - The public held-out suites and the parent-scored host grade use values
+    the candidate can read, so a candidate can forge their frames. When the
+    evaluator holds cases for the target function (scripts/selfmod_oracle.py),
+    the independent oracle gate sends the candidate only nonce-bound,
+    token-labelled inputs, compares its raw outputs in this process with
+    expected values the candidate uid was proven unable to read, and seals a
+    receipt bound to the tested bytes and the baseline. A failing oracle
+    rejects the candidate; a missing or non-independent one (every non-Linux
+    host) is recorded as not evaluated and blocks unattended promotion.
 """
 from __future__ import annotations
 
@@ -96,6 +105,8 @@ if str(REPO) not in sys.path:
 import selfmod
 from scripts import selfmod_host_grader
 from scripts import selfmod_linux_isolation
+from scripts import selfmod_oracle
+from sonder_runtime.application.selfmod import independent_oracle
 from sonder_runtime.application.selfmod.candidate_isolation import accepted_probe_attestation
 
 _HELD_OUT_MAX_FILES = 2048
@@ -383,11 +394,12 @@ def _compose_stage_journal():
     return factory()
 
 
-def _evaluator_truth_paths(run_id, held_out) -> tuple[str, ...]:
+def _evaluator_truth_paths(run_id, held_out, oracle=None) -> tuple[str, ...]:
     """Evaluator truth every candidate gate must leave byte-for-byte untouched.
 
-    The held-out snapshot and the rollback point (the sealed backup bundle
-    and its manifest, which also records the baseline hashes).  Supervisors
+    The held-out snapshot, the rollback point (the sealed backup bundle
+    and its manifest, which also records the baseline hashes) and, when one
+    is held, the independent oracle's case set.  Supervisors
     refuse to launch when any of these is candidate-writable (Linux) and
     re-digest them after each check.  The selfmod ledger is checked for
     candidate write exposure once per run instead (``_isolation_refusal``):
@@ -401,6 +413,8 @@ def _evaluator_truth_paths(run_id, held_out) -> tuple[str, ...]:
         for name in ("manifest.json", "manifest.sha256"):
             if (bundle / name).is_file():
                 paths.append(str(bundle / name))
+    if oracle is not None:
+        paths.append(str(oracle.path))
     return tuple(dict.fromkeys(paths))
 
 
@@ -1378,6 +1392,62 @@ def _parent_scored_gate(run_id: str, workspace: Path, target: str,
     )
 
 
+def _load_oracle(target: str, function_name: str):
+    """The evaluator-held case set for the target function, and why not.
+
+    Loaded by the parent before any candidate process runs, so later gates
+    re-digest the exact bytes the oracle will grade against.
+    """
+    module = _module_name_for_target(target)
+    if not module:
+        return None, "target has no importable module name"
+    try:
+        loaded = selfmod_oracle.load_case_set(module, function_name)
+    except (selfmod_oracle.OracleUnavailable, independent_oracle.OracleError) as exc:
+        return None, "held case set unusable (%s)" % str(exc)[:200]
+    if loaded is None:
+        return None, "no evaluator-held cases for %s.%s" % (module, function_name)
+    return loaded, ""
+
+
+def _independent_oracle_gate(run_id: str, workspace: Path, loaded, timeout: int,
+                             *, stages=None, protected_paths=()) -> dict:
+    """Grade the candidate against expected values it cannot read.
+
+    The candidate probe receives only this run's nonce and token-labelled
+    inputs in a random order; ``selfmod.record_oracle_grade`` compares its raw
+    outputs with the held outcomes in this process and seals a receipt bound
+    to the tested candidate bytes and the baseline.  The receipt is
+    independent only when the Linux uid supervisor ran the probe and the
+    candidate uid was refused the case set at the OS boundary.
+    """
+    confidential, why = selfmod_oracle.confidentiality(loaded.path)
+    if confidential:
+        read_denied, seal = selfmod_oracle.prove_read_denied(
+            loaded.path, workspace, timeout, python=_test_python())
+    else:
+        read_denied, seal = False, why
+    challenge = independent_oracle.new_challenge(len(loaded.case_set.cases))
+    command = selfmod_oracle.challenge_command(
+        workspace, challenge, loaded.case_set, python=_test_python())
+    probe = _record_candidate_test(
+        run_id, "oracle_probe", command, timeout=timeout,
+        protected_paths=tuple(dict.fromkeys((*protected_paths, str(loaded.path)))),
+        stages=stages,
+    )
+    _runner, selected_kind = selfmod_linux_isolation.candidate_supervisor()
+    typed = (accepted_probe_attestation(probe, selected_kind=selected_kind)
+             if isinstance(probe, dict) else None)
+    if typed is None or not probe.get("test_id"):
+        return {"passed": False, "independent": False,
+                "detail": f"oracle challenge lacked an attested {selected_kind} probe"}
+    graded = selfmod.record_oracle_grade(
+        run_id, probe["test_id"], challenge=challenge, loaded=loaded,
+        attestation=typed, confidential=confidential, read_denied=read_denied,
+    )
+    return {**graded, "detail": "%s; %s" % (graded.get("detail", ""), seal)}
+
+
 def _committed_digests(workspace: Path, expected_files: dict) -> dict:
     """SHA-256 of each bound file as recorded in the candidate's HEAD commit."""
     result = {}
@@ -1563,7 +1633,9 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0,
     else:
         log("  lint: Ruff unavailable; Python compilation is the syntax gate")
     held_out = _prepare_held_out(target, workspace, test_timeout, function_name)
-    truth = _evaluator_truth_paths(run_id, held_out)
+    oracle, oracle_note = _load_oracle(target, function_name)
+    oracle_independent = False
+    truth = _evaluator_truth_paths(run_id, held_out, oracle)
     workers = _regression_workers()
     for kind in REGRESSION_KINDS:
         checks.append((kind, _regression_command(
@@ -1573,6 +1645,8 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0,
     log("  %s: NOT EVALUATED -- %s" % (unevaluated_kind, unevaluated_reason))
     if not held_out.get("host_cases"):
         log("  host_grade: NOT EVALUATED -- no safe literal assertion for selected function")
+    if oracle is None:
+        log("  oracle_grade: NOT EVALUATED -- %s" % oracle_note)
     try:
         for kind, command in checks:
             # cwd is deliberately NOT passed: the default is the candidate
@@ -1603,6 +1677,21 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0,
                 selfmod.reject(run_id, reason="parent-scored host grade failed")
                 _discard_workspace(run_id)
                 return "candidate rejected: parent-scored host grade failed"
+        if oracle is not None:
+            outcome = _independent_oracle_gate(
+                run_id, workspace, oracle, test_timeout, stages=stages, protected_paths=truth,
+            )
+            passed = bool(outcome.get("passed"))
+            oracle_independent = passed and bool(outcome.get("independent"))
+            results.append(("oracle_grade", passed))
+            log("  oracle_grade: %s (independent=%s)" % (
+                "pass" if passed else "FAIL", "yes" if oracle_independent else "no"))
+            if not passed:
+                selfmod.reject(run_id, reason="independent oracle failed")
+                _discard_workspace(run_id)
+                return "candidate rejected: independent oracle failed"
+            if not oracle_independent:
+                oracle_note = "verdict is not independent: %s" % str(outcome.get("detail", ""))[:300]
     finally:
         cleanup = held_out.get("cleanup")
         if cleanup is not None:
@@ -1626,7 +1715,7 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0,
     unevaluated = ("%s: %s" % UNEVALUATED_PARTITION,) + (
         (f"host_grade: no safe parent-scored assertion for {function_name}",)
         if not held_out.get("host_cases") else ()
-    )
+    ) + ((f"oracle_grade: {oracle_note}",) if not oracle_independent else ())
     reviewed = stages.journaled_stage(
         run_id, "review",
         {"require_kinds": sorted(require_kinds), "unevaluated": list(unevaluated)},
@@ -1677,10 +1766,10 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0,
                 "required: git log -p %s" % (sha.strip(), name, target,
                                              unevaluated_kind, name))
 
-    # Unattended promotion requires every partition to have been evaluated.
-    # The medium-integrity partition never is, so this stage stops for a
-    # human regardless of mode.
-    if mode != "auto-low-risk" or unevaluated_kind:
+    # Unattended promotion requires every partition to have been evaluated
+    # and an independent oracle verdict.  The medium-integrity partition
+    # never is evaluated, so this stage stops for a human regardless of mode.
+    if mode != "auto-low-risk" or unevaluated_kind or not oracle_independent:
         return ("candidate READY for review: %s -- %s | %s NOT EVALUATED | "
                 "approve with /selfmod approve %s" % (
                     run_id, target, unevaluated_kind, run_id))

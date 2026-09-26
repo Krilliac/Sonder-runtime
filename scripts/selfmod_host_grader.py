@@ -5,6 +5,9 @@ configuration, fixtures, or setup hooks are left unevaluated. This projection
 is not an independent or complete scorer. Candidate code runs in the host's
 candidate supervisor (Windows low integrity, or the Linux uid-separated
 supervisor when configured) and receives inputs, never expected values.
+The assertions are projected from public suites the candidate can read, so a
+candidate can forge this frame with correct values; the independent oracle
+(``scripts/selfmod_oracle.py``) grades against held expected values instead.
 """
 
 from __future__ import annotations
@@ -228,7 +231,7 @@ def grade(output: str, nonce: str, cases: Sequence[dict]) -> tuple[bool, str]:
     return True, f"parent-scored {len(cases)} assertion(s); expected sha256={receipt}"
 
 
-def _attested_pass(isolated: object, attestation: str) -> bool:
+def attested_pass(isolated: object, attestation: str) -> bool:
     """True only for a passing result carrying the selected supervisor's attestation."""
     import os
 
@@ -314,7 +317,7 @@ def clean_replay(
                 command, cwd=clean, timeout=timeout,
                 protected_paths=(*protected_paths, *(clean / rel for rel in tested_files)),
             )
-            if not _attested_pass(isolated, attestation):
+            if not attested_pass(isolated, attestation):
                 result = (False, "fresh checkout lacked a successful isolated probe")
             else:
                 result = grade(str(isolated.get("output") or ""), nonce, cases)

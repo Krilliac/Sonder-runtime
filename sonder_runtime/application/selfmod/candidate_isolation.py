@@ -16,7 +16,8 @@ same rules instead of re-implementing string checks.
 
 The attestation says which OS boundary bounded the candidate's *writes*. It
 does not claim result independence: the candidate still produces the output
-the parent grades (see REMAINING-SELFMOD-517-LINUX-ISOLATION.md).
+the parent grades.  Independence is the separate oracle receipt in
+``independent_oracle.py`` (see REMAINING-SELFMOD-517-LINUX-ISOLATION.md).
 """
 
 from __future__ import annotations

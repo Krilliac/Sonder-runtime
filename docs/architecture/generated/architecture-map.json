@@ -396,7 +396,7 @@
       ]
     },
     {
-      "file_count": 374,
+      "file_count": 375,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -695,6 +695,7 @@
         "sonder_runtime/application/selfmod/__init__.py",
         "sonder_runtime/application/selfmod/candidate_isolation.py",
         "sonder_runtime/application/selfmod/governance.py",
+        "sonder_runtime/application/selfmod/independent_oracle.py",
         "sonder_runtime/application/selfmod/reproducer_contract.py",
         "sonder_runtime/application/selfmod/selfmod_service.py",
         "sonder_runtime/application/selfmod/verification_lifecycle.py",
