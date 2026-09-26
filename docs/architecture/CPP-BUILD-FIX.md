@@ -220,6 +220,18 @@ already terminal. Nothing is retried or reverted; `build_fix_restore` still
 restores the originals. A failing `recover()` is logged by exception type
 and does not block startup.
 
+`recover()` can tell only its own process's runs from a crashed
+predecessor's, while the manifests and the durable job registry are shared
+by every runtime process on the node (`serve`, a REPL, a client-spawned
+native MCP, `backup create`). So the step first takes this process's
+worker-effects host lease and runs only when no other live host lease
+exists, the same peer check the journal pass uses. When a peer is live, or
+the leases cannot be read, the step is deferred and logged: a fix that a
+crash left behind then keeps reading `running` until a runtime starts with
+no live peer (`build_fix_restore` still works meanwhile), and a live peer's
+fix is never marked `interrupted` under it
+(`tests/test_build_fix_effect_journal.py`).
+
 The proof describes the file's current state only. An edit undone by hand
 back to the exact before-digest reads as not applied. The details are in
 [Issue 515](REMAINING-AGENT-515-EFFECT-JOURNAL.md), in the section on the

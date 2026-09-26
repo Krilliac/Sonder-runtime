@@ -642,6 +642,19 @@ def test_build_application_proves_a_crashed_fix_edit_at_startup(tmp_path, monkey
         application.close_delegation(timeout=10)
 
 
+def _seed_running_fix_job(registry, job: str) -> None:
+    """The durable jobs.db record a fix holds while it runs (as ``start`` makes it)."""
+    from sonder_runtime.application.build.ports import BUILD_FIX_JOB_KIND
+    from sonder_runtime.application.ports.jobs import JobIdentity
+
+    try:
+        registry.poll(job)
+    except KeyError:
+        registry.start(JobIdentity(job, BUILD_FIX_JOB_KIND, job, job), max_attempts=1,
+                       metadata={"kind": BUILD_FIX_JOB_KIND})
+        registry.transition(job, JobStatus.RUNNING)
+
+
 @pytest.mark.skipif(os.name != "posix", reason="real POSIX process crash cut")
 def test_build_application_marks_a_crashed_fix_interrupted(tmp_path, monkeypatch):
     """Production composition calls ``BuildFixService.recover()`` after the
@@ -664,13 +677,14 @@ def test_build_application_marks_a_crashed_fix_interrupted(tmp_path, monkeypatch
         services = original(**kwargs)
         composed["services"] = services
         composed["job_registry"] = kwargs["job_registry"]
+        _seed_running_fix_job(kwargs["job_registry"](), job)
         return services
 
     recovered = []
     real_recover = app_module._recover_interrupted_build_fixes
 
-    def observe(services):
-        result = real_recover(services)
+    def observe(services, **kwargs):
+        result = real_recover(services, **kwargs)
         recovered.append(result)
         return result
 
@@ -684,15 +698,11 @@ def test_build_application_marks_a_crashed_fix_interrupted(tmp_path, monkeypatch
         assert fix.status(job, ctx()).status == "interrupted"
         shown = fix.result(job, ctx())
         assert shown["status"] == "interrupted"
-        # The crashed child ran over an in-process registry, so the durable
-        # registry either never saw the job or now holds it interrupted.
-        registry = composed["job_registry"]()
-        try:
-            record = registry.poll(job)
-        except KeyError:
-            pass
-        else:
-            assert record.status is JobStatus.INTERRUPTED
+        # The durable registry record the fix left RUNNING is interrupted by
+        # recover() itself (the production path through _LazyJobRegistry).
+        record = composed["job_registry"]().poll(job)
+        assert record.status is JobStatus.INTERRUPTED
+        assert record.error == "runtime restarted during the fix"
         # Recovery rewrote status only: the proven edit is still on disk, once.
         assert (tmp_path / "proj" / REL).read_text() == IMPROVED
         assert len(writes(tmp_path)) == 1
@@ -726,11 +736,94 @@ def test_a_failing_build_fix_recovery_never_blocks_startup(caplog):
         def recover(self):
             raise OSError("/private/state/path unreadable")
 
+    def no_peer():
+        return False
+
     with caplog.at_level("WARNING", logger="sonder_runtime.bootstrap.app"):
-        assert _recover_interrupted_build_fixes(SimpleNamespace(fix=Broken())) == ()
+        assert _recover_interrupted_build_fixes(SimpleNamespace(fix=Broken()),
+                                                peer_hosts_live=no_peer) == ()
     assert "OSError" in caplog.text and "/private/state/path" not in caplog.text
-    assert _recover_interrupted_build_fixes(None) == ()
-    assert _recover_interrupted_build_fixes(SimpleNamespace(fix=None)) == ()
+    assert _recover_interrupted_build_fixes(None, peer_hosts_live=no_peer) == ()
+    assert _recover_interrupted_build_fixes(SimpleNamespace(fix=None),
+                                            peer_hosts_live=no_peer) == ()
+
+
+@pytest.mark.parametrize("peers", ["live", "unreadable"])
+def test_startup_recovery_defers_while_a_peer_may_be_live(peers):
+    """A live (or unprovable) peer may be running the fix: recover() never runs."""
+    from types import SimpleNamespace
+
+    from sonder_runtime.bootstrap.app import _recover_interrupted_build_fixes
+
+    class Fix:
+        calls = 0
+
+        def recover(self):
+            Fix.calls += 1
+            return ("build-fix-" + "0" * 32,)
+
+    def peer_hosts_live():
+        if peers == "unreadable":
+            raise OSError("lease directory unreadable")
+        return True
+
+    assert _recover_interrupted_build_fixes(SimpleNamespace(fix=Fix()),
+                                            peer_hosts_live=peer_hosts_live) == ()
+    assert Fix.calls == 0
+
+
+@pytest.mark.skipif(os.name != "posix", reason="real POSIX process crash cut")
+def test_build_application_leaves_a_live_peers_fix_running(tmp_path, monkeypatch):
+    """While another runtime process holds its worker-effects host lease, a
+    composing process (a native MCP, a REPL, a backup command) cannot tell
+    that peer's running fix from a crashed one, so it marks nothing: the
+    manifest and the durable job keep their live status. Once the peer is
+    gone, the next composition recovers the fix."""
+    from sonder_runtime.adapters.persistence.worker_effect_hosts import WorkerEffectHostLease
+    from sonder_runtime.bootstrap import app as app_module
+    from sonder_runtime.bootstrap import build_tools
+    from sonder_runtime.bootstrap.app import build_application
+
+    (tmp_path / "workspace").mkdir()
+    job = crash("write_after_edit", tmp_path, composed=True)
+    manifest = tmp_path / "state" / "build-fix" / job / "manifest.json"
+    # The peer's lease, held open (and locked) as a live runtime process holds it.
+    peer = WorkerEffectHostLease(tmp_path / "state" / "worker-effect-hosts")
+    composed = {}
+    original = build_tools.compose_build_tools
+
+    def capture(**kwargs):
+        services = original(**kwargs)
+        composed["job_registry"] = kwargs["job_registry"]
+        _seed_running_fix_job(kwargs["job_registry"](), job)
+        return services
+
+    recovered = []
+    real_recover = app_module._recover_interrupted_build_fixes
+
+    def observe(services, **kwargs):
+        result = real_recover(services, **kwargs)
+        recovered.append(result)
+        return result
+
+    monkeypatch.setattr(build_tools, "compose_build_tools", capture)
+    monkeypatch.setattr(app_module, "_recover_interrupted_build_fixes", observe)
+    application = build_application(config=_config(tmp_path))
+    try:
+        assert recovered == [()]
+        assert json.loads(manifest.read_text())["status"] == "running"
+        assert composed["job_registry"]().poll(job).status is JobStatus.RUNNING
+    finally:
+        application.close_delegation(timeout=10)
+
+    peer._handle.close()  # the peer exits; the kernel releases its lock
+    second = build_application(config=_config(tmp_path))
+    try:
+        assert recovered[-1] == (job,)
+        assert json.loads(manifest.read_text())["status"] == "interrupted"
+        assert composed["job_registry"]().poll(job).status is JobStatus.INTERRUPTED
+    finally:
+        second.close_delegation(timeout=10)
 
 
 if __name__ == "__main__" and len(sys.argv) == 4 and sys.argv[1] in ALL_CUTS:

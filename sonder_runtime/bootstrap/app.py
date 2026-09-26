@@ -287,7 +287,7 @@ def _compose_build_tools(config, runtime_redactor, developer_tools, get_job_regi
         return None
 
 
-def _recover_interrupted_build_fixes(build_tools) -> tuple[str, ...]:
+def _recover_interrupted_build_fixes(build_tools, *, peer_hosts_live) -> tuple[str, ...]:
     """Mark build fixes a crash left unfinished as interrupted, once, at startup.
 
     Runs after the worker effect journal's startup reconciliation, so every
@@ -296,9 +296,26 @@ def _recover_interrupted_build_fixes(build_tools) -> tuple[str, ...]:
     never retries or reverts an edit. A failure is logged by exception type
     and never blocks composition: the fix then keeps reporting its stored
     status until the next start, and ``build_fix_restore`` still works.
+
+    ``recover()`` can tell only this process's own runs from a crashed
+    predecessor's, and the manifests and job registry are shared by every
+    runtime process on the node. So, like the journal pass, the step is
+    deferred (fail closed) while ``peer_hosts_live()`` reports another live
+    runtime process or cannot tell (it raises): a live peer's fix is never
+    marked interrupted under it. ``peer_hosts_live`` also registers this
+    process's own host lease first, so a later peer sees this one.
     """
     fix = getattr(build_tools, "fix", None)
     if fix is None:
+        return ()
+    try:
+        deferred = bool(peer_hosts_live())
+    except Exception as exc:  # noqa: BLE001 - cannot tell: a peer may be live
+        logger.info("startup build-fix recovery deferred: runtime peers could not be "
+                    "checked: %s", type(exc).__name__)
+        return ()
+    if deferred:
+        logger.info("startup build-fix recovery deferred: another runtime process is live")
         return ()
     try:
         interrupted = tuple(fix.recover())
@@ -310,6 +327,20 @@ def _recover_interrupted_build_fixes(build_tools) -> tuple[str, ...]:
         logger.info("startup build-fix recovery marked %d unfinished fix(es) interrupted",
                     len(interrupted))
     return interrupted
+
+
+def _build_fix_peer_hosts_live() -> bool:
+    """Whether another runtime process holds a worker-effects host lease.
+
+    Takes this process's own lease first (a process that can run a fix must be
+    visible to a peer's startup recovery). Raises ``OSError`` when the leases
+    cannot be read; the caller treats that as "a peer may be live".
+    """
+    from ..adapters.persistence.worker_effect_hosts import host_lease
+    from ..platform.paths import state_path
+
+    lease = host_lease(state_path("worker-effects.db", "SONDER_WORKER_EFFECTS_DB"))
+    return lease.live_peers() > 0
 
 
 def _compose_debug_tools(config, runtime_redactor, developer_tools, get_job_registry,
@@ -1909,8 +1940,9 @@ def build_application(
             type(exc).__name__,
         )
     # After the journal proof: mark build fixes a crashed predecessor left
-    # "running"/"planned" as interrupted (never retried, never reverted).
-    _recover_interrupted_build_fixes(build_tools)
+    # "running"/"planned" as interrupted (never retried, never reverted), but
+    # only while no other runtime process is live on this state.
+    _recover_interrupted_build_fixes(build_tools, peer_hosts_live=_build_fix_peer_hosts_live)
     if inference_pool is not None:
         ollama_pool.configure_typed_pool(inference_pool)
     return application
