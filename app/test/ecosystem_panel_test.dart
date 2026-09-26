@@ -37,6 +37,7 @@ Future<void> _pump(
   bool loading = false,
   String runtimeUrl = 'http://127.0.0.1:11435',
   bool canStartProcesses = true,
+  bool usesCredential = false,
   _Launches? launches,
   ThemeData? theme,
   Size size = const Size(1000, 1400),
@@ -58,6 +59,7 @@ Future<void> _pump(
           loading: loading,
           runtimeUrl: runtimeUrl,
           canStartProcesses: canStartProcesses,
+          usesCredential: usesCredential,
           onLaunch: (launches ?? _Launches()).call,
         ),
       ),
@@ -136,7 +138,36 @@ void main() {
     expect(
         find.textContaining('Sonder Inference not configured'), findsOneWidget);
     expect(find.text(inferenceEnvHint), findsOneWidget);
+    // Following the hint must not bind embeddings to Sonder Inference.
+    expect(inferenceEnvHint, contains('SONDER_MODEL_BACKEND=sonder-inference'));
+    expect(inferenceEnvHint, contains('SONDER_EMBEDDING_PROVIDER=ollama'));
+    expect(
+        find.text('Sonder Inference not configured. Generation uses Ollama. '
+            'Embeddings use Ollama.'),
+        findsOneWidget);
     expect(find.byKey(const Key('ecosystem-fallback')), findsNothing);
+  });
+
+  test('not configured: generation and embeddings are named separately', () {
+    final mixed = _reading(ecosystemAllOllama()
+      ..['providers']['default_generation_provider'] = 'openai_compatible'
+      ..['providers']['embedding_provider'] = 'ollama');
+    expect(
+        inferenceNotConfiguredText(mixed.status!),
+        'Sonder Inference not configured. Generation uses OpenAI-compatible, '
+        'Ollama. Embeddings use Ollama.');
+    final empty = _reading({'schema': ecosystemSchema});
+    expect(
+        inferenceNotConfiguredText(empty.status!),
+        'Sonder Inference not configured. The runtime reported no provider '
+        'bindings.');
+  });
+
+  testWidgets('Checked is shown in UTC and says so', (tester) async {
+    await _pump(tester, reading: _reading(ecosystemReadySynthetic()));
+    expect(find.text('2026-09-25 12:41:25 UTC'), findsOneWidget);
+    expect(ecosystemTimestamp(DateTime.utc(2026, 1, 2, 3, 4, 5)),
+        '2026-01-02 03:04:05 UTC');
   });
 
   testWidgets('fallback configured names what Ollama serves', (tester) async {
@@ -241,6 +272,51 @@ void main() {
     await tester.tap(find.byKey(const Key('ecosystem-copy-urls')));
     await tester.pump();
     expect(copied.single, 'http://127.0.0.1:11435\nhttp://127.0.0.1:11437');
+  });
+
+  testWidgets('a launch notice survives a refresh, not a change of URLs',
+      (tester) async {
+    final launches = _Launches();
+    await _pump(tester,
+        reading: _reading(ecosystemReadySynthetic()), launches: launches);
+    await tester.tap(find.byKey(const Key('ecosystem-open-observatory')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('ecosystem-launch-result')), findsOneWidget);
+
+    // The refresh cycle hands over an equal reading: the notice stays.
+    await _pump(tester,
+        reading: _reading(ecosystemReadySynthetic()), launches: launches);
+    expect(find.byKey(const Key('ecosystem-launch-result')), findsOneWidget);
+
+    // Different connect URLs: the notice described another launch.
+    await _pump(tester,
+        reading: _reading(ecosystemJson(
+            inference: inferenceStatusJson(),
+            connectUrls: const ['http://127.0.0.1:11435'])),
+        launches: launches);
+    expect(find.byKey(const Key('ecosystem-launch-result')), findsNothing);
+
+    // A copy notice goes when the runtime URL changes.
+    _captureClipboard(tester);
+    await tester.tap(find.byKey(const Key('ecosystem-copy-urls')));
+    await tester.pump();
+    expect(find.byKey(const Key('ecosystem-copied')), findsOneWidget);
+    await _pump(tester,
+        reading: _reading(ecosystemJson(
+            inference: inferenceStatusJson(),
+            connectUrls: const ['http://127.0.0.1:11435'])),
+        runtimeUrl: 'http://localhost:11435',
+        launches: launches);
+    expect(find.byKey(const Key('ecosystem-copied')), findsNothing);
+  });
+
+  testWidgets('with an API key, Open Observatory says a token will be asked',
+      (tester) async {
+    await _pump(tester, reading: _reading(ecosystemReadySynthetic()));
+    expect(find.byKey(const Key('ecosystem-token-note')), findsNothing);
+    await _pump(tester,
+        reading: _reading(ecosystemReadySynthetic()), usesCredential: true);
+    expect(find.text(observatoryTokenNote), findsOneWidget);
   });
 
   testWidgets('web: a link to copy instead of a process', (tester) async {

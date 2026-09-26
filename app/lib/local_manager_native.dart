@@ -941,25 +941,11 @@ class LocalManager {
     );
   }
 
-  /// Opens [url] with the OS opener: `xdg-open`, `open`, or `cmd /c start`.
+  /// Opens [url] with the OS opener ([observatoryOpenerCommand]).
   static Future<bool> _openUrl(
       String url, Map<String, String> environment) async {
-    final String program;
-    final List<String> arguments;
-    if (Platform.isWindows) {
-      // cmd parses the command line itself: escape its metacharacters so
-      // the `&` between query parameters is not a command separator.
-      final escaped = url.replaceAllMapped(
-          RegExp(r'[&|<>^()]'), (match) => '^${match.group(0)}');
-      program = 'cmd.exe';
-      arguments = ['/c', 'start', '', escaped];
-    } else if (Platform.isMacOS) {
-      program = 'open';
-      arguments = [url];
-    } else {
-      program = 'xdg-open';
-      arguments = [url];
-    }
+    final (program, arguments) = observatoryOpenerCommand(url,
+        operatingSystem: Platform.operatingSystem);
     try {
       await Process.start(
         program,
@@ -976,13 +962,28 @@ class LocalManager {
 
   static bool _isFile(String path) => File(path).existsSync();
 
+  /// True when [path] can be launched as the Observatory on
+  /// [operatingSystem]: an existing file, or on macOS an existing `.app`
+  /// bundle directory.
+  static bool observatoryPathExists(String path, {String? operatingSystem}) {
+    if (_isFile(path)) return true;
+    return (operatingSystem ?? Platform.operatingSystem) == 'macos' &&
+        isMacAppBundle(path) &&
+        Directory(path).existsSync();
+  }
+
   /// The first `PATH` entry holding [name] (with a `PATHEXT` suffix on
-  /// Windows), or null.
+  /// Windows), or null. [fileExists] and [operatingSystem] default to the
+  /// real file system and host; tests inject them.
   static String? findExecutableOnPath(
-      String name, Map<String, String> environment) {
+      String name, Map<String, String> environment,
+      {bool Function(String path)? fileExists, String? operatingSystem}) {
+    final exists = fileExists ?? _isFile;
+    final windows = (operatingSystem ?? Platform.operatingSystem) == 'windows';
     final path = environment['PATH'] ?? environment['Path'] ?? '';
-    final separator = Platform.isWindows ? ';' : ':';
-    final suffixes = Platform.isWindows
+    final separator = windows ? ';' : ':';
+    final directorySeparator = windows ? r'\' : '/';
+    final suffixes = windows
         ? [
             '',
             ...(environment['PATHEXT'] ?? '.EXE;.CMD;.BAT')
@@ -993,9 +994,11 @@ class LocalManager {
     for (final directory in path.split(separator)) {
       if (directory.trim().isEmpty) continue;
       for (final suffix in suffixes) {
-        final candidate =
-            '$directory${Platform.pathSeparator}$name${suffix.toLowerCase()}';
-        if (_isFile(candidate)) return candidate;
+        final base = directory.endsWith(directorySeparator)
+            ? directory
+            : '$directory$directorySeparator';
+        final candidate = '$base$name${suffix.toLowerCase()}';
+        if (exists(candidate)) return candidate;
       }
     }
     return null;
@@ -1015,9 +1018,13 @@ class LocalManager {
   /// telemetry is loopback on the runtime host. No token or API key is ever
   /// passed, in arguments, URL or environment.
   ///
-  /// [environment], [start], [fileExists], [findOnPath] and [open] are
-  /// injectable for tests; they default to this process's environment and
-  /// the real process, file and opener calls.
+  /// On macOS a `.app` bundle path is accepted and started with
+  /// `open -n -a <bundle> --args …` ([observatoryProcessCommand]).
+  ///
+  /// [environment], [start], [fileExists], [findOnPath], [open] and
+  /// [operatingSystem] are injectable for tests; they default to this
+  /// process's environment, the real process, file and opener calls, and
+  /// the host OS.
   static Future<ObservatoryLaunchResult> launchObservatory(
     List<String> connectUrls, {
     String runtimeUrl = '',
@@ -1030,7 +1037,9 @@ class LocalManager {
     bool Function(String path)? fileExists,
     String? Function(String name, Map<String, String> environment)? findOnPath,
     Future<bool> Function(String url, Map<String, String> environment)? open,
+    String? operatingSystem,
   }) async {
+    final os = operatingSystem ?? Platform.operatingSystem;
     final urls = observatoryConnectUrls(connectUrls);
     final blocked =
         observatoryLaunchBlocked(runtimeUrl: runtimeUrl, connectUrls: urls);
@@ -1051,7 +1060,8 @@ class LocalManager {
     }
     final env = environment ?? Platform.environment;
     final childEnv = observatoryEnvironment(env);
-    final exists = fileExists ?? _isFile;
+    final exists = fileExists ??
+        (String path) => observatoryPathExists(path, operatingSystem: os);
 
     String resolved = '';
     final configured = executable.trim();
@@ -1077,8 +1087,10 @@ class LocalManager {
       }
       resolved = fromEnv;
     } else {
-      resolved = (findOnPath ?? findExecutableOnPath)(
-              observatoryExecutableName, env) ??
+      resolved = (findOnPath ??
+              (name, environment) => findExecutableOnPath(name, environment,
+                  fileExists: exists,
+                  operatingSystem: os))(observatoryExecutableName, env) ??
           '';
     }
 
@@ -1086,8 +1098,10 @@ class LocalManager {
       final arguments = [
         for (final url in urls) ...['--connect', url],
       ];
+      final (program, programArguments) =
+          observatoryProcessCommand(resolved, arguments, operatingSystem: os);
       try {
-        await (start ?? _startDetached)(resolved, arguments, childEnv);
+        await (start ?? _startDetached)(program, programArguments, childEnv);
       } on ProcessException catch (error) {
         return ObservatoryLaunchResult(
           ok: false,

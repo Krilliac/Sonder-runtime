@@ -210,3 +210,40 @@ ObservatoryLaunchResult? observatoryLaunchBlocked({
   }
   return null;
 }
+
+/// True when [path] names a macOS application bundle (`…/Observatory.app`),
+/// which is a directory started through `open`, not an executable file.
+bool isMacAppBundle(String path) =>
+    path.trim().replaceAll(RegExp(r'/+$'), '').toLowerCase().endsWith('.app');
+
+/// The program and arguments that start the Observatory at [executable] on
+/// [operatingSystem] (a `Platform.operatingSystem` value). A macOS `.app`
+/// bundle is started with `open -n -a <bundle> --args …` so the connect
+/// arguments reach a fresh instance; anything else is run directly.
+(String, List<String>) observatoryProcessCommand(
+    String executable, List<String> arguments,
+    {required String operatingSystem}) {
+  if (operatingSystem == 'macos' && isMacAppBundle(executable)) {
+    return ('open', ['-n', '-a', executable, '--args', ...arguments]);
+  }
+  return (executable, arguments);
+}
+
+/// The OS opener command for [url] on [operatingSystem]: `cmd.exe /c start`
+/// on Windows, `open` on macOS, `xdg-open` elsewhere.
+///
+/// cmd parses its command line itself, so its metacharacters are escaped
+/// with `^`: the `&` between query parameters must not end the command.
+(String, List<String>) observatoryOpenerCommand(String url,
+    {required String operatingSystem}) {
+  switch (operatingSystem) {
+    case 'windows':
+      final escaped = url.replaceAllMapped(
+          RegExp(r'[&|<>^()]'), (match) => '^${match.group(0)}');
+      return ('cmd.exe', ['/c', 'start', '', escaped]);
+    case 'macos':
+      return ('open', [url]);
+    default:
+      return ('xdg-open', [url]);
+  }
+}

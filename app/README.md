@@ -151,14 +151,17 @@ unsupported instead of failing the page. Every state is spoken as text, never
 by colour alone.
 
 To bind Sonder Inference, set `SONDER_MODEL_BACKEND=sonder-inference` (or a
-per-tier `SONDER_<TIER>_PROVIDER`) and `SONDER_INFERENCE_BASE_URL` on the
-runtime host, then restart Sonder Runtime.
+per-tier `SONDER_<TIER>_PROVIDER`), `SONDER_EMBEDDING_PROVIDER=ollama` and
+`SONDER_INFERENCE_BASE_URL` on the runtime host, then restart Sonder Runtime.
+The embedding provider must be set explicitly: it defaults to
+`SONDER_MODEL_BACKEND`, and Sonder Inference serves no embeddings.
 
 **Open Observatory** (desktop) starts Sonder Observatory with one
 `--connect <url>` per URL the runtime published. The executable is, in order:
 **Settings → Observatory executable**, then `SONDER_OBSERVATORY_BIN`, then
-`sonder-observatory` on `PATH`. A configured path that does not exist is
-reported, never skipped. Without an executable, a configured **Observatory web
+`sonder-observatory` on `PATH`. On macOS the path may be the Observatory's
+`.app` bundle, started with `open -n -a <bundle> --args --connect …`. A
+configured path that does not exist is reported, never skipped. Without an executable, a configured **Observatory web
 URL** opens as `<url>?fixture=0&connect=<url>&connect=<url>` (URL-encoded)
 with `xdg-open`, `open` or `cmd start`; the web URL is unset by default
 (`http://127.0.0.1:4173/` is the Observatory's `npm run preview` address).
@@ -173,7 +176,14 @@ fragment are dropped. Launching is disabled while the app talks to a
 non-loopback runtime, because producer telemetry is served on loopback on the
 runtime host. Because no credential is passed, a launched Observatory reads
 the runtime's admin-gated telemetry only in local-open mode on loopback;
-otherwise it asks for a token itself.
+otherwise it asks for a token itself, and the panel says so next to **Open
+Observatory** whenever the app uses an API key or account session.
+
+A hosted (HTTPS, non-loopback) Observatory web URL still opens in this
+device's browser and connects to the loopback URLs above. Its origin must be
+on the runtime's exact-match `SONDER_CORS_ORIGINS` allowlist (and Sonder
+Inference's `--cors-origin`), and browsers may block a public page from
+reading loopback addresses.
 
 ## Download a pre-built app (no toolchain needed)
 

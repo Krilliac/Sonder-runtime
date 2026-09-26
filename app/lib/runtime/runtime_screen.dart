@@ -1338,6 +1338,10 @@ class _RuntimeScreenState extends State<RuntimeScreen>
                     runtimeUrl: widget.settings.serverUrl,
                     canStartProcesses: LocalManager.canRunLocalTools,
                     onLaunch: _launchObservatory,
+                    usesCredential: widget.settings.apiKey.trim().isNotEmpty ||
+                        widget.settings.accountSession
+                                ?.matches(widget.settings.serverUrl) ==
+                            true,
                   ),
                 ],
               ),

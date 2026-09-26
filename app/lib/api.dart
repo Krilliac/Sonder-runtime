@@ -1022,9 +1022,14 @@ class SonderApi implements SonderApiPort {
 
   /// GET [path] bounded by [timeout]; transport failures become a readable
   /// "Cannot reach server" error bound to this host (never the fallback).
-  Future<http.Response> _get(Uri uri, Duration timeout) async {
+  Future<http.Response> _get(Uri uri, Duration timeout,
+      {int? maxBodyBytes}) async {
     try {
-      return await requestGet(uri, headers: _headers(), timeout: timeout);
+      return await requestGet(uri,
+          headers: _headers(), timeout: timeout, maxBodyBytes: maxBodyBytes);
+    } on ResponseTooLargeException {
+      // The server answered; it is not unreachable.
+      rethrow;
     } catch (e) {
       // A silent local retry made connection tests authenticate a different
       // machine, turning bad URLs and API keys into false green results.
@@ -1083,6 +1088,7 @@ class SonderApi implements SonderApiPort {
       'Administrator authorization is required.';
 
   /// Upper bound on an ecosystem status body; the real one is a few KiB.
+  /// Enforced while reading: a larger body is not buffered.
   static const _ecosystemBodyLimit = 256 * 1024;
 
   /// Sonder Inference and Observatory status (`GET /v1/sonder/ecosystem`,
@@ -1093,8 +1099,14 @@ class SonderApi implements SonderApiPort {
   /// available) is [EcosystemReading.unsupportedRuntime], not an error. A
   /// payload with another schema is an unsupported-schema reading.
   Future<EcosystemReading> ecosystemStatus() async {
-    final resp =
-        await _get(_uri('/v1/sonder/ecosystem'), const Duration(seconds: 15));
+    final http.Response resp;
+    try {
+      resp = await _get(
+          _uri('/v1/sonder/ecosystem'), const Duration(seconds: 15),
+          maxBodyBytes: _ecosystemBodyLimit);
+    } on ResponseTooLargeException {
+      throw SonderException('Ecosystem status exceeds the response limit.');
+    }
     if (resp.statusCode == 401 || resp.statusCode == 403) {
       throw responseException(resp, adminRequiredMessage)
           .copyWith(message: adminRequiredMessage);
@@ -1104,9 +1116,6 @@ class SonderApi implements SonderApiPort {
     }
     if (resp.statusCode != 200) {
       throw _failure(resp, action: 'read ecosystem status');
-    }
-    if (resp.bodyBytes.length > _ecosystemBodyLimit) {
-      throw SonderException('Ecosystem status exceeds the response limit.');
     }
     return EcosystemReading.parse(decodeJsonObject(resp, 'ecosystem status'));
   }

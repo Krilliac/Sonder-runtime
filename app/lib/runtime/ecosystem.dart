@@ -64,11 +64,19 @@ List<String> _strings(Object? value, [int limit = 400]) => value is List
       ]
     : const [];
 
+/// The largest magnitude [DateTime] accepts, in milliseconds since the epoch.
+const _maxEpochMilliseconds = 8640000000000000;
+
+/// A timestamp from epoch seconds or an ISO-8601 string; null when absent,
+/// mistyped or outside the range [DateTime] can represent.
 DateTime? _time(Object? value) {
   if (value is num && value.isFinite && value > 0) {
-    return DateTime.fromMillisecondsSinceEpoch((value * 1000).round(),
+    final milliseconds = value * 1000;
+    if (milliseconds > _maxEpochMilliseconds) return null;
+    return DateTime.fromMillisecondsSinceEpoch(milliseconds.round(),
         isUtc: true);
   }
+  // tryParse already answers null for an out-of-range date string.
   if (value is String) return DateTime.tryParse(value.trim());
   return null;
 }
@@ -378,6 +386,13 @@ class EcosystemStatus {
           observatory == null ? null : ObservatoryExport.fromJson(observatory),
     );
   }
+
+  /// Every distinct provider a generation binding names (default and
+  /// tiers), without the embedding provider.
+  Set<String> get generationProviders => {
+        if (defaultGenerationProvider != null) defaultGenerationProvider!,
+        ...tierProviders.values,
+      };
 
   /// Every distinct provider a binding names.
   Set<String> get boundProviders => {

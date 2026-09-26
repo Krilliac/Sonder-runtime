@@ -719,7 +719,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             'Observatory executable (optional)',
             hint: '/usr/local/bin/sonder-observatory',
             helper: 'Empty uses $observatoryBinEnv, then '
-                '$observatoryExecutableName on PATH.',
+                '$observatoryExecutableName on PATH. On macOS, the .app '
+                'bundle works too.',
             icon: Icons.insights_outlined,
           ),
         ),
@@ -733,9 +734,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
         decoration: _field(
           'Observatory web URL (optional)',
           helper: remote
-              ? 'This Observatory is on another host. It can reach only '
-                  'producers on its own loopback, so connect it to a runtime '
-                  'on that host.'
+              ? 'A hosted Observatory opens in this browser and connects to '
+                  'the loopback URLs here. Add its origin to the runtime\'s '
+                  'SONDER_CORS_ORIGINS (and Sonder Inference\'s '
+                  '--cors-origin); browsers may also block a public page '
+                  'from reading loopback.'
               : LocalManager.canRunLocalTools
                   ? 'Opened when no Observatory executable is found. HTTPS off '
                       'this device; a local preview build is on loopback port 4173.'

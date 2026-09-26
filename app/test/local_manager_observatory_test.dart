@@ -2,6 +2,8 @@
 // executable resolution order, one --connect per URL, the URL-encoded web
 // fallback, the loopback-only rule, and that no credential ever reaches the
 // Observatory process.
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -51,6 +53,152 @@ class _Recorder {
 }
 
 void main() {
+  group('PATH lookup and OS commands', () {
+    late Directory temp;
+    setUp(() => temp = Directory.systemTemp.createTempSync('obs-path-'));
+    tearDown(() => temp.deleteSync(recursive: true));
+
+    test('findExecutableOnPath finds a real file on PATH, in PATH order', () {
+      final first = Directory('${temp.path}/first')..createSync();
+      final second = Directory('${temp.path}/second')..createSync();
+      File('${second.path}/sonder-observatory').writeAsStringSync('');
+      final env = {'PATH': '/does/not/exist::${first.path}:${second.path}'};
+      expect(
+          LocalManager.findExecutableOnPath('sonder-observatory', env,
+              operatingSystem: 'linux'),
+          '${second.path}/sonder-observatory');
+      File('${first.path}/sonder-observatory').writeAsStringSync('');
+      expect(
+          LocalManager.findExecutableOnPath('sonder-observatory', env,
+              operatingSystem: 'linux'),
+          '${first.path}/sonder-observatory');
+      expect(
+          LocalManager.findExecutableOnPath(
+              'sonder-observatory', const {'PATH': ''},
+              operatingSystem: 'linux'),
+          isNull);
+    });
+
+    test('on Windows it splits on ; and tries each PATHEXT suffix', () {
+      final tried = <String>[];
+      final found = LocalManager.findExecutableOnPath(
+        'sonder-observatory',
+        const {r'Path': r'C:\Tools;C:\Obs\', 'PATHEXT': '.COM;.EXE'},
+        operatingSystem: 'windows',
+        fileExists: (path) {
+          tried.add(path);
+          return path == r'C:\Obs\sonder-observatory.exe';
+        },
+      );
+      expect(found, r'C:\Obs\sonder-observatory.exe');
+      expect(tried, [
+        r'C:\Tools\sonder-observatory',
+        r'C:\Tools\sonder-observatory.com',
+        r'C:\Tools\sonder-observatory.exe',
+        r'C:\Obs\sonder-observatory',
+        r'C:\Obs\sonder-observatory.com',
+        r'C:\Obs\sonder-observatory.exe',
+      ]);
+    });
+
+    test('launchObservatory looks up PATH with the injected fileExists',
+        () async {
+      final starts = <(String, List<String>)>[];
+      final result = await LocalManager.launchObservatory(
+        _urls,
+        runtimeUrl: _runtime,
+        environment: const {'PATH': '/usr/bin:/opt/obs/bin'},
+        operatingSystem: 'linux',
+        fileExists: {'/opt/obs/bin/sonder-observatory'}.contains,
+        start: (exe, args, env) async => starts.add((exe, args)),
+      );
+      expect(result.ok, isTrue);
+      expect(starts.single.$1, '/opt/obs/bin/sonder-observatory');
+    });
+
+    test('a macOS .app bundle starts through open -n -a with --args', () async {
+      const bundle = '/Applications/Sonder Observatory.app';
+      final starts = <(String, List<String>)>[];
+      final result = await LocalManager.launchObservatory(
+        _urls,
+        runtimeUrl: _runtime,
+        executable: bundle,
+        environment: const {'PATH': '/usr/bin'},
+        operatingSystem: 'macos',
+        fileExists: {bundle}.contains,
+        start: (exe, args, env) async => starts.add((exe, args)),
+      );
+      expect(result.ok, isTrue);
+      expect(result.executable, bundle);
+      expect(starts.single.$1, 'open');
+      expect(starts.single.$2, [
+        '-n',
+        '-a',
+        bundle,
+        '--args',
+        '--connect',
+        'http://127.0.0.1:11435',
+        '--connect',
+        'http://127.0.0.1:11437',
+      ]);
+      // Elsewhere the path is run as it is.
+      final (program, arguments) = observatoryProcessCommand(
+          '/opt/Obs.app', const ['--connect', 'u'],
+          operatingSystem: 'linux');
+      expect(program, '/opt/Obs.app');
+      expect(arguments, ['--connect', 'u']);
+    });
+
+    test('an .app bundle directory exists only on macOS', () {
+      final bundle = Directory('${temp.path}/Sonder Observatory.app')
+        ..createSync();
+      expect(
+          LocalManager.observatoryPathExists(bundle.path,
+              operatingSystem: 'macos'),
+          isTrue);
+      expect(
+          LocalManager.observatoryPathExists(bundle.path,
+              operatingSystem: 'linux'),
+          isFalse);
+      expect(
+          LocalManager.observatoryPathExists('${temp.path}/missing.app',
+              operatingSystem: 'macos'),
+          isFalse);
+      final binary = File('${temp.path}/sonder-observatory')
+        ..writeAsStringSync('');
+      expect(
+          LocalManager.observatoryPathExists(binary.path,
+              operatingSystem: 'linux'),
+          isTrue);
+    });
+
+    test('the Windows opener escapes cmd metacharacters', () {
+      const url = 'http://127.0.0.1:4173/?fixture=0'
+          '&connect=http%3A%2F%2F127.0.0.1%3A11435'
+          '&connect=http%3A%2F%2F127.0.0.1%3A11437';
+      final (program, arguments) =
+          observatoryOpenerCommand(url, operatingSystem: 'windows');
+      expect(program, 'cmd.exe');
+      expect(arguments.sublist(0, 3), ['/c', 'start', '']);
+      expect(
+          arguments[3],
+          'http://127.0.0.1:4173/?fixture=0'
+          '^&connect=http%3A%2F%2F127.0.0.1%3A11435'
+          '^&connect=http%3A%2F%2F127.0.0.1%3A11437');
+      // Every cmd metacharacter is escaped, and nothing else changes.
+      expect(
+          observatoryOpenerCommand('a|b<c>d^e(f)g', operatingSystem: 'windows')
+              .$2[3],
+          'a^|b^<c^>d^^e^(f^)g');
+      final mac = observatoryOpenerCommand(url, operatingSystem: 'macos');
+      expect(mac.$1, 'open');
+      expect(mac.$2, [url]);
+      final linux = observatoryOpenerCommand(url, operatingSystem: 'linux');
+      expect(linux.$1, 'xdg-open');
+      expect(linux.$2, [url]);
+    });
+  });
+
   test('Settings executable wins, with one --connect per URL', () async {
     final r = _Recorder()
       ..files = {'/opt/obs/sonder-observatory', '/env/obs'}
@@ -308,8 +456,9 @@ void main() {
 
       await tester.enterText(webField, 'https://obs.example.com/');
       await tester.pumpAndSettle();
-      expect(find.textContaining('This Observatory is on another host'),
+      expect(find.textContaining('A hosted Observatory opens in this browser'),
           findsOneWidget);
+      expect(find.textContaining('SONDER_CORS_ORIGINS'), findsOneWidget);
       await tester.enterText(webField, 'http://127.0.0.1:4173/');
       await tester.enterText(
           find.byKey(const Key('settings-observatory-executable')),

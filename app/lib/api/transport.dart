@@ -20,6 +20,7 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
@@ -506,12 +507,54 @@ class SonderEndpoint {
   }
 }
 
+/// A response body larger than the caller's `maxBodyBytes`. Thrown before
+/// the rest of the body is read: the connection is closed instead.
+class ResponseTooLargeException implements Exception {
+  final int limit;
+
+  const ResponseTooLargeException(this.limit);
+
+  @override
+  String toString() => 'Response body exceeds $limit bytes.';
+}
+
+/// Buffers [streamed] into a response, failing as soon as its declared
+/// Content-Length or the bytes received pass [limit]. Returning early
+/// cancels the stream subscription, so the rest is never read.
+Future<http.Response> _boundedResponse(
+    http.StreamedResponse streamed, int limit) async {
+  final declared = streamed.contentLength;
+  if (declared != null && declared > limit) {
+    throw ResponseTooLargeException(limit);
+  }
+  final bytes = BytesBuilder(copy: false);
+  await for (final chunk in streamed.stream) {
+    if (bytes.length + chunk.length > limit) {
+      throw ResponseTooLargeException(limit);
+    }
+    bytes.add(chunk);
+  }
+  return http.Response.bytes(
+    bytes.takeBytes(),
+    streamed.statusCode,
+    request: streamed.request,
+    headers: streamed.headers,
+    isRedirect: streamed.isRedirect,
+    persistentConnection: streamed.persistentConnection,
+    reasonPhrase: streamed.reasonPhrase,
+  );
+}
+
 /// Send one request on its own client, bounded by [timeout] and [cancel].
 ///
 /// The client is always closed: on success, on error, on timeout (so the
 /// socket does not keep running after the caller gave up), and on cancel.
 /// A cancel or timeout completes immediately even if the underlying future
 /// has not yet noticed the close.
+///
+/// With [maxBodyBytes], a body that declares or delivers more than that many
+/// bytes throws [ResponseTooLargeException] without being read to the end,
+/// so memory stays bounded as well as time.
 Future<http.Response> sendRequest(
   String method,
   Uri uri, {
@@ -519,6 +562,7 @@ Future<http.Response> sendRequest(
   Object? body,
   Duration timeout = const Duration(seconds: 20),
   CancelToken? cancel,
+  int? maxBodyBytes,
 }) async {
   if (cancel?.isCancelled == true) throw SonderException.cancelled();
   final client = NoRedirectClient(http.Client());
@@ -552,7 +596,9 @@ Future<http.Response> sendRequest(
         request.bodyBytes = body;
       }
       final streamed = await client.send(request);
-      final response = await http.Response.fromStream(streamed);
+      final response = maxBodyBytes == null
+          ? await http.Response.fromStream(streamed)
+          : await _boundedResponse(streamed, maxBodyBytes);
       if (!done.isCompleted) done.complete(response);
     } catch (error, stack) {
       if (!done.isCompleted) done.completeError(error, stack);
@@ -570,8 +616,13 @@ Future<http.Response> sendRequest(
 Future<http.Response> requestGet(Uri uri,
         {Map<String, String>? headers,
         Duration timeout = const Duration(seconds: 20),
-        CancelToken? cancel}) =>
-    sendRequest('GET', uri, headers: headers, timeout: timeout, cancel: cancel);
+        CancelToken? cancel,
+        int? maxBodyBytes}) =>
+    sendRequest('GET', uri,
+        headers: headers,
+        timeout: timeout,
+        cancel: cancel,
+        maxBodyBytes: maxBodyBytes);
 
 Future<http.Response> requestPost(Uri uri,
         {Map<String, String>? headers,

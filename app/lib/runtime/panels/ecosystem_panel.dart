@@ -29,11 +29,40 @@ StatusKind _inferenceKind(InferenceState state) => switch (state) {
     };
 
 /// How to bind a tier to Sonder Inference (contract sections 3.1 and 3.2).
+/// Embeddings default to SONDER_MODEL_BACKEND, and Sonder Inference serves
+/// none (contract 3.3), so the hint pins SONDER_EMBEDDING_PROVIDER as well.
 const inferenceEnvHint =
     'Set SONDER_MODEL_BACKEND=sonder-inference (or SONDER_<TIER>_PROVIDER, '
-    'for example SONDER_CODE_PROVIDER=sonder-inference) and '
-    'SONDER_INFERENCE_BASE_URL=http://127.0.0.1:11437, then restart Sonder '
-    'Runtime.';
+    'for example SONDER_CODE_PROVIDER=sonder-inference), '
+    'SONDER_EMBEDDING_PROVIDER=ollama (Sonder Inference serves no '
+    'embeddings) and SONDER_INFERENCE_BASE_URL=http://127.0.0.1:11437, then '
+    'restart Sonder Runtime.';
+
+/// `2026-09-25 12:41:30 UTC`: always UTC and labelled, so the reading does
+/// not depend on (or hide) the viewer's time zone.
+String ecosystemTimestamp(DateTime time) =>
+    '${time.toUtc().toIso8601String().substring(0, 19).replaceFirst('T', ' ')} UTC';
+
+/// The not-configured sentence: which providers serve generation and
+/// embeddings, said separately (an embedding binding is not a tier).
+String inferenceNotConfiguredText(EcosystemStatus status) {
+  String names(Iterable<String> ids) => ids.map(providerLabel).join(', ');
+  final generation = status.generationProviders;
+  final embedding = status.embeddingProvider;
+  return [
+    'Sonder Inference not configured.',
+    if (generation.isNotEmpty) 'Generation uses ${names(generation)}.',
+    if (embedding != null) 'Embeddings use ${providerLabel(embedding)}.',
+    if (generation.isEmpty && embedding == null)
+      'The runtime reported no provider bindings.',
+  ].join(' ');
+}
+
+/// Shown beside Open Observatory when the app authenticates with a
+/// credential: the app never hands one to the Observatory (contract 10).
+const observatoryTokenNote =
+    'The Observatory will ask for a token; telemetry is admin-only outside '
+    'local-open mode.';
 
 /// Sonder Inference and Observatory status on the Runtime page
 /// (`GET /v1/sonder/ecosystem`), with Open Observatory and Copy connect URLs.
@@ -53,6 +82,10 @@ class EcosystemPanel extends StatefulWidget {
   final bool canStartProcesses;
   final ObservatoryLauncher onLaunch;
 
+  /// True when the app sends an API key or account token. The launched
+  /// Observatory gets neither, so it will ask for its own.
+  final bool usesCredential;
+
   const EcosystemPanel({
     super.key,
     required this.reading,
@@ -61,6 +94,7 @@ class EcosystemPanel extends StatefulWidget {
     this.error,
     this.loading = false,
     this.canStartProcesses = true,
+    this.usesCredential = false,
   });
 
   @override
@@ -71,6 +105,25 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
   ObservatoryLaunchResult? _launch;
   bool _launching = false;
   String? _copied;
+
+  /// The connect URLs a launch would use, so a notice about an earlier
+  /// launch can be dropped once they change.
+  static List<String> _urlsOf(EcosystemReading? reading) =>
+      observatoryConnectUrls(
+          reading?.status?.observatory?.connectUrls ?? const []);
+
+  @override
+  void didUpdateWidget(covariant EcosystemPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // A launch result or copy notice describes the runtime and URLs it was
+    // made for; a refresh with the same ones keeps it.
+    if (oldWidget.runtimeUrl != widget.runtimeUrl ||
+        _urlsOf(oldWidget.reading).join('\n') !=
+            _urlsOf(widget.reading).join('\n')) {
+      _launch = null;
+      _copied = null;
+    }
+  }
 
   Future<void> _copy(String text, String what) async {
     await Clipboard.setData(ClipboardData(text: text));
@@ -277,8 +330,7 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
             kind: StatusKind.skipped,
             word: state.word,
             label: 'Sonder Inference',
-            value: 'Sonder Inference not configured. Every tier uses '
-                '${status.boundProviders.map(providerLabel).join(', ')}.',
+            value: inferenceNotConfiguredText(status),
           ),
           const SizedBox(height: 4),
           SelectableText(inferenceEnvHint,
@@ -364,7 +416,7 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
           if (entry.checkedAt != null)
             _EcosystemField(
               label: 'Checked',
-              value: entry.checkedAt!.toLocal().toString().substring(0, 19),
+              value: ecosystemTimestamp(entry.checkedAt!),
             ),
         ],
         const SizedBox(height: 6),
@@ -464,6 +516,12 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
             ),
           ],
         ),
+        if (widget.usesCredential && !remote && urls.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Text(observatoryTokenNote,
+              key: const Key('ecosystem-token-note'),
+              style: Theme.of(context).textTheme.bodySmall),
+        ],
         if (remote) ...[
           const SizedBox(height: 8),
           Text(observatoryRemoteExplanation,

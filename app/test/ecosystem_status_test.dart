@@ -3,6 +3,7 @@
 // The fixtures are built from the integration contract (runtime_fixtures.dart).
 // With SONDER_ECOSYSTEM_JSON pointing at a payload captured from a real
 // runtime, the last group parses that file too: the ecosystem e2e runs it.
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -158,6 +159,35 @@ void main() {
       expect(bare.inferenceState, InferenceState.notConfigured);
     });
 
+    test('timestamps outside the DateTime range read as null', () {
+      for (final value in <Object>[
+        1e13,
+        1e300,
+        '+999999999-01-01T00:00:00Z',
+      ]) {
+        final reading = EcosystemReading.parse({
+          'schema': ecosystemSchema,
+          'generated_at': value,
+          'providers': {
+            'status': {
+              'sonder_inference': {'state': 'ready', 'checked_at': value},
+            },
+          },
+        });
+        final status = reading.status!;
+        expect(status.generatedAt, isNull, reason: '$value');
+        expect(status.inference!.checkedAt, isNull, reason: '$value');
+        expect(status.inferenceState, InferenceState.ready);
+      }
+      // The largest representable instant still parses.
+      final edge = EcosystemReading.parse({
+        'schema': ecosystemSchema,
+        'generated_at': 8.64e12,
+      });
+      expect(
+          edge.status!.generatedAt!.millisecondsSinceEpoch, 8640000000000000);
+    });
+
     test('a bound provider with no status entry reads as unknown', () {
       final status = _status(ecosystemJson());
       expect(status.inference, isNull);
@@ -225,6 +255,73 @@ void main() {
       final huge = await read(http.Response('x' * (300 * 1024), 200));
       expect((huge as SonderException).message,
           'Ecosystem status exceeds the response limit.');
+    });
+
+    Future<Object> readStreamed(http.StreamedResponse response) async {
+      try {
+        return await http.runWithClient(
+          () => SonderApi(baseUrl: 'http://127.0.0.1:11435', apiKey: 'k')
+              .ecosystemStatus(),
+          () => MockClient.streaming((request, body) async => response),
+        );
+      } catch (error) {
+        return error;
+      }
+    }
+
+    test('a declared oversized body is refused before any byte is read',
+        () async {
+      var listened = false;
+      final body = Stream<List<int>>.fromIterable([
+        utf8.encode('{}'),
+      ]);
+      final controller =
+          StreamController<List<int>>(onListen: () => listened = true);
+      unawaited(controller.addStream(body).then((_) => controller.close()));
+      final result = await readStreamed(http.StreamedResponse(
+          controller.stream, 200,
+          contentLength: 300 * 1024));
+      expect((result as SonderException).message,
+          'Ecosystem status exceeds the response limit.');
+      expect(listened, isFalse);
+    });
+
+    test('an undeclared endless body stops at the limit', () async {
+      var delivered = 0;
+      var cancelled = false;
+      final chunk = List<int>.filled(16 * 1024, 0x20);
+      late final StreamController<List<int>> controller;
+      controller = StreamController<List<int>>(
+        onListen: () async {
+          // Endless: only a cancel from the reader ends it.
+          while (!cancelled) {
+            controller.add(chunk);
+            delivered += chunk.length;
+            await Future<void>.delayed(Duration.zero);
+          }
+        },
+        onCancel: () => cancelled = true,
+      );
+      final result =
+          await readStreamed(http.StreamedResponse(controller.stream, 200));
+      expect((result as SonderException).message,
+          'Ecosystem status exceeds the response limit.');
+      expect(cancelled, isTrue);
+      // At most one chunk past the 256 KiB limit was ever produced.
+      expect(delivered, lessThanOrEqualTo(256 * 1024 + 2 * chunk.length));
+    });
+
+    test('a body within the limit streams through', () async {
+      final bytes = utf8.encode(jsonEncode(ecosystemReadySynthetic()));
+      final result = await readStreamed(http.StreamedResponse(
+          Stream.fromIterable([
+            bytes.sublist(0, 10),
+            bytes.sublist(10),
+          ]),
+          200,
+          contentLength: bytes.length));
+      expect((result as EcosystemReading).status!.inferenceState,
+          InferenceState.ready);
     });
 
     test('HttpRuntimeDataSource.ecosystem reads the same route', () async {

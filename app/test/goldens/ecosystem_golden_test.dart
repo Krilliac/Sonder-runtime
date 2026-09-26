@@ -14,13 +14,16 @@ import '../runtime_fixtures.dart';
 import 'golden_fonts.dart';
 
 /// The Inference & Observatory panel: ready on the synthetic mock backend
-/// (desk width) and down with an Ollama fallback (phone width).
+/// after Open Observatory (desk width, launch result shown) and down with an
+/// Ollama fallback (phone width). Both surfaces are tall enough to include
+/// the action row. Checked times render in UTC, so these do not depend on
+/// the host time zone.
 void main() {
   setUpAll(loadGoldenFonts);
 
   final cases = {
-    'ready_desk': (const Size(760, 1000), ecosystemReadySynthetic()),
-    'fallback_phone': (const Size(390, 1150), ecosystemFallback()),
+    'ready_desk': (const Size(760, 1180), ecosystemReadySynthetic(), true),
+    'fallback_phone': (const Size(390, 1240), ecosystemFallback(), false),
   };
   final themes = {'dark': SonderTheme.dark, 'light': SonderTheme.light};
 
@@ -42,15 +45,19 @@ void main() {
                 onLaunch: (_) async => const ObservatoryLaunchResult(
                   ok: true,
                   mode: ObservatoryLaunchMode.executable,
-                  message: 'Opened the Observatory.',
+                  message: 'Opened the Observatory with 2 producers.',
                 ),
               ),
             ),
           ),
         ));
         await tester.pumpAndSettle();
-        await expectLater(find.byType(MaterialApp),
-            matchesGoldenFile(goldenPath(name)));
+        if (entry.value.$3) {
+          await tester.tap(find.byKey(const Key('ecosystem-open-observatory')));
+          await tester.pumpAndSettle();
+        }
+        await expectLater(
+            find.byType(MaterialApp), matchesGoldenFile(goldenPath(name)));
       }, skip: goldenSkip != null);
     }
   }
