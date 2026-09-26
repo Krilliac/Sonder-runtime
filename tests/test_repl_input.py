@@ -517,7 +517,9 @@ def test_startup_banner_reads_the_live_runtime_not_a_literal(monkeypatch):
     _caps(monkeypatch, color="none", glyphs="unicode")
     monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "some-model:13b"},
                         raising=False)
-    text = sonder_repl._startup_banner(None, "coder", "duetos")
+    # Pinned wide: at ~80 columns the identity line deliberately drops the
+    # persona first (style._identity_line), which is not what this checks.
+    text = sonder_repl._startup_banner(None, "coder", "duetos", width=160)
     assert "some-model:13b" in text
     assert "coder" in text
     assert "/help" in text
@@ -531,7 +533,7 @@ def test_startup_banner_is_one_design_on_every_platform(monkeypatch):
     monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "m"}, raising=False)
     for available in (True, False):
         monkeypatch.setattr(sonder_repl, "_composer_available", lambda a=available: a)
-        text = sonder_repl._startup_banner(None, "coder", "default")
+        text = sonder_repl._startup_banner(None, "coder", "default", width=160)
         lines = text.splitlines()
         assert lines[0].startswith("◈ sonder · coder · m (code) · ")
         assert lines[1].strip().startswith("/help commands")
