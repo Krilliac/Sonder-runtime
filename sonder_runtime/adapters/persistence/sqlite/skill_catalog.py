@@ -7,6 +7,11 @@ transaction; ``load`` rebuilds the snapshot and verifies it through
 ``DurableLastGoodCatalog.from_snapshot`` so a tampered or malformed row fails
 closed.  The digest detects corruption and uncoordinated edits; it is not an
 authenticity signature against a writer who can recompute SHA-256.
+
+Writers are serialized by the stored generation: an instance remembers the
+generation it last loaded or saved, and ``save`` refuses, inside the same
+``BEGIN IMMEDIATE`` transaction, when another instance or process has written
+since.  The refused writer's service rolls back and must reload.
 """
 from __future__ import annotations
 
@@ -140,6 +145,8 @@ class SQLiteCatalogSnapshotStore:
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = Lock()
+        # Generation this instance last loaded or saved; 0 is the empty store.
+        self._generation = 0
         with self._connect() as connection:
             connection.executescript(_DDL)
 
@@ -158,37 +165,51 @@ class SQLiteCatalogSnapshotStore:
         return 0 if row is None else int(row[0])
 
     def load(self) -> CatalogSnapshot | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT schema_version,snapshot_digest,payload_json "
-                "FROM procedural_skill_catalog WHERE singleton=1"
-            ).fetchone()
-        if row is None:
-            return None
-        schema_version, digest, payload_json = row
-        if schema_version != SCHEMA_VERSION:
-            raise CatalogStoreError("stored catalog schema version is not supported")
-        if not isinstance(digest, str) or not isinstance(payload_json, str):
-            raise CatalogStoreError("stored procedural skill catalog failed verification")
-        return _decode(payload_json, digest)
+        """Return the verified snapshot and adopt its generation for saves."""
+        with self._lock:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT schema_version,generation,snapshot_digest,payload_json "
+                    "FROM procedural_skill_catalog WHERE singleton=1"
+                ).fetchone()
+            if row is None:
+                self._generation = 0
+                return None
+            schema_version, generation, digest, payload_json = row
+            if schema_version != SCHEMA_VERSION:
+                raise CatalogStoreError("stored catalog schema version is not supported")
+            if (type(generation) is not int or generation < 1
+                    or not isinstance(digest, str) or not isinstance(payload_json, str)):
+                raise CatalogStoreError("stored procedural skill catalog failed verification")
+            snapshot = _decode(payload_json, digest)
+            self._generation = generation
+            return snapshot
 
     def save(self, snapshot: CatalogSnapshot) -> None:
+        """Replace the row, refusing when it changed since this instance read it."""
         _verify(snapshot, "refusing to persist an unverified catalog snapshot")
         payload_json = _encode(snapshot)
-        with self._lock, self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT generation FROM procedural_skill_catalog WHERE singleton=1"
-            ).fetchone()
-            generation = 1 if row is None else int(row[0]) + 1
-            connection.execute(
-                "INSERT INTO procedural_skill_catalog"
-                "(singleton,schema_version,generation,snapshot_digest,payload_json) "
-                "VALUES (1,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET "
-                "schema_version=excluded.schema_version,generation=excluded.generation,"
-                "snapshot_digest=excluded.snapshot_digest,payload_json=excluded.payload_json",
-                (SCHEMA_VERSION, generation, snapshot.snapshot_digest, payload_json),
-            )
+        with self._lock:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT generation FROM procedural_skill_catalog WHERE singleton=1"
+                ).fetchone()
+                stored = 0 if row is None else int(row[0])
+                if stored != self._generation:
+                    raise CatalogStoreError(
+                        "procedural skill catalog changed since it was loaded"
+                    )
+                generation = stored + 1
+                connection.execute(
+                    "INSERT INTO procedural_skill_catalog"
+                    "(singleton,schema_version,generation,snapshot_digest,payload_json) "
+                    "VALUES (1,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET "
+                    "schema_version=excluded.schema_version,generation=excluded.generation,"
+                    "snapshot_digest=excluded.snapshot_digest,payload_json=excluded.payload_json",
+                    (SCHEMA_VERSION, generation, snapshot.snapshot_digest, payload_json),
+                )
+            self._generation = generation
 
 
 __all__ = ["CatalogStoreError", "SQLiteCatalogSnapshotStore", "SCHEMA_VERSION"]

@@ -214,3 +214,41 @@ def test_catalog_and_store_are_mutually_exclusive(tmp_path):
             catalog=DurableLastGoodCatalog(), active=InMemoryActiveSkillPort(),
             store=SQLiteCatalogSnapshotStore(tmp_path / "skills.sqlite3"),
         )
+
+
+def test_second_writer_on_the_same_file_is_refused_and_rolled_back(tmp_path):
+    path = tmp_path / "skills.sqlite3"
+    first_active = InMemoryActiveSkillPort()
+    second_active = InMemoryActiveSkillPort()
+    first_store, first = _open(path, first_active)
+    second_store, second = _open(path, second_active)
+
+    _publish(first, "alpha", "1")
+    with pytest.raises(CatalogStoreError, match="changed since it was loaded"):
+        _publish(second, "beta", "1")
+    assert second.catalog.current("beta") is None
+    assert second_active.current("beta") is None
+    assert second_store.generation() == 1
+
+    # A writer that reloads sees the other publication and may then write.
+    third_store, third = _open(path)
+    assert third.catalog.current("alpha").version == "1"
+    _publish(third, "beta", "1")
+    assert third_store.generation() == 2
+    with pytest.raises(CatalogStoreError, match="changed since it was loaded"):
+        _publish(first, "alpha", "2")
+    assert first.catalog.current("alpha").version == "1"
+
+    _, reopened = _open(path)
+    assert reopened.catalog.current("alpha").version == "1"
+    assert reopened.catalog.current("beta").version == "1"
+    assert first_active.current("alpha").version == "1"
+
+
+def test_unloaded_store_refuses_to_overwrite_existing_catalog(tmp_path):
+    path = tmp_path / "skills.sqlite3"
+    _seed(path)
+    stranger = SQLiteCatalogSnapshotStore(path)
+    with pytest.raises(CatalogStoreError, match="changed since it was loaded"):
+        stranger.save(DurableLastGoodCatalog().snapshot())
+    assert stranger.generation() == 4

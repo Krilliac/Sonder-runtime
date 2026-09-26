@@ -35,7 +35,12 @@ canonical JSON and digest.  `save` refuses a snapshot that does not verify and
 replaces the row in one `BEGIN IMMEDIATE` transaction; `load` returns `None`
 for an empty store and otherwise rebuilds the snapshot through
 `DurableLastGoodCatalog.from_snapshot`, so a tampered payload, a wrong digest,
-or malformed JSON raises `CatalogStoreError` and nothing is restored.  The
+or malformed JSON raises `CatalogStoreError` and nothing is restored.  Each
+store instance remembers the generation it last loaded or saved, and `save`
+refuses with `CatalogStoreError` inside the same `BEGIN IMMEDIATE`
+transaction when another instance or process wrote the row since, so two
+compositions over one file cannot silently overwrite each other; the refused
+service rolls back and the host must reopen the composition to continue.  The
 digest detects corruption and uncoordinated edits; it is not an authenticity
 signature against a writer able to recompute SHA-256.
 
@@ -56,7 +61,8 @@ Evidence:
 - `tests/test_mem008_procedural_composition.py`
 - `tests/test_mem008_procedural_catalog_sqlite.py` (publish, reopen, and
   rollback over a real SQLite file; tampered and malformed rows fail closed;
-  an injected save failure leaves catalog and active port unchanged)
+  an injected save failure leaves catalog and active port unchanged; a second
+  writer on the same file is refused and rolled back)
 - focused command: `python -m pytest -q tests/test_remaining_procedural_publication.py tests/test_mem008_procedural_composition.py tests/test_mem008_procedural_catalog_sqlite.py`
 - `python scripts/check_architecture.py`
 - `python scripts/check_requirement_evidence.py`
