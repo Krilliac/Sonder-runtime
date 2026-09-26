@@ -250,10 +250,16 @@ The existing job endpoints also read the run: `GET /v1/jobs/{id}`,
 
 ### Over HTTP
 
-HTTP callers start and read runs through the same typed tools. The gating is
-the same as for `/v1/build/*`:
+HTTP callers start and read runs through the same typed tools. The gating
+is as follows:
 
-- the caller needs developer or admin authority
+- the caller needs admin authority, as for `/v1/tools/crash-*` (a
+  developer-role account gets `403 FORBIDDEN`). A test run executes the
+  project's own code, and a digest reads any log-like file under the file
+  roots. `/v1/build/*` accepts developer authority; this family does not.
+- an admin caller carries the configured workspace roots, so the planner
+  also refuses a project outside them (`PROJECT_OUTSIDE_ROOTS`). With no
+  workspace roots configured, only the file roots apply.
 - every route is one typed gateway call, made as the authenticated principal
   with `source="http"`
 - the permission modes grade that call unattended, because nobody is at a
@@ -291,7 +297,8 @@ Refusals and failures:
 
 The app's chat sends `/test` and `/digest` to the HTTP chat dispatcher
 (`serve._handle_slash`). The authority check is the same as for the routes
-above: developer or admin. Each line becomes the same typed gateway call,
+above: admin. Other callers get `refused /test: admin authority is
+required`. Each line becomes the same typed gateway call,
 made as the same principal with `source="http"`:
 
 | Chat line | Typed call |

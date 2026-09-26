@@ -219,25 +219,29 @@ def test_nothing_falls_through_to_the_model_as_prose(monkeypatch, line, context)
 def test_a_caller_without_developer_authority_is_refused_before_the_app(monkeypatch):
     monkeypatch.setattr("sonder_runtime.bootstrap.app.default_app",
                         lambda: pytest.fail("a refused chat command built the app"))
-    for line in ("/test", "/digest a.log", "/build model", "/fix-build game"):
+    for line in ("/build model", "/fix-build game"):
         assert ts._handle_slash(line, context=USER) == (
             "refused %s: developer or admin authority is required" % line.split()[0])
-    for line in ("/crash triage core.1", "/profile trace.json"):
-        assert ts._handle_slash(line, context=DEVELOPER) == (
-            "refused %s: admin authority is required" % line.split()[0])
+    # /test and /digest carry their routes' admin guard: a test run executes
+    # the project's code and a digest reads files under the roots.
+    for line in ("/test", "/test pytest", "/test result " + JOB, "/digest a.log",
+                 "/crash triage core.1", "/profile trace.json"):
+        for context in (USER, DEVELOPER):
+            assert ts._handle_slash(line, context=context) == (
+                "refused %s: admin authority is required" % line.split()[0])
 
 
 def test_test_runs_as_the_account_principal_through_the_gateway(monkeypatch):
     gateway = SpyGateway()
     _serve_gateway(monkeypatch, gateway)
-    reply = ts._handle_slash("/test pytest k:fast", context=DEVELOPER)
+    reply = ts._handle_slash("/test pytest k:fast", context=ADMIN)
     assert reply.startswith("test run %s: running (pytest)" % JOB)
     assert "next: /test result " + JOB in reply
     request = gateway.requests[-1]
     assert request.tool_name == "test_run"
     assert dict(request.arguments) == {"runner": "pytest", "selector": "k:fast", "wait_seconds": 20}
-    assert request.scope.source == "http" and request.scope.auth_level == "developer"
-    assert request.scope.principal_id == "account:" + hashlib.sha256(b"dev").hexdigest()
+    assert request.scope.source == "http" and request.scope.auth_level == "admin"
+    assert request.scope.principal_id == "account:" + hashlib.sha256(b"root").hexdigest()
     assert request.scope.workspace_roots == ()
 
 
@@ -249,7 +253,7 @@ def test_a_finished_report_is_rendered_with_its_failures(monkeypatch):
               "failures": [{"id": "t.py::test_bad", "file": "t.py", "line": 4,
                             "message_excerpt": "assert 1 == 2"}]}
     _serve_gateway(monkeypatch, SpyGateway([report]))
-    reply = ts._handle_slash("/test result " + JOB, context=DEVELOPER)
+    reply = ts._handle_slash("/test result " + JOB, context=ADMIN)
     assert "test run %s: failed (pytest) exit=1" % JOB in reply
     assert "passed=1 failed=1" in reply and "t.py::test_bad (t.py:4) assert 1 == 2" in reply
 
@@ -259,10 +263,10 @@ def test_manual_mode_refuses_a_chat_run_at_the_chain_gate_but_not_its_reads(monk
     gateway = SpyGateway([{"object": "test_run_status", "job_id": JOB, "status": "running",
                            "runner": "pytest", "elapsed_seconds": 1}])
     _serve_gateway(monkeypatch, gateway)
-    reply = ts._handle_slash("/test pytest", context=DEVELOPER)
+    reply = ts._handle_slash("/test pytest", context=ADMIN)
     assert reply.startswith("refused /test:")
     assert gateway.requests == []
-    reply = ts._handle_slash("/test status " + JOB, context=DEVELOPER)
+    reply = ts._handle_slash("/test status " + JOB, context=ADMIN)
     assert reply.startswith("test run %s: running" % JOB)
     assert [request.tool_name for request in gateway.requests] == ["test_run_result"]
 
@@ -301,7 +305,7 @@ def test_another_principals_job_digest_falls_back_to_a_file(monkeypatch):
         {"object": "output_digest", "source_kind": "file", "final_line": "done"},
     ])
     _serve_gateway(monkeypatch, gateway)
-    reply = ts._handle_slash("/digest build-output", context=DEVELOPER)
+    reply = ts._handle_slash("/digest build-output", context=ADMIN)
     assert reply.startswith("output digest:") and '"source_kind": "file"' in reply
     assert [dict(r.arguments) for r in gateway.requests] == [
         {"job_id": "build-output"}, {"path": "build-output"}]
@@ -310,7 +314,7 @@ def test_another_principals_job_digest_falls_back_to_a_file(monkeypatch):
 def test_an_unknown_test_run_is_not_found(monkeypatch):
     _serve_gateway(monkeypatch, SpyGateway([
         {"ok": False, "error_code": "JOB_NOT_FOUND", "message": "test run not found"}]))
-    reply = ts._handle_slash("/test result " + JOB, context=DEVELOPER)
+    reply = ts._handle_slash("/test result " + JOB, context=ADMIN)
     assert reply.startswith("test_run_result refused: JOB_NOT_FOUND")
 
 

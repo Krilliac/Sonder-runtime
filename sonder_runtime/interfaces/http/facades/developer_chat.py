@@ -15,7 +15,9 @@ would make, and nothing else:
   there and the refusal names no call. Approving one run by its ``call_id``
   goes through the HTTP route (``POST /v1/tools/test-run`` or
   ``/v1/build/*``), whose refusal names it. ``render_refusal`` still shows a
-  ``call_id`` when a gateway refusal carries one;
+  ``call_id`` when a gateway refusal carries one. ``/test`` and ``/digest``
+  need admin authority, as their routes do; ``/build`` and ``/fix-build``
+  need developer or admin authority, as ``/v1/build/*`` does;
 * ``/crash`` and ``/profile`` become one request to the admin
   ``DebugToolsHttpFacade`` -- the ``/v1/tools/crash-*``, ``profile-*`` and
   ``debug-runs`` routes -- with the same admin guard, the same permission
@@ -39,8 +41,11 @@ from . import build_tools as http_build
 from . import testing_tools as http_testing
 from .typed_gateway import GatewayErrorCodes
 
-DEVELOPER_COMMANDS = frozenset({"/test", "/digest", "/build", "/fix-build"})
-ADMIN_COMMANDS = frozenset({"/crash", "/profile"})
+# The authority each spelling's HTTP route requires: developer or admin for
+# ``/v1/build/*``; admin for ``/v1/tools/test-run``, ``output-digest`` and the
+# ``crash-*``/``profile-*`` routes.
+DEVELOPER_COMMANDS = frozenset({"/build", "/fix-build"})
+ADMIN_COMMANDS = frozenset({"/test", "/digest", "/crash", "/profile"})
 CHAT_COMMANDS = DEVELOPER_COMMANDS | ADMIN_COMMANDS
 
 TEST_USAGE = (

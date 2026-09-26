@@ -3016,7 +3016,8 @@ def _developer_chat_reply(cmd, arg, context):
     ``interfaces/http/facades/developer_chat.py``): a typed gateway call as
     the authenticated principal with ``source="http"``, or an admin ``DebugToolsHttpFacade`` request (same guard, grading and
     caps as ``/v1/tools/crash-*``). The authority check is the route's:
-    developer or admin for the typed tools, admin for crash and profile.
+    developer or admin for ``/build`` and ``/fix-build``, admin for
+    ``/test``, ``/digest``, ``/crash`` and ``/profile``.
 
     The permission modes have already graded the line unattended at the
     chain gate (``_http_slash_refusal``), without the call's arguments; a
@@ -5134,14 +5135,17 @@ class Handler(BaseHTTPRequestHandler):
 
         return self._dispatch_developer_gateway_route(
             method, path, payload, BuildHttpRoutes, invalid_code="INVALID_BUILD_REQUEST",
-            read_noun="build reads",
+            read_noun="build reads", admin_only=False,
         )
 
     def _handle_test_tools_request(self, method, path, payload=None):
         """``/v1/tools/test-run`` and ``/v1/tools/output-digest``.
 
-        The same gating as ``/v1/build/*``: developer authority, then one
-        typed gateway call as the authenticated principal with
+        Admin authority is required, as for ``/v1/tools/crash-*``: a test run
+        executes the project's own code, and a digest reads any log-like file
+        under the file roots. An admin caller also carries the configured
+        workspace roots, so the planner's per-caller grant check applies.
+        Then one typed gateway call as the authenticated principal with
         ``source="http"`` (graded unattended; ``test_run`` is execution). See
         ``interfaces/http/facades/testing_tools.py``.
         """
@@ -5154,25 +5158,27 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return self._dispatch_developer_gateway_route(
             method, path, payload, TestRunHttpRoutes, invalid_code="INVALID_TEST_REQUEST",
-            read_noun="test run reads",
+            read_noun="test run reads", admin_only=True,
         )
 
     def _dispatch_developer_gateway_route(self, method, path, payload, routes_type, *,
-                                          invalid_code, read_noun):
+                                          invalid_code, read_noun, admin_only):
         """Authenticate, bind the principal, and send one typed gateway route.
 
-        Developer or admin authority is required. Workspace roots are passed
-        only for admin callers; the permission modes grade every call as an
-        unattended HTTP caller.
+        ``admin_only`` requires admin authority; otherwise developer or admin
+        authority is required. Workspace roots are passed only for admin
+        callers; the permission modes grade every call as an unattended HTTP
+        caller.
         """
         auth = self._request_auth_context()
         if not auth.get("authorized"):
             self._send_auth_error()
             return True
-        if not _developer_authorized(auth):
-            self._send_json_payload({"error": {"code": "FORBIDDEN",
-                                               "message": "developer or admin authority is required"}},
-                                    status=403)
+        allowed = _admin_authorized(auth) if admin_only else _developer_authorized(auth)
+        if not allowed:
+            self._send_json_payload({"error": {"code": "FORBIDDEN", "message": (
+                "admin authority is required" if admin_only
+                else "developer or admin authority is required")}}, status=403)
             return True
         from sonder_runtime.bootstrap.app import default_app
 

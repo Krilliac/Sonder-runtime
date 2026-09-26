@@ -17,8 +17,8 @@ production lifecycle and admission layer (`sonder_lifecycle.py`).
 | `POST /v1/admin/drain` | admin | Begin graceful drain (idempotent). |
 | `GET /v1/tools/inventory` | admin | Redacted host developer-tool inventory; optional `category` and `name` filters. See [Host tool inventory](../host-tool-inventory.md). |
 | `POST /v1/tools/inventory/refresh` | admin | Force host tool rediscovery (`{}` or `{"full": true}`); returns the same view. |
-| `POST /v1/tools/test-run`, `GET /v1/tools/test-run/<id>` | developer/admin (own runs only) | Structured test run through the typed `test_run` / `test_run_result` tools, graded unattended by the permission modes (`test_run` is execution). `202` with the status while running, `200` with the report. Cancel with `POST /v1/jobs/<id>/cancel`. See [Structured test runs](../structured-test-runs.md#over-http). |
-| `POST /v1/tools/output-digest` | developer/admin | Typed `output_digest` of exactly one of an owned test-run `job_id` or a guarded `path`. |
+| `POST /v1/tools/test-run`, `GET /v1/tools/test-run/<id>` | admin (own runs only) | Structured test run through the typed `test_run` / `test_run_result` tools, graded unattended by the permission modes (`test_run` is execution). `202` with the status while running, `200` with the report. Cancel with `POST /v1/jobs/<id>/cancel`. See [Structured test runs](../structured-test-runs.md#over-http). |
+| `POST /v1/tools/output-digest` | admin | Typed `output_digest` of exactly one of an owned test-run `job_id` or a guarded `path`. |
 | `GET /v1/admin/updates/status` | admin | Durable update state (System page). |
 | `POST /v1/memory/replication/batches` | fixed configured peer only | Disabled unless the typed fact-only receiver is enabled; accepts one bounded authenticated replication batch and returns its durable receipt. It is not an operator send, takeover, or failback endpoint. |
 | `GET /v1/sonder/status` | admin/owner | Rich host-wide runtime/stats snapshot, including the configured deployment profile and honest capability availability. Ordinary hosted accounts receive only their account and the model catalog. |

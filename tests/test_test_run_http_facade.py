@@ -307,29 +307,37 @@ def _serve_as(monkeypatch, *, authorized, role, username="alice"):
         "account": {"role": role, "username": username}, "api_key": False})
 
 
-def test_serve_refuses_a_caller_without_developer_authority(http_server, monkeypatch):
-    _serve_as(monkeypatch, authorized=True, role="user")
+@pytest.mark.parametrize("role", ["user", "developer"])
+def test_serve_refuses_a_caller_without_admin_authority(http_server, monkeypatch, role):
+    # A test run executes the project's own code and a digest reads any
+    # log-like file under the roots; a non-admin carries no workspace grant
+    # to confine either, so the family is admin-only, like /v1/tools/crash-*.
+    _serve_as(monkeypatch, authorized=True, role=role)
     monkeypatch.setattr("sonder_runtime.bootstrap.app.default_app",
                         lambda: pytest.fail("a refused request constructed the app"))
     status, body = _post(http_server, "/v1/tools/test-run", {"runner": "pytest"})
     assert status == 403 and body["error"]["code"] == "FORBIDDEN"
+    assert body["error"]["message"] == "admin authority is required"
     assert _get(http_server, "/v1/tools/test-run/" + JOB)[0] == 403
     assert _post(http_server, "/v1/tools/output-digest", {"path": "a.log"})[0] == 403
 
 
-def test_serve_dispatches_as_the_account_principal(http_server, monkeypatch):
+def test_serve_dispatches_as_the_account_principal(http_server, monkeypatch, tmp_path):
     import hashlib
 
     gateway = SpyGateway()
-    _serve_as(monkeypatch, authorized=True, role="developer", username="dev")
+    _serve_as(monkeypatch, authorized=True, role="admin", username="root")
+    state = SimpleNamespace(workspace_roots=(str(tmp_path),))
     monkeypatch.setattr("sonder_runtime.bootstrap.app.default_app",
-                        lambda: SimpleNamespace(tools=gateway, config=None))
+                        lambda: SimpleNamespace(tools=gateway, config=SimpleNamespace(state=state)))
     status, body = _post(http_server, "/v1/tools/test-run", {"runner": "pytest"})
     assert status == 202 and body["job_id"] == JOB
     request = gateway.requests[-1]
-    assert request.scope.source == "http" and request.scope.auth_level == "developer"
-    assert request.scope.workspace_roots == ()
-    assert request.scope.principal_id == "account:" + hashlib.sha256(b"dev").hexdigest()
+    assert request.scope.source == "http" and request.scope.auth_level == "admin"
+    # The admin caller carries the configured workspace grant to the planner.
+    assert tuple(str(root) for root in request.scope.workspace_roots) == (
+        str(tmp_path.resolve()),)
+    assert request.scope.principal_id == "account:" + hashlib.sha256(b"root").hexdigest()
     status, body = _post(http_server, "/v1/tools/output-digest", {"job_id": JOB, "path": "a.log"})
     assert status == 400 and body["error"]["code"] == "INVALID_TEST_REQUEST"
     assert len(gateway.requests) == 1
