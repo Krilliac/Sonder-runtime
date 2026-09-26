@@ -81,6 +81,7 @@ from sonder_runtime.interfaces.repl.facades.developer_tools import (
 from sonder_runtime.application.context import local_owner_context as _local_owner_context
 from sonder_runtime.interfaces.repl.facades.debug_tools import (
     crash_command as _render_crash_command,
+    crash_repro_observation as _crash_repro_observation,
     profile_command as _render_profile_command,
 )
 from sonder_runtime.interfaces.repl.facades.build_tools import (
@@ -2496,6 +2497,9 @@ def _test_command(
             )
             if done:
                 out(text)
+                note = _crash_repro_note(services, job_id, context)
+                if note:
+                    out(note)
                 return
             now = clock()
             if now - last_progress >= progress_every:
@@ -2508,6 +2512,31 @@ def _test_command(
                 time.sleep(min(0.25, poll_seconds))
     except KeyboardInterrupt:
         out(_render_test_followup(services, "cancel", job_id, context))
+
+
+def _crash_repro_note(services, job_id, context):
+    """Record a finished ``/test`` of the ``/crash fix`` repro as a crash-fix attempt.
+
+    The strategy trace is optional: without it (rollout off, or unavailable)
+    nothing is recorded and nothing is shown. The run's own report is read
+    once, without waiting; a run that measured nothing about the crash is
+    left alone.
+    """
+    runs = getattr(services, "test_runs", None) if services is not None else None
+    if runs is None:
+        return None
+    try:
+        report = runs.result(job_id, context, wait_seconds=0)
+    except Exception:
+        return None
+    if not hasattr(report, "failures") or not hasattr(report, "selector"):
+        return None
+    from sonder_runtime.bootstrap.debug_tools import observe_crash_repro
+    from sonder_runtime.bootstrap.strategy import try_configured_strategy_trace
+
+    return _crash_repro_observation(
+        report, trace_getter=try_configured_strategy_trace, observe=observe_crash_repro,
+    )
 
 
 def _debug_services():

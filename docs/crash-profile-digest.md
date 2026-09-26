@@ -183,8 +183,20 @@ only `result.json` is kept (the last 32 runs, under the state directory).
   binary is the crashed process.
 
 Nothing is launched to find a repro. You (or the model) fix the code and run
-the existing build and test tools; the strategy metric `crash_reproduced`
-(1 while the repro crashes, 0 once fixed) is minimized.
+the existing build and test tools.
+
+When strategy tracing is on, each later console `/test` of exactly that repro
+(same runner and selector) that finishes as passed or failed is recorded as
+one attempt of this crash in the strategy trace, with the metric
+`crash_reproduced` (1 while the repro still crashes, 0 once it passes,
+minimized) and the handoff's `CRASH_REPRODUCED` failure while it still
+crashes. The console prints one line such as
+`crash repro passes: crash_reproduced 1 -> 0 (attempt 2)`. Attempts are
+numbered from the trace's own history of this crash in this checkout, so a
+restarted console continues the run; at most 12 are recorded. A run that
+errored, found no tests, timed out or was cancelled records nothing, and
+with tracing off nothing is recorded or shown. Only the console `/test` path
+records attempts; a test run through another surface does not.
 
 ## Never done
 

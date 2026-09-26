@@ -27,6 +27,7 @@ from typing import Any
 from ....application.context import OperationContext
 from ....application.debugging.crash_fix import (
     build_crash_fix_handoff,
+    crash_reproduced_in,
     render_crash_fix_brief,
     repro_lookup_for,
 )
@@ -77,6 +78,9 @@ _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
 _LAST: dict[str, Any] = {"run_id": "", "report": None}
 _REPRO_BY_RUN: dict[str, str] = {}
 _MAX_REMEMBERED = 32
+# The newest ``/crash fix`` hand-off that named a repro, and the checkout it
+# was for: a later ``/test`` of exactly that repro is one crash-fix attempt.
+_REPRO_WATCH: dict[str, Any] = {"handoff": None, "project": ""}
 
 
 class _Usage(Exception):
@@ -382,7 +386,47 @@ def crash_fix_brief(
         )
     except InvalidInput as exc:
         return "crash fix refused: %s: %s" % (_code(exc), str(exc)[:200])
+    if handoff.repro is not None:
+        roots = tuple(getattr(context, "workspace_roots", ()) or ())
+        _REPRO_WATCH["handoff"] = handoff
+        _REPRO_WATCH["project"] = str(roots[0]) if roots else ""
     return render_crash_fix_brief(handoff, run_id=identifier)
+
+
+def crash_repro_observation(
+    report: Any,
+    *,
+    trace_getter: Callable[[], Any],
+    observe: Callable[..., Any],
+) -> str | None:
+    """Record a finished ``/test`` run of the remembered crash repro.
+
+    Only a run of exactly the repro ``/crash fix`` named (same runner and
+    selector) that measured something counts (``crash_reproduced_in``); it
+    becomes one attempt of that crash in the strategy trace, with the metric
+    ``crash_reproduced`` going 1 -> 0 once the crash is gone. Without strategy
+    tracing (``trace_getter()`` is None) nothing is recorded and nothing is
+    said. Returns the one line to show, or None.
+    """
+    handoff = _REPRO_WATCH.get("handoff")
+    if handoff is None:
+        return None
+    reproduced = crash_reproduced_in(report, handoff.repro)
+    if reproduced is None:
+        return None
+    trace = trace_getter()
+    if trace is None:
+        return None
+    try:
+        recorded = observe(trace, handoff, project_dir=str(_REPRO_WATCH.get("project", "")),
+                           reproduced_after=reproduced)
+    except (SonderError, ValueError, OSError) as exc:
+        return "crash repro not recorded: %s" % _code(exc)
+    if recorded is None:
+        return "crash repro not recorded: this crash's attempt budget is spent"
+    _decision, attempt, before = recorded
+    return "crash repro %s: crash_reproduced %d -> %d (attempt %d)" % (
+        "still crashes" if reproduced else "passes", int(bool(before)), int(reproduced), attempt)
 
 
 def crash_command(
@@ -586,5 +630,5 @@ def profile_command(
 
 __all__ = [
     "CRASH_USAGE", "HELP_LINES", "NOT_COMPOSED", "PROFILE_USAGE",
-    "crash_command", "crash_fix_brief", "profile_command",
+    "crash_command", "crash_fix_brief", "crash_repro_observation", "profile_command",
 ]

@@ -232,20 +232,37 @@ def debug_http_authorizer(debug_service):
     return authorize
 
 
-def observe_crash_repro(trace, *, run_id: str, attempt_number: int, attempt_limit: int,
-                        project_dir: str, signature: str, signature_basis: str,
-                        repro_selector: str, reproduced_before: bool, reproduced_after: bool,
-                        route: str = "", code: str = ""):
-    """Observe one crash-fix attempt: metric ``crash_reproduced`` (0 or 1, minimize).
+# Attempts one crash's repro trace may record; the budget is fixed so a later
+# console never tries to widen a persisted one.
+CRASH_REPRO_ATTEMPT_LIMIT = 12
 
-    The failure digest is the full sha256 of the signature and its basis, so
-    the same crash keeps one identity across attempts; nothing else from the
-    crashed process enters the strategy trace.
+
+def crash_repro_run_id(handoff, project_dir: str) -> str:
+    """The strategy run of one crash in one project: stable across consoles."""
+    basis = json.dumps([str(project_dir), handoff.signature, handoff.signature_basis],
+                       ensure_ascii=True)
+    return "crash-fix-" + hashlib.sha256(basis.encode("ascii")).hexdigest()[:32]
+
+
+def observe_crash_repro(trace, handoff, *, project_dir: str, reproduced_after: bool,
+                        route: str = "", code: str = ""):
+    """Record one run of a crash's repro: metric ``crash_reproduced`` (1 -> 0, minimize).
+
+    ``handoff`` is the ``CrashFixHandoff`` of ``/crash fix`` and must carry a
+    repro. The attempt number and the before value come from the trace's own
+    history of this crash (the first run starts from 1: the dump proves it
+    crashed), so a restarted console continues the same run instead of
+    reusing an attempt id. The failure is the handoff's
+    ``crash_failure_observation`` (full sha256 of signature and basis), so the
+    same crash keeps one identity; nothing else from the crashed process
+    enters the trace. Returns ``(decision, attempt_number, reproduced_before)``,
+    or None once the attempt budget is spent.
     """
+    from ..application.debugging.crash_fix import (
+        crash_failure_observation,
+        crash_progress_metric,
+    )
     from ..domain.strategy.models import (
-        FailureClass,
-        FailureObservation,
-        ProgressMetric,
         ProgressVector,
         StrategyAction,
         StrategyAttempt,
@@ -254,41 +271,52 @@ def observe_crash_repro(trace, *, run_id: str, attempt_number: int, attempt_limi
         StrategyUsage,
     )
 
+    repro = getattr(handoff, "repro", None)
+    if repro is None:
+        raise ValueError("a crash repro observation needs the handoff's repro")
+
     def digest(value) -> str:
         return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True,
                                          default=str).encode("ascii")).hexdigest()
 
-    scope = digest((project_dir, repro_selector))
-    crash_digest = hashlib.sha256((str(signature) + str(signature_basis)).encode("utf-8")).hexdigest()
+    run_id = crash_repro_run_id(handoff, project_dir)
+    history = trace.history(run_id)
+    if len(history) >= CRASH_REPRO_ATTEMPT_LIMIT:
+        return None
+    reproduced_before = True
+    if history and history[-1].progress_after is not None:
+        reproduced_before = any(metric.value for metric in history[-1].progress_after.metrics)
+    attempt_number = len(history) + 1
+    scope = digest((str(project_dir), repro.runner, repro.selector))
+    failure = crash_failure_observation(handoff)
 
     def vector(reproduced: bool) -> ProgressVector:
-        return ProgressVector(scope, (ProgressMetric("crash_reproduced", 1 if reproduced else 0),),
-                              complete=True)
+        return ProgressVector(scope, (crash_progress_metric(reproduced),), complete=True)
 
-    failure = None
-    if reproduced_after:
-        failure = FailureObservation(
-            FailureClass.TEST_FAILURE if repro_selector else FailureClass.IMPLEMENTATION_FAILURE,
-            "CRASH_REPRODUCED", crash_digest)
     attempt = StrategyAttempt(
-        run_id, "crash-%s-attempt-%d" % (crash_digest[:12], int(attempt_number)),
-        StrategySignature("patch", digest((project_dir, signature, signature_basis)),
-                          ("project:" + scope,), digest(code or signature),
-                          "fix crashing code path", "repro:" + digest(repro_selector)[:16]),
-        "failed" if failure else "succeeded", failure,
-        vector(reproduced_before), vector(reproduced_after),
+        run_id, "%s-attempt-%d" % (run_id, attempt_number),
+        StrategySignature("patch", digest((str(project_dir), handoff.signature,
+                                           handoff.signature_basis)),
+                          ("project:" + scope,), digest(code or handoff.signature),
+                          "fix crashing code path", "repro:" + digest(repro.selector)[:16]),
+        "failed" if reproduced_after else "succeeded",
+        failure if reproduced_after else None,
+        vector(reproduced_before), vector(bool(reproduced_after)),
         StrategyUsage(attempts=1, verifier_calls=1),
         model_route=str(route)[:128],
     )
-    return trace.record(
-        attempt, budget=StrategyBudget(attempts=int(attempt_limit)),
+    decision = trace.record(
+        attempt, budget=StrategyBudget(attempts=CRASH_REPRO_ATTEMPT_LIMIT,
+                                       verifier_calls=CRASH_REPRO_ATTEMPT_LIMIT),
         available_actions=(StrategyAction.REPAIR, StrategyAction.INSPECT, StrategyAction.CRITIC),
         unresolved_effects=False, transport_replay_safe=False,
     )
+    return decision, attempt_number, reproduced_before
 
 
 __all__ = [
     "DEBUG_TYPED_TOOLS", "DebugToolPermissionEvaluator", "compose_debug_tools",
     "debug_http_authorizer", "debug_permission_resolvers",
-    "debug_tool_executor", "observe_crash_repro",
+    "CRASH_REPRO_ATTEMPT_LIMIT", "crash_repro_run_id", "debug_tool_executor",
+    "observe_crash_repro",
 ]

@@ -473,6 +473,36 @@ def repro_from_test_reports(reports: Iterable[Any], process_name: str) -> ReproS
     return None
 
 
+def crash_reproduced_in(report: Any, repro: ReproSpec | None) -> bool | None:
+    """Whether a finished run of exactly this repro still crashed.
+
+    ``True`` when a failure's bounded message says the test binary crashed,
+    ``False`` when the run passed or every listed failure is something else
+    (the crash is gone), and ``None`` when the report measured nothing about
+    it: a different runner or selector, a run that errored, found no tests,
+    was cancelled or timed out, or a failed run whose failure list is empty
+    or truncated.
+    """
+    if repro is None:
+        return None
+    if _text(getattr(report, "runner", ""), 32).lower() != repro.runner:
+        return None
+    if _text(getattr(report, "selector", ""), 300) != repro.selector:
+        return None
+    status = _text(getattr(report, "status", ""), 32).lower()
+    if status == "passed":
+        return False
+    if status != "failed":
+        return None
+    failures = tuple(getattr(report, "failures", ()) or ())
+    if any(_CRASH_FAILURE_RE.search(_text(getattr(failure, "message_excerpt", ""), 400))
+           for failure in failures):
+        return True
+    if not failures or getattr(report, "failures_truncated", False):
+        return None
+    return False
+
+
 def repro_lookup_for(
     *, explicit: str = "", runner: str = "ctest",
     reports: Callable[[], Iterable[Any]] | None = None,
@@ -617,7 +647,8 @@ __all__ = [
     "CRASH_METRIC", "CRASH_OBSERVATION_CODE", "CrashFixHandoff", "ReproLookup",
     "ReproSpec", "SourceLookup", "SourceSpan", "UNTRUSTED_LABEL",
     "build_crash_fix_handoff", "crash_diagnostic_lines", "crash_diagnostics",
-    "crash_failure_observation", "crash_progress_metric", "explicit_repro",
+    "crash_failure_observation", "crash_progress_metric", "crash_reproduced_in",
+    "explicit_repro",
     "map_report_sources", "project_relative", "project_source_lookup",
     "redact_user_paths", "render_crash_diagnostic",
     "render_crash_fix_brief", "repro_from_test_reports", "repro_lookup_for",
