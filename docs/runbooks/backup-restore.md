@@ -115,6 +115,24 @@ Run the disposable rehearsal against a verified backup before an upgrade or
 recovery exercise.  This is a local/test-only contract: it does not stop the
 service, switch `current`, contact a provider, or provide live failover.
 
+```bash
+sudo -u sonder /opt/sonder/current/venv/bin/python -m sonder_runtime restore rehearse \
+    /var/backups/sonder/<verified-backup> \
+    --workspace /var/tmp/sonder-recovery-rehearsal \
+    --source-revision "<release revision recorded before the upgrade>" --json
+```
+
+`--workspace` must be an existing regular directory (a symlink is refused);
+without it the command uses a fresh temporary directory and removes it when
+empty.  `--source-revision` makes the drill refuse a backup that records a
+different revision; without it the backup's own recorded revision is used.
+The candidate upgrade is labelled `<source>+rehearsal` unless
+`--target-revision` names one.  The command exits 0 with the report below,
+1 when the rehearsal refuses the backup (the JSON names the error and the
+steps completed before it), and 2 for an unusable workspace or request.
+
+The same drill from Python, for a caller composing its own port:
+
 ```python
 from pathlib import Path
 

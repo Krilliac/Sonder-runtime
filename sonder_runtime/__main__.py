@@ -12,7 +12,8 @@ Commands:
     config        show the effective redacted configuration
     migrate       apply pending schema migrations
     backup        create / verify / list / prune backups
-    restore       verify / apply a backup into an empty directory
+    restore       verify / apply a backup into an empty directory, or
+                  rehearse restore + failed-upgrade rollback in a disposable tree
     drain         request graceful drain of a running server
     smoke         minimal end-to-end check without a real model
     control-state-rehearsal  collect disposable provider evidence without promotion
@@ -781,6 +782,11 @@ def cmd_restore(args) -> int:
 
 
 def _cmd_restore(args) -> int:
+    if args.restore_command == "rehearse":
+        # Filesystem-only: the drill needs no application graph, services
+        # or state home, and must not open the live stores.
+        return _restore_rehearse(args)
+
     from .bootstrap.app import default_app
 
     backups = default_app().backup
@@ -815,6 +821,130 @@ def _cmd_restore(args) -> int:
         )
         return 0
     raise AssertionError(args.restore_command)
+
+
+_REHEARSAL_TARGET_SUFFIX = "+rehearsal"
+
+
+def _rehearsal_target_revision(source_revision: str, requested: str | None) -> str:
+    """The candidate revision the scripted upgrade pretends to install.
+
+    It only labels the disposable release marker, so a caller that has no real
+    candidate gets a value that is visibly synthetic and always differs from
+    the source revision the backup records.
+    """
+    if requested is not None:
+        return requested
+    from sonder_runtime.application.updates.recovery_rehearsal import MAX_REVISION_CHARS
+
+    candidate = source_revision + _REHEARSAL_TARGET_SUFFIX
+    if len(candidate) <= MAX_REVISION_CHARS:
+        return candidate
+    import hashlib
+
+    return "rehearsal-of:" + hashlib.sha256(source_revision.encode("utf-8")).hexdigest()
+
+
+def _restore_rehearse(args) -> int:
+    """Run the P6 offline recovery rehearsal against one backup directory.
+
+    Restores the backup into a fresh directory under a fenced workspace,
+    applies a scripted candidate upgrade that fails on purpose, rolls it back,
+    restores the authoritative state from the same backup, verifies every
+    digest, and removes the disposable tree.  It never reads or switches the
+    live release pointer or the running state home.
+    """
+    import tempfile
+    import uuid
+
+    from sonder_runtime.adapters.updates.offline_rehearsal import (
+        FilesystemOfflineRecoveryPort,
+    )
+    from sonder_runtime.application.updates.recovery_rehearsal import (
+        OfflineRecoveryRehearsal, OfflineRehearsalRequest, RehearsalError,
+    )
+
+    as_json = bool(args.json)
+    owned_workspace = args.workspace is None
+    if owned_workspace:
+        workspace = tempfile.mkdtemp(prefix="sonder-recovery-rehearsal-")
+    else:
+        workspace = os.path.abspath(os.path.expanduser(args.workspace))
+
+    def refuse(payload: dict, code: int) -> int:
+        payload = {"ok": False, "path": args.path, "workspace": workspace, **payload}
+        if as_json:
+            _emit(payload, as_json=True)
+        else:
+            print("FAIL: %s: %s" % (payload["error"], payload["message"]), file=sys.stderr)
+            if payload.get("steps_completed"):
+                print("steps completed: " + ", ".join(payload["steps_completed"]),
+                      file=sys.stderr)
+        return code
+
+    try:
+        try:
+            port = FilesystemOfflineRecoveryPort(workspace)
+        except (OSError, ValueError) as exc:
+            return refuse({
+                "error": "workspace_invalid",
+                "message": "--workspace must be an existing regular directory ("
+                           + type(exc).__name__ + ")",
+                "steps_completed": [],
+            }, 2)
+        if args.source_revision is not None:
+            source_revision = args.source_revision
+        else:
+            try:
+                source_revision = port.inspect_backup(args.path).source_revision
+            except RehearsalError as exc:
+                return refuse({
+                    "error": type(exc).__name__, "message": str(exc),
+                    "steps_completed": [],
+                }, 1)
+            except OSError as exc:
+                return refuse({
+                    "error": "backup_unreadable",
+                    "message": "backup directory is unreadable (" + type(exc).__name__ + ")",
+                    "steps_completed": [],
+                }, 1)
+        destination = os.path.join(workspace, "rehearsal-" + uuid.uuid4().hex[:12])
+        try:
+            request = OfflineRehearsalRequest(
+                backup_ref=args.path,
+                destination_ref=destination,
+                source_revision=source_revision,
+                target_revision=_rehearsal_target_revision(
+                    source_revision, args.target_revision,
+                ),
+            )
+        except ValueError as exc:
+            return refuse({
+                "error": "request_invalid", "message": str(exc), "steps_completed": [],
+            }, 2)
+        try:
+            report = OfflineRecoveryRehearsal(port).run(request)
+        except RehearsalError as exc:
+            return refuse({
+                "error": type(exc).__name__,
+                "message": str(exc),
+                "steps_completed": [step.value for step in exc.steps],
+                "destination_left": os.path.lexists(destination),
+            }, 1)
+        payload = {"ok": True, "path": args.path, "workspace": workspace,
+                   **report.as_dict(), "evidence_digest": report.evidence_digest}
+        _emit(payload, as_json=as_json)
+        if not as_json:
+            print("Offline recovery rehearsal passed; the disposable tree was "
+                  "removed and the live state was not touched.")
+        return 0
+    finally:
+        if owned_workspace:
+            # Only an empty directory this command created is removed: a
+            # tree the rehearsal left behind (cleanup refused past its bound)
+            # stays for the operator to inspect, as the contract requires.
+            with contextlib.suppress(OSError):
+                os.rmdir(workspace)
 
 
 def cmd_smoke(args) -> int:
@@ -1707,6 +1837,26 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("path")
     rp.add_argument("destination")
     rp.add_argument("--confirm", help="pass 'restore' to confirm")
+    rp.add_argument("--json", action="store_true")
+    rp = restore_sub.add_parser(
+        "rehearse",
+        help="offline restore + failed-upgrade rollback drill in a disposable tree",
+    )
+    rp.add_argument("path", help="verified backup directory")
+    rp.add_argument(
+        "--workspace",
+        help="existing directory that fences the disposable tree "
+             "(default: a fresh temporary directory, removed afterwards)",
+    )
+    rp.add_argument(
+        "--source-revision",
+        help="revision the backup must record (default: the backup's own)",
+    )
+    rp.add_argument(
+        "--target-revision",
+        help="label for the scripted candidate upgrade "
+             "(default: '<source>+rehearsal')",
+    )
     rp.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_restore)
 
