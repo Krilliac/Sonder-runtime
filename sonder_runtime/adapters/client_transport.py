@@ -40,8 +40,22 @@ class _AuthenticatedRedirectRefusal(urllib.request.HTTPRedirectHandler):
 
 
 def _open(request):
-    """Open ``request`` through an opener that never redirects the key."""
-    opener = urllib.request.build_opener(_AuthenticatedRedirectRefusal)
+    """Open ``request`` through an opener that never redirects the key.
+
+    A keyed plaintext request (only ever to loopback, see
+    :func:`require_secure_key_transport`) also bypasses every environment or
+    system proxy: urllib has no implicit loopback bypass, so with
+    ``http_proxy`` set and no matching ``no_proxy`` entry the Bearer header
+    would travel in plaintext to the proxy host. Keyed https requests keep
+    proxy support because CONNECT tunnels the header inside TLS.
+    """
+    handlers = [_AuthenticatedRedirectRefusal]
+    if (
+        request.has_header("Authorization")
+        and request.type.lower() == "http"
+    ):
+        handlers.append(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(*handlers)
     return opener.open(request)
 
 

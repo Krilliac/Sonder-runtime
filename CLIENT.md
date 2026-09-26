@@ -141,9 +141,11 @@ surface and consume host resources. Treat the key like a privileged password:
 - Rotate it in `/etc/sonder/sonder.env` and restart `sonder` if it leaks.
 - Never send the key over plaintext HTTP except to a loopback address. Remote
   clients must use HTTPS through the documented reverse proxy. The thin client
-  enforces this: with a key set it refuses a non-loopback `http://` server and
-  refuses to follow any redirect, so the key cannot be forwarded to another
-  origin or downgraded to plaintext.
+  enforces this: with a key set it refuses a non-loopback `http://` server,
+  refuses to follow any redirect, and connects to a loopback `http://` server
+  directly even when `http_proxy` is set, so the key cannot be forwarded to
+  another origin or sent in plaintext to a proxy. Keyed `https://` requests
+  still honour `https_proxy`, which tunnels the header inside TLS.
 - Never expose or port-forward the runtime's loopback port. Restrict the TLS
   endpoint at the firewall or security-group layer as well.
 
