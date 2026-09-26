@@ -90,6 +90,12 @@ from sonder_runtime.platform.deployment_auth import (
     authenticates_callers as _deployment_authenticates_callers_policy,
 )
 from sonder_runtime.domain.model_usage import usage_count as _model_usage_count
+from sonder_runtime.domain.model_usage import (
+    merge_reasoning_response_usage as _merge_reasoning_response_usage,
+)
+from sonder_runtime.domain.memory.authoritative_fact_metadata import (
+    fact_metadata_from_inputs as _surface_fact_metadata,
+)
 from sonder_runtime.domain.model_usage_formatting import (
     usage_source as _model_usage_source,
 )
@@ -180,6 +186,8 @@ from sonder_runtime.application.routing import tier_escalation
 # The per-rung provider ContextVar lives in this package module, not here, so
 # a live reload of server.py cannot orphan an in-flight rung binding.
 from sonder_runtime.application.chat import provider_bridge as _provider_bridge
+from sonder_runtime.adapters import legacy_chat_bridge as _legacy_chat_bridge
+from sonder_runtime.adapters import mcp_tool_manifest as _mcp_tool_manifest
 from sonder_runtime.application.context_health import (
     ContextHealthService,
     ContextHealthSettings,
@@ -4127,7 +4135,7 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
     if qv is None and augment and _provider_bridge.active_rung() is not None:
         # Recall ranks by the Ollama embedder even when generation runs on
         # another provider; say so instead of silently recalling less.
-        _note_bridged_degradation(
+        _legacy_chat_bridge.note_degradation(
             "memory_recall_embeddings",
             "embedding provider unavailable; recall used no query vector",
         )
@@ -5107,52 +5115,6 @@ def _reasoning_segment_tokens(out, payload) -> int:
     return 1
 
 
-def _merge_reasoning_response_usage(first, later, *, segments: int) -> dict:
-    """Combine provider counters while retaining only the final response body."""
-    merged = dict(later if isinstance(later, dict) else {})
-    for key in (
-        "total_duration",
-        "load_duration",
-        "prompt_eval_count",
-        "prompt_eval_duration",
-        "eval_count",
-        "eval_duration",
-    ):
-        left = first.get(key) if isinstance(first, dict) else None
-        right = later.get(key) if isinstance(later, dict) else None
-        if all(
-            isinstance(value, int) and not isinstance(value, bool) and value >= 0
-            for value in (left, right)
-        ):
-            merged[key] = left + right
-        elif isinstance(left, int) and not isinstance(left, bool) and left >= 0:
-            merged[key] = left
-    first_message = first.get("message") if isinstance(first, dict) else None
-    first_thinking = (
-        first_message.get("thinking") if isinstance(first_message, dict) else None
-    )
-    first_thinking_chars = (
-        len(first_thinking) if isinstance(first_thinking, str) else 0
-    )
-    later_thinking_chars = None
-    if isinstance(later, dict) and "reasoning_segments" in later:
-        later_thinking_chars = _model_usage_count(later.get("thinking_chars"))
-    if later_thinking_chars is None:
-        later_message = later.get("message") if isinstance(later, dict) else None
-        later_thinking = (
-            later_message.get("thinking")
-            if isinstance(later_message, dict) else None
-        )
-        later_thinking_chars = (
-            len(later_thinking) if isinstance(later_thinking, str) else 0
-        )
-    thinking_chars = first_thinking_chars + later_thinking_chars
-    if thinking_chars > 0:
-        merged["thinking_chars"] = thinking_chars
-    merged["reasoning_segments"] = max(1, int(segments))
-    return merged
-
-
 def _preserve_reasoning_failure_usage(
     error: ModelCallError,
     first: dict,
@@ -5180,148 +5142,31 @@ def _preserve_reasoning_failure_usage(
     error.reasoning_segments = max(1, int(segments), later_segments)
 
 
-# --- HTTP chat through the ModelGateway for non-Ollama rungs -----------------
-# The legacy chat path below is Ollama-shaped.  When a rung's tier is bound to
-# another provider (SONDER_*_PROVIDER / SONDER_MODEL_BACKEND), the local
-# branch of _chat_request hands the payload to the application's
-# model_gateway instead; conversion, shaping and error classification live in
-# sonder_runtime/application/chat/provider_bridge.py.  With every tier on
-# Ollama none of this runs.
-
-
-def _bridge_provider_bindings():
-    """Bindings of the live graph when one exists, else the same env parse."""
-    bindings = getattr(_APP_GRAPH, "provider_bindings", None)
-    if bindings is not None:
-        return bindings
-    from sonder_runtime.adapters.provider_bindings import provider_bindings_from_env
-
-    try:
-        return provider_bindings_from_env()
-    except ValueError as exc:
-        # The gateway composition would refuse the same configuration; fail
-        # the turn loudly rather than silently serving it from Ollama.
-        raise ModelCallError("configuration", str(exc), status=503) from exc
+# HTTP chat through the ModelGateway for non-Ollama rungs: the bridge lives in
+# sonder_runtime/adapters/legacy_chat_bridge.py; these wrappers inject policy.
 
 
 def _bridge_provider_for_tier(tier_label, cloud=False):
     """The non-Ollama provider serving a local rung, or None for Ollama."""
-    if cloud:
-        return None
-    provider = _provider_bridge.provider_for_tier(tier_label, _bridge_provider_bindings())
-    return provider if _provider_bridge.is_bridged(provider) else None
-
-
-class _BridgeCancellation:
-    """Cancellation for one bridged model step: the legacy ``cancel_check`` only.
-
-    The ambient HTTP context carries the lifecycle coordinator's token, which
-    ``drain()`` cancels the moment a drain starts.  An admitted turn on the
-    Ollama path is never interrupted by that token -- drain waits for it --
-    so a bridged turn must not be either: honouring the coordinator token here
-    would throw away an answer the provider already produced (and billed).
-    Client disconnects and explicit cancels still arrive via ``cancel_check``.
-    """
-
-    def __init__(self, cancel_check):
-        self._check = cancel_check
-
-    @property
-    def cancelled(self):
-        return bool(self._check()) if callable(self._check) else False
-
-    def wait(self, timeout=None):
-        if timeout:
-            time.sleep(max(timeout, 0.0))
-        return self.cancelled
+    return _legacy_chat_bridge.provider_for_tier(tier_label, cloud, _APP_GRAPH)
 
 
 def _bridge_operation_context(timeout, cancel_check):
-    """The ambient turn context (correlation id R), bounded by this call.
-
-    The HTTP context's own 30 s default is an admission budget, not a model
-    budget; the legacy call's timeout is the deadline, as on the Ollama path.
-    Its cancellation is the legacy ``cancel_check`` only (see
-    ``_BridgeCancellation``): a drain that starts after admission lets the
-    turn finish, exactly as it does for an Ollama rung.  Consent follows the
-    same host policy _gateway_generate_text applies.
-    """
-    import dataclasses
-    from sonder_runtime.application.context import (
-        current_operation_context,
-        local_owner_context,
+    return _legacy_chat_bridge.operation_context(
+        timeout, cancel_check,
+        cloud_allowed=_cloud_allowed_policy(os.environ),
+        remote_ollama_allowed=not _ollama_endpoint_is_local(),
     )
-
-    deadline = time.monotonic() + float(timeout) if timeout else None
-    cloud_allowed = _cloud_allowed_policy(os.environ)
-    remote_ollama_allowed = not _ollama_endpoint_is_local()
-    ambient = current_operation_context()
-    if ambient is not None:
-        return dataclasses.replace(
-            ambient,
-            deadline_monotonic=deadline,
-            cancellation=_BridgeCancellation(cancel_check),
-            cloud_allowed=cloud_allowed,
-            remote_ollama_allowed=remote_ollama_allowed,
-        )
-    return local_owner_context(
-        correlation_id="chat-%s" % os.urandom(6).hex(),
-        timeout_seconds=float(timeout) if timeout else None,
-        cancellation=_BridgeCancellation(cancel_check),
-        cloud_allowed=cloud_allowed,
-        remote_ollama_allowed=remote_ollama_allowed,
-    )
-
-
-def _bridged_chat_request(payload, rung, *, timeout, cancel_check):
-    """Serve one local chat step through the gateway for a non-Ollama rung."""
-    from sonder_runtime.domain.common.errors import SonderError
-
-    context = _bridge_operation_context(timeout, cancel_check)
-    try:
-        out, response = _provider_bridge.generate_via_gateway(
-            _application().model_gateway, payload, tier=rung.tier, context=context,
-        )
-    except SonderError as exc:
-        failure = _provider_bridge.classify_failure(exc, provider=rung.provider)
-        raise ModelCallError(
-            failure.kind, failure.detail, status=failure.status,
-            transient=failure.transient, attempts=1, cloud=False,
-        ) from exc
-    return out, response.text
 
 
 def _refuse_ollama_agent_on_bound_tier(tier, step):
-    """Fail closed when an Ollama-only HTTP chat step meets a bound tier.
-
-    The tool-using agent (web research) drives Ollama's native tool calls,
-    which the gateway cannot carry.  When the tier it would run on is bound
-    to another provider, answering from Ollama would silently ignore the
-    binding -- and with Ollama absent it would return a transport error as a
-    200 answer -- so the turn ends with a 503 that names the binding.
-    """
+    """Fail closed (503) when an Ollama-only HTTP chat step meets a bound tier."""
     _model, cloud, _augment, tier_label = _serve_target(tier, None)
     if tier_label in (None, "cloud-disabled"):
         return
     provider = _bridge_provider_for_tier(tier_label, cloud)
-    if provider is None:
-        return
-    raise ModelCallError(
-        "configuration",
-        "%s runs a tool-using agent that only Ollama serves, but tier %r is "
-        "bound to provider %s; bind that tier to ollama "
-        "(SONDER_%s_PROVIDER=ollama) to use it over HTTP chat"
-        % (step, tier_label, provider, str(tier_label).upper()),
-        status=503, attempts=0,
-    )
-
-
-def _note_bridged_degradation(step, detail):
-    """An Ollama-only step a non-Ollama rung ran without: loud, never silent."""
-    logging.getLogger("sonder.server").warning(
-        "non-Ollama chat turn degraded: %s (%s)", step, detail,
-    )
-    _provider_bridge.record_degradation(step)
+    if provider is not None:
+        raise _legacy_chat_bridge.ollama_agent_refusal(step, tier_label, provider)
 
 
 def _chat_request(
@@ -5360,8 +5205,9 @@ def _chat_request(
                 "reasoning continuation is only available on Ollama tiers",
                 status=400, attempts=0,
             )
-        return _bridged_chat_request(
-            payload, bridged_rung, timeout=timeout, cancel_check=cancel_check,
+        return _legacy_chat_bridge.chat_request(
+            _application().model_gateway, payload, bridged_rung,
+            context=_bridge_operation_context(timeout, cancel_check),
         )
     if reasoning_continuation:
         options = payload.get("options") if isinstance(payload, dict) else None
@@ -14544,71 +14390,6 @@ def sonder_sessions(limit: int = 20) -> str:
     return "\n".join(lines)
 
 
-def _surface_fact_metadata(
-    entities_json: str = "",
-    decision_json: str = "",
-    valid_from: str = "",
-    valid_until: str = "",
-    supersedes: str = "",
-    provenance_json: str = "",
-):
-    """Decode explicit metadata without inferring policy from fact text."""
-    from sonder_runtime.adapters.persistence.sqlite.authoritative_memory import AuthoritativeFactMetadata
-
-    fields = {
-        "entities_json": entities_json,
-        "decision_json": decision_json,
-        "valid_from": valid_from,
-        "valid_until": valid_until,
-        "supersedes": supersedes,
-        "provenance_json": provenance_json,
-    }
-    if any(not isinstance(value, str) for value in fields.values()):
-        raise ValueError("authoritative metadata inputs must be strings")
-    if not any((entities_json, decision_json, valid_from, valid_until, supersedes, provenance_json)):
-        return None
-
-    def bounded_json(value, label, expected):
-        if not value:
-            return expected()
-        if not isinstance(value, str) or len(value) > 8192:
-            raise ValueError(label + " exceeds the input bound")
-        try:
-            parsed = json.loads(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(label + " must be valid JSON") from exc
-        return parsed
-
-    entities = bounded_json(entities_json, "entities_json", list)
-    if not isinstance(entities, list) or len(entities) > 32 or any(
-        not isinstance(item, str) or not item.strip() or len(item) > 160
-        for item in entities
-    ):
-        raise ValueError("entities_json must be a bounded list of identifiers")
-    decision = bounded_json(decision_json, "decision_json", lambda: None)
-    if decision is not None and (
-        not isinstance(decision, dict) or set(decision) != {"id", "value"}
-        or any(not isinstance(item, str) or not item.strip() or len(item) > 2048
-               for item in decision.values())
-    ):
-        raise ValueError("decision_json must contain only bounded id and value")
-    provenance = bounded_json(provenance_json, "provenance_json", list)
-    if not isinstance(provenance, list) or len(provenance) > 32 or any(
-        not isinstance(item, str) or not item.strip() or len(item) > 256
-        for item in provenance
-    ):
-        raise ValueError("provenance_json must be a bounded list of strings")
-    values = {"valid_from": valid_from, "valid_until": valid_until, "supersedes": supersedes}
-    for label, value in values.items():
-        if value and (not isinstance(value, str) or len(value) > 64):
-            raise ValueError(label + " exceeds the input bound")
-    return AuthoritativeFactMetadata(
-        entities=tuple(entities), decision=decision,
-        valid_from=valid_from or None, valid_until=valid_until or None,
-        supersedes=supersedes or None, provenance=tuple(provenance),
-    )
-
-
 @mcp.tool()
 def sonder_remember_fact(
     text: str, project: str = "", entities_json: str = "",
@@ -17221,81 +17002,7 @@ def repo_blame(
 @mcp.tool()
 def tool_manifest() -> str:
     """List the sonder-runtime MCP tools and what they are for."""
-    tools = {
-        "agent": "Run a Claude-like tool-calling loop that can use local tools and web tools. Exact-ack unsafe lab mode removes its host tool policy only on a loopback, unprivileged process.",
-        "autopilot_start/autopilot_status/autopilot_resume/autopilot_pause/autopilot_cancel": "Run a restart-persistent local goal with evidence-aware checkpoints, bounded replans, host tool gates, and explicit lifecycle control.",
-        "runtime_policy_status/runtime_policy_update": "Inspect or guarded-edit shared hot-reloadable local model mappings and execution-lane tiers; cloud opt-in stays separate.",
-        "cloud_opt_in": "Show, explicitly enable, or immediately revoke process-local hosted/cloud consent; enabling allows later cloud-* prompts to leave the machine and does not persist across restart.",
-        "runtime_source_update_status/runtime_source_update": "Check the installed Git commit and canonical origin/main update time, or safely fast-forward only a clean canonical Sonder source checkout. Updates never merge/rebase/overwrite local work and require restart.",
-        "mcp_runtime_status/live_reload_status": "Audit atomic MCP source/tool convergence, refresh history, list-change signaling, and fail-closed reload errors.",
-        "master_orchestrate/master_status/master_capacity/master_cancel/master_retry": "Run restart-safe hardware-scheduled orchestration, inspect capacity/activity, cancel fleets, and explicitly retry interrupted work.",
-        "admin_register/admin_login/admin_accounts/admin_set_account": "Manage hosted accounts, roles, bans, tiers, and developer flags.",
-        "admin_status/debug_inspect/admin_private_chain_of_thought": "Inspect admin/debug state; private chain-of-thought is refused unless the operator opted in twice (SONDER_ALLOW_PRIVATE_COT plus an explicit allow rule), and then serves only the reasoning record reasoning_show serves.",
-        "sonder": "Ask through Sonder Runtime's local learning loop.",
-        "offload": "Route a self-contained task to a configured local/cloud tier.",
-        "model_fanout/model_fanout_recent/model_fanout_status/model_fanout_cancel/model_fanout_resume/model_fanout_synthesize": "Run a durable, bounded fanout across discovered local, cloud, or all chat models; list caller-scoped safe recent-run summaries after a restart, inspect its owner-scoped receipt, cancel it, explicitly retry finished results, or locally synthesize one completed receipt's exact complete answer previews. Synthesis has no natural-language route, requires two non-truncated answered receipts and a fixed/discovered local generative model, and persists neither synthesis nor reasoning. Fixed profiles are `healthy-local-chat`, `healthy-cloud-chat`, `healthy-chat`, and `loaded-local-chat`; they exclude non-chat targets and active health cooldowns, but never accept arbitrary selectors. `loaded-local-chat` is local-only and fails closed unless Ollama confirms residency at both planning and dispatch, so it never triggers a model load. Natural chat supports `use code and reasoning ensemble to review ...` for a fixed local two-tier answer, `ask all healthy local chat models: ...`, `ask all loaded local chat models: ...`, `ask all available models for ...`, `ask all available local models: ...`, `ask all local and cloud models: ...`, `ask all local models and cloud models: ...`, `ask all Sonder models + cloud: ...`, `run every available cloud models to answer: ...`, `run phi4:latest to ...`, `ask the phi4:latest model to ...`, `run using model phi4:latest: ...`, `run using phi4:latest: ...`, `run using phi4:latest to ...`, and `ask with qwen2.5-coder:14b for ...`. Compiler-feedback repair remains the explicit `codegen_build_loop` tool because it needs an approved project root, an exact file contract, and an exact build command; it is never inferred from conversational text. Cloud use still needs explicit operator opt-in; shared deployments restrict fanout and ensembles to developer-authorized callers.",
-        "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
-        "local_service_probe": "Bounded unauthenticated GET/HEAD health probe for an explicit-port HTTP/HTTPS service resolving exclusively to loopback.",
-        "workspace_inventory/workspace_compare/dependency_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace/dependency inventory and metadata-only comparison, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
-        "repo_status/repo_diff": "Inspect bounded read-only Git branch, worktree, staged, and unstaged state without shell execution.",
-        "project_detect": "Inventory guarded build/test/runtime manifests and return deterministic evidence-backed language, framework, and cross-platform argv candidates without executing them.",
-        "file_policy/file_find/file_read/file_write/file_batch_write/json_patch/file_edit/file_copy/file_move/file_delete/text_patch": "Guarded filesystem find/read/create/edit/transactional batch write/atomic JSON patch/single-file transfer/delete and strict unified-diff preview/apply.",
-        "repository_symbol_index": "Build a deterministic bounded read-only declaration index with Python AST and conservative JS/TS/C/C++/C#/Rust/Go extraction.",
-        "repo_log/repo_show/repo_blame": "Read bounded structured Git history, patches, and line attribution from an exact project repository without shell execution or upward discovery.",
-        "file_digest/directory_digest": "Stream guarded files into SHA-256 and build deterministic relative-path manifests with fail-closed complete or explicitly partial directory Merkle roots.",
-        "archive_list/archive_extract": "Prevalidate bounded ZIP/TAR manifests or transactionally extract them to a new non-overwriting workspace directory.",
-        "archive_create": "Transactionally create a bounded deterministic ZIP/TAR from explicit guarded project inputs without overwriting.",
-        "artifact_risk_inspect": "Statically inspect guarded PDFs, PE/ELF/Mach-O executables, scripts, or opaque binaries for bounded risk indicators without executing or returning content.",
-        "process_list/process_memory_risk_inspect": "Opt-in bounded Windows process metadata and fixed-indicator memory-risk inspection; never returns command lines, paths, addresses, strings, or raw bytes.",
-        "log_inspect": "Inspect one guarded text log with fixed level/timestamp/source extraction, failure clusters, repeats, and bounded context.",
-        "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
-        "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
-        "toolchain_status": "Run one fixed, bounded, local version probe for a tool already discovered by environment_status; it never accepts a command or arguments.",
-        "tool_inventory": "Report the categorized host tool inventory (compilers, build systems, test runners, linters, package managers, runtimes, containers, VCS, cloud CLIs, editors) with redacted paths and cached fixed-probe versions.",
-        "output_digest": "Summarize a guarded log file or your own test-run job output: final line, run summary counts, FAILED/ERROR lines, first parsed compiler/test errors, and a short tail.",
-        "hardware_profile": "Detect cross-vendor accelerators and report conservative resident, unified-memory, and GPU+RAM-spill model plans without changing host settings.",
-        "data_inspect/data_query/sqlite_mutate": "Preview structured data, run bounded read-only queries, or explicitly preview/apply one guarded parameterized SQLite DML statement.",
-        "data_convert": "Preview or atomically create a non-overwriting JSON/JSONL/CSV/TSV conversion with explicit ordered fields.",
-        "program_search/script_search/workspace_run/script_run/image_inspect": "Discover installed programs and workspace scripts, run bounded argv-only processes, and inspect image metadata; script_run applies the operator execution-risk policy before launch.",
-        "task_create/task_list/task_update/task_show/task_delete/task_plan/task_progress/task_ledger/task_depend/checklist_create/checklist_update/checklist_show": "Visible todo, ordered checklist, and digest-bound manager ledger state shared by console, app, agents, and MCP. task_plan batch-creates a work plan with ordered steps and auto-dependencies. task_progress shows a compact summary; task_ledger exposes bounded dependencies and replan metadata.",
-        "workbench_agent": "Run an autonomous local tool loop with a guaranteed checklist, exact action transcript, validation gate, and end report.",
-        "command_registry_list": "Inspect available slash commands by category, name, or risk.",
-        "tool_manifest/tool_capability_manifest/access_request_preview": "Inspect the human-readable MCP tool catalog, fingerprint the live registered capability schemas, or preview a non-authorizing scoped filesystem access request.",
-        "activity_status": "Inspect active/latest response activity, tool calls, and file changes.",
-        "permission_policy/permission_rule_set/permission_approve/permission_approvals": "Inspect the effective permission decision -- the rule, the active mode, and which one governs -- guarded-edit a rule, or approve exactly one refused call once and list what asked.",
-        "context_compaction_plan": "Preview when to summarize, split sessions, or reduce live context.",
-        "run_code": "Run a bounded snippet: Python, JS/TypeScript, Bash, Ruby, Perl, PHP, Lua, R, Go, Java, Rust, PowerShell, C++, C#.",
-        "isolated_run": "Direct MCP-only, explicitly enabled and developer-authorized Docker/Podman execution with approved roots, separate writable approval, and a fixed resource-capped isolation policy.",
-        "ground_artifact": "Validate in-memory non-code content with exact/contains/regex/JSON checks.",
-        "artifact_ground": "Validate files or bundles with inferred writing, data, editable Office/media/timelines, UI, image, audio, and static or animated humanoid model recipes.",
-        "run_project": "Run a bounded temporary multi-file project with optional build commands.",
-        "artifact_generate/artifact_verify": "Create and verify stdlib-only images, animated GIF/AVI video, SVGs, Office files, MIDI/WAV audio, captions, EDL timelines, data, web mockups, OBJ and textured humanoid GLBs with full morph frames and clip sequences, scenes, and themed packs from a free-form brief.",
-        "game_reference_suite/game_generate_and_test/game_generation_campaign": "Build, execute, repair, and ground persistent in-house 2D/2.5D/3D game projects and fleets.",
-        "loop": "Repeat bounded code/model/system actions.",
-        # Spell every tool out.  The old "workflow_list/save/run/delete"
-        # shorthand read as four tool names, three of which ("save", "run",
-        # "delete") are not registered tools at all -- the only names on any
-        # advertising surface that no @mcp.tool() backs.
-        "workflow_list/workflow_save/workflow_run/workflow_delete": "Manage reusable loop workflows.",
-        "system_profile_text/update_system_profile": "Read or edit standing instructions.",
-        "emotion_vector_status/update_emotion_vectors/tune_emotion_vectors": "Read, edit, or live-tune tone vectors.",
-        "learn_preference/preferences_status": "Read or teach durable user behavior/workflow preferences.",
-        "memory_search/memory_export/session_export": "Inspect local memory.",
-        "learning_health_status": "Inspect grounded outcome coverage, signal quality, lesson provenance, distillation yield, and memory hygiene.",
-        "evaluation_history_status": "Read explicit evaluation trends separated by exact model digest and suite version/digest; it never runs or promotes a model.",
-        "memory_quality_report/memory_quality_repair": "Audit and dry-run/prune exact duplicate lessons.",
-        "memory_privacy_review/memory_privacy_repair": "Review redacted privacy findings and explicitly dry-run/remove selected flagged lessons.",
-        "memory_embedding_backfill": "Dry-run or refresh stale/missing semantic vectors with the local embedding model.",
-        "memory_interaction_embedding_backfill": "Dry-run or locally refresh stale raw-interaction task vectors without printing task text.",
-        "system_improvement_report": "Suggest next improvements from learning, memory, context, and deployment signals.",
-        "context_policy_status/set_context_size": "Show or select requested virtual context up to 1m while clamping Ollama native num_ctx.",
-        "learn_from_example/apply_learned": "Teach from examples and preview lesson application.",
-        "self_heal_check/self_heal_repair": "Detect and safely repair common local breakage.",
-        "context_health/diagnostics/live_reload_status/status/unload": "Observe and manage runtime health.",
-        "record_outcome": "Feed grounded outcomes back into learning.",
-        "sonder_stats/sonder_sessions/sonder_remember_fact/sonder_forget_fact": "Memory observability and durable facts.",
-    }
-    return "\n".join("  %s: %s" % item for item in sorted(tools.items()))
+    return _mcp_tool_manifest.render_tool_manifest()
 
 
 @mcp.tool()

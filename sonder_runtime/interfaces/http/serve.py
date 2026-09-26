@@ -102,7 +102,6 @@ from sonder_runtime.application.extensions.facade import ExtensionAuthority
 from sonder_runtime.application.ports.model_gateway import ModelRequest
 from sonder_runtime.application.context import bind_operation_context
 from sonder_runtime.application.chat import provider_bridge as _provider_bridge
-from sonder_runtime.application.ports.telemetry_feed import SubscriberLimitReached
 from sonder_runtime.domain import launcher_health as sonder_health
 from sonder_runtime.domain.common.errors import (
     Conflict,
@@ -134,6 +133,7 @@ from sonder_runtime.interfaces.http.facades.model_request import (
 )
 from sonder_runtime.interfaces.http.facades.observability import dispatch_trace_route
 from sonder_runtime.interfaces.http.facades import observability_stream
+from sonder_runtime.interfaces.http.facades import observatory_routes
 from sonder_runtime.interfaces.http.facades.session import dispatch_session_route
 from sonder_runtime.platform import debug_dump
 
@@ -942,59 +942,9 @@ def _live_telemetry_application(*, build=False):
     return application
 
 
-_LEGACY_ERROR_REPLY = re.compile(r"\AERROR(?::| contacting )")
-
-
-def _is_legacy_error_reply(content):
-    """True for the legacy ``ERROR: ...`` / ``ERROR contacting ...`` answers."""
-    return isinstance(content, str) and bool(_LEGACY_ERROR_REPLY.match(content.lstrip()))
-
-
-def _chat_turn_outcome(result, error_kind, *, error_reply=False, failed_attempt_code=None,
-                       http_status=None):
-    """(outcome, error_code) of the terminal request.* event for one chat turn.
-
-    ``result`` is the HTTP metric label.  A model failure reports its kind as
-    a domain code (``cancelled`` becomes ``request.cancelled``).  A 200 whose
-    body is a legacy error answer, or whose every provider attempt failed,
-    is a failed turn: telemetry never calls a failed model call completed.
-    """
-    if error_kind:
-        from sonder_runtime.application.session.provider_attempts import (
-            MODEL_ERROR_KIND_CODES,
-        )
-
-        code = MODEL_ERROR_KIND_CODES.get(str(error_kind), str(error_kind))
-        if code == "INVALID_INPUT" and type(http_status) is int and http_status >= 500:
-            # A configuration refusal answered 503 (for example web research
-            # on a tier bound to another provider) is not the caller's error.
-            code = "DEPENDENCY_UNAVAILABLE"
-        return ("cancelled" if error_kind == "cancelled" else "failed"), code
-    if result == "cancelled":
-        return "cancelled", "CANCELLED"
-    if result != "ok":
-        return "failed", result
-    if failed_attempt_code:
-        return "failed", failed_attempt_code
-    if error_reply:
-        return "failed", "ERROR_REPLY"
-    return "completed", None
-
-
-def _register_telemetry_drain(coordinator, application):
-    """Close the live telemetry export when a drain completes; True if registered.
-
-    Streams hold no admission slot, so a drain would never wait for them; the
-    flush hook ends them.  It runs the graph's own telemetry close when there
-    is one, which emits ``session.ended`` (and a final ``telemetry.dropped``)
-    before closing the subscriptions, so connected subscribers receive them.
-    """
-    feed = getattr(application, "telemetry_feed", None)
-    if feed is None:
-        return False
-    close = getattr(application, "close_telemetry", None)
-    coordinator.add_flush_hook(close if callable(close) else feed.close_subscribers)
-    return True
+_is_legacy_error_reply = observatory_routes.is_legacy_error_reply
+_chat_turn_outcome = observatory_routes.chat_turn_outcome
+_register_telemetry_drain = observatory_routes.register_telemetry_drain
 
 
 def _socket_peer_closed(connection):
@@ -1030,76 +980,23 @@ def _socket_peer_closed(connection):
         return True
 
 
-# Longer than the default drain deadline (25 s), so the flush hook -- not
-# this backstop -- normally ends the telemetry streams.
-STREAM_DRAIN_BACKSTOP_SECONDS = 35.0
-
-_TELEMETRY_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "[::1]"})
-
-
-def _telemetry_host_allowed(value):
-    """True when a Host header names a loopback name (any port)."""
-    host = str(value or "").strip().lower()
-    if host.startswith("["):
-        end = host.find("]")
-        if end < 0:
-            return False
-        name, rest = host[: end + 1], host[end + 1:]
-    else:
-        name, _sep, rest = host.partition(":")
-        rest = ":" + rest if _sep else ""
-    if rest and not (rest.startswith(":") and rest[1:].isdigit()):
-        return False
-    return name in _TELEMETRY_LOOPBACK_HOSTS
-
-
 def _runtime_loopback_base_url():
     """The listener URL a same-host client uses (127.0.0.1 for 0.0.0.0)."""
-    port = BOUND_PORT or CONFIGURED_PORT
-    host = str(HOST or "").strip()
-    if host in ("", "0.0.0.0"):
-        host = "127.0.0.1"
-    elif host in ("::", "[::]"):
-        host = "[::1]"
-    elif ":" in host and not host.startswith("["):
-        host = "[%s]" % host
-    return "http://%s:%s" % (host, port)
+    return observatory_routes.loopback_base_url(HOST, BOUND_PORT or CONFIGURED_PORT)
 
 
 def _ecosystem_document(application, feed):
     """GET /v1/sonder/ecosystem body, or None when there is nothing to report."""
-    if application is None:
-        return None
     from datetime import datetime, timezone
     import platform as _platform
 
-    from sonder_runtime.application.observability.ecosystem_status import build_ecosystem_status
     from sonder_runtime.platform.version import VERSION
 
-    base = _runtime_loopback_base_url()
-    export_enabled = feed is not None
-    stream = None
-    if export_enabled:
-        stream = {
-            "discovery_url": base + observability_stream.DISCOVERY_ROUTE,
-            "sse_url": base + observability_stream.EVENTS_ROUTE,
-            "ndjson_url": base + observability_stream.EVENTS_ROUTE + "?format=ndjson",
-        }
-    return build_ecosystem_status(
-        generated_at=datetime.now(timezone.utc),
-        runtime={
-            "version": VERSION,
-            "instance_id": getattr(feed, "instance_id", None),
-            "node_id": getattr(feed, "node_id", None) or _platform.node(),
-        },
-        bindings=application.provider_bindings,
-        gateway=application.model_gateway,
-        export_enabled=export_enabled,
-        runtime_stream=stream,
-        stats=feed.stats() if export_enabled else None,
-        observatory_origins=sorted(OBSERVATORY_ORIGINS | CORS_ORIGINS),
-        dedicated_origins=sorted(OBSERVATORY_ORIGINS),
-        runtime_base_url=base,
+    return observatory_routes.ecosystem_document(
+        application, feed, base=_runtime_loopback_base_url(), version=VERSION,
+        generated_at=datetime.now(timezone.utc), node=_platform.node(),
+        observatory_origins=OBSERVATORY_ORIGINS | CORS_ORIGINS,
+        dedicated_origins=OBSERVATORY_ORIGINS,
     )
 
 
@@ -5284,192 +5181,32 @@ class Handler(BaseHTTPRequestHandler):
         super().send_response(code, message)
 
     def _begin_chat_turn_telemetry(self, *, model, stream, session_id):
-        """Bind the ambient context and start the Observatory turn (R = correlation id)."""
-        stack = getattr(self, "_turn_stack", None)
-        if stack is None:
-            return
-        operation_context = getattr(self, "_operation_context", None)
-        if operation_context is not None:
-            stack.enter_context(bind_operation_context(operation_context))
-        application = _live_telemetry_application()
-        telemetry = getattr(application, "telemetry", None)
-        if telemetry is None:
-            return
-        try:
-            turn = telemetry.begin_turn(
-                turn_id=self._correlation(),
-                surface="http.chat_completions",
-                stream=bool(stream),
-                requested_model=model,
-                source="http",
-                session_id=session_id or None,
-            )
-            stack.enter_context(telemetry.activate(turn))
-        except Exception:
-            _serve_logger.warning("live telemetry turn could not start", exc_info=True)
-            return
-        self._telemetry_turn = (telemetry, turn)
+        observatory_routes.begin_chat_turn(
+            self, application=_live_telemetry_application(),
+            bind_operation_context=bind_operation_context, log=_serve_logger,
+            model=model, stream=stream, session_id=session_id,
+        )
 
     def _finish_chat_turn_telemetry(self):
-        """Emit the single terminal request.* event for a started turn."""
-        started = getattr(self, "_telemetry_turn", None)
-        self._telemetry_turn = None
-        if started is None:
-            return
-        telemetry, turn = started
-        result = getattr(self, "_telemetry_result", None) or "unrecorded"
-        status = getattr(self, "_last_response_status", None)
-        kind = getattr(self, "_telemetry_error_kind", None)
-        outcome, error_code = _chat_turn_outcome(
-            result, kind,
-            error_reply=bool(getattr(self, "_telemetry_error_reply", False)),
-            failed_attempt_code=turn.failed_attempts_code(),
-            http_status=status,
-        )
-        try:
-            telemetry.finish_turn(
-                turn, outcome=outcome, http_status=status, error_code=error_code,
-            )
-        except Exception:
-            _serve_logger.warning("live telemetry turn could not finish", exc_info=True)
-
-    def _telemetry_admin_context(self):
-        """Admin authorization exactly as for /v1/observability/trace."""
-        context = self._request_auth_context()
-        if not context["authorized"]:
-            self._send_auth_error()
-            return None
-        if not _admin_authorized(context):
-            self._send_json_payload(
-                {"error": {"message": "administrator authorization is required",
-                            "type": "forbidden", "code": "FORBIDDEN"}},
-                status=403,
-            )
-            return None
-        return context
-
-    def _reject_rebound_host(self):
-        """DNS-rebinding defence for the telemetry routes on a loopback bind.
-
-        A rebinding page is same-origin, so it sends no Origin and CORS never
-        applies; its Host header still names the attacker's domain.  On a
-        loopback listener (without a declared TLS proxy, which forwards its
-        public name) a Host that is not 127.0.0.1, localhost or [::1] (any
-        port) is refused with 403 forbidden_host, as Sonder-Inference does.
-        """
-        if TLS_TERMINATED_BY_PROXY or not _is_loopback_host(HOST):
-            return False
-        raw = self.headers.get("Host")
-        if raw is None:
-            return False
-        if _telemetry_host_allowed(raw):
-            return False
-        self._send_json_payload(
-            {"error": {"message": "host is not allowed", "type": "forbidden",
-                       "code": "forbidden_host"}},
-            status=403,
-        )
-        return True
+        observatory_routes.finish_chat_turn(self, log=_serve_logger)
 
     def _handle_telemetry_get(self, path):
-        if self._reject_rebound_host():
-            return
-        if self._telemetry_admin_context() is None:
-            return
-        application = _live_telemetry_application(build=True)
-        feed = getattr(application, "telemetry_feed", None)
-        if path == observability_stream.ECOSYSTEM_ROUTE:
-            document = _ecosystem_document(application, feed)
-            if document is None:
-                self._send_not_found()
-                return
-            self._send_json_payload(document, headers={"Cache-Control": "no-store"})
-            return
-        if feed is None:
-            # SONDER_OBSERVATORY_EXPORT=0: the telemetry routes do not exist.
-            self._send_not_found()
-            return
-        if path == observability_stream.DISCOVERY_ROUTE:
-            self._send_json_payload(
-                dict(feed.discovery(auth_required=_effective_auth_mode() != "local-open")),
-                headers={"Cache-Control": "no-store"},
-            )
-            return
-        self._stream_telemetry(feed)
-
-    def _stream_telemetry(self, feed):
-        """Serve one SSE/NDJSON subscriber; never holds a request admission slot."""
-        query = urllib.parse.parse_qs(
-            urllib.parse.urlsplit(self.path).query, keep_blank_values=True,
+        observatory_routes.serve_get(
+            self, path,
+            loopback_listener=not TLS_TERMINATED_BY_PROXY and _is_loopback_host(HOST),
+            admin_authorized=_admin_authorized,
+            application_for=lambda: _live_telemetry_application(build=True),
+            ecosystem_for=_ecosystem_document,
+            auth_required=lambda: _effective_auth_mode() != "local-open",
+            stream=lambda feed: observatory_routes.stream_telemetry(
+                self, feed,
+                query=urllib.parse.parse_qs(
+                    urllib.parse.urlsplit(self.path).query, keep_blank_values=True,
+                ),
+                lifecycle=sonder_lifecycle.get(), idle_timeout=STREAM_IDLE_TIMEOUT_SECONDS,
+                peer_closed=_socket_peer_closed,
+            ),
         )
-        try:
-            request = observability_stream.negotiate_stream(
-                query,
-                accept=self.headers.get("Accept", ""),
-                last_event_id_header=self.headers.get("Last-Event-ID"),
-            )
-        except observability_stream.StreamRequestError as error:
-            self._send_json_payload(
-                {"error": {"message": str(error), "type": "invalid_request"}},
-                status=400,
-            )
-            return
-        try:
-            subscription = feed.subscribe(
-                last_event_id=request.last_event_id, since_now=request.since_now,
-            )
-        except SubscriberLimitReached as error:
-            self._send_json_payload(
-                {"error": {"message": str(error), "type": "rate_limit_error",
-                           "code": "TOO_MANY_SUBSCRIBERS"}},
-                status=429,
-                headers={"Retry-After": "2"},
-            )
-            return
-        lifecycle = sonder_lifecycle.get()
-        drain_seen = []
-
-        def should_stop():
-            # A drain lets admitted turns finish; the drain's flush hook then
-            # emits session.ended and closes this subscription, so the stream
-            # shows the in-flight turns ending.  This is only the backstop for
-            # a drain whose flush hooks never run.
-            coordinator = getattr(lifecycle, "coordinator", None)
-            if not getattr(coordinator, "draining", False):
-                return False
-            if not drain_seen:
-                drain_seen.append(time.monotonic())
-            return time.monotonic() - drain_seen[0] > STREAM_DRAIN_BACKSTOP_SECONDS
-
-        try:
-            must_close = self._close_for_unread_body()
-            self.close_connection = True
-            self.send_response(200)
-            self._cors()
-            self.send_header("Content-Type", request.content_type)
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Connection", "close")
-            self.send_header("X-Accel-Buffering", "no")
-            if must_close:
-                self.close_connection = True
-            self.end_headers()
-            self.wfile.flush()
-            connection = getattr(self, "connection", None)
-            if connection is not None:
-                # A subscriber that stops reading must not pin this thread:
-                # a blocked write fails after the stream idle timeout.
-                connection.settimeout(STREAM_IDLE_TIMEOUT_SECONDS)
-            for frame in observability_stream.stream_frames(
-                subscription, request.format, should_stop=should_stop,
-                peer_closed=lambda: _socket_peer_closed(connection),
-            ):
-                self.wfile.write(frame)
-                self.wfile.flush()
-        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, TimeoutError, OSError):
-            # The subscriber left or stalled past the idle timeout.
-            pass
-        finally:
-            subscription.close()
 
     def _read_json(self, *, max_bytes=None):
         # HTTP framing must be unambiguous before this handler reads a body.

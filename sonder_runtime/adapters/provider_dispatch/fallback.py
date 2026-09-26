@@ -86,7 +86,7 @@ class PreSendFallbackGateway:
 
     @property
     def request_admission(self):
-        return getattr(self._primary, "request_admission")
+        return self._primary.request_admission
 
     def resolve_route(self, request: ModelRequest, context: OperationContext):
         resolver = getattr(self._primary, "resolve_route", None)

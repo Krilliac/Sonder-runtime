@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 355,
+      "file_count": 357,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -213,10 +213,12 @@
         "sonder_runtime/adapters/launcher_output.py",
         "sonder_runtime/adapters/learning_health.py",
         "sonder_runtime/adapters/learning_tier_formatting.py",
+        "sonder_runtime/adapters/legacy_chat_bridge.py",
         "sonder_runtime/adapters/local_observability.py",
         "sonder_runtime/adapters/location.py",
         "sonder_runtime/adapters/logging_event_sink.py",
         "sonder_runtime/adapters/mcp_subprocess.py",
+        "sonder_runtime/adapters/mcp_tool_manifest.py",
         "sonder_runtime/adapters/memory_lesson_ids.py",
         "sonder_runtime/adapters/memory_replication/__init__.py",
         "sonder_runtime/adapters/memory_replication/http_client.py",
@@ -1120,7 +1122,7 @@
       ]
     },
     {
-      "file_count": 67,
+      "file_count": 68,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -1159,6 +1161,7 @@
         "sonder_runtime/interfaces/http/facades/model_request.py",
         "sonder_runtime/interfaces/http/facades/observability.py",
         "sonder_runtime/interfaces/http/facades/observability_stream.py",
+        "sonder_runtime/interfaces/http/facades/observatory_routes.py",
         "sonder_runtime/interfaces/http/facades/session.py",
         "sonder_runtime/interfaces/http/facades/testing_tools.py",
         "sonder_runtime/interfaces/http/facades/typed_gateway.py",

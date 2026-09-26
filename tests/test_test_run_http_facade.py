@@ -351,4 +351,8 @@ def test_serve_routes_the_family_on_get_and_post():
     source = inspect.getsource(serve.Handler._handle_test_tools_request)
     assert "TestRunHttpRoutes" in source and "_dispatch_developer_gateway_route(" in source
     assert '_handle_test_tools_request("GET", path)' in inspect.getsource(serve.Handler.do_GET)
-    assert '_handle_test_tools_request("POST", path, req)' in inspect.getsource(serve.Handler.do_POST)
+    # do_POST opens the per-request turn scope and delegates the routing.
+    assert "self._handle_post_request()" in inspect.getsource(serve.Handler.do_POST)
+    assert '_handle_test_tools_request("POST", path, req)' in inspect.getsource(
+        serve.Handler._handle_post_request
+    )

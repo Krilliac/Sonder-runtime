@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from datetime import datetime, timezone
 
 from .replication import MemoryReplicationError
@@ -90,4 +91,67 @@ class AuthoritativeFactMetadata:
         }
 
 
-__all__ = ["AuthoritativeFactMetadata"]
+def fact_metadata_from_inputs(
+    entities_json: str = "",
+    decision_json: str = "",
+    valid_from: str = "",
+    valid_until: str = "",
+    supersedes: str = "",
+    provenance_json: str = "",
+):
+    """Decode explicit metadata without inferring policy from fact text."""
+    fields = {
+        "entities_json": entities_json,
+        "decision_json": decision_json,
+        "valid_from": valid_from,
+        "valid_until": valid_until,
+        "supersedes": supersedes,
+        "provenance_json": provenance_json,
+    }
+    if any(not isinstance(value, str) for value in fields.values()):
+        raise ValueError("authoritative metadata inputs must be strings")
+    if not any((entities_json, decision_json, valid_from, valid_until, supersedes, provenance_json)):
+        return None
+
+    def bounded_json(value, label, expected):
+        if not value:
+            return expected()
+        if not isinstance(value, str) or len(value) > 8192:
+            raise ValueError(label + " exceeds the input bound")
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(label + " must be valid JSON") from exc
+        return parsed
+
+    entities = bounded_json(entities_json, "entities_json", list)
+    if not isinstance(entities, list) or len(entities) > 32 or any(
+        not isinstance(item, str) or not item.strip() or len(item) > 160
+        for item in entities
+    ):
+        raise ValueError("entities_json must be a bounded list of identifiers")
+    decision = bounded_json(decision_json, "decision_json", lambda: None)
+    if decision is not None and (
+        not isinstance(decision, dict) or set(decision) != {"id", "value"}
+        or any(not isinstance(item, str) or not item.strip() or len(item) > 2048
+               for item in decision.values())
+    ):
+        raise ValueError("decision_json must contain only bounded id and value")
+    provenance = bounded_json(provenance_json, "provenance_json", list)
+    if not isinstance(provenance, list) or len(provenance) > 32 or any(
+        not isinstance(item, str) or not item.strip() or len(item) > 256
+        for item in provenance
+    ):
+        raise ValueError("provenance_json must be a bounded list of strings")
+    values = {"valid_from": valid_from, "valid_until": valid_until, "supersedes": supersedes}
+    for label, value in values.items():
+        if value and (not isinstance(value, str) or len(value) > 64):
+            raise ValueError(label + " exceeds the input bound")
+    return AuthoritativeFactMetadata(
+        entities=tuple(entities), decision=decision,
+        valid_from=valid_from or None, valid_until=valid_until or None,
+        supersedes=supersedes or None, provenance=tuple(provenance),
+    )
+
+
+__all__ = ["AuthoritativeFactMetadata", "fact_metadata_from_inputs"]
