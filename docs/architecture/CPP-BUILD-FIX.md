@@ -261,8 +261,22 @@ back to the exact before-digest reads as not applied. The details are in
 - `server.py` (server lane):
   - done: the local agent prompt assembly declares `LOCAL_OWNER` through
     `_local_agent_brief` (`tests/test_build_brief.py`);
-  - add `grounded_outcomes.VERIFIERS` and `verification_reach` entries for
-    `build_job` and `build_fix`;
+  - done: `build_job` and `build_job_result` are `grounded_outcomes`
+    verifiers. `server._application()` installs `_typed_receipt_outcome` as a
+    receipt observer on its typed gateway (`ToolApplicationFacade.add_receipt_observer`),
+    so a console or bridge build report judges a pending generation of the
+    same project (`tests/test_grounded_outcomes_typed_build.py`). The verdict
+    is the report's terminal status (`typed_build_verdict`), never the
+    executor's always-true `ok`: a `build`/`compile_one` report that
+    `succeeded` or `failed` with an exit code is `compiled`/`failed`; a
+    running job, a cancellation, a timeout, a job that never ran and a
+    `configure`/`include_trace` job record nothing and leave the generation
+    pending. Graphs composed outside `server._application()` (the native MCP
+    process) have no generation ledger and are not observed;
+  - not done, on purpose: `build_fix`/`build_fix_result` are not verifiers
+    (a fix report grades the fix's own edits, not an earlier generation), and
+    `verification_reach` lists no build tool, because the agent loop cannot
+    dispatch the typed build tools, so no agent run could satisfy it;
   - point the legacy `build_run` help text at `build_job`.
 
 ## Configuration

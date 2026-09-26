@@ -1924,6 +1924,10 @@ def _application():
                 preference_module_provider=lambda: preference_learning,
             )
             _APP_GRAPH_OWNED_BY_SERVER = True
+            # Typed build reports judge recent generations like build_run does.
+            observe = getattr(getattr(_APP_GRAPH, "tools", None), "add_receipt_observer", None)
+            if callable(observe):
+                observe(_typed_receipt_outcome)
         return _APP_GRAPH
 
 
@@ -11074,6 +11078,60 @@ def _feed_grounded_outcome(name, ok, output, args=None, project=None, run_id="",
     except Exception:
         # Bookkeeping must never break the run it is observing.
         pass
+
+
+# job id -> resolved project root of the typed ``build_job`` that started it,
+# so a later ``build_job_result`` (which names only the job) is attributed
+# within the same project. Bounded; an unknown job attributes unscoped.
+_TYPED_BUILD_JOB_PROJECTS: dict[str, str] = {}
+_TYPED_BUILD_JOB_PROJECTS_MAX = 256
+_TYPED_BUILD_JOB_PROJECTS_LOCK = threading.Lock()
+
+
+def _typed_build_project(arguments) -> str:
+    """The absolute project root a typed build call named, or "" (unscoped)."""
+    text = str((arguments or {}).get("project") or "").strip()
+    if not text or "\x00" in text or not os.path.isabs(text):
+        return ""
+    try:
+        return os.path.realpath(text)
+    except (OSError, ValueError):
+        return ""
+
+
+def _typed_receipt_outcome(request, receipt) -> None:
+    """Feed a finished typed build report to the grounded-outcome ledger.
+
+    Installed on this process's typed tool gateway, so every surface that
+    runs ``build_job``/``build_job_result`` through it (the console, the
+    legacy bridges) feeds the same ledger the generators note into. The
+    verdict comes from the report's terminal status
+    (``grounded_outcomes.typed_build_verdict``); a running job, a
+    cancellation or a refused call is not evidence and records nothing.
+    """
+    name = str(getattr(request, "tool_name", "") or "")
+    if name not in grounded_outcomes.TYPED_BUILD_VERIFIERS or not getattr(receipt, "success", False):
+        return
+    try:
+        payload = json.loads(receipt.output or "")
+    except (TypeError, ValueError):
+        return
+    if not isinstance(payload, dict):
+        return
+    arguments = dict(getattr(request, "arguments", None) or {})
+    with _TYPED_BUILD_JOB_PROJECTS_LOCK:
+        if name == "build_job":
+            project = _typed_build_project(arguments)
+            job_id = str(payload.get("job_id") or "")
+            if job_id:
+                _TYPED_BUILD_JOB_PROJECTS.pop(job_id, None)
+                _TYPED_BUILD_JOB_PROJECTS[job_id] = project
+                while len(_TYPED_BUILD_JOB_PROJECTS) > _TYPED_BUILD_JOB_PROJECTS_MAX:
+                    _TYPED_BUILD_JOB_PROJECTS.pop(next(iter(_TYPED_BUILD_JOB_PROJECTS)))
+        else:
+            project = _TYPED_BUILD_JOB_PROJECTS.get(str(arguments.get("job_id") or ""), "")
+    _feed_grounded_outcome(name, True, receipt.output, arguments, project=project,
+                           evidence=payload)
 
 
 def _record_direct_tool(
