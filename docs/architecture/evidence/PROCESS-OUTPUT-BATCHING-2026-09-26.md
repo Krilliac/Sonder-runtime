@@ -64,18 +64,25 @@ stays well under the registry's `MAX_OUTPUT_APPEND_BATCH` (4096 entries).
 - **Failures.** A persistence error stops the readers, as a failed per-line
   commit did. Classification is unchanged: `OSError` and `ValueError` end
   output quietly, and any other error fails the job with the exception type.
+  If `wait` cannot publish the last window within `OUTPUT_DRAIN_SECONDS`, it
+  fails closed: the job ends `FAILED` with
+  `process output persistence failed (TimeoutError)` rather than `SUCCEEDED`
+  with output still unpersisted.
 
 ### Crash-loss bound
 
 Readers block while the pending batch plus the batch being committed holds
 `max_lines` lines or `max_bytes` bytes. So at most `max_lines` lines and
-`max_bytes` bytes (plus the one line that crossed the byte bound) are ever
-read from a child without being durable. By default that is 1024 lines or
-256 KiB, and no line waits longer than 50 ms plus one commit.
+`max_bytes` bytes (plus the one line that crossed the byte bound) are queued
+without being durable. A reader blocked in `put` also holds one line it has
+already read, so read-but-not-durable output is at most that window plus one
+line per reader (stdout and stderr: two). By default that is 1024 lines or
+256 KiB, plus two lines. No queued line waits longer than 50 ms plus one
+commit.
 
-A runtime crash loses at most that window. Each batch commits atomically and
-in order, so after a restart the registry holds an exact, gap-free prefix of
-what was read. Nothing is duplicated or reordered. Recovery
+A runtime crash loses at most that. Each batch commits atomically and in
+order, so after a restart the registry holds an exact, gap-free prefix of
+each stream as it was read. Nothing is duplicated or reordered. Recovery
 (`reconcile_with_cleanup`) never replays output. New output continues from
 the durable `output_next`.
 

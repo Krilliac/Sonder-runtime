@@ -13,12 +13,14 @@ these holds:
 
 Unpersisted output is bounded, which is also the crash-loss bound: readers
 block while the pending batch plus the batch being committed holds
-``max_lines`` lines or ``max_bytes`` bytes, so at most ``max_lines`` lines and
-``max_bytes`` bytes (plus the one line that crossed the byte bound) are ever
-read from the child without being durable.  A crash of the runtime loses at
-most that window; every earlier line is already committed, and because each
-batch commits atomically and in order the registry always holds an exact,
-gap-free prefix of what was read.
+``max_lines`` lines or ``max_bytes`` bytes.  So at most ``max_lines`` lines
+and ``max_bytes`` bytes (plus the one line that crossed the byte bound) are
+queued, and each reader blocked in ``put`` holds one more line it has already
+read.  Read-but-not-durable output is therefore at most that window plus one
+line per reader (two: stdout and stderr).  A crash of the runtime loses at
+most that; every earlier line is already committed, and because each batch
+commits atomically and in order the registry always holds an exact, gap-free
+prefix of each stream as read.
 
 Lines are never merged: each keeps its own output sequence number, stream and
 exact text, so retention, watermarks and the output-limit accounting see the

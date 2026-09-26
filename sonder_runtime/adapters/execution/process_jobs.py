@@ -465,6 +465,7 @@ class SubprocessJobProvider:
             if cleanup_complete:
                 self._processes.pop(request.identity.job_id, None)
                 self._failed_launches.discard(request.identity.job_id)
+                self._forget_output_threads(request.identity.job_id)
                 self._release_process_slot(request.identity.job_id)
                 self._limits.pop(request.identity.job_id, None)
                 self._discard_deadline(request.identity.job_id)
@@ -1253,6 +1254,11 @@ class SubprocessJobProvider:
         left, so this returns as soon as that commit lands.  A reader kept
         alive by a descendant holding the pipe keeps publishing later,
         exactly as before.
+
+        A drain that times out fails closed: the job must not read as
+        succeeded while output read before its exit is still unpersisted, so
+        it is recorded as an output-persistence failure.  (A persister that
+        already stopped on an error has classified that error itself.)
         """
         with self._timer_lock:
             batcher = self._output_batchers.get(job_id)
@@ -1260,8 +1266,11 @@ class SubprocessJobProvider:
         for thread in threads:
             if thread is not persister:
                 thread.join(timeout=1)
-        if batcher is not None:
-            batcher.flush(OUTPUT_DRAIN_SECONDS)
+        if batcher is not None and not batcher.flush(OUTPUT_DRAIN_SECONDS):
+            if not batcher.finished:
+                self._remember_output_failure(
+                    job_id, TimeoutError("process output was not persisted in time"),
+                )
 
     def _forget_output_threads(self, job_id: str) -> None:
         self._output_threads.pop(job_id, None)

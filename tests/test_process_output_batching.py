@@ -631,3 +631,128 @@ def test_a_crash_loses_at_most_the_unflushed_window_without_duplicates(tmp_path)
     assert _events(registry, "crash-job")[-1] == (101, STDERR, "after restart\n")
     page = registry.stream("crash-job", after=OutputWatermark(100))
     assert [e.data for e in page.events] == ["after restart\n"]
+
+
+# -- review follow-ups: drain timeout, cancel flush, launch-failure cleanup -----
+
+class _GatedRegistry(SQLiteDurableJobRegistry):
+    """SQLite registry whose batch appends block until ``gate`` is set."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.gate = threading.Event()
+        self.entered = threading.Event()
+
+    def append_outputs(self, job_id, entries):
+        entries = tuple(entries)
+        self.entered.set()
+        assert self.gate.wait(60), "test gate never opened"
+        return super().append_outputs(job_id, entries)
+
+
+def test_a_drain_that_times_out_fails_the_job_closed(tmp_path, monkeypatch):
+    from sonder_runtime.adapters.execution import process_jobs
+
+    monkeypatch.setattr(process_jobs, "OUTPUT_DRAIN_SECONDS", 0.5)
+    registry = _GatedRegistry(tmp_path / "jobs.db")
+    provider = SubprocessJobProvider(registry, process_cleanup=ProcessTreeSupervisor())
+    try:
+        provider.start(_request("slow-store", "print('only line', flush=True)"))
+        waited = provider.wait("slow-store", timeout=30)
+        # The line was read but is not durable: the job must not read as a
+        # success with its output missing.
+        assert waited.record.status is JobStatus.FAILED, waited.record
+        assert waited.record.error == "process output persistence failed (TimeoutError)"
+        assert waited.exit_code == 0
+        assert _events(registry, "slow-store") == []
+    finally:
+        registry.gate.set()
+    # The late commit still lands; nothing is lost or duplicated.
+    assert _eventually(lambda: [d for _, _, d in _events(registry, "slow-store")] == [
+        "only line\n",
+    ], 10)
+
+
+def test_cancel_requests_publication_before_the_kill_and_never_waits_for_storage(tmp_path):
+    registry = _GatedRegistry(tmp_path / "jobs.db")
+    provider = SubprocessJobProvider(
+        registry, process_cleanup=ProcessTreeSupervisor(),
+        # A 30 s window: only an explicit flush request publishes these lines
+        # before the kill closes the pipes.
+        output_batch=OutputBatchPolicy(1000, 1 << 20, 30),
+    )
+    ready = tmp_path / "ready"
+    code = (
+        "import sys,time,pathlib\n"
+        "for i in range(3): print('line %d' % i, flush=True)\n"
+        "pathlib.Path(sys.argv[1]).write_text('x')\n"
+        "time.sleep(120)\n"
+    )
+    started = provider.start(_request("gated-cancel", code, str(ready)))
+    observed = []
+    real_quiesce = provider._quiesce_containment
+
+    def observing_quiesce(job_id, *, force):
+        # The kill happens here (or right after, through the cleanup
+        # contract).  By now cancel must already have asked the persister to
+        # publish the pending window: it is committing (and blocked on the
+        # gated store) rather than still waiting out its 30 s window.
+        observed.append(registry.entered.wait(5))
+        return real_quiesce(job_id, force=force)
+
+    provider._quiesce_containment = observing_quiesce
+    try:
+        assert _eventually(ready.exists, 20)
+        time.sleep(0.3)
+        assert not registry.entered.is_set()  # pending in the window
+        began = time.monotonic()
+        provider.cancel("gated-cancel", "operator cancel")
+        # The persister is blocked in the store; cancel must not wait for it.
+        assert time.monotonic() - began < 8
+        assert observed and observed[0] is True
+    finally:
+        registry.gate.set()
+    assert _eventually(lambda: registry.poll("gated-cancel").status is JobStatus.CANCELLED, 15)
+    assert _eventually(lambda: [d for _, _, d in _events(registry, "gated-cancel")] == [
+        "line 0\n", "line 1\n", "line 2\n",
+    ], 10)
+    from sonder_runtime.adapters.process_liveness import PROCESS_DEAD, probe_process
+
+    assert _eventually(lambda: probe_process(started.process_id)[0] == PROCESS_DEAD, 15)
+
+
+def test_a_reader_that_fails_to_start_leaves_no_output_bookkeeping(tmp_path, monkeypatch):
+    from sonder_runtime.adapters.execution import process_jobs
+
+    real_thread = process_jobs.owned_runtime_thread
+    batchers = []
+
+    class _Unstartable:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("cannot start thread")
+
+    def thread_factory(*args, name="", **kwargs):
+        if name.endswith("-stderr"):
+            return _Unstartable()
+        if name.endswith("-persist"):
+            batchers.append(kwargs["target"].__self__)
+        return real_thread(*args, name=name, **kwargs)
+
+    monkeypatch.setattr(process_jobs, "owned_runtime_thread", thread_factory)
+    registry = SQLiteDurableJobRegistry(tmp_path / "jobs.db")
+    provider = SubprocessJobProvider(registry, process_cleanup=ProcessTreeSupervisor())
+    code = "import time\nprint('hi', flush=True)\ntime.sleep(120)\n"
+    with pytest.raises(RuntimeError, match="cannot start thread"):
+        provider.start(_request("no-reader", code))
+    record = registry.poll("no-reader")
+    assert record.status is JobStatus.FAILED, record
+    assert "no-reader" not in provider._output_batchers
+    assert "no-reader" not in provider._output_threads
+    assert "no-reader" not in provider._processes
+    # The started reader reaches EOF once the child is killed, and the
+    # never-started one was released, so the persister finishes.
+    assert len(batchers) == 1
+    assert _eventually(lambda: batchers[0].finished, 15)
