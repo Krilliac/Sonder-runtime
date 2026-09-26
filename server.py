@@ -311,6 +311,7 @@ from sonder_runtime.domain.thinking_controls import (
 )
 from sonder_runtime.domain import reasoning_continuation as _reasoning_continuation
 from sonder_runtime.domain import verification_progress
+from sonder_runtime.domain import batch_coalescing as _batch_coalescing
 from sonder_runtime.domain.fanout_receipts import (
     safe_answer as _fanout_safe_answer,
     snapshot_allows as _fanout_snapshot_allows_policy,
@@ -20041,6 +20042,65 @@ _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
 _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "workflow_run",
 })
+
+
+@functools.lru_cache(maxsize=1)
+def _agent_batch_counterparts():
+    """Batch counterparts the agent dispatcher really registers (Issue #510 s6).
+
+    Derived, never assumed: a declared candidate is active only when both
+    tools have a literal ``_agent_dispatch`` branch, both are on the
+    repository read-only allow-list, and neither is a mutation or execution
+    tool.  If the dispatcher cannot be inspected the set is empty and the
+    batch-coalescing guard is inert, so it can never refuse on a guess.
+    """
+    registered = tool_capabilities.dispatch_names(_agent_dispatch)
+    return _batch_coalescing.resolve_counterparts(
+        _batch_coalescing.CANDIDATE_COUNTERPARTS,
+        registered=registered,
+        read_only=REPOSITORY_READ_ONLY_TOOLS,
+        state_changing=(
+            _WORK_MUTATION_TOOLS
+            | _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS
+            | _CLOUD_AGENT_NESTED_MODEL_TOOLS
+            | {"agent_lane"}
+        ),
+    )
+
+
+def _agent_batch_coalescing_config(env=None):
+    """Typed guard thresholds; an invalid setting keeps the safe defaults.
+
+    The guard stays enabled either way: a malformed operator value must not
+    silently switch it off or loosen it past the configuration ceilings.
+    """
+    try:
+        return _batch_coalescing.BatchCoalescingConfig.from_environ(
+            os.environ if env is None else env
+        )
+    except ValueError as exc:
+        logging.getLogger("sonder.server").warning(
+            "invalid batch-coalescing guard setting (%s); using defaults", exc,
+        )
+        return _batch_coalescing.BatchCoalescingConfig()
+
+
+def _agent_batch_guard_telemetry(event):
+    """Emit one guard decision to the response activity feed and the log."""
+    fields = dict(event)
+    summary = "%s %s -> %s (%d distinct target(s), threshold %d)" % (
+        fields["action"], fields["tool"], fields["batch_tool"],
+        fields["distinct_targets"], fields["threshold"],
+    )
+    logging.getLogger("sonder.server").info("agent guard %s: %s", fields["guard"], summary)
+    activity_tracker.record_event(
+        "agent_guard",
+        summary=summary,
+        ok=fields["action"] == "advisory",
+        **fields,
+    )
+
+
 _LOCAL_AGENT_NUM_PREDICT = 1200
 _CLOUD_AGENT_WRITE_CHUNK_HINT = 24000
 
@@ -20418,6 +20478,33 @@ def _agent_turn(
     # Keep only a small window of host-known failed/empty outcomes so those
     # semantic retries cannot consume the whole agent budget.
     semantic_no_progress = collections.deque(maxlen=6)
+    # Issue #510 s6 batching/coalescing guard: one window per turn over
+    # distinct single-target read-only calls that have a registered batch
+    # form.  A tool this run must use by name keeps its single form, and the
+    # batch tool must pass every run gate the dispatcher will apply; an
+    # argument-aware ``tool_policy`` cannot be consulted without charging its
+    # budget, so such runs never get steered to a tool it might refuse.
+    def _batch_admissible(counterpart, _target):
+        if tool_policy is not None:
+            return False
+        if allowed_tools is not None and counterpart.batch_tool not in allowed_tools:
+            return False
+        return not _agent_run_tool_refusal(
+            counterpart.batch_tool,
+            read_only=read_only, cloud=cloud, unsafe=unsafe,
+            project_bound=bool(project_scope),
+            allow_web=allow_web, allow_location=allow_location,
+        )
+
+    batch_guard = _batch_coalescing.BatchCoalescingGuard(
+        tuple(
+            counterpart for counterpart in _agent_batch_counterparts()
+            if counterpart.single_tool not in required_tools
+            and counterpart.single_tool not in abort_on_tool_failure
+        ),
+        _agent_batch_coalescing_config(),
+        batch_admissible=_batch_admissible,
+    )
     # A later unrelated success must not turn a failed required/evidence call
     # into a host-approved completion. Key by the canonical call signature so
     # only a successful retry of that exact host observation can recover it.
@@ -21182,6 +21269,15 @@ def _agent_turn(
                 "before making a mutation."
             )
         tool_dispatched = False
+        batch_refusal = None
+        if (
+            prior_identical_failures < 2
+            and not policy_error
+            and not cached_inspection
+        ):
+            batch_refusal = batch_guard.before_dispatch(tool_name, policy_tool_args)
+            if batch_refusal is not None:
+                _agent_batch_guard_telemetry(batch_refusal.telemetry())
         if prior_identical_failures >= 2:
             observation = (
                 "ERROR: HOST NO-PROGRESS: this exact tool call already failed twice. "
@@ -21198,6 +21294,10 @@ def _agent_turn(
             )
         elif policy_error:
             observation = policy_error
+        elif batch_refusal is not None:
+            # Not dispatched: the typed refusal names the registered batch
+            # tool with this target already in its argument.
+            observation = batch_refusal.render()
         elif cached_inspection:
             repeated = repeated_inspection_counts.get(call_signature, 0) + 1
             repeated_inspection_counts[call_signature] = repeated
@@ -21421,8 +21521,20 @@ def _agent_turn(
             tool_dispatched
             and tool_name in _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS
         )
+        batch_advisory = None
+        if tool_dispatched and not (
+            mutation_attempt_may_have_changed or execution_may_have_changed
+        ):
+            batch_advisory = batch_guard.after_dispatch(
+                tool_name, policy_tool_args, ok=tool_ok,
+            )
+            if batch_advisory is not None:
+                _agent_batch_guard_telemetry(batch_advisory.telemetry())
         if mutation_attempt_may_have_changed or execution_may_have_changed:
             parent_effect_dirty = True
+            # Fresh reads after a state change are legitimate evidence, not
+            # a wasteful run of singles: start a new batching window.
+            batch_guard.reset()
             # A real mutation or an execution-capable tool can make prior
             # inspection results stale even when the command exits nonzero.
             # Dry-run mutation tools do not reach here.
@@ -21534,14 +21646,36 @@ def _agent_turn(
                 verifier=tool_name in _AGENT_VERIFICATION_TOOLS,
                 validator=tool_name in _WORK_VALIDATION_TOOLS,
             )
+        # The advisory is steering for the model only: it is appended after
+        # the host ledger, inspection cache and evidence checks have seen the
+        # unchanged tool result.
+        model_observation = observation_text[:6000]
+        if batch_advisory is not None:
+            model_observation += "\n" + batch_advisory.render()
         observations.append(
             "step %d tool=%s reason=%s\n%s" % (
                 step,
                 tool_name,
                 decision.get("reason", ""),
-                observation_text[:6000],
+                model_observation,
             )
         )
+        if batch_refusal is not None and batch_refusal.exhausted:
+            if auto_checklist:
+                _agent_checklist_fail(
+                    checklist_id, checklist_states,
+                    "model ignored repeated batch-tool steering", 2,
+                )
+            return _early_exit(
+                "ERROR: agent kept issuing single %s calls after %d batch-guard "
+                "refusals; use %s for multi-target reads.\n\n%s"
+                % (
+                    batch_refusal.counterpart.single_tool,
+                    batch_refusal.refusals,
+                    batch_refusal.counterpart.batch_tool,
+                    "\n\n".join(observations),
+                )
+            )
         if semantic_stall is not None:
             stalled_tool, outcome_class, distinct_count = semantic_stall
             return _early_exit(

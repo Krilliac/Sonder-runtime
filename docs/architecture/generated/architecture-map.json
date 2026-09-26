@@ -396,7 +396,7 @@
       ]
     },
     {
-      "file_count": 375,
+      "file_count": 377,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -847,7 +847,7 @@
       ]
     },
     {
-      "file_count": 253,
+      "file_count": 254,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -879,6 +879,7 @@
         "sonder_runtime/domain/automation/selfmod_test_commands.py",
         "sonder_runtime/domain/automation/state_machine.py",
         "sonder_runtime/domain/backpressure.py",
+        "sonder_runtime/domain/batch_coalescing.py",
         "sonder_runtime/domain/binaries/__init__.py",
         "sonder_runtime/domain/binaries/elf_ids.py",
         "sonder_runtime/domain/binaries/pdb_info.py",

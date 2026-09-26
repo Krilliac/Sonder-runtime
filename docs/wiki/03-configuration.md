@@ -220,6 +220,16 @@ The persistent marker prevents a missing database from looking like first boot
 after a process restart; these guards do not isolate state from arbitrary
 same-user host code.
 
+Agent batching guard: within one agent turn, distinct single `file_read`
+calls get an advisory pointing at `context_pack` after
+`SONDER_AGENT_BATCH_ADVISORY_AFTER` targets (default 3, range 2–20). New-target
+singles are refused, without being dispatched, after
+`SONDER_AGENT_BATCH_REFUSE_AFTER` targets (default 6, from the advisory value
+to 20). The run ends at the `SONDER_AGENT_BATCH_MAX_REFUSALS`-th refusal
+(default 3, range 1–10). An invalid value logs a warning and keeps all
+defaults; the guard cannot be switched off. It never applies to mutating or
+execution tools.
+
 Consent gates: `SONDER_ALLOW_CLOUD`, `SONDER_WEB_TOOLS`,
 `SONDER_ALLOW_REMOTE_OLLAMA`, and `SONDER_ALLOW_REMOTE_COMPUTE`. These are
 independent: enabling private-node compute does not enable remote inference or

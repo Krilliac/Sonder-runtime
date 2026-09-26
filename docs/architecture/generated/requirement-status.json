@@ -180,9 +180,9 @@
     },
     {
       "checked": false,
-      "claim": "The transactional hierarchical resource/ownership/key admission implementation passed an actual owned PostgreSQL 18 primary and synchronous standby qualification at published code revision 6dcd99246a1a8dca5ae6aaff63bb94c7f2180a9d: 21 tests, no skips. SQLite multi-process races and the integrated Linux suite also pass.",
+      "claim": "The agent loop's batching/coalescing guard counts distinct successful single file_read targets per turn and, only where the dispatcher registers the read-only context_pack batch form and the run admits it, appends a typed advisory at 3 targets, refuses further new-target singles after 6 without dispatching them, and ends the run at the third refusal. Mutating and execution tools are never steered, results are never altered, thresholds are typed and bounded, and each decision emits an agent_guard activity event.",
       "requirement_id": "AGENT-007",
-      "revision": 8,
+      "revision": 9,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "6d62c6acb23d426748dd6071c1119f7877948c7829e588b62a0a7a1b8e99586e",
+    "ledger_sha256": "58082c03fcab4bf4b735acaae617d1a173d29f71a2a92441ee58709aa86ddb34",
     "spec_sha256": "1d7da49c5910bcf0bd5099ef1858312a8491a0429a4df33895d8088942278e33"
   }
 }

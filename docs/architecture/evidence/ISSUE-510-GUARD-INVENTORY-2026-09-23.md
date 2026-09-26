@@ -38,7 +38,7 @@ not happen. A code path that exists but that no test trips is listed as
 | 8 | Dangerous concurrent Git/worktree operation | **Missing: added by this lane** | `sonder_runtime/adapters/git_mutation_guard.py`, wired into all seven `harness_tools` Git mutations and `git_tools.runtime_update` / `runtime_stash` | `tests/test_git_mutation_guard.py` (new) |
 | 9 | Orphan-process reaper | Present, canaried | job registry `reconcile_with_cleanup` via `ProcessTreeSupervisor`; `ollama_lifecycle.cleanup_orphaned_discovery_probes` | `tests/test_remaining_agent_005_job_integration.py::test_recovery_executes_only_bounded_cleanup_and_requires_complete_receipt`, `tests/test_ollama_lifecycle.py::test_cleanup_terminates_only_stable_trusted_orphan_discovery` |
 | 10 | Expensive/top-tier spawn cap | Partial: output-token budget and cloud opt-in only | no per-run count of cloud/top-tier spawns in router, orchestrator, or fanout | token budget canaries only (4a) |
-| 11 | Batching/coalescing | **Missing** (only repeat detection) | repeat guards (1, 3) exist; nothing detects N distinct single `file_read`/`file_edit` calls or steers to `file_batch_write` | none |
+| 11 | Batching/coalescing | **Missing** (only repeat detection); **added 2026-09-26** for the agent loop | `sonder_runtime/domain/batch_coalescing.py` `BatchCoalescingGuard`, wired into `server._agent_turn`; counterparts derived by `server._agent_batch_counterparts` (only `file_read` -> `context_pack` qualifies today) | `tests/test_batch_coalescing_guard.py::test_canary_single_reads_are_steered_then_refused`, `::test_canary_ignored_refusals_end_the_run` (new) |
 
 ## Guards added by this lane
 
@@ -90,6 +90,60 @@ one build, so the duplicate-keeping fingerprint matters for other callers of
 the guard rather than for this loop. The default two-attempt contract is
 unchanged.
 
+### Batching/coalescing guard (candidate 11, added 2026-09-26)
+
+The mutating half of the original gap (distinct single `file_edit` calls that
+could have been one `file_batch_write`) is deliberately **not** guarded:
+mutating and execution tools are never steered, coalesced or refused by this
+guard. Only the read-only half is covered, and only where a real batch form is
+registered.
+
+Counterparts are declared as candidates in
+`batch_coalescing.CANDIDATE_COUNTERPARTS` and activated by
+`server._agent_batch_counterparts` only when both tools have a literal
+`_agent_dispatch` branch (`tool_capabilities.dispatch_names`), both are on
+`REPOSITORY_READ_ONLY_TOOLS`, and neither is in `WORK_MUTATION_TOOLS`,
+`_AGENT_EXECUTION_STATE_INVALIDATION_TOOLS`, the nested-model set or
+`agent_lane`. The registered surface has exactly one qualifying pair today:
+`file_read` (single path) -> `context_pack` (`paths_json`, each path through
+the same `file_ops.read_file` guards, per-file errors). No read-only batch form
+exists for `file_read_range`, `file_digest`, `data_query` or any stat-style
+tool, so those are not covered; `directory_digest` hashes a whole tree and is
+not treated as a batch form of `file_digest`.
+
+Per `_agent_turn` call (the window) the guard counts distinct normalized
+targets of successful single `file_read` dispatches:
+
+- at `advisory_after` (default 3) distinct targets a typed `BatchAdvisory`
+  naming `context_pack` is appended to the model-visible observation *after*
+  the host ledger, inspection cache and evidence checks have seen the
+  unchanged tool result;
+- after `refuse_after` (default 6) distinct targets, a single `file_read` on a
+  new target is not dispatched; the model receives a typed `BatchRefusal`
+  (`ERROR: HOST BATCH GUARD (batch_coalescing): ...`) with the refused path
+  already in a `context_pack {"paths_json": [...]}` example;
+- the `max_refusals`-th (default 3) refusal in one turn ends the run through
+  the loop's normal early exit, so ignored steering cannot consume the rest of
+  the step budget.
+
+Re-reading an already-counted target is never counted or refused (the
+existing identical-call and cached-inspection guards own that). Failed single
+reads do not count. The window restarts on a new turn, after any mutation or
+execution attempt (fresh reads after a change are legitimate), and after a
+successful `context_pack`. The guard never names a batch tool this run cannot
+use: it stays silent when `context_pack` is outside the run's allowlist or
+refused by `_agent_run_tool_refusal`, when the run carries an argument-aware
+`tool_policy` (selfmod and autopilot policies; consulting them would charge
+their budgets), or when `file_read` is a required or abort-on-failure tool.
+
+Thresholds are typed (`BatchCoalescingConfig`) from
+`SONDER_AGENT_BATCH_ADVISORY_AFTER` (2..20), `SONDER_AGENT_BATCH_REFUSE_AFTER`
+(advisory..20) and `SONDER_AGENT_BATCH_MAX_REFUSALS` (1..10). An invalid value
+keeps the defaults and logs a warning; there is no switch that disables the
+guard. Each advisory, refusal and exhausting refusal emits an `agent_guard`
+activity event (guard, action, family, tool, batch_tool, distinct_targets,
+threshold, refusals) and a `sonder.server` log line.
+
 ## Verification
 
 Commands run locally on Windows 11, Python 3.12.10, in a fresh venv from
@@ -117,6 +171,15 @@ already existed); they add coverage, not a RED proof.
 
 Regression suites and repository checks are listed in the pull request.
 
+Batching/coalescing guard (2026-09-26, Linux, Python 3.12.3, `-n 4`):
+
+| Check | Result |
+|---|---|
+| `python -m pytest tests/test_batch_coalescing_guard.py -q` | 32 passed |
+| same, with the `_agent_turn` counterpart set forced empty (RED) | 4 failed (both canaries, the configured-threshold canary and the family-window control), 28 passed |
+| agent-loop, speculation, workbench, orchestrator, autopilot and existing guard suites (`-n 4`) | 1198 passed, 3 skipped |
+| full `tests/` (`-n 8`) | 17382 passed, 166 skipped, 6 failed; 5 of the 6 pass when rerun alone, and `test_nightly_selfmod_model_selection.py::test_held_out_snapshot_rejects_candidate_mutation` also fails on the unmodified baseline `de522017` |
+
 ## Requirement mapping
 
 | Requirement | Ledger revision | Why |
@@ -124,6 +187,7 @@ Regression suites and repository checks are listed in the pull request.
 | AGENT-008 (isolated workspaces; reconcile concurrent Git changes without force-overwriting another session) | 3, `implemented_unverified` | concurrent Git mutation guard |
 | LOOP-007 (bounded retries) | 3, then 4, `implemented_unverified` | verification no-progress guard; web-repeat canary; revision 4 narrows the stall rule (duplicates kept, score must not improve, non-comparable outcomes excluded) |
 | AGENT-007 (budgets) | 3, then 4, `implemented_unverified` | codegen attempt clamp; selfmod tool-call and runtime budget canaries; revision 4 adds reporting of a clamped attempt count |
+| AGENT-007 (budgets) | 9, `implemented_unverified` | batching/coalescing guard: bounded advisory, refusal and refusal limit for runs of single `file_read` calls that `context_pack` subsumes |
 
 All three stay `implemented_unverified`: the canaries are focused tests with
 fake Git and fake compiler/model boundaries, not an end-to-end multi-lane run.
@@ -138,8 +202,15 @@ fake Git and fake compiler/model boundaries, not an end-to-end multi-lane run.
 - The no-progress guard covers `codegen_build_loop` only. The autopilot
   failure budget still has no canary.
 - Still missing: request-rate velocity limiting on model calls (4c), a
-  per-run cap on cloud/top-tier spawns (10), scope-level duplicate-worker
-  detection (6), and batching/coalescing (11).
+  per-run cap on cloud/top-tier spawns (10), and scope-level duplicate-worker
+  detection (6).
+- Batching/coalescing (11) covers only the legacy agent loop and only the
+  `file_read` -> `context_pack` pair. The typed tool gateway and native MCP
+  clients have no turn window and no registered read-only batch tool, so they
+  are not covered. Runs with an argument-aware `tool_policy` (selfmod,
+  autopilot) are never steered. Other single-target read families (line
+  ranges, digests, queries, stats) need a real batch tool before they can be
+  covered; none was invented. The guard window is in-memory per turn.
 - Still without canaries: fanout `MAX_MODELS`, interactive-lane capacity, and
   the fanout `cloud_workers` clamp.
 - Guard state is in-memory telemetry (`guard_snapshot`); it is not persisted
