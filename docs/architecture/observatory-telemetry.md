@@ -234,6 +234,12 @@ is replaced with `[unsafe-label]`.
 | `request.completed` \| `request.failed` \| `request.cancelled` | `outcome`, `total_ms`, `http_status`, `provider`, `model`, `attempts`, `prompt_tokens?`, `completion_tokens?`, `error_code?` | exactly once per started turn |
 | `telemetry.dropped` | `dropped_events` (cumulative), `emitted_events`, `queue_capacity`, `final` | producer drops |
 
+A pre-send fallback (`SONDER_INFERENCE_FALLBACK=ollama` after a refusal from
+cached health) never reaches `dispatch_provider`; bootstrap wires the fallback
+wrapper's observer to `provider_attempts.report_provider_fallback`, which
+emits `route.changed` (`reason_code: "primary_unreachable"`) before the
+fallback's own `route.selected`.
+
 Provider ids come from the `dispatch_provider` labels, which stay unchanged
 as capture evidence: `ollama` to `ollama`, `openai-compatible` to
 `openai_compatible`, `sonder-inference` to `sonder_inference`.
@@ -334,10 +340,6 @@ for the request carry `run_id = R` and `attributes.parent_request_id = R`.
 These are cross-repo shapes the contract does not pin; they are recorded here
 rather than invented.
 
-- The provider fallback wrapper reports a pre-send fallback through
-  `provider_attempts.report_provider_fallback(from, to, reason_code)`, which
-  forwards to the telemetry observer's `provider_fallback`. The provider change
-  must call it for `route.changed` to appear when no send happened.
 - `subscriber_dropped_events` is exposed in the discovery `stats` block; the
   Observatory discovery schema pins no field for it (additive keys allowed).
 - A read-only telemetry capability for remote or token-bearing Observatory

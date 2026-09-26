@@ -396,6 +396,19 @@ def _debug_executor_chain(debug_tools, developer_tools):
         debug_tools, developer_tool_executor(developer_tools, PackagedToolExecutor()))
 
 
+def _report_provider_fallback(from_provider, to_provider, reason_code, _context) -> None:
+    """``PreSendFallbackGateway`` observer: announce the fallback as ``route.changed``.
+
+    A pre-send refusal (cached health not ready) never reaches
+    ``dispatch_provider``, so without this the Runtime stream would show the
+    fallback's Ollama attempt with no route change.  It forwards to whichever
+    telemetry observer is installed; with export disabled it does nothing.
+    """
+    from ..application.session.provider_attempts import report_provider_fallback
+
+    report_provider_fallback(from_provider, to_provider, reason_code)
+
+
 @dataclass(frozen=True)
 class _LiveTelemetry:
     """The composed Observatory export chain, or all-None when disabled."""
@@ -675,6 +688,7 @@ def build_application(
         target_resolver=target_resolver,
         generate_factory=generate_factory,
         embedding_provider=embedding_adapter,
+        fallback_observer=_report_provider_fallback,
     )
     logger.info("model gateway built")
     logger.debug("composing vision service and context planning facade")

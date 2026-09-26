@@ -260,6 +260,24 @@ consent gate refuses a hosted (`-cloud`) or remote target even when the
 original request allowed cloud; the fallback cannot widen where a prompt
 goes. See [the provider reference](docs/architecture/sonder-inference-provider.md).
 
+### Observatory telemetry and ecosystem routes
+
+`/.well-known/sonder-telemetry`, `/v1/observability/events` (SSE and NDJSON)
+and `/v1/sonder/ecosystem` require administrator authorization exactly as
+`/v1/observability/trace` does; in local-open loopback mode that is every
+loopback caller. They export content-free events only: prompts, responses,
+summaries and provider payloads are never exported (`text_capture` is
+`none`), and bridged event-sink codes are an allowlist with sanitized
+detail. Browsers are admitted by exact-match allowlists: the route-scoped
+`SONDER_OBSERVATORY_ORIGINS` applies to these three GET routes only, while
+the global `SONDER_CORS_ORIGINS` also admits that origin to every admin route,
+so an Observatory origin belongs in the route-scoped list. After the
+listener's `Host` check, these routes on a loopback bind also refuse a `Host`
+that is not `127.0.0.1`, `localhost` or `[::1]` (403 `forbidden_host`) unless
+a TLS-terminating proxy is declared. The event ring and the subscriber count
+are bounded (429 beyond the cap), and `SONDER_OBSERVATORY_EXPORT=0` removes
+the telemetry routes. See [the telemetry reference](docs/architecture/observatory-telemetry.md).
+
 ## Supported versions
 
 This is a single-maintainer project. Fixes land on `main`; there are no
@@ -292,5 +310,6 @@ implementation work is tracked only in the
 | Unsafe lab mode | Experimental | Exact acknowledgement, loopback-only, and unprivileged; disposable isolated hosts only, and never an OS sandbox. |
 | Sonder Inference provider on a loopback endpoint | Implemented | No consent needed; `sonder-inference` bindings only, see the Sonder Inference provider section. |
 | Remote Sonder Inference endpoint | Experimental | Refused unless `SONDER_ALLOW_REMOTE_INFERENCE=1`, `https://`, an API key and a cloud-allowed operation context all hold; Inference itself serves no TLS, so a TLS-terminating proxy is required. |
+| Observatory telemetry and ecosystem routes | Implemented | Admin-authorized, content-free, exact-match origin allowlists; see the Observatory telemetry section. |
 | Exposing the runtime port directly to a network | Unsupported | Remote access requires the server-private profile behind a TLS reverse proxy. |
 | Scoped credential handles for every tool instead of injected raw secrets | Proposed | SEC-001; an opaque-handle provider boundary exists but is not yet the end-to-end tool contract. |

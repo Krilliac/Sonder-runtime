@@ -199,6 +199,8 @@ Inference gateway in `PreSendFallbackGateway`:
   `(from_provider, to_provider, reason_code, context)` once per fallback,
   before the fallback send. This is the seam for a `route.changed` event,
   because a refusal from cached health never reaches `dispatch_provider`.
+  Bootstrap wires it to `provider_attempts.report_provider_fallback`, so the
+  Runtime telemetry stream shows the change even when no send happened.
 - Identity-bound runtimes (`build_runtime(route_evidence=...)`) refuse a
   fallback configuration.
 
@@ -274,8 +276,3 @@ meaning for Inference-bound tiers.
 - open: whether Inference includes `sonder.api_version` in every JSON body
   (the critique's correction); the gateway checks it when present and relies
   on the health document otherwise.
-- open: the `fallback_observer` seam is not wired by bootstrap on this
-  branch; emitting `route.changed` from it belongs to the chat-telemetry lane.
-- open: SECURITY.md rows for the telemetry and ecosystem routes (contract
-  section 13) wait for those routes to exist on the integrated branch; the
-  proposed text is in the ADR.

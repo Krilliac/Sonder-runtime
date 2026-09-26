@@ -116,6 +116,50 @@ def test_pre_send_fallback_is_announced_once(telemetry):
     assert sink.events[1].fields["to_provider"] == "ollama"
 
 
+def test_composed_pre_send_fallback_emits_route_changed(telemetry):
+    """The composed graph wires PreSendFallbackGateway to the telemetry observer.
+
+    The primary refuses before any send (as cached not-ready health does), so
+    only the fallback wrapper can announce the change.
+    """
+    import inspect
+
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import (
+        SonderInferenceUnreachable,
+    )
+    from sonder_runtime.adapters.provider_dispatch.fallback import PreSendFallbackGateway
+    from sonder_runtime.application.context import local_owner_context
+    from sonder_runtime.application.ports.model_gateway import ModelRequest, ModelResponse
+    from sonder_runtime.bootstrap import app as bootstrap_app
+
+    class Refusing:
+        def generate(self, request, context):
+            raise SonderInferenceUnreachable("not ready")
+
+    class Ollama:
+        def generate(self, request, context):
+            _send("ollama")
+            return ModelResponse(text="ok", model="sonder:latest", tier=request.tier,
+                                 duration_ms=1, tokens_in=1, tokens_out=1)
+
+    assert "fallback_observer=_report_provider_fallback" in inspect.getsource(
+        bootstrap_app.build_application)
+    gateway = PreSendFallbackGateway(Refusing(), fallback=Ollama(),
+                                     observer=bootstrap_app._report_provider_fallback)
+    runtime, sink = telemetry
+    turn = runtime.begin_turn(turn_id="req-composed", surface="http.chat_completions",
+                              stream=False, requested_model="sonder")
+    context = local_owner_context(correlation_id="req-composed", source="http",
+                                  timeout_seconds=30)
+    with runtime.activate(turn):
+        gateway.generate(ModelRequest(prompt="hi", tier="general"), context)
+    assert sink.types() == ["request.started", "route.changed", "route.selected"]
+    assert sink.events[1].fields == {"from_provider": "sonder_inference",
+                                     "to_provider": "ollama",
+                                     "reason_code": "primary_unreachable", "attempt": 1}
+    assert sink.events[2].fields["provider"] == "ollama"
+
+
 def test_fallback_after_a_failed_send_does_not_announce_twice(telemetry):
     from sonder_runtime.domain.common.errors import DependencyUnavailable
 
