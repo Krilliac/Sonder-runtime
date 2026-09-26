@@ -167,14 +167,18 @@ All three routes require administrator authorization exactly as
 loopback caller; with an API key it is `Authorization: Bearer <key>`.
 Discovery reports `auth.required: false` only in local-open mode.
 
-DNS-rebinding defence: on a loopback bind the three routes refuse a `Host`
-header that does not name `127.0.0.1`, `localhost` or `[::1]` (any port)
-with 403 `{"error": {"code": "forbidden_host"}}`, as Sonder-Inference does
-(contract section 2.3). A rebinding page is same-origin, sends no `Origin`,
-and would otherwise pass the CORS check. The check is off when
-`SONDER_TLS_TERMINATED_BY_PROXY` declares a proxy that forwards its public
-name, and a request without `Host` (no browser sends one) is not refused.
-Other Runtime routes keep their existing posture.
+DNS-rebinding defence has two layers. The listener's own `Host` policy runs
+first, before any routing, and refuses a name it does not trust with 421
+`HOST_NOT_ALLOWED` (see SECURITY.md). On a loopback bind the three telemetry
+routes then also refuse a `Host` header that does not name `127.0.0.1`,
+`localhost` or `[::1]` (any port) with 403 `{"error": {"code":
+"forbidden_host"}}`, as Sonder-Inference does (contract section 2.3), even
+for a name listed in `[server].allowed_hosts`. A rebinding page is
+same-origin, sends no `Origin`, and would otherwise pass the CORS check. The
+route check is off when `SONDER_TLS_TERMINATED_BY_PROXY` declares a proxy that
+forwards its public name (the listener policy still applies, so that name
+must be trusted there), and a request without `Host` (no browser sends one)
+is not refused. Other Runtime routes keep the listener policy only.
 
 A request whose `Origin` is present but not allowed gets 403 with
 `{"error": {"message": "origin is not allowed", "type": "cors", "code":

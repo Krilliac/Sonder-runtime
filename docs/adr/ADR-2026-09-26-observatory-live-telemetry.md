@@ -41,7 +41,9 @@
    rebinding page is same-origin and sends no `Origin`, so CORS alone does
    not stop it from reading the provider inventory or holding a stream open.
    The check is off behind a declared TLS-terminating proxy
-   (`SONDER_TLS_TERMINATED_BY_PROXY`), which forwards its public name.
+   (`SONDER_TLS_TERMINATED_BY_PROXY`), which forwards its public name. It
+   sits behind the listener's own `Host` policy (421 `HOST_NOT_ALLOWED`),
+   which runs first for every route.
 
 ## Rationale
 

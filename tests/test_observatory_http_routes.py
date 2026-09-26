@@ -443,13 +443,26 @@ def test_rejected_origin_carries_the_forbidden_origin_code(monkeypatch, local_op
 
 
 def test_loopback_telemetry_routes_refuse_a_rebound_host(monkeypatch, local_open):
+    """Two layers: the listener's Host policy, then the telemetry-route check.
+
+    An attacker-chosen name never reaches routing in local-open mode (421
+    HOST_NOT_ALLOWED from the listener).  A name the listener does trust
+    (here an operator's ``allowed_hosts`` entry) still gets 403
+    forbidden_host on the telemetry routes of a loopback bind, which accept
+    only 127.0.0.1, localhost and [::1].
+    """
     monkeypatch.setattr(ts, "HOST", "127.0.0.1")
     monkeypatch.setattr(ts, "TLS_TERMINATED_BY_PROXY", False)
+    monkeypatch.setattr(ts, "ALLOWED_HOSTS", ts._parse_allowed_hosts(["sonder.lan"]))
     with _serve(monkeypatch, _application()) as port:
         for path in ("/.well-known/sonder-telemetry", "/v1/sonder/ecosystem",
                      "/v1/observability/events"):
             status, _, body = _request(port, "GET", path,
                                        headers={"Host": "evil.example:%d" % port})
+            assert status == 421, path
+            assert json.loads(body)["error"]["code"] == "HOST_NOT_ALLOWED"
+            status, _, body = _request(port, "GET", path,
+                                       headers={"Host": "sonder.lan:%d" % port})
             assert status == 403, path
             assert json.loads(body)["error"]["code"] == "forbidden_host"
         for host in ("localhost:%d" % port, "127.0.0.1", "[::1]:%d" % port):
@@ -459,8 +472,14 @@ def test_loopback_telemetry_routes_refuse_a_rebound_host(monkeypatch, local_open
 
 
 def test_rebinding_check_is_off_behind_a_declared_tls_proxy(monkeypatch, local_open):
+    """Behind a declared proxy only the listener's Host policy applies.
+
+    The proxy forwards its public name, which the listener must trust (an
+    ``allowed_hosts`` entry here); the telemetry-route loopback check is off.
+    """
     monkeypatch.setattr(ts, "HOST", "127.0.0.1")
     monkeypatch.setattr(ts, "TLS_TERMINATED_BY_PROXY", True)
+    monkeypatch.setattr(ts, "ALLOWED_HOSTS", ts._parse_allowed_hosts(["sonder.example.org"]))
     with _serve(monkeypatch, _application()) as port:
         status, _, _ = _request(port, "GET", "/.well-known/sonder-telemetry",
                                 headers={"Host": "sonder.example.org"})
