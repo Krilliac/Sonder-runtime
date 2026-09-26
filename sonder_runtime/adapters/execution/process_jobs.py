@@ -569,10 +569,14 @@ class SubprocessJobProvider:
             error = f"process output persistence failed ({output_failure})"
         elif status is JobStatus.FAILED:
             error = "process exited with a non-zero status"
+        # The observed exit code is durable for failed runs too: consumers that
+        # classify by exit code (pytest 5 = no tests, 2-4 = error) must read the
+        # same answer after a restart as before it.
+        observed = isinstance(exit_code, int) and not isinstance(exit_code, bool)
         record = self._registry.transition(
             job_id,
             status,
-            result={"exit_code": exit_code} if status is JobStatus.SUCCEEDED else None,
+            result={"exit_code": exit_code} if observed else None,
             error=error,
         )
         if self._jobs._lifecycle is not None:

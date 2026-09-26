@@ -8,9 +8,17 @@ from pathlib import Path
 
 import pytest
 
+from sonder_runtime.adapters.testing.artifacts import ReportArtifactCollector
+from sonder_runtime.adapters.testing.launcher import ProcessTestLauncher
 from sonder_runtime.application.testing.ports import TestRunRequest
+from sonder_runtime.application.testing.service import TestRunService
 from sonder_runtime.domain.testing.report import TestReport
-from tests.test_tools_test_runs_harness import stack  # noqa: F401 - fixture
+from tests.test_tools_test_runs_harness import (  # noqa: F401 - stack is a fixture
+    RegistryOutputReader,
+    host_executable_guard,
+    stack,
+    summarize,
+)
 
 pytestmark = [pytest.mark.integration,
               pytest.mark.skipif(os.name != "posix", reason="process-tree checks read /proc")]
@@ -166,3 +174,41 @@ def test_a_collection_error_is_reported_as_an_error_run(stack):
     report = _finish(stack, stack.service.start(TestRunRequest(project=str(project)), stack.context()))
     assert report.status == "error" and report.exit_code == 2
     assert report.totals.errors == 1
+
+
+def _terminal(stack, job_id, limit=90.0):
+    deadline = time.monotonic() + limit
+    while time.monotonic() < deadline:
+        record, _, running = stack.launcher.wait(job_id, 5.0)
+        if not running:
+            return record
+    raise AssertionError("test run did not finish in %.0fs" % limit)
+
+
+@pytest.mark.parametrize(("selector", "ini", "exit_code", "status"), [
+    ("", "[pytest]\n", 1, "failed"),
+    ("k:matches_nothing_here", "[pytest]\n", 5, "no_tests"),
+    # A project-owned usage error: pytest exits 4 on an unknown option.
+    ("", "[pytest]\naddopts = --no-such-pytest-option\n", 4, "error"),
+])
+def test_a_failed_runs_exit_code_survives_a_runtime_restart(stack, selector, ini, exit_code, status):
+    """The exit code is durable: a fresh launcher (no in-memory run) still classifies it."""
+    project = _project(stack.allowed / ("restart%d" % exit_code))
+    (project / "pytest.ini").write_text(ini)
+    context = stack.context()
+    job = stack.service.start(TestRunRequest(project=str(project), selector=selector), context)
+    record = _terminal(stack, job)
+    assert record.status.value == "failed"
+    assert record.result == {"exit_code": exit_code}
+
+    report_root = str(stack.state / "test-runs")
+    restarted = ProcessTestLauncher(lambda: stack.provider, lambda: stack.registry,
+                                    executable_guard=host_executable_guard, report_root=report_root)
+    service = TestRunService(
+        stack.planner, restarted, ReportArtifactCollector(report_root),
+        output=RegistryOutputReader(stack.registry), summarize=summarize,
+        redact=lambda text: text, clock=time.time,
+    )
+    report = service.result(job, context, wait_seconds=0)
+    assert isinstance(report, TestReport)
+    assert report.exit_code == exit_code and report.status == status

@@ -290,9 +290,12 @@ The host-configured `run_tests` catalog in
   that changes between the two can pick a different candidate runner. The
   approval still binds runner, selector and project, and both plans use the
   same host-owned templates.
-- **Exit codes are held in memory.** A failed run's exit code is kept by the
-  running process. After a runtime restart, only the durable record (and a
-  report already cached) remain.
+- **Exit codes are durable only once observed.** The process job records the
+  observed exit code in the durable job record for failed runs as well as
+  passing ones, so a report built after a runtime restart still classifies
+  pytest exit 5 as `no_tests` and exits 2-4 as `error`. A run that was
+  cancelled, or whose exit the runtime never observed (the runtime stopped
+  while it ran), has no exit code to keep.
 
 ## Known debt
 

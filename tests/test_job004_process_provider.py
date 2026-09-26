@@ -989,6 +989,9 @@ def test_wait_publishes_terminal_truth_after_process_exit():
     assert waited.timed_out is False
     assert waited.record.status is JobStatus.FAILED
     assert waited.record.error == "process exited with a non-zero status"
+    # The exit code is durable for failures too, not only for success.
+    assert waited.record.result == {"exit_code": 3}
+    assert provider.poll("job-process").result == {"exit_code": 3}
 
 
 def test_running_process_publishes_incremental_output_before_wait(tmp_path):
