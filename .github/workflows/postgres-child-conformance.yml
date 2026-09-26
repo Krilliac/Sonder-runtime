@@ -13,6 +13,10 @@ on:
       - sonder_runtime/adapters/persistence/durable_continuation.py
       - sonder_runtime/adapters/persistence/postgres*.py
       - sonder_runtime/adapters/subagents.py
+      - sonder_runtime/adapters/persistence/sqlite/effect_journal.py
+      - sonder_runtime/application/execution/effect_journal.py
+      - sonder_runtime/application/execution/worker_bindings.py
+      - sonder_runtime/bootstrap/app.py
       - tests/test_atomic_child_reservations.py
       - tests/test_postgres_child_storage_integration.py
   workflow_dispatch:

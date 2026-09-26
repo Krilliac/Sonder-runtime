@@ -117,6 +117,11 @@ procedure is available. These database guarantees do not establish independent
 host fencing or complete two-host Sonder high availability.
 
 `tests/test_postgres_child_storage_integration.py` runs only with an explicit
-disposable lab binding. Pair-loss cases require the in-process lab's trusted
+disposable lab binding. It also covers the journal-stamped checkpoint path on
+the live pair: stamping, provenance read-back, cut points around the snapshot
+compare-and-set, and resuming a recoverable child through `build_application`
+after a clean restart, including the typed refusal of a swapped journal
+identity. Resuming a child whose owner process was killed stays blocked by the
+unclean owner marker described above. Pair-loss cases require the in-process lab's trusted
 standby controls. Tests do not accept arbitrary DSNs, reset a schema, install
 services, or operate on an installed Sonder runtime.

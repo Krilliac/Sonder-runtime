@@ -876,3 +876,506 @@ def test_toml_cli_uses_actual_postgres_graph(
         assert cli.cmd_mcp(arguments) == 0
     assert len(seen) == 1
     assert seen[0].lineage_query()._children._closed
+
+
+# --- Journal-stamped checkpoints and child resume (#515) ----------------------
+#
+# Production wraps whichever child repository it composes in
+# DurableContinuationService with a JournalProvenanceStamp over the SQLite
+# worker-effects journal.  These cases run that path against the live pair.
+# A killed interpreter would leave this pair's single durable owner marker
+# unclean (only the owner-loss canary may do that), so each cut is a failure
+# raised at the same point instead of os._exit.  For the database the effect
+# is the same: a transaction that never reached COMMIT is rolled back.
+
+_PROVENANCE_RUN = "subagent:pg-provenance"
+_PROVENANCE_WORKER = "subagent:pg-worker"
+
+
+class _Cut(RuntimeError):
+    """Stands in for the host dying at one cut point."""
+
+
+class _CutBeforeReceipt:
+    """Connection proxy: fail after the snapshot UPDATE, before its receipt."""
+
+    def __init__(self, connection, child_id, sequence, fired):
+        self._connection, self._child_id = connection, child_id
+        self._sequence, self._fired = sequence, fired
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+    def execute(self, query, *args, **kwargs):
+        if isinstance(query, str) and query.startswith("INSERT INTO sonder_child.receipt"):
+            from sonder_runtime.adapters.persistence.postgres_continuation import (
+                decode_child_snapshot,
+            )
+
+            # The provenance-carrying snapshot is written inside this open
+            # transaction; the cut lands before the receipt and COMMIT.
+            snapshot = self._connection.execute(
+                "SELECT snapshot FROM sonder_child.child WHERE child_id=%s",
+                (self._child_id,),
+            ).fetchone()[0]
+            written = decode_child_snapshot(bytes(snapshot)).checkpoint
+            assert written.sequence == self._sequence
+            assert written.provenance is not None
+            self._fired.append(written)
+            raise _Cut("host stopped inside the checkpoint compare-and-set")
+        return self._connection.execute(query, *args, **kwargs)
+
+
+def _cut_checkpoint_cas(repository, monkeypatch, child_id, sequence):
+    from sonder_runtime.application.subagents.continuation_codec import decode_call
+
+    transport, fired = repository._transport, []
+    original = transport.run
+
+    def run(function, *, prepared=None, **kwargs):
+        if prepared is not None and prepared.kind == "save_checkpoint" and not fired:
+            args, _kwargs = decode_call(prepared)
+            if args[0].child_id == child_id and args[0].sequence == sequence:
+                return original(
+                    lambda connection: function(
+                        _CutBeforeReceipt(connection, child_id, sequence, fired)
+                    ),
+                    prepared=prepared, **kwargs,
+                )
+        return original(function, prepared=prepared, **kwargs)
+
+    monkeypatch.setattr(transport, "run", run)
+    return fired
+
+
+def _provenance_journal(root):
+    from sonder_runtime.adapters.persistence.durable_continuation import (
+        SQLiteJournalProvenanceSource,
+    )
+    from sonder_runtime.adapters.persistence.sqlite.effect_journal import (
+        SQLiteEffectJournal,
+    )
+    from sonder_runtime.application.execution.worker_bindings import (
+        AuthenticatedWorkerBinding,
+    )
+    from sonder_runtime.application.subagents.checkpoint_provenance import (
+        JournalProvenanceStamp,
+        ProvenanceBinding,
+    )
+
+    journal = SQLiteEffectJournal(root / "worker-effects.db")
+    source = SQLiteJournalProvenanceSource(journal, create_identity=True)
+    journal.claim_owner(_PROVENANCE_RUN, _PROVENANCE_WORKER, 1)
+    binding = AuthenticatedWorkerBinding(
+        journal, _PROVENANCE_RUN, _PROVENANCE_WORKER, 1, "local-subagents",
+    )
+    stamp = JournalProvenanceStamp(
+        source, lambda _subject: ProvenanceBinding(_PROVENANCE_RUN, _PROVENANCE_WORKER, 1),
+    )
+    return journal, source, binding, stamp
+
+
+def _validate_resume(checkpoint, source, *, epoch):
+    from sonder_runtime.application.subagents.checkpoint_provenance import (
+        validate_checkpoint_resume,
+    )
+
+    return validate_checkpoint_resume(
+        checkpoint, source, run_id=_PROVENANCE_RUN, worker_id=_PROVENANCE_WORKER,
+        resumer_owner_epoch=epoch,
+    )
+
+
+@pytest.mark.parametrize("cut", ["after_receipt", "in_cas", "after_cas"])
+def test_actual_pair_checkpoint_cuts_never_pass_the_settled_journal(
+    repository, tmp_path, monkeypatch, cut
+):
+    from sonder_runtime.application.context import local_owner_context
+    from sonder_runtime.application.execution.effect_journal import EffectState
+    from sonder_runtime.application.execution.worker_bindings import journaled_effect
+    from sonder_runtime.application.ports.subagents import SubagentStatus
+    from sonder_runtime.application.subagents.continuable import (
+        checkpoint_state_digest,
+    )
+    from sonder_runtime.application.subagents.durable_continuation import (
+        DurableContinuationService,
+    )
+
+    journal, source, binding, stamp = _provenance_journal(tmp_path)
+    root_id = "pg-provenance-root-" + uuid.uuid4().hex
+    child_id = "pg-provenance-" + uuid.uuid4().hex
+    service = DurableContinuationService(repository, checkpoint_provenance=stamp)
+    service.register_root(root_id, SubagentBudget(max_steps=8))
+    fired = (
+        _cut_checkpoint_cas(repository, monkeypatch, child_id, 1)
+        if cut == "in_cas" else []
+    )
+
+    def runner(_state, save, _control):
+        save({"phase": "before"}, "before")
+        journaled_effect(  # The journal receipt commits before the next save.
+            binding, operation_id="op-write-1", idempotency_key="write-1",
+            request={"key": "write-1"}, invoke=lambda: "done",
+            receipt_key="receipt:write-1",
+        )
+        if cut == "after_receipt":
+            raise _Cut("host stopped after the journal receipt")
+        save({"phase": "after"}, "after")
+        if cut == "after_cas":
+            raise _Cut("host stopped after the checkpoint compare-and-set")
+        return "unreachable"
+
+    handle = service.spawn(
+        SubagentRequest(root_id, "bounded provenance fixture", SubagentBudget(max_steps=8), child_id),
+        local_owner_context(correlation_id="pg-provenance-" + cut),
+        runner,
+    )
+    try:
+        handle.result(10)
+    except Exception:
+        pass  # A storage cut surfaces as the service's storage failure.
+    assert service.close(5)
+    if cut == "in_cas":
+        assert len(fired) == 1  # The cut really ran inside the open transaction.
+        monkeypatch.undo()
+
+    record = repository.get(child_id)
+    checkpoint = record.checkpoint
+    provenance = checkpoint.provenance
+    receipts = journal.effects_since(_PROVENANCE_RUN, 0).records
+    assert [(item.idempotency_key, item.state) for item in receipts] == [
+        ("write-1", EffectState.COMPLETED),
+    ]
+    assert provenance is not None and provenance.digest_valid
+    assert provenance.child_id == child_id
+    assert provenance.settled_position <= journal.settled_high_water(_PROVENANCE_RUN)
+    assert provenance.state_digest == checkpoint_state_digest(checkpoint.state)
+    if cut == "after_cas":
+        assert (checkpoint.sequence, checkpoint.state, provenance.settled_position) == (
+            1, {"phase": "after"}, 1,
+        )
+    else:
+        assert (checkpoint.sequence, checkpoint.state, provenance.settled_position) == (
+            0, {"phase": "before"}, 0,
+        )
+    if cut == "in_cas":
+        # The rolled-back save leaves its admitted intent without a receipt:
+        # the child stays fenced as an ambiguous mutation.
+        assert repository.unresolved_mutation(child_id) is not None
+    else:
+        assert record.status is SubagentStatus.FAILED and record.recovery_required
+
+    journal.claim_owner(_PROVENANCE_RUN, _PROVENANCE_WORKER, 2)
+    decision = _validate_resume(checkpoint, source, epoch=2)
+    assert decision.allowed, decision.detail
+    settled = decision.receipts if cut == "after_cas" else decision.later_receipts
+    assert tuple(settled) == ("write-1",)
+    assert settled["write-1"].receipt_key == "receipt:write-1"
+
+
+def test_actual_pair_refuses_superseded_and_foreign_checkpoint_provenance(
+    repository, tmp_path
+):
+    from sonder_runtime.adapters.persistence.durable_continuation import (
+        SQLiteJournalProvenanceSource,
+    )
+    from sonder_runtime.adapters.persistence.sqlite.effect_journal import (
+        SQLiteEffectJournal,
+    )
+    from sonder_runtime.application.context import local_owner_context
+    from sonder_runtime.application.execution.worker_bindings import (
+        AuthenticatedWorkerBinding,
+        journaled_effect,
+    )
+    from sonder_runtime.application.subagents.checkpoint_provenance import (
+        CheckpointResumeRefusal,
+    )
+    from sonder_runtime.application.subagents.durable_continuation import (
+        DurableContinuationService,
+    )
+
+    journal, source, binding, stamp = _provenance_journal(tmp_path / "journal")
+    root_id = "pg-provenance-root-" + uuid.uuid4().hex
+    child_id = "pg-provenance-" + uuid.uuid4().hex
+    service = DurableContinuationService(repository, checkpoint_provenance=stamp)
+    service.register_root(root_id, SubagentBudget(max_steps=8))
+
+    def effect(owner, key):
+        journaled_effect(
+            owner, operation_id=f"op-{key}", idempotency_key=key,
+            request={"key": key}, invoke=lambda: key, receipt_key=f"receipt:{key}",
+        )
+
+    def runner(_state, save, _control):
+        effect(binding, "a")
+        save({"step": 1}, "cursor-1")
+        raise _Cut("host stopped after the checkpoint")
+
+    handle = service.spawn(
+        SubagentRequest(root_id, "bounded provenance fixture", SubagentBudget(max_steps=8), child_id),
+        local_owner_context(correlation_id="pg-provenance-refusals"), runner,
+    )
+    handle.result(10)
+    assert service.close(5)
+    checkpoint = repository.get(child_id).checkpoint
+    assert checkpoint.provenance.settled_position == 1
+
+    # A newer owner settles more work: the old stamp still names a valid
+    # prefix, so it is accepted while the stale epoch itself is refused.
+    journal.claim_owner(_PROVENANCE_RUN, _PROVENANCE_WORKER, 2)
+    newer = AuthenticatedWorkerBinding(
+        journal, _PROVENANCE_RUN, _PROVENANCE_WORKER, 2, "local-subagents",
+    )
+    effect(newer, "b")
+    assert _validate_resume(checkpoint, source, epoch=2).allowed
+    assert _validate_resume(checkpoint, source, epoch=1).reason is (
+        CheckpointResumeRefusal.STALE_OWNER_EPOCH
+    )
+
+    # A journal file with another identity cannot authorize the checkpoint.
+    other = SQLiteEffectJournal(tmp_path / "other" / "worker-effects.db")
+    other_source = SQLiteJournalProvenanceSource(other, create_identity=True)
+    other.claim_owner(_PROVENANCE_RUN, _PROVENANCE_WORKER, 2)
+    assert _validate_resume(checkpoint, other_source, epoch=2).reason is (
+        CheckpointResumeRefusal.JOURNAL_IDENTITY_MISMATCH
+    )
+
+
+def test_actual_pair_store_refuses_provenance_for_a_different_subject(
+    repository, tmp_path
+):
+    from sonder_runtime.application.ports.subagents import InvalidSubagentRequest
+    from sonder_runtime.application.subagents.continuable import (
+        CheckpointProvenance,
+        checkpoint_state_digest,
+    )
+
+    _journal, source, _binding, _stamp = _provenance_journal(tmp_path)
+    record = repository.create(new_record())
+    child_id = record.request.child_id
+    stamped = CheckpointProvenance.stamp(
+        child_id=child_id, sequence=0, state_digest=checkpoint_state_digest({"step": 1}),
+        cursor="c1",
+        journal_identity=source.position(_PROVENANCE_RUN, _PROVENANCE_WORKER).journal_identity,
+        run_id=_PROVENANCE_RUN, worker_id=_PROVENANCE_WORKER, owner_epoch=1,
+        settled_position=0,
+    )
+    forged = ContinuableCheckpoint(child_id, 0, {"step": 999}, "c1", stamped)
+    with pytest.raises(InvalidSubagentRequest, match="provenance"):
+        repository.save_checkpoint(forged, expected_sequence=-1)
+    assert repository.get(child_id).checkpoint is None
+    genuine = ContinuableCheckpoint(child_id, 0, {"step": 1}, "c1", stamped)
+    saved = repository.save_checkpoint(genuine, expected_sequence=-1)
+    assert saved.checkpoint.provenance == stamped
+    assert repository.get(child_id).checkpoint.provenance == stamped
+
+
+_RESUME_WRITE = "append-once"
+
+
+def _resume_runner_factory(root, *, fail_after_write):
+    """Checkpoint, perform one journaled append, checkpoint again."""
+    import hashlib
+
+    from sonder_runtime.application.execution import effect_journal
+
+    target = root / "workspace" / "append.txt"
+    trace = root / "runner-trace.log"
+
+    def bind(request, _context):
+        key = f"{request.child_id}:{_RESUME_WRITE}"
+
+        def run(state, save, _control):
+            binding = effect_journal.current()
+            assert binding is not None, "runner must execute under the child journal binding"
+            if int(state.get("step", 0)) == 0:
+                save({"step": 1}, "before-write")
+            settled = effect_journal.settled_receipt(key)
+            if settled is None:
+                intent = binding.begin_request(
+                    operation_id=_RESUME_WRITE, idempotency_key=key,
+                    request_digest=hashlib.sha256(b"append x").hexdigest(),
+                    reconciliation="manual",
+                )
+                with target.open("a", encoding="utf-8") as handle:
+                    handle.write("x")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                binding.complete(
+                    intent, outcome_digest=hashlib.sha256(b"x").hexdigest(),
+                    receipt_key="append.txt:1",
+                )
+                with trace.open("a", encoding="utf-8") as handle:
+                    handle.write("wrote\n")
+                if fail_after_write:
+                    # Receipt committed; the next checkpoint was never saved.
+                    raise _Cut("host stopped after the journaled append")
+                settled = "append.txt:1"
+            else:
+                with trace.open("a", encoding="utf-8") as handle:
+                    handle.write(f"consumed {settled}\n")
+            save({"step": 2, "write_receipt": settled}, "after-write")
+            return "resumed output"
+
+        return run
+
+    return lambda *_dependencies: bind
+
+
+def _compose_resume_application(storage_config, root, monkeypatch, *, fail_after_write):
+    from dataclasses import replace
+
+    from sonder_runtime.adapters import conversational_subagents
+    from sonder_runtime.bootstrap.app import build_application
+    from sonder_runtime.platform.config import SonderConfig
+
+    monkeypatch.setattr(
+        conversational_subagents, "conversational_runner_factory",
+        _resume_runner_factory(root, fail_after_write=fail_after_write),
+    )
+    config = SonderConfig()
+    return build_application(config=replace(
+        config,
+        child_storage=storage_config,
+        state=replace(
+            config.state, home=str(root / "state"),
+            workspace_roots=(str(root / "workspace"),),
+        ),
+    ))
+
+
+def _delegate_resume_child(application, root, child_id, delegation_id):
+    from sonder_runtime.application.agents.lineage_delegation import (
+        DelegationRequest,
+        LineageRecord,
+        WorkspaceAssignment,
+    )
+    from sonder_runtime.application.agents.presets import resolve_preset
+    from sonder_runtime.application.context import local_owner_context
+
+    workspace = root / "workspace"
+    delegation = application.delegation_service()
+    context = local_owner_context(
+        correlation_id="pg-resume-op", workspace_roots=(workspace,),
+    )
+    root_id = delegation.root_id_for_context(context)
+    preset = resolve_preset("researcher")
+    assignment = WorkspaceAssignment((str(workspace),))
+    lineage = LineageRecord(
+        "lineage-" + delegation_id, root_id, root_id, child_id, 1,
+        preset.name, preset.role, assignment,
+    )
+    request = DelegationRequest(delegation_id, lineage, "append once", preset, assignment)
+    return delegation.dispatch(request, context)
+
+
+def _interrupted_child(storage_config, root, monkeypatch):
+    """Run a child whose host stops after its append's receipt committed."""
+    from sonder_runtime.application.ports.subagents import SubagentStatus
+
+    (root / "workspace").mkdir(parents=True)
+    child_id = "pg-resume-" + uuid.uuid4().hex
+    delegation_id = "pg-resume-delegation-" + uuid.uuid4().hex
+    application = _compose_resume_application(
+        storage_config, root, monkeypatch, fail_after_write=True,
+    )
+    try:
+        result = _delegate_resume_child(application, root, child_id, delegation_id).result(30)
+        assert result.status is SubagentStatus.FAILED, result
+    finally:
+        # A clean close leaves the pair's owner marker eligible for the next
+        # composition, which is the restart below.
+        application.close_providers(timeout=10)
+    assert (root / "workspace" / "append.txt").read_text(encoding="utf-8") == "x"
+    return child_id, delegation_id
+
+
+def test_actual_pair_child_resumes_from_stamped_checkpoint_and_consumes_settled_write(
+    storage_config, tmp_path, monkeypatch
+):
+    from sonder_runtime.adapters.persistence.postgres_continuation import (
+        PostgreSQLDurableContinuationRepository,
+    )
+    from sonder_runtime.adapters.persistence.sqlite.effect_journal import (
+        SQLiteEffectJournal,
+    )
+    from sonder_runtime.application.execution.effect_journal import EffectState
+    from sonder_runtime.application.ports.subagents import SubagentStatus
+
+    child_id, delegation_id = _interrupted_child(storage_config, tmp_path, monkeypatch)
+    journal = SQLiteEffectJournal(tmp_path / "state" / "worker-effects.db")
+    run_id = f"subagent:{child_id}"
+    assert [(r.operation_id, r.state) for r in journal.effects_since(run_id, 0).records] == [
+        (f"subagent-dispatch:{child_id}", EffectState.COMPLETED),
+        (_RESUME_WRITE, EffectState.COMPLETED),
+    ]
+
+    application = _compose_resume_application(
+        storage_config, tmp_path, monkeypatch, fail_after_write=False,
+    )
+    try:
+        repository = application.delegation_service()._provider._local_service._repository
+        assert isinstance(repository, PostgreSQLDurableContinuationRepository)
+        interrupted = repository.get(child_id)
+        assert interrupted.status is SubagentStatus.FAILED and interrupted.recovery_required
+        # The production save path stamped the checkpoint and the live
+        # PostgreSQL store returned the provenance intact.
+        provenance = interrupted.checkpoint.provenance
+        assert provenance is not None and provenance.digest_valid
+        assert (provenance.run_id, provenance.settled_position) == (run_id, 1)
+        assert provenance.worker_id.startswith("subagent:")
+        assert interrupted.checkpoint.state == {"step": 1}
+
+        result = _delegate_resume_child(
+            application, tmp_path, child_id, delegation_id,
+        ).result(30)
+        assert result.status is SubagentStatus.SUCCEEDED, result
+        assert result.output == "resumed output"
+        final = repository.get(child_id)
+    finally:
+        application.close_providers(timeout=10)
+
+    # The append was consumed from its settled receipt, never repeated.
+    assert (tmp_path / "workspace" / "append.txt").read_text(encoding="utf-8") == "x"
+    assert (tmp_path / "runner-trace.log").read_text(encoding="utf-8").splitlines() == [
+        "wrote", "consumed append.txt:1",
+    ]
+    assert [r.operation_id for r in journal.effects_since(run_id, 0).records] == [
+        f"subagent-dispatch:{child_id}", _RESUME_WRITE,
+    ]
+    assert final.checkpoint.state == {"step": 2, "write_receipt": "append.txt:1"}
+    assert final.checkpoint.provenance is not None
+    assert final.checkpoint.provenance.owner_epoch > provenance.owner_epoch
+
+
+def test_actual_pair_resume_refuses_a_swapped_journal_identity(
+    storage_config, tmp_path, monkeypatch
+):
+    import sqlite3
+
+    from sonder_runtime.application.ports.subagents import SubagentStatus
+    from sonder_runtime.application.subagents.checkpoint_provenance import (
+        CheckpointResumeRefusal,
+        ChildResumeRefused,
+    )
+
+    child_id, delegation_id = _interrupted_child(storage_config, tmp_path, monkeypatch)
+    # The checkpoint was stamped against the original journal identity.
+    with sqlite3.connect(tmp_path / "state" / "worker-effects.db") as connection:
+        connection.execute("UPDATE effect_journal_identity SET identity='journal-swapped'")
+
+    application = _compose_resume_application(
+        storage_config, tmp_path, monkeypatch, fail_after_write=False,
+    )
+    try:
+        with pytest.raises(ChildResumeRefused) as refused:
+            _delegate_resume_child(application, tmp_path, child_id, delegation_id)
+        assert refused.value.reason is CheckpointResumeRefusal.JOURNAL_IDENTITY_MISMATCH
+        assert refused.value.recovery_required is True
+        repository = application.delegation_service()._provider._local_service._repository
+        child = repository.get(child_id)
+        assert child.status is SubagentStatus.FAILED and child.recovery_required
+    finally:
+        application.close_providers(timeout=10)
+    assert (tmp_path / "workspace" / "append.txt").read_text(encoding="utf-8") == "x"
+    assert (tmp_path / "runner-trace.log").read_text(encoding="utf-8").splitlines() == ["wrote"]

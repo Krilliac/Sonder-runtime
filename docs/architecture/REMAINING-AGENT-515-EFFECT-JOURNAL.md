@@ -552,7 +552,8 @@ What is not qualified:
   them is detected at validation (`owner_superseded` or `stale_owner_epoch`),
   not prevented at write time.
 - PostgreSQL is qualified at the codec and `_apply` level only, with no live
-  database. The SQLite-to-PostgreSQL child migration copies
+  database. *(Superseded 2026-09-26: see "PostgreSQL child store: stamped
+  checkpoints and resume on a live pair" below.)* The SQLite-to-PostgreSQL child migration copies
   `durable_child_session` rows only, so migrated checkpoints arrive
   provenance-absent (fail-closed). A child migration that was paused before
   this change and resumed after it recomputes page digests over snapshots
@@ -711,8 +712,10 @@ Evidence (end-to-end through `build_application`):
 
 What remains:
 
-- PostgreSQL child storage has provenance stamping at the codec level, but
-  the resume path has been exercised only with the SQLite child store.
+- *Superseded 2026-09-26 (live-pair section below):* PostgreSQL child
+  storage has provenance stamping at the codec level, but the resume path
+  has been exercised only with the SQLite child store. A killed PostgreSQL
+  owner still blocks resume until a reviewed owner-cleanup procedure exists.
   `release_dead_owner` relies on the reservation's recorded pid/host, so a
   child started without a worker-registry reservation still needs manual
   owner cleanup (`ContinuationCleanupRequired`).
@@ -1380,3 +1383,79 @@ Limits:
 - Compositions inside one process share the lease. As before, a later
   composition in the same process claims a newer epoch over an earlier one.
 - No master-spec checkbox changes. LOOP-008 stays unverified.
+
+## PostgreSQL child store: stamped checkpoints and resume on a live pair (2026-09-26)
+
+*Supersedes* the limitation "PostgreSQL is qualified at the codec and `_apply`
+level only, with no live database", and the remaining item "the resume path
+has been exercised only with the SQLite child store".
+
+Production already wrapped the PostgreSQL child repository in
+`DurableContinuationService(checkpoint_provenance=JournalProvenanceStamp(...))`
+over the SQLite worker-effects journal, and `LocalSubagentProvider` already
+validated resumes with `validate_checkpoint_resume`. No test had run either
+path against a real database. `tests/test_postgres_child_storage_integration.py`,
+which `scripts/run_disposable_postgres_pair.py` runs against an owned
+PostgreSQL 18.6+ primary and synchronous standby, now covers them:
+
+- `test_actual_pair_checkpoint_cuts_never_pass_the_settled_journal`
+  (`after_receipt`, `in_cas`, `after_cas`) mirrors the SQLite crash-cut
+  matrix. The runner saves a checkpoint, commits one journaled write, and is
+  cut at one point. In the `in_cas` case, a connection proxy lets the
+  PostgreSQL snapshot `UPDATE` run inside the open transaction. It reads the
+  written snapshot back to prove that the stamped provenance is in it, then
+  fails before the receipt insert and `COMMIT`. Read back from the pair,
+  the checkpoint is always either the old one or the new one, never past the
+  settled journal. The validator accepts it under a newer epoch, and the
+  write appears in `receipts` or `later_receipts`. In `in_cas`, the rolled
+  back save leaves the child fenced as an unresolved mutation.
+- `test_actual_pair_refuses_superseded_and_foreign_checkpoint_provenance`:
+  a stale epoch is refused (`STALE_OWNER_EPOCH`). A journal with another
+  identity is refused (`JOURNAL_IDENTITY_MISMATCH`). A newer owner's later
+  receipts do not invalidate the old settled prefix.
+- `test_actual_pair_store_refuses_provenance_for_a_different_subject`: the
+  live `save_checkpoint` refuses provenance stamped for other state, and a
+  genuine stamp round-trips.
+- `test_actual_pair_child_resumes_from_stamped_checkpoint_and_consumes_settled_write`
+  ports `test_wiring_journal_child_resume.py` to `build_application` with
+  `child_storage.backend=postgresql`. A delegated child checkpoints and
+  commits one journaled append. Its host then stops before the next
+  checkpoint, and the child is left `failed` and `recovery_required`. The
+  application is closed and composed again, which gives a newer worker
+  epoch and a clean pair-owner handover. The exact delegation then resumes
+  from the stamped checkpoint read back from PostgreSQL and consumes the
+  settled receipt. The file holds one append, the journal holds one append
+  intent, and the final checkpoint's owner epoch is newer.
+- `test_actual_pair_resume_refuses_a_swapped_journal_identity`: after the
+  same interruption, a swapped journal identity refuses the resume with
+  `ChildResumeRefused(JOURNAL_IDENTITY_MISMATCH)`. The child stays
+  `recovery_required` and the runner never runs again.
+- Planted-defect checks, run locally on the pair:
+  - With provenance dropped from `encode_child_snapshot`, all six
+    provenance tests fail.
+  - With the `provenance_subject_error` check dropped from the PostgreSQL
+    `_apply`, the subject test fails.
+- The workflow's `paths` filter now also covers the effect journal, the
+  worker bindings and the bootstrap composition, so changes to the stamp or
+  resume wiring trigger the live job.
+
+Local run: the PGDG 18.6 server packages were unpacked (not installed) and the
+harness was run as an unprivileged user. Result: 28 passed, 0 skipped.
+
+Limits:
+
+- These cuts do not kill the process. The pair has one durable owner marker,
+  and a killed owner leaves it unclean. By design
+  (`docs/postgresql-child-storage.md`), an unclean marker blocks every later
+  owner until a reviewed cleanup procedure exists, and the harness allows
+  only the owner-loss canary to leave it unclean. Each cut is therefore a
+  failure raised at the same point. For the database the result is the same:
+  a transaction that never committed is rolled back.
+- For the same reason, resuming a `running` child whose PostgreSQL owner
+  process was killed stays blocked (`ContinuationCleanupRequired`, then the
+  unclean owner marker) until that cleanup procedure exists. What is
+  qualified is resuming a `recoverable` child after a clean restart.
+- The journal and the child store are still separate stores. Validation
+  covers the window between them; no single transaction spans both.
+- No master-spec checkbox changes. LOOP-008, AGENT-006 and SESSION-007 stay
+  unverified.
